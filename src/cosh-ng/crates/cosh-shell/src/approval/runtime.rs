@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
 use crate::agent::run::ActiveAgentRun;
-use crate::approval::broker::ApprovalOutcome;
+use crate::approval::broker::{provider_deny_response, ApprovalOutcome, ProviderResponseInput};
 use crate::approval::cards::write_approval_receipt;
 use crate::approval::handoff::{queue_approved_shell_handoff, queue_interactive_shell_handoff};
 use crate::approval::panel::{
@@ -142,12 +144,16 @@ pub(crate) fn render_approval_actions<W: Write>(
         }
 
         if let Some(decision) = apply_approval_decision(state, request_index, command.kind) {
-            // Capture the consented run before delivery: fallback handoff
+            // Capture the consented run and its blocks before delivery: fallback handoff
             // paths may stop the run (clearing the consent state) while the
             // remaining queued requests of this turn still must be swept.
             let sweep_run_id = (command.kind == ApprovalCommandKind::ApproveTurn
                 && decision.request.status == ApprovalRequestStatus::Approved)
-                .then(|| decision.request.run_id.clone());
+                .then(|| {
+                    let run_id = decision.request.run_id.clone();
+                    let blocked = state.control.trust.blocked_commands_for_run(&run_id);
+                    (run_id, blocked)
+                });
             // When a sweep follows, it owns the final next-card repaint so
             // requests it is about to resolve never flash their own card.
             let render_next_card = sweep_run_id.is_none();
@@ -159,12 +165,14 @@ pub(crate) fn render_approval_actions<W: Write>(
                 output,
                 render_next_card,
             )?;
-            if let Some(run_id) = sweep_run_id {
+            if let Some((run_id, blocked)) = sweep_run_id {
                 // Swept resolutions are not tied to the user's input event:
                 // pass None so any recovery/continuation run they spawn does
                 // not anchor selectable-command state to an unrelated event
                 // index (review note on PR #1825).
-                sweep_batch_consented_requests(&run_id, None, adapter, state, output)?;
+                sweep_batch_consented_requests_with_blocks(
+                    &run_id, None, adapter, state, output, blocked,
+                )?;
             }
         }
         output.flush()?;
@@ -302,6 +310,36 @@ fn deliver_approval_decision<W: Write>(
     Ok(())
 }
 
+/// Whether a pending request must keep its own card despite run-scope consent.
+///
+/// The live block set is run-bound; captured blocks survive owner teardown.
+/// It holds commands whose last attempt in that run left the effect
+/// state uncertain, keyed by `trust_key_from_command` of the command a handoff
+/// executes. The lookup has to derive that same command rather than the display
+/// preview: a `{"cmd": ...}` tool input shows the serialized object on the card
+/// while executing the `cmd` value, and a spelling differing only in whitespace
+/// the key preserves must not miss either. Fails closed — a request that cannot
+/// be mapped to an executable command is exactly the case that must not be
+/// replayed on a blanket consent.
+fn blocked_from_turn_consent(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+    captured_blocks: &HashSet<String>,
+) -> bool {
+    match crate::approval::handoff::shell_handoff_command_from_request(request) {
+        Ok(command) => {
+            crate::approval::handoff::trust_key_from_command(&command).is_some_and(|key| {
+                captured_blocks.contains(&key)
+                    || state
+                        .control
+                        .trust
+                        .is_blocked_for_turn_consent(&request.run_id, &key)
+            })
+        }
+        Err(_) => true,
+    }
+}
+
 /// After the user grants turn-scope batch consent, sweep the queue: resolve
 /// every remaining pending request of the consented run that the consent
 /// covers, each through the same resolution + delivery pipeline as a user
@@ -314,12 +352,23 @@ pub(crate) fn sweep_batch_consented_requests<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    while let Some(request_index) = state
-        .approvals
-        .requests
-        .iter()
-        .position(|request| batch_consent_covers_request(request, run_id))
-    {
+    let blocked = state.control.trust.blocked_commands_for_run(run_id);
+    sweep_batch_consented_requests_with_blocks(run_id, event_index, adapter, state, output, blocked)
+}
+
+fn sweep_batch_consented_requests_with_blocks<W: Write>(
+    run_id: &str,
+    event_index: Option<usize>,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+    mut captured_blocks: HashSet<String>,
+) -> std::io::Result<()> {
+    captured_blocks.extend(state.control.trust.blocked_commands_for_run(run_id));
+    while let Some(request_index) = state.approvals.requests.iter().position(|request| {
+        batch_consent_covers_request(request, run_id)
+            && !blocked_from_turn_consent(state, request, &captured_blocks)
+    }) {
         if approval_resolution_needs_queue_slot(state, &state.approvals.requests[request_index])
             && !control_queue_has_capacity(state)
         {
@@ -461,6 +510,68 @@ pub(crate) fn drain_unhomed_control_requests(state: &mut InlineState) {
             .approval_ledger_mut()
             .mark_responded(&run_id, &request_id);
     }
+}
+
+pub(crate) fn cancel_pending_approvals_for_failed_run<W: Write>(
+    state: &mut InlineState,
+    run_id: &str,
+    handle: &AgentRunHandle,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    let pending = state
+        .approvals
+        .requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.run_id == run_id && request.status == ApprovalRequestStatus::Pending
+        })
+        .map(|(index, request)| (index, request.id.clone()))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    if pending
+        .iter()
+        .any(|(_, id)| state.approvals.active_panel_id.as_ref() == Some(id))
+    {
+        clear_active_approval_panel(state, output)?;
+    }
+    for (index, id) in pending {
+        let decision = crate::approval::resolution::finalize_approval_decision(
+            state,
+            index,
+            ApprovalRequestStatus::Cancelled,
+            MessageId::ApprovalResolutionCancelledTitle,
+            None,
+            false,
+            "run_terminal",
+        )
+        .ok_or_else(|| std::io::Error::other("pending terminal approval disappeared"))?;
+        state
+            .approvals
+            .pending_capture_invalidations
+            .push_back(id.clone());
+        state.approvals.focus.remove(&id);
+        state.approvals.expanded_cards.remove(&id);
+        if let Some(request_id) = decision.request.request_id.as_deref() {
+            let _ = handle.respond_approval(provider_deny_response(
+                ProviderResponseInput {
+                    request_id,
+                    tool_use_id: decision.request.tool_use_id.as_deref(),
+                    tool_input: decision.request.tool_input.as_ref(),
+                },
+                "Agent run failed before approval; this request was not executed.".to_string(),
+            ));
+            state
+                .control
+                .approval_ledger_mut()
+                .mark_responded(run_id, request_id);
+        }
+    }
+    state.agent_run.needs_prompt_after_run = true;
+    state.agent_run.native_prompt_after_run = false;
+    Ok(true)
 }
 
 /// #1940 run-terminal sweep: same contract as the batch drain, for the

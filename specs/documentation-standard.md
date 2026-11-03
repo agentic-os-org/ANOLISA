@@ -17,6 +17,11 @@ Agents enter this repository via `AGENTS.md` (auto-loaded by tooling). For **doc
 - Code > README/user-guide > design docs
 - Before generating or modifying documentation: read source code, verify CLI examples against `clap`/`argparse` definitions, never document unimplemented features as available
 
+Before writing or revising design documents, technical explanations or change
+summaries, also read the [change description standard](change-description-standard.md).
+It defines reader context and accurate change descriptions alongside this file's
+placement, bilingual and maintenance rules.
+
 ---
 
 ## 1. Bilingual Naming Convention
@@ -24,7 +29,7 @@ Agents enter this repository via `AGENTS.md` (auto-loaded by tooling). For **doc
 | Scope | English (default) | Chinese | Notes |
 |-------|-------------------|---------|-------|
 | Repo root / component root | `FILE.md` | `FILE_zh.md` | No suffix = English |
-| `docs/` standalone pages | `docs/FILE.md` | `docs/FILE_zh.md` | e.g. QUICKSTART, BUILDING |
+| `docs/` directory guide | `docs/README.md` | `docs/README_zh.md` | Explains the documentation layout |
 | `docs/` long-form guides | `docs/{type}/en/` | `docs/{type}/zh/` | Directory-based separation |
 
 **Cross-reference convention:**
@@ -99,23 +104,33 @@ Chinese version (`CHANGELOG_zh.md`) mirrors the same structure with translated s
 
 ## 3. docs/ Directory Structure
 
-```
+```text
 docs/
-├── QUICKSTART.md              # Cross-component quick start (English)
-├── QUICKSTART_zh.md           # Cross-component quick start (Chinese)
-├── BUILDING.md                # Build from source (English)
-├── BUILDING_zh.md             # Build from source (Chinese)
+├── README.md                  # Documentation layout and placement rationale
+├── README_zh.md
+├── navigation.yaml            # Website groups, labels, descriptions and ordering
 ├── user-guide/
-│   ├── en/                    # User manual (English)
-│   │   ├── README.md          # Index page
-│   │   ├── installation.md
-│   │   └── {capability}/      # Organized by capability domain
-│   └── zh/                    # User manual (Chinese, mirrors en/)
-│       └── ...
-└── developer-guide/
-    ├── en/                    # Developer documentation (English)
-    │   └── {component}/       # Organized by component name
-    └── zh/                    # Developer documentation (Chinese)
+│   ├── en/
+│   │   ├── index.md           # Manual entry point
+│   │   ├── getting-started/
+│   │   │   ├── quickstart.md  # One short cross-component first-use journey
+│   │   │   ├── installation.md
+│   │   │   ├── anolisa-cli.md
+│   │   │   ├── building.md
+│   │   │   ├── testing.md
+│   │   │   └── troubleshooting.md
+│   │   ├── aw/
+│   │   │   ├── index.md
+│   │   │   └── ...
+│   │   ├── agent-sec-core/
+│   │   │   ├── index.md
+│   │   │   └── owasp-agentic-top10.md
+│   │   └── {component}/       # Flat component directories, each with index.md
+│   └── zh/                    # Mirrors the English manual
+└── developer-guide/           # Existing developer docs; separate migration
+    ├── en/
+    │   └── {component}/
+    └── zh/
         └── ...
 ```
 
@@ -125,11 +140,17 @@ docs/
 |-------------|----------|----------|
 | Full user-facing how-to / reference | `docs/user-guide/{en,zh}/` | — |
 | Developer architecture / IPC / hooks | `docs/developer-guide/{en,zh}/` | Component root |
+| Archived manuals for deprecated components | `deprecated/<component>/docs/` | Published user/developer guides |
 | Component design docs | `src/<component>/docs/` | `docs/` top level |
-| Cross-component quick start | `docs/QUICKSTART.md` | README |
-| Build instructions | `docs/BUILDING.md` | README |
+| Cross-component quick start | `docs/user-guide/{en,zh}/getting-started/quickstart.md` | Component entry pages |
+| Build and test instructions | `docs/user-guide/{en,zh}/getting-started/{building,testing}.md` | Duplicate command inventories |
 
 > **Note on component README**: README.md serves as a **summary entry point** (positioning + quick-start + basic install/use). It is NOT a full how-to or reference manual. Complete usage documentation belongs in `docs/user-guide/`. When CLI/config changes occur, update both the README summary and the user-guide reference.
+
+Deprecated component manuals are retained with their source, with the component
+README linking to the archive. Keep archived relative links checked, but remove
+their entries from current guide indexes and the public website. Copilot Shell's
+archive lives in `deprecated/copilot-shell/docs/`.
 
 ### 3.2 Design Documents
 
@@ -138,6 +159,20 @@ Design documents live **only** in the component's own directory:
 ```
 src/<component>/docs/design/    ← component-specific design docs
 ```
+
+A single design may remain directly under this directory. A coherent batch or
+multi-stage change may use a dated topic subdirectory with a `README.md` entry
+and numbered files, without requiring a topic-specific exception:
+
+```text
+src/<component>/docs/design/2026-10-22_cli-refresh/
+  README.md
+  01-cli-foundation.md
+  02-package-management.md
+```
+
+Choose this grouping for an actual shared topic. Do not pre-create empty
+categories or introduce a cross-component architecture layer for filing alone.
 
 For distribution tooling or retained deprecated components, substitute the source
 root registered in `.github/components.json`, such as
@@ -156,9 +191,21 @@ deployment target, not a hand-maintained documentation source.
 
 The website MUST consume canonical repository content at build time:
 
-- Documentation routes render `docs/QUICKSTART*.md`, `docs/BUILDING*.md`,
-  and the paired files under `docs/user-guide/{en,zh}/` and
-  `docs/developer-guide/{en,zh}/`.
+- Documentation routes render the paired files under
+  `docs/user-guide/{en,zh}/` and `docs/developer-guide/{en,zh}/`.
+  `docs/README*.md` explains the source directory and is not a website landing page.
+- `docs/navigation.yaml` defines user-manual groups, bilingual labels, fixed
+  one-sentence component descriptions, and ordering. Each component item supplies
+  non-empty, single-line `description.en` and `description.zh` values for the
+  manual index; sidebar entries use labels only. These descriptions summarize
+  the component's purpose without release numbers or installation details and
+  stay consistent with its documentation.
+  The website and generated navigation blocks in the manual indexes consume it.
+  Component source directories and canonical URLs stay flat when website groups
+  change: `/docs/user-guide/<component>/` is the entry, with chapters below it.
+  Shared pages use `/docs/user-guide/getting-started/<page>/`. Previous addresses
+  redirect directly to the current URL, retaining locale and incoming fragments;
+  navigation group names are not part of canonical component URLs.
 - Changelog routes render the root and component `CHANGELOG*.md` files.
 - `/agents/`, `/agents/repo-index.*`, `/agents/cli-reference.txt`,
   `/agents/changelog.txt`, `/llms.txt`, and `/llms-full.txt` are generated
@@ -195,6 +242,9 @@ Pull requests build and validate the artifact without deploying it, and
 | `AGENTS.md` | English only | When component has non-trivial AI-agent constraints | Specific to module scope |
 | `LICENSE` | English only | When component uses a different license than root | e.g. MIT sub-component |
 | `docs/` | — | For design documents, internal protocol specs | NOT for user-guide content |
+
+Deprecated components may also retain their archived user and developer manuals
+in this directory, as specified in §3.1.
 
 ### 4.3 Files NOT Needed at Component Level
 
@@ -255,12 +305,15 @@ AgentSight captures kernel-level events without modifying agent code...
 - Technical terms keep English form in Chinese docs (eBPF, Token, CLI)
 - Command examples identical across languages; only prose differs
 
-**Entry point convention:** when one page is sufficient, use a flat
-`{component}.md` file directly under its capability directory. Create a
-component subdirectory only when it contains multiple user documents. Reserve
-`QUICKSTART.md` for cross-component journeys or components whose setup needs a
-distinct, short onboarding path; do not duplicate a component manual into a
-second quickstart.
+**Entry point convention:** every component has a directory directly under
+`docs/user-guide/{en,zh}/`, with `index.md` as its manual entry point, even when
+one page is sufficient. Put first-use steps in that index rather than creating
+a separate component Quickstart. Keep the project-level `getting-started/quickstart.md`
+as a standalone short journey with prerequisites, a first useful result,
+verification and next steps. The `getting-started/` directory does not need an
+`index.md`; its shared pages can also be linked from contribution documentation.
+Website groups belong in `docs/navigation.yaml`, not in source directory names.
+The `docs/README*.md` pair describes this layout for documentation maintainers.
 
 ## 5. PR Documentation Update Rules
 
@@ -270,12 +323,27 @@ When a PR introduces any of the following changes, documentation MUST be updated
 |-------------|-------------------|
 | New/modified CLI command or flag | Component README (summary) + user-guide (full reference) |
 | New/modified config option | Component README (summary) + user-guide (full reference) |
-| Installation method change | docs/QUICKSTART + component README |
+| Installation method change | Shared installation/quickstart pages as applicable + component index and README |
 | Architecture or protocol change | Component `docs/design/` |
 | New component added | Root README + NOTICE (if applicable) |
 
 **CHANGELOG update timing**: Daily feature/fix PRs update README and user-guide only; CHANGELOG is written exclusively in **release version bump PRs** that aggregate all user-perceivable changes since the last release.
 
+**Release-note requirement (all release components)**: Every component with a
+non-null `release_tag_prefix` in `.github/components.json` MUST include exactly
+one non-empty section for the release version in its English `CHANGELOG.md` in
+the next and every subsequent version bump PR. Match the version in the release tag, aggregate the
+user-visible changes, and include any breaking changes and migration steps.
+Keep `CHANGELOG_zh.md` semantically equivalent. The English version section at
+the tagged commit is the source of the GitHub Release body.
+
+This requirement also applies to first releases, including ktuner. Before
+pushing the first version tag, the version bump PR MUST finalize the applicable
+`Unreleased` content into the matching version section. `Unreleased` alone does
+not satisfy the requirement. A missing CHANGELOG, missing or duplicate matching
+section, or empty section stops publication before the GitHub Release is
+created; the workflow does not fall back to commit subjects or another version.
+
 ---
 
-*Last updated: 2026-07-29*
+*Last updated: 2026-10-23*

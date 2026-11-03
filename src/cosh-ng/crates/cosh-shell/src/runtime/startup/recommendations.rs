@@ -1,5 +1,8 @@
 use super::*;
 
+const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
+const STARTUP_AUTH_HINT_WAIT: Duration = Duration::from_millis(150);
+
 pub(crate) fn render_startup_banner<W: Write>(
     events: &[ShellEvent],
     adapter: &AdapterInstance,
@@ -98,6 +101,83 @@ pub(crate) fn render_startup_banner<W: Write>(
     }
     restore_startup_prompt(state, output)?;
     output.flush()
+}
+
+pub(crate) fn render_pending_upgrade_notice_at_prompt_boundary<W: Write>(
+    events: &[ShellEvent],
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    // precmd reports ShellReady only for command-less prompts; after a command
+    // the same prompt boundary arrives as CommandCompleted or CommandFailed.
+    if state.shell_at_prompt
+        && events.iter().any(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::ShellReady
+                    | ShellEventKind::CommandCompleted
+                    | ShellEventKind::CommandFailed
+            )
+        })
+        && !state.personalization.shell_input_active
+    {
+        render_pending_upgrade_notice(state, output)?;
+    }
+    Ok(())
+}
+
+/// Renders a probe result that lands after the banner while the shell idles at
+/// an empty prompt, so the user does not have to submit a line to see it.
+pub(crate) fn render_pending_upgrade_notice_at_idle_prompt<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    // A draft, an open card, or a running agent owns the screen; wait for the
+    // next idle tick or prompt boundary instead of drawing over it.
+    if state.personalization.shell_input_active
+        || state.agent_run.active.is_some()
+        || crate::runtime::controller::pending_card_capture(state).is_some()
+    {
+        return Ok(());
+    }
+    render_pending_upgrade_notice(state, output)
+}
+
+pub(crate) fn render_pending_upgrade_notice<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if !state.rendered_startup_banner || state.startup_upgrade.rendered {
+        return Ok(());
+    }
+    state.startup_upgrade.poll_ready();
+    let Some(notice) = state.startup_upgrade.notice().cloned() else {
+        return Ok(());
+    };
+    let i18n = state.i18n();
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    let body = vec![i18n.format(
+        MessageId::StartupUpgradeHintLine,
+        &[
+            ("current", &notice.current),
+            ("latest", &notice.latest),
+            ("command", &notice.command),
+        ],
+    )];
+    write!(output, "\r\x1b[2K")?;
+    renderer.write_notice_panel(
+        output,
+        NoticePanelModel {
+            title: i18n.t(MessageId::StartupUpgradeNoticeTitle),
+            body,
+            footer: None,
+        },
+    )?;
+    writeln!(output)?;
+    restore_startup_prompt(state, output)?;
+    output.flush()?;
+    state.startup_upgrade.rendered = true;
+    Ok(())
 }
 
 pub(crate) fn render_pending_recommendation_notice<W: Write>(

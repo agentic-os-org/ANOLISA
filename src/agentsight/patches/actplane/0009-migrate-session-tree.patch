@@ -1,0 +1,594 @@
+--- a/bpf/src/lib.rs	2026-10-02 10:00:00.000000000 +0800
++++ b/bpf/src/lib.rs	2026-10-02 10:00:00.000000000 +0800
+@@ -726,0 +727,241 @@ fn ignore_missing_remove(result: Result<(), MapError>, what: &str) -> io::Result
++/// Outcome of moving a live session tree into a fresh runtime domain.
++///
++/// Detaching a binding clears `cap_task` but leaves the tree's per-domain
++/// state behind, so processes that joined the session under the old binding
++/// silently fall out of every policy when the binding is recreated with a new
++/// domain. [`PinnedEngine::migrate_session_tree`] and
++/// [`Loader::migrate_session_tree`] rewrite that state into the new domain and
++/// restore the task bindings; this report records what happened so callers can
++/// surface it.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct SessionDomainMigration {
++    /// Processes whose stale per-domain state was rewritten into the new domain.
++    pub migrated_pids: Vec<i32>,
++    /// Processes that already carried state in the new domain and only needed
++    /// their `cap_task` binding restored.
++    pub rebound_pids: Vec<i32>,
++    /// Domains the stale state was moved out of.
++    pub stale_domains: Vec<u32>,
++    /// Processes that still carry stale state because a map update failed;
++    /// they remain outside every policy until rebound.
++    pub failed_pids: Vec<i32>,
++}
++
++impl SessionDomainMigration {
++    /// True when the sweep found nothing to do.
++    pub fn is_empty(&self) -> bool {
++        self.migrated_pids.is_empty()
++            && self.rebound_pids.is_empty()
++            && self.stale_domains.is_empty()
++            && self.failed_pids.is_empty()
++    }
++
++    /// Sanitized one-line summary for binding reports and logs.
++    pub fn summary(&self) -> String {
++        let mut parts = vec![format!(
++            "migrated {} pre-existing processes into the new runtime domain",
++            self.migrated_pids.len() + self.rebound_pids.len()
++        )];
++        if !self.stale_domains.is_empty() {
++            parts.push(format!("out of stale domains {:#?}", self.stale_domains));
++        }
++        if !self.failed_pids.is_empty() {
++            parts.push(format!(
++                "{} processes could not be migrated and remain outside the policy: {:?}",
++                self.failed_pids.len(),
++                self.failed_pids
++            ));
++        }
++        parts.join("; ")
++    }
++}
++
++/// Per-pid session state gathered while sweeping `ts_proc_domains`.
++struct SessionPidState {
++    pid: i32,
++    /// Entry already present under the new domain: only the `cap_task`
++    /// binding needs restoring (same-domain rebind).
++    has_new_domain_entry: bool,
++    /// Per-domain state to move out of stale domains.
++    stale: Vec<(u32, ProcState)>,
++}
++
++/// Dump every `ts_proc_domains` entry (key and state).
++fn dump_proc_domains<T: std::borrow::Borrow<MapData>>(
++    proc: &mut HashMap<T, PidDomainKey, ProcState>,
++) -> io::Result<Vec<(PidDomainKey, ProcState)>> {
++    let mut entries = Vec::new();
++    for key in proc.keys() {
++        let key = key.map_err(|e| err(format!("list ts_proc_domains: {e}")))?;
++        let state = proc
++            .get(&key, 0)
++            .map_err(|e| err(format!("read ts_proc_domains: {e}")))?;
++        entries.push((key, state));
++    }
++    Ok(entries)
++}
++
++/// Classify dumped entries into per-pid session state for the tree rooted at
++/// `root_pid`.
++///
++/// The fork handler stamps `ts_root[pid]` with the session root and the exit
++/// handler removes it, so `ts_root[pid] == root_pid` selects exactly the
++/// processes that joined the tree while it was bound; dead pids lose their
++/// `ts_root` entry at exit, which also makes the sweep safe against pid reuse.
++fn classify_session_entries<T: std::borrow::Borrow<MapData>>(
++    entries: Vec<(PidDomainKey, ProcState)>,
++    roots: &HashMap<T, i32, i32>,
++    root_pid: i32,
++    new_domain: u32,
++) -> Vec<SessionPidState> {
++    let mut by_pid: std::collections::BTreeMap<i32, SessionPidState> =
++        std::collections::BTreeMap::new();
++    for (key, state) in entries {
++        if key.pid == root_pid || key.domain_id == 0 || key.domain_id == GLOBAL_ACTIVE_DOMAIN_ID {
++            continue;
++        }
++        match roots.get(&key.pid, 0) {
++            Ok(session_root) if session_root == root_pid => {}
++            _ => continue,
++        }
++        let entry = by_pid.entry(key.pid).or_insert(SessionPidState {
++            pid: key.pid,
++            has_new_domain_entry: false,
++            stale: Vec::new(),
++        });
++        if key.domain_id == new_domain {
++            entry.has_new_domain_entry = true;
++        } else {
++            entry.stale.push((key.domain_id, state));
++        }
++    }
++    by_pid.into_values().collect()
++}
++
++/// Drop sessions that are already fully in place: no stale state and the
++/// current `cap_task` binding already points at the new domain. This keeps
++/// the sweep idempotent — re-running it reports nothing.
++fn retain_migratable_sessions<T: std::borrow::Borrow<MapData>>(
++    sessions: &mut Vec<SessionPidState>,
++    tasks: &HashMap<T, i32, u32>,
++    new_domain: u32,
++) {
++    sessions.retain(|session| {
++        !session.stale.is_empty()
++            || !matches!(tasks.get(&session.pid, 0), Ok(current) if current == new_domain)
++    });
++}
++
++/// Rewrite the collected session state into `new_domain`.
++///
++/// Each pid's stale per-domain entries are merged by OR-ing labels and
++/// lineage gates — exact for the single-domain trees the enforcer produces —
++/// and written as the pid's state in the new domain; the stale entries are
++/// then removed. Pids whose updates fail keep their stale state and are
++/// reported in `failed_pids`.
++fn rewrite_session_state<T: std::borrow::BorrowMut<MapData>>(
++    proc: &mut HashMap<T, PidDomainKey, ProcState>,
++    sessions: Vec<SessionPidState>,
++    new_domain: u32,
++) -> SessionDomainMigration {
++    let mut report = SessionDomainMigration::default();
++    for session in sessions {
++        if session.stale.is_empty() && !session.has_new_domain_entry {
++            continue;
++        }
++        let new_key = PidDomainKey {
++            pid: session.pid,
++            domain_id: new_domain,
++        };
++        let mut merged = ProcState {
++            labels: 0,
++            lin_gates: 0,
++        };
++        if session.has_new_domain_entry {
++            if let Ok(existing) = proc.get(&new_key, 0) {
++                merged.labels |= existing.labels;
++                merged.lin_gates |= existing.lin_gates;
++            }
++        }
++        for (_, state) in &session.stale {
++            merged.labels |= state.labels;
++            merged.lin_gates |= state.lin_gates;
++        }
++        let mut failed = false;
++        if !session.stale.is_empty() {
++            if let Err(e) = proc.insert(new_key, merged, 0) {
++                log::warn!(
++                    "session migration: rewrite pid {} into domain {}: {e}",
++                    session.pid,
++                    new_domain
++                );
++                failed = true;
++            }
++            for (domain, _) in &session.stale {
++                let stale_key = PidDomainKey {
++                    pid: session.pid,
++                    domain_id: *domain,
++                };
++                if ignore_missing_remove(proc.remove(&stale_key), "remove stale domain state")
++                    .is_err()
++                {
++                    failed = true;
++                }
++            }
++        }
++        if failed {
++            report.failed_pids.push(session.pid);
++        } else if session.stale.is_empty() {
++            report.rebound_pids.push(session.pid);
++        } else {
++            report.migrated_pids.push(session.pid);
++            report
++                .stale_domains
++                .extend(session.stale.iter().map(|(domain, _)| *domain));
++        }
++    }
++    report.stale_domains.sort_unstable();
++    report.stale_domains.dedup();
++    report
++}
++
++/// Restore `cap_task[pid] = new_domain` for the given pids, returning the
++/// pids whose binding could not be written.
++fn restore_task_bindings<T: std::borrow::BorrowMut<MapData>>(
++    tasks: &mut HashMap<T, i32, u32>,
++    pids: &[i32],
++    new_domain: u32,
++) -> Vec<i32> {
++    let mut failed = Vec::new();
++    for &pid in pids {
++        if let Err(e) = tasks.insert(pid, new_domain, 0) {
++            log::warn!("session migration: rebind pid {pid} to domain {new_domain}: {e}");
++            failed.push(pid);
++        }
++    }
++    failed
++}
++
++/// Shared sweep body once the three maps are open. Split from the public
++/// wrappers so the pinned and loader paths execute identical logic.
++fn migrate_session_tree_domains(
++    proc: &mut HashMap<MapData, PidDomainKey, ProcState>,
++    roots: &HashMap<MapData, i32, i32>,
++    tasks: &mut HashMap<MapData, i32, u32>,
++    root_pid: i32,
++    new_domain: u32,
++) -> io::Result<SessionDomainMigration> {
++    let entries = dump_proc_domains(proc)?;
++    let mut sessions = classify_session_entries(entries, roots, root_pid, new_domain);
++    retain_migratable_sessions(&mut sessions, tasks, new_domain);
++    let mut report = rewrite_session_state(proc, sessions, new_domain);
++    let mut to_bind = report.migrated_pids.clone();
++    to_bind.extend(report.rebound_pids.iter().copied());
++    report
++        .failed_pids
++        .extend(restore_task_bindings(tasks, &to_bind, new_domain));
++    report.failed_pids.sort_unstable();
++    report.failed_pids.dedup();
++    Ok(report)
++}
++
+@@ -2164,0 +2406,36 @@ impl PinnedEngine {
++    /// Move the live process tree of `root_pid` into `new_domain`.
++    ///
++    /// Detaching a binding clears `cap_task` but leaves the tree's
++    /// per-domain state in the old domain, so processes that joined the
++    /// session under the previous binding silently fall out of every policy
++    /// once it is recreated with a new domain. This sweep rewrites their
++    /// per-domain state (labels and lineage gates preserved) into
++    /// `new_domain`, restores their `cap_task` binding, and returns a report
++    /// for binding-level visibility. It is a no-op for a first binding of a
++    /// tree that was never bound before.
++    ///
++    /// Concurrent forks are safe in both directions: a fork of an already
++    /// migrated pid inherits the new domain, and a fork of a not-yet-migrated
++    /// pid inherits nothing (its `cap_task` was cleared at detach) — the same
++    /// unbound state as before the sweep, never a half-bound one.
++    ///
++    /// # Errors
++    ///
++    /// Returns an error when the BPF maps cannot be listed or read; partial
++    /// per-pid failures are reported through
++    /// [`SessionDomainMigration::failed_pids`] instead.
++    pub fn migrate_session_tree(
++        &self,
++        root_pid: i32,
++        new_domain: u32,
++    ) -> io::Result<SessionDomainMigration> {
++        if root_pid <= 0 || new_domain == 0 {
++            return Err(err("root pid and domain id must both be set"));
++        }
++        let mut proc: HashMap<_, PidDomainKey, ProcState> =
++            pinned_hash_map(&self.paths, "ts_proc_domains")?;
++        let roots: HashMap<_, i32, i32> = pinned_hash_map(&self.paths, "ts_root")?;
++        let mut tasks: HashMap<_, i32, u32> = pinned_hash_map(&self.paths, "cap_task")?;
++        migrate_session_tree_domains(&mut proc, &roots, &mut tasks, root_pid, new_domain)
++    }
++
+@@ -2644,0 +2922,75 @@ impl Loader {
++    /// Move the live process tree of `root_pid` into `new_domain`.
++    ///
++    /// Loader-based twin of [`PinnedEngine::migrate_session_tree`]; see there
++    /// for the rebind semantics and the safety argument for concurrent forks.
++    ///
++    /// # Errors
++    ///
++    /// Returns an error when the BPF maps cannot be listed or read; partial
++    /// per-pid failures are reported through
++    /// [`SessionDomainMigration::failed_pids`] instead.
++    pub fn migrate_session_tree(
++        &mut self,
++        root_pid: i32,
++        new_domain: u32,
++    ) -> io::Result<SessionDomainMigration> {
++        if root_pid <= 0 || new_domain == 0 {
++            return Err(err("root pid and domain id must both be set"));
++        }
++        // One map per block: `Ebpf::map_mut` borrows the object exclusively,
++        // and the intermediate states (state rewritten, binding not yet
++        // restored) are unbound-but-consistent, never half-enforced.
++        let entries = {
++            let mut proc: HashMap<_, PidDomainKey, ProcState> = HashMap::try_from(
++                self.bpf
++                    .map_mut("ts_proc_domains")
++                    .ok_or_else(|| err("ts_proc_domains missing"))?,
++            )
++            .map_err(|e| err(format!("ts_proc_domains: {e}")))?;
++            dump_proc_domains(&mut proc)?
++        };
++        let mut sessions = {
++            let roots: HashMap<_, i32, i32> = HashMap::try_from(
++                self.bpf
++                    .map_mut("ts_root")
++                    .ok_or_else(|| err("ts_root missing"))?,
++            )
++            .map_err(|e| err(format!("ts_root: {e}")))?;
++            classify_session_entries(entries, &roots, root_pid, new_domain)
++        };
++        {
++            let tasks: HashMap<_, i32, u32> = HashMap::try_from(
++                self.bpf
++                    .map_mut("cap_task")
++                    .ok_or_else(|| err("cap_task missing"))?,
++            )
++            .map_err(|e| err(format!("cap_task: {e}")))?;
++            retain_migratable_sessions(&mut sessions, &tasks, new_domain);
++        }
++        let mut report = {
++            let mut proc: HashMap<_, PidDomainKey, ProcState> = HashMap::try_from(
++                self.bpf
++                    .map_mut("ts_proc_domains")
++                    .ok_or_else(|| err("ts_proc_domains missing"))?,
++            )
++            .map_err(|e| err(format!("ts_proc_domains: {e}")))?;
++            rewrite_session_state(&mut proc, sessions, new_domain)
++        };
++        {
++            let mut tasks: HashMap<_, i32, u32> = HashMap::try_from(
++                self.bpf
++                    .map_mut("cap_task")
++                    .ok_or_else(|| err("cap_task missing"))?,
++            )
++            .map_err(|e| err(format!("cap_task: {e}")))?;
++            let mut to_bind = report.migrated_pids.clone();
++            to_bind.extend(report.rebound_pids.iter().copied());
++            report
++                .failed_pids
++                .extend(restore_task_bindings(&mut tasks, &to_bind, new_domain));
++            report.failed_pids.sort_unstable();
++            report.failed_pids.dedup();
++        }
++        Ok(report)
++    }
++
+@@ -7708,0 +8061,236 @@ finally:
++    fn test_map<'m, K: aya::Pod, V: aya::Pod>(
++        loader: &'m mut Loader,
++        name: &str,
++    ) -> io::Result<HashMap<&'m mut MapData, K, V>> {
++        HashMap::try_from(
++            loader
++                .bpf
++                .map_mut(name)
++                .ok_or_else(|| err(format!("{name} missing")))?,
++        )
++        .map_err(|e| err(format!("{name}: {e}")))
++    }
++
++    /// Current `cap_task` binding of `pid` (None when unbound).
++    fn bound_domain(loader: &mut Loader, pid: i32) -> Option<u32> {
++        let tasks = test_map::<i32, u32>(loader, "cap_task").expect("open cap_task");
++        tasks.get(&pid, 0).ok()
++    }
++
++    /// Remove a pid's domain state and task binding (the detach semantics of
++    /// `unbind_pid_from_domain`, which the pinned engine exposes but the
++    /// loader does not).
++    fn unbind_pid(loader: &mut Loader, pid: i32, domain: u32) {
++        let mut proc = test_map::<PidDomainKey, ProcState>(loader, "ts_proc_domains")
++            .expect("open ts_proc_domains");
++        ignore_missing_remove(
++            proc.remove(&PidDomainKey {
++                pid,
++                domain_id: domain,
++            }),
++            "remove ts_proc_domains",
++        )
++        .expect("remove domain state");
++        let mut tasks = test_map::<i32, u32>(loader, "cap_task").expect("open cap_task");
++        ignore_missing_remove(tasks.remove(&pid), "remove cap_task").expect("remove cap_task");
++    }
++
++    #[test]
++    fn session_migration_report_summarizes_and_detects_emptiness() {
++        let empty = SessionDomainMigration::default();
++        assert!(empty.is_empty());
++        assert_eq!(
++            empty.summary(),
++            "migrated 0 pre-existing processes into the new runtime domain"
++        );
++
++        let failed_only = SessionDomainMigration {
++            failed_pids: vec![42],
++            ..SessionDomainMigration::default()
++        };
++        assert!(!failed_only.is_empty());
++        assert!(
++            failed_only
++                .summary()
++                .contains("remain outside the policy: [42]"),
++            "{}",
++            failed_only.summary()
++        );
++
++        let full = SessionDomainMigration {
++            migrated_pids: vec![7, 8],
++            rebound_pids: vec![9],
++            stale_domains: vec![300],
++            failed_pids: Vec::new(),
++        };
++        assert!(!full.is_empty());
++        let summary = full.summary();
++        assert!(summary.contains("migrated 3"), "{summary}");
++        assert!(summary.contains("stale domains"), "{summary}");
++        assert!(!summary.contains("remain outside"), "{summary}");
++    }
++
++    #[test]
++    #[ignore = "requires root/CAP_BPF and loads live eBPF programs"]
++    fn rebind_migrates_live_session_tree_into_new_domain_smoke() {
++        let _guard = live_bpf_test_guard();
++        let policy = notify_exec_config_blob("apsessionrebind");
++        let mut loader = Loader::load(&policy).expect("load eBPF engine");
++
++        // Synthetic pids: no real process is involved, so the assertions only
++        // exercise the userspace map semantics of the migration sweep.
++        let root = 421_000_000i32;
++        let child_a = 421_000_001i32;
++        let child_b = 421_000_002i32;
++        child_domain_entries_smoke(&mut loader, root, root, 300, 1);
++        child_domain_entries_smoke(&mut loader, child_a, root, 300, 2);
++        // child_b carries state in the old domain AND the new domain (a
++        // same-domain rebind leftover); both must merge into the new domain.
++        child_domain_entries_smoke(&mut loader, child_b, root, 300, 4);
++        child_domain_entries_smoke(&mut loader, child_b, root, 500, 8);
++        // child_c only has state in the new domain: binding restore only.
++        let child_c = 421_000_003i32;
++        child_domain_entries_smoke(&mut loader, child_c, root, 500, 16);
++        // decoy: another session in another domain must stay untouched.
++        let decoy = 431_000_000i32;
++        child_domain_entries_smoke(&mut loader, decoy, decoy, 400, 32);
++        // dead: stale state without a session root (exit cleanup already ran)
++        // must not be migrated.
++        let dead = 441_000_000i32;
++        child_domain_entries_smoke(&mut loader, dead, 0, 300, 64);
++
++        // Detach the previous binding: rule counts and cap_task are cleared,
++        // per-domain state is left behind (the production detach behavior).
++        loader
++            .reload_handle()
++            .expect("reload handle")
++            .clear_runtime_state()
++            .expect("clear runtime state");
++        unbind_pid(&mut loader, root, 300);
++
++        // Recreate the binding with a fresh domain for the same root.
++        loader
++            .bind_state(
++                root,
++                500,
++                CapState {
++                    scope_id: 1,
++                    target_mask: TARGET_SELF | TARGET_CHILD,
++                    ..CapState::default()
++                },
++            )
++            .expect("rebind root into fresh domain");
++
++        let report = loader
++            .migrate_session_tree(root, 500)
++            .expect("migrate session tree");
++        assert_eq!(report.migrated_pids, vec![child_a, child_b], "{report:?}");
++        assert_eq!(report.rebound_pids, vec![child_c], "{report:?}");
++        assert_eq!(report.stale_domains, vec![300], "{report:?}");
++        assert!(report.failed_pids.is_empty(), "{report:?}");
++        assert!(!report.is_empty());
++        assert!(
++            report.summary().contains("migrated 3"),
++            "{}",
++            report.summary()
++        );
++
++        // The tree is bound to the new domain with its labels preserved
++        // (child_b's old- and new-domain labels merge).
++        assert_eq!(bound_domain(&mut loader, root), Some(500));
++        assert_eq!(bound_domain(&mut loader, child_a), Some(500));
++        assert_eq!(bound_domain(&mut loader, child_b), Some(500));
++        assert_eq!(bound_domain(&mut loader, child_c), Some(500));
++        {
++            let proc = test_map::<PidDomainKey, ProcState>(&mut loader, "ts_proc_domains")
++                .expect("open ts_proc_domains");
++            for (pid, labels) in [(child_a, 2), (child_b, 12), (child_c, 16)] {
++                let state = proc
++                    .get(
++                        &PidDomainKey {
++                            pid,
++                            domain_id: 500,
++                        },
++                        0,
++                    )
++                    .expect("state in new domain");
++                assert_eq!(state.labels, labels, "pid {pid} labels {}", state.labels);
++                assert!(
++                    proc.get(
++                        &PidDomainKey {
++                            pid,
++                            domain_id: 300
++                        },
++                        0
++                    )
++                    .is_err(),
++                    "pid {pid} stale state must be removed"
++                );
++            }
++            // Decoy session and rootless (dead) state stay untouched.
++            assert!(
++                proc.get(
++                    &PidDomainKey {
++                        pid: decoy,
++                        domain_id: 400
++                    },
++                    0
++                )
++                .is_ok(),
++                "other session must not be migrated"
++            );
++            assert!(
++                proc.get(
++                    &PidDomainKey {
++                        pid: dead,
++                        domain_id: 300
++                    },
++                    0
++                )
++                .is_ok(),
++                "state without a session root must not be migrated"
++            );
++        }
++        assert_eq!(bound_domain(&mut loader, decoy), None);
++        assert_eq!(bound_domain(&mut loader, dead), None);
++
++        // A second sweep over the same tree is a no-op.
++        let again = loader
++            .migrate_session_tree(root, 500)
++            .expect("second migration");
++        assert!(again.is_empty(), "{again:?}");
++    }
++
++    /// Seed `ts_root[pid]`, `ts_proc_domains[{pid, domain}]` and `cap_task[pid]`
++    /// the way the fork handler leaves a live session member (labels chosen
++    /// by the caller so merges are observable). `session_root` 0 skips the
++    /// `ts_root` entry (exit-cleaned state).
++    fn child_domain_entries_smoke(
++        loader: &mut Loader,
++        pid: i32,
++        session_root: i32,
++        domain: u32,
++        labels: u64,
++    ) {
++        if session_root != 0 {
++            let mut roots = test_map::<i32, i32>(loader, "ts_root").expect("open ts_root");
++            roots.insert(pid, session_root, 0).expect("seed ts_root");
++        }
++        let mut proc = test_map::<PidDomainKey, ProcState>(loader, "ts_proc_domains")
++            .expect("open ts_proc_domains");
++        proc.insert(
++            PidDomainKey {
++                pid,
++                domain_id: domain,
++            },
++            ProcState {
++                labels,
++                lin_gates: 0,
++            },
++            0,
++        )
++        .expect("seed ts_proc_domains");
++        let mut tasks = test_map::<i32, u32>(loader, "cap_task").expect("open cap_task");
++        tasks.insert(pid, domain, 0).expect("seed cap_task");
++    }
++

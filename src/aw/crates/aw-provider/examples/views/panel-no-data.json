@@ -1,0 +1,57 @@
+{
+  "api_version": "aw-panel/v1alpha1",
+  "generated_at_ms": 1000,
+  "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "service": {
+    "state": "online",
+    "generation": "example-generation",
+    "audit_healthy": true,
+    "adoption": "unverified",
+    "code": null
+  },
+  "providers": [
+    {
+      "id": "tokenless-main",
+      "implementation": "tokenless",
+      "version": null,
+      "configured": true,
+      "enabled": true,
+      "admission": "unknown",
+      "native_readiness": "unknown",
+      "capabilities": [
+        "health.summary",
+        "metrics.summary"
+      ],
+      "views": {
+        "health.summary": {
+          "status": "ok",
+          "observed_at_ms": 1000,
+          "code": null,
+          "data": {
+            "configured": true,
+            "enabled": true,
+            "admission": "unknown",
+            "native_readiness": "unknown",
+            "backend_liveness": "unknown"
+          }
+        },
+        "metrics.summary": {
+          "status": "no_data",
+          "observed_at_ms": 1000,
+          "code": "store_absent",
+          "data": null
+        }
+      }
+    }
+  ],
+  "recent_execution": {
+    "status": "ok",
+    "observed_at_ms": 1000,
+    "code": null,
+    "data": {
+      "scope": "service_generation",
+      "limit": 20,
+      "items": []
+    }
+  }
+}

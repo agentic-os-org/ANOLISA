@@ -1,0 +1,110 @@
+# Offline configuration example; does not install or run an Agent.
+# Provider commands and private security settings are illustrative.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: team-agent-policy
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: auto
+
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+
+  audit:
+    enabled: true
+    payload: metadata_only
+
+  # First release: QwenPaw, Qoder CLI, OpenClaw, and Hermes.
+  # This draft expands two launch examples. Verify QwenPaw/Hermes entrypoints
+  # before adding their launch arguments; both remain first-release targets.
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [qodercli]
+    openclaw:
+      adapter: openclaw
+      argv: [openclaw, gateway, run]
+
+  providers:
+    security:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        argv: [aw, provider, sec-core]
+        location: agent
+      timeout_ms: 1500
+      max_output_bytes: 1048576
+      config:
+        rule_sets: [command-safety, sensitive-output]
+
+    business:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        argv: [/opt/company/bin/aw-business-hook]
+        location: agent
+      timeout_ms: 1000
+      max_output_bytes: 1048576
+      config:
+        project: platform
+
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      budget_ms: 5000
+      match: {tools: ["*"]}
+      steps:
+        - id: business-before
+          provider: business
+          operation: before
+          effects: [observe]
+          on_error: block
+      guard: security.violation
+
+    tool.after:
+      enabled: true
+      required: true
+      budget_ms: 5000
+      match: {tools: ["*"]}
+      steps:
+        - id: business-after
+          provider: business
+          operation: after
+          effects: [observe]
+          on_error: report
+        - id: redact-result
+          enabled: false
+          provider: security
+          operation: redact
+          effects: [observe, replace_result]
+          on_error: withhold_result
+
+    security.violation:
+      enabled: true
+      required: true
+      budget_ms: 2000
+      steps:
+        - id: final-security-check
+          provider: security
+          operation: check
+          effects: [observe, block]
+          on_error: block
+
+    session.start:        {enabled: true,  required: false, steps: []}
+    input.submit:         {enabled: true,  required: false, steps: []}
+    permission.request:   {enabled: true,  required: false, steps: []}
+    compact.before:       {enabled: true,  required: false, steps: []}
+    compact.after:        {enabled: true,  required: false, steps: []}
+    subagent.start:       {enabled: true,  required: false, steps: []}
+    subagent.stop:        {enabled: true,  required: false, steps: []}
+    turn.stop:            {enabled: true,  required: false, steps: []}
+    session.end:          {enabled: true,  required: false, steps: []}
+    model.before_request: {enabled: false, required: false, steps: []}
+    runtime.observed:     {enabled: true,  required: false, steps: []}
+    runtime.exited:       {enabled: true,  required: false, steps: []}
+    coverage.changed:     {enabled: true,  required: false, steps: []}

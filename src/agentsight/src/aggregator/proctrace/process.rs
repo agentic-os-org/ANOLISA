@@ -5,6 +5,44 @@
 
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, next_flow_id, ns_to_us};
 
+/// Cap on the stdout or stderr bytes retained per process.
+///
+/// A long-lived chatty process — or one whose exit event was lost — would
+/// otherwise retain its entire output for the process lifetime, and
+/// `to_chrome_trace_events` serialises the whole buffer into the trace args.
+/// 64 KiB per stream keeps the trace payload sane while preserving the head of
+/// the output the audit/trace consumers read.
+pub(crate) const MAX_RETAINED_PROCESS_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Append a bounded prefix, returning bytes discarded from this stream.
+fn append_capped(buffer: &mut Vec<u8>, data: &[u8], capped: &mut bool) -> usize {
+    if *capped {
+        return data.len();
+    }
+    let take = data
+        .len()
+        .min(MAX_RETAINED_PROCESS_OUTPUT_BYTES.saturating_sub(buffer.len()));
+    buffer.extend_from_slice(&data[..take]);
+    let mut removed = 0;
+    if buffer.len() == MAX_RETAINED_PROCESS_OUTPUT_BYTES {
+        // Stop retaining after the first cut, even if backing off leaves room:
+        // later bytes would splice unrelated output across a discarded gap.
+        *capped = true;
+        // Inspect the combined tail, since a UTF-8 sequence may start in an
+        // earlier event. Keep incomplete tails below the cap for the next event
+        // to complete; keep genuinely invalid bytes for the existing lossy read.
+        if let Some(start) = buffer.iter().rposition(|b| b & 0xC0 != 0x80) {
+            if let Err(error) = std::str::from_utf8(&buffer[start..]) {
+                if error.error_len().is_none() {
+                    removed = buffer.len() - start;
+                    buffer.truncate(start);
+                }
+            }
+        }
+    }
+    data.len() - take + removed
+}
+
 /// Aggregated process data for a specific PID
 #[derive(Debug, Clone)]
 pub struct AggregatedProcess {
@@ -22,10 +60,13 @@ pub struct AggregatedProcess {
     pub filename: Option<String>,
     /// Command arguments (from exec event)
     pub args: Option<String>,
-    /// Collected stdout data
+    /// Collected stdout data, capped at [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub stdout_data: Vec<u8>,
-    /// Collected stderr data
+    /// Collected stderr data, capped at [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub stderr_data: Vec<u8>,
+    // Each stream freezes independently once retention reaches its cap.
+    stdout_capped: bool,
+    stderr_capped: bool,
     /// Whether this aggregation is complete (process exited)
     pub is_complete: bool,
     /// First timestamp when this process was seen (nanoseconds)
@@ -50,6 +91,8 @@ impl AggregatedProcess {
             args: None,
             stdout_data: Vec::new(),
             stderr_data: Vec::new(),
+            stdout_capped: false,
+            stderr_capped: false,
             is_complete: false,
             start_timestamp_ns: timestamp_ns,
             end_timestamp_ns: timestamp_ns,
@@ -82,15 +125,31 @@ impl AggregatedProcess {
         self.end_timestamp_ns = timestamp_ns;
     }
 
-    /// Add stdout data
+    /// Add stdout data, retaining at most [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub fn add_stdout(&mut self, data: &[u8], timestamp_ns: u64) {
-        self.stdout_data.extend_from_slice(data);
+        // Only the chunk that crosses the cap logs; a chatty process must not
+        // produce one warning per event for the rest of its life.
+        let was_full = self.stdout_capped;
+        let dropped = append_capped(&mut self.stdout_data, data, &mut self.stdout_capped);
+        if dropped > 0 && !was_full {
+            log::debug!(
+                "add_stdout(pid={}): output capped at {MAX_RETAINED_PROCESS_OUTPUT_BYTES} bytes",
+                self.pid
+            );
+        }
         self.end_timestamp_ns = timestamp_ns;
     }
 
-    /// Add stderr data
+    /// Add stderr data, retaining at most [`MAX_RETAINED_PROCESS_OUTPUT_BYTES`].
     pub fn add_stderr(&mut self, data: &[u8], timestamp_ns: u64) {
-        self.stderr_data.extend_from_slice(data);
+        let was_full = self.stderr_capped;
+        let dropped = append_capped(&mut self.stderr_data, data, &mut self.stderr_capped);
+        if dropped > 0 && !was_full {
+            log::debug!(
+                "add_stderr(pid={}): output capped at {MAX_RETAINED_PROCESS_OUTPUT_BYTES} bytes",
+                self.pid
+            );
+        }
         self.end_timestamp_ns = timestamp_ns;
     }
 
@@ -116,12 +175,12 @@ impl AggregatedProcess {
             .saturating_sub(self.start_timestamp_ns)
     }
 
-    /// Get total stdout data size
+    /// Get retained stdout data size
     pub fn stdout_size(&self) -> usize {
         self.stdout_data.len()
     }
 
-    /// Get total stderr data size
+    /// Get retained stderr data size
     pub fn stderr_size(&self) -> usize {
         self.stderr_data.len()
     }
@@ -331,6 +390,20 @@ mod tests {
     }
 
     #[test]
+    fn test_output_retention_is_capped_per_direction() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "chatty".to_string(), 1000);
+        let chunk = vec![b'x'; 32 * 1024];
+
+        for _ in 0..8 {
+            proc.add_stdout(&chunk, 2000);
+            proc.add_stderr(&chunk, 2000);
+        }
+
+        assert_eq!(proc.stdout_size(), MAX_RETAINED_PROCESS_OUTPUT_BYTES);
+        assert_eq!(proc.stderr_size(), MAX_RETAINED_PROCESS_OUTPUT_BYTES);
+    }
+
+    #[test]
     fn test_parse_session_claude_code() {
         let env = b"HOME=/root\0CLAUDE_CODE_SESSION_ID=abc-123\0TERM=xterm\0";
         assert_eq!(parse_session_from_environ(env), Some("abc-123".to_string()));
@@ -399,3 +472,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "output_cap_tests.rs"]
+mod output_cap_tests;

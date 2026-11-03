@@ -2,12 +2,13 @@
 use std::sync::{Arc, Barrier};
 
 use asc_pap::PapRepository;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_pcp::*;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::binding::{BindingStatus, BindingView};
 
 fn initial() -> BindingStateSnapshot {
     BindingStateSnapshot {
+        status_version: 1,
         binding: BindingView {
             spec: serde_json::from_str(include_str!(
                 "../../asc-policy-types/tests/fixtures/prepared-binding.json"
@@ -22,8 +23,7 @@ fn initial() -> BindingStateSnapshot {
 #[test]
 fn concurrent_writes_from_one_snapshot_have_exactly_one_winner() {
     let before = initial();
-    let repo =
-        Arc::new(ProcessLocalPapRepository::with_binding_states(vec![before.clone()]).unwrap());
+    let repo = Arc::new(SqlitePolicyRepository::with_binding_states(vec![before.clone()]).unwrap());
     let barrier = Arc::new(Barrier::new(3));
     let writers: Vec<_> = (1..=2)
         .map(|attempts| {
@@ -52,7 +52,7 @@ fn concurrent_writes_from_one_snapshot_have_exactly_one_winner() {
     assert_eq!(
         results
             .iter()
-            .filter(|(r, _)| *r == WriteResult::Applied)
+            .filter(|(r, _)| matches!(r, WriteResult::Applied(_)))
             .count(),
         1
     );
@@ -65,13 +65,14 @@ fn concurrent_writes_from_one_snapshot_have_exactly_one_winner() {
     );
     let winner = &results
         .iter()
-        .find(|(r, _)| *r == WriteResult::Applied)
+        .find(|(r, _)| matches!(r, WriteResult::Applied(_)))
         .unwrap()
         .1;
     assert_eq!(
         repo.get_binding_state(&before.binding.spec.binding_id)
             .unwrap(),
         Some(BindingStateSnapshot {
+            status_version: 2,
             binding: BindingView {
                 spec: before.binding.spec.clone(),
                 status: winner.next.as_ref().unwrap().status.clone().unwrap()
@@ -92,7 +93,7 @@ fn concurrent_writes_from_one_snapshot_have_exactly_one_winner() {
 fn status_error_and_deployment_changes_invalidate_stale_snapshot() {
     for deployments in [false, true] {
         let before = initial();
-        let repo = ProcessLocalPapRepository::with_binding_states(vec![before.clone()]).unwrap();
+        let repo = SqlitePolicyRepository::with_binding_states(vec![before.clone()]).unwrap();
         let mut next = before.clone();
         if deployments {
             next.deployments.push(Deployment {
@@ -107,13 +108,14 @@ fn status_error_and_deployment_changes_invalidate_stale_snapshot() {
             });
         } else {
             next.binding.status.error = Some(Failure::new(FailureKind::Retryable, "RETRY"));
+            next.status_version += 1;
         }
         let write = BindingStateWrite::new(next.clone());
-        assert_eq!(
+        assert!(matches!(
             repo.compare_exchange_binding_state(&before, &write)
                 .unwrap(),
-            WriteResult::Applied
-        );
+            WriteResult::Applied(_)
+        ));
         let mut stale_next = before.clone();
         stale_next.binding.status.phase = BindingStatus::Applying;
         assert_eq!(
@@ -132,29 +134,35 @@ fn status_error_and_deployment_changes_invalidate_stale_snapshot() {
 #[test]
 fn replay_after_pap_write_is_acknowledged_without_overwriting_new_intent() {
     let before = initial();
-    let repo = ProcessLocalPapRepository::with_binding_states(vec![before.clone()]).unwrap();
+    let repo = SqlitePolicyRepository::with_binding_states(vec![before.clone()]).unwrap();
     let mut next = before.clone();
     next.binding.status.phase = BindingStatus::ApplyFailed;
     let write = BindingStateWrite::new(next);
-    assert_eq!(
+    assert!(matches!(
         repo.compare_exchange_binding_state(&before, &write)
             .unwrap(),
-        WriteResult::Applied
-    );
+        WriteResult::Applied(_)
+    ));
     let new_intent = before.binding.clone();
-    repo.update_binding(
-        Some(&repo.get_binding(&before.binding.spec.binding_id).unwrap()),
+    repo.admit_binding_for_test(
+        Some(
+            &(&repo
+                .get_binding_state(&before.binding.spec.binding_id)
+                .unwrap()
+                .unwrap())
+                .into(),
+        ),
         &new_intent,
     )
     .unwrap();
     let current = repo
         .get_binding_state(&before.binding.spec.binding_id)
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         repo.compare_exchange_binding_state(&before, &write)
             .unwrap(),
-        WriteResult::AlreadyApplied
-    );
+        WriteResult::AlreadyApplied(_)
+    ));
     let mut reused = write.clone();
     reused.next.as_mut().unwrap().status.as_mut().unwrap().error =
         Some(Failure::new(FailureKind::Rejected, "CHANGED"));
@@ -176,16 +184,16 @@ fn replay_after_pap_write_is_acknowledged_without_overwriting_new_intent() {
 #[test]
 fn reconciliation_patch_cannot_write_a_spec_or_change_identity() {
     let before = initial();
-    let repo = ProcessLocalPapRepository::with_binding_states(vec![before.clone()]).unwrap();
+    let repo = SqlitePolicyRepository::with_binding_states(vec![before.clone()]).unwrap();
     let mut next = before.clone();
     next.binding.spec.binding_id =
         asc_foundation_types::ResourceId::new("10000000-0000-4000-8000-000000000002").unwrap();
     next.binding.status.error = Some(Failure::new(FailureKind::Retryable, "RETRY"));
-    assert_eq!(
+    assert!(matches!(
         repo.compare_exchange_binding_state(&before, &BindingStateWrite::new(next))
             .unwrap(),
-        WriteResult::Applied
-    );
+        WriteResult::Applied(_)
+    ));
     let current = repo
         .get_binding_state(&before.binding.spec.binding_id)
         .unwrap()
@@ -201,29 +209,36 @@ fn reconciliation_patch_cannot_write_a_spec_or_change_identity() {
 fn removal_is_atomic_replayable_and_stale_writes_cannot_resurrect_revision_one() {
     let mut before = initial();
     before.binding.spec.binding_revision = asc_foundation_types::Revision::new(1).unwrap();
-    let repo = ProcessLocalPapRepository::with_binding_states(vec![before.clone()]).unwrap();
+    before.binding.status.phase = BindingStatus::Deleting;
+    let repo = SqlitePolicyRepository::with_binding_states(vec![before.clone()]).unwrap();
     let write = BindingStateWrite::delete();
-    assert_eq!(
+    assert!(matches!(
         repo.compare_exchange_binding_state(&before, &write)
             .unwrap(),
-        WriteResult::Applied
-    );
+        WriteResult::Applied(_)
+    ));
     let id = &before.binding.spec.binding_id;
     assert_eq!(repo.get_binding_state(id).unwrap(), None);
     assert_eq!(repo.get_binding(id), Err(asc_pap::PapError::NotFound));
     assert!(repo.list_bindings(100, 0).unwrap().items.is_empty());
-    assert_eq!(
+    assert!(matches!(
         repo.compare_exchange_binding_state(&before, &write)
             .unwrap(),
-        WriteResult::AlreadyApplied
-    );
+        WriteResult::AlreadyApplied(_)
+    ));
     assert_eq!(
         repo.compare_exchange_binding_state(&before, &BindingStateWrite::new(before.clone()))
             .unwrap(),
         WriteResult::Conflict
     );
     assert_eq!(
-        repo.update_binding(Some(&before.binding), &before.binding),
+        repo.admit_binding_for_test(
+            Some(&(&before).into()),
+            &BindingView {
+                spec: before.binding.spec.clone(),
+                status: BindingStatus::PendingDelete.into()
+            }
+        ),
         Err(asc_pap::PapError::NotFound)
     );
     assert_eq!(repo.get_binding_state(id).unwrap(), None);
@@ -232,9 +247,10 @@ fn removal_is_atomic_replayable_and_stale_writes_cannot_resurrect_revision_one()
 #[test]
 fn stale_removal_cannot_erase_a_newer_status_or_target_observation() {
     let before = initial();
-    let repo = ProcessLocalPapRepository::with_binding_states(vec![before.clone()]).unwrap();
+    let repo = SqlitePolicyRepository::with_binding_states(vec![before.clone()]).unwrap();
     let mut next = before.clone();
     next.binding.status.phase = BindingStatus::PendingDelete;
+    next.status_version += 1;
     next.binding.status.error = Some(Failure::new(FailureKind::Retryable, "TEST_NEW_OBSERVATION"));
     repo.compare_exchange_binding_state(&before, &BindingStateWrite::new(next.clone()))
         .unwrap();

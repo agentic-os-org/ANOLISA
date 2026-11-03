@@ -1,14 +1,19 @@
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+// Readiness includes real SQLite initialization on shared CI storage.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+// Match the deployment stop budget, including drain, persistence, and runtime cleanup.
+const EXIT_TIMEOUT: Duration = Duration::from_secs(45);
 
 struct RunningBinary {
     child: Child,
@@ -43,6 +48,38 @@ fn create_runtime_directory() -> PathBuf {
     directory
 }
 
+fn configured_command(directory: &Path) -> Command {
+    // Process tests never open the machine's production SkillSec key store or configuration.
+    let config = directory.join("skillsec.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "stateDir": directory.join("state"),
+            "enableDefaultSkillDirs": false
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"));
+    command.arg("--skillsec-config").arg(config);
+    command
+}
+
+async fn rejected_without_root(running: &mut RunningBinary) -> bool {
+    if rustix::process::geteuid().as_raw() == 0 {
+        return false;
+    }
+    assert!(!wait_for_exit(running).await.success());
+    let stderr = read_stderr(&running.directory);
+    assert!(
+        stderr.contains("SkillSec system daemon must run as root"),
+        "{stderr}"
+    );
+    assert!(!running.socket_path.exists());
+    true
+}
+
 fn stderr_log(directory: &Path) -> Stdio {
     std::fs::File::create(directory.join("stderr.log"))
         .unwrap()
@@ -54,7 +91,8 @@ fn read_stderr(directory: &Path) -> String {
 }
 
 async fn wait_for_socket(running: &mut RunningBinary) {
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    let started = Instant::now();
+    let result = tokio::time::timeout(STARTUP_TIMEOUT, async {
         loop {
             if let Some(status) = running.child.try_wait().unwrap() {
                 panic!(
@@ -86,27 +124,40 @@ async fn wait_for_socket(running: &mut RunningBinary) {
     })
     .await;
     if result.is_err() {
+        let elapsed = started.elapsed();
         let _ = running.child.kill();
         let status = running.child.wait().unwrap();
         panic!(
-            "daemon bootstrap timed out; socket: {}; status after cleanup: {status}; stderr: {}",
+            "daemon bootstrap timed out after {elapsed:?}; pid: {}; socket: {}; status after cleanup: {status}; stderr: {}",
+            running.child.id(),
             running.socket_path.display(),
             read_stderr(&running.directory)
         );
     }
 }
 
-async fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
-    tokio::time::timeout(Duration::from_secs(2), async {
+async fn wait_for_exit(running: &mut RunningBinary) -> std::process::ExitStatus {
+    let started = Instant::now();
+    tokio::time::timeout(EXIT_TIMEOUT, async {
         loop {
-            if let Some(status) = child.try_wait().unwrap() {
+            if let Some(status) = running.child.try_wait().unwrap() {
                 return status;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the foreground daemon should exit within the deadline")
+    .unwrap_or_else(|_| {
+        let elapsed = started.elapsed();
+        let _ = running.child.kill();
+        let status = running.child.wait().unwrap();
+        panic!(
+            "daemon exit timed out after {elapsed:?}; pid: {}; socket: {}; status after cleanup: {status}; stderr: {}",
+            running.child.id(),
+            running.socket_path.display(),
+            read_stderr(&running.directory)
+        );
+    })
 }
 
 async fn request(path: &Path, payload: &[u8]) -> Value {
@@ -132,13 +183,54 @@ async fn dproc_configured_administrator_can_query_without_root() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dproc_023_unsafe_policy_directory_reports_metadata_before_socket_admission() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let log = directory.join("log");
+    let data = log.join("agent-sec");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let child = configured_command(&directory)
+        .env("AGENT_SEC_DATA_DIR", &data)
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(&directory))
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+    assert!(!wait_for_exit(&mut running).await.success());
+    let stderr = read_stderr(&running.directory);
+    for expected in [
+        log.display().to_string(),
+        "uid=".into(),
+        "gid=".into(),
+        "mode=0775".into(),
+        "without group/other write".into(),
+    ] {
+        assert!(stderr.contains(&expected), "{stderr}");
+    }
+    assert!(!data.join("policy-state.db").exists());
+    assert!(!running.socket_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_refuses_to_bind_when_sqlite_event_storage_is_unusable() {
     let directory = create_runtime_directory();
     let socket_path = directory.join("daemon.sock");
     let data_dir = directory.join("data");
-    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&data_dir)
+        .unwrap();
     std::fs::create_dir(data_dir.join("security-events.db")).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"))
+    let child = configured_command(&directory)
         .env("AGENT_SEC_DATA_DIR", &data_dir)
         .args(["serve", "--socket"])
         .arg(&socket_path)
@@ -153,7 +245,10 @@ async fn daemon_refuses_to_bind_when_sqlite_event_storage_is_unusable() {
         directory,
         socket_path,
     };
-    assert!(!wait_for_exit(&mut running.child).await.success());
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+    assert!(!wait_for_exit(&mut running).await.success());
     let stderr = read_stderr(&running.directory);
     assert!(
         stderr.contains("security event storage unavailable"),
@@ -167,9 +262,12 @@ async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
     let directory = create_runtime_directory();
     let socket_path = directory.join("daemon.sock");
     let data_dir = directory.join("data");
-    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&data_dir)
+        .unwrap();
     std::fs::create_dir(data_dir.join("security-events.jsonl")).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"))
+    let child = configured_command(&directory)
         .env("AGENT_SEC_DATA_DIR", &data_dir)
         .args(["serve", "--socket"])
         .arg(&socket_path)
@@ -184,11 +282,150 @@ async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
         socket_path,
     };
 
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+    wait_for_socket(&mut running).await;
+    assert!(data_dir.join("security-events.db").exists());
+
+    let signal = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(running.child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(signal.success());
+    assert!(wait_for_exit(&mut running).await.success());
+    // Socket readiness does not flush the asynchronous diagnostic writer.
+    let stderr = read_stderr(&running.directory);
+    assert!(
+        stderr.contains("JSONL security event log unavailable"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dproc_scope_binary_starts_discovery_and_stops_it_on_sigterm() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let child = configured_command(&directory)
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .arg("--policy-admin-uid")
+        .arg(std::fs::metadata(&directory).unwrap().uid().to_string())
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(&directory))
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+    wait_for_socket(&mut running).await;
+    let policy = request(&running.socket_path, b"{\"method\":\"policy.templates.create\",\"params\":{\"policyName\":\"scope-policy\",\"template\":{\"specVersion\":\"0.1\",\"rules\":[{\"effect\":\"block\",\"category\":\"file\",\"action\":\"write\",\"target\":{\"type\":\"file\",\"path\":\"/protected\"},\"where\":{\"operation\":{\"eq\":\"delete\"}}}]}}}\n").await;
+    for _ in 0..2 {
+        let mut payload = serde_json::to_vec(&serde_json::json!({"method":"policy.scopes.create","params":{
+            "selector":{"kind":"process","match":{"executable":env!("CARGO_BIN_EXE_agent-sec-daemon")}},
+            "policyTemplates":[{"policyId":policy["result"]["policyId"],"policyRevision":policy["result"]["revision"]}]
+        }})).unwrap();
+        payload.push(b'\n');
+        let created = request(&running.socket_path, &payload).await;
+        assert!(created["result"]["scopeId"].is_string(), "{created}");
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if read_stderr(&running.directory).contains("selected new instances") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial scan should discover the daemon executable");
+    assert!(
+        Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(running.child.id().to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(wait_for_exit(&mut running).await.success());
+    assert!(!running.socket_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dproc_removed_probe_option_rejects_before_binding_socket() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let config = directory.join("probes.json");
+    let child = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"))
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .arg("--agent-probes")
+        .arg(config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(&directory))
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+    assert!(!wait_for_exit(&mut running).await.success());
+    assert!(!running.socket_path.exists());
+    assert!(read_stderr(&running.directory).contains("unknown argument: --agent-probes"));
+}
+
+/// DPROC-QRY-001: optional index failure is diagnosed without preventing admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_binds_when_optional_query_indexes_fail() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let data_dir = directory.join("data");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&data_dir)
+        .unwrap();
+    let db = data_dir.join("security-events.db");
+    let writer = asc_persistence_sqlite::security_events::SqliteEventWriter::new(&db).unwrap();
+    writer.probe().unwrap();
+    writer.close();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE idx_security_uid_time (id INTEGER)")
+        .unwrap();
+    let child = configured_command(&directory)
+        .env("AGENT_SEC_DATA_DIR", &data_dir)
+        .args(["serve", "--socket"])
+        .arg(&socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(&directory))
+        .spawn()
+        .unwrap();
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+
+    if rejected_without_root(&mut running).await {
+        return;
+    }
     wait_for_socket(&mut running).await;
     assert!(data_dir.join("security-events.db").exists());
     let stderr = read_stderr(&running.directory);
     assert!(
-        stderr.contains("JSONL security event log unavailable"),
+        stderr.contains("security query indexes unavailable"),
         "{stderr}"
     );
 
@@ -198,14 +435,14 @@ async fn daemon_binds_when_jsonl_event_storage_is_unusable() {
         .status()
         .unwrap();
     assert!(signal.success());
-    assert!(wait_for_exit(&mut running.child).await.success());
+    assert!(wait_for_exit(&mut running).await.success());
 }
 
 async fn run_binary_scenario(configure_admin: bool) {
     let directory = create_runtime_directory();
     let socket_path = directory.join("daemon.sock");
     let data_dir = directory.join("data");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"));
+    let mut command = configured_command(&directory);
     command.env("AGENT_SEC_DATA_DIR", &data_dir);
     if configure_admin {
         let uid = std::fs::metadata(&directory).unwrap().uid();
@@ -225,6 +462,9 @@ async fn run_binary_scenario(configure_admin: bool) {
         socket_path,
     };
 
+    if rejected_without_root(&mut running).await {
+        return;
+    }
     wait_for_socket(&mut running).await;
     // DPROC-UDS-001: local users can reach the service; PAP still requires an administrator.
     assert_eq!(
@@ -264,8 +504,145 @@ async fn run_binary_scenario(configure_admin: bool) {
         .status()
         .unwrap();
     assert!(signal.success());
-    let status = wait_for_exit(&mut running.child).await;
+    let status = wait_for_exit(&mut running).await;
 
     assert!(status.success());
     assert!(!running.socket_path.exists());
+}
+
+async fn pap_request(path: &Path, method: &str, params: Value) -> Value {
+    let mut payload =
+        serde_json::to_vec(&serde_json::json!({"method":method,"params":params})).unwrap();
+    payload.push(b'\n');
+    request(path, &payload).await
+}
+fn restart_command(directory: &Path, socket: &Path) -> Child {
+    configured_command(directory)
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .args(["serve", "--socket"])
+        .arg(socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_log(directory))
+        .spawn()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_policy_and_scope_survive_sigkill_and_database_lease_rejects_second_socket() {
+    let directory = create_runtime_directory();
+    let socket_path = directory.join("daemon.sock");
+    let child = restart_command(&directory, &socket_path);
+    let mut running = RunningBinary {
+        child,
+        directory,
+        socket_path,
+    };
+    if rejected_without_root(&mut running).await {
+        return;
+    }
+    wait_for_socket(&mut running).await;
+    let template = serde_json::json!({"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/protected"}, "where": {"operation": {"eq": "delete"}}}]});
+    let policy = pap_request(
+        &running.socket_path,
+        "policy.templates.create",
+        serde_json::json!({"policyName":"original","template":template}),
+    )
+    .await;
+    assert!(policy.get("error").is_none(), "{policy}");
+    let policy_id = policy["result"]["policyId"].clone();
+    // This impossible PID exercises real registry startup without contacting the host PEP.
+    let scope = pap_request(
+        &running.socket_path,
+        "policy.scopes.create",
+        serde_json::json!({
+            "selector": {"kind": "pid", "pid": u32::MAX},
+            "policyTemplates": [{"policyId": policy_id, "policyRevision": 1}]
+        }),
+    )
+    .await;
+    assert!(scope.get("error").is_none(), "{scope}");
+    let scope_id = scope["result"]["scopeId"].clone();
+    let updated = pap_request(
+        &running.socket_path,
+        "policy.templates.update",
+        serde_json::json!({"policyId":policy_id,"policyName":"updated","template":template}),
+    )
+    .await;
+    assert_eq!(updated["result"]["revision"], 2);
+    assert_database_lease_excludes_second_socket(&running.directory);
+    running.child.kill().unwrap();
+    running.child.wait().unwrap();
+    running.child = restart_command(&running.directory, &running.socket_path);
+    wait_for_socket(&mut running).await;
+    let restored = pap_request(
+        &running.socket_path,
+        "policy.scopes.get",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert_eq!(restored["result"], scope["result"]);
+    let current = pap_request(
+        &running.socket_path,
+        "policy.templates.get",
+        serde_json::json!({"id":policy_id,"revision":2}),
+    )
+    .await;
+    assert_eq!(current["result"], updated["result"]);
+    for response in [&restored, &current] {
+        let encoded = response.to_string();
+        assert!(!encoded.contains("statusVersion") && !encoded.contains("cleanup"));
+    }
+    let deleted = pap_request(
+        &running.socket_path,
+        "policy.scopes.delete",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert!(deleted.get("error").is_none(), "{deleted}");
+    let missing = pap_request(
+        &running.socket_path,
+        "policy.scopes.get",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert_eq!(missing["error"]["code"], "not_found");
+    running.child.kill().unwrap();
+    running.child.wait().unwrap();
+    running.child = restart_command(&running.directory, &running.socket_path);
+    wait_for_socket(&mut running).await;
+    let missing = pap_request(
+        &running.socket_path,
+        "policy.scopes.get",
+        serde_json::json!({"id":scope_id}),
+    )
+    .await;
+    assert_eq!(missing["error"]["code"], "not_found");
+    let signal = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(running.child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(signal.success());
+    assert!(wait_for_exit(&mut running).await.success());
+}
+
+fn assert_database_lease_excludes_second_socket(directory: &Path) {
+    let second_runtime = directory.join("second-runtime");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&second_runtime)
+        .unwrap();
+    let second = configured_command(directory)
+        .env("AGENT_SEC_DATA_DIR", directory.join("data"))
+        .args(["serve", "--socket"])
+        .arg(second_runtime.join("second.sock"))
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("Policy database already owned"),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
 }

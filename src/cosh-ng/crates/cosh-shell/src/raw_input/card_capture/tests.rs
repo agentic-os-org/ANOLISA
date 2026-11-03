@@ -1192,3 +1192,47 @@ fn draft_split_csi_u_backspace_reassembles_before_editing() {
         .expect("joined CSI-u backspace must delete one char");
     assert_eq!(changed, "第一");
 }
+
+#[test]
+fn composer_request_refresh_preserves_only_same_request_selection() {
+    let hooks_index = crate::input::composer::slash_completions("/", 0, 1)
+        .iter()
+        .position(|command| *command == "/hooks")
+        .expect("public /hooks completion");
+    for same_request in [true, false] {
+        let capture = RawInputCapture::PromptDraft {
+            id: "composer-first".to_string(),
+            initial_text: "/".into(),
+            completion: Some(Box::new(("/help ".into(), (0, 1)))),
+            agent_composer: true,
+            workspace_cwd: None,
+        };
+        let mut state = CardInputState::default();
+        state.apply_capture(&capture);
+        let events = state.consume(&capture, &b"\x1b[B".repeat(hooks_index));
+        assert!(matches!(
+            events.last(),
+            Some(RawInputEvent::PromptDraftChanged { selected_completion, .. })
+                if *selected_completion == hooks_index
+        ));
+        let mut refreshed = capture;
+        if let RawInputCapture::PromptDraft { id, completion, .. } = &mut refreshed {
+            if same_request {
+                *completion = Some(Box::new(("/hooks ".into(), (0, 1))));
+            } else {
+                *id = "composer-next".to_string();
+            }
+        }
+        state.apply_capture(&refreshed);
+        let (events, remainder) = state.consume_split(&refreshed, b"\r");
+        let expected = if same_request { "/hooks " } else { "/help " };
+        assert!(remainder.is_empty());
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                RawInputEvent::PromptDraftSubmit { text, slash: true, .. } if text == expected
+            )),
+            "same request {same_request}: expected {expected:?}, got {events:?}"
+        );
+    }
+}

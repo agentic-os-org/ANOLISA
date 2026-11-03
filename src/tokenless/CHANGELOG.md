@@ -9,6 +9,136 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.2] - Unreleased
+
+### Changed
+
+- Choose the CLI and framework integrations separately using the core and plugins RPMs.
+- Use the selected installation paths for adapter registration and removal.
+
+## [0.9.1] - 2026-10-29
+
+### Fixed
+
+- Qoder retains the native Bash result envelope when compressing stdout, preserving exit status and telemetry fields without serializing them into the model's text. Other result shapes keep their existing replacement behavior ([#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)).
+- Recognized `head` and `tail` commands, including supported wrappers and compound commands containing them, now execute natively so the requested line window is preserved. Explicit RTK calls and custom RTK wrapper prefixes retain their existing behavior ([#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)).
+- QwenWork workspace hooks now use the system user's `~/.tokenless` directory by default and honor an absolute `TOKENLESS_DATA_DIR`, keeping state in one location across working-directory changes. Existing workspace history is not migrated automatically. Install and detect commands report the resolved directory and explain that Shell sandbox permissions can prevent RTK statistics and execution receipts from being saved ([#9215](https://github.com/agentic-os-org/ANOLISA/pull/9215)).
+- Verbose unittest and Django test logs now compress repeated successful test records while preserving summaries, nonpassing outcomes, tracebacks, and database setup output. The original remains retrievable; multiline descriptions and unknown output are retained ([#9083](https://github.com/agentic-os-org/ANOLISA/pull/9083)).
+- HTML tables with `rowspan="0"` now keep cells under the correct column headers through the end of each row group. Original-page retrieval remains byte-exact ([#9012](https://github.com/agentic-os-org/ANOLISA/pull/9012)).
+- Windows builds now stage the current Tokenless and RTK executables from Cargo's resolved target directories, avoiding missing or stale artifacts when environment or configuration settings redirect build output ([#9018](https://github.com/agentic-os-org/ANOLISA/pull/9018)).
+
+## [0.9.0] - 2026-10-25
+
+### Added
+
+- Windows x64 support includes a native CLI, bundled RTK, npm launchers, a Python ABI3 wheel, and the QwenWork adapter for local sessions. Release builds produce Windows ZIP and wheel assets; npm installation awaits separate registry publication. Windows ARM and QwenWork VM sessions remain unsupported ([#8853](https://github.com/agentic-os-org/ANOLISA/pull/8853), [#9011](https://github.com/agentic-os-org/ANOLISA/pull/9011), [#9015](https://github.com/agentic-os-org/ANOLISA/pull/9015)).
+- Intel Mac (macOS x86_64) is now a release build target for raw archives, npm binaries, and Python wheels. npm installation awaits separate registry publication ([#8770](https://github.com/agentic-os-org/ANOLISA/pull/8770)).
+
+### Changed
+
+- **Breaking for Rust callers:** Remove `drop_nulls` and `drop_empty_fields` from `JsonCompressionConfig` initializers and `preserve_top_level_shape` from `JsonCompressionContext` initializers. Complete JSON candidates now retain every field and empty value, including array positions; some inputs save fewer tokens or pass through. Explicit truncation and record reduction retain their recovery policies, and CLI arguments are unchanged ([#8814](https://github.com/agentic-os-org/ANOLISA/pull/8814)).
+- TOON encoding uses spec v4.4 to compact nested record arrays and objects keyed by ID. Upgrade decoders from `toon-format` 0.5.0 to 0.7.0 before consuming the new nested and keyed headers. Previously saved malformed empty-object-array documents still require their original JSON; the codec update does not repair them ([#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)).
+
+### Fixed
+
+- JSON compression and Stash recovery retain source numeric literals without precision loss. TOON candidates must preserve the retained values and numeric types; otherwise compression keeps exact JSON, and direct `compress-toon` returns the original input byte for byte ([#7784](https://github.com/agentic-os-org/ANOLISA/pull/7784), [#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)).
+- PostTool compression can resume when all tracked RTK invocations report byte-identical output and the executed command matches. Changed output or missing, stale, or mismatched evidence retains the RTK bypass; adapters without recovery remain limited to lossless candidates ([#8901](https://github.com/agentic-os-org/ANOLISA/pull/8901)).
+- `compress-response` and `compress-schema` now emit payloads byte for byte without appending a newline. Active-mode statistics match those emitted bytes; dry-run still emits the original input while recording predicted savings ([#7789](https://github.com/agentic-os-org/ANOLISA/pull/7789)).
+- Advisory messages no longer turn successful compression, passthrough, or statistics operations into panics when stderr is unwritable ([#7796](https://github.com/agentic-os-org/ANOLISA/pull/7796), [#7752](https://github.com/agentic-os-org/ANOLISA/pull/7752)).
+- Codex adapter install and uninstall commands now preview the actual lifecycle branches under `ANOLISA_DRY_RUN=1` without modifying files or registrations. Missing binaries and source trees fail before previewing steps the real installation cannot reach ([#7723](https://github.com/agentic-os-org/ANOLISA/pull/7723)).
+
+## [0.8.8] - 2026-10-21
+
+### Added
+
+- An opt-in, Bearer-authenticated statistics service now exposes read-only records with session and tool filters, pagination, and optional content for integrations such as AgentSight. Remote listeners need a private network or TLS proxy ([#7303](https://github.com/agentic-os-org/ANOLISA/pull/7303)).
+- Native `find` path lists can share repeated directory prefixes in a reversible view while preserving every path and line ending. Ambiguous or unprofitable output passes through unchanged ([#7953](https://github.com/agentic-os-org/ANOLISA/pull/7953)).
+- QwenWorkCN 1.3.2 workspace Shell calls can use Tokenless after the macOS plugin is loaded in a new conversation. Native Bash remains supported; Linux VM execution is unsupported ([#8725](https://github.com/agentic-os-org/ANOLISA/pull/8725)).
+
+### Changed
+
+- CSV and TSV compression now preserves every row and cell instead of sampling rows, and no longer writes Stash entries for tables. Some outputs save fewer tokens; previously stored reduced views remain retrievable ([#8584](https://github.com/agentic-os-org/ANOLISA/pull/8584)).
+
+### Fixed
+
+- CLI commands no longer panic when stdout or stderr cannot be written. A closed output pipe exits successfully after completed work, other output failures report failure, and an undelivered statistics-clear prompt cannot confirm deletion ([#7777](https://github.com/agentic-os-org/ANOLISA/pull/7777), [#7773](https://github.com/agentic-os-org/ANOLISA/pull/7773)).
+- Qoder, Claude Code, and QwenWork installers and uninstallers now preview their actions under `ANOLISA_DRY_RUN=1` without changing registrations or files. OpenCode's preview also names conditional plugin-directory creation ([#7715](https://github.com/agentic-os-org/ANOLISA/pull/7715), [#7731](https://github.com/agentic-os-org/ANOLISA/pull/7731), [#7747](https://github.com/agentic-os-org/ANOLISA/pull/7747), [#7750](https://github.com/agentic-os-org/ANOLISA/pull/7750)).
+- Qoder unwraps shorter shell results before compression. QwenPaw preserves the entire response if any PostTool block fails and honors an absolute `TOKENLESS_DATA_DIR` ([#8290](https://github.com/agentic-os-org/ANOLISA/pull/8290)).
+- QwenPaw rejects a runtime wheel whose SDK constructors lack required keyword arguments before the plugin reaches a tool call ([#7744](https://github.com/agentic-os-org/ANOLISA/pull/7744)).
+- Hosts that replace tool responses directly now pass all raw response fields to Core instead of losing fields during Cosh wrapper extraction ([#7633](https://github.com/agentic-os-org/ANOLISA/pull/7633)).
+- The Codex adapter now recognizes its qualified plugin identity and passes through PreToolUse events whose decoded `tool_input` is not an object ([#7565](https://github.com/agentic-os-org/ANOLISA/pull/7565), [#6984](https://github.com/agentic-os-org/ANOLISA/pull/6984)).
+- Pipeline workers now return an error for invalid request variants and continue serving later requests ([#7569](https://github.com/agentic-os-org/ANOLISA/pull/7569)).
+- Git diff and HTML compression retain the original tool result and report Stash write failures consistently instead of failing the whole PostTool call as a pipeline error ([#6619](https://github.com/agentic-os-org/ANOLISA/pull/6619)).
+- `stats show` distinguishes empty or unstored after-content from a result that was not compressed ([#7809](https://github.com/agentic-os-org/ANOLISA/pull/7809)).
+- QwenPaw prerelease wheel URLs now use installable PEP 440 filenames while keeping the release tag's original spelling ([#7662](https://github.com/agentic-os-org/ANOLISA/pull/7662)).
+
+## [0.8.7] - 2026-10-15
+
+### Fixed
+
+- JSON responses containing numbers that cannot retain their exact value during parsing now pass through unchanged. TOON conversion is used only when decoding preserves the same values and types, preventing silent numeric precision loss ([#7069](https://github.com/agentic-os-org/ANOLISA/pull/7069)).
+- OpenCode schema compression now preserves executable parameter validators and modifies only the model-facing JSON schema. Older hosts exposing only a runtime codec skip schema compression ([#7048](https://github.com/agentic-os-org/ANOLISA/pull/7048)).
+- Qwen Code and OpenCode uninstall scripts now honor `ANOLISA_DRY_RUN=1`, previewing removals without deleting plugin registrations or changing enablement settings ([#7348](https://github.com/agentic-os-org/ANOLISA/pull/7348)).
+- Compression and retrieval now warn when the statistics database cannot be opened while continuing to return their normal output. Missed statistics are not retried or replayed ([#7395](https://github.com/agentic-os-org/ANOLISA/pull/7395)).
+- Selective-Claw now aligns archived summaries with the current conversation window's recall IDs. Partial or rewritten turns no longer overwrite unrelated archived summaries ([#7042](https://github.com/agentic-os-org/ANOLISA/pull/7042)).
+- Release validation now accepts normalized Python prerelease wheel filenames while checking the original release-tag spelling separately, and rejects filenames that pip cannot install ([#5271](https://github.com/agentic-os-org/ANOLISA/pull/5271)).
+
+## [0.8.6] - 2026-10-14
+
+### Added
+
+- Add a QwenWorkCN local-mode adapter with command rewriting, response compression, and explicit desktop plugin sideloading. The adapter ships in raw, npm, and RPM packages; security-workspace/VM sessions are not supported ([#7257](https://github.com/agentic-os-org/ANOLISA/pull/7257)).
+
+### Changed
+
+- **Breaking:** The OpenClaw adapter now requires OpenClaw 2026.6.6 or newer and applies lossless compression to supported live tool results before the same-turn model request. Results are no longer compressed a second time during persistence. Legacy hosts such as 2026.8.2 may truncate text before middleware runs; Tokenless cannot restore that missing content, and builds containing upstream fix `2f620b970a04` are recommended ([#7124](https://github.com/agentic-os-org/ANOLISA/pull/7124)).
+
+### Fixed
+
+- Quiet, print-only `sed` commands using long options, combined flags, or multiple expressions now preserve HTML source correctly. Commands that modify content or read scripts from files no longer qualify as plain file reads ([#4963](https://github.com/agentic-os-org/ANOLISA/pull/4963)).
+- HTML inline code containing consecutive backticks now receives a long enough Markdown delimiter to preserve the code span ([#6393](https://github.com/agentic-os-org/ANOLISA/pull/6393)).
+- On macOS, RTK command rewriting no longer rejects an otherwise successful result when cleanup encounters a process group containing only its exited leader ([#7257](https://github.com/agentic-os-org/ANOLISA/pull/7257)).
+- Shared and Codex stdin hooks now ignore JSON payloads that are not objects, and Codex response diagnostics ignore invalid payload shapes, avoiding tracebacks on unsupported input ([#6691](https://github.com/agentic-os-org/ANOLISA/pull/6691), [#6663](https://github.com/agentic-os-org/ANOLISA/pull/6663)).
+- AgentScope 2.x and QwenPaw now pass malformed tool arguments through to the host instead of aborting the whole Agent reply; response processing remains lossless for those calls ([#5288](https://github.com/agentic-os-org/ANOLISA/pull/5288), [#5299](https://github.com/agentic-os-org/ANOLISA/pull/5299)).
+- Stats and Stash library warnings no longer interrupt successful compression, statistics reads, or retrieval when stderr is unwritable ([#6911](https://github.com/agentic-os-org/ANOLISA/pull/6911)).
+- Selective-Claw returns each requested turn only once and preserves first-request order, avoiding duplicated recall output and token usage ([#4859](https://github.com/agentic-os-org/ANOLISA/pull/4859)).
+- Selective-Claw history reconciliation now distinguishes tool results by call ID, tool identity, and error state, retaining distinct results even when their text is identical ([#7040](https://github.com/agentic-os-org/ANOLISA/pull/7040)).
+
+## [0.8.5] - 2026-10-11
+
+### Added
+
+- Expired SQLite Stash payloads are now reclaimed during successful writes, so compression-only workloads no longer require retrieval to clean up old payloads. This does not immediately shrink the database file or securely erase deleted data ([#3565](https://github.com/agentic-os-org/ANOLISA/pull/3565)).
+
+### Changed
+
+- Complete HTML page rendering is now enabled by default in the CLI, Runtime, and Python SDK. Disable it with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; an empty environment value keeps the default. Git diff cropping remains opt-in ([#3473](https://github.com/agentic-os-org/ANOLISA/pull/3473)).
+
+### Fixed
+
+- Plain shell file reads such as `cat page.html` now keep HTML source verbatim across adapters that supply the command, including OpenClaw, DSH, QwenPaw, and AgentScope. JSON, tables, and other supported file data can still compress ([#3481](https://github.com/agentic-os-org/ANOLISA/pull/3481)).
+- A single leading byte-order mark no longer prevents HTML, JSON, tables, or stack traces from reaching their matching content handlers; recoverable transformations retain the original bytes ([#3486](https://github.com/agentic-os-org/ANOLISA/pull/3486), [#4888](https://github.com/agentic-os-org/ANOLISA/pull/4888)).
+- Bracketed tool output that is not one valid JSON document, including concatenated documents and NDJSON, now passes through unchanged instead of failing the PostTool call ([#4159](https://github.com/agentic-os-org/ANOLISA/pull/4159)).
+- Build/test commands wrapped in `env -i` or `env -u`, or using a Cargo `+toolchain`, retain their native output for build-log compression instead of being handed to RTK ([#4270](https://github.com/agentic-os-org/ANOLISA/pull/4270)).
+- RTK rewriting now enforces its deadline even when descendants keep stdout open after the parent exits, and cleans up the owned process group ([#3552](https://github.com/agentic-os-org/ANOLISA/pull/3552)).
+- Concurrent hooks can initialize or migrate the stats database without racing to add the same columns; failed migrations roll back together ([#3607](https://github.com/agentic-os-org/ANOLISA/pull/3607)).
+- Stats history and session-diff reports now order records by their actual timestamp, including mixed UTC offsets and sub-millisecond differences, so newest-record limits and compression chains remain correct ([#3848](https://github.com/agentic-os-org/ANOLISA/pull/3848)).
+- Failed stats and retrieval-event writes now emit a `[tokenless-stats]` warning while compression and retrieval continue, including when stderr itself is unwritable ([#3587](https://github.com/agentic-os-org/ANOLISA/pull/3587)).
+- Clean AgentScope 1.x installations now include the `greenlet` dependency required by newer SQLAlchemy versions. Positional application postprocessors are also chained correctly before Tokenless processing ([#3496](https://github.com/agentic-os-org/ANOLISA/pull/3496), [#3706](https://github.com/agentic-os-org/ANOLISA/pull/3706)).
+- Hermes preserves the full error envelope for failed or stopped shell calls, retaining diagnostics that may exist outside the output field ([#3815](https://github.com/agentic-os-org/ANOLISA/pull/3815)).
+- OpenCode forwards nonzero Bash exit codes for diagnosis, cleans up timed-out hooks and their descendants, and enforces the 1 MiB hook-output limit in UTF-8 bytes. Oversized hook responses leave the original tool output intact ([#4398](https://github.com/agentic-os-org/ANOLISA/pull/4398), [#3818](https://github.com/agentic-os-org/ANOLISA/pull/3818), [#4757](https://github.com/agentic-os-org/ANOLISA/pull/4757)).
+- OpenCode host edits to a returned tool schema no longer affect the cached schema used by later calls ([#4731](https://github.com/agentic-os-org/ANOLISA/pull/4731)).
+- Qwen Code adapter installation with `--dry-run` no longer invokes the host CLI, stamps manifests, or changes the active extension link ([#4397](https://github.com/agentic-os-org/ANOLISA/pull/4397)).
+- `npm rebuild` can now replace dangling `tokenless` and `rtk` launcher symlinks and complete repeated runs ([#4711](https://github.com/agentic-os-org/ANOLISA/pull/4711)).
+- OpenClaw binary discovery now skips same-named directories in `PATH`, allowing a later executable or executable symlink to be found ([#4855](https://github.com/agentic-os-org/ANOLISA/pull/4855)).
+- Selective-Claw turn recall now combines live and archived turns in request order and stays bound to the host session, preventing interleaved conversations from redirecting `expand_turn` ([#4670](https://github.com/agentic-os-org/ANOLISA/pull/4670), [#4782](https://github.com/agentic-os-org/ANOLISA/pull/4782)).
+- Selective-Claw keeps leading system or implicit turns distinct from later user turns and migrates older archives to matching ordinal turn IDs ([#4673](https://github.com/agentic-os-org/ANOLISA/pull/4673), [#4693](https://github.com/agentic-os-org/ANOLISA/pull/4693)).
+- Selective-Claw makes existing archive messages searchable when first creating its full-text index ([#4689](https://github.com/agentic-os-org/ANOLISA/pull/4689)).
+- Repeated Selective-Claw lifecycle calls no longer duplicate replacement conversation history, including after an engine restart ([#4700](https://github.com/agentic-os-org/ANOLISA/pull/4700)).
+- Selective-Claw restores structured host messages from the archive, preserving tool identities, content blocks, role aliases, and metadata when assembling stored context ([#4699](https://github.com/agentic-os-org/ANOLISA/pull/4699)).
+- Selective-Claw persists summaries for turns without a user message and includes summaries and fallback previews in context token estimates ([#4698](https://github.com/agentic-os-org/ANOLISA/pull/4698), [#4662](https://github.com/agentic-os-org/ANOLISA/pull/4662)).
+- Selective-Claw now honors OpenClaw `pluginConfig` options and expands `~/` archive paths, including the disabled registration setting ([#4822](https://github.com/agentic-os-org/ANOLISA/pull/4822)).
+
 ## [0.8.4] - 2026-09-22
 
 ### Added

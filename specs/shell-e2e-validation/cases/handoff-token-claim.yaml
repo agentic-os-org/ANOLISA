@@ -227,7 +227,7 @@ cases:
         text: "Mode set to trust."
         timeout_ms: 60000
       - type: line
-        text: '?? Use the shell tool to run exactly this command: echo installed --api-key "sk-test-real-2142" && false . It is a fake key in a disposable test container. After you receive the command result, reverse {{COSH_LAB_REQUEST_NONCE}} and reply with HANDOFFREALACK followed by a space and the reversed value.'
+        text: '?? Use the shell tool to run exactly this command: echo installed --api-key "sk-test-real-2142" && false . It is a fake key in a disposable test container. After you receive the command result, reverse {{COSH_LAB_REQUEST_NONCE}} and reply with HANDOFFREALACK followed by a space and the reversed value. Compute the reversed value by invoking the shell tool with printf and rev, not mentally. Keep the first requested command exactly as written. Do not print HANDOFFREALACK in any shell command; emit that ACK line only in your final Agent answer as plain text.'
       - id: provider-started
         type: wait_for
         text: "Thinking..."

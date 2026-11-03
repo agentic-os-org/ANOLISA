@@ -252,28 +252,96 @@ fn reset_region_cache() {
 /// metadata endpoint is plain HTTP on a fixed IP, so no TLS or DNS is
 /// needed.
 ///
-/// Validates that the response status is 2xx and that the body looks like a
-/// region id (letters, digits and hyphens). Any malformed response falls back
-/// to `None` so the caller uses the default region instead of caching an
-/// attacker-controlled value.
+/// Hardened (IMDSv2-only) instances reject tokenless GETs, so a session token
+/// is acquired first and presented on the region GET. A missing token
+/// (compatible mode or older metadata) falls back to a tokenless IMDSv1 GET;
+/// region-id is non-sensitive and is still validated as a region id below, so
+/// any malformed response falls back to `None` and the caller uses the default
+/// region instead of caching an attacker-controlled value.
 async fn fetch_region_id_from_metadata() -> Option<String> {
+    const METADATA_HOST: &str = "100.100.100.200:80";
+
+    let host = std::env::var("COSH_METADATA_HOST").unwrap_or_else(|_| METADATA_HOST.to_string());
+
+    let token = fetch_imdsv2_token(&host).await;
+    let (status, body) = metadata_request(
+        &host,
+        "GET",
+        "/latest/meta-data/region-id",
+        token.as_deref(),
+    )
+    .await?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let region = body.trim();
+    if is_valid_region(region) {
+        Some(region.to_string())
+    } else {
+        None
+    }
+}
+
+/// Acquire an IMDSv2 session token via `PUT /latest/api/token`.
+///
+/// Returns `None` when the endpoint is unreachable, returns a non-2xx status,
+/// or yields a token that is unsafe as a header value, letting the caller fall
+/// back to a tokenless IMDSv1 request.
+async fn fetch_imdsv2_token(host: &str) -> Option<String> {
+    let (status, body) = metadata_request(host, "PUT", "/latest/api/token", None).await?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let token = body.trim();
+    if is_valid_imds_token(token) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// Returns true for tokens safe to place verbatim in a request header.
+///
+/// Rejecting spaces, CR/LF and control characters prevents request-splitting
+/// through a malformed metadata response.
+fn is_valid_imds_token(token: &str) -> bool {
+    !token.is_empty() && token.len() <= 256 && token.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Perform one bounded raw-HTTP metadata request over plain TCP.
+///
+/// The endpoint is plain HTTP on a fixed IP, so no TLS or DNS is needed. TCP may
+/// deliver headers and body in separate packets, so the response is read to EOF
+/// (`Connection: close`) up to `MAX_RESPONSE_BYTES`. The caller's
+/// `tokio::time::timeout` bounds the whole exchange and drops this future on
+/// expiry, closing the stream.
+async fn metadata_request(
+    host: &str,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Option<(u16, String)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    const METADATA_HOST: &str = "100.100.100.200:80";
     const MAX_RESPONSE_BYTES: usize = 1024;
 
-    let host = std::env::var("COSH_METADATA_HOST").unwrap_or_else(|_| METADATA_HOST.to_string());
     let addr: std::net::SocketAddr = host.parse().ok()?;
     let mut stream = TcpStream::connect(addr).await.ok()?;
 
-    let request = "GET /latest/meta-data/region-id HTTP/1.1\r\nHost: 100.100.100.200\r\nConnection: close\r\n\r\n";
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: 100.100.100.200\r\nConnection: close\r\n");
+    if method == "PUT" {
+        request.push_str("x-aliyun-ecs-metadata-token-ttl-seconds: 60\r\nContent-Length: 0\r\n");
+    }
+    if let Some(token) = token {
+        request.push_str("x-aliyun-ecs-metadata-token: ");
+        request.push_str(token);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
     stream.write_all(request.as_bytes()).await.ok()?;
 
-    // Read the complete response. TCP may deliver headers and body in separate
-    // packets, so a single read can return headers only. Loop until EOF or the
-    // bounded buffer is full. The outer `tokio::time::timeout` provides the
-    // absolute deadline and drops this future on expiry, closing the stream.
     let mut buf = Vec::new();
     let mut temp = [0u8; 1024];
     loop {
@@ -287,17 +355,8 @@ async fn fetch_region_id_from_metadata() -> Option<String> {
         }
     }
     let response = std::str::from_utf8(&buf).ok()?;
-
     let (status, body) = parse_metadata_response(response)?;
-    if !(200..300).contains(&status) {
-        return None;
-    }
-    let region = body.trim();
-    if is_valid_region(region) {
-        Some(region.to_string())
-    } else {
-        None
-    }
+    Some((status, body.to_string()))
 }
 
 /// Parse a raw HTTP response into (status_code, body).
@@ -518,6 +577,108 @@ fn installation_id_path() -> PathBuf {
         .join("installation_id")
 }
 
+/// Process-invariant OS distro identifier for the SLS `os.distro` field:
+/// `<ID> <VERSION_ID>` from os-release(5) on Linux (`/etc/os-release` first,
+/// `/usr/lib/os-release` as the os-release(5) fallback) and the bare platform
+/// name `macos` on macOS — version granularity adds nothing there, as
+/// cosh-ng is limited-functionality on that platform. Empty when the platform
+/// exposes no source, matching the zero/empty placeholder convention of this
+/// schema.
+///
+/// Cached because the value cannot change within a process lifetime — unlike
+/// `installation_id()`, which must re-read its rewritable file on every call.
+fn os_distro() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(detect_os_distro).clone()
+}
+
+/// Probe the live platform for the distro identifier. Separated from
+/// `os_distro()` so tests exercise detection directly instead of racing the
+/// process-level `OnceLock` cache.
+fn detect_os_distro() -> String {
+    // Test-only override so detection is verifiable without depending on the
+    // host's real os-release. Mirrors `system_telemetry_disabled_path()`:
+    // production builds never read this variable, so a caller's environment
+    // cannot distort shipped telemetry.
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("COSH_OS_RELEASE_PATH") {
+        return std::fs::read_to_string(path)
+            .map(|content| parse_os_distro(&content))
+            .unwrap_or_default();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // No version granularity on macOS: telemetry analysis targets Linux
+        // server distros, and os.type already carries the platform name.
+        "macos".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        os_distro_from_release_files(
+            Path::new("/etc/os-release"),
+            Path::new("/usr/lib/os-release"),
+        )
+    }
+}
+
+/// Distill the distro from an os-release(5) file pair. The primary is used
+/// exclusively whenever it is readable — a keyless file yields an empty
+/// value, never the vendor's answer — and the vendor copy is consulted only
+/// when the primary is absent, per the os-release(5) lookup order. Any other
+/// primary read error also stays empty: an unreadable host configuration is
+/// not a reason to label the machine with the vendor distro.
+fn os_distro_from_release_files(primary: &Path, vendor: &Path) -> String {
+    match std::fs::read_to_string(primary) {
+        Ok(content) => parse_os_distro(&content),
+        Err(e) if e.kind() == ErrorKind::NotFound => std::fs::read_to_string(vendor)
+            .map(|content| parse_os_distro(&content))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Extract `<ID> <VERSION_ID>` from os-release(5) content. ID + VERSION_ID is
+/// preferred over PRETTY_NAME on purpose: PRETTY_NAME embeds marketing
+/// suffixes ("Alibaba Cloud Linux 3 (Soaring Falcon)") that defeat group-by
+/// analytics, while `ID VERSION_ID` is stable and machine-comparable. Either
+/// component is omitted when absent; empty when the file carries neither key.
+fn parse_os_distro(content: &str) -> String {
+    let mut id = None;
+    let mut version = None;
+    for line in content.lines() {
+        match line.split_once('=') {
+            Some(("ID", raw)) if id.is_none() => id = Some(os_release_value(raw)),
+            Some(("VERSION_ID", raw)) if version.is_none() => {
+                version = Some(os_release_value(raw));
+            }
+            _ => {}
+        }
+    }
+    let id = id.filter(|v| !v.is_empty());
+    let version = version.filter(|v| !v.is_empty());
+    match (id, version) {
+        (Some(id), Some(version)) => format!("{id} {version}"),
+        (Some(id), None) => id,
+        (None, Some(version)) => version,
+        (None, None) => String::new(),
+    }
+}
+
+/// Unquote one os-release(5) value the way the spec writes them: an optional
+/// pair of double or single quotes around the payload.
+fn os_release_value(raw: &str) -> String {
+    let value = raw.trim();
+    let bytes = value.as_bytes();
+    let quoted = bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''));
+    if quoted {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 impl CoshCore {
     /// Build the SLS JSONL record from the accumulated turn metrics.
     /// Field names are kept identical to the copilot-shell SLS schema
@@ -586,12 +747,13 @@ impl CoshCore {
             // Environment info
             "os.type": std::env::consts::OS,
             "os.arch": std::env::consts::ARCH,
+            "os.distro": os_distro(),
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Read;
 
@@ -630,7 +792,7 @@ mod tests {
         CoshCore::new_legacy(config, provider, tools)
     }
 
-    /// All 28 SLS fields must be present with correct types.
+    /// All 33 SLS fields must be present with correct types.
     #[test]
     fn build_sls_record_has_all_fields() {
         let _guard = ENV_TEST_MUTEX.lock().unwrap();
@@ -690,6 +852,85 @@ mod tests {
         // Environment
         assert!(record["os.type"].is_string());
         assert!(record["os.arch"].is_string());
+        assert!(record["os.distro"].is_string());
+    }
+
+    /// The detected distro must thread through to the serialized record as
+    /// its real value (not a hardcoded placeholder), and detection itself
+    /// must compose the exact `ID VERSION_ID` pair from a synthetic
+    /// os-release file.
+    #[test]
+    fn os_distro_threads_through_sls_record() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        let record = test_engine().build_sls_record(Duration::from_millis(1));
+        // Consistency with the cache entry proves the field references the
+        // detected value rather than a placeholder constant.
+        assert_eq!(record["os.distro"], os_distro().as_str());
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let release = dir.path().join("os-release");
+        std::fs::write(
+            &release,
+            concat!(
+                "# https://www.alinux.com\n",
+                "NAME=\"Alibaba Cloud Linux\"\n",
+                "ID=alinux\n",
+                "VERSION_ID=\"3\"\n",
+                "HOME_URL=\"https://www.alinux.com\"\n",
+            ),
+        )
+        .unwrap();
+        let _env = EnvVarGuard::set("COSH_OS_RELEASE_PATH", release.to_str().unwrap());
+        assert_eq!(detect_os_distro(), "alinux 3");
+    }
+
+    /// parse_os_distro composes ID + VERSION_ID, unquotes both quote styles,
+    /// ignores unrelated keys, and degrades gracefully on partial data.
+    #[test]
+    fn parse_os_distro_composes_id_and_version() {
+        let alinux = concat!(
+            "# https://www.alinux.com\n",
+            "NAME=\"Alibaba Cloud Linux\"\n",
+            "PRETTY_NAME=\"Alibaba Cloud Linux 3 (Soaring Falcon)\"\n",
+            "ID=alinux\n",
+            "VERSION_ID=\"3\"\n",
+        );
+        assert_eq!(parse_os_distro(alinux), "alinux 3");
+        assert_eq!(
+            parse_os_distro("ID='ubuntu'\nVERSION_ID=24.04\n"),
+            "ubuntu 24.04"
+        );
+        assert_eq!(parse_os_distro("ID=fedora\n"), "fedora");
+        assert_eq!(parse_os_distro("VERSION_ID=\"7\"\n"), "7");
+        assert_eq!(parse_os_distro("PRETTY_NAME=\"Anolis OS 23\"\n"), "");
+        assert_eq!(parse_os_distro(""), "");
+    }
+
+    /// os-release(5) exclusivity: the vendor file answers only when the
+    /// primary is missing — never when the primary is keyless or unreadable.
+    #[test]
+    fn os_release_vendor_fallback_requires_missing_primary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let primary = dir.path().join("primary");
+        let vendor = dir.path().join("vendor");
+        std::fs::write(&vendor, "ID=debian\nVERSION_ID=\"12\"\n").unwrap();
+
+        // Missing primary: the vendor file answers.
+        assert_eq!(os_distro_from_release_files(&primary, &vendor), "debian 12");
+
+        // Keyless primary: exclusive use, stays empty.
+        std::fs::write(&primary, "PRETTY_NAME=\"Custom OS\"\n").unwrap();
+        assert_eq!(os_distro_from_release_files(&primary, &vendor), "");
+
+        // Unreadable primary (a directory reads back EISDIR, not NotFound):
+        // stays empty instead of adopting the vendor distro.
+        let unreadable = dir.path().join("unreadable");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert_eq!(os_distro_from_release_files(&unreadable, &vendor), "");
+
+        // Populated primary: exclusive use, vendor ignored.
+        std::fs::write(&primary, "ID=alinux\nVERSION_ID=\"3\"\n").unwrap();
+        assert_eq!(os_distro_from_release_files(&primary, &vendor), "alinux 3");
     }
 
     /// Metrics accumulation is reflected in the SLS record.
@@ -764,18 +1005,18 @@ mod tests {
     }
 
     /// Serialize env-var-dependent tests to avoid cross-test interference.
-    static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// RAII guard that saves an env var's original value on creation and
     /// restores it on drop so tests never leak state even if the test body
     /// panics.
-    struct EnvVarGuard {
+    pub(crate) struct EnvVarGuard {
         key: &'static str,
         old_value: Option<String>,
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let old_value = std::env::var(key).ok();
             std::env::set_var(key, value);
             Self { key, old_value }
@@ -1252,7 +1493,85 @@ mod tests {
         assert!(!url.contains("-internal"));
     }
 
-    /// fetch_region_id_from_metadata accepts a 200 response with a valid region.
+    /// Serve a minimal loopback IMDS: `PUT /latest/api/token` returns a token,
+    /// any `GET` returns metadata. When `require_token` is `Some`, the GET only
+    /// succeeds if it carries that exact `x-aliyun-ecs-metadata-token` header,
+    /// modeling a hardened instance that rejects tokenless IMDSv1.
+    fn spawn_imds_mock(
+        listener: std::net::TcpListener,
+        token_status: u16,
+        token_body: &'static str,
+        get_status: u16,
+        get_body: &'static str,
+        require_token: Option<&'static str>,
+    ) {
+        std::thread::spawn(move || {
+            // One connection each for the token PUT and the metadata GET
+            // (HTTP/1.1 with `Connection: close`).
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 512];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let response = if request.starts_with("PUT ") {
+                    http_metadata_response(token_status, token_body)
+                } else if require_token
+                    .map(|token| {
+                        request.contains(&format!("x-aliyun-ecs-metadata-token: {token}\r\n"))
+                    })
+                    .unwrap_or(true)
+                {
+                    http_metadata_response(get_status, get_body)
+                } else {
+                    http_metadata_response(403, "")
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+    }
+
+    fn http_metadata_response(status: u16, body: &str) -> String {
+        let reason = if (200..300).contains(&status) {
+            "OK"
+        } else {
+            "ERR"
+        };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Hardened IMDSv2 instances reject tokenless IMDSv1 GETs, so the probe must
+    /// acquire a session token via PUT and present it on the region GET.
+    #[tokio::test]
+    // Holding the std mutex across await is intentional: this test mutates
+    // env vars and must be serialized against other tests that read them.
+    #[allow(clippy::await_holding_lock)]
+    async fn fetch_region_id_uses_imdsv2_token_on_hardened_instance() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
+
+        spawn_imds_mock(
+            listener,
+            200,
+            "imds-token-xyz",
+            200,
+            "cn-shanghai",
+            Some("imds-token-xyz"),
+        );
+
+        assert_eq!(
+            fetch_region_id_from_metadata().await,
+            Some("cn-shanghai".to_string())
+        );
+    }
+
+    /// fetch_region_id_from_metadata accepts a token then a 200 valid region.
     #[tokio::test]
     // Holding the std mutex across await is intentional: this test mutates
     // env vars and must be serialized against other tests that read them.
@@ -1263,14 +1582,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
 
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 256];
-                let _ = stream.read(&mut buf);
-                let _ =
-                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\ncn-hangzhou");
-            }
-        });
+        spawn_imds_mock(listener, 200, "imds-token", 200, "cn-hangzhou", None);
 
         assert_eq!(
             fetch_region_id_from_metadata().await,
@@ -1278,7 +1590,7 @@ mod tests {
         );
     }
 
-    /// fetch_region_id_from_metadata rejects non-2xx responses.
+    /// fetch_region_id_from_metadata rejects a non-2xx region response.
     #[tokio::test]
     // Holding the std mutex across await is intentional: this test mutates
     // env vars and must be serialized against other tests that read them.
@@ -1289,13 +1601,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
 
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 256];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
-            }
-        });
+        spawn_imds_mock(listener, 200, "imds-token", 403, "", None);
 
         assert_eq!(fetch_region_id_from_metadata().await, None);
     }
@@ -1311,21 +1617,65 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
 
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 256];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 25\r\n\r\ncn-hangzhou-internal.evil",
-                );
-            }
-        });
+        spawn_imds_mock(
+            listener,
+            200,
+            "imds-token",
+            200,
+            "cn-hangzhou-internal.evil",
+            None,
+        );
 
         assert_eq!(fetch_region_id_from_metadata().await, None);
     }
 
+    /// A missing token endpoint falls back to a tokenless IMDSv1 region GET.
+    #[tokio::test]
+    // Holding the std mutex across await is intentional: this test mutates
+    // env vars and must be serialized against other tests that read them.
+    #[allow(clippy::await_holding_lock)]
+    async fn fetch_region_id_falls_back_to_imdsv1_without_token() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
+
+        // Token PUT returns 404 (endpoint unavailable); the tokenless GET still succeeds.
+        spawn_imds_mock(listener, 404, "", 200, "cn-hangzhou", None);
+
+        assert_eq!(
+            fetch_region_id_from_metadata().await,
+            Some("cn-hangzhou".to_string())
+        );
+    }
+
+    /// An unreachable metadata endpoint (not on ECS) yields None, not garbage.
+    #[tokio::test]
+    // Holding the std mutex across await is intentional: this test mutates
+    // env vars and must be serialized against other tests that read them.
+    #[allow(clippy::await_holding_lock)]
+    async fn fetch_region_id_returns_none_off_ecs() {
+        let _guard = ENV_TEST_MUTEX.lock().unwrap();
+        // Non-routable port: both the token PUT and the region GET refuse fast.
+        let _env = EnvVarGuard::set("COSH_METADATA_HOST", "127.0.0.1:1");
+
+        assert_eq!(fetch_region_id_from_metadata().await, None);
+    }
+
+    /// Tokens unsafe as a header value are rejected before they can split a request.
+    #[test]
+    fn is_valid_imds_token_rejects_unsafe_values() {
+        assert!(is_valid_imds_token("abcDEF0123-_=+/"));
+        assert!(is_valid_imds_token(&"x".repeat(256)));
+        assert!(!is_valid_imds_token(""));
+        assert!(!is_valid_imds_token("has space"));
+        assert!(!is_valid_imds_token("crlf\r\ninjected"));
+        assert!(!is_valid_imds_token("tab\there"));
+        assert!(!is_valid_imds_token(&"x".repeat(257)));
+    }
+
     /// fetch_region_id_from_metadata reads headers and body even when they are
-    /// delivered in separate TCP packets.
+    /// delivered in separate TCP packets after the token PUT.
     #[tokio::test]
     // Holding the std mutex across await is intentional: this test mutates
     // env vars and must be serialized against other tests that read them.
@@ -1337,10 +1687,19 @@ mod tests {
         let _env = EnvVarGuard::set("COSH_METADATA_HOST", &format!("127.0.0.1:{}", addr.port()));
 
         std::thread::spawn(move || {
+            // Connection 1: token PUT.
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buf = [0u8; 256];
                 let _ = stream.read(&mut buf);
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nimds-token",
+                );
+            }
+            // Connection 2: region GET, headers and body in separate packets.
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n");
                 let _ = stream.flush();
                 // Sleep to ensure the client receives headers before the body.
                 std::thread::sleep(std::time::Duration::from_millis(50));

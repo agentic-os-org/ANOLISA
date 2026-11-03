@@ -131,3 +131,37 @@ fn manual_mode_records_silently() {
         RuntimeHookDisplay::Silent
     );
 }
+
+#[test]
+fn painted_prompt_readiness_is_not_followup_user_input() {
+    for (component, message, expected) in [
+        ("shell_prompt_ready", "painted", false),
+        ("shell_prompt_ready", "occupied", true),
+        ("shell_prompt_input", "write", true),
+        ("shell_pty_input", "write", true),
+    ] {
+        let block = block_with_command("make all");
+        let mut input = ShellEvent::user_input_intercepted("session", "");
+        input.component = Some(component.to_string());
+        input.message = Some(message.to_string());
+        let events = vec![
+            ShellEvent::command_started("session", "cmd-1", "make all", "/tmp", 10),
+            ShellEvent::command_finished(
+                ShellEventKind::CommandFailed,
+                "session",
+                "cmd-1",
+                2,
+                20,
+                "/tmp/out",
+            ),
+            input,
+        ];
+        let mut state = InlineState::default();
+        record_blocks_followed_by_user_input(&events, &[block], &mut state);
+        assert_eq!(
+            state.hooks.block_followed_by_user_input("cmd-1"),
+            expected,
+            "{component}:{message}"
+        );
+    }
+}

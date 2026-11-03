@@ -1252,6 +1252,19 @@ struct PendingInstallFixture {
 
 impl PendingInstallFixture {
     fn new(pending_timeout_ms: u64, seed: impl FnOnce(&Path)) -> Self {
+        Self::new_with_ceiling(
+            pending_timeout_ms,
+            seed,
+            skillfs_core::DEFAULT_MAX_SKILL_SIZE,
+        )
+    }
+
+    /// Like [`PendingInstallFixture::new`], but threads a non-default
+    /// `SKILL.md` ceiling into both the pending-install worker (through
+    /// `PendingInstallController::new_with_post_publish`) and the mount
+    /// (`MountConfig::max_skill_size`), so the completeness probe runs
+    /// with the ceiling a real deployment configured.
+    fn new_with_ceiling(pending_timeout_ms: u64, seed: impl FnOnce(&Path), ceiling: usize) -> Self {
         let source = tempfile::tempdir().unwrap();
         seed(source.path());
 
@@ -1284,10 +1297,12 @@ impl PendingInstallFixture {
             );
         }
 
-        let pending_ctrl = PendingInstallController::new(
+        let pending_ctrl = PendingInstallController::new_with_post_publish(
             notify_ctrl.clone(),
             Duration::from_millis(pending_timeout_ms),
             source.path().to_path_buf(),
+            None,
+            ceiling,
         );
 
         let mount_resolver = Arc::new(ActiveSkillResolver::new(source.path()));
@@ -1307,6 +1322,7 @@ impl PendingInstallFixture {
             notify_controller: Some(notify_ctrl.clone()),
             active_resolver: Some(mount_resolver.clone()),
             pending_install_controller: Some(pending_ctrl.clone()),
+            max_skill_size: Some(ceiling),
             ..MountConfig::default()
         };
 
@@ -1355,6 +1371,110 @@ impl Drop for PendingInstallFixture {
             .args(["-u", &mp.to_string_lossy()])
             .output();
     }
+}
+
+#[test]
+fn pending_install_worker_applies_a_lowered_ceiling() {
+    skip_if_no_fuse!();
+
+    // A non-default ceiling reaches the real worker through
+    // new_with_post_publish: under a 64 KiB ceiling a 96 KiB SKILL.md is
+    // over the limit, so the worker keeps waiting — no install
+    // notification. With the default ceiling (the pre-fix behavior) the
+    // probe parsed the manifest and fired.
+    let fixture = PendingInstallFixture::new_with_ceiling(
+        200,
+        |src| {
+            create_skill(src, "existing");
+        },
+        64 * 1024,
+    );
+
+    let new_skill = fixture.skill_path("oversized");
+    std::fs::create_dir(&new_skill).unwrap();
+    let mut md = String::from("---\nname: oversized\ndescription: test\n---\n");
+    md.push_str(&"a".repeat(96 * 1024 - md.len()));
+    std::fs::write(new_skill.join("SKILL.md"), md).unwrap();
+
+    // Bounded wait well past the 200 ms quiet timeout: the notification
+    // must never arrive for an over-ceiling manifest.
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    while std::time::Instant::now() < deadline {
+        fixture.notify_controller.flush_for_testing();
+        if fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "oversized")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "oversized"),
+        "the pending worker must not fire for a manifest over the configured ceiling"
+    );
+    // A direct flush must refuse it too: the controller carries the
+    // ceiling, not just the worker loop.
+    fixture.pending_controller.flush_for_testing();
+    fixture.notify_controller.flush_for_testing();
+    assert!(
+        !fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "oversized"),
+        "flush_for_testing must refuse the over-ceiling manifest too"
+    );
+}
+
+#[test]
+fn pending_install_worker_applies_a_raised_ceiling() {
+    skip_if_no_fuse!();
+
+    // The raised arm: a 1.5 MiB manifest is a complete skill under the
+    // 2 MiB configured ceiling, so the real worker must fire the install
+    // notification. With the default 1 MiB ceiling (the pre-fix behavior)
+    // the probe refused it and the notification never fired.
+    let fixture = PendingInstallFixture::new_with_ceiling(
+        200,
+        |src| {
+            create_skill(src, "existing");
+        },
+        2 * 1024 * 1024,
+    );
+
+    let new_skill = fixture.skill_path("legal-big");
+    std::fs::create_dir(&new_skill).unwrap();
+    let mut md = String::from("---\nname: legal-big\ndescription: test\n---\n");
+    md.push_str(&"a".repeat(1536 * 1024 - md.len()));
+    std::fs::write(new_skill.join("SKILL.md"), md).unwrap();
+
+    // Bounded wait for the real worker to fire.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut fired = false;
+    while std::time::Instant::now() < deadline {
+        fixture.notify_controller.flush_for_testing();
+        if fixture
+            .notify_client
+            .events()
+            .iter()
+            .any(|e| e.skill_id == "legal-big")
+        {
+            fired = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        fired,
+        "the pending worker must fire for a manifest legal under the raised ceiling"
+    );
 }
 
 #[test]
@@ -1850,18 +1970,33 @@ fn pending_staging_inbox_not_affected() {
 use skillfs_fuse::security::{PostPublishGraceController, PostPublishWritePattern};
 
 struct PostPublishFixture {
-    #[allow(dead_code)]
     source: tempfile::TempDir,
     mountpoint: tempfile::TempDir,
     handle: Option<MountHandle>,
     notify_client: Arc<InMemoryNotifyClient>,
     notify_controller: Arc<NotifyController>,
-    #[allow(dead_code)]
+    resolver: Arc<ActiveSkillResolver>,
     post_publish_controller: Arc<PostPublishGraceController>,
 }
 
 impl PostPublishFixture {
     fn new(grace_ms: u64, seed: impl FnOnce(&Path)) -> Self {
+        Self::with_patterns(
+            grace_ms,
+            vec![PostPublishWritePattern::PrefixRecursive(
+                ".openclaw".to_string(),
+            )],
+            seed,
+        )
+    }
+
+    /// Fixture variant with an explicit post-publish whitelist, for the
+    /// exact / single-level pattern listing regressions.
+    fn with_patterns(
+        grace_ms: u64,
+        pp_patterns: Vec<PostPublishWritePattern>,
+        seed: impl FnOnce(&Path),
+    ) -> Self {
         let source = tempfile::tempdir().unwrap();
         seed(source.path());
 
@@ -1903,16 +2038,13 @@ impl PostPublishFixture {
             );
         }
 
-        let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
-            ".openclaw".to_string(),
-        )];
         let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(grace_ms), pp_patterns);
 
         let config = MountConfig {
             notify_controller: Some(notify_ctrl.clone()),
             staging_matcher: Some(matcher),
             staging_controller: Some(staging_ctrl),
-            active_resolver: Some(resolver),
+            active_resolver: Some(resolver.clone()),
             post_publish_controller: Some(pp_ctrl.clone()),
             ..MountConfig::default()
         };
@@ -1935,6 +2067,7 @@ impl PostPublishFixture {
             handle: Some(handle),
             notify_client,
             notify_controller: notify_ctrl,
+            resolver,
             post_publish_controller: pp_ctrl,
         }
     }
@@ -2213,6 +2346,527 @@ fn post_publish_grace_readdir_does_not_list_hidden_skill_contents() {
 }
 
 #[test]
+fn post_publish_grace_hidden_whitelisted_dir_lists_during_grace() {
+    skip_if_no_fuse!();
+
+    // Staging-rename flow: the published skill has no activation (hidden),
+    // so only the grace window lets the installer reach whitelisted paths.
+    let fixture = PostPublishFixture::new(5000, |src| {
+        create_skill(src, "existing");
+    });
+
+    let staging = fixture.skill_path(".openclaw-install-stage-lsdir");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: lsdir\ndescription: test\n---\n",
+    )
+    .unwrap();
+
+    let final_path = fixture.skill_path("lsdir");
+    std::fs::rename(&staging, &final_path).unwrap();
+    fixture.wait_for_notify(1);
+
+    // Grace-authorized installer writes into the whitelisted directory.
+    std::fs::create_dir(final_path.join(".openclaw")).unwrap();
+    std::fs::write(final_path.join(".openclaw/meta.json"), "{}").unwrap();
+
+    // Exact-path reads succeed through the grace bypass (lookup/getattr/open
+    // already honor grace)...
+    let content = std::fs::read_to_string(final_path.join(".openclaw/meta.json")).unwrap();
+    assert_eq!(content, "{}");
+
+    // ...so enumerating that same directory must succeed too instead of
+    // ENOENT from the hidden-skill view: readdir/opendir ignored grace.
+    let entries = common::list_dir_names(&final_path.join(".openclaw"));
+    assert!(
+        entries.contains(&"meta.json".to_string()),
+        "readdir of the grace-whitelisted dir must honor grace: {:?}",
+        entries
+    );
+
+    // The hidden skill root itself keeps its carve-out: it must stay
+    // unlistable during grace.
+    assert!(
+        std::fs::read_dir(&final_path).is_err(),
+        "readdir on the hidden skill root must still fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_exact_dir_pattern_does_not_list_unapproved_children() {
+    skip_if_no_fuse!();
+
+    // An exact pattern authorizes the directory itself, not its contents:
+    // live children under `.openclaw` that the whitelist never covered must
+    // not leak into the grace listing (stat of the child answers ENOENT, so
+    // listing it would break the exact-path agreement).
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::Exact(".openclaw".to_string())],
+        |src| {
+            create_skill(src, "existing");
+        },
+    );
+
+    let staging = fixture.skill_path(".openclaw-install-stage-exactls");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: exactls\ndescription: test\n---\n",
+    )
+    .unwrap();
+    // Live content the exact pattern never authorized: the installer cannot
+    // write it through the mount, so the grace listing must not show it.
+    std::fs::create_dir(staging.join(".openclaw")).unwrap();
+    std::fs::write(
+        staging.join(".openclaw").join("private-name.txt"),
+        "live only",
+    )
+    .unwrap();
+
+    let final_path = fixture.skill_path("exactls");
+    std::fs::rename(&staging, &final_path).unwrap();
+    fixture.wait_for_notify(1);
+
+    // The whitelisted directory stays reachable through the grace bypass:
+    // the listing must succeed (not ENOENT) ...
+    let entries = common::list_dir_names(&final_path.join(".openclaw"));
+    assert!(
+        !entries.contains(&"private-name.txt".to_string()),
+        "exact pattern must not leak unapproved children into the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.is_empty(),
+        "no child of an exact-pattern directory is whitelisted: {:?}",
+        entries
+    );
+
+    // ... and the child stays unreadable, matching the read surface.
+    assert!(
+        std::fs::read(final_path.join(".openclaw").join("private-name.txt")).is_err(),
+        "read of the unapproved child must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_single_level_pattern_does_not_list_grandchildren() {
+    skip_if_no_fuse!();
+
+    // `.openclaw/*` authorizes `.openclaw/cache` (a matching directory)
+    // without authorizing its children. A fallback skill traverses
+    // `.openclaw` through its snapshot, so live grandchildren under
+    // `.openclaw/cache` must not leak into the grace listing.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::PrefixSingleLevel(
+            ".openclaw".to_string(),
+        )],
+        |src| {
+            create_skill(src, "existing");
+            // Live source of the fallback skill: a grandchild the
+            // single-level pattern never authorized.
+            let live = src.join("fallback-skill");
+            std::fs::create_dir_all(live.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---\nname: fallback-skill\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("cache").join("tmp-a.txt"),
+                "live only",
+            )
+            .unwrap();
+            // Trusted snapshot: `.openclaw` exists (so traversal reaches the
+            // matching `cache` directory) but holds no grandchild entry.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---\nname: fallback-skill\ndescription: test\n---\n",
+            )
+            .unwrap();
+        },
+    );
+
+    // The skill falls back to its trusted snapshot ...
+    fixture.resolver.set(
+        "fallback-skill",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("fallback-skill")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    // ... and a post-publish grace session is active for it.
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    // Traversal works: `.openclaw` resolves through the snapshot and the
+    // whitelisted `.openclaw/cache` directory through the grace bypass.
+    let cache_dir = fixture
+        .skill_path("fallback-skill")
+        .join(".openclaw")
+        .join("cache");
+    assert!(
+        std::fs::metadata(&cache_dir).is_ok(),
+        "whitelisted cache dir must be reachable during grace"
+    );
+
+    let entries = common::list_dir_names(&cache_dir);
+    assert!(
+        !entries.contains(&"tmp-a.txt".to_string()),
+        "single-level pattern must not leak grandchildren into the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.is_empty(),
+        "no grandchild of `.openclaw` is whitelisted by `.openclaw/*`: {:?}",
+        entries
+    );
+
+    // Stated agreement with exact-path reads: the grandchild stats as ENOENT
+    // (not whitelisted, absent from the snapshot).
+    assert!(
+        std::fs::read(cache_dir.join("tmp-a.txt")).is_err(),
+        "read of the unapproved grandchild must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_exact_dir_pattern_lists_snapshot_visible_children() {
+    skip_if_no_fuse!();
+
+    // Exact pattern `.openclaw` authorizes the directory itself. Children
+    // outside the whitelist are still stat-able when the trusted snapshot
+    // carries them (shared and snapshot-only names), while live-only
+    // unapproved children answer ENOENT — the grace listing must show
+    // exactly the readable set.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::Exact(".openclaw".to_string())],
+        |src| {
+            create_skill(src, "existing");
+            // Fallback skill: the live tree holds a shared name plus an
+            // unapproved private name under `.openclaw`.
+            let live = src.join("exact-snap");
+            std::fs::create_dir_all(live.join(".openclaw")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---
+name: exact-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(live.join(".openclaw").join("shared.txt"), "live shared").unwrap();
+            std::fs::write(live.join(".openclaw").join("private.txt"), "live private").unwrap();
+            // Trusted snapshot: the shared name (trusted content) plus a
+            // snapshot-only name the live tree never had.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---
+name: exact-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(snap.join(".openclaw").join("shared.txt"), "trusted shared").unwrap();
+            std::fs::write(
+                snap.join(".openclaw").join("snapshot-only.txt"),
+                "trusted only",
+            )
+            .unwrap();
+        },
+    );
+
+    // Snapshot-resolved skill under an active grace session.
+    fixture.resolver.set(
+        "exact-snap",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("exact-snap")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    fixture
+        .post_publish_controller
+        .start_session("exact-snap", PostPublishSessionKind::StagingRename);
+
+    let openclaw = fixture.skill_path("exact-snap").join(".openclaw");
+    assert!(
+        std::fs::metadata(&openclaw).is_ok(),
+        "exact-pattern directory must be reachable during grace"
+    );
+
+    let entries = common::list_dir_names(&openclaw);
+    assert!(
+        !entries.contains(&"private.txt".to_string()),
+        "live-only unapproved child must stay out of the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"shared.txt".to_string()),
+        "snapshot-backed shared name stays stat-able and must be listed: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"snapshot-only.txt".to_string()),
+        "snapshot-only name is readable through the ordinary view and must be listed: {:?}",
+        entries
+    );
+
+    // Reads agree with the listing: the shared name answers from the
+    // trusted snapshot, the snapshot-only name succeeds, and the private
+    // live-only name fails.
+    assert_eq!(
+        std::fs::read_to_string(openclaw.join("shared.txt")).unwrap(),
+        "trusted shared"
+    );
+    assert_eq!(
+        std::fs::read_to_string(openclaw.join("snapshot-only.txt")).unwrap(),
+        "trusted only"
+    );
+    assert!(
+        std::fs::read(openclaw.join("private.txt")).is_err(),
+        "read of the live-only unapproved child must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_single_level_pattern_lists_snapshot_visible_grandchildren() {
+    skip_if_no_fuse!();
+
+    // `.openclaw/*` authorizes `.openclaw/cache` without authorizing its
+    // children. Grandchildren outside the whitelist stay stat-able when
+    // the trusted snapshot carries them, while live-only unapproved
+    // grandchildren answer ENOENT — the grace listing must show exactly
+    // the readable set.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::PrefixSingleLevel(
+            ".openclaw".to_string(),
+        )],
+        |src| {
+            create_skill(src, "existing");
+            let live = src.join("single-snap");
+            std::fs::create_dir_all(live.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---
+name: single-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("cache").join("shared.txt"),
+                "live shared",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("cache").join("private.txt"),
+                "live private",
+            )
+            .unwrap();
+            // Trusted snapshot: `.openclaw` exists so traversal reaches the
+            // matching `cache` directory; the cache carries the shared name
+            // (trusted content) plus a snapshot-only name.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw").join("cache")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---
+name: single-snap\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                snap.join(".openclaw").join("cache").join("shared.txt"),
+                "trusted shared",
+            )
+            .unwrap();
+            std::fs::write(
+                snap.join(".openclaw")
+                    .join("cache")
+                    .join("snapshot-only.txt"),
+                "trusted only",
+            )
+            .unwrap();
+        },
+    );
+
+    // Snapshot-resolved skill under an active grace session.
+    fixture.resolver.set(
+        "single-snap",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("single-snap")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    fixture
+        .post_publish_controller
+        .start_session("single-snap", PostPublishSessionKind::StagingRename);
+
+    // Traversal works: `.openclaw` resolves through the snapshot and the
+    // whitelisted `.openclaw/cache` directory through the grace bypass.
+    let cache_dir = fixture
+        .skill_path("single-snap")
+        .join(".openclaw")
+        .join("cache");
+    assert!(
+        std::fs::metadata(&cache_dir).is_ok(),
+        "whitelisted cache dir must be reachable during grace"
+    );
+
+    let entries = common::list_dir_names(&cache_dir);
+    assert!(
+        !entries.contains(&"private.txt".to_string()),
+        "live-only unapproved grandchild must stay out of the grace listing: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"shared.txt".to_string()),
+        "snapshot-backed shared grandchild stays stat-able and must be listed: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"snapshot-only.txt".to_string()),
+        "snapshot-only grandchild is readable through the ordinary view and must be listed: {:?}",
+        entries
+    );
+
+    // Reads agree with the listing: the shared grandchild answers from the
+    // trusted snapshot, the snapshot-only name succeeds, and the private
+    // live-only grandchild fails.
+    assert_eq!(
+        std::fs::read_to_string(cache_dir.join("shared.txt")).unwrap(),
+        "trusted shared"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cache_dir.join("snapshot-only.txt")).unwrap(),
+        "trusted only"
+    );
+    assert!(
+        std::fs::read(cache_dir.join("private.txt")).is_err(),
+        "read of the live-only unapproved grandchild must fail during grace"
+    );
+}
+
+#[test]
+fn post_publish_grace_recursive_pattern_does_not_list_deleted_live_names() {
+    skip_if_no_fuse!();
+
+    // A recursive whitelist routes matching children to the live tree for
+    // the whole grace window: reading and deleting `.openclaw/obsolete.json`
+    // both answer from live, and after the deletion the read surface says
+    // ENOENT even though the trusted snapshot still carries the name. The
+    // grace listing must not resurrect the deleted name from the snapshot
+    // merge, and must keep listing live whitelisted names.
+    let fixture = PostPublishFixture::with_patterns(
+        5000,
+        vec![PostPublishWritePattern::PrefixRecursive(
+            ".openclaw".to_string(),
+        )],
+        |src| {
+            create_skill(src, "existing");
+            let live = src.join("recursive-del");
+            std::fs::create_dir_all(live.join(".openclaw")).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---
+name: recursive-del\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                live.join(".openclaw").join("obsolete.json"),
+                "live obsolete",
+            )
+            .unwrap();
+            std::fs::write(live.join(".openclaw").join("current.json"), "live current").unwrap();
+            // Trusted snapshot still carries the deletable name; `current`
+            // stays live-only.
+            let snap = live.join(".skill-meta").join("versions").join("v000001");
+            std::fs::create_dir_all(snap.join(".openclaw")).unwrap();
+            std::fs::write(
+                snap.join("SKILL.md"),
+                "---
+name: recursive-del\ndescription: test\n---\n",
+            )
+            .unwrap();
+            std::fs::write(
+                snap.join(".openclaw").join("obsolete.json"),
+                "stale snapshot obsolete",
+            )
+            .unwrap();
+        },
+    );
+
+    // Snapshot-resolved skill under an active grace session.
+    fixture.resolver.set(
+        "recursive-del",
+        ActiveTarget::Snapshot {
+            snapshot_dir: fixture
+                .source
+                .path()
+                .join("recursive-del")
+                .join(".skill-meta")
+                .join("versions")
+                .join("v000001"),
+            version: "v000001".to_string(),
+        },
+    );
+    fixture
+        .post_publish_controller
+        .start_session("recursive-del", PostPublishSessionKind::StagingRename);
+
+    let openclaw = fixture.skill_path("recursive-del").join(".openclaw");
+    assert!(
+        std::fs::metadata(&openclaw).is_ok(),
+        "recursive-pattern directory must be reachable during grace"
+    );
+
+    // The whitelisted child reads live content before the deletion.
+    assert_eq!(
+        std::fs::read_to_string(openclaw.join("obsolete.json")).unwrap(),
+        "live obsolete"
+    );
+    // The recursive whitelist allows the deletion through the mount.
+    std::fs::remove_file(openclaw.join("obsolete.json")).unwrap();
+    // The read surface agrees the name is gone.
+    assert!(
+        std::fs::read(openclaw.join("obsolete.json")).is_err(),
+        "deleted whitelisted child must read as ENOENT during grace"
+    );
+
+    let entries = common::list_dir_names(&openclaw);
+    assert!(
+        entries.contains(&"current.json".to_string()),
+        "live whitelisted child must stay listed: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&"obsolete.json".to_string()),
+        "a name deleted through the mount must not be resurrected from the snapshot: {:?}",
+        entries
+    );
+}
+
+#[test]
 fn post_publish_grace_non_whitelisted_file_read_rejected() {
     skip_if_no_fuse!();
 
@@ -2417,6 +3071,7 @@ fn post_publish_grace_direct_pending_complete_triggers_session() {
         Duration::from_millis(200),
         source.path().to_path_buf(),
         Some(pp_ctrl.clone()),
+        skillfs_core::DEFAULT_MAX_SKILL_SIZE,
     );
 
     let config = MountConfig {
@@ -2731,6 +3386,77 @@ fn post_publish_grace_fallback_readdir_does_not_leak_source() {
 }
 
 #[test]
+fn post_publish_grace_fallback_whitelisted_dir_lists_live_source() {
+    skip_if_no_fuse!();
+
+    let fixture = FallbackGraceFixture::new(5000, |src, snapshot| {
+        // Physical source has the skill with .clawhub and a non-whitelisted dir
+        let skill = src.join("fallback-skill");
+        std::fs::create_dir_all(skill.join(".clawhub")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill.join(".clawhub/origin.json"),
+            r#"{"origin":"installer"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill.join("data")).unwrap();
+        std::fs::write(skill.join("data/secret.txt"), "secret").unwrap();
+
+        // Snapshot does NOT contain .clawhub — only SKILL.md
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+        )
+        .unwrap();
+    });
+
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    let skill_via_fuse = fixture.skill_path();
+
+    // Cross-surface agreement: the whitelisted file is stat-able and readable
+    // from the live source (lookup/getattr/open honor grace today).
+    let whitelisted = skill_via_fuse.join(".clawhub/origin.json");
+    assert!(
+        std::fs::metadata(&whitelisted).is_ok(),
+        "stat of grace-whitelisted path must serve the live source"
+    );
+    let content = std::fs::read_to_string(&whitelisted).unwrap();
+    assert_eq!(content, r#"{"origin":"installer"}"#);
+
+    // readdir/opendir of the whitelisted directory must enumerate the live
+    // source too — not the snapshot view, which has no .clawhub and reports
+    // an empty directory while stat/open succeed on its children.
+    let entries = common::list_dir_names(&skill_via_fuse.join(".clawhub"));
+    assert!(
+        entries.contains(&"origin.json".to_string()),
+        "readdir of the grace-whitelisted dir must list the live source: {:?}",
+        entries
+    );
+
+    // The skill-root listing keeps its carve-out: source-only directories
+    // stay out of the snapshot-driven root listing.
+    let root_entries = common::list_dir_names(&skill_via_fuse);
+    assert!(
+        !root_entries.contains(&".clawhub".to_string()),
+        "skill-root readdir must not leak source-only dirs during grace: {:?}",
+        root_entries
+    );
+
+    // Non-whitelisted source-only files stay hidden behind the snapshot view.
+    assert!(
+        std::fs::metadata(skill_via_fuse.join("data/secret.txt")).is_err(),
+        "non-whitelisted source-only file must stay hidden during grace"
+    );
+}
+
+#[test]
 fn post_publish_grace_fallback_skill_md_not_opened_via_grace() {
     skip_if_no_fuse!();
 
@@ -3027,6 +3753,1016 @@ fn hermes_staging_exact_path_accessible() {
 
     let data = std::fs::read_to_string(staging.join("data.txt")).unwrap();
     assert_eq!(data, "payload");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H3: Hermes top-level staging. A staging root at the mount root parses as
+// a CategoryDir while it is being populated (no SKILL.md yet — an
+// interrupted install) and as a SkillDir once the manifest has been
+// written; a fresh top-level rename target parses as a HermesMeta on an
+// in-place mount. The rename handling must classify BOTH source states
+// and BOTH target shapes, or the validation and the install-completion
+// notify can be bypassed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_top_level_staging_hidden_from_root_listing() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+        // A top-level staging root being populated by an installer.
+        let staging = src.join(".openclaw-install-stage-alpha");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("SKILL.md"),
+            "---\nname: alpha\ndescription: staged\n---\n",
+        )
+        .unwrap();
+    });
+
+    let entries = common::list_dir_names(fix.mp());
+    assert!(
+        !entries.contains(&".openclaw-install-stage-alpha".to_string()),
+        "a top-level staging root must NOT appear in the root listing: {:?}",
+        entries
+    );
+    // The seeded category must remain visible.
+    assert!(
+        entries.contains(&"apple".to_string()),
+        "existing category must be visible: {:?}",
+        entries
+    );
+    // Exact-path access stays fully allowed (the I2 hiding is
+    // listing-only).
+    assert!(
+        fix.mp()
+            .join(".openclaw-install-stage-alpha/SKILL.md")
+            .exists()
+    );
+}
+
+#[test]
+fn hermes_top_level_staging_rename_triggers_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join(".openclaw-install-stage-beta");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: beta\ndescription: installed\n---\n",
+    )
+    .unwrap();
+
+    // Rename the staging root to a valid TOP-LEVEL skill name: the
+    // completion signal for the install.
+    let final_path = fix.mp().join("beta");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    fix.wait_for_notify(1);
+
+    let events = fix.notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id == "beta" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for the top-level skill beta, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0].canonical_skill_dir.ends_with("/beta"),
+        "skillDir must end with /beta, got: {}",
+        rename_events[0].canonical_skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+
+    // The installed skill is readable through the mount.
+    let manifest = std::fs::read_to_string(final_path.join("SKILL.md")).unwrap();
+    assert!(manifest.contains("name: beta"));
+}
+
+#[test]
+fn hermes_top_level_staging_partial_rename_triggers_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    // An interrupted install: the staging root exists but its manifest
+    // has not been written yet, so the source side of the rename parses
+    // as a plain CategoryDir rather than a top-level Skill.
+    let staging = fix.mp().join(".openclaw-install-stage-beta");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("data.txt"), "partial payload").unwrap();
+
+    // Completing the install by renaming the partial workspace to its
+    // final top-level name must still be the one notify-bearing event.
+    let final_path = fix.mp().join("beta");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    fix.wait_for_notify(1);
+
+    let events = fix.notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id == "beta" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for the top-level skill beta, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0].canonical_skill_dir.ends_with("/beta"),
+        "skillDir must end with /beta, got: {}",
+        rename_events[0].canonical_skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+
+    // The renamed workspace survives intact and is reachable at its
+    // final name.
+    let data = std::fs::read_to_string(final_path.join("data.txt")).unwrap();
+    assert_eq!(data, "partial payload");
+    // The root listing shows the final name, not the staging name.
+    let entries = common::list_dir_names(fix.mp());
+    assert!(
+        entries.contains(&"beta".to_string()),
+        "the installed top-level name must be listed: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&".openclaw-install-stage-beta".to_string()),
+        "the staging name must be gone: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn hermes_top_level_staging_rename_to_sensitive_name_rejected() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join(".openclaw-install-stage-evil");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: evil\ndescription: probes sensitive target\n---\n",
+    )
+    .unwrap();
+
+    // Rename onto a sensitive namespace name: the flat and intra-category
+    // arms reject this with EACCES; the top-level arm must too, for a
+    // complete staging root (manifest written, parses as a Skill)...
+    let target = fix.mp().join(".skill-meta");
+    let result = std::fs::rename(&staging, &target);
+    assert!(
+        result.is_err(),
+        "rename onto .skill-meta must be rejected with EACCES"
+    );
+    // The sensitive name was not created on the source.
+    assert!(!fix.source.path().join(".skill-meta").exists());
+    // The staging workspace is untouched (exact-path access preserved).
+    assert!(staging.join("SKILL.md").exists());
+
+    // ...and for a partial one (no manifest yet, parses as a Category).
+    let partial = fix.mp().join(".openclaw-install-stage-evil-partial");
+    std::fs::create_dir(&partial).unwrap();
+    std::fs::write(partial.join("data.txt"), "payload").unwrap();
+    let result_partial = std::fs::rename(&partial, &target);
+    assert!(
+        result_partial.is_err(),
+        "partial staging rename onto .skill-meta must be rejected with EACCES"
+    );
+    assert!(!fix.source.path().join(".skill-meta").exists());
+    assert!(partial.join("data.txt").exists());
+}
+
+#[test]
+fn hermes_top_level_staging_writes_no_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join(".openclaw-install-stage-new");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: new-skill\ndescription: test\n---\n",
+    )
+    .unwrap();
+    std::fs::write(staging.join("data.txt"), "payload").unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+    fix.notify_controller.flush_for_testing();
+
+    let staging_events: Vec<_> = fix
+        .notify_client
+        .events()
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .cloned()
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "top-level staging writes must not trigger any notify: {:?}",
+        staging_events
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H3: cross-scope staging renames. The staging-root validation is keyed on
+// the OLD side's leaf name, so it must hold no matter which scope the old
+// staging root lives in (mount root vs category) and which scope the target
+// sits in: a root → category rename, a category → category rename, and a
+// category → root rename must all be validated exactly like the same-scope
+// shapes above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_top_level_staging_rename_to_nested_sensitive_name_rejected() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join(".openclaw-install-stage-evil");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: evil\ndescription: probes nested sensitive target\n---\n",
+    )
+    .unwrap();
+
+    // Root → category scope crossing: the target parses as a
+    // NestedSkillDir under the `apple` category. The validation must not
+    // depend on the scopes matching — a complete staging root...
+    let target = fix.mp().join("apple/.skill-meta");
+    let result = std::fs::rename(&staging, &target);
+    assert!(
+        result.is_err(),
+        "root→category staging rename onto apple/.skill-meta must be rejected with EACCES"
+    );
+    // No physical creation of the sensitive name.
+    assert!(!fix.source.path().join("apple/.skill-meta").exists());
+    // The staging workspace is untouched (exact-path access preserved).
+    assert!(staging.join("SKILL.md").exists());
+    // The tree is otherwise unchanged: the category still lists its skill
+    // and no `.skill-meta` entry leaked in.
+    let entries = common::list_dir_names(&fix.mp().join("apple"));
+    assert!(
+        entries.contains(&"apple-notes".to_string()),
+        "existing skill must remain: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&".skill-meta".to_string()),
+        "no .skill-meta entry may appear: {:?}",
+        entries
+    );
+
+    // ...and a partial one (no manifest yet, parses as a Category).
+    let partial = fix.mp().join(".openclaw-install-stage-evil-partial");
+    std::fs::create_dir(&partial).unwrap();
+    std::fs::write(partial.join("data.txt"), "payload").unwrap();
+    let result_partial = std::fs::rename(&partial, &target);
+    assert!(
+        result_partial.is_err(),
+        "partial root→category staging rename onto apple/.skill-meta must be rejected"
+    );
+    assert!(!fix.source.path().join("apple/.skill-meta").exists());
+    assert!(partial.join("data.txt").exists());
+}
+
+#[test]
+fn hermes_cross_category_staging_rename_to_sensitive_name_rejected() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+        std::fs::create_dir_all(src.join("banana/ripe-notes")).unwrap();
+        std::fs::write(
+            src.join("banana/ripe-notes/SKILL.md"),
+            "---\nname: ripe-notes\ndescription: notes\n---\n",
+        )
+        .unwrap();
+    });
+
+    // Same-category control: the intra-category arm already rejects a
+    // staging rename onto a sensitive name inside the same category.
+    let same_cat_staging = fix.mp().join("apple/.openclaw-install-stage-ctrl");
+    std::fs::create_dir(&same_cat_staging).unwrap();
+    std::fs::write(
+        same_cat_staging.join("SKILL.md"),
+        "---\nname: ctrl\ndescription: same-category control\n---\n",
+    )
+    .unwrap();
+    let same_cat_result = std::fs::rename(&same_cat_staging, fix.mp().join("apple/.skill-meta"));
+    assert!(
+        same_cat_result.is_err(),
+        "same-category staging rename onto .skill-meta must stay rejected"
+    );
+    assert!(same_cat_staging.join("SKILL.md").exists());
+
+    // Category → category scope crossing: moving a staging root from one
+    // category into a sensitive name under another must not slip past the
+    // same validation just because old_cat != new_cat.
+    let cross_staging = fix.mp().join("apple/.openclaw-install-stage-cross");
+    std::fs::create_dir(&cross_staging).unwrap();
+    std::fs::write(
+        cross_staging.join("SKILL.md"),
+        "---\nname: cross\ndescription: cross-category probe\n---\n",
+    )
+    .unwrap();
+    let cross_result = std::fs::rename(&cross_staging, fix.mp().join("banana/.skill-meta"));
+    assert!(
+        cross_result.is_err(),
+        "cross-category staging rename onto banana/.skill-meta must be rejected with EACCES"
+    );
+    assert!(
+        !fix.source.path().join("banana/.skill-meta").exists(),
+        "no physical banana/.skill-meta may be created"
+    );
+    assert!(
+        cross_staging.join("SKILL.md").exists(),
+        "the staging workspace must be untouched"
+    );
+    let entries = common::list_dir_names(&fix.mp().join("banana"));
+    assert!(
+        entries.contains(&"ripe-notes".to_string()),
+        "existing skill must remain: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&".skill-meta".to_string()),
+        "no .skill-meta entry may appear: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn hermes_top_level_staging_rename_to_valid_nested_target_completes_install() {
+    skip_if_no_fuse!();
+
+    use skillfs_fuse::security::PostPublishWritePattern;
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let staging_config = StagingConfig {
+        patterns: vec![StagingPattern::PrefixStar(
+            ".openclaw-install-stage-".to_string(),
+        )],
+        ..StagingConfig::default()
+    };
+    let matcher = Arc::new(StagingMatcher::new(staging_config));
+    let staging_ctrl = InstallerStagingController::new(matcher.clone(), notify_ctrl.clone());
+
+    // The resolver knows only the pre-existing skill, so the freshly
+    // installed `apple/grace-nested` resolves Hidden and the grace
+    // session is the only thing that can let installer writes through.
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: source.path().join("apple/apple-notes"),
+        },
+    );
+
+    let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
+        ".openclaw".to_string(),
+    )];
+    let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(5000), pp_patterns);
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        active_resolver: Some(resolver),
+        staging_matcher: Some(matcher),
+        staging_controller: Some(staging_ctrl),
+        post_publish_controller: Some(pp_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    let staging = mp.join(".openclaw-install-stage-nested");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: grace-nested\ndescription: installed\n---\n",
+    )
+    .unwrap();
+
+    // Root → category rename to a VALID nested target: the install must
+    // complete — the rename succeeds and the install-completion signals
+    // (rename notify + post-publish grace session) are keyed on the
+    // Hermes skill id `apple/grace-nested`.
+    let final_path = mp.join("apple/grace-nested");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        notify_ctrl.flush_for_testing();
+        if !notify_client.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for rename notify, events: {:?}",
+                notify_client.events()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let events = notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id == "apple/grace-nested" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for the nested skill id apple/grace-nested, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0]
+            .canonical_skill_dir
+            .ends_with("/apple/grace-nested"),
+        "skillDir must end with /apple/grace-nested, got: {}",
+        rename_events[0].canonical_skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+
+    // The post-publish grace session must be active for the nested id:
+    // whitelisted .openclaw/** writes succeed...
+    std::fs::create_dir(final_path.join(".openclaw")).unwrap();
+    let result = std::fs::write(final_path.join(".openclaw/metadata.tmp"), "installer-data");
+    assert!(
+        result.is_ok(),
+        "whitelisted .openclaw/** write must succeed during grace: {:?}",
+        result.err()
+    );
+    // ...while non-whitelisted writes are rejected for its duration.
+    let result = std::fs::create_dir(final_path.join("other-dir"));
+    assert!(
+        result.is_err(),
+        "non-whitelisted path must be rejected during grace"
+    );
+
+    // The install physically landed at the nested target (the resolver
+    // has not activated it yet, so reads through the mount stay hidden —
+    // the D1.1 contract — which is exactly what the grace window
+    // bridges for installer writes).
+    let manifest =
+        std::fs::read_to_string(source.path().join("apple/grace-nested/SKILL.md")).unwrap();
+    assert!(manifest.contains("name: grace-nested"));
+
+    pp_ctrl.shutdown();
+    notify_ctrl.shutdown();
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}
+
+#[test]
+fn hermes_nested_staging_rename_to_sensitive_root_name_rejected() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+        // An existing empty root directory (CategoryDir target shape)
+        // whose name is itself a staging pattern.
+        std::fs::create_dir_all(src.join(".openclaw-install-stage-occupied")).unwrap();
+        // An existing top-level skill (SkillDir target shape) under a
+        // sensitive name: `skill-discover`.
+        let occupied = src.join("skill-discover");
+        std::fs::create_dir_all(&occupied).unwrap();
+        std::fs::write(
+            occupied.join("SKILL.md"),
+            "---\nname: skill-discover\ndescription: occupied\n---\n",
+        )
+        .unwrap();
+    });
+
+    // Category → root scope crossing onto a fresh root name (HermesMeta
+    // target on the in-place mount): the review's exact shape
+    // `mv /apple/.openclaw-install-stage-x /.skill-meta`.
+    let staging = fix.mp().join("apple/.openclaw-install-stage-evil");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: evil\ndescription: probes root sensitive target\n---\n",
+    )
+    .unwrap();
+    let target = fix.mp().join(".skill-meta");
+    let result = std::fs::rename(&staging, &target);
+    assert_eq!(
+        result.err().and_then(|e| e.raw_os_error()),
+        Some(libc::EACCES),
+        "category→root staging rename onto /.skill-meta must be rejected with EACCES"
+    );
+    // The sensitive name was not created on the source.
+    assert!(!fix.source.path().join(".skill-meta").exists());
+    // The staging workspace is untouched (exact-path access preserved).
+    assert!(staging.join("SKILL.md").exists());
+
+    // ...and for a partial one (no manifest yet).
+    let partial = fix.mp().join("apple/.openclaw-install-stage-evil-partial");
+    std::fs::create_dir(&partial).unwrap();
+    std::fs::write(partial.join("data.txt"), "payload").unwrap();
+    let result_partial = std::fs::rename(&partial, fix.mp().join(".takeover-hidden"));
+    assert_eq!(
+        result_partial.err().and_then(|e| e.raw_os_error()),
+        Some(libc::EACCES),
+        "partial category→root staging rename onto a fresh dot-name must be rejected with EACCES"
+    );
+    assert!(!fix.source.path().join(".takeover-hidden").exists());
+    assert!(partial.join("data.txt").exists());
+
+    // A fresh root target that is itself a staging pattern name must not
+    // be reachable either: staging names may not land at the root via a
+    // nested→root rename.
+    let sneaky = fix.mp().join("apple/.openclaw-install-stage-sneaky");
+    std::fs::create_dir(&sneaky).unwrap();
+    std::fs::write(
+        sneaky.join("SKILL.md"),
+        "---\nname: sneaky\ndescription: probes staging name at root\n---\n",
+    )
+    .unwrap();
+    let result_sneaky = std::fs::rename(&sneaky, fix.mp().join(".openclaw-install-stage-root"));
+    assert_eq!(
+        result_sneaky.err().and_then(|e| e.raw_os_error()),
+        Some(libc::EACCES),
+        "category→root staging rename onto a staging-pattern name must be rejected with EACCES"
+    );
+    assert!(
+        !fix.source
+            .path()
+            .join(".openclaw-install-stage-root")
+            .exists()
+    );
+    assert!(sneaky.join("SKILL.md").exists());
+
+    // Existing empty root directory with a staging-pattern name
+    // (CategoryDir target): the validation must fire before the physical
+    // rename can replace the directory.
+    let occupied = fix.mp().join("apple/.openclaw-install-stage-occupied-src");
+    std::fs::create_dir(&occupied).unwrap();
+    std::fs::write(
+        occupied.join("SKILL.md"),
+        "---\nname: occupied-src\ndescription: probes occupied dir\n---\n",
+    )
+    .unwrap();
+    let result_occupied =
+        std::fs::rename(&occupied, fix.mp().join(".openclaw-install-stage-occupied"));
+    assert_eq!(
+        result_occupied.err().and_then(|e| e.raw_os_error()),
+        Some(libc::EACCES),
+        "category→root staging rename onto the occupied staging dir must be rejected with EACCES"
+    );
+    // The seeded directory was not replaced by the staging payload.
+    assert!(
+        !fix.source
+            .path()
+            .join(".openclaw-install-stage-occupied/SKILL.md")
+            .exists()
+    );
+    assert!(occupied.join("SKILL.md").exists());
+
+    // Existing top-level skill under a sensitive name (SkillDir target).
+    // `skill-discover` is additionally the reserved read-only namespace:
+    // since #5085 the skill-discover read-only rejection deliberately
+    // takes priority over the staging/cross-namespace handling, so this
+    // one shape answers EROFS — not the staging arm's EACCES and not the
+    // bare physical ENOTEMPTY an unvalidated rename would return — while
+    // the source directory stays unchanged. The other staging sensitive
+    // targets above keep their EACCES contract.
+    let onto_skill = fix.mp().join("apple/.openclaw-install-stage-onto-skill");
+    std::fs::create_dir(&onto_skill).unwrap();
+    std::fs::write(
+        onto_skill.join("SKILL.md"),
+        "---\nname: onto-skill\ndescription: probes existing skill target\n---\n",
+    )
+    .unwrap();
+    let result_skill = std::fs::rename(&onto_skill, fix.mp().join("skill-discover"));
+    assert_eq!(
+        result_skill.err().and_then(|e| e.raw_os_error()),
+        Some(libc::EROFS),
+        "category→root staging rename onto the skill-discover read-only namespace must be EROFS: the read-only gate precedes staging validation (#5085)"
+    );
+    // The occupied skill's manifest was not replaced.
+    let manifest =
+        std::fs::read_to_string(fix.source.path().join("skill-discover/SKILL.md")).unwrap();
+    assert!(manifest.contains("name: skill-discover"));
+    // ...and the read-only rejection left the source directory untouched.
+    assert!(
+        onto_skill.join("SKILL.md").exists(),
+        "the staging source directory must survive the EROFS-rejected rename"
+    );
+
+    // The root listing never gained a sensitive entry and the category is
+    // otherwise unchanged.
+    let entries = common::list_dir_names(fix.mp());
+    assert!(
+        !entries.contains(&".skill-meta".to_string()),
+        "no .skill-meta entry may appear: {:?}",
+        entries
+    );
+    let apple = common::list_dir_names(&fix.mp().join("apple"));
+    assert!(
+        apple.contains(&"apple-notes".to_string()),
+        "existing skill must remain: {:?}",
+        apple
+    );
+}
+
+#[test]
+fn hermes_nested_staging_rename_to_valid_root_target_completes_install() {
+    skip_if_no_fuse!();
+
+    use skillfs_fuse::security::PostPublishWritePattern;
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let staging_config = StagingConfig {
+        patterns: vec![StagingPattern::PrefixStar(
+            ".openclaw-install-stage-".to_string(),
+        )],
+        ..StagingConfig::default()
+    };
+    let matcher = Arc::new(StagingMatcher::new(staging_config));
+    let staging_ctrl = InstallerStagingController::new(matcher.clone(), notify_ctrl.clone());
+
+    // The resolver knows only the pre-existing skill, so the freshly
+    // installed top-level `grace-root` resolves Hidden and the grace
+    // session is the only thing that can let installer writes through.
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: source.path().join("apple/apple-notes"),
+        },
+    );
+
+    let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
+        ".openclaw".to_string(),
+    )];
+    let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(5000), pp_patterns);
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        active_resolver: Some(resolver),
+        staging_matcher: Some(matcher),
+        staging_controller: Some(staging_ctrl),
+        post_publish_controller: Some(pp_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    let staging = mp.join("apple/.openclaw-install-stage-rooted");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: grace-root\ndescription: installed\n---\n",
+    )
+    .unwrap();
+
+    // Category → root rename to a VALID fresh top-level name: the install
+    // must complete — the rename succeeds and the install-completion
+    // signals (rename notify + post-publish grace session) are keyed on
+    // the bare top-level skill id `grace-root`.
+    let final_path = mp.join("grace-root");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        notify_ctrl.flush_for_testing();
+        if !notify_client.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for rename notify, events: {:?}",
+                notify_client.events()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let events = notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id == "grace-root" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for the bare top-level id grace-root, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0]
+            .canonical_skill_dir
+            .ends_with("/grace-root"),
+        "skillDir must end with /grace-root, got: {}",
+        rename_events[0].canonical_skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+
+    // The post-publish grace session must be active for the bare
+    // top-level id: whitelisted .openclaw/** writes succeed...
+    std::fs::create_dir(final_path.join(".openclaw")).unwrap();
+    let result = std::fs::write(final_path.join(".openclaw/metadata.tmp"), "installer-data");
+    assert!(
+        result.is_ok(),
+        "whitelisted .openclaw/** write must succeed during grace: {:?}",
+        result.err()
+    );
+    // ...while non-whitelisted writes are rejected for its duration.
+    let result = std::fs::create_dir(final_path.join("other-dir"));
+    assert!(
+        result.is_err(),
+        "non-whitelisted path must be rejected during grace"
+    );
+
+    // The install physically landed at the top-level target.
+    let manifest = std::fs::read_to_string(source.path().join("grace-root/SKILL.md")).unwrap();
+    assert!(manifest.contains("name: grace-root"));
+
+    pp_ctrl.shutdown();
+    notify_ctrl.shutdown();
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}
+
+#[test]
+fn hermes_nested_staging_rename_to_existing_root_dir_target_completes_install() {
+    skip_if_no_fuse!();
+
+    use skillfs_fuse::security::PostPublishWritePattern;
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+    // An existing EMPTY root directory: the rename target parses as a
+    // CategoryDir (in-place mount, name already present as a directory)
+    // instead of a HermesMeta.
+    std::fs::create_dir_all(source.path().join("banana")).unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let staging_config = StagingConfig {
+        patterns: vec![StagingPattern::PrefixStar(
+            ".openclaw-install-stage-".to_string(),
+        )],
+        ..StagingConfig::default()
+    };
+    let matcher = Arc::new(StagingMatcher::new(staging_config));
+    let staging_ctrl = InstallerStagingController::new(matcher.clone(), notify_ctrl.clone());
+
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: source.path().join("apple/apple-notes"),
+        },
+    );
+
+    let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
+        ".openclaw".to_string(),
+    )];
+    let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(5000), pp_patterns);
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        active_resolver: Some(resolver),
+        staging_matcher: Some(matcher),
+        staging_controller: Some(staging_ctrl),
+        post_publish_controller: Some(pp_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    let staging = mp.join("apple/.openclaw-install-stage-catted");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: banana\ndescription: installed into the empty dir\n---\n",
+    )
+    .unwrap();
+
+    // Category → root rename onto the existing empty directory
+    // (CategoryDir target): the install must complete with the bare
+    // top-level id `banana` — the rename replaces the empty directory.
+    let final_path = mp.join("banana");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        notify_ctrl.flush_for_testing();
+        if !notify_client.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for rename notify, events: {:?}",
+                notify_client.events()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let events = notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id == "banana" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for the bare top-level id banana, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0].canonical_skill_dir.ends_with("/banana"),
+        "skillDir must end with /banana, got: {}",
+        rename_events[0].canonical_skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+
+    // The grace session is keyed on the bare top-level id for the
+    // CategoryDir target shape as well.
+    std::fs::create_dir(final_path.join(".openclaw")).unwrap();
+    let result = std::fs::write(final_path.join(".openclaw/metadata.tmp"), "installer-data");
+    assert!(
+        result.is_ok(),
+        "whitelisted .openclaw/** write must succeed during grace: {:?}",
+        result.err()
+    );
+    let result = std::fs::create_dir(final_path.join("other-dir"));
+    assert!(
+        result.is_err(),
+        "non-whitelisted path must be rejected during grace"
+    );
+
+    // The install physically landed inside the former empty directory.
+    let manifest = std::fs::read_to_string(source.path().join("banana/SKILL.md")).unwrap();
+    assert!(manifest.contains("name: banana"));
+
+    pp_ctrl.shutdown();
+    notify_ctrl.shutdown();
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3349,6 +5085,314 @@ fn hermes_post_publish_grace_allows_whitelisted() {
     assert!(
         result.is_err(),
         "non-whitelisted path must be rejected during grace"
+    );
+
+    pp_ctrl.shutdown();
+    notify_ctrl.shutdown();
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes root listing: the ordinary-view filters
+//
+// The Hermes root listing is the physical workspace, so it must apply the
+// same filters the flat `/skills` listing applies: activation-hidden skills
+// (D1.1), installer staging roots and pending installs (I2).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Normal-mode Hermes mount with a staging matcher, a pending-install
+/// controller, and an activation resolver that only learns `visible`.
+struct HermesOrdinaryViewFixture {
+    source: tempfile::TempDir,
+    mountpoint: tempfile::TempDir,
+    handle: Option<MountHandle>,
+    #[allow(dead_code)]
+    notify_controller: Arc<NotifyController>,
+    #[allow(dead_code)]
+    pending_controller: Arc<PendingInstallController>,
+}
+
+impl HermesOrdinaryViewFixture {
+    fn new(visible: &[&str], seed: impl FnOnce(&Path)) -> Self {
+        let source = tempfile::tempdir().unwrap();
+        seed(source.path());
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        let mountpoint = tempfile::tempdir().unwrap();
+        let notify_client = Arc::new(InMemoryNotifyClient::new());
+        let notify_ctrl = NotifyController::new(
+            notify_client,
+            source.path().to_path_buf(),
+            Duration::from_millis(50),
+            5000,
+        );
+
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+        for name in visible {
+            resolver.set(
+                (*name).to_string(),
+                ActiveTarget::Current {
+                    source_dir: source.path().join(name),
+                },
+            );
+        }
+
+        let staging_matcher = Arc::new(StagingMatcher::new(StagingConfig {
+            patterns: vec![StagingPattern::PrefixStar(
+                ".openclaw-install-stage-".to_string(),
+            )],
+            ..StagingConfig::default()
+        }));
+        let staging_ctrl =
+            InstallerStagingController::new(staging_matcher.clone(), notify_ctrl.clone());
+        let pending_ctrl = PendingInstallController::new(
+            notify_ctrl.clone(),
+            Duration::from_millis(5000),
+            source.path().to_path_buf(),
+        );
+
+        let config = MountConfig {
+            notify_controller: Some(notify_ctrl.clone()),
+            active_resolver: Some(resolver),
+            pending_install_controller: Some(pending_ctrl.clone()),
+            staging_matcher: Some(staging_matcher),
+            staging_controller: Some(staging_ctrl),
+            skill_layout: Some(SkillLayout::Hermes),
+            ..MountConfig::default()
+        };
+
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            false,
+            config,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            mountpoint,
+            handle: Some(handle),
+            notify_controller: notify_ctrl,
+            pending_controller: pending_ctrl,
+        }
+    }
+
+    fn mp(&self) -> &Path {
+        self.mountpoint.path()
+    }
+
+    fn skills_root(&self) -> PathBuf {
+        self.mp().join("skills")
+    }
+}
+
+impl Drop for HermesOrdinaryViewFixture {
+    fn drop(&mut self) {
+        self.pending_controller.shutdown();
+        self.notify_controller.shutdown();
+        if let Some(handle) = self.handle.take() {
+            drop(handle);
+        }
+        let mp = self.mountpoint.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+#[test]
+fn hermes_root_listing_applies_the_ordinary_view_filters() {
+    skip_if_no_fuse!();
+
+    let fixture = HermesOrdinaryViewFixture::new(&["visible-skill", "nested-skill"], |src| {
+        create_skill(src, "visible-skill");
+        create_skill(&src.join("apple"), "nested-skill");
+        // A skill the activation resolver never learns about, and a staging
+        // root: both exist physically at the top level.
+        create_skill(src, "hidden-skill");
+        std::fs::create_dir_all(src.join(".openclaw-install-stage-x")).unwrap();
+    });
+
+    let entries = common::list_dir_names(&fixture.skills_root());
+    assert!(
+        entries.contains(&"visible-skill".to_string()),
+        "a resolved skill must stay visible: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"apple".to_string()),
+        "a category directory must stay visible: {entries:?}"
+    );
+    assert!(
+        !entries.contains(&"hidden-skill".to_string()),
+        "an activation-hidden skill must not be listed: {entries:?}"
+    );
+    assert!(
+        !entries.contains(&".openclaw-install-stage-x".to_string()),
+        "a staging root must not be listed: {entries:?}"
+    );
+
+    // The filter is a view concern: the hidden skill and the staging root
+    // are still on disk.
+    assert!(fixture.source.path().join("hidden-skill").is_dir());
+    assert!(
+        fixture
+            .source
+            .path()
+            .join(".openclaw-install-stage-x")
+            .is_dir()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #7968: nested read surfaces must honor the post-publish grace window.
+//
+// The flat layout's I4 grace bypass lets whitelisted paths (`.clawhub/**`)
+// keep resolving against the live source during a grace session even when the
+// skill resolves to a fallback snapshot. The nested layout only honored grace
+// in the shared `access()` resolver; lookup/getattr/readdir/opendir/open
+// redirected to the snapshot unconditionally, so `access()` said readable
+// while `stat`/`open` returned ENOENT for the same whitelisted path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_post_publish_grace_fallback_snapshot_reads_honor_grace() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    // Live nested skill on a fallback snapshot: the source has `.clawhub`
+    // (grace-whitelisted) and `data` (not whitelisted); the snapshot only
+    // carries a different SKILL.md.
+    let skill = source.path().join("apple/fallback-skill");
+    std::fs::create_dir_all(skill.join(".clawhub")).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: fallback-skill\ndescription: live\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill.join(".clawhub/origin.json"),
+        r#"{"origin":"installer"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(skill.join("data")).unwrap();
+    std::fs::write(skill.join("data/secret.txt"), "secret").unwrap();
+
+    let snapshot_dir = skill.join(".skill-meta/versions/v1");
+    std::fs::create_dir_all(&snapshot_dir).unwrap();
+    std::fs::write(
+        snapshot_dir.join("SKILL.md"),
+        "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+    )
+    .unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/fallback-skill",
+        ActiveTarget::Snapshot {
+            snapshot_dir: snapshot_dir.clone(),
+            version: "v1".to_string(),
+        },
+    );
+
+    let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
+        ".clawhub".to_string(),
+    )];
+    let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(5000), pp_patterns);
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        active_resolver: Some(resolver),
+        post_publish_controller: Some(pp_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    pp_ctrl.start_session(
+        "apple/fallback-skill",
+        PostPublishSessionKind::StagingRename,
+    );
+
+    let mp = mountpoint.path();
+    let whitelisted = mp.join("apple/fallback-skill/.clawhub/origin.json");
+
+    // lookup/getattr surface: stat of the grace-whitelisted file that only
+    // exists in the live source must succeed, matching access().
+    let meta = std::fs::metadata(&whitelisted);
+    assert!(
+        meta.is_ok(),
+        "stat of grace-whitelisted nested path must honor grace: {:?}",
+        meta.err()
+    );
+
+    // open surface: the same file must be readable back through the mount.
+    let content = std::fs::read_to_string(&whitelisted);
+    assert!(
+        content.is_ok(),
+        "open of grace-whitelisted nested path must honor grace: {:?}",
+        content.err()
+    );
+    assert_eq!(content.unwrap(), r#"{"origin":"installer"}"#);
+
+    // readdir/opendir surface: the grace directory must list its live
+    // contents instead of ENOENT from the snapshot view.
+    let entries = common::list_dir_names(&mp.join("apple/fallback-skill/.clawhub"));
+    assert!(
+        entries.contains(&"origin.json".to_string()),
+        "readdir of grace-whitelisted nested dir must honor grace: {:?}",
+        entries
+    );
+
+    // SKILL.md keeps serving the snapshot during grace (the whitelist never
+    // matches it), and non-whitelisted source-only files stay hidden behind
+    // the snapshot view.
+    let manifest = std::fs::read_to_string(mp.join("apple/fallback-skill/SKILL.md")).unwrap();
+    assert!(
+        manifest.contains("description: snapshot"),
+        "SKILL.md must still serve the snapshot during grace: {manifest}"
+    );
+    let secret = std::fs::metadata(mp.join("apple/fallback-skill/data/secret.txt"));
+    assert!(
+        secret.is_err(),
+        "non-whitelisted source-only file must stay hidden behind the snapshot view"
     );
 
     pp_ctrl.shutdown();

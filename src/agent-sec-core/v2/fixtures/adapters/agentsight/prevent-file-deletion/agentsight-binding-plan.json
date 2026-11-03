@@ -1,12 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "source": {
     "bindingId": "10000000-0000-4000-8000-000000000001",
     "bindingRevision": 7,
     "policyId": "00000000-0000-4000-8000-000000000002",
     "policyRevision": 1,
-    "scopeId": "20000000-0000-4000-8000-000000000001",
-    "scopeRevision": 3
+    "scopeId": "20000000-0000-4000-8000-000000000001"
   },
   "policy": {
     "mediaType": "application/vnd.actplane.dsl.v1",
@@ -14,6 +13,12 @@
   },
   "scope": {
     "kind": "process_tree",
-    "rootPid": 4242
+    "rootPid": 4242,
+    "process": {
+      "bootId": "11111111-2222-4333-8444-555555555555",
+      "pidNamespace": "pid:[42]",
+      "pid": 4242,
+      "startTime": 987654
+    }
   }
 }

@@ -409,6 +409,37 @@ def test_main_redacts_and_uses_host_trace_context_for_both_cli_calls(
     assert "alice@example.com" not in serialized
     assert "a***@example.com" in serialized
 
+    # Pin both argv literally: the redact call's --source and the record
+    # call's subcommand/flags are unpinned today - dropping --stdin from
+    # either makes the real CLI exit non-zero ("--stdin is required") and the
+    # hook silently stops recording, with no test noticing.
+    redact_argv = calls[0][0]
+    assert redact_argv[0] == "agent-sec-cli"
+    assert redact_argv[redact_argv.index("--trace-context") + 2 :] == [
+        "scan-pii",
+        "--stdin",
+        "--format",
+        "json",
+        "--redact-output",
+        "--include-low-confidence",
+        "--source",
+        "observability",
+    ]
+    record_argv = calls[-1][0]
+    record_context = json.dumps(
+        {"agent_name": "qoder", "session_id": "session-123"}, separators=(",", ":")
+    )
+    assert record_argv == [
+        "agent-sec-cli",
+        "--trace-context",
+        record_context,
+        "observability",
+        "record",
+        "--format",
+        "json",
+        "--stdin",
+    ]
+
 
 def test_redaction_failure_drops_raw_value_and_reports_once(
     monkeypatch, capsys

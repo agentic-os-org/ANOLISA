@@ -79,6 +79,134 @@ def read_contract_frameworks(contract: Path) -> set[str]:
     return frameworks
 
 
+def _referenced_wheel_versions(text: str) -> set:
+    """Return the tokenless wheel versions referenced as wheel URLs.
+
+    Anchored on the wheel tag (cp/py) so pre-release versions such as
+    0.9.0-rc.1 are captured whole; the previous pattern stopped at the
+    first dash and truncated them, making the gate reject every
+    pre-release with a false drift.
+    """
+    return set(re.findall(r"anolisa_tokenless-(.+?)-(?:cp|py)\d", text))
+
+
+# PEP 440 version grammar, from the appendix of the spec. Wheel filenames
+# carry the *normalized* form of the project version -- the pinned maturin
+# 1.15.0 names the wheel of a Cargo 0.9.0-rc.1 "anolisa_tokenless-0.9.0rc1-
+# ...", and pip rejects filenames that keep an unnormalized spelling --
+# while the Cargo workspace version keeps its original form. This script
+# runs under the bare python3 that packaging/raw/package.sh provides, so
+# only the stdlib is available and the normalization below is hand-rolled
+# instead of delegating to packaging.version.Version.
+_PEP440_VERSION = re.compile(
+    r"""
+    ^v?
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?P<pre>[-_.]?(?P<pre_l>alpha|a|beta|b|preview|pre|c|rc)[-_.]?(?P<pre_n>[0-9]+)?)?
+    (?P<post>(?:-(?P<post_n1>[0-9]+))|(?:[-_.]?(?P<post_l>post|rev|r)[-_.]?(?P<post_n2>[0-9]+)?))?
+    (?P<dev>[-_.]?dev[-_.]?(?P<dev_n>[0-9]+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+    $
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_PRE_ALIASES = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc", "preview": "rc"}
+
+
+def _normalize_pep440(version: str) -> str:
+    """Return the PEP 440 normalized spelling of a version string.
+
+    Normalization drops the separators around pre/post/dev segments, folds
+    the long pre-release spellings (alpha/beta/preview/pre/c) into their
+    single letters, lowercases the remainder and canonicalizes local-version
+    separators to dots -- exactly what str(packaging.version.Version) does,
+    reproduced here for a stdlib-only environment. A version the grammar
+    cannot parse is returned unchanged, so the caller falls back to exact
+    string comparison, which is the only contract such a spelling ever had.
+    """
+    match = _PEP440_VERSION.match(version)
+    if match is None:
+        return version
+    parts = []
+    if match.group("epoch") is not None:
+        parts.append(f"{int(match.group('epoch'))}!")
+    parts.append(
+        ".".join(str(int(piece)) for piece in match.group("release").split("."))
+    )
+    if match.group("pre_l") is not None:
+        letter = _PRE_ALIASES.get(
+            match.group("pre_l").lower(), match.group("pre_l").lower()
+        )
+        parts.append(f"{letter}{int(match.group('pre_n') or 0)}")
+    if match.group("post_n1") is not None:
+        parts.append(f".post{int(match.group('post_n1'))}")
+    elif match.group("post_l") is not None:
+        parts.append(f".post{int(match.group('post_n2') or 0)}")
+    if match.group("dev") is not None:
+        parts.append(f".dev{int(match.group('dev_n') or 0)}")
+    if match.group("local") is not None:
+        local = ".".join(re.split(r"[-_.]", match.group("local").lower()))
+        parts.append(f"+{local}")
+    return "".join(parts)
+
+
+def _verify_requirements_references(relative: str, expected: str, text: str) -> None:
+    """Fail unless a stamped requirements file pins this release's wheels.
+
+    The release URL keeps the raw workspace version in its tag path
+    (/tokenless/v0.9.0-rc.1/) while the wheel filename carries the PEP 440
+    normalized form (anolisa_tokenless-0.9.0rc1-cp311-...). Each position
+    must use its own spelling: the release workflow tags the workspace
+    version verbatim, so a normalized tag path would point installers at a
+    tag the workflow never creates, while a wheel filename that keeps the
+    unnormalized spelling is a form pip refuses to install and would break
+    `qwenpaw plugin install` on every host. The producer side of the pair is
+    the Makefile rule that stamps adapters/tokenless/qwenpaw/requirements.txt
+    through packaging/raw/wheel-version.py.
+    """
+    # The template carries two placeholders -- @VERSION@ for the tag path and
+    # @WHEEL_VERSION@ for the filenames -- so report any surviving stamp
+    # marker instead of only the one this gate used to know about.
+    placeholders = sorted(set(re.findall(r"@[A-Z0-9_]+@", text)))
+    if placeholders:
+        raise SystemExit(
+            f"ERROR: {relative} is not stamped: {', '.join(placeholders)} remains"
+        )
+    path_versions = set(re.findall(r"/tokenless/v([^/]+)/", text))
+    wheel_versions = _referenced_wheel_versions(text)
+    normalized = _normalize_pep440(expected)
+    unnormalized = sorted(v for v in wheel_versions if _normalize_pep440(v) != v)
+    if unnormalized:
+        raise SystemExit(
+            f"ERROR: {relative} pins wheel filename version(s) {unnormalized} "
+            f"in a form pip rejects: wheel filenames must carry the PEP 440 "
+            f"normalized version ({normalized})"
+        )
+    # The release workflow creates the tag from the workspace version
+    # verbatim, so the tag path must use that exact spelling; the normalized
+    # Python spelling would point requirements at a different tag.
+    stale_tags = sorted(v for v in path_versions if v != expected)
+    if stale_tags:
+        raise SystemExit(
+            f"ERROR: {relative} pins release tag version(s) {stale_tags}: the "
+            f"release tag must use the workspace spelling {expected}"
+        )
+    # Wheel filenames carry the PEP 440 normalized spelling of the same
+    # version; any other value is a different release.
+    wrong_wheels = sorted(v for v in wheel_versions if v != normalized)
+    if wrong_wheels:
+        raise SystemExit(
+            f"ERROR: {relative} does not reference tokenless {expected}: "
+            f"{wrong_wheels}"
+        )
+    if not path_versions and not wheel_versions:
+        raise SystemExit(
+            f"ERROR: {relative} does not reference tokenless {expected}: "
+            "no wheel URL"
+        )
+
+
 def verify_versions(root: Path, contract: Path) -> str:
     """Return the source version after checking packaged release metadata."""
     cargo_path = root / "Cargo.toml"
@@ -113,6 +241,7 @@ def verify_versions(root: Path, contract: Path) -> str:
         adapters / "openclaw" / "openclaw.plugin.json",
         adapters / "dsh" / "package.json",
         adapters / "qoder" / ".qoder-plugin" / "plugin.json",
+        adapters / "qwenwork" / ".qoder-plugin" / "plugin.json",
         adapters / "claude-code" / ".claude-plugin" / "plugin.json",
         adapters / "codex" / ".codex-plugin" / "plugin.json",
         adapters / "qwencode" / "qwen-extension.json",
@@ -131,14 +260,9 @@ def verify_versions(root: Path, contract: Path) -> str:
     # stale or unstamped version there only fails inside `qwenpaw plugin install`.
     requirements = adapters / "qwenpaw" / "requirements.txt"
     text = requirements.read_text(encoding="utf-8")
-    referenced = set(re.findall(r"/tokenless/v([^/]+)/", text)) | set(
-        re.findall(r"anolisa_tokenless-([^-]+)-", text)
+    _verify_requirements_references(
+        str(requirements.relative_to(root)), expected, text
     )
-    if "@VERSION@" in text or referenced != {expected}:
-        raise SystemExit(
-            f"ERROR: {requirements.relative_to(root)} does not reference "
-            f"tokenless {expected}: {sorted(referenced) or 'no wheel URL'}"
-        )
     return expected
 
 

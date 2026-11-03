@@ -72,8 +72,13 @@ impl PackagedDataProbe {
         {
             return Some(candidate.to_path_buf());
         }
-        if let Some(prefix) = self
+        // npm exposes a launcher symlink outside the native package. Resolve
+        // that link before finding the executable's own sibling data tree.
+        let executable = self
             .executable
+            .as_ref()
+            .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()));
+        if let Some(prefix) = executable
             .as_deref()
             .and_then(Path::parent)
             .and_then(Path::parent)
@@ -153,5 +158,37 @@ mod tests {
         let probe = PackagedDataProbe::from_inputs(None, None);
         let got = packaged_datadir_root(&layout, &probe);
         assert_eq!(got.as_deref(), Some(layout.datadir.as_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_symlink_uses_native_package_data_and_preserves_env_priority() {
+        let tmp = tempdir().expect("tmp");
+        let native = tmp
+            .path()
+            .join("node_modules/@anolisa/cli-native/bin/anolisa");
+        fs::create_dir_all(native.parent().expect("native bin parent")).expect("mkdir native bin");
+        fs::write(&native, "native binary fixture").expect("write native");
+        let packaged = native
+            .parent()
+            .and_then(Path::parent)
+            .expect("package root")
+            .join("share/anolisa");
+        fs::create_dir_all(packaged.join("components/tokenless")).expect("mkdir registry");
+        let launcher = tmp.path().join("cli/bin/anolisa");
+        fs::create_dir_all(launcher.parent().expect("launcher bin parent"))
+            .expect("mkdir launcher");
+        std::os::unix::fs::symlink(&native, &launcher).expect("launcher symlink");
+        let layout = FsLayout::system(Some(tmp.path().join("layout")));
+        let probe = PackagedDataProbe::from_inputs(None, Some(launcher.clone()));
+        assert_eq!(
+            packaged_datadir_root(&layout, &probe),
+            Some(packaged.canonicalize().expect("canonical package data"))
+        );
+
+        let override_root = tmp.path().join("explicit-data");
+        fs::create_dir_all(&override_root).expect("mkdir env data");
+        let probe = PackagedDataProbe::from_inputs(Some(override_root.clone()), Some(launcher));
+        assert_eq!(packaged_datadir_root(&layout, &probe), Some(override_root));
     }
 }

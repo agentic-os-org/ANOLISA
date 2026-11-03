@@ -1,5 +1,7 @@
 # AgentSec daemon 进程与部署契约
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 Python 交付基线、兼容语料及仓库内 V2 部署目标 |
@@ -116,7 +118,9 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 - 当前 Linux unit 使用 root:root，不创建专用账户；保留现有 capability 和沙箱限制，
   root 身份不等于开放全部特权；
 - systemd 负责 start/stop/restart、资源限制、目录准备和故障拉起；
-- daemon 不自行 daemonize，不在启动路径隐式执行不可逆 migration；
+- V2 RPM 首次安装或检测到尚未卸载的 V1 user unit 时，在运行中的 system manager 上执行 `systemctl enable --now agent-sec-core.service`；这使 V1 升级切换到 system service，同时纯 V2 重装保留管理员已有的服务状态。启动失败不使 RPM 事务失败，部署者应查询 service 状态和 journal。没有 system manager 的镜像构建或容器安装只完成文件安装，不尝试启动 daemon；
+- daemon 不自行 daemonize；安装、跨目录数据导入与 owner mapping 应由显式迁移入口负责；
+  当前 obs 启动期 schema 收敛见本文 DPROC-QRY-001；
 - runtime 目录由 systemd RuntimeDirectory 创建；state/log 路径按各自存储契约管理；
 - 两个不同 UID/Agent 通过同一 system socket 访问并保持 owner-scope 隔离。
 
@@ -124,7 +128,8 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 
 - 默认 DaemonSet，每个目标 Node 恰有一个 Ready 实例；
 - Helm/manifest 明确 service account、security context、volume、resource 和 probe；
-- init job 或安装流程显式调用 asc-state-migrator；daemon 启动不偷偷升级状态；
+- 跨目录数据导入与 owner mapping 应由 init job 或安装流程显式调用 asc-state-migrator；
+  当前 obs 启动期 schema 1 → 2 收敛见本文 DPROC-QRY-001，不执行上述导入；
 - rollout、rollback、drain 和 Node replacement 分别留存证据。
 
 ### 4.3 CLI 与进程所有权
@@ -240,6 +245,15 @@ WAL/SHM sidecar 受私有目录保护。绑定 UDS 前必须实际打开 JSONL�
 失败即非零退出；JSONL 失败只输出告警，daemon 仍启动并对该副本保持 best-effort 写入。成功
 启动后单侧瞬时写失败仍保持独立 fail-open，不改变 capability 的业务结果。
 
+Policy 存储独立执行 DPROC-023 路径选择：显式非空 `AGENT_SEC_DATA_DIR` 为固定路径，
+否则候选 A 为 `/var/log/agent-sec/policy-state.db`，B 为
+`/var/lib/agent-sec/policy/policy-state.db`。先检查两处已有状态，再按目录安全性优先选择 A，
+A 的祖先不安全时选择安全的 B。祖先安全且已有叶目录归 daemon 所有时，先将叶目录修复为 `0700`；
+叶目录属主错误或修复失败直接报错。两处都有库，或选址会绕过另一处已有库时拒绝启动并列出路径与原因。
+不能把读取错误视为不存在，也不因数据库损坏、schema、锁或 I/O 错误换库。
+预检查不创建文件、不改变祖先权限、不迁移数据；无冲突时才打开或初始化所选库，最终打开再次验证目录。
+`0700` 私有目录及 `0600` 文件要求保持不变，安全事件和可观测路径不随 Policy fallback 改变。
+
 scan composition root 还注入共享 telemetry sink。`AGENT_SEC_TELEMETRY_LOG_PATH` 沿用 V1，
 默认 uploader-owned JSONL。路径中的 `~` 优先使用 `HOME`，未设置时查询当前 UID 的系统
 用户数据库；`~user` 查询指定用户的 home，保持 V1 `Path.expanduser()` 对已有用户的展开行为。
@@ -262,7 +276,11 @@ RPC error、SecurityEvent 或 telemetry。`agent-sec-daemon` binary 单元测试
 OTel 初始化后由 §11 的有界 hook 接管，仅输出固定诊断且不等待 stderr。
 
 该 slice 已由唯一的 concrete `DaemonDispatcher` 注册 first-version PAP daemon protocol，
-但尚未注册 `daemon.health`。dispatcher 完成 envelope decode、request ID、kernel peer
+并注册 `daemon.health`，供任意经过内核认证的本地调用方检查进程响应。
+返回 `status: "ok"`、`pid` 和从 dispatcher 初始化起计的 `uptime_seconds`；
+该快照不代表扫描模型、后台任务或存储的健康状态，也不包含 V1 的完整 jobs/queues 快照。
+`caller: "agentsight"` 沿用 V1 响应外壳，其余请求使用 V2 外壳。
+dispatcher 完成 envelope decode、request ID、kernel peer
 credentials 到 trusted Principal 的绑定、method allowlist、authorization 和 response
 encode；PAP 是其中一组显式注册的方法，不增加第二个 service dispatch 层。当前 composition
 root 使用 `RootManagedPrincipalPolicy`：UID 0 始终具有 PAP 管理权限。部署者可用
@@ -280,12 +298,12 @@ CLI 装配选择 `0666`，可复用 bootstrap 保持私有 `0600` 默认值。�
 `asc-daemon/tests/bootstrap.rs` 验证真实进程 scan 成功及 PAP 授权；系统运行目录、默认
 socket 权限和跨 UID 接入的部署测试沿用 `tests/v2/e2e/test_daemon_process_e2e.py`。
 
-当前 PAP 由 `PolicyTemplateCompiler` 和过渡性的 process-local Repository 组成。Policy、Scope
-和 Binding CRUD 可在同一 daemon 生命周期内经真实 UDS 执行，但所有状态在进程重启后丢失，
-进程启动时会 best-effort 输出该限制（诊断背压规则见 §11）。这些结果只证明 protocol、identity、authorization 和应用装配的
-integration slice，不表示 durable persistence、target enforcement 或 application READY。
+当前 PAP 校验 PolicyTemplate 并将 Policy、Scope 和 Binding 保存到 SQLite Repository。
+启动恢复 discovery 和 reconcile，持久化与恢复验收见
+[Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
+真实 UDS 测试验证 protocol、identity、authorization 和应用装配，不代表真实 target enforcement。
 Busy、timeout、shutdown 等 transport failure 由独立且有短 deadline 的
-`RejectionEncoder` 投影，正常依赖图不包含 PAP、Repository 或 Compiler。
+`RejectionEncoder` 投影，正常依赖图不包含 PAP 或 Repository。
 framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 transaction 或其它共享阻塞
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
@@ -293,24 +311,39 @@ framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 trans
 它以 `root:root` 运行，不创建专用 UID，systemd 创建 `/run/agent-sec-core`（0755），socket
 为 0666。普通用户无需加入服务组即可连接；PAP 方法授权仍检查内核 peer UID，
 连接权限不授予 PAP 管理权限。
-**TODO（独立入口流量控制任务）**：当前全局 64 个连接名额可被单个普通 UID 占满，
-管理员请求也会被拒绝；方法授权不能解决该可用性问题。后续实现按身份隔离/管理员
-保留容量，并用跨 UID 饱和测试验收。本次仅记录缺口，不宣称已实现隔离。
+**[TARGET V2][IMPLEMENTED] DPROC-UDS-002**：连接准入在读取请求前使用内核 peer UID，
+通过 `PrincipalPolicy` 的专用接入查询判断 root 和配置的 Policy 管理员。该查询只使用
+内存中的管理员名单，不调用可能阻塞的业务授权；没有实现接入分类的替代 policy 默认
+使用普通连接额度。公共容量为 64，另加 16 个管理员保留名额，总容量为 80。
+保留容量由 root 和配置的 Policy 管理员共享；管理员先用公共容量，公共容量耗尽后才使用保留容量。
+单个普通 UID 的所有进程合计最多占用 16 个连接，不能占用管理员保留容量。
+16 是单 UID 上限，并非固定分配；不设置独立的 UID 数量上限，所有 UID 按实际连接占用共享公共容量。
+超出单 UID、公共或总容量时沿用 `Busy` transport rejection，wire error 为
+`resource_exhausted`，不排队；rejection 的独立
+8 个名额和编码 deadline 保持不变。额度覆盖 frame read、dispatch、response write，
+超时、断开、取消和 shutdown 释放额度；无活动连接的 UID 计数随之删除。
+请求 JSON 的 UID/role 不能影响接入分类，连接分类不替代方法授权。
+可执行 fixture 为 `tests/v2/e2e/test_daemon_ingress_e2e.py`：单 UID 饱和不阻塞另一个
+普通 UID；多个普通 UID 占满公共容量时 root 和配置管理员仍可请求；总容量占满时
+root 也返回容量耗尽错误，连接完成后恢复容量。该 fixture 需要隔离的 root 环境。
 `BootstrapConfig::new()` 保持私有 socket 默认值 0600，daemon CLI 装配显式改为 0666；
 使用固定授权策略的库测试将运行目录限制为 0700。
 目录不可由 group/other 写入，锁保持 0600。
 `BoundUnixSocket` 允许 other 读写位，继续拒绝执行位、特殊位和缺少 owner 读写的 mode。
 跨 UID fixture 检查普通 UID 可连接且 PAP 管理仍被拒绝；该 fixture 需要 root，
-缺少权限时跳过，不计为验收通过。本次不交付扫描接口。
-进程设置 umask 0077，最终 socket mode 显式设置为 0666。unit 不授予 capabilities，
-启用 NoNewPrivileges、只读系统路径等 hardening，stdout/stderr 进入 journal。
+缺少权限时跳过，不计为验收通过。SkillSec 扫描与业务接口见第 11 节。
+进程设置 umask 0077，最终 socket mode 显式设置为 0666。unit 启用 NoNewPrivileges，
+stdout/stderr 进入 journal；SkillSec 目录访问与最小 capabilities 见第 11 节。
 **DPROC-V2-HARDENING-1（2026-09-10，获准实施，跟踪 issue #2861）**：V2 默认启用
 `SystemCallFilter=@system-service`、`SystemCallArchitectures=native` 和
-`MemoryDenyWriteExecute=true`，并保留空 `CapabilityBoundingSet`/`AmbientCapabilities`。
+`MemoryDenyWriteExecute=true`；CapabilityBoundingSet 限定为
+`CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SYS_PTRACE`，AmbientCapabilities 仍为空。
+前三项用于 SkillSec 目录访问与恢复；`CAP_SYS_PTRACE` 用于 scope discovery 读取跨 UID、
+不可 dump 或权限较高进程的 `/proc/<pid>/exe` 和 `ns/pid`，通过 `PTRACE_MODE_READ_FSCREDS` 检查。
 打包 fixture 锁定这些生效指令；实际 syscall/W^X 兼容性需在目标发行版的 systemd
 服务下验收当前业务路径，不能用 unit 语法检查或普通进程测试替代。
-V2 spec 暂保留原有 Python、GPG/PGPy、loongshield 依赖声明及 strip/自动依赖
-排除设置；发布前按能力迁移结果单独审计，不在本次 system-service 变更中清理。
+SkillSec 核心 CLI 子包不再依赖 Python、GPG/PGPy 或 loongshield；未迁移 Hook
+子包仍保留自身依赖。自动依赖排除设置保持不变。
 不再打包 sysusers 文件或执行账户创建脚本。V1/V2 源包分别收录各自的 unit
 模板；构建和安装继续复制共享的 `.anolisa/component.toml`。该 manifest 仍声明
 V1 user scope，尚未适配 V2 的 system-service 编排，不能作为 V2 服务管理的验收证据。
@@ -330,8 +363,53 @@ runner 工作目录的 owner、权限和 umask。
 服务 UID 与 root 是可信边界；客户端不得拥有目录写权限。显式 `--socket` 允许在另一
 安全目录建立隔离开发实例，不代表防止特权操作者故意创建第二个 namespace。
 
-当前正常退出包含 UDS drain 2s、reconciliation join 30s 和 Tokio shutdown 1s 的上限；
-unit 另设 `TimeoutStopSec=45`，超时由 systemd 对 control group 发 SIGKILL。
+**[TARGET V2][IMPLEMENTED] DPROC-UDS-002 服务端身份认证**：
+`asc-daemon-client` 在 connect 成功后、首次 write 前，对同一连接 fd 读取 Linux
+`SO_PEERCRED`，要求服务端 UID 为 0。跨 PID namespace 时内核可返回 PID=0，
+凭据读取必须允许该值，认证仅判断 UID，不要求共享 PID namespace。
+凭据读取失败或 UID 不符返回独立的
+`ServerIdentity` 错误，关闭连接，不发送请求、不重试、不回退本地实现；非 Linux
+返回不支持认证的错误。期望 UID 不从 socket 文件属主、客户端 UID 或响应 JSON 推导。
+服务 UID 是信任域；该检查不区分其它 root 进程，也不能保护同 UID 的不可信 Agent。
+
+`agent-sec-daemon-health` 是独立 Rust probe，直接复用上述 client，不经过主 CLI 的
+参数解析和 telemetry runtime 初始化。raw/RPM 安装同名二进制，容器探针直接执行它。
+它使用 `AGENT_SEC_DAEMON_SOCKET` 或 `/run/agent-sec-core/daemon.sock`，
+`AGENT_SEC_HEALTH_TIMEOUT_SECONDS` 默认 1 秒，覆盖 connect/write/read 的共同预算。
+只有经过身份校验的 V2 response 中 `result.status == "ok"` 才静默退出 0；认证、传输、
+协议或状态检查失败退出 1。该 probe 检查进程响应，不证明模型、Job 或 enforcement 就绪。
+
+可执行 fixture：`tests/v2/e2e/test_daemon_process_e2e.py::test_dproc_uds_002_rejects_fake_peer_even_with_root_owned_socket`
+验证 socket 文件属主改为 root 的非 root 伪服务仍被真实 Rust CLI 和 native health probe 拒绝，
+服务端不得收到请求字节；该用例需要 root 的跨 UID 进程环境，编译或单元测试不替代该验收。
+同文件的 `test_dproc_uds_002_authenticates_uid_with_zero_peer_pid` 使用 user/PID namespace
+确认内核实际返回 PID=0，并验证 CLI 和 health probe 接受 UID=0、拒绝非 root UID 且不发送请求。
+普通 workspace CI 统一启用默认关闭的 `asc-daemon-client/testing` feature，并设置
+`AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1`，允许非 root 模拟服务执行协议和业务测试，
+普通测试无需修改。身份认证回归单独使用默认配置执行；RPM 构建和 E2E 不启用该 feature
+或配置，仍要求服务端 UID 为 0。该配置不影响服务端对客户端的身份识别和授权。
+非 root 开发环境可运行 `asc-daemon-client/tests/transport.rs::untrusted_server_is_rejected_before_request_bytes_are_sent`，
+验证本 UID 模拟服务被拒绝且未收到请求；该用例在 root 环境交由上述跨 UID E2E 覆盖。
+
+当前正常退出的停机预算：UDS drain 2s，随后 retention terminal join（65s）与 SkillFS
+worker join（65s）、reconciliation join（30s）并行等待、共享同一 65s stop deadline，再加
+Tokio shutdown 1s 与 telemetry shutdown 2s，合计约 70s；unit 另设 `TimeoutStopSec=75`（为
+security final pass 与观测余量保留），超时由 systemd 对 control group 发 SIGKILL。retention
+join 超时跳过两库 final pass（daemon 以 FAILURE 退出码报告该降级；在途 pass 可能持有任一
+store 的 mutex）；SkillFS worker drain 不受该超时影响，照常执行。
+
+两库 final pass 自身有明确的剩余预算：drains 完成后，final pass（security 与
+observability 的 gated maintenance）必须在 stop deadline + Tokio shutdown 1s + 5s
+（`FINAL_PASS_BUDGET`）之内完成；剩余预算不足 2s（`FINAL_PASS_MIN_BUDGET`，见
+`SqliteSink::close_with_deadline`）时直接跳过该 pass、只关闭连接，gate marker 不前进，
+下次启动的 catch-up pass 补跑该 prune（与硬杀死同一恢复路径）。周期 pass 持续失败导致
+marker 未推进、final pass 需要重跑完整 prune 的场景因此被预算闸门挡住；在窗口内启动但
+超时的 pass 由 `TimeoutStopSec=75` 截断，同样落入硬杀死恢复路径。
+
+SIGTERM/SIGINT 在启动 catch-up 期间到达时不再挂起等待：信号任务先于 catch-up 启动，
+catch-up 与 shutdown 信号 `select!` 竞争；信号先到则放弃 admission（daemon 不进入
+serve，直接进入停机流程，退出码 0），in-flight catch-up pass 由 retention 任务继续
+持有直至终局 join，不会与 final pass 争抢 store mutex。
 SIGTERM/SIGINT 正常退出为 0，启动运行错误为 1，参数错误为 2；SIGHUP 消费但不 reload。
 `Restart=on-failure`、`RestartSec=2`、300s 内最多 5 次启动限制异常退出重启循环。
 Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 readiness 证据。
@@ -341,7 +419,25 @@ Type=simple 不要求 READY 通知或 watchdog；systemd active 不作为应用 
 使用 root 身份的 system unit 和独立安装检查。V2 不再沿用此前的 XDG socket 默认值。服务环境由 systemd 配置，终端变量不会自动
 传给服务；自定义路径时，部署者须同时配置服务和客户端。
 回退本次变更时停止测试用 V2 服务并恢复此前 V2 构建，不操作 V1 服务或迁移数据。
-持久化、业务重启恢复、readiness/持续健康检查和 OTel 不在本次交付范围。
+PAP 持久化、readiness/持续健康检查和 OTel 不在本次交付范围；
+SkillSec 持久化与激活恢复见第 11 节。
+
+**DPROC-V2-SOURCE-BUILD-1（2026-09-29）**：仓库级
+`./scripts/build-all.sh --component sec-core` 源码安装改为 V2 交付。它构建 Rust
+`agent-sec-cli`、`agent-sec-daemon` 和 `linux-sandbox`，以 root 安装到
+`/usr/local/bin`，并在 `/etc/systemd/system/agent-sec-core.service` 渲染 V2
+host-level unit；不创建 wheel、venv、Python wrapper 或 user unit。默认模式仍将
+现有 Agent integration assets 安装在调用用户路径，`--system` 则安装 system 路径。
+安装器在 active systemd host 上必须 daemon-reload、enable 与 restart 服务；没有
+active systemd 的构建环境只安装文件，并明确要求操作者在 systemd host 启用服务。
+
+**DPROC-V2-SOURCE-BUILD-2（2026-10-20）**：source-build 的 V2 验收不再要求
+Security Baseline 迁移。`harden`、`verify` 和 `log-sandbox` 按 `CHANGELOG.md` 1.0.0
+记录的版本化退役契约不再由 V2 CLI 提供；依赖这些命令的脚本必须在切换安装器前
+更新。`verify` 的发行资产校验由 Skill Ledger 的 Ed25519 签名承担。Prompt、PII、
+Skill Ledger、Observability 和 Security Events 仍须具备对应的 Rust command/RPC、
+兼容输出和端到端 fixture 后才能切换。RPM 和 raw 安装路径不由该变更修改。
+回退本变更时恢复目标 revision 的安装器与文档，不恢复已退役命令。
 
 RuntimeLease 是 binary 私有实现；目录 fd 仅用于验证/openat，锁 fd 保留至进程退出。
 V2 不继承 V1 的 PID 文件内容契约，单实例判断依赖非阻塞 flock。
@@ -379,18 +475,21 @@ response 和 output failure 退出 1，参数用法错误退出 2。OTel subscri
 
 请求发送后的超时或协议失败不证明业务未执行；CLI 不自动重试，也不把 Binding
 `PENDING_APPLY`/`PENDING_DELETE` 表述为目标生效或删除完成。CREATE identity、current
-revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary 与 V1 Python CLI 同名；当前命令范围仅覆盖本节的 PAP
-命令，不代表已替代 V1 全量能力或提供 V1 wire adapter。
+revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary 与 V1 Python CLI 同名；
+本节仅冻结 PAP 子集。现有 Code Scan 和新增 SkillSec 命令分别依照各自合同，不表示
+Rust binary 已替代 V1 全量能力或提供通用 V1 wire adapter。
 
 DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的 binary
 失败测试、`asc-cli/tests/pap_process.rs` 的真实 CLI 进程和 UDS 授权测试，以及客户端
 依赖图。CLI 进程测试使用测试进程内的 daemon service；真实 CLI 与 daemon binary
 共同运行的双进程 E2E 位于 `tests/v2/e2e/`。
 `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_can_query_without_root`
-验证真实 daemon binary 的只读授权和信号退出，不依赖 Client 默认凭据是否可用。测试不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
+在 root 环境验证真实 daemon binary 的管理员配置与信号退出，在非 root 环境验证系统 daemon
+明确拒绝启动。普通用户 CLI 调用 root daemon 的证据见 DPROC-SG-001。
+测试注入独立配置、状态及审计目录，不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
 完整 PAP CRUD 保留在 `asc-daemon/tests/pap_protocol.rs` 的进程内 UDS fixture 中；后台下发
 装配由 DPROC-021 验证，CLI/daemon 进程链路由上述 pytest E2E 验证。完整范围与命令见
-[`POLICY_CLI_ACCEPTANCE_zh.md`](POLICY_CLI_ACCEPTANCE_zh.md)，不扩大其它 DPROC gate。
+[生命周期契约的可执行验收](POLICY_SCOPE_BINDING_CONTRACT_zh.md#6-可执行验收)，不扩大其它 DPROC gate。
 
 ## 9. 验收矩阵
 
@@ -424,6 +523,7 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 | DPROC-017 | state migrator 完成 V1 per-user 到 system-owned state 的 owner-safe 迁移和回滚 |
 | DPROC-018 | CLI/TUI 不直读 SQLite；query 必须经过 daemon authorization |
 | DPROC-019 | raw/RPM/container/systemd/Helm 生成 checksum、SBOM 和 build metadata |
+| DPROC-023 | Policy 默认目录安全性选择与已有状态冲突拒绝；已有自有叶目录修复为 `0700`，仅祖先不安全触发回退；显式数据根不回退，不修改已有数据库；fixture 为 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs` 和 `v2/apps/asc-daemon/tests/bootstrap.rs` 的同名测试及叶目录修复回归 |
 
 每个 DPROC ID 必须映射到机器可执行 fixture 或真实部署证据。Rust unit test 不能代替安装后
 service/package、server-side admission 或真实 Kubernetes rollout 验证。
@@ -440,7 +540,7 @@ CRUD request 不传递目标凭据。每次 reconcile 尝试创建 Client 并读
 
 启动顺序是构造 Repository、Client factory/核心并尝试启动 Runtime，再开放 UDS 请求。
 Runtime 初始化失败时记录安全错误并注入不可用通知入口，Binding mutation 返回既有准入错误；
-Policy/Scope CRUD、读查询及其它 daemon 服务继续工作。不能以不注入通知入口的方式静默接受 Binding 写请求。目标尚未
+Policy CRUD、Scope 查询/删除及其它 daemon 服务继续工作。不能以不注入通知入口的方式静默接受新 Scope。目标尚未
 READY 或暂时不可连接也不阻止 daemon 启动。shutdown 先停止 UDS 新准入并 drain 已准入请求，再停止 Runtime
 领取和扫描，最多等待 30s join 活跃调用；随后沿用进程外层 1s Tokio shutdown 上限。超时
 不会伪装成同步调用已取消或清理成功。单次 reconcile panic 在 worker 调用边界隔离：
@@ -449,15 +549,20 @@ READY 或暂时不可连接也不阻止 daemon 启动。shutdown 先停止 UDS �
 但不会主动关闭 daemon。首版不自动重建失败 Runtime，需要进程重启；普通 Binding
 重试或终态失败不影响服务健康。单 Binding 存储/数据错误及 CAS 竞争耗尽只安排该 ID 重试；
 存储/数据错误输出安全诊断，不能伪造已落库的失败状态。补扫失败影响 health，但不关闭写准入。
-实际 Repository 错误由每次 CRUD 操作返回。Memory Repository 无跨重启恢复保证。
+实际 Repository 错误由每次 CRUD 操作返回。当前使用 SQLite Repository，存储恢复边界见
+[Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
 
 | ID | 必须验证 | 可执行 fixture |
 |---|---|---|
 | DPROC-020 | 默认凭据不参与 daemon 启动；PAP 读查询和信号退出可用；reconciliation 不可用时仅拒绝 Binding 写入，Policy/Scope CRUD 仍可完成 | `v2/apps/asc-daemon/tests/bootstrap.rs`；`tests/reconciliation.rs::unavailable_reconciliation_only_rejects_binding_writes` |
-| DPROC-021 | daemon 注入真实 Adapter/核心/Runtime，PAP 接受后下发，Delete 清理及 owned shutdown | `v2/apps/asc-daemon/tests/reconciliation.rs::configured_composition_delivers_pap_intent_and_joins_its_workers` |
+| DPROC-021 | daemon 注入真实 Adapter/核心/Runtime，PAP 接受后下发，Delete 清理及 owned shutdown；真实 CLI/daemon 经生产 Client 发出完整 HTTP 请求 | `v2/apps/asc-daemon/tests/reconciliation.rs::configured_composition_delivers_pap_intent_and_joins_its_workers`；`tests/v2/e2e/test_policy_delivery_e2e.py::test_discovered_binding_delivers_saved_revision_and_cleans_up` |
 
-DPROC-021 是进程内装配验收，Client 使用 scripted port；完整 CLI→daemon 进程 E2E 是单独 PR，
-不能由此宣称真实 AgentSight/kernel 生效或持久化恢复通过。
+DPROC-021 的 Rust 组合测试使用 scripted Client；Python E2E 使用真实 CLI/daemon、SQLite、
+procfs、Adapter 和生产 Client，仅 AgentSight HTTP 服务端为 mock。mock 监听默认地址，
+验证 health→apply→delete 请求，apply 内容与既有 fixture 完整比较，仅替换动态身份字段。
+已有 token 文件保留；文件不存在时独占创建测试 token 并在结束后删除。不新增 daemon 配置参数。
+测试要求隔离的 root E2E 环境及空闲的 7396 端口；不能由此宣称真实 AgentSight/kernel
+生效或崩溃恢复通过。
 
 ## 10. 当前实现证据
 
@@ -514,3 +619,149 @@ SQLite 插入失败、高版本 schema 警告和独立 audit sink 仍写入；
 未确认 terminalization 诊断和 join，RUST_LOG info/off 均执行。原有 DPROC 条款仍由各自 fixtures 验收。
 OTel E2E 从 PATH 解析产品 binary，与现有 `make test-e2e-rpm-v2` 的收集和安装态执行方式一致；
 本机源码进程测试不替代完整 systemd/RPM 验收。
+
+## PII 第一阶段 V2 启动配置
+
+**[TARGET V2，已实现]** `agent-sec-daemon --pii-rules <绝对路径>` 仅在进程启动时选择、
+读取、校验并编译自定义检测规则，默认路径为 `/etc/agent-sec/pii-checker/rules.yaml`。
+每进程共享不可变 Arc 规则集合；更改文件后重启生效。扫描请求不能指定规则或输入文件路径。
+不按 peer owner 选择规则，不读取 HOME，不自动汇总 V1 用户文件。
+路径参数拒绝相对路径、空值和重复指定；显式文件读取失败只禁用自定义规则，内置检测继续，
+启动诊断和扫描 summary 仅包含安全错误码。
+
+CLI 沿用显式 `--socket`、非空 `AGENT_SEC_DAEMON_SOCKET`、系统默认
+`/run/agent-sec-core/daemon.sock` 的优先级；不自动拉起进程，不回退 Python。
+UID/GID/PID 来自 UDS peer；来源与 trace 不改变授权。
+本迁移不改 systemd 拓扑，不切换真实宿主；已有 V2 RPM 的服务打包边界不能当作系统级部署目标已完成。
+安装态验收运行真实 Rust CLI/daemon 和已安装 Hook，并屏蔽 V1 检测包与源码。
+
+可执行启动/路径/重启/身份用例为 `tests/v2/e2e/test_pii_cli_e2e.py`；安装态入口为
+`make test-e2e-rpm-v2`，六宿主 direct_protocol 用例为 `test_pii_hook_contracts.py`。
+规则及 runtime 回滚步骤见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
+
+## 12. [TARGET V2] SkillSec 系统身份与恢复
+
+SkillSec 第一阶段使用 root 系统 daemon。`/run/agent-sec-core/daemon.sock` 为默认公共端点，
+CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；无 HOME/XDG socket 回退。
+现有库内 BootstrapConfig::new 仍默认 0600，实际进程使用 0666。单实例锁贯穿已准入请求 drain
+与外层 Tokio 退出；残留恢复拒绝普通文件、符号链接、错误所有者和活跃/不确定监听者。
+
+领域状态默认 `/var/lib/agent-sec/skillsec`，root 所有、0700，当前 signing-key.pk8 为 0600。
+`/etc/agent-sec/skillsec.json` 或 --skillsec-config 可注入 stateDir、精确 managedSkillDirs、
+scanners 和 parsers，以及默认开启的 enableDefaultSkillDirs；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+公开 file-only `make install` / `make install-core` 生成的 system unit 使用
+`--skillsec-config CONFIGDIR/skillsec.json`，读取本次安装的配置；`DESTDIR` 只用于暂存，
+不进入服务参数。RPM/raw 原有 unit 继续使用 native 配置默认值，配置和状态的安全校验不变。
+默认授权包含系统目录及本地 `/etc/passwd` 的所有有效账户 HOME 下标准 Skill 目录，不按 UID 或
+登录 shell 排除账户，不采信客户端环境。禁用默认目录不影响显式配置或 SkillFS；账户变化重启后生效。
+DPROC-SG-007 的可执行边界为 `apps/asc-daemon/src/skill_sec/defaults.rs` 及 capability 的 `tests/scope.rs`。
+配置、状态与 runtime 路径校验不跟随符号链接。客户端有业务访问权限不意味着有密钥或配置权限。
+
+换钥不执行 DPROC-017 的 V1 state migration：本模块明确采用新信任域，不导入历史密钥和记录。
+旧部署回退须使用对应 V1 状态，不能混合两个写入者。启动恢复先完成私有换钥 intent，再 reconcile
+登记 Skill；通过公共 Action Runtime 留审计。恢复失败保留状态供管理员排查，不伪装成功；普通
+方法仍可提供状态与诊断。
+
+第七批交付 `packaging/systemd/agent-sec-core-v2.service.in`，安装到 system unit 目录，
+不安装 V1 user unit。服务以 root 运行，`UMask=0077`，runtime 为 0755，state/log 为 0700；
+仅保留 `CAP_DAC_OVERRIDE`、`CAP_CHOWN`、`CAP_FOWNER`，不授予 `CAP_SYS_ADMIN`。
+`NoNewPrivileges` 和内核保护保持开启；HOME、`/tmp`、系统 Skill 目录及共享挂载必须可访问，
+以支持扫描、发布和恢复。`TimeoutStopSec=75` 覆盖连接 drain、SkillFS worker 收尾与运行时退出。
+服务 active 仍不等于业务就绪，必须通过 CLI 状态查询和真实业务验证。
+
+`make install-core-v2` 安装核心二进制、system unit 及初始 0600 配置；保留已有配置，
+不创建签名密钥或启用 Hook。V2 RPM 的 CLI 子包采用 systemd system macros 和
+`%config(noreplace)`，不依赖 Python Ledger。V1/V2 CLI 包名和二进制路径相同，切换前必须停止
+旧写入者并备份匹配状态。源码 staging 检查不替代真实 RPM 安装或 systemd 生命周期验收。
+第七批已在 Alibaba Cloud Linux 4 x86_64 完成源码安装、正常依赖解析的 RPM 安装、真实 PID 1
+systemd 255 下的 45 项操作及 12 项包恢复检查。与新主线对齐后，源码安装套件通过 914 项，
+RPM 安装套件通过 914 项，并单独通过修正后的 systemd 生命周期用例（含 75s 超时及限流）；
+源码套件跳过 38 项（含无 systemd PID 1），RPM 跳过 37 项规则元数据/清单及 telemetry；
+两套均排除 2 项真实模型用例，失败尝试与单项复验证据分开保存。
+这些结果不代表 Agent Hook 接入或 V1 降级验收。
+
+| ID | 必须验证 | 可执行证据 |
+|---|---|---|
+| DPROC-SG-001 | 公共 socket 上普通 UID 调用、换钥拒绝、导出归属 | `v2/apps/asc-cli/tests/skill_sec.rs` |
+| DPROC-SG-002 | 启动换钥恢复、旧密钥撤销与重新建立信任 | `asc-capability-skill-sec/src/service/administration.rs` 测试 |
+| DPROC-SG-003 | 核心接口保持普通方法原超时和权限 | `asc-daemon-handler/src/skill_sec.rs` 测试与原 PAP/CodeScan 回归 |
+| DPROC-SG-004 | 真实二进制 staging、配置权限/保留、V1/V2 unit 分离 | `tests/packaging/test-skillsec-install.sh` |
+| DPROC-SG-005 | 安装后 CLI 核心流程、公共审计及进程退出 | `tests/v2/e2e/test_skillsec_cli_e2e.py`、`test_daemon_process_e2e.py` |
+| DPROC-SG-006 | 实际 RPM 安装、system unit 启停/重启、普通 UID 与用户/系统 Skill 操作 | 第七批独立 Linux 安装环境执行；staging 和进程 fixture 不替代此证据 |
+| DPROC-SG-007 | 默认目录、多账户 HOME、范围关闭及部分发现错误 | `apps/asc-daemon/src/skill_sec/defaults.rs`、capability `tests/scope.rs` |
+
+## [TARGET V2] 可观测采集存储接线（DPROC-022）
+
+`obs.record` 的 JSONL/SQLite writers 使用与安全事件相同的已解析 daemon 系统数据目录，
+显式装配，无 HOME fallback；obs schema 在启动时准备，JSONL 惰性初始化。可观测双写仅通过 daemon 持有的
+`ConfiguredObservabilitySinks` 实例，不提供进程全局可观测写入口。关闭时保留 sinks 到 transport/blocking drain
+之后再执行 close/保留期维护。具体路径、失败及有界关闭语义见
+[V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md#3-数据路径与生命周期)。
+DPROC-022 的 executable fixture 为
+`tests/v2/e2e/test_observability_record_e2e.py::test_v1_cli_records_persist_and_survive_restart`；
+验证源码二进制的目录权限、双落盘与进程重启，不替代 RPM/systemd 或跨 UID 验收。
+
+## 13. [TARGET V2][IMPLEMENTED] 通过 Scope 启动 discovery
+
+对象语义见 [生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)（SCOPE-CR-002）：Policy
+保留 revision；Scope 无 revision，保存所选版本完整快照；系统自动创建并清理子 Binding。
+删除模板不撤销分配。Policy Administrator、可信 peer、UID/socket 和进程部署边界不变。
+
+```bash
+agent-sec-cli --socket "$SOCKET" scope create --process-name openclaw --policy-id "$POLICY_ID" --policy-revision 1
+agent-sec-cli --socket "$SOCKET" scope create --executable /opt/agent/bin/agent --policy-id "$POLICY_ID" --policy-revision 1
+agent-sec-cli --socket "$SOCKET" scope delete --scope-id "$SCOPE_ID"
+agent-sec-cli --socket "$SOCKET" scope retry --scope-id "$SCOPE_ID"
+```
+
+RPC 支持多策略，CLI 当前创建单策略 assignment。PID 也要求策略引用；cgroup 当前拒绝。
+Scope update、Scope revision 参数及手动 Binding mutation 已移除，应成套升级 CLI/daemon。
+新 Scope 要求 Reconciler readiness；Policy 操作、查询和 Scope 删除仍可受理。删除会关闭
+准入、join worker 并异步清理全部部署；响应 completed 为 true 才表示回收完成。
+
+单进程 Scope/Binding 快照不构成 daemon 重启恢复证据。procfs/runtime/Adapter 的 scripted
+Client 组合验证自动 Binding 和清理；bootstrap SIGTERM 验证任务停止，CLI/UDS 验证权限与
+公开接口。本节不声明 RPM/systemd 实测、真实 AgentSight 或 kernel enforcement。
+
+## [TARGET V2 obs 已实现] 当前用户查询范围（DPROC-QRY-001）
+
+查询 reader 使用与 writer 一致的显式系统数据路径，由 daemon 装配；只读连接随每次查询结束关闭，writers 在请求 drain 后关闭。
+CLI/TUI 不直读数据库；普通用户按 UDS peer UID 过滤，root 可查询全部；非 root 的
+PolicyAdministrator 不获得跨 UID 查询权限。可观测数据在单次 INSERT 中持久化 peer UID，
+JSONL 同时写入可信顶层 `uid`。当前 obs schema revision 2 包含可空 UID 和归属索引；
+SQLite 与 JSONL writer 均强制携带可信 `uid: u32`，不提供无 UID writer。写入侧将所选数据库
+从 revision 1 升级到 2：缺少 UID 时添加可空列，历史记录保持 `NULL`，已有 UID 保持不变；
+列、索引与版本在同一事务收敛，失败回滚并可重试。非 root 的 UID 过滤不匹配历史 `NULL`；
+root 可查询这些记录，但不为其关联安全事件，不将未知归属当作 UID 0。
+该升级不执行 V1 per-user 数据发现、合并或 owner 推断，不替代 §6.2 的 state migrator。
+初始化或升级失败时 obs 查询不可用且采集显式报错。回退不支持 revision 2 的二进制前，
+须恢复升级前的配套数据库备份；不提供 schema 逆向迁移。
+存储失败边界和真实跨 UID 安装态验收见
+[V2 安全事件与 Observability 查询设计](V2_SECURITY_OBSERVABILITY_QUERY_zh.md)。
+三个 obs 查询和 CLI report/review 已接线，已有源码 CLI/daemon E2E 和 AgentSight 真实数据联调证据。
+2026-10-10 检查确认：宿主机运行 systemd，但当前账号无法免密 sudo，且未安装 V2 RPM；
+现有 root 调试容器的 PID 1 不是 systemd。因此本轮未执行安装态跨 UID/systemd 验证，
+已测范围及限制见查询设计 §9.2；库内 scope 测试和源码进程测试不作为安装态通过证据。
+
+启动边界：security SQLite 必要 schema 初始化失败仍阻止 READY；随后单独准备三项可选
+查询索引，失败记录具体原因并继续 admission，查询可能变慢。当前建索引仍在 READY 前同步
+执行；已有索引使用 IF NOT EXISTS，新索引需扫描/排序历史记录。大库首次启动成本未测量，
+此变更只隔离索引错误，不提供耗时上限或后台重建能力。obs 初始化失败的既有降级策略保持不变。
+
+DPROC-QRY-001 源码 fixture：
+`v2/crates/asc-event-sink/src/configured.rs::tests::query_index_failure_does_not_disable_required_storage`
+验证索引失败后仍可写安全事件；
+`v2/apps/asc-daemon/tests/bootstrap.rs::daemon_binds_when_optional_query_indexes_fail`
+在 root 分支验证真实二进制继续监听并输出诊断。非 root 执行仅验证 daemon 的启动身份拒绝，
+不算该启动场景通过。QRY-001..011 的逐项 fixture 映射见查询设计 §8，验证范围见 §9.2。
+
+
+DPROC-QRY-001 查询身份补充：所有查询的授权范围由 UDS peer UID 决定；
+root 为 All，普通用户固定 Own(peer_uid)。sec 按原始 session ID 筛选，root 返回所有
+UID 下的匹配记录；root 返回中的 `UID_session_id` 仅用于区分同名会话。
+obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒绝。
+可执行 fixture：`v2/apps/asc-cli/tests/observability_query.rs` 验证真实 peer、
+无 UID 的 report/review；`v2/crates/asc-persistence-sqlite/tests/owned_queries.rs` 验证 root
+组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
+`v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
+以上不替代安装态不同 UID/systemd 验收。

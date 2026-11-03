@@ -66,7 +66,6 @@ pub(super) fn consume_captured_input(
         };
         card_state.reset();
     }
-    drop(mode);
     if let Some(generation) = submitted_generation {
         let (kind, target_id) = capture_target(capture);
         let _ = input_events.send(RawInputEvent::CaptureSubmitted {
@@ -78,6 +77,7 @@ pub(super) fn consume_captured_input(
     for event in events {
         let _ = input_events.send(event);
     }
+    drop(mode);
     CaptureConsumeResult {
         generation: submitted_generation,
         remainder,
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_capture_snapshot_retries_the_complete_chunk() {
+    fn capture_snapshots_retry_and_event_batches_keep_mode_lock() {
         let capture = question();
         let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
             capture: capture.clone(),
@@ -140,6 +140,36 @@ mod tests {
             &*input_mode.lock().expect("input mode"),
             RawInputMode::Capture { generation: 7, .. }
         ));
+        let sender = CaptureLockWitness {
+            sender,
+            mode: input_mode.clone(),
+        };
+        let result =
+            consume_captured_input(&mut state, &capture, 7, b"answer\n", &sender, &input_mode);
+        assert_eq!(result.generation, Some(7));
+        let events: Vec<_> = receiver.try_iter().collect();
+        assert!(matches!(
+            events.first(),
+            Some(RawInputEvent::CaptureSubmitted { generation: 7, .. })
+        ));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::CardAnswer(answer) if answer == "answer")));
+    }
+
+    struct CaptureLockWitness {
+        sender: mpsc::Sender<RawInputEvent>,
+        mode: Arc<Mutex<RawInputMode>>,
+    }
+
+    impl RawInputEventSink for CaptureLockWitness {
+        fn send(&self, event: RawInputEvent) -> Result<(), mpsc::SendError<RawInputEvent>> {
+            assert!(
+                self.mode.try_lock().is_err(),
+                "capture batch must be sent before releasing its mode lock: {event:?}"
+            );
+            self.sender.send(event)
+        }
     }
 
     #[test]

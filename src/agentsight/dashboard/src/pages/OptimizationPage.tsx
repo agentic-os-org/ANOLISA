@@ -1,4 +1,4 @@
-import React, { Fragment, useCallback, useEffect, useState } from 'react';
+import React, { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 import {
@@ -9,6 +9,7 @@ import {
 } from '../utils/apiClient';
 import type { OptimizeHistoryEntry } from '../utils/apiClient';
 import { copyText } from '../components/CopyButton';
+import { formatDurationSecs as formatSecs } from '../utils/formatDuration';
 import type {
   AccIssue,
   AccuracyResult,
@@ -23,6 +24,7 @@ import type {
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 import { fixLocusDiverges, fixLocusLabel } from '../utils/accuracyAttribution';
+import { RichText } from '../utils/richText';
 import TokenFlameChart from '../components/TokenFlameChart';
 
 // ── 通用状态类型 ──────────────────────────────────────────────────────────────
@@ -62,21 +64,10 @@ function userFacingError(
   return e instanceof Error ? e.message : String(e);
 }
 
-const H = (s: string) => (
-  <span
-    className="[&_code]:bg-gray-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-xs [&_code]:text-gray-800"
-    dangerouslySetInnerHTML={{ __html: s }}
-  />
-);
-
-function formatSecs(s: number): string {
-  if (s >= 60) {
-    const m = Math.floor(s / 60);
-    const sec = Math.round(s % 60);
-    return `${m}m ${sec}s`;
-  }
-  return `${s.toFixed(1)}s`;
-}
+// Finding texts may carry the two documented tags (<code>, <b>), but they are
+// assembled from tool commands, user queries and model output, so they go
+// through the sanitizer in utils/richText before touching the DOM.
+const H = (s: string) => <RichText>{s}</RichText>;
 
 function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
@@ -580,12 +571,12 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
   const modelPct = Math.round((perf.model_secs / wall) * 100);
   const toolPct = Math.round((perf.tool_secs / wall) * 100);
   const idlePct = Math.max(0, 100 - modelPct - toolPct);
-  // 环形图三分：仅保留有实际占用的分类，避免 0 值扇区
+  // Keep positive model/tool time; preserve the existing idle display threshold.
   const timeSlices = [
-    { name: t('opt.perf.slice.model'), secs: perf.model_secs, pct: modelPct, color: '#3b82f6' },
-    { name: t('opt.perf.slice.tools'), secs: perf.tool_secs, pct: toolPct, color: '#10b981' },
-    { name: t('opt.perf.slice.idle'), secs: perf.idle_secs, pct: idlePct, color: '#9ca3af' },
-  ].filter((s) => s.secs > 1);
+    { kind: 'model', name: t('opt.perf.slice.model'), secs: perf.model_secs, pct: modelPct, color: '#3b82f6' },
+    { kind: 'tool', name: t('opt.perf.slice.tools'), secs: perf.tool_secs, pct: toolPct, color: '#10b981' },
+    { kind: 'idle', name: t('opt.perf.slice.idle'), secs: perf.idle_secs, pct: idlePct, color: '#9ca3af' },
+  ].filter((s) => s.kind === 'idle' ? s.secs > 1 : s.secs > 0);
 
   return (
     <section className="mt-6">
@@ -912,15 +903,30 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   const [loadingResults, setLoadingResults] = useState(true);
   const [llmNotConfigured, setLlmNotConfigured] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  // A history read that failed is not "this session was never analyzed": both
+  // leave every dimension idle, and the auto-run below reads idle as a first
+  // visit and starts six LLM calls. Keep the two apart so a 5xx cannot spend
+  // the budget by itself.
+  const [resultsUnavailable, setResultsUnavailable] = useState(false);
+  // Dimension requests run for tens of seconds (some are LLM calls). The route
+  // param can change while they are in flight, and the page keeps the same
+  // component instance, so a result must only be applied when it belongs to
+  // the session currently on screen.
+  const activeSessionRef = useRef(sessionId);
+  activeSessionRef.current = sessionId;
+  const visitGenerationRef = useRef(0);
+  const analysisGenerationRef = useRef(0);
 
   // 进入分析页时先加载历史结果展示
   useEffect(() => {
+    ++visitGenerationRef.current;
     let cancelled = false;
     setLoadingResults(true);
     setReport(EMPTY_REPORT);
     setProgress(IDLE_PROGRESS);
     setAnalyzeError(null);
     setLlmNotConfigured(false);
+    setResultsUnavailable(false);
     (async () => {
       try {
         const data = await fetchOptimizeResults(sessionId);
@@ -944,19 +950,28 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
           accuracy: data.accuracy ? 'done' : 'idle',
         });
       } catch {
-        // 无历史结果时保持 idle，不阻塞页面
+        // A failed read is not a session without stored results: the page
+        // cannot tell them apart from the progress map alone, and the auto-run
+        // below starts every dimension as soon as they all read idle. Record
+        // the failure instead of leaving the page looking like a first visit.
+        if (!cancelled) setResultsUnavailable(true);
       } finally {
         if (!cancelled) setLoadingResults(false);
       }
     })();
     return () => {
       cancelled = true;
+      ++visitGenerationRef.current;
     };
   }, [sessionId]);
 
   // 维度请求失败的统一处理：400 llm_not_configured 时提示去设置里配置 LLM
   const handleDimError = useCallback((e: unknown) => {
-    if (e instanceof ApiRequestError && e.status === 400 && e.body?.error === 'llm_not_configured') {
+    if (
+      e instanceof ApiRequestError &&
+      e.status === 400 &&
+      e.body?.error === 'llm_not_configured'
+    ) {
       setLlmNotConfigured(true);
     }
   }, []);
@@ -965,6 +980,24 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   const runDimensions = useCallback(
     (dims: DimKey[]) => {
       const has = (d: DimKey) => dims.includes(d);
+      // Returning to the same session must not revive an earlier visit's
+      // requests; a full reanalysis also supersedes the previous run.
+      const visitGeneration = visitGenerationRef.current;
+      const analysisGeneration = analysisGenerationRef.current;
+      const isCurrent = () =>
+        activeSessionRef.current === sessionId &&
+        visitGenerationRef.current === visitGeneration &&
+        analysisGenerationRef.current === analysisGeneration;
+      const forSession =
+        <T,>(apply: (data: T) => void) =>
+        (data: T) => {
+          if (isCurrent()) apply(data);
+        };
+      const failed = (dim: DimKey) => (e: unknown) => {
+        if (!isCurrent()) return;
+        handleDimError(e);
+        setProgress((prev) => ({ ...prev, [dim]: 'error' }));
+      };
       setProgress((prev) => {
         const next = { ...prev };
         dims.forEach((d) => {
@@ -976,76 +1009,74 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       // summary — 叙事摘要，单次 LLM 调用，数秒
       if (has('summary'))
         runOptimizeDimension<TrajectorySummary>(sessionId, 'summary')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, summary: data }));
-            setProgress((prev) => ({ ...prev, summary: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, summary: 'error' }));
-          });
+          .then(
+            forSession<TrajectorySummary>((data) => {
+              setReport((prev) => ({ ...prev, summary: data }));
+              setProgress((prev) => ({ ...prev, summary: 'done' }));
+            }),
+          )
+          .catch(failed('summary'));
 
       // perf — 纯计算，毫秒级
       if (has('perf'))
         runOptimizeDimension<PerfStats>(sessionId, 'perf')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, perf: data }));
-            setProgress((prev) => ({ ...prev, perf: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, perf: 'error' }));
-          });
+          .then(
+            forSession<PerfStats>((data) => {
+              setReport((prev) => ({ ...prev, perf: data }));
+              setProgress((prev) => ({ ...prev, perf: 'done' }));
+            }),
+          )
+          .catch(failed('perf'));
 
       // perf-issues — Rust 供数 + LLM 策略选择，10-30s
       if (has('perfIssues'))
         runOptimizeDimension<PerfReport>(sessionId, 'perf-issues')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, perf_issues: data }));
-            setProgress((prev) => ({ ...prev, perfIssues: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, perfIssues: 'error' }));
-          });
+          .then(
+            forSession<PerfReport>((data) => {
+              setReport((prev) => ({ ...prev, perf_issues: data }));
+              setProgress((prev) => ({ ...prev, perfIssues: 'done' }));
+            }),
+          )
+          .catch(failed('perfIssues'));
 
       // cost — 纯计算，毫秒级
       if (has('cost'))
         runOptimizeDimension<CostStats>(sessionId, 'cost')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, cost: data }));
-            setProgress((prev) => ({ ...prev, cost: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, cost: 'error' }));
-          });
+          .then(
+            forSession<CostStats>((data) => {
+              setReport((prev) => ({ ...prev, cost: data }));
+              setProgress((prev) => ({ ...prev, cost: 'done' }));
+            }),
+          )
+          .catch(failed('cost'));
 
       // cost-waste — Rust 候选 + LLM 判定，10-30s
       if (has('costWaste'))
         runOptimizeDimension<WasteReport>(sessionId, 'cost-waste')
-          .then((data) => {
-            setReport((prev) => ({ ...prev, cost_waste: data }));
-            setProgress((prev) => ({ ...prev, costWaste: 'done' }));
-          })
-          .catch((e) => {
-            handleDimError(e);
-            setProgress((prev) => ({ ...prev, costWaste: 'error' }));
-          });
+          .then(
+            forSession<WasteReport>((data) => {
+              setReport((prev) => ({ ...prev, cost_waste: data }));
+              setProgress((prev) => ({ ...prev, costWaste: 'done' }));
+            }),
+          )
+          .catch(failed('costWaste'));
 
       // accuracy — LLM 多检测器，30-60s+，不设短超时
       if (has('accuracy'))
         runOptimizeDimension<AccuracyResult>(sessionId, 'accuracy')
-          .then((data) => {
-            setReport((prev) => ({
-              ...prev,
-              extraction: data.extraction,
-              failures: data.failures,
-              issues: data.issues ?? [],
-            }));
-            setProgress((prev) => ({ ...prev, accuracy: 'done' }));
-          })
+          .then(
+            forSession<AccuracyResult>((data) => {
+              setReport((prev) => ({
+                ...prev,
+                extraction: data.extraction,
+                failures: data.failures,
+                issues: data.issues ?? [],
+              }));
+              setProgress((prev) => ({ ...prev, accuracy: 'done' }));
+            }),
+          )
           .catch((e) => {
+            if (!isCurrent()) return;
             handleDimError(e);
             setProgress((prev) => ({ ...prev, accuracy: 'error' }));
             setAnalyzeError(t('opt.accuracy.analyzeFailed', { msg: userFacingError(e, t) }));
@@ -1056,6 +1087,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
 
   // 全量重新分析（「重新分析」按钮）：清空已有结果后并行触发全部维度
   const runAnalysis = useCallback(() => {
+    ++analysisGenerationRef.current;
     setReport(EMPTY_REPORT);
     setAnalyzeError(null);
     setLlmNotConfigured(false);
@@ -1064,9 +1096,11 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
 
   // 历史结果加载后自动补齐缺失维度：全空 = 首次进入，自动全量分析；
   // 部分缺失（如 cost 已落库但 cost-waste 从未跑成）只补跑缺的维度，
-  // 避免这些维度停在「尚未分析」死等手动重跑
+  // 避免这些维度停在「尚未分析」死等手动重跑。
+  // 读取失败时维度同样全空，但那不是「首次进入」：此时不能自作主张花掉
+  // 六次 LLM 调用，交给用户手动决定（页面另有提示）。
   useEffect(() => {
-    if (loadingResults) return;
+    if (loadingResults || resultsUnavailable) return;
     const idle = ALL_DIMS.filter((k) => progress[k] === 'idle');
     if (idle.length === 0) return;
     if (idle.length === ALL_DIMS.length) {
@@ -1074,7 +1108,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
     } else {
       runDimensions(idle);
     }
-  }, [loadingResults, progress, runAnalysis, runDimensions]);
+  }, [loadingResults, resultsUnavailable, progress, runAnalysis, runDimensions]);
 
   const running = Object.values(progress).some((s) => s === 'loading');
   const hasAnyResult = Object.values(progress).some((s) => s === 'done');
@@ -1091,7 +1125,9 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
         </button>
         <div className="min-w-0">
           <p className="text-xs text-gray-400">{t('opt.session.headerTitle')}</p>
-          <p className="font-mono text-sm text-gray-800 truncate" title={sessionId}>{sessionId}</p>
+          <p className="font-mono text-sm text-gray-800 truncate" title={sessionId}>
+            {sessionId}
+          </p>
           <div className="flex items-center gap-3 mt-1">
             {/* 轨迹在新标签页打开：分析页可能正在跑维度（LLM 调用 10–60s），
                 同标签跳走会卸载组件、丢掉进行中的分析 */}
@@ -1119,7 +1155,11 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
             disabled={running || loadingResults}
             className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
           >
-            {running ? t('opt.session.action.analyzing') : hasAnyResult ? t('opt.session.action.reanalyze') : t('opt.session.action.start')}
+            {running
+              ? t('opt.session.action.analyzing')
+              : hasAnyResult
+                ? t('opt.session.action.reanalyze')
+                : t('opt.session.action.start')}
           </button>
         </div>
       </div>
@@ -1144,6 +1184,13 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       {analyzeError && !llmNotConfigured && (
         <div className="mt-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm break-all">
           {analyzeError}
+        </div>
+      )}
+
+      {/* ── 历史结果读取失败 ── */}
+      {resultsUnavailable && (
+        <div className="mt-4 bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
+          {t('opt.session.resultsUnavailable')}
         </div>
       )}
 
@@ -1383,7 +1430,7 @@ function SessionEntryView() {
             </button>
             <button
               disabled={safePage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              onClick={() => setPage((p) => Math.max(1, Math.min(p, totalPages) - 1))}
               className="px-2.5 py-1 rounded border border-gray-300 disabled:opacity-40 hover:bg-gray-100"
             >
               ‹

@@ -265,3 +265,10 @@ where
     let config = shell_host_test_config(config);
     shell_run_raw_relay_zsh_with_output_control(&config, input, output, event_observer)
 }
+
+#[path = "shell_host/redaction.rs"]
+mod redaction;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "shell_host/replay_interrupt.rs"]
+mod replay_interrupt;

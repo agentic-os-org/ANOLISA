@@ -1,0 +1,11 @@
+[HTML page rendered as Markdown; <article> only, 2 nodes outside it omitted; removed 1 script, 1 style. Retrieve original for the full page.]
+Title: Operations
+# Incident report
+
+The deployment failed because the database connection timed out. Retry only after checking database availability and preserving the original error details.
+
+> Connection timeout after 30 seconds.
+
+- Check connectivity
+- Review the database logs
+[End page]

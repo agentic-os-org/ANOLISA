@@ -4,6 +4,7 @@ set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-qoder}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 
 find_qodercli() {
     local versioned_glob latest_versioned candidate
@@ -108,6 +109,13 @@ if ! PLUGIN_STATE="$(read_plugin_state)"; then
 fi
 if [ "$PLUGIN_STATE" = "absent" ]; then
     echo "[${COMPONENT}] ${AGENT} plugin is already absent."
+    exit 0
+fi
+
+# Preview before the removal: the CLI path unregisters the user-scoped
+# plugin, so a dry run must leave the registration in place.
+if [ "$DRY_RUN" = "1" ]; then
+    echo "DRY-RUN: ${QODERCLI} plugins uninstall tokenless --scope user"
     exit 0
 fi
 

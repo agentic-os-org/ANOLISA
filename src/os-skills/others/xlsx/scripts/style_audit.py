@@ -419,6 +419,8 @@ def _load_from_xlsx(xlsx_path: str) -> tuple[bytes, list[tuple[str, bytes]]]:
             rid = rel.get("Id", "")
             target = rel.get("Target", "")
             if "worksheets" in target:
+                # Package-absolute targets start with / (e.g. /xl/worksheets/sheet1.xml)
+                target = target.lstrip("/")
                 if not target.startswith("xl/"):
                     target = "xl/" + target
                 rid_to_path[rid] = target
@@ -495,6 +497,11 @@ def main() -> None:
             sys.exit(1)
     except Exception as e:
         print(f"ERROR loading file: {e}")
+        sys.exit(1)
+
+    if not sheet_xmls:
+        # Auditing zero sheets would report PASS without checking anything
+        print(f"ERROR: no worksheets could be loaded from {target}")
         sys.exit(1)
 
     results = _audit(styles_xml, sheet_xmls)

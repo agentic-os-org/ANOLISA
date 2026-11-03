@@ -14,7 +14,7 @@
 
 //! Response compression quality — information retention & reversibility.
 //!
-//! Verifies truncation, field dropping, and the reversible stash round-trip
+//! Verifies truncation, field preservation, and the reversible stash round-trip
 //! preserve exactly what they should. 11 tests.
 
 use serde_json::{Value, json};
@@ -89,55 +89,28 @@ fn array_truncation_custom_limit() {
 }
 
 #[test]
-fn debug_family_fields_are_dropped() {
+fn debug_family_fields_are_preserved() {
     let obj = json!({
         "data": "keep",
         "debug": "x", "trace": "x", "traces": "x",
         "stack": "x", "stacktrace": "x", "logs": "x", "logging": "x"
     });
     let out = compress_json(&obj);
-    let o = out.as_object().unwrap();
-    assert_eq!(
-        o["data"],
-        json!("keep"),
-        "preserved field must retain its value"
-    );
-    for k in [
-        "debug",
-        "trace",
-        "traces",
-        "stack",
-        "stacktrace",
-        "logs",
-        "logging",
-    ] {
-        assert!(!o.contains_key(k), "{k} should be dropped");
-    }
+    assert_eq!(out, obj);
 }
 
 #[test]
-fn nulls_are_dropped_by_default() {
-    let out = compress_json(&json!({ "name": "t", "value": null, "count": 5 }));
-    let o = out.as_object().unwrap();
-    assert_eq!(o["name"], json!("t"), "name must retain its value");
-    assert_eq!(o["count"], json!(5), "count must retain its value");
-    assert!(!o.contains_key("value"));
+fn nulls_are_preserved() {
+    let input = json!({ "name": "t", "value": null, "count": 5 });
+    assert_eq!(compress_json(&input), input);
 }
 
 #[test]
-fn empty_fields_are_dropped_by_default() {
-    let out = compress_json(&json!({
+fn empty_fields_are_preserved() {
+    let input = json!({
         "keep": "data", "es": "", "ea": [], "eo": {}
-    }));
-    let o = out.as_object().unwrap();
-    assert_eq!(
-        o["keep"],
-        json!("data"),
-        "preserved field must retain its value"
-    );
-    assert!(!o.contains_key("es"));
-    assert!(!o.contains_key("ea"));
-    assert!(!o.contains_key("eo"));
+    });
+    assert_eq!(compress_json(&input), input);
 }
 
 #[test]
@@ -165,13 +138,13 @@ fn stash_round_trip_recovers_dropped_items_verbatim() {
 }
 
 #[test]
-fn stashed_items_keep_fields_the_compressor_would_strip() {
+fn retained_and_stashed_items_both_keep_diagnostic_fields() {
     let store = Arc::new(InMemoryStore::new());
     let arr = json!([
         {
             "id": 1,
             "payload": "x".repeat(200),
-            "debug": "stripped in kept item"
+            "debug": "retained in kept item"
         },
         {
             "id": 2,
@@ -189,18 +162,11 @@ fn stashed_items_keep_fields_the_compressor_would_strip() {
         Some(store.as_ref()),
     );
     let a = out.as_array().unwrap();
-    // Kept item is compressed: debug stripped.
-    assert!(a[0].get("debug").is_none());
+    assert_eq!(a[0], arr[0]);
     let hash = extract_hash(a.last().unwrap().as_str().unwrap()).unwrap();
     let recovered: Vec<Value> =
         serde_json::from_str(&store.retrieve(hash).unwrap().unwrap()).unwrap();
-    // Stashed item is verbatim: debug preserved.
-    assert!(
-        recovered[0]["debug"]
-            .as_str()
-            .unwrap()
-            .starts_with("survives in stash")
-    );
+    assert_eq!(recovered[0], arr[1]);
 }
 
 #[test]

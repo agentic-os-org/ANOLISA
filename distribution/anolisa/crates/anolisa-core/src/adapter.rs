@@ -37,6 +37,7 @@ pub mod opencode;
 pub mod qoder;
 pub mod qwencode;
 pub mod qwenpaw;
+pub mod qwenwork;
 pub mod registry;
 mod util;
 

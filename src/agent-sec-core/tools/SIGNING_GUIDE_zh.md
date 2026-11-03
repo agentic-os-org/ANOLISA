@@ -2,6 +2,10 @@
 
 [English](SIGNING_GUIDE.md)
 
+> **V1 流程。** 本指南面向 V1 的 `agent-sec-cli verify` 命令；V2 CLI 不提供该命令
+> （见 `CHANGELOG.md` 1.0.0）。V2 的 Skill 签名与校验使用
+> `agent-sec-cli skill-ledger`。
+
 通过源码构建和部署 ANOLISA 时，部署的 skill 默认是**未签名**的。agent-sec-core 安全工作流的 Phase 2 要求有效的 GPG 签名——在每个 skill 目录包含已签名的 `.skill-meta/Manifest.json` 之前，完整性校验将无法通过。
 
 `sign-skill.sh`（位于本目录）提供了所需的全部功能：前置依赖检查、GPG 密钥生成、批量签名、公钥导出。

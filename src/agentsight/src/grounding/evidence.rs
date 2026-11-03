@@ -24,7 +24,7 @@ use std::ops::Range;
 use agentsight_atif::{AtifTrajectory, Step, StepSource, same_call_id};
 
 use super::claims::{Claim, ClaimClass, extract_claims, numbers_agree};
-use super::outcome::{CallStatus, CallVerdict, Confidence, classify_call, result_text};
+use super::outcome::{CallStatus, CallVerdict, Confidence, classify_call, command_of, result_text};
 
 /// Cap on pool numbers considered when testing whether a claim was computed from
 /// evidence. The check is pairwise, so this bounds it to a fixed cost.
@@ -264,6 +264,8 @@ struct EvidenceEntry {
     /// Lowercased text, for containment checks.
     haystack: String,
     numbers: Vec<f64>,
+    literal_text: String,
+    urls: Vec<String>,
 }
 
 /// Build the index for `round`, an index range into `doc.steps`.
@@ -298,17 +300,39 @@ pub fn build_index(doc: &AtifTrajectory, round: Range<usize>) -> GroundingIndex 
 const EVIDENCE_DIGEST_LIMIT: usize = 12_000;
 
 /// Flatten the pool into text, newest entries first so a cap trims the oldest.
+///
+/// The budget is a byte budget — that is what the prompt costs, and what the
+/// constant documents — so each entry's text is cut by bytes, on a character
+/// boundary. Cutting `remaining` *characters* instead let a CJK observation
+/// spend three bytes per character and push the digest to roughly three times
+/// the limit, on a call that is paid for by the byte.
 fn digest_pool(pool: &[EvidenceEntry]) -> String {
     let mut out = String::new();
     for entry in pool.iter().rev() {
-        if out.len() >= EVIDENCE_DIGEST_LIMIT {
+        let header = format!("[step{}] ", entry.step_id);
+        // The header and the terminating newline come out of the same budget as
+        // the text, so a digest never overshoots by its own framing.
+        let Some(budget) = EVIDENCE_DIGEST_LIMIT.checked_sub(out.len() + header.len() + 1) else {
             break;
-        }
-        let remaining = EVIDENCE_DIGEST_LIMIT - out.len();
-        let take: String = entry.haystack.chars().take(remaining).collect();
-        out.push_str(&format!("[step{}] {}\n", entry.step_id, take));
+        };
+        out.push_str(&header);
+        out.push_str(truncate_bytes(&entry.haystack, budget));
+        out.push('\n');
     }
     out
+}
+
+/// Longest prefix of `text` that fits in `max_bytes`, cut on a character
+/// boundary.
+fn truncate_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Classify every tool call in `steps`, correlating results by call id.
@@ -409,7 +433,7 @@ fn assign_aftermath(verdicts: &mut [StepCallVerdict]) {
 /// Collect usable evidence from the step prefix.
 fn build_pool(steps: &[Step], verdicts: &[StepCallVerdict]) -> Vec<EvidenceEntry> {
     let mut pool = Vec::new();
-    for step in steps {
+    for (step_idx, step) in steps.iter().enumerate() {
         match step.source {
             // The user's own words are evidence by definition: a fact they
             // supplied needs no further source.
@@ -446,7 +470,8 @@ fn build_pool(steps: &[Step], verdicts: &[StepCallVerdict]) -> Vec<EvidenceEntry
                 continue;
             }
             let text = result_text(result);
-            let cleaned = strip_command_echo(&text, step, result.source_call_id.as_deref());
+            let cleaned =
+                strip_command_echo(&text, &steps[..=step_idx], result.source_call_id.as_deref());
             push_entry(
                 &mut pool,
                 step.step_id,
@@ -467,16 +492,49 @@ fn push_entry(
     if text.trim().is_empty() {
         return;
     }
-    let numbers = extract_claims(text)
-        .into_iter()
+    let claims = extract_claims(text);
+    let numbers = claims
+        .iter()
         .filter(|c| c.class == ClaimClass::Number)
         .filter_map(|c| c.value)
+        .collect();
+    // JSON escape sequences delimit decoded values, not literal filenames or
+    // version suffixes. Keep the raw haystack for weak containment and digests.
+    let literal_text =
+        if let Ok(value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) =
+            serde_json::from_str::<serde_json::Value>(text)
+        {
+            let mut parts = Vec::new();
+            let mut pending = vec![&value];
+            while let Some(value) = pending.pop() {
+                match value {
+                    serde_json::Value::String(text) => parts.push(text.as_str()),
+                    serde_json::Value::Array(values) => pending.extend(values),
+                    serde_json::Value::Object(values) => {
+                        parts.extend(values.keys().map(String::as_str));
+                        pending.extend(values.values());
+                    }
+                    _ => {}
+                }
+            }
+            parts.join("\n").to_lowercase()
+        } else {
+            text.to_lowercase()
+        };
+    // Reuse URL extraction so valid continuations (query, slash, comma) cannot
+    // be mistaken for prose punctuation around a shorter URL.
+    let urls = extract_claims(&literal_text)
+        .into_iter()
+        .filter(|c| c.class == ClaimClass::Url)
+        .map(|c| c.text.to_lowercase())
         .collect();
     pool.push(EvidenceEntry {
         step_id,
         source_call_id,
         haystack: text.to_lowercase(),
         numbers,
+        literal_text,
+        urls,
     });
 }
 
@@ -484,21 +542,21 @@ fn push_entry(
 ///
 /// Shell results commonly open with the invocation, so leaving it in would let a
 /// URL or path the agent invented ground itself through its own command line.
-fn strip_command_echo(text: &str, step: &Step, source_call_id: Option<&str>) -> String {
-    let Some(command) = step
-        .tool_calls
-        .as_ref()
-        .and_then(|calls| {
-            calls.iter().find(|c| {
-                source_call_id.is_some_and(|id| same_call_id(c.tool_call_id.as_str(), id))
-            })
-        })
-        .and_then(|call| {
-            call.arguments
-                .get("command")
-                .or_else(|| call.arguments.get("cmd"))
-        })
-        .and_then(|v| v.as_str())
+fn strip_command_echo(text: &str, steps_prefix: &[Step], source_call_id: Option<&str>) -> String {
+    // The call that owns a result may sit on the result's step or on an
+    // earlier one: `classify_calls` correlates a result with
+    // the nearest preceding invocation of its id, and the echo guard must
+    // resolve the owning call the same way. A step-local lookup silently
+    // no-ops for the cross-step shape, which keeps the echoed command in the
+    // pool, where the agent's own command line grounds the very path or URL
+    // it invented.
+    let Some(command) = steps_prefix
+        .iter()
+        .rev()
+        .filter_map(|step| step.tool_calls.as_deref())
+        .flatten()
+        .find(|c| source_call_id.is_some_and(|id| same_call_id(c.tool_call_id.as_str(), id)))
+        .and_then(command_of)
     else {
         return text.to_string();
     };
@@ -507,6 +565,13 @@ fn strip_command_echo(text: &str, step: &Step, source_call_id: Option<&str>) -> 
     // Filtering every line that appears in the command deleted real output:
     // `echo /etc/hosts` printing `/etc/hosts` is a result, not an echo, and
     // losing it makes a grounded claim read as ungrounded.
+    //
+    // The dropped line has to be the invocation itself, not merely a line the
+    // invocation happens to mention. `command.contains(bare)` also matched a
+    // result that answers the command — `ls /var/log/app.log` prints
+    // `/var/log/app.log` — so a successful one-line listing lost the very
+    // observation it produced. Compare against the whole command instead; the
+    // prompt markers stripped above keep `$ ls -la` matching `ls -la`.
     let mut lines = text.lines().peekable();
     let mut leading_blanks: Vec<&str> = Vec::new();
     while lines.peek().is_some_and(|l| l.trim().is_empty()) {
@@ -514,7 +579,7 @@ fn strip_command_echo(text: &str, step: &Step, source_call_id: Option<&str>) -> 
     }
     if let Some(first) = lines.peek() {
         let bare = first.trim().trim_start_matches(['$', '>', '#']).trim();
-        if !bare.is_empty() && command.contains(bare) {
+        if !bare.is_empty() && bare == command.trim() {
             lines.next();
         }
     }
@@ -562,13 +627,85 @@ fn ground_one(claim: &Claim, pool: &[EvidenceEntry]) -> Grounding {
     }
 
     let needle = claim.text.to_lowercase();
-    if let Some(entry) = pool.iter().find(|e| e.haystack.contains(&needle)) {
+    if let Some(entry) = pool.iter().find(|e| match claim.class {
+        ClaimClass::Url => e.urls.contains(&needle),
+        ClaimClass::Path | ClaimClass::Version => {
+            contains_literal(&e.literal_text, &needle, claim.class)
+        }
+        _ => e.haystack.contains(&needle),
+    }) {
         return Grounding::Grounded {
             step_id: entry.step_id,
             source_call_id: entry.source_call_id.clone(),
         };
     }
     Grounding::Unresolved
+}
+
+// Strong literals name complete values. Weak quotes/identifiers intentionally
+// retain containment, and numbers retain their separate approximate comparison.
+fn contains_literal(haystack: &str, needle: &str, class: ClaimClass) -> bool {
+    // The delimiters include the structural separators the extractor splits a
+    // value out of, where they also bound one in real output. A colon bounds
+    // the `path:line` shape of grep/compiler output, and `=` bounds an
+    // assignment. The CJK marks bound a value where prose puts no spaces
+    // around it. `|` is sqlite3's default column separator, so
+    // `1|/tmp/report.txt` is the text-column shape of the `complete|119` a
+    // count was once hidden in. `\` opens the escape that follows a value in a
+    // JSON payload serialized inside a string (`\"v1.2.3\",\n`), which the
+    // decoding pass in `push_entry` leaves raw.
+    let boundary = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\''
+                    | '`'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '|'
+                    | ':'
+                    | '='
+                    | '\\'
+                    | '（'
+                    | '）'
+                    | '【'
+                    | '】'
+                    | '！'
+                    | '？'
+                    | '。'
+                    | '，'
+                    | '、'
+                    | '：'
+                    | '；'
+                    | '「'
+                    | '」'
+                    | '“'
+                    | '”'
+            )
+    };
+    haystack.match_indices(needle).any(|(start, _)| {
+        let prefix = &haystack[..start];
+        let before = prefix.chars().next_back();
+        // A comma opens a value, as in a CSV column, but does not close one:
+        // see the suffix rule below.
+        let starts_value = before.is_none_or(|c| boundary(c) || matches!(c, ':' | '=' | ','))
+            || (class == ClaimClass::Version
+                && before == Some('v')
+                && prefix[..prefix.len() - 1]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| boundary(c) || matches!(c, ':' | '=' | ',')));
+        // A terminal period/comma is sentence decoration; the same character
+        // followed by more filename/version content is a continuation.
+        let suffix = haystack[start + needle.len()..].trim_start_matches(['.', ',', ';', '!', '?']);
+        starts_value && suffix.chars().next().is_none_or(boundary)
+    })
 }
 
 /// Whether a value follows arithmetically from two values already in evidence.
@@ -583,7 +720,13 @@ fn is_derived(value: f64, pool: &[EvidenceEntry]) -> bool {
         .take(DERIVED_SEARCH_CAP)
         .collect();
     for (i, a) in numbers.iter().enumerate() {
-        for b in &numbers[i..] {
+        // Pair with distinct pool entries only: the doc contract says
+        // "follows arithmetically from two values already in evidence",
+        // and a self-pair (a, a) trivially yields a/a == 1, marking
+        // every value-1 claim Derived instead of Unresolved — value-1
+        // Number claims can anchor findings, so this would let fabricated
+        // ones escape detection whenever any nonzero number is pooled.
+        for b in &numbers[i + 1..] {
             if numbers_agree(value, a + b)
                 || numbers_agree(value, (a - b).abs())
                 || numbers_agree(value, a * b)
@@ -591,6 +734,12 @@ fn is_derived(value: f64, pool: &[EvidenceEntry]) -> bool {
                 return true;
             }
             if *b != 0.0 && numbers_agree(value, a / b) {
+                return true;
+            }
+            // Ratios are not commutative: an error rate or share is the
+            // quotient of the smaller operand by the larger, so checking only
+            // `a / b` reported a correctly computed ratio as invented.
+            if *a != 0.0 && numbers_agree(value, b / a) {
                 return true;
             }
         }
@@ -701,11 +850,17 @@ fn output_domain(function_name: &str) -> &'static [ClaimClass] {
         || name.contains("grep")
         || name.contains("search")
     {
+        // Dates and URLs belong here with the numbers and versions: a read
+        // returns the file's own content, and both (log lines, headers,
+        // timestamps; config values, docs) are among what that content
+        // carries. The pool builder already extracts URLs from a read result.
         return &[
             ClaimClass::Path,
+            ClaimClass::Url,
             ClaimClass::Quoted,
             ClaimClass::Identifier,
             ClaimClass::Number,
+            ClaimClass::Date,
             ClaimClass::Version,
         ];
     }

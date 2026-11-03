@@ -564,6 +564,7 @@ function summarizeRuntimeInspect(data) {
   const text = JSON.stringify(data);
   for (const hookName of [
     "before_dispatch",
+    "before_agent_run",
     "before_tool_call",
     "after_tool_call",
     "llm_input",

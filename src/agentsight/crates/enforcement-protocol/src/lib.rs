@@ -7,13 +7,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod file_protection;
 mod replacement;
 pub mod security;
+pub use file_protection::*;
 pub use replacement::*;
 pub use security::*;
 
 /// Wire protocol version implemented by this crate.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Maximum JSON payload size accepted for one NDJSON frame.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -40,7 +42,7 @@ impl Request {
     }
 }
 
-/// Operations supported by protocol version 4.
+/// Operations supported by protocol version 5.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", content = "params", rename_all = "snake_case")]
 pub enum Command {
@@ -128,11 +130,54 @@ pub struct ApplyPolicy {
     pub policy_id: String,
     /// Immutable product policy revision.
     pub policy_revision: String,
-    /// ActPlane DSL compiled only by the privileged adapter.
+    /// Legacy ActPlane DSL compiled only by the privileged adapter.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub policy_dsl: String,
-    /// Structured product mode retained for API consumers.
+    /// Product mode; the ActPlane structured file backend requires explicit Enforce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_mode: Option<PolicyMode>,
+    /// Versioned structured file protections, mutually exclusive with nonblank DSL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_protection_policy: Option<FileProtectionPolicy>,
+}
+
+impl ApplyPolicy {
+    /// Validates only payload selection and structured schema envelope invariants.
+    ///
+    /// Path semantics, overlap, conflicts, and target-type checks belong to the
+    /// policy normalization layer and are deliberately excluded here.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless exactly one supported, nonempty payload is
+    /// selected and every structured target requests at least one protection.
+    pub fn validate_payload(&self) -> Result<(), ApplyPolicyValidationError> {
+        let has_legacy_dsl = !self.policy_dsl.trim().is_empty();
+        match (has_legacy_dsl, self.file_protection_policy.as_ref()) {
+            (false, None) => Err(ApplyPolicyValidationError::MissingPayload),
+            (true, Some(_)) => Err(ApplyPolicyValidationError::MultiplePayloads),
+            (true, None) => Ok(()),
+            (false, Some(policy)) => {
+                if policy.version != FILE_PROTECTION_POLICY_VERSION {
+                    return Err(
+                        ApplyPolicyValidationError::UnsupportedFileProtectionPolicyVersion {
+                            expected: FILE_PROTECTION_POLICY_VERSION,
+                            actual: policy.version,
+                        },
+                    );
+                }
+                if policy.targets.is_empty() {
+                    return Err(ApplyPolicyValidationError::EmptyTargets);
+                }
+                for (target_index, target) in policy.targets.iter().enumerate() {
+                    if !target.protections.delete && !target.protections.ordinary_write {
+                        return Err(ApplyPolicyValidationError::EmptyProtections { target_index });
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Lifecycle state acknowledged for a binding.
@@ -208,6 +253,24 @@ pub struct EnforcementCapabilities {
     /// - `None`: file_delete_guard is false
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_delete_guard_mode: Option<String>,
+    /// Whether exact file entries can be protected from deletion.
+    #[serde(default)]
+    pub file_entry_delete_protection: bool,
+    /// Whether directory trees can be protected from recursive deletion.
+    #[serde(default)]
+    pub directory_tree_delete_protection: bool,
+    /// Whether ordinary write operations can be denied for protected content.
+    #[serde(default)]
+    pub ordinary_write_protection: bool,
+    /// Whether targets are resolved against mount topology fixed at apply time.
+    #[serde(default)]
+    pub static_mount_topology: bool,
+    /// Whether enforcement follows mount-topology changes after apply.
+    #[serde(default)]
+    pub dynamic_mount_topology: bool,
+    /// Whether all content-changing operation classes are covered.
+    #[serde(default)]
+    pub complete_content_protection: bool,
 }
 
 impl EnforcementCapabilities {
@@ -223,6 +286,12 @@ impl EnforcementCapabilities {
             test_development: false,
             file_delete_guard: false,
             file_delete_guard_mode: None,
+            file_entry_delete_protection: false,
+            directory_tree_delete_protection: false,
+            ordinary_write_protection: false,
+            static_mount_topology: false,
+            dynamic_mount_topology: false,
+            complete_content_protection: false,
         }
     }
 
@@ -238,6 +307,12 @@ impl EnforcementCapabilities {
             test_development: false,
             file_delete_guard: false,
             file_delete_guard_mode: None,
+            file_entry_delete_protection: false,
+            directory_tree_delete_protection: false,
+            ordinary_write_protection: false,
+            static_mount_topology: false,
+            dynamic_mount_topology: false,
+            complete_content_protection: false,
         }
     }
 
@@ -253,6 +328,12 @@ impl EnforcementCapabilities {
             test_development: true,
             file_delete_guard: true,
             file_delete_guard_mode: None,
+            file_entry_delete_protection: false,
+            directory_tree_delete_protection: false,
+            ordinary_write_protection: false,
+            static_mount_topology: false,
+            dynamic_mount_topology: false,
+            complete_content_protection: false,
         }
     }
 }
@@ -331,7 +412,7 @@ pub struct Response {
     pub result: Result<ResponseBody, RemoteError>,
 }
 
-/// Successful response payloads supported by protocol version 4.
+/// Successful response payloads supported by protocol version 5.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "response", content = "data", rename_all = "snake_case")]
 pub enum ResponseBody {
@@ -567,7 +648,48 @@ mod tests {
             policy_revision: "1".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: None,
+            file_protection_policy: None,
         }
+    }
+
+    fn structured_file_policy() -> FileProtectionPolicy {
+        FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![
+                FileProtectionTarget {
+                    path: "/workspace/config.json".into(),
+                    kind: FileProtectionTargetKind::ExactFile,
+                    protections: FileProtections {
+                        delete: true,
+                        ordinary_write: true,
+                    },
+                    exclusions: vec![FileProtectionExclusion {
+                        path: "/workspace/config.json.lock".into(),
+                        kind: FileProtectionExclusionKind::ExactEntry,
+                    }],
+                },
+                FileProtectionTarget {
+                    path: "/workspace/state".into(),
+                    kind: FileProtectionTargetKind::DirectoryTree,
+                    protections: FileProtections {
+                        delete: true,
+                        ordinary_write: false,
+                    },
+                    exclusions: vec![FileProtectionExclusion {
+                        path: "/workspace/state/cache".into(),
+                        kind: FileProtectionExclusionKind::DirectorySubtree,
+                    }],
+                },
+            ],
+        }
+    }
+
+    fn structured_apply() -> ApplyPolicy {
+        let mut request = replacement_apply(Uuid::new_v4());
+        request.policy_dsl.clear();
+        request.file_protection_policy = Some(structured_file_policy());
+        request
     }
 
     #[test]
@@ -580,6 +702,131 @@ mod tests {
             serde_json::from_slice(&encoded).expect("policy should deserialize");
 
         assert_eq!(decoded.policy_mode, Some(PolicyMode::Observe));
+    }
+
+    #[test]
+    fn structured_file_policy_round_trip_preserves_scoped_contract() {
+        let request = structured_apply();
+
+        let encoded = serde_json::to_vec(&request).expect("structured policy should serialize");
+        let encoded_json: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("structured policy JSON should decode");
+        assert!(encoded_json.get("policy_dsl").is_none());
+        let decoded: ApplyPolicy =
+            serde_json::from_slice(&encoded).expect("structured policy should deserialize");
+
+        assert_eq!(decoded, request);
+        assert_eq!(decoded.validate_payload(), Ok(()));
+    }
+
+    #[test]
+    fn apply_policy_payload_requires_exactly_one_representation() {
+        let mut neither = replacement_apply(Uuid::new_v4());
+        neither.policy_dsl = "  \n".into();
+        assert_eq!(
+            neither.validate_payload(),
+            Err(ApplyPolicyValidationError::MissingPayload)
+        );
+
+        let mut both = replacement_apply(Uuid::new_v4());
+        both.file_protection_policy = Some(structured_file_policy());
+        assert_eq!(
+            both.validate_payload(),
+            Err(ApplyPolicyValidationError::MultiplePayloads)
+        );
+    }
+
+    #[test]
+    fn structured_file_policy_rejects_unsupported_version() {
+        let mut request = structured_apply();
+        request
+            .file_protection_policy
+            .as_mut()
+            .expect("structured fixture should exist")
+            .version = FILE_PROTECTION_POLICY_VERSION + 1;
+
+        assert_eq!(
+            request.validate_payload(),
+            Err(
+                ApplyPolicyValidationError::UnsupportedFileProtectionPolicyVersion {
+                    expected: FILE_PROTECTION_POLICY_VERSION,
+                    actual: FILE_PROTECTION_POLICY_VERSION + 1,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn structured_file_policy_rejects_empty_targets_and_protections() {
+        let mut empty_targets = structured_apply();
+        empty_targets
+            .file_protection_policy
+            .as_mut()
+            .expect("structured fixture should exist")
+            .targets
+            .clear();
+        assert_eq!(
+            empty_targets.validate_payload(),
+            Err(ApplyPolicyValidationError::EmptyTargets)
+        );
+
+        let mut empty_protections = structured_apply();
+        empty_protections
+            .file_protection_policy
+            .as_mut()
+            .expect("structured fixture should exist")
+            .targets[0]
+            .protections = FileProtections {
+            delete: false,
+            ordinary_write: false,
+        };
+        assert_eq!(
+            empty_protections.validate_payload(),
+            Err(ApplyPolicyValidationError::EmptyProtections { target_index: 0 })
+        );
+    }
+
+    #[test]
+    fn structured_file_policy_rejects_unknown_nested_fields() {
+        let mut policy = serde_json::to_value(structured_file_policy())
+            .expect("structured fixture should serialize");
+        policy["targets"][0]["future_target_scope"] = serde_json::json!("mount");
+        assert!(serde_json::from_value::<FileProtectionPolicy>(policy).is_err());
+
+        let mut policy = serde_json::to_value(structured_file_policy())
+            .expect("structured fixture should serialize");
+        policy["targets"][0]["protections"]["future_operation"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<FileProtectionPolicy>(policy).is_err());
+
+        let mut policy = serde_json::to_value(structured_file_policy())
+            .expect("structured fixture should serialize");
+        policy["targets"][1]["exclusions"][0]["future_scope"] = serde_json::json!("entry");
+        assert!(serde_json::from_value::<FileProtectionPolicy>(policy).is_err());
+    }
+
+    #[test]
+    fn absent_structured_capabilities_default_to_false() {
+        let legacy = serde_json::json!({
+            "max_active_bindings": 1,
+            "credential_observe": true,
+            "credential_audit": true,
+            "credential_enforce": false,
+            "policy_handoff": false,
+            "alternate_pid_retarget": false,
+            "test_development": false,
+            "file_delete_guard": true,
+            "file_delete_guard_mode": "inode"
+        });
+
+        let capabilities: EnforcementCapabilities =
+            serde_json::from_value(legacy).expect("legacy capabilities should decode");
+
+        assert!(!capabilities.file_entry_delete_protection);
+        assert!(!capabilities.directory_tree_delete_protection);
+        assert!(!capabilities.ordinary_write_protection);
+        assert!(!capabilities.static_mount_topology);
+        assert!(!capabilities.dynamic_mount_topology);
+        assert!(!capabilities.complete_content_protection);
     }
 
     fn replacement_credential(binding_id: Uuid) -> ApplyCredentialPolicy {
@@ -962,6 +1209,66 @@ mod tests {
     }
 
     #[test]
+    fn generic_replacement_reverse_preserves_structured_file_policy() {
+        let source_request = structured_apply();
+        let source = Binding {
+            request: source_request.clone(),
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: Some(7),
+        };
+        let target_request = replacement_apply(Uuid::new_v4());
+        let forward = ReplacePolicy {
+            expected: source,
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(target_request.clone()),
+        };
+        let target = Binding {
+            request: target_request,
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: Some(7),
+        };
+
+        let reverse = forward.reverse(target);
+        let ReplacementPolicy::Generic(restored) = reverse.replacement else {
+            panic!("generic source should reverse to a generic policy");
+        };
+
+        assert_eq!(
+            restored.file_protection_policy,
+            source_request.file_protection_policy
+        );
+        assert!(restored.policy_dsl.trim().is_empty());
+        assert_eq!(restored.validate_payload(), Ok(()));
+    }
+
+    #[test]
+    fn replacement_validation_checks_generic_payload_envelope() {
+        let expected = replacement_binding(BindingState::Enforced);
+        let valid = ReplacePolicy {
+            expected: expected.clone(),
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(structured_apply()),
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        let mut invalid = structured_apply();
+        invalid.policy_dsl = "label AGENT".into();
+        let invalid = ReplacePolicy {
+            expected,
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(invalid),
+        };
+        assert_eq!(
+            invalid.validate(),
+            Err(ReplaceValidationError::PolicyPayload(
+                ApplyPolicyValidationError::MultiplePayloads
+            ))
+        );
+    }
+
+    #[test]
     fn credential_policy_snapshot_rejects_unknown_versions() {
         let policy = replacement_credential(Uuid::new_v4()).policy;
         let json = serde_json::json!({ "version": 99, "policy": policy });
@@ -1048,20 +1355,20 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v3_is_rejected_after_replacement_upgrade() {
+    fn protocol_v4_is_rejected_after_file_protection_upgrade() {
         let mut request = Request::new(Command::Health);
-        request.protocol_version = 3;
+        request.protocol_version = 4;
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &request).expect("fixture should encode");
 
         let error = read_frame::<_, Request>(&mut BufReader::new(Cursor::new(bytes)))
-            .expect_err("protocol v3 must be rejected");
+            .expect_err("protocol v4 must be rejected");
 
         assert!(matches!(
             error,
             ProtocolError::UnsupportedVersion {
-                expected: PROTOCOL_VERSION,
-                actual: 3,
+                expected: 5,
+                actual: 4,
             }
         ));
     }

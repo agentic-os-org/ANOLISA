@@ -1,0 +1,122 @@
+{
+  "function": {
+    "description": "Send a message to a specified Slack channel. This tool posts a message to a public channel, private channel, direct message, or multi-person direct message.",
+    "name": "send_message",
+    "parameters": {
+      "properties": {
+        "attachments": {
+          "description": "An array of legacy attachment objects. Prefer using Block Kit blocks for new integrations.",
+          "items": {
+            "properties": {
+              "color": {
+                "description": "A hex color code (e.g., #36a64f) or predefined good/warning/danger.",
+                "type": "string"
+              },
+              "fields": {
+                "items": {
+                  "properties": {
+                    "short": {
+                      "type": "boolean"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "text": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "blocks": {
+          "description": "An array of Block Kit layout blocks that define the visual structure of the message.",
+          "items": {
+            "properties": {
+              "block_id": {
+                "description": "A unique identifier for the block, used for interaction payloads.",
+                "type": "string"
+              },
+              "text": {
+                "description": "The text object for the block content.",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "enum": [
+                      "plain_text",
+                      "mrkdwn"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": {
+                "description": "The type of block.",
+                "enum": [
+                  "section",
+                  "divider",
+                  "image",
+                  "actions",
+                  "context",
+                  "header",
+                  "input",
+                  "file"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "channel": {
+          "description": "The channel ID, private group ID, or user ID to send the message to. Can be an encoded ID (e.g., C123456) or a channel name.",
+          "type": "string"
+        },
+        "reply_broadcast": {
+          "description": "Used in conjunction with thread_ts and indicates whether reply should be made visible to everyone in the channel or conversation.",
+          "type": "boolean"
+        },
+        "text": {
+          "description": "The main text of the message. This field is required and supports Slack's mrkdwn formatting for bold, italic, strikethrough, links, and channel/user references.",
+          "type": "string"
+        },
+        "thread_ts": {
+          "description": "Provide another message's ts value to make this message a reply in a thread. Do not use the reply_broadcast parameter when also setting thread_ts.",
+          "type": "string"
+        },
+        "unfurl_links": {
+          "description": "Pass true to enable unfurling of primarily text-based content.",
+          "type": "boolean"
+        },
+        "unfurl_media": {
+          "description": "Pass false to disable unfurling of media content.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "channel",
+        "text"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}

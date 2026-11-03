@@ -1,33 +1,26 @@
-// Makes the prebuilt eBPF CO-RE objects available to lib.rs (include_bytes! from
-// OUT_DIR). Two variants are maintained:
-//   - process.bpf.o:            full build with bpf_d_path (kernel 7.1.x+)
-//   - process-inode-only.bpf.o: compiled with -DINODE_GUARD_ONLY, no bpf_d_path
-//                                 (kernel 5.10/6.6 where verifier rejects it)
-//
-// By default this just copies the committed prebuilt/*.bpf.o files, so
-// `cargo build` / `cargo install` needs NO clang/llvm/libbpf and no submodules.
-//
-// Set ACTPLANE_REBUILD_BPF=1 to rebuild both from the kernel C via the Makefile.
+// Copies the target-specific full and inode-only CO-RE objects to OUT_DIR.
+// Cargo builds need no BPF toolchain unless ACTPLANE_REBUILD_BPF=1 is explicit.
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn main() {
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let prebuilt_full = manifest.join("prebuilt/process.bpf.o");
-    let prebuilt_inode = manifest.join("prebuilt/process-inode-only.bpf.o");
-    let built_full = manifest.join(".output/process.bpf.o");
-    let built_inode = manifest.join(".output/process-inode-only.bpf.o");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let out = PathBuf::from(env::var("OUT_DIR")?);
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH")?;
+    let bpf_arch = match target_arch.as_str() {
+        "x86_64" => "x86",
+        "aarch64" => "arm64",
+        _ => return Err(format!("unsupported BPF target architecture: {target_arch}").into()),
+    };
+    let prebuilt = manifest.join("prebuilt").join(&target_arch);
 
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH");
     println!("cargo:rerun-if-env-changed=ACTPLANE_REBUILD_BPF");
-    println!("cargo:rerun-if-changed={}", prebuilt_full.display());
-    println!("cargo:rerun-if-changed={}", prebuilt_inode.display());
+    println!("cargo:rerun-if-changed=build.rs");
 
-    let rebuild = env::var_os("ACTPLANE_REBUILD_BPF").is_some();
-
-    if rebuild || !prebuilt_full.exists() {
-        for f in [
+    if env::var_os("ACTPLANE_REBUILD_BPF").is_some() {
+        for file in [
             "process.bpf.c",
             "process.h",
             "taint.h",
@@ -36,47 +29,36 @@ fn main() {
             "channel.bpf.h",
             "Makefile",
         ] {
-            println!("cargo:rerun-if-changed={}", manifest.join(f).display());
+            println!("cargo:rerun-if-changed={}", manifest.join(file).display());
         }
+        // Separate output directories prevent a cross build from reusing host
+        // objects. Force compilation even if only the selected ARCH changed.
+        let output = format!(".output/{target_arch}");
         let status = Command::new("make")
             .arg("-C")
             .arg(&manifest)
-            .arg("process")
-            .status()
-            .expect("run make -C bpf process (ACTPLANE_REBUILD_BPF)");
-        assert!(status.success(), "make -C bpf process failed");
-        std::fs::create_dir_all(manifest.join("prebuilt")).ok();
-        std::fs::copy(&built_full, &prebuilt_full)
-            .unwrap_or_else(|e| panic!("copy {} -> prebuilt: {e}", built_full.display()));
-        // Also rebuild the inode-only variant if the Makefile target exists.
-        let _ = Command::new("make")
-            .arg("-C")
-            .arg(&manifest)
+            .arg(format!("ARCH={bpf_arch}"))
+            .arg(format!("OUTPUT={output}"))
+            .args(["-W", "process.bpf.c"])
+            .arg(format!("{output}/process.bpf.o"))
             .arg("process-inode-only")
-            .status();
-        if built_inode.exists() {
-            std::fs::copy(&built_inode, &prebuilt_inode).ok();
+            .status()?;
+        if !status.success() {
+            return Err(format!("BPF rebuild failed for {target_arch}: {status}").into());
+        }
+        std::fs::create_dir_all(&prebuilt)?;
+        for name in ["process.bpf.o", "process-inode-only.bpf.o"] {
+            std::fs::copy(manifest.join(&output).join(name), prebuilt.join(name))?;
         }
     }
 
-    // Full variant (always required).
-    let src_full = if prebuilt_full.exists() {
-        &prebuilt_full
-    } else {
-        &built_full
-    };
-    std::fs::copy(src_full, out.join("process.bpf.o"))
-        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", src_full.display()));
-
-    // Inode-only variant: fall back to the full variant if no separate build exists
-    // (ensures compilation succeeds even without the inode-only prebuilt).
-    let src_inode = if prebuilt_inode.exists() {
-        prebuilt_inode
-    } else if built_inode.exists() {
-        built_inode
-    } else {
-        src_full.clone()
-    };
-    std::fs::copy(&src_inode, out.join("process-inode-only.bpf.o"))
-        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", src_inode.display()));
+    // Missing committed artifacts fail closed; never implicitly invoke make
+    // (release builders deliberately lack the BPF headers/toolchain).
+    for name in ["process.bpf.o", "process-inode-only.bpf.o"] {
+        let source = prebuilt.join(name);
+        println!("cargo:rerun-if-changed={}", source.display());
+        std::fs::copy(&source, out.join(name))
+            .map_err(|error| format!("copy {} -> OUT_DIR: {error}", source.display()))?;
+    }
+    Ok(())
 }

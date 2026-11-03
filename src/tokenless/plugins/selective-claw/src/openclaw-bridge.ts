@@ -71,6 +71,7 @@ export type ContextEngine = {
 
 export type OpenClawPluginApi = {
   config?: any;
+  pluginConfig?: Partial<import("./types.js").SelectiveClawConfig>;
   runtime?: any;
   logger?: any;
   registerContextEngine: (id: string, factory: () => ContextEngine | Promise<ContextEngine>) => void;

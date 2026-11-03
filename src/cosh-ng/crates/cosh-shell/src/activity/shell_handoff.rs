@@ -11,7 +11,11 @@ use super::runtime::{
 
 /// Returns the prompt-boundary event that closes the front pending handoff as
 /// untracked, when the fallback applies (see close_untracked_shell_handoffs).
-fn untracked_handoff_boundary(state: &InlineState, events: &[ShellEvent]) -> Option<ShellEvent> {
+fn untracked_handoff_boundary(
+    state: &InlineState,
+    events: &[ShellEvent],
+    history_base: usize,
+) -> Option<ShellEvent> {
     let handoff = state.control.shell_handoff().pending_front()?;
     let emitted_at = handoff.emitted_at_event_index()?;
     // Scan forward from the emission point and let the first relevant
@@ -20,12 +24,15 @@ fn untracked_handoff_boundary(state: &InlineState, events: &[ShellEvent]) -> Opt
     // owns closure), while a ShellReady seen first closes the handoff as
     // untracked. The event list is cumulative, so commands that run after
     // an already-reached prompt boundary must never veto that boundary.
-    let boundary = events.iter().skip(emitted_at).find(|event| {
-        matches!(
-            event.kind,
-            ShellEventKind::ShellReady | ShellEventKind::CommandStarted
-        )
-    })?;
+    let boundary = events
+        .iter()
+        .skip(emitted_at.saturating_sub(history_base))
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::ShellReady | ShellEventKind::CommandStarted
+            )
+        })?;
     if boundary.kind == ShellEventKind::CommandStarted {
         return None;
     }
@@ -38,12 +45,21 @@ fn untracked_handoff_boundary(state: &InlineState, events: &[ShellEvent]) -> Opt
 /// pending handoff must be closed with degraded evidence instead of blocking
 /// the Agent run and the input routing forever. The degraded evidence never
 /// fabricates an exit code (`-1`) or output.
+#[cfg(test)]
 pub(crate) fn close_untracked_shell_handoffs(
     state: &mut InlineState,
     events: &[ShellEvent],
 ) -> Vec<String> {
+    close_untracked_shell_handoffs_with_history_base(state, events, 0)
+}
+
+pub(crate) fn close_untracked_shell_handoffs_with_history_base(
+    state: &mut InlineState,
+    events: &[ShellEvent],
+    history_base: usize,
+) -> Vec<String> {
     let mut ids = Vec::new();
-    while let Some(ready) = untracked_handoff_boundary(state, events) {
+    while let Some(ready) = untracked_handoff_boundary(state, events, history_base) {
         let handoff = state
             .control
             .shell_handoff_mut()

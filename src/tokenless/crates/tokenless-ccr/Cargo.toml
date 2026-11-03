@@ -3,6 +3,7 @@ name = "tokenless-ccr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Reversible compression stash (Compress-Cache-Retrieve) for tokenless"
 
 [features]
@@ -23,4 +24,5 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+libc.workspace = true
 tempfile.workspace = true

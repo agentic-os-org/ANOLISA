@@ -4,12 +4,13 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
+use crate::admission::{ConnectionAdmission, ConnectionPermit};
 use crate::config::{ConfigError, ServiceConfig};
 use crate::dispatcher::{
     DispatchControl, DispatchRequest, PeerCredentials, RejectedRequest, RejectionEncoder,
@@ -17,6 +18,14 @@ use crate::dispatcher::{
 };
 use crate::frame::{BoundedResponseBuffer, FrameReadError, ResponseFrameError, read_request_frame};
 use crate::shutdown::ShutdownToken;
+
+/// Byte budget for one frame exchanged inside an authenticated session.
+///
+/// Both directions of the connection-local exchange (incoming request
+/// frames and outgoing session responses) are bounded by this single
+/// budget, so session adapters must keep every [`SessionStep`] response
+/// inside it.
+pub const SESSION_FRAME_BYTES: usize = 64 * 1024;
 
 /// A bound listener plus filesystem identity proving socket-path ownership.
 pub struct BoundUnixSocket {
@@ -157,7 +166,7 @@ impl UnixService {
     /// # Errors
     /// Returns only for listener ownership or socket cleanup failures.
     pub async fn serve(mut self, shutdown: ShutdownToken) -> Result<ServeReport, ServeError> {
-        let normal_admission = Arc::new(Semaphore::new(self.config.max_connections));
+        let normal_admission = ConnectionAdmission::new(&self.config);
         let rejection_admission = Arc::new(Semaphore::new(self.config.max_rejection_connections));
         let runtime = ConnectionRuntime {
             config: self.config.clone(),
@@ -217,7 +226,7 @@ struct ConnectionRuntime {
     dispatcher: Arc<dyn RequestDispatcher>,
     rejection_encoder: Arc<dyn RejectionEncoder>,
     shutdown: ShutdownToken,
-    normal_admission: Arc<Semaphore>,
+    normal_admission: ConnectionAdmission,
     rejection_admission: Arc<Semaphore>,
 }
 
@@ -275,12 +284,12 @@ fn admit_connection(
         return;
     }
 
-    // TODO: isolate host-wide admission across peer UIDs and reserve administrator
-    // capacity. Public UDS access currently lets one UID exhaust the global budget;
-    // method authorization does not prevent this availability failure. Add a
-    // cross-UID saturation regression with the separate ingress-control work.
-    match Arc::clone(&runtime.normal_admission).try_acquire_owned() {
-        Ok(permit) => {
+    let administrator = runtime.dispatcher.is_administrator(peer);
+    match runtime
+        .normal_admission
+        .try_acquire(peer.uid(), administrator)
+    {
+        Some(permit) => {
             let config = runtime.config.clone();
             let dispatcher = Arc::clone(&runtime.dispatcher);
             let rejection_encoder = Arc::clone(&runtime.rejection_encoder);
@@ -289,7 +298,7 @@ fn admit_connection(
                     .await
             });
         }
-        Err(_) => spawn_rejection(stream, peer, RejectionReason::Busy, runtime, tasks, report),
+        None => spawn_rejection(stream, peer, RejectionReason::Busy, runtime, tasks, report),
     }
 }
 
@@ -318,7 +327,7 @@ async fn process_connection(
     config: &ServiceConfig,
     dispatcher: Arc<dyn RequestDispatcher>,
     rejection_encoder: Arc<dyn RejectionEncoder>,
-    permit: OwnedSemaphorePermit,
+    permit: ConnectionPermit,
 ) -> ConnectionOutcome {
     let outcome =
         process_admitted_connection(stream, peer, config, dispatcher, rejection_encoder).await;
@@ -327,21 +336,22 @@ async fn process_connection(
 }
 
 async fn process_admitted_connection(
-    mut stream: UnixStream,
+    stream: UnixStream,
     peer: PeerCredentials,
     config: &ServiceConfig,
     dispatcher: Arc<dyn RequestDispatcher>,
     rejection_encoder: Arc<dyn RejectionEncoder>,
 ) -> ConnectionOutcome {
+    let mut reader = BufReader::new(stream);
     let frame = match timeout(
         config.request_read_timeout,
-        read_request_frame(&mut stream, config.max_request_frame_bytes),
+        read_request_frame(&mut reader, config.max_request_frame_bytes),
     )
     .await
     {
         Err(_) => {
             return reject_on_stream(
-                stream,
+                reader.into_inner(),
                 peer,
                 RejectionReason::RequestReadTimeout,
                 config,
@@ -351,7 +361,7 @@ async fn process_admitted_connection(
         }
         Ok(Err(FrameReadError::TooLarge)) => {
             return reject_on_stream(
-                stream,
+                reader.into_inner(),
                 peer,
                 RejectionReason::RequestFrameTooLarge,
                 config,
@@ -361,7 +371,7 @@ async fn process_admitted_connection(
         }
         Ok(Err(FrameReadError::Empty)) => {
             return reject_on_stream(
-                stream,
+                reader.into_inner(),
                 peer,
                 RejectionReason::EmptyRequest,
                 config,
@@ -373,7 +383,23 @@ async fn process_admitted_connection(
         Ok(Ok(frame)) => frame,
     };
 
-    let control = DispatchControl::new(std::time::Instant::now() + config.dispatch_timeout);
+    match dispatcher.start_session(peer, &frame) {
+        Ok(Some((session, step))) => return process_session(reader, session, step).await,
+        Err(_) => return ConnectionOutcome::RejectedClose,
+        Ok(None) => {}
+    }
+    let stream = reader.into_inner();
+
+    let dispatch_timeout =
+        dispatcher
+            .dispatch_timeout(&frame)
+            .map_or(config.dispatch_timeout, |budget| {
+                budget.clamp(
+                    std::time::Duration::from_millis(1),
+                    config.max_dispatch_timeout,
+                )
+            });
+    let control = DispatchControl::new(std::time::Instant::now() + dispatch_timeout);
     let request = DispatchRequest {
         peer,
         payload: frame,
@@ -384,7 +410,7 @@ async fn process_admitted_connection(
         request,
         control,
         config.max_response_frame_bytes,
-        config.dispatch_timeout,
+        dispatch_timeout,
     )
     .await
     {
@@ -395,6 +421,43 @@ async fn process_admitted_connection(
         DispatchAttempt::Reject(reason) => {
             reject_on_stream(stream, peer, reason, config, rejection_encoder).await
         }
+    }
+}
+
+async fn process_session(
+    mut reader: BufReader<UnixStream>,
+    mut session: Box<dyn crate::ConnectionSession>,
+    mut step: crate::SessionStep,
+) -> ConnectionOutcome {
+    // Authentication never borrows the potentially long capability execution budget.
+    let exchange = async {
+        for _ in 0..4 {
+            if step.responses.len() > 2 {
+                return Err(());
+            }
+            for response in step.responses {
+                let mut buffer = BoundedResponseBuffer::new(SESSION_FRAME_BYTES);
+                std::io::Write::write_all(&mut buffer, &response).map_err(|_| ())?;
+                reader
+                    .get_mut()
+                    .write_all(&buffer.finish_send().map_err(|_| ())?)
+                    .await
+                    .map_err(|_| ())?;
+            }
+            if step.complete {
+                reader.get_mut().shutdown().await.map_err(|_| ())?;
+                return Ok(());
+            }
+            let payload = read_request_frame(&mut reader, SESSION_FRAME_BYTES)
+                .await
+                .map_err(|_| ())?;
+            step = session.advance(&payload).map_err(|_| ())?;
+        }
+        Err(())
+    };
+    match timeout(std::time::Duration::from_secs(5), exchange).await {
+        Ok(Ok(())) => ConnectionOutcome::DispatchedResponse,
+        _ => ConnectionOutcome::RejectedClose,
     }
 }
 

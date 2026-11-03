@@ -110,7 +110,7 @@ impl BtrfsBaseBackend {
             BtrfsBaseScenario::CrossDisk => {
                 let src = format!("{}/", backup_path);
                 let status = Command::new("rsync")
-                    .args(["-a", &src, &subvol_path.to_string_lossy()])
+                    .args(["-aHAX", &src, &subvol_path.to_string_lossy()])
                     .status()
                     .await
                     .context("failed to run rsync")?;
@@ -211,6 +211,8 @@ impl StorageBackend for BtrfsBaseBackend {
         let subvol_path = self.data_root.join(ws_id);
         let snap_dir = self.snapshots_dir.join(ws_id);
 
+        // Admit before any init side effect (#7234).
+        btrfs_common::ensure_create_allowed(&self.data_root).await?;
         let mut backup_owned = false;
         if let Err(e) = self
             .do_init_storage(
@@ -242,12 +244,15 @@ impl StorageBackend for BtrfsBaseBackend {
     }
 
     async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let ws_subvol = self.data_root.join(ws_id);
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
+        btrfs_common::ensure_create_allowed(&self.data_root).await?;
         btrfs_common::create_snapshot(&ws_subvol, &snap_path, true).await
     }
 
     async fn rollback(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<PathBuf> {
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let ws_path = self.data_root.join(ws_id);
         let tmp_path = self.data_root.join(format!("{}.rollback-tmp", ws_id));
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
@@ -262,6 +267,9 @@ impl StorageBackend for BtrfsBaseBackend {
 
         // Warmup snapshot metadata cache
         btrfs_common::warmup_snapshot_metadata(&snap_path).await;
+
+        // Admit the writable snapshot before moving the workspace aside (#7234).
+        btrfs_common::ensure_create_allowed(&self.data_root).await?;
 
         // Move current workspace aside
         tokio::fs::rename(&ws_path, &tmp_path).await?;
@@ -290,11 +298,16 @@ impl StorageBackend for BtrfsBaseBackend {
     }
 
     async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
         btrfs_common::delete_subvolume_space_aware(&snap_path, &self.data_root).await
     }
 
-    async fn recover_workspace(&self, ws_id: &str, original_path: &str) -> anyhow::Result<()> {
+    async fn recover_workspace(
+        &self,
+        ws_id: &str,
+        original_path: &str,
+    ) -> anyhow::Result<Vec<String>> {
         let subvol_path = self.data_root.join(ws_id);
         let snap_base = self.snapshots_dir.join(ws_id);
 
@@ -333,7 +346,7 @@ impl StorageBackend for BtrfsBaseBackend {
         let sv_mode = subvol_meta.mode();
 
         let rsync_status = Command::new("rsync")
-            .args(["-a", "--delete", &src, original_path])
+            .args(["-aHAX", "--delete", &src, original_path])
             .status()
             .await
             .context("failed to run rsync")?;
@@ -378,10 +391,35 @@ impl StorageBackend for BtrfsBaseBackend {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
         }
 
+        // 5. Remove the workspace's internal diff temp directory. recover
+        //    holds the same workspace mutation lock as diff, so nothing here
+        //    can be a live temp snapshot; leftovers sweep first, then the
+        //    directory itself goes away — but only when empty: a plain
+        //    remove_dir keeps the entries the sweep refused to touch (they
+        //    are already reported as leftovers), so the warning never lists
+        //    a path this teardown deleted.
+        let diff_tmp_dir = self
+            .data_root
+            .join(btrfs_common::DIFF_TMP_DIR_NAME)
+            .join(ws_id);
+        let mut temp_leftovers =
+            btrfs_common::sweep_diff_tmp_dir(&diff_tmp_dir, &self.data_root).await;
+        match tokio::fs::remove_dir(&diff_tmp_dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(
+                    "failed to remove internal diff temp dir {:?}: {}",
+                    diff_tmp_dir, e
+                );
+                temp_leftovers.push(diff_tmp_dir.display().to_string());
+            }
+        }
+
         // The backup can contain files absent from an interrupted migration.
         // Leave it intact; the manager archives it and reports the new location.
 
-        Ok(())
+        Ok(temp_leftovers)
     }
 
     async fn diff(
@@ -390,14 +428,21 @@ impl StorageBackend for BtrfsBaseBackend {
         from: &str,
         to: Option<&str>,
     ) -> anyhow::Result<Vec<DiffEntry>> {
+        btrfs_common::ensure_snapshot_id_is_single_component(from)?;
+        if let Some(id) = to {
+            btrfs_common::ensure_snapshot_id_is_single_component(id)?;
+        }
         let snap_base = self.snapshots_dir.join(ws_id);
         let snap_from = snap_base.join(from);
         match to {
             Some(id) => btrfs_common::diff_between_snapshots(&snap_from, &snap_base.join(id)).await,
             None => {
                 let live = self.data_root.join(ws_id);
-                btrfs_common::diff_against_live(&snap_from, &live, &snap_base, &self.data_root)
-                    .await
+                let tmp_dir = self
+                    .data_root
+                    .join(btrfs_common::DIFF_TMP_DIR_NAME)
+                    .join(ws_id);
+                btrfs_common::diff_against_live(&snap_from, &live, &tmp_dir, &self.data_root).await
             }
         }
     }
@@ -414,8 +459,10 @@ impl StorageBackend for BtrfsBaseBackend {
     }
 
     async fn fork(&self, ws_id: &str, snapshot_id: &str, new_ws_id: &str) -> anyhow::Result<()> {
+        btrfs_common::ensure_snapshot_id_is_single_component(snapshot_id)?;
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
         let new_ws_path = self.data_root.join(new_ws_id);
+        btrfs_common::ensure_create_allowed(&self.data_root).await?;
         btrfs_common::create_snapshot(&snap_path, &new_ws_path, false).await
     }
 
@@ -519,6 +566,21 @@ impl StorageBackend for BtrfsBaseBackend {
             btrfs_common::ZombieSweepPolicy::KickOnly,
         )
         .await;
+        // Internal diff temp storage lives at <data_root>/.diff-tmp/<ws-id>/,
+        // outside snapshots/ so no recovery scan can ever index a crash
+        // leftover as a phantom snapshot. Sweep leftovers from a previous
+        // daemon run before any request can start a diff, and surface
+        // legacy-named .diff-tmp-* snapshots for manual handling instead of
+        // deleting them.
+        let diff_tmp_root = self.data_root.join(btrfs_common::DIFF_TMP_DIR_NAME);
+        if let Err(e) = tokio::fs::create_dir_all(&diff_tmp_root).await {
+            warn!(
+                "failed to create internal diff temp root {:?}: {:#}",
+                diff_tmp_root, e
+            );
+        }
+        btrfs_common::sweep_diff_tmp_root(&diff_tmp_root, &self.data_root).await;
+        btrfs_common::warn_legacy_diff_tmp_snapshots(&self.snapshots_dir).await;
         // Startup awaits bootstrap before rebuilding workspace watchers.
         self.recover_interrupted_rollbacks().await?;
         Ok(())
@@ -569,6 +631,28 @@ mod tests {
         backend.bootstrap(&dummy_config()).await.unwrap();
         // A second call on existing directories must succeed.
         backend.bootstrap(&dummy_config()).await.unwrap();
+    }
+
+    /// Unsafe snapshot ids are refused before any path is constructed: the
+    /// legacy IPC path forwards ids without upstream validation, and
+    /// `Path::join` normalizes `./` components away, so the backend must
+    /// check the shape of the id itself.
+    #[tokio::test]
+    async fn create_snapshot_rejects_unsafe_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = BtrfsBaseBackend::new(tmp.path().to_path_buf(), BtrfsBaseScenario::InPlace);
+        for (bad, expected) in [
+            ("../escape", "single path component"),
+            ("./.diff-tmp-backup", "single path component"),
+            ("a/b", "single path component"),
+            (".", "must not be '.' or '..'"),
+        ] {
+            let err = backend
+                .create_snapshot("ws-abc123", bad)
+                .await
+                .expect_err("unsafe ids must be rejected");
+            assert!(err.to_string().contains(expected), "{bad}: {err:#}");
+        }
     }
 
     #[tokio::test]

@@ -78,6 +78,9 @@
             "maintainers": [
                 {
                     "github": "yummypeng"
+                },
+                {
+                    "github": "Ziqi002"
                 }
             ]
         },
@@ -120,18 +123,18 @@
             ]
         },
         {
-            "label": "component:blaze",
-            "maintainers": [
-                {
-                    "github": "casparant"
-                }
-            ]
-        },
-        {
             "label": "component:ktuner",
             "maintainers": [
                 {
                     "github": "jfeng18"
+                }
+            ]
+        },
+        {
+            "label": "component:benchmark",
+            "maintainers": [
+                {
+                    "github": "alex-yuxi"
                 }
             ]
         }

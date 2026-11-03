@@ -8,6 +8,9 @@ use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
 use crate::service::MemoryService;
 
+// Keep the shared audit identity to preserve git auto-commit and the existing
+// consolidation quality/heuristic gates. Frontmatter distinguishes capture;
+// changing audit provenance requires updating all three consumers together.
 const TOOL: &str = "memory_observe";
 
 /// Closed 4-type memory taxonomy inspired by Dreaming V3 and Claude Code memdir.
@@ -86,6 +89,32 @@ pub fn memory_observe(
     memory_type: Option<&str>,
     config: &MemoryConfig,
 ) -> Result<String> {
+    write_observation(svc, content, hint, memory_type, config, "manual-observe")
+}
+
+/// Record an automatic observation only when capture consent permits it.
+/// Returns `None` without writing when the user has denied auto-capture.
+pub fn memory_capture(
+    svc: &MemoryService,
+    content: &str,
+    hint: Option<&str>,
+    memory_type: Option<&str>,
+    config: &MemoryConfig,
+) -> Result<Option<String>> {
+    if !crate::tools::memory_sovereignty::capture_allowed(svc)? {
+        return Ok(None);
+    }
+    write_observation(svc, content, hint, memory_type, config, "auto-capture").map(Some)
+}
+
+fn write_observation(
+    svc: &MemoryService,
+    content: &str,
+    hint: Option<&str>,
+    memory_type: Option<&str>,
+    config: &MemoryConfig,
+    source: &str,
+) -> Result<String> {
     let ulid = ulid::Ulid::new();
     let path = format!("notes/observed/{ulid}.md");
 
@@ -125,8 +154,7 @@ pub fn memory_observe(
         body.push_str(&format!("hint: {safe}\n"));
     }
 
-    // Mark source as manual-observe for sovereignty tracking
-    body.push_str("source: manual-observe\n");
+    body.push_str(&format!("source: {source}\n"));
     body.push_str(&format!("created_at: {}\n", Utc::now().to_rfc3339()));
     body.push_str("---\n\n");
     body.push_str(content);
@@ -149,16 +177,20 @@ pub fn memory_observe(
         // Read the actual file mtime from the filesystem rather than
         // using Utc::now(). The watcher's flush path uses
         // store::mtime_ms_of(&meta) for time-decay scoring; using a
-        // synthetic timestamp here would create a mismatch with the
-        // subsequent redundant upsert and skew decay-based ranking.
+        // synthetic timestamp here would defeat watcher deduplication
+        // and skew decay-based ranking.
         let mtime_ms = crate::safe_fs::metadata(svc.mount.root_fd.as_fd(), Path::new(&path))
             .map(|m| crate::index::store::mtime_ms_of(&m))
             .unwrap_or_else(|_| Utc::now().timestamp_millis());
-        if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n) {
+        // Match watcher attribution before its deduplication can skip this
+        // row: NULL hides it from its isolated agent and shares it with others.
+        let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+        if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n, agent_id.as_deref()) {
             tracing::warn!("synchronous reindex after observe failed for {path}: {e}");
         }
     }
 
+    // Both writers intentionally retain TOOL; see its compatibility contract.
     svc.audit_log(AuditEntry::new(TOOL).path(path.clone()).bytes(n));
     Ok(path)
 }

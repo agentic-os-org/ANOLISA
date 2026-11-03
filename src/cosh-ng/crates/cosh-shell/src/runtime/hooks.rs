@@ -170,7 +170,10 @@ fn command_end_event_index(events: &[ShellEvent], block: &CommandBlock) -> Optio
 fn is_followup_user_input_event(event: &ShellEvent, block_id: &str) -> bool {
     match event.kind {
         ShellEventKind::CommandStarted => event.command_id.as_deref() != Some(block_id),
-        ShellEventKind::UserInputIntercepted => true,
+        ShellEventKind::UserInputIntercepted => {
+            event.component.as_deref() != Some("shell_prompt_ready")
+                || event.message.as_deref() != Some("painted")
+        }
         _ => false,
     }
 }
@@ -635,6 +638,11 @@ pub(crate) fn start_agent_for_hook_consultation<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
+    // COSH_SHELL_AI=off: the consultation card "approve" and `/hint <id> analyze`
+    // both land here, so this is the one gate that keeps them provider-free.
+    if state.personalization.ai_disabled {
+        return Ok(());
+    }
     let findings = findings_from_blocks(blocks);
     let Some(mut request) =
         agent_request_after_confirmation(&block.session_id, block, &findings, true)

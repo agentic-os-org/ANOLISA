@@ -11,7 +11,8 @@
  * seeing what the rules said next to what a person decided is how a misfiring
  * rule gets noticed.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { sameMembers } from '../utils/setSelection';
 
 import { useI18n } from '../i18n';
 import {
@@ -98,30 +99,50 @@ export const ReuseLabelsPage: React.FC = () => {
    * edits make the selection no longer match any criterion, in which case it
    * falls back to the placeholder. */
   const [selectMode, setSelectMode] = useState<string>('');
+  // Filter changes re-issue `load`; only the newest request may touch the
+  // state, or a slow older response lands last and the table shows rows that
+  // violate the active label/confirm-state filter — and its selection reset
+  // discards rows the user already ticked under the new filter.
+  const loadRequestIdRef = useRef(0);
+  // The filters as of the newest render. Judging and triage run for minutes
+  // and refetch when they finish; that refetch must honour whatever filter the
+  // reader picked in the meantime, not the one captured when the action
+  // started — otherwise it becomes the newest request and repopulates the
+  // table with rows that violate the active filter.
+  const labelFilterRef = useRef(labelFilter);
+  labelFilterRef.current = labelFilter;
+  const stateFilterRef = useRef(stateFilter);
+  stateFilterRef.current = stateFilter;
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setError(null);
     try {
       const response = await fetchReuseSessions({
-        label: labelFilter || undefined,
-        confirmState: stateFilter || undefined,
+        label: labelFilterRef.current || undefined,
+        confirmState: stateFilterRef.current || undefined,
         limit: PAGE_LIMIT,
       });
+      if (requestId !== loadRequestIdRef.current) return;
       setRows(response.sessions);
       // Selections that are no longer on screen would be confirmed invisibly.
       setSelected(new Set());
       setSelectMode('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestId === loadRequestIdRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
-  }, [labelFilter, stateFilter]);
+  }, []);
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, labelFilter, stateFilter]);
 
   const counts = useMemo(() => {
     const tally: Record<string, number> = {};
@@ -279,8 +300,8 @@ export const ReuseLabelsPage: React.FC = () => {
   };
 
   const toggleAllPending = () => {
-    const pending = rows.filter((row) => !row.human_backed).map((row) => row.session_id);
-    setSelected((current) => (current.size === pending.length ? new Set() : new Set(pending)));
+    const pending = new Set(rows.filter((row) => !row.human_backed).map((row) => row.session_id));
+    setSelected((current) => (sameMembers(current, pending) ? new Set() : pending));
   };
 
   /**
@@ -305,7 +326,9 @@ export const ReuseLabelsPage: React.FC = () => {
         })
         .map((row) => row.session_id),
     );
-    setSelected((current) => (ids.size === current.size ? new Set() : ids));
+    // Toggle off only when this criterion's rows are the current selection:
+    // a hand-picked selection of the same size is a different selection.
+    setSelected((current) => (sameMembers(current, ids) ? new Set() : ids));
   };
 
   return (

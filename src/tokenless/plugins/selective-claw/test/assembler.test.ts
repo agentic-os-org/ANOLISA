@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Assembler } from "../src/assembler.js";
+import { estimateTokens } from "../src/estimate-tokens.js";
 import type { AgentMessage } from "../src/openclaw-bridge.js";
 
 function makeTurns(turnCount: number): AgentMessage[] {
@@ -91,6 +92,41 @@ describe("Assembler", () => {
     expect(summaryMsg.content).not.toContain("Recent topic");
   });
 
+  it("includes the inserted summary message in its token estimate", () => {
+    const msgs = makeTurns(4);
+    const result = assembler.assemble({
+      messages: msgs,
+      summaries: new Map([[1, "Detailed summary ".repeat(200)]]),
+      tokenBudget: 500,
+      freshTailTurns: 3,
+    });
+
+    const summaryTokens = estimateTokens(JSON.stringify(result.messages[0]));
+    expect(summaryTokens).toBeGreaterThan(500);
+    expect(result.estimatedTokens).toBeGreaterThan(summaryTokens);
+    for (let index = 0; index < msgs.length - 2; index++) {
+      expect(result.messages[index + 1]).toBe(msgs[index + 2]);
+    }
+  });
+
+  it("counts fallback previews as part of the returned context", () => {
+    const msgs = makeTurns(5);
+    const result = assembler.assemble({
+      messages: msgs,
+      summaries: new Map(),
+      tokenBudget: 100000,
+      freshTailTurns: 3,
+    });
+
+    const tailTokens = msgs.slice(4).reduce(
+      (total, message) => total + estimateTokens(JSON.stringify(message)),
+      0,
+    );
+    expect(result.estimatedTokens).toBe(
+      tailTokens + estimateTokens(JSON.stringify(result.messages[0])),
+    );
+  });
+
   it("shows [no summary] for older turns without summaries", () => {
     const msgs = makeTurns(5);
     const result = assembler.assemble({
@@ -121,5 +157,23 @@ describe("Assembler", () => {
     );
     expect(tailMsgs[0].content).toContain("Turn 3");
     expect(tailMsgs[tailMsgs.length - 1].content).toContain("Turn 5");
+  });
+
+  it.each(["assistant", "toolResult"])("gives a leading %s its own summary turn", (role) => {
+    const messages: AgentMessage[] = [
+      { role, content: "leading context" },
+      { role: "user", content: "new question" },
+      { role: "assistant", content: "new answer" },
+      { role: "user", content: "latest question" },
+    ];
+    const result = assembler.assemble({
+      messages,
+      summaries: new Map([[1, "Leading turn summary"], [2, "New question summary"]]),
+      tokenBudget: 100000,
+      freshTailTurns: 1,
+    });
+    expect(result.messages[0].content).toContain("Turn 1: Leading turn summary");
+    expect(result.messages[0].content).toContain("Turn 2: New question summary");
+    expect(result.messages.slice(1)).toEqual(messages.slice(3));
   });
 });

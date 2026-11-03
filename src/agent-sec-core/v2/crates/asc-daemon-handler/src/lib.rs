@@ -10,8 +10,18 @@
 
 mod action;
 mod dispatcher;
+mod observability;
 mod pap;
+mod pii;
+mod prompt_scan;
+mod query;
 mod rejection;
+mod skill_sec;
+mod v1_compat;
 
+pub use asc_security_events::query::SecurityEventQueries;
 pub use dispatcher::DaemonDispatcher;
+pub use query::QueryHandler;
 pub use rejection::JsonRejectionEncoder;
+
+mod observability_query;

@@ -61,6 +61,12 @@ class ResolveAgentIdTest(unittest.TestCase):
             "qoder-cli",
         )
 
+    def test_qwenwork_argument_overrides_inherited_agent(self) -> None:
+        os.environ["TOKENLESS_AGENT_ID"] = "qoder-cli"
+        for args in (["--agent-id", "qwenwork"], ["--agent-id=qwenwork"]):
+            with self.subTest(args=args):
+                self.assertEqual(hook_utils.resolve_agent_id(argv=args), "qwenwork")
+
     def test_blank_argument_falls_through_to_env(self) -> None:
         os.environ["TOKENLESS_AGENT_ID"] = "claude-code"
         self.assertEqual(

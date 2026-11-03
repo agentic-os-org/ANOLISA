@@ -15,7 +15,6 @@ SEMVER = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 REQUIRED_SOURCES = {
-    ".anolisa/component.toml",
     "bin/cosh-cli",
     "bin/cosh",
     "bin/cosh-switch",

@@ -82,6 +82,7 @@ fn user_message_produces_sls_record() {
     // Verify environment fields
     assert!(record["os.type"].is_string());
     assert!(record["os.arch"].is_string());
+    assert!(record["os.distro"].is_string());
 }
 
 /// SLS file is not written when the file does not exist (no O_CREAT).

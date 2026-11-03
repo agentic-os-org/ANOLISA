@@ -1,0 +1,135 @@
+//! A native startup receipt is separate from daemon and foreground-process readiness.
+
+use super::{adapter::Readiness, read_file, Result};
+use aw_exec::CommandSpec;
+use serde_json::Value;
+use std::{
+    io,
+    os::unix::fs::MetadataExt,
+    process::ExitStatus,
+    sync::{
+        atomic::{AtomicBool, AtomicI32, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+pub(super) fn run(
+    command: &CommandSpec,
+    signal: &AtomicI32,
+    failed: &AtomicBool,
+    shutdown_grace: Duration,
+    leader_signals: bool,
+    ready: Option<Readiness>,
+    started: impl FnOnce(u32),
+) -> Result<ExitStatus> {
+    if ready
+        .as_ref()
+        .is_some_and(|ready| ready.timeout.is_zero() || ready.timeout > Duration::from_secs(120))
+    {
+        return Err("native startup deadline must be within 1..120000 ms".into());
+    }
+    let (stop, receiver) = mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        let mut watcher = None;
+        let execute = if leader_signals {
+            aw_exec::run_foreground_worker_with_grace
+        } else {
+            aw_exec::run_foreground_with_grace
+        };
+        let execution = execute(command, signal, failed, shutdown_grace, |pid| {
+            started(pid);
+            let Some(ready) = &ready else { return };
+            watcher = Some(scope.spawn(move || {
+                let result = wait(ready, receiver, pid);
+                if result.is_err() {
+                    // Startup failure keeps its short cleanup budget even when
+                    // the application has a longer cooperative shutdown grace.
+                    failed.store(true, Ordering::Release);
+                }
+                result
+            }));
+        });
+        let _ = stop.send(());
+        let registered = match watcher {
+            Some(watcher) => watcher
+                .join()
+                .map_err(|_| "native startup watcher panicked")?
+                .map_err(|message| -> Box<dyn std::error::Error> { message.into() })?,
+            None => false,
+        };
+        let status = execution?;
+        if ready.is_some() && !registered && status.success() {
+            return Err("Agent exited before native hooks became ready".into());
+        }
+        Ok(status)
+    })
+}
+
+fn wait(
+    ready: &Readiness,
+    stop: mpsc::Receiver<()>,
+    pid: u32,
+) -> std::result::Result<bool, String> {
+    let deadline = Instant::now() + ready.timeout;
+    loop {
+        if receipt(ready, pid).map_err(|error| error.to_string())? {
+            return Ok(true);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "{} native hook startup deadline exceeded",
+                ready.adapter
+            ));
+        }
+        match stop.recv_timeout(remaining.min(Duration::from_millis(25))) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return receipt(ready, pid).map_err(|error| error.to_string());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+pub(super) fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(&ready.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    // A receipt is same-user installation evidence, not a privileged attestation.
+    if !metadata.is_file()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err("unsafe native startup receipt".into());
+    }
+    let value: Value = serde_json::from_slice(&read_file(&ready.path, 4096)?)?;
+    if value["version"] != 1
+        || value["adapter"] != ready.adapter
+        || value["token"] != ready.token
+        || value["hooks"].as_u64() != Some(ready.hooks as u64)
+        || value["pid"].as_u64() != Some(u64::from(pid))
+    {
+        return Err("native startup receipt does not match this launch".into());
+    }
+    let suffix = match value.get("degraded") {
+        None => "",
+        Some(reason)
+            if reason.as_str().is_some_and(|reason| {
+                aw_adapter::callback::readiness_degraded(&ready.adapter, reason)
+            }) =>
+        {
+            " (degraded: result replacement unavailable)"
+        }
+        Some(_) => return Err("invalid native startup degradation reason".into()),
+    };
+    eprintln!("AW {} native hooks ready{suffix}", ready.adapter);
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "readiness/tests.rs"]
+mod tests;

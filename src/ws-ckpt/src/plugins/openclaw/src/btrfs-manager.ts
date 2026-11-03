@@ -22,6 +22,14 @@ import type {
  * These messages are designed to be understood by AI agents.
  */
 export function mapErrorToLLMMessage(stderr: string, context?: { id?: string }): string {
+  // A filename may itself contain words such as "active write" or "not found".
+  if (stderr.includes('cannot be represented as UTF-8')) {
+    const diagnostic = stderr.replace(/\x1b\[[0-9;]*m/g, '').trim();
+    return 'A workspace path cannot be represented as UTF-8. ' +
+      'This is NOT retryable until the filename is fixed. ' +
+      'Use a valid UTF-8 name for the affected file or directory. ' +
+      'The operation and escaped path token are shown in this diagnostic:\n' + diagnostic;
+  }
   if (stderr.includes('already exists')) {
     return `Snapshot ID '${context?.id ?? 'unknown'}' already exists in this workspace. Use a different ID.`;
   }
@@ -165,10 +173,11 @@ export class BtrfsManager {
       return { success: false, message: "Workspace not initialized" };
     }
 
+    const snapshotId = options?.id ?? `snap-${Date.now()}`;
     try {
       const output = await this.executor.checkpoint(
         this.workspacePath,
-        options?.id ?? `snap-${Date.now()}`,
+        snapshotId,
         {
           message: options?.message,
           metadata: options?.metadata,
@@ -178,7 +187,7 @@ export class BtrfsManager {
       if (output.exitCode !== 0) {
         return {
           success: false,
-          message: mapErrorToLLMMessage(output.stderr, { id: options?.id }),
+          message: mapErrorToLLMMessage(output.stderr, { id: snapshotId }),
         };
       }
 
@@ -187,9 +196,8 @@ export class BtrfsManager {
         return { success: true, skipped: true, reason: 'Empty workspace, no snapshot created.', message: 'Empty workspace, no snapshot created.' };
       }
 
-      // Use the caller-supplied ID directly — CLI stdout may contain
+      // Use the ID sent to the CLI directly — stdout may contain
       // ANSI codes / prompt text that breaks parseSnapshotIdFromOutput.
-      const snapshotId = options?.id ?? `snap-${Date.now()}`;
 
       // Update local cache
       let parsedMetadata: Record<string, unknown> | undefined;
@@ -476,36 +484,39 @@ export class BtrfsManager {
    * Expected format: a JSON array of snapshot objects.
    */
   private parseSnapshotList(stdout: string): SnapshotInfo[] {
-    if (!stdout.trim()) return [];
-
+    let data: unknown;
     try {
-      const data = JSON.parse(stdout);
-      if (Array.isArray(data)) {
-        return data.map((item: Record<string, unknown>) => {
-          // Fields live under item.meta in the current CLI format;
-          // fall back to top-level for backward compatibility.
-          const meta = (item.meta ?? {}) as Record<string, unknown>;
-          return {
-            snapshot: String(item.snapshot ?? item.id ?? ""),
-            message: (meta.message ?? item.message) ? String(meta.message ?? item.message) : undefined,
-            metadata: (meta.metadata ?? item.metadata) as Record<string, unknown> | undefined,
-            createdAt: String(
-              meta.created_at ?? meta.createdAt
-              ?? item.created_at ?? item.createdAt
-              ?? new Date().toISOString(),
-            ),
-            detail: item.detail === "summary" ? "summary" : "full",
-            omittedFields: Array.isArray(item.omitted_fields)
-              ? item.omitted_fields.map(String)
-              : undefined,
-          };
-        });
-      }
-      return [];
+      data = JSON.parse(stdout);
     } catch {
-      console.warn(`[ws-ckpt] Failed to parse snapshot list output: ${stdout.substring(0, 200)}`);
-      return [];
+      throw new Error("Invalid snapshot list JSON");
     }
+    if (!Array.isArray(data)) {
+      throw new Error("Invalid snapshot list: expected an array");
+    }
+    return data.map((item: Record<string, unknown>, index: number) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)
+          || typeof (item.snapshot ?? item.id) !== "string"
+          || !(item.snapshot ?? item.id)) {
+        throw new Error(`Invalid snapshot list entry at index ${index}`);
+      }
+      // Fields live under item.meta in the current CLI format;
+      // fall back to top-level for backward compatibility.
+      const meta = (item.meta ?? {}) as Record<string, unknown>;
+      return {
+        snapshot: String(item.snapshot ?? item.id ?? ""),
+        message: (meta.message ?? item.message) ? String(meta.message ?? item.message) : undefined,
+        metadata: (meta.metadata ?? item.metadata) as Record<string, unknown> | undefined,
+        createdAt: String(
+          meta.created_at ?? meta.createdAt
+          ?? item.created_at ?? item.createdAt
+          ?? new Date().toISOString(),
+        ),
+        detail: item.detail === "summary" ? "summary" : "full",
+        omittedFields: Array.isArray(item.omitted_fields)
+          ? item.omitted_fields.map(String)
+          : undefined,
+      };
+    });
   }
 
 }

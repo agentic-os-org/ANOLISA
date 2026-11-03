@@ -21,6 +21,7 @@ import {
   runGatewayTrafficProbe,
 } from "./pilot/gateway-probes.mjs";
 import { createPilotHarness } from "./pilot/harness.mjs";
+import { runPiiGatewayProbe } from "./pilot/pii-gateway-probe.mjs";
 import { assertHookProbe, runHookProbe } from "./pilot/hook-probe.mjs";
 import {
   configureGatewayPilotModel,
@@ -67,6 +68,7 @@ const result = {
   runtimeInspect: undefined,
   gatewayTrafficProbe: undefined,
   policyMatrix: undefined,
+  piiGatewayProbe: undefined,
   hookProbe: undefined,
   errors: [],
 };
@@ -239,6 +241,8 @@ async function runPilot() {
   const baseEnv = {
     ...process.env,
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    // Preserve the private CLI wrappers instead of prepending a system CLI.
+    OPENCLAW_PATH_BOOTSTRAPPED: "1",
     OPENCLAW_STATE_DIR: openclawStateDir,
     OPENCLAW_CONFIG_PATH: openclawConfigPath,
     AGENT_SEC_DAEMON_SOCKET: daemonSocket,
@@ -349,6 +353,21 @@ async function runPilot() {
     ],
     { cwd: result.install.packageRoot, env: baseEnv },
   );
+
+  if (args.piiOnly) {
+    await runRequiredStep("openclaw-config-pii-only", "openclaw", [
+      "config", "set", "plugins.entries.agent-sec.config.capabilities",
+      JSON.stringify({
+        "pii-scan-user-input": { enabled: true, policy: "block" },
+        "prompt-scan": { enabled: false }, "scan-code": { enabled: false },
+        "skill-ledger": { enabled: false }, "observability": { enabled: false },
+      }), "--strict-json",
+    ], { cwd: result.install.packageRoot, env: baseEnv });
+    Object.assign(baseEnv, {
+      PII_CHECKER_HOOK_ENABLED: "true", PII_CHECKER_MODE: "block",
+      CODE_SCANNER_HOOK_ENABLED: "false", SKILL_LEDGER_HOOK_ENABLED: "false",
+    });
+  }
 
   // The mock model is only responsible for deterministic tool-turn behavior;
   // prompts still travel through real OpenClaw Gateway sessions and plugin hooks.
@@ -467,6 +486,14 @@ async function runPilot() {
   result.install.installedPluginRoot =
     result.runtimeInspect.plugin?.rootDir ?? result.install.packageRoot;
 
+  if (!args.skipGateway && args.piiOnly) {
+    result.piiGatewayProbe = await runPiiGatewayProbe({
+      callGatewayRpc: callGatewayRpcWithBaseEnv, cliLogPath: agentSecCliCallsLog,
+      gatewayToken, gatewayUrl, logsDir, mockModel, openclawVersion: result.versions.openclaw,
+    });
+    return;
+  }
+
   if (!args.skipGateway) {
     // Happy-path probe: verify one full model-driven Gateway turn reaches the
     // plugin hooks, agent-sec-cli, tool execution, and observability output.
@@ -517,6 +544,7 @@ async function runPilot() {
     env: baseEnv,
     logsDir,
     openclawBin,
+    openclawVersion: result.versions.openclaw,
     pluginRoot: result.install.installedPluginRoot,
     repoRoot: REPO_ROOT,
     workdir,

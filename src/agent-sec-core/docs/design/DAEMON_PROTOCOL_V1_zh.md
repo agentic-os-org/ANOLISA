@@ -1,5 +1,7 @@
 # AgentSec daemon 协议 V1
 
+> PII 第一阶段 V2 已实现扩展见本文末尾专节；其版本化差异不修改 V1 oracle 基线。
+
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 wire 基线、兼容语料及 V2 asc-daemon-protocol 候选扩展 |
@@ -237,6 +239,23 @@ V1 parser 对 `ok` 与 `error` 的组合不做交叉字段强校验，但兼容�
 
 optional string 的空白值归一为未设置。
 
+#### V2 UID 范围与 session 定位
+
+四个 `sec.*` method 的读取范围由 transport 认证的 peer UID 决定（DPV1-018/019）：
+
+- root peer 读取全部 UID；非 root peer（包括 `PolicyAdministrator`）只能读取自身 UID。
+- 跨 UID 的 `session_id` 碰撞时，root 的事件、latest_events 和 session 分组返回
+  `UID_session_id`；唯一 session 和普通用户返回原始 ID。碰撞判断覆盖完整 store，
+  不受当前分页、时间或其它筛选影响；`affected_sessions` 分别统计各 UID 的同名 session。
+- `session_id` 筛选对所有调用者按原始存储 ID 匹配；root 返回所有 UID 下的匹配事件。
+  返回中的 `UID_session_id` 仅用于区分同名会话；查询不解析该展示前缀。
+  原始 ID 本身带数字前缀时，同样按字面值匹配。
+
+存储存在但不可读（页损坏、I/O 错误、查询被中断）时，四个 method 返回 `unavailable`
+错误而不是成功的空结果；数据库尚未创建时仍返回空结果（首次写入前的正常状态）。
+SQL 执行受 5 秒内核级执行预算约束（progress handler 中断），`count_by` 收集的分组
+桶数上限为 100000。
+
 ### 6.2 `daemon.health`
 
 参数：当前忽略所有 `params`。
@@ -353,6 +372,11 @@ metadata-only 响应包含 `ignored=true`、`reason="metadata-only change"` 和 
 `details`。若 details 可投影出 verdict，item 顶层增加 `verdict`；Skill Ledger event
 还可以增加 `command`、`skill_name` dashboard 字段。
 
+`total` 是应用 filter 后、分页前整个 scope 的行数（不折叠 offset）；`next_offset`
+是绝对偏移，仅当 `offset + 本页返回行数 < total` 时存在，末页为 `null`。`limit` 为
+`1..=1000`；`offset` 为非负 64-bit integer（上限 9223372036854775807，与 V1 校验
+一致）。
+
 ### 6.6 `sec.events.get`
 
 参数：必填非空 string `event_id`。
@@ -365,7 +389,10 @@ metadata-only 响应包含 `ignored=true`、`reason="metadata-only change"` 和 
 
 ### 6.7 `sec.events.count_by`
 
-参数：必填 `group_by`、security-event filters。`limit` 和 `offset` 明确禁止。
+参数：必填 `group_by`、security-event filters、可选 `offset`（默认 0，先在 SQL 内跳过
+最新 N 行再分组——与 v1 直读 SQLite 时的单条 GROUP BY 语义一致，分组计数来自同一次
+一致快照，避免客户端 OFFSET 分页在并发写入下重复计数）。`limit` 明确禁止
+（分组聚合不分页）。
 
 `group_by` 值域恰好为：
 
@@ -379,7 +406,8 @@ metadata-only 响应包含 `ignored=true`、`reason="metadata-only change"` 和 
 }
 ```
 
-空/null group 被排除；按 count 降序、value 字符串升序排列。
+SQL `NULL` 桶以 `value: null` 交付（客户端按 v1 的 SQL 拼写渲染为 `"null"` 对象键）；
+空字符串 group 被排除；按 count 降序、value 字符串升序排列。
 
 ### 6.8 `obs.sessions.list`
 
@@ -427,6 +455,11 @@ next offset。items 按 `(timestamp_epoch, kind)` 升序排列：
 
 ### 6.11 **[TARGET V2]** PAP administration
 
+本节 15-method CRUD 表描述现有 V2 实现基线。新的对象目标以
+[生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)和第 14 节为准：保留 Policy update，
+Scope 无自身 revision 且不可更新；Binding 仅供用户查询。实施前不把旧方法表当作新目标，
+也不把目标文档变化解释为当前二进制已经移除相应方法。
+
 PAP administration 是新增的 V2 method family，不是九个 V1 method 之一。第一版接口采用
 互斥的 `{requestId,result}` 或 `{requestId,error}` 响应，不保留 POC 的 `poc.*` method、
 `ok/data/stdout/stderr/exit_code` envelope 或兼容分支。输入和输出以
@@ -435,7 +468,7 @@ PAP administration 是新增的 V2 method family，不是九个 V1 method 之一
 success 不得再包一层 `{policy}`、`{scope}` 或 `{binding}`。
 
 `v2/crates/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` 进一步冻结覆盖
-15 个 method 的有状态 CRUD 场景及完整 response value，包括 Canonical Policy IR、Scope
+15 个 method 的历史有状态 CRUD 场景及完整 response value、Scope
 template、Binding 内嵌快照、revision、status 和确定性 digest。daemon 生成的 request/resource
 UUID 使用具名占位符：fixture 不冻结随机值本身，但必须验证 UUID 格式、CREATE 捕获值在后续
 请求/响应中的一致性，以及不同资源 identity 不混用。该 fixture 同时由 protocol 类型测试、
@@ -499,29 +532,32 @@ Delete 和 DeleteFailed 重试均保留 revision。Delete 保留完整 spec 与�
 允许在 Applying 时受理；PendingDelete/Deleting/DeleteFailed 拒绝所有 UPDATE，不能
 撤销删除。全部目标确认 Absent 后，Reconciler 原子移除 Binding 及运行记录；此后
 GET/UPDATE/DELETE 返回 not_found，LIST 不包含该 ID。重新部署须 CREATE 新 ID、revision 1。
-`Deleted` 只作内部完成标记，不作为持久化 current record。当前 daemon 尚未接入后台
-reconcile worker；硬删除行为由 PAP + Reconciler 内存组合测试验证。
+`Deleted` 只作内部完成标记，不作为持久化 current record。现有 daemon 已接入后台
+reconcile Runtime。当前 Scope 自动管理 Binding，生产使用 SQLite，最后一条 Binding 与
+已停止 discovery 的 Deleting Scope 同事务删除；恢复证据见
+[Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。内部 status_version、
+deployments 与写回执不进入公共响应。历史内存组合测试不作为真实 PEP 或物理断电验收。
 
-Policy CREATE/UPDATE 在 PAP 内同步调用 `PolicyCompiler::lower(TemplateEnvelope) ->
-PolicyEnvelope`。当前产品 compiler 只实现 `prevent_file_deletion`，其输入与完整 Canonical
-Policy IR 输出由
-`v2/crates/asc-policy-engine/tests/fixtures/compiler-contract.json` 冻结；输出语义是
-`ResourceOperation::Delete + FileResolution::PathEntry`。该模板只覆盖对匹配目录项的删除操作，
-例如 unlink/rmdir；rename/move、link、truncate、内容修改和其它 namespace mutation 不在其
-保护范围内。其它 `PolicyTemplate` kind 在各自 lowering 与直接 Adapter conformance 完成前
-返回 `invalid_argument`，不得生成占位 IR。
+Policy CREATE/UPDATE 在 PAP 内校验 `PolicyTemplate` 并保存完整模板。
+PolicyTemplate 是可被多个 Scope 复用的策略；内容使用 `specVersion`、可选 description 和
+非空 rules，每条规则包含 effect/category/action/typed target 及可选 where/previous/because。
+当前定义文件目标和 read/write/exec 动作，合法但 AgentSight 不支持的规则可以保存。
+Adapter 只转换不带历史条件的 block + file/write + operation=delete 规则；任意一条不支持，
+整个 Binding 失败，错误码包含规则序号，不部分下发。旧 kind/files 格式拒绝。
+完整结构与校验边界见 [对象契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md#7-通用规则结构改造计划)；
+固定输出见 `v2/fixtures/adapters/agentsight/prevent-file-deletion/`。
 
-参数 object 拒绝未知字段。ScopeSelector 只包含正数 PID 或 cgroup ID；PreparedScope
+参数 object 拒绝未知字段。基线 ScopeSelector 支持正数 PID 或 cgroup ID；第 14 节
+SCOPE-CR-001 扩展 name/path process selector 与 policyTemplates assignment。PreparedScope
 必须显式包含 selector，缺失或 null 均拒绝，不再从 scopeId 推导执行域身份。
-PreparedScope 的输出仅含 `scopeId`、`revision`、`selector`；不再包含自动填充的
+Legacy PreparedScope 的输出含 `scopeId`、`revision`、`selector`，assignment 增加 `policyTemplates`；不再包含自动填充的
 `template` 或 `templateDigest`。读取时显式携带这两个已移除字段会被拒绝，不能
 把其中的 lifetime 等约束静默丢弃。Scope Update 直接按 selector 比较内容是否相同；
-PreparedPolicy 保留 policyId/policyName/revision/template/canonicalPolicy，移除
-templateDigest；Policy 的 authored template 保留，canonicalPolicy 不再含预留的 payloadDigest。
+PreparedPolicy 包含 policyId/policyName/revision/template。Scope 和 Binding 中的内嵌
+Policy 使用相同结构。
 PreparedBinding 只含 bindingId/bindingRevision/policy/scope，不再接受顶层
 executionDomainId。已删除的 Policy templateDigest 和 Binding executionDomainId
-（包括显式 null）均按未知字段拒绝；Policy/Scope 的 retired 和 canonicalPolicy 的
-payloadDigest 也不再接受。当前三个模型直接派生严格反序列化，不保留旧字段吞入逻辑。
+（包括显式 null）均按未知字段拒绝；Policy/Scope 的 retired 也不再接受。当前三个模型直接派生严格反序列化，不保留旧字段吞入逻辑。
 LIST 的 `limit` 为 `1..=1000`，`offset` 为 `u32`；total 是
 分页前总数。当前 aggregate byte budget 仍是 Repository/PAP/transport 联合 gate，在该 gate
 完成前 LIST 只达到 integration contract，不构成 distribution-ready 大数据量查询能力。
@@ -536,9 +572,9 @@ PAP error 稳定投影如下：无法构造成 method params 的字段、类型�
 identifier、revision、pagination 和 authored selector）→ `invalid_request`，同时返回最多 256
 字节的参数解码原因；任意层级 JSON object 的 duplicate key 在进入 `serde_json::Value` 前拒绝，
 按 malformed envelope 返回 `invalid_request / request envelope is invalid`。成功构造 params 后
-发生的 authoring/compiler validation → `invalid_argument`，message 为最多 256 字节的稳定
+发生的 template/selector validation → `invalid_argument`，message 为最多 256 字节的稳定
 `invalid policy name: <reason>`、`invalid policy: <authored-path>: <reason>` 或
-`invalid scope: <authored-path>: <reason>`，不得暴露 canonical IR path、输入内容或内部 error
+`invalid scope: <authored-path>: <reason>`，不得暴露 内部字段路径、输入内容或内部 error
 code。
 
 not found → `not_found`，并按操作对象稳定区分 `policy was not found`、
@@ -819,9 +855,9 @@ agent-sec-cli 触发 PyO3、Python backend 或第二套本地业务执行。
 | DPV1-015 | 旧 daemon 返回 `unknown_method` 时返回稳定 version/capability mismatch；timeout/EOF 时同样不本地执行 |
 | DPV1-016 | envelope/wire-shape 错误与 action 领域输入错误稳定落入不同 response layer |
 | DPV1-017 | 八个 action method 的 timeout、queue/resource、access-log、blocking 和 cancellation metadata 已冻结并逐项验证 |
-| DPV1-018 | 多 UID 共用 system socket；trusted Principal/QueryScope 隔离 owner，`caller/trace_context` 不参与授权 |
+| DPV1-018 | 多 UID 共用 system socket；trusted Principal/QueryScope 按 UID 隔离，`caller/trace_context` 不参与授权；root 为 All，非 root（含 PolicyAdministrator）仅限自身；sec 按原始 session ID 查询，root 返回所有匹配 UID 的记录，返回标签区分同名 session |
 | DPV1-019 | CLI/TUI 不能用 RPC filter 绕过服务端 QueryScope，也不能直读 SQLite 替代授权查询 |
-| DPV1-020 | 15 个 PAP method 的 strict params、完整请求/响应 CRUD fixture、直接领域 result、错误投影、server-owned Principal；必跑 UDS integration 经 Dispatcher/PapHandler → PapService → Policy Compiler/Repository 执行完整 fixture，真实 `asc-daemon` 子进程通过启动管理员 UID 配置完成非 root 成功场景，同时验证默认拒绝；root 环境验证默认成功 |
+| DPV1-020 | 15 个 PAP method 的 strict params、完整请求/响应 CRUD fixture、直接领域 result、错误投影、server-owned Principal；必跑 UDS integration 经 Dispatcher/PapHandler → PapService → Repository 执行完整 fixture，真实 `asc-daemon` 子进程通过启动管理员 UID 配置完成非 root 成功场景，同时验证默认拒绝；root 环境验证默认成功 |
 
 协议测试必须使用 socket bytes 和解析后 JSON 比较；只测试某个 Python dataclass 或 Rust
 struct 的构造函数不足以证明 wire compatibility。
@@ -886,3 +922,135 @@ Rust 响应仍保留公开 `requestId` UUID 和既有 result/error 结构。
 关闭 exporter 不关闭 carrier。
 兼容记录 OTEL-CR-001/002/005/006/007、执行 fixtures、直接消费者和回滚见
 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。冻结 V1 运行时没有增加 OTel 依赖。
+
+## PII 第一阶段 V2 协议扩展
+
+**[TARGET V2，已实现]** 新增唯一方法 `action.pii_scan`，角色为 `LocalUser`，保持现有
+V2 顶层 OTel 信封及第 13 节独立预算（请求业务 4 MiB + 传播 32 KiB，响应 4 MiB）。
+本文原有 V1 默认 catalogue 不因此改变。
+
+| `params` 字段 | 类型与默认值 |
+|---------------|----------------|
+| `text` | 必填 string，允许空文本 |
+| `source` | string，默认 `unknown`；允许 user_input/model_input/tool_input/tool_output/model_output/observability/manual/unknown |
+| `includeLowConfidence`、`rawEvidence`、`redactOutput` | bool，默认 false |
+| `maxBytes` | 可选正整数或 null |
+| `inputTruncated` | bool，默认 false |
+| `inputBytesScanned` | 可选非负整数或 null；必须等于收到文本字节数，截断时可多出最多 3 个 UTF-8 尾字节 |
+
+拒绝未知字段，包括未发布的 `params.traceContext`；不接受输入文件或规则路径，
+也不接受调用者 UID/GID/PID。关联信息仅使用公共顶层 `traceContext` / `compatibility`。
+识别方法并完成授权后，DTO/schema 错误返回 `invalid_request`，无效 source 或语义限制返回
+`invalid_argument`；错误消息固定为 `PII scan parameters are invalid`，通过公共 Finalizer
+记录安全终态。扫描结果（含执行失败报告）置于 daemon success 响应；CLI 对扫描失败退出 1。
+未处理的执行 panic 由公共 Runtime 捕获并收尾，再返回 `internal` 和固定消息
+`capability execution failed`，不把原始异常内容返回给调用者。
+
+可执行契约为 `tests/v2/e2e/test_pii_cli_e2e.py`，实现 DTO 为
+`v2/crates/asc-daemon-protocol/src/action.rs`。当前/未来链路、兼容性和回滚见
+[PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
+
+## 14. [TARGET V2] SkillSec 第一阶段批准替代
+
+本节将 §6.12 中 `action.skill_ledger` 候选明确替换为 `action.skill_sec`，采用已落地 V2
+`{method,params}` 请求及 `{requestId,result|error}` envelope。普通 V1 RPC 不兼容；SkillFS
+HMAC/notify 单独在适配层保留，不扩大通用解析器接受字段。
+
+`params.command` 为封闭枚举：init/check/analyze/scan/certify/status/audit/list-scanners/
+decide/show/export/activate/rotate-keys。未知 command、未知字段和伪造 uid/ioDir 拒绝解析。
+每个方法按内核 peer credentials 鉴别本地用户；换钥和 forceKeys 进一步要求 UID 0，PAP 的
+policy-admin-uid 不赋予换钥权限。正常用户可操作全部受管 Skill，用户隔离留在领域配置 TODO。
+
+结果字段为 `success`、`exitCode`、`error`、`errorType`、`data`。方法解析失败仍为 daemon error；
+执行失败为正常 envelope 内的失败业务结果；风险判定不必带执行错误。CLI 只投影 data 与退出码。
+`timeoutMs` 为 1–120000，缺省 60000；只改变 SkillSec 的 dispatch 预算，其他方法不变。
+超时之后不得重放写请求，应通过 show/check 查明状态。大于 3 MiB 的业务响应改为明确
+ResponseTooLarge，注明 operationMayHaveCommitted；完整版本可用 export 读取。
+
+可执行合同：`v2/fixtures/skillsec/consumer.json`、`v2/apps/asc-cli/tests/skill_sec.rs`、
+`v2/crates/asc-daemon-handler/src/skill_sec.rs` 测试。样例覆盖正常、风险、未初始化、超时、
+执行失败与激活未完成，不能作为 Agent Hook 或真实 FUSE 联调证据。
+
+### SkillSec 第一阶段的 SkillFS 兼容实现
+
+当前 Rust 适配层在 V2 公共 socket 上识别 `auth.init`，完成现有 SkillFS HMAC 握手后，只接收
+notify schema version 2。请求保留 `id/method/params/trace_context/timeout_ms`，响应保留
+`id/ok/data` 和 `accepted/queued/coalesced`；合并事件仍为 `queued=true`，保留 6.3 节
+的 `skill/reason` 数据及 V1 `request_id/stdout/stderr/exit_code`、结构化错误字段。
+`request_id` 由 daemon 生成，不信任客户端 `id` 作为服务端身份。认证失败关闭连接，认证后的业务拒绝也带有
+server frame proof。普通 V2 请求仍由原 closed envelope 解析，不接受旧 RPC 顶层 `id`。
+
+每个连接只接受一次 notify；会话入站上限四帧、单帧 64 KiB、首帧后的会话期限五秒。
+实时 pending 上限为 256 个不同 canonical Skill，满队列返回签名业务拒绝；已确认接受不表示
+持久化或已完成激活。完整配置、权限和恢复语义见
+[SkillSec 第一阶段迁移](SKILL_SEC_PHASE_ONE_zh.md#第六批-skillfs-边界)。
+
+## 15. [TARGET V2] 可观测单条采集
+
+新增显式 allowlist 方法 `obs.record`，按 `LocalUser` 授权。业务参数仅含
+`hook / observedAt / metrics`，关联 metadata 通过第 13 节 OTel carrier 的 Baggage 传递。
+成功响应为 `{requestId,result:{}}`，且发生在 JSONL、SQLite 两次写入成功之后。
+完整输入、错误、部分成功语义、V1 CLI 兼容边界与 OBS-001..006 executable fixtures 见
+[V2 可观测单条采集契约](V2_OBSERVABILITY_INGESTION_zh.md)。这不是 V1 新增 RPC，
+不改变本文 CURRENT V1 方法清单；后续 obs 查询扩展见第 17 节。
+
+## 16. [TARGET V2][IMPLEMENTED] Scope assignment（SCOPE-CR-002）
+
+对象与生命周期权威定义为
+[Policy/Scope/Binding 生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)。本节替代第 6.11
+节及 SCOPE-CR-001 中 Scope revision、引用阻止模板更新/删除和手动 Binding CRUD 语义。
+
+当前公开 12 个 PAP 方法：`policy.templates.{create,update,get,list,delete}`、
+`policy.scopes.{create,get,list,delete,retry}`、`policy.bindings.{get,list}`。
+Scope update、Binding mutation 返回 `unknown_method`；Scope revision 参数拒绝。
+
+```json
+{"method":"policy.scopes.create","params":{"selector":{"kind":"process","match":{"processName":"openclaw"}},"policyTemplates":[{"policyId":"policy-one","policyRevision":1}]}}
+```
+
+`policyTemplates` 对全部 selector 均必填，1–32 个不同 Policy；服务端解析并在提交锁内
+核对精确 current revision。并发更新/删除导致该版本不可用时返回 `not_found`，不替换版本。
+Scope 返回 `scopeId`、`selector`、`policySnapshots`（完整 PreparedPolicy）和 `status:ACTIVE`；
+没有 revision，不可 update。模板更新/删除不影响该 Scope 或未来实例。
+
+`match` 必须且只能包含 `processName` 或 `executable`。名称精确匹配 `/proc/PID/comm`
+（1–15 bytes），路径精确匹配 `/proc/PID/exe` 的规范化绝对路径；不做 glob/前缀匹配。
+PID selector 固定首次观察到的实例；当前拒绝 cgroup assignment。未配置发现、调度不可用或
+32 个 discovery jobs 容量耗尽时返回 unavailable。
+
+Scope get/delete/retry 参数均为 `{"id":"scope-id"}`。删除关闭准入、停止发现并清理所属
+Binding，返回 `{"scopeId":"scope-id","completed":false}`，完成时 completed 为 true。
+未完成 Scope 为 `DELETING`；重复 delete 不重置预算。全部 Binding 删除成功后，已停止
+discovery 的 Scope 及其快照随之删除；无 Binding 时停止 discovery 后直接删除 Scope。
+`scope retry` 返回 Scope 快照，仅重试所属终态失败 Binding。Binding 查询包含单策略快照、
+Scope 来源和固定进程身份，不包含完整 Scope 或 scopeRevision。
+
+编码后 Policy/Scope 单记录上限 1 MiB，列表条目预算 3 MiB。`total` 是分页前总数，
+下页 offset 按实际 items 数推进。方法/字段/错误由 `pap-methods.json`、
+`pap-invalid-requests.json`、`pap-crud-e2e.json` 冻结，CLI 与 daemon 成套升级。
+
+真实 procfs + scripted Client 组合验证自动下发/清理；UDS、CLI 和 bootstrap 验证公开接口。
+这不构成磁盘恢复、真实 AgentSight 或 kernel enforcement 证据。旧 Probe 入口继续拒绝。
+
+## 17. [TARGET V2：obs 已实现] 当前用户查询
+
+V2 已注册 `obs.sessions.list`、`obs.runs.list`、`obs.timeline.get`，使用 V2 信封；
+CLI report/TUI review 只通过 daemon 读取。`sec.summary`、`sec.events.list/get/count_by` 的契约见第 6 节。
+`agent-sec-cli events` 的 V1 诊断兼容范围：未知 `event_type`/`category` 输出
+`Warning: Unknown ...` 和排序后的已知值列表，仍执行原筛选查询；非法整数 `--limit`/`--offset`
+保留 `Invalid value for '...': '...' is not a valid integer.`，缺少 `--event-type`/`--category`
+值保留 `Option '...' requires an argument.`，均退出 2。非法 `--since`/`--until` 输出
+`Error: Invalid time format for ...: '...'. Expected ISO 8601 format.` 并退出 1。
+参数解析错误保留诊断正文与退出码，不复刻 Typer 的终端边框排版。
+obs 普通用户范围固定为内核认证的 UDS peer UID，SQL 按 `uid = peer_uid` 过滤；
+root 可查询全部，包含历史 `NULL` UID。响应的历史无归属 `uid` 为 `null`，不代表 UID 0；
+其安全计数为 0、分类聚合与关联为空，不推断安全事件归属。
+`obs.record` 的 writer 仍必须携带可信 `uid: u32`，客户端不能指定或覆盖 UID。
+参数、分页、关联与错误契约，以及 QRY-001..011 完整验收矩阵和当前证据见
+[V2 安全事件与 Observability 查询设计](V2_SECURITY_OBSERVABILITY_QUERY_zh.md)。
+obs 查询采用 LocalUser access policy 和服务端 QueryScope，不改变本文 CURRENT V1 事实。
+`obs.sessions.list` 接受可选精确 `session_id`，先应用 UID、session、时间过滤，再统计与分页；
+跨 owner 同名 session 仍返回独立条目；仅 root 的重名条目使用 `UID_SessionId` 作为下钻定位符，
+历史未知归属使用 `unknown_SessionId`；未重名的 ID 保持原样。组合名称仍有歧义时拒绝；原始存储 ID 和安全关联不变，详见查询设计 §4.1。
+内部 `DaemonDispatcher::handle` 使用命名的 5 秒 convenience budget；真实 UDS dispatch
+使用 transport 配置生成的 `DispatchControl`，不受该默认值替代。

@@ -1,5 +1,6 @@
 //! Path normalization for `SQLite` state.
 
+use std::fs::symlink_metadata;
 use std::path::{Component, Path, PathBuf};
 
 /// Normalizes a path the way v1 `normalize_sqlite_path` does.
@@ -18,9 +19,20 @@ pub fn normalize_sqlite_path(path: impl AsRef<Path>) -> PathBuf {
     };
     // Canonicalize the longest existing prefix before collapsing `..`: a parent
     // component following a symlink applies to the symlink target, as it does in
-    // Python's `Path.resolve()`.
+    // Python's `Path.resolve()`. One deliberate deviation from v1: a symlink in
+    // the *final* component is preserved, not resolved. Resolving it here would
+    // redirect every later open to the link target before the store's identity
+    // gates could see the path the caller actually named, so a link planted
+    // before construction would be silently served or written through instead
+    // of refused.
     let mut remainder: Vec<&std::ffi::OsStr> = Vec::new();
     let mut candidate: &Path = &absolute;
+    if symlink_metadata(&absolute).is_ok_and(|meta| meta.file_type().is_symlink())
+        && let (Some(name), Some(parent)) = (absolute.file_name(), absolute.parent())
+    {
+        remainder.push(name);
+        candidate = parent;
+    }
     loop {
         if let Ok(resolved) = candidate.canonicalize() {
             let mut out = resolved;
@@ -134,6 +146,34 @@ mod tests {
 
     #[test]
     fn normalizes_an_existing_file() {
+        let dir = TempDir::new().expect("temp dir");
+        let target = dir.path().join("events.db");
+        std::fs::write(&target, b"").expect("seed");
+        let normalized = normalize_sqlite_path(&target);
+        assert_eq!(normalized, target.canonicalize().expect("canonical"));
+    }
+
+    #[test]
+    fn a_symlinked_final_component_is_preserved_not_resolved() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().expect("temp dir");
+        let target = dir.path().join("elsewhere.db");
+        std::fs::write(&target, b"").expect("seed");
+        let link = dir.path().join("events.db");
+        symlink(&target, &link).expect("symlink");
+
+        let normalized = normalize_sqlite_path(&link);
+        let expected = dir.path().canonicalize().expect("canonical temp dir");
+        assert_eq!(
+            normalized,
+            expected.join("events.db"),
+            "the final link must be preserved for the identity gates to see"
+        );
+    }
+
+    #[test]
+    fn a_regular_final_component_still_canonicalizes() {
         let dir = TempDir::new().expect("temp dir");
         let target = dir.path().join("events.db");
         std::fs::write(&target, b"").expect("seed");

@@ -3,7 +3,7 @@ use std::net::Shutdown;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -196,7 +196,7 @@ fn run_probe(
 ) -> Result<Value, String> {
     let deadline = Instant::now() + PROBE_TIMEOUT;
     check_deadline(cancelled, deadline)?;
-    let mut command = Command::new(program);
+    let mut command = super::command_with_trusted_startup_path(program);
     command
         .arg("--registry")
         .stdin(Stdio::piped())
@@ -209,7 +209,7 @@ fn run_probe(
     let mut child = ProbeChild(
         command
             .spawn()
-            .map_err(|_| "Could not start ECS probe".to_string())?,
+            .map_err(|error| format!("Could not start ECS probe {program}: {error}"))?,
     );
     let mut input = child.0.stdin.take().ok_or("ECS probe stdin unavailable")?;
     let mut output = child

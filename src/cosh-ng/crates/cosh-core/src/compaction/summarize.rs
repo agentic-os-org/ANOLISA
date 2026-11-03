@@ -478,3 +478,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod redaction_boundaries;

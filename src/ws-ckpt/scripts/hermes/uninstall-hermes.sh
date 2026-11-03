@@ -15,7 +15,7 @@ fi
 
 if [ "$DRY_RUN" = "1" ]; then
     if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
-        echo "DRY-RUN: HERMES_HOME=${HERMES_HOME%/} $HERMES_BIN plugins disable ws-ckpt"
+        echo "DRY-RUN: HERMES_HOME=${HERMES_HOME%/} timeout --kill-after=5s 30s $HERMES_BIN plugins disable ws-ckpt"
         echo "DRY-RUN: HERMES_HOME=${HERMES_HOME%/} $HERMES_BIN plugins remove ws-ckpt"
     else
         echo "DRY-RUN: hermes CLI not found; skip CLI disable/remove"
@@ -27,7 +27,10 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
-    HERMES_HOME="${HERMES_HOME%/}" "$HERMES_BIN" plugins disable ws-ckpt 2>/dev/null || true
+    # A stalled gateway reload must not prevent local cleanup.
+    HERMES_HOME="${HERMES_HOME%/}" timeout --kill-after=5s 30s "$HERMES_BIN" plugins disable ws-ckpt 2>/dev/null || {
+        echo "Warning: hermes plugins disable failed or timed out; continuing local cleanup. Restart the Hermes gateway if needed." >&2
+    }
 fi
 
 # 1. Remove plugin symlink

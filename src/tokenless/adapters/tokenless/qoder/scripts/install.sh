@@ -4,6 +4,7 @@ set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-qoder}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PLUGIN_DIR="$ADAPTER_DIR/qoder"
 PLUGIN_JSON="$PLUGIN_DIR/.qoder-plugin/plugin.json"
@@ -69,6 +70,13 @@ if "$QODERCLI" plugins validate --help >/dev/null 2>&1; then
         echo "    Output: $VALIDATE_OUT" >&2
         exit 1
     fi
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    # Preview before the registration: the CLI path writes the user-scoped
+    # plugin registration, so a dry run must leave qodercli's store untouched.
+    echo "DRY-RUN: ${QODERCLI} plugins install ${PLUGIN_DIR} --scope user"
+    exit 0
 fi
 
 echo "[${COMPONENT}] Registering native plugin with qodercli..."

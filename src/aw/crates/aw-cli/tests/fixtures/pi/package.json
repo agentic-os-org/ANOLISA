@@ -1,0 +1,12 @@
+{
+  "name": "aw-pi-sdk-acceptance",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

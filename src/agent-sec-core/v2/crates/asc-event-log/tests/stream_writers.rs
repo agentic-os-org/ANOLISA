@@ -97,10 +97,11 @@ fn observability_writer_round_trips_through_jsonl() {
     let writer = ObservabilityWriter::new(&path);
 
     let record = sample_record(ObservabilityHook::BeforeAgentRun);
-    writer.write(&record).expect("write");
+    writer.write(&record, 1000).expect("write");
 
     let written = lines(&path);
     assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["uid"], 1000);
     let parsed: ObservabilityRecord =
         serde_json::from_value(written[0].clone()).expect("re-parsable as a record");
     assert_eq!(parsed, record);
@@ -130,7 +131,7 @@ fn observability_writer_surfaces_failures() {
 
     let writer = ObservabilityWriter::new(&path);
     writer
-        .write(&sample_record(ObservabilityHook::AfterAgentRun))
+        .write(&sample_record(ObservabilityHook::AfterAgentRun), 1000)
         .expect_err("observability JSONL writes are not fire-and-forget");
 }
 
@@ -144,7 +145,7 @@ fn both_streams_rotate_with_mutually_recognizable_backup_names() {
     let obs = ObservabilityWriter::new(&obs_path).with_max_bytes(8);
     for _ in 0..3 {
         sec.write_or_raise(&sample_event()).expect("write");
-        obs.write(&sample_record(ObservabilityHook::BeforeLlmCall))
+        obs.write(&sample_record(ObservabilityHook::BeforeLlmCall), 1000)
             .expect("write");
     }
 

@@ -7,7 +7,13 @@
 //! administer policy.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use asc_action_runtime::{
+    Diagnostic, DiagnosticSink, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus,
+};
+use asc_security_events::SecurityEvent;
+use asc_telemetry::TelemetryRecord;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -15,8 +21,8 @@ use asc_daemon::{BootstrapConfig, serve};
 use asc_daemon_core::{PeerCredentials, PrincipalPolicy, PrincipalRole};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_pap::PapService;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
+
 use serde_json::{Value, json};
 use tokio::net::UnixStream;
 
@@ -34,7 +40,28 @@ impl PrincipalPolicy for FixedRolePolicy {
     }
 }
 
+#[derive(Default)]
+struct Outputs {
+    audit: Mutex<Vec<SecurityEvent>>,
+    telemetry: Mutex<Vec<TelemetryRecord>>,
+}
+impl SecurityEventSink for Outputs {
+    fn write(&self, event: &SecurityEvent) {
+        self.audit.lock().unwrap().push(event.clone());
+    }
+}
+impl TelemetrySink for Outputs {
+    fn write(&self, record: &TelemetryRecord) -> TelemetryStatus {
+        self.telemetry.lock().unwrap().push(record.clone());
+        TelemetryStatus::Written
+    }
+}
+impl DiagnosticSink for Outputs {
+    fn record(&self, _: &Diagnostic) {}
+}
+
 struct RunningDaemon {
+    output: Arc<Outputs>,
     directory: PathBuf,
     socket_path: PathBuf,
     shutdown: asc_daemon_service::ShutdownToken,
@@ -50,14 +77,15 @@ impl RunningDaemon {
         ));
         std::fs::create_dir(&directory).unwrap();
         let socket_path = directory.join("daemon.sock");
-        let application = PapService::new(
-            Arc::new(ProcessLocalPapRepository::default()),
-            Arc::new(PolicyTemplateCompiler),
-        );
+        let application = PapService::new(Arc::new(SqlitePolicyRepository::temporary().unwrap()));
+        let output = Arc::new(Outputs::default());
         let dispatcher = Arc::new(DaemonDispatcher::new(
             application,
             Arc::new(FixedRolePolicy(role)),
-            asc_daemon::scan_application(asc_action_runtime::testing::discarding_finalizer()),
+            asc_daemon::scan_application(
+                Finalizer::new(output.clone(), output.clone(), output.clone()),
+                Arc::new(asc_capability_pii_scan::PiiRuleSet::builtin().unwrap()),
+            ),
         ));
         let shutdown = asc_daemon_service::ShutdownToken::new();
         let service_shutdown = shutdown.clone();
@@ -75,6 +103,7 @@ impl RunningDaemon {
         });
         wait_for_socket(&socket_path).await;
         Self {
+            output,
             directory,
             socket_path,
             shutdown,
@@ -103,13 +132,165 @@ async fn wait_for_socket(path: &Path) {
     .expect("daemon should accept connections on its socket");
 }
 
+fn assert_pii_terminal_events(output: &Outputs) {
+    let audit = output.audit.lock().unwrap();
+    let telemetry = output.telemetry.lock().unwrap();
+    assert_eq!(audit.len(), 5);
+    assert_eq!(telemetry.len(), 5);
+    for (index, event) in audit.iter().enumerate() {
+        assert_eq!(event.uid, rustix::process::getuid().as_raw());
+        assert_eq!(event.pid, std::process::id());
+        assert_eq!(event.trace_id, "trace");
+        assert_eq!(event.session_id.as_deref(), Some("session"));
+        let serialized = serde_json::to_string(event).unwrap();
+        assert!(!serialized.contains("PRIVATE"));
+        assert!(!serialized.contains("alice@company.cn"));
+        if index == 0 {
+            assert_eq!(event.details["request"]["agent_name"], "codex");
+        }
+        if index > 0 {
+            assert_eq!(event.details["request"], json!({}));
+            assert_eq!(event.details["error_type"], "invalid_parameters");
+        }
+        let scalar = serde_json::to_value(&telemetry[index]).unwrap();
+        assert_eq!(scalar["component.agent_name"], "codex");
+        assert_eq!(scalar["seccore.event_type"], "pii_scan");
+        assert_eq!(
+            scalar["seccore.result"],
+            if index == 0 { "succeeded" } else { "failed" }
+        );
+        if index == 0 {
+            assert_eq!(scalar["seccore.verdict"], "warn");
+            assert!(scalar["seccore.elapsed_ms"].is_number());
+        } else {
+            assert!(scalar.get("seccore.verdict").is_none());
+            assert_eq!(scalar["seccore.error_type"], "invalid_parameters");
+        }
+        for forbidden in [
+            "PRIVATE",
+            "alice@company.cn",
+            "findings",
+            "redacted_text",
+            "raw_evidence",
+            "session",
+            "trace",
+        ] {
+            assert!(!scalar.to_string().contains(forbidden));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pii_scan_finalizes_safe_outputs_with_peer_identity_and_business_trace() {
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let trace = json!({"version":1,
+        "traceparent":"00-11111111111111111111111111111111-2222222222222222-01",
+        "baggage":"agentsec.session.id=session,agentsec.agent.name=codex,uid=424242,pid=424242"
+    });
+    let compatibility = json!({"version":1,"traceId":" trace "});
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "action.pii_scan", "traceContext":trace,"compatibility":compatibility,"params": {
+            "text": "PRIVATE_INPUT alice@company.cn", "rawEvidence":true,
+            "redactOutput":true
+        }}),
+    )
+    .await;
+    assert_eq!(response["result"]["verdict"], "warn", "{response}");
+    assert!(
+        response["result"]["redacted_text"]
+            .as_str()
+            .unwrap()
+            .contains("PRIVATE_INPUT")
+    );
+    for (extra, error) in [
+        (json!({"unknown":"PRIVATE_PARAMETER"}), "invalid_request"),
+        (json!({"source":"PRIVATE_SOURCE"}), "invalid_argument"),
+        (json!({"maxBytes":0}), "invalid_argument"),
+        (
+            json!({"traceContext":{"traceId":"PRIVATE_OLD_TRACE"}}),
+            "invalid_request",
+        ),
+    ] {
+        let mut params = json!({"text":"PRIVATE_INPUT"});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let response = support::request_json(
+            &daemon.socket_path,
+            &json!({"method":"action.pii_scan","traceContext":trace,"compatibility":compatibility,"params":params}),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], error, "{response}");
+        assert!(!response.to_string().contains("PRIVATE"));
+    }
+    for (method, error) in [
+        ("policy.templates.list", "permission_denied"),
+        ("action.unknown", "unknown_method"),
+    ] {
+        let response =
+            support::request_json(&daemon.socket_path, &json!({"method":method,"params":{}})).await;
+        assert_eq!(response["error"]["code"], error);
+    }
+    assert_pii_terminal_events(&daemon.output);
+    // The following request has no carrier and must not inherit the prior caller's context.
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({"method":"action.pii_scan", "params":{"text":""}}),
+    )
+    .await;
+    assert_eq!(response["result"]["verdict"], "pass");
+    {
+        let events = daemon.output.audit.lock().unwrap();
+        assert_eq!(events.len(), 6);
+        assert!(events[5].trace_id.is_empty());
+        assert!(events[5].session_id.is_none());
+        assert!(events[5].details["request"].get("agent_name").is_none());
+    }
+    daemon.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_local_user_scans_dangerous_bash_and_receives_the_verdict() {
     // The role is LocalUser, not PolicyAdministrator: reaching a scan result at
     // all is what proves the method's LocalUser access policy, since every PAP
     // method denies this same peer.
     let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
-    let response = support::request_json(
+    for (code, language) in [
+        ("rm -rf /tmp/test", "bash"),
+        (r#"rm -rf /tmp/test; python3 -c "print(1)""#, "python"),
+        (r#"python3 -c "print(1)" && rm -rf /tmp/test"#, "python"),
+        (r#"rm -rf /tmp/test; bash -c "echo hi""#, "bash"),
+    ] {
+        let response = support::request_json(
+            &daemon.socket_path,
+            &json!({
+                "method": "action.code_scan",
+                "params": {"code": code, "language": "bash"}
+            }),
+        )
+        .await;
+        let result = &response["result"];
+        assert_eq!(result["ok"], json!(true), "unexpected response {response}");
+        assert_eq!(result["verdict"], json!("warn"), "{code}: {response}");
+        assert_eq!(result["language"], json!(language));
+        assert!(
+            result["findings"]
+                .as_array()
+                .is_some_and(|findings| findings
+                    .iter()
+                    .any(|finding| finding["rule_id"] == "shell-recursive-delete")),
+            "expected recursive-delete finding: {response}"
+        );
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn python_keyword_command_arguments_reuse_bash_findings() {
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let bash = support::request_json(
         &daemon.socket_path,
         &json!({
             "method": "action.code_scan",
@@ -117,16 +298,30 @@ async fn a_local_user_scans_dangerous_bash_and_receives_the_verdict() {
         }),
     )
     .await;
-    let result = &response["result"];
-    assert_eq!(result["ok"], json!(true), "unexpected response {response}");
-    assert_eq!(result["verdict"], json!("warn"));
-    assert_eq!(result["language"], json!("bash"));
-    assert!(
-        result["findings"]
-            .as_array()
-            .is_some_and(|findings| !findings.is_empty()),
-        "expected at least one finding: {response}"
-    );
+    for (code, language) in [
+        (
+            r#"subprocess.Popen(args="rm -rf /tmp/test", shell=True)"#,
+            "python",
+        ),
+        (
+            r#"python3 -c 'subprocess.Popen(args="rm -rf /tmp/test", shell=True)'"#,
+            "bash",
+        ),
+    ] {
+        let python = support::request_json(
+            &daemon.socket_path,
+            &json!({
+                "method": "action.code_scan",
+                "params": {"code": code, "language": language}
+            }),
+        )
+        .await;
+
+        assert_eq!(python["result"]["ok"], json!(true), "{python}");
+        assert_eq!(python["result"]["verdict"], bash["result"]["verdict"]);
+        assert_eq!(python["result"]["findings"], bash["result"]["findings"]);
+        assert_eq!(python["result"]["language"], json!("python"));
+    }
     daemon.stop().await;
 }
 
@@ -204,6 +399,31 @@ async fn malformed_parameters_are_rejected_as_invalid_request() {
         json!("invalid_request"),
         "{response}"
     );
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_mode_rejects_blank_input_before_model_lookup() {
+    // This is intentionally independent of the host's Ollama state. V1 rejects
+    // blank input before selecting its LLM engine, and the daemon must preserve
+    // that response at the public socket boundary.
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({
+            "method": "action.code_scan",
+            "params": {"code": " \n\t", "language": "bash", "mode": "llm"}
+        }),
+    )
+    .await;
+    assert_eq!(response["result"]["ok"], json!(false), "{response}");
+    assert_eq!(response["result"]["verdict"], json!("error"), "{response}");
+    assert_eq!(
+        response["result"]["summary"],
+        json!("scan error: empty input code"),
+        "{response}"
+    );
+    assert_eq!(response["result"]["elapsed_ms"], json!(0), "{response}");
     daemon.stop().await;
 }
 

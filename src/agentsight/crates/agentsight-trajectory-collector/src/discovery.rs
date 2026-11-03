@@ -1,10 +1,11 @@
 //! Local agent session file discovery.
 //!
-//! Scans known local AI agent session roots and returns JSONL files that can be
-//! converted into ATIF. Qoder/QoderWork/Claude Code share the Claude-style JSONL
-//! schema; Codex/Cursor roots are discovered here so converter support can be
-//! added without changing the API surface.
+//! Scans known local AI agent session roots for JSONL and legacy Gemini JSON
+//! files to convert into ATIF. Qoder/QoderWork/Claude Code share the JSONL
+//! schema; Codex/Cursor/Gemini CLI roots are discovered here so converter
+//! support can be added without changing the API surface.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Session file storage layout.
@@ -15,6 +16,9 @@ enum Layout {
     PerProject,
     /// `<root>/<session>.jsonl`.
     Flat,
+    /// Gemini sessions under `<root>/<project>/chats/`, with sub-agent
+    /// transcripts under `chats/<parent-session>/`; files use `.jsonl` or `.json`.
+    Chats,
 }
 
 /// Known local session roots relative to a home directory.
@@ -24,6 +28,12 @@ struct SessionRoot {
     layout: Layout,
     scan_subdirs: &'static [&'static str],
 }
+
+/// Maximum recursion below an explicit scan root when looking for SDK-owned
+/// `.claude/projects` trees. This covers per-session workspaces without turning
+/// a broad mount into an unbounded filesystem walk.
+const MAX_CLAUDE_ROOT_DEPTH: usize = 4;
+const MAX_CLAUDE_ROOT_DIRECTORIES: usize = 4096;
 
 const SESSION_ROOTS: &[SessionRoot] = &[
     SessionRoot {
@@ -62,6 +72,12 @@ const SESSION_ROOTS: &[SessionRoot] = &[
         layout: Layout::PerProject,
         scan_subdirs: &[],
     },
+    SessionRoot {
+        rel_dir: ".gemini/tmp",
+        source: "gemini-cli",
+        layout: Layout::Chats,
+        scan_subdirs: &[],
+    },
 ];
 
 /// A discovered session file.
@@ -84,11 +100,15 @@ pub struct DiscoveredSession {
 ///
 /// `scan_dirs` overrides the default scan roots. Each entry is interpreted by
 /// path (`.qoderwork`, `.qoder`, `.claude`, `.codex`, `.cursor`) to choose the
-/// source label and layout. When `None`, the current user's home directory is
-/// probed for all known roots.
+/// source label and layout. When `None`, standard homes and the inherited
+/// `CLAUDE_CONFIG_DIR` are probed. Explicit roots may also contain nested
+/// `.claude/projects` directories.
 pub fn discover_sessions(scan_dirs: Option<&[PathBuf]>) -> Vec<DiscoveredSession> {
     let roots = match scan_dirs {
-        Some(list) => list.iter().map(|dir| root_from_path(dir)).collect(),
+        Some(list) => list
+            .iter()
+            .flat_map(|dir| configured_scan_roots(dir))
+            .collect(),
         None => default_scan_roots(),
     };
 
@@ -104,8 +124,10 @@ pub fn discover_sessions(scan_dirs: Option<&[PathBuf]>) -> Vec<DiscoveredSession
         sessions.extend(discover_in_root(&root));
     }
 
-    // Sort by path for stable output
+    // Sort and deduplicate because a standard home root and
+    // `CLAUDE_CONFIG_DIR` may resolve to the same projects directory.
     sessions.sort_by(|a, b| a.path.cmp(&b.path));
+    sessions.dedup_by(|left, right| left.path == right.path);
     sessions
 }
 
@@ -154,7 +176,114 @@ fn default_scan_roots() -> Vec<ScanRoot> {
             }
         }
     }
+    if let Some(config_dir) =
+        std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
+    {
+        if let Some(root) = claude_config_scan_root(Path::new(&config_dir)) {
+            roots.push(root);
+        }
+    }
+    deduplicate_roots(roots)
+}
+
+/// Resolves one configured path into concrete session roots.
+///
+/// Claude Agent SDK deployments may create one `<workspace>/.claude` per
+/// tenant. Inspect bounded descendants for that canonical marker before
+/// applying the backward-compatible Qoder fallback.
+fn configured_scan_roots(dir: &Path) -> Vec<ScanRoot> {
+    // scan_dirs 可以包含 Hermes 数据库文件，不能将其当作 JSONL 目录反复读取。
+    if dir.is_file() {
+        return Vec::new();
+    }
+    if let Some(projects) = standard_claude_projects_root(dir) {
+        return vec![claude_scan_root(projects)];
+    }
+
+    let root = root_from_path(dir);
+    // 已知会话根目录不再递归探测，避免每轮遍历已有 Agent 的整个工程树。
+    if SESSION_ROOTS
+        .iter()
+        .any(|known| dir.ends_with(known.rel_dir))
+    {
+        return vec![root];
+    }
+    let mut roots = vec![root];
+    let mut projects = Vec::new();
+    let mut remaining = MAX_CLAUDE_ROOT_DIRECTORIES;
+    find_nested_claude_projects(dir, 0, &mut remaining, &mut projects);
+    roots.extend(projects.into_iter().map(claude_scan_root));
     roots
+}
+
+fn standard_claude_projects_root(dir: &Path) -> Option<PathBuf> {
+    if dir.file_name().is_some_and(|name| name == "projects")
+        && dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == ".claude")
+    {
+        return Some(dir.to_path_buf());
+    }
+    let projects = dir.join("projects");
+    (dir.file_name().is_some_and(|name| name == ".claude") && projects.is_dir()).then_some(projects)
+}
+
+/// Resolves the SDK's explicit config contract without guessing from its name.
+fn claude_config_scan_root(config_dir: &Path) -> Option<ScanRoot> {
+    let projects = config_dir.join("projects");
+    projects.is_dir().then(|| claude_scan_root(projects))
+}
+
+fn find_nested_claude_projects(
+    dir: &Path,
+    depth: usize,
+    remaining: &mut usize,
+    roots: &mut Vec<PathBuf>,
+) {
+    if depth >= MAX_CLAUDE_ROOT_DEPTH || *remaining == 0 {
+        return;
+    }
+    *remaining -= 1;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        if *remaining == 0 {
+            log::warn!("Claude 工作区扫描达到目录预算，请缩小 scan_dirs 范围");
+            break;
+        }
+        let path = entry.path();
+        if let Some(projects) = standard_claude_projects_root(&path) {
+            *remaining -= 1;
+            roots.push(projects);
+            continue;
+        }
+        find_nested_claude_projects(&path, depth + 1, remaining, roots);
+    }
+}
+
+fn claude_scan_root(dir: PathBuf) -> ScanRoot {
+    ScanRoot {
+        dir,
+        source: "claude-code".to_string(),
+        layout: Layout::PerProject,
+        scan_subdirs: &[],
+    }
+}
+
+fn deduplicate_roots(roots: Vec<ScanRoot>) -> Vec<ScanRoot> {
+    let mut seen = HashSet::new();
+    roots
+        .into_iter()
+        .filter(|root| seen.insert((root.dir.clone(), root.source.clone())))
+        .collect()
 }
 
 /// Infer the source and layout for a user-provided scan directory.
@@ -173,15 +302,26 @@ fn root_from_path(dir: &Path) -> ScanRoot {
     }
 
     // Backward-compatible default: existing configs passed Qoder projects dirs.
+    // A `.gemini` config without the `tmp` segment is normalized onto the
+    // runtime root the CLI actually writes chats under (reaching this point
+    // means no known root — including `.gemini/tmp` — matched the path).
+    let dir = if path.contains(".gemini") {
+        dir.join("tmp")
+    } else {
+        dir.to_path_buf()
+    };
+    let source = source_from_path(&dir);
     ScanRoot {
-        dir: dir.to_path_buf(),
-        source: source_from_path(dir),
+        dir,
+        source,
         layout: if path.contains(".codex") {
             Layout::Flat
+        } else if path.contains(".gemini") {
+            Layout::Chats
         } else {
             Layout::PerProject
         },
-        scan_subdirs: if path.contains(".codex") {
+        scan_subdirs: if path.contains(".codex") || path.contains(".gemini") {
             &[]
         } else {
             &["transcript"]
@@ -202,6 +342,8 @@ fn source_from_path(dir: &Path) -> String {
         "codex".to_string()
     } else if path.contains(".cursor") {
         "cursor".to_string()
+    } else if path.contains(".gemini") {
+        "gemini-cli".to_string()
     } else {
         "qoder".to_string()
     }
@@ -212,6 +354,7 @@ fn discover_in_root(root: &ScanRoot) -> Vec<DiscoveredSession> {
     match root.layout {
         Layout::PerProject => discover_in_projects_dir(root),
         Layout::Flat => discover_in_flat_dir(root),
+        Layout::Chats => discover_in_chats_dir(root),
     }
 }
 
@@ -292,6 +435,141 @@ fn discover_in_flat_dir_recursive(
             source: source.to_string(),
         });
     }
+}
+
+/// Discover sessions within a Gemini CLI root: `<root>/<project>/chats/`.
+///
+/// Project directories carry a registry slug, not the project path; the
+/// sibling `.project_root` marker file holds the absolute path and yields a
+/// human-readable project name. Runtime directories without a `chats/`
+/// child (e.g. `bin/`) hold no sessions and are skipped by the join.
+fn discover_in_chats_dir(root: &ScanRoot) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+
+    let entries = match std::fs::read_dir(&root.dir) {
+        Ok(e) => e,
+        Err(err) => {
+            log::warn!(
+                "Trajectory scan: failed to read {}: {err}",
+                root.dir.display()
+            );
+            return sessions;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let chats = path.join("chats");
+        if !chats.is_dir() {
+            continue;
+        }
+        let project = chats_project_name(&path)
+            .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+        sessions.extend(discover_in_chats_project(&chats, &project, &root.source));
+    }
+
+    sessions
+}
+
+/// Read the project name from a Gemini CLI project directory's
+/// `.project_root` marker (the absolute project path).
+fn chats_project_name(project_dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(project_dir.join(".project_root")).ok()?;
+    let name = Path::new(content.trim())
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Discover session files inside one `<project>/chats/` directory.
+///
+/// Main sessions use `.jsonl` record streams or legacy `.json` documents.
+/// Any non-empty stem is accepted; subdirectories hold
+/// sub-agent transcripts named by their full session id.
+fn discover_in_chats_project(chats: &Path, project: &str, source: &str) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+
+    let entries = match std::fs::read_dir(chats) {
+        Ok(e) => e,
+        Err(err) => {
+            log::debug!("Trajectory scan: failed to read {}: {err}", chats.display());
+            return sessions;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+        if is_dir {
+            sessions.extend(discover_chats_subagents(&path, project, source));
+            continue;
+        }
+        let Some(stem) = name
+            .strip_suffix(".jsonl")
+            .or_else(|| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if stem.is_empty() {
+            continue;
+        }
+        sessions.push(DiscoveredSession {
+            path,
+            project: project.to_string(),
+            session_id: stem.to_string(),
+            is_subagent: false,
+            source: source.to_string(),
+        });
+    }
+
+    sessions
+}
+
+/// Discover sub-agent transcripts under `chats/<parent-session>/`.
+///
+/// Gemini nests sub-agents below the parent's full session id (not the
+/// parent's file stem), so the composite id keeps per-file uniqueness but
+/// does not join back to the parent's discovered row.
+fn discover_chats_subagents(
+    parent_dir: &Path,
+    project: &str,
+    source: &str,
+) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+    let parent = parent_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let Ok(entries) = std::fs::read_dir(parent_dir) else {
+        return sessions;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(stem) = name
+            .strip_suffix(".jsonl")
+            .or_else(|| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if stem.is_empty() {
+            continue;
+        }
+        sessions.push(DiscoveredSession {
+            path: entry.path(),
+            project: project.to_string(),
+            session_id: format!("{parent}:subagent:{stem}"),
+            is_subagent: true,
+            source: source.to_string(),
+        });
+    }
+    sessions
 }
 
 /// Discover sessions within a single project directory.
@@ -580,6 +858,71 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_gemini_chats_layout() {
+        let base = tmp_projects_dir("gemini");
+        let root = base.join(".gemini").join("tmp");
+        let project = root.join("demo-slug");
+        let chats = project.join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        // The registry slug maps to a real path via the `.project_root` marker.
+        std::fs::write(
+            project.join(".project_root"),
+            "/Users/alice/work/demo-app\n",
+        )
+        .unwrap();
+        std::fs::write(
+            chats.join("session-2026-08-03T10-00-ab12cd34.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        // Sub-agent transcripts nest under the parent's full session id.
+        let parent = "b7c9ed01-1234-4abc-9def-aabbccddeeff";
+        let sub = chats.join(parent);
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("c0ffee12-4abc-4def-9abc-112233445566.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        // Runtime directories without a `chats/` child hold no sessions.
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+
+        let sessions = discover_sessions(Some(std::slice::from_ref(&root)));
+        assert_eq!(sessions.len(), 2, "main + subagent: {sessions:?}");
+
+        let main = sessions.iter().find(|s| !s.is_subagent).unwrap();
+        assert_eq!(main.session_id, "session-2026-08-03T10-00-ab12cd34");
+        assert_eq!(main.project, "demo-app");
+        assert_eq!(main.source, "gemini-cli");
+
+        let sub = sessions.iter().find(|s| s.is_subagent).unwrap();
+        assert_eq!(
+            sub.session_id,
+            format!("{parent}:subagent:c0ffee12-4abc-4def-9abc-112233445566")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_gemini_config_root_normalizes_to_tmp() {
+        let base = tmp_projects_dir("gemini-norm");
+        let config = base.join(".gemini");
+        let chats = config.join("tmp").join("demo-slug").join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(chats.join("session-x.jsonl"), "{}\n").unwrap();
+
+        // A config path ending at `.gemini` (no `tmp` segment) is normalized
+        // onto the runtime root the CLI actually writes chats under.
+        let sessions = discover_sessions(Some(std::slice::from_ref(&config)));
+        assert_eq!(sessions.len(), 1, "normalized root: {sessions:?}");
+        assert_eq!(sessions[0].source, "gemini-cli");
+        assert_eq!(sessions[0].session_id, "session-x");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn test_discover_known_claude_root_source() {
         let base = tmp_projects_dir("claude");
         let root = base.join(".claude").join("projects");
@@ -593,6 +936,121 @@ mod tests {
         assert_eq!(sessions[0].project, "demo");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_discover_claude_sdk_explicit_config_dir() {
+        let base = tmp_projects_dir("claude-config");
+        let config = base.join("custom-sdk-state");
+        let project = config
+            .join("projects")
+            .join("-var-lib-agent-sessions-alert-123");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
+
+        let root = claude_config_scan_root(&config).expect("config projects root");
+        let sessions = discover_in_root(&root);
+        assert_eq!(sessions.len(), 1, "explicit Claude config: {sessions:?}");
+        assert_eq!(sessions[0].source, "claude-code");
+        assert_eq!(sessions[0].project, "var-lib-agent-sessions-alert-123");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_discover_nested_claude_sdk_workspaces() {
+        let workspace = tmp_projects_dir("claude-workspaces");
+        for (tenant, session) in [("tenant-a", UUID_A), ("tenant-b", UUID_B)] {
+            let project = workspace
+                .join(tenant)
+                .join(".claude")
+                .join("projects")
+                .join(format!("-srv-agent-workspace-{tenant}"));
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join(format!("{session}.jsonl")), "{}\n").unwrap();
+        }
+
+        let sessions = discover_sessions(Some(std::slice::from_ref(&workspace)));
+        assert_eq!(sessions.len(), 2, "nested Claude workspaces: {sessions:?}");
+        assert!(sessions
+            .iter()
+            .all(|session| session.source == "claude-code"));
+        assert!(sessions.iter().any(|session| session.project == "tenant-a"));
+        assert!(sessions.iter().any(|session| session.project == "tenant-b"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn nested_discovery_preserves_existing_sessions_and_deduplicates() {
+        let workspace = tmp_projects_dir("mixed-roots");
+        let legacy = workspace.join("legacy");
+        let claude = workspace.join("tenant/.claude/projects");
+        let project = claude.join("-srv-workspace-tenant");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(legacy.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
+        std::fs::write(project.join(format!("{UUID_B}.jsonl")), "{}\n").unwrap();
+        let sessions = discover_sessions(Some(&[workspace.clone(), claude]));
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions
+            .iter()
+            .any(|s| s.session_id == UUID_A && s.source == "qoder"));
+        assert!(sessions
+            .iter()
+            .any(|s| s.session_id == UUID_B && s.source == "claude-code"));
+    }
+
+    #[test]
+    fn configured_files_are_not_jsonl_roots() {
+        let base = tmp_projects_dir("file-root");
+        let database = base.join("state.db");
+        std::fs::write(&database, "").unwrap();
+        assert!(configured_scan_roots(&database).is_empty());
+        // 保留尚不存在的目录，使后续创建的会话仍可被发现。
+        assert_eq!(configured_scan_roots(&base.join("later")).len(), 1);
+    }
+
+    #[test]
+    fn config_names_alone_do_not_identify_claude() {
+        let base = tmp_projects_dir("no-name-heuristic");
+        let dir = base.join("claude-unrelated/projects");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(standard_claude_projects_root(&dir).is_none());
+        assert_eq!(configured_scan_roots(&dir)[0].source, "qoder");
+    }
+
+    #[test]
+    fn nested_discovery_respects_depth_and_budget() {
+        let base = tmp_projects_dir("bounded-root");
+        let visible = base.join("one/two/three/.claude/projects");
+        let deep = base.join("one/two/three/four/.claude/projects");
+        std::fs::create_dir_all(&visible).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+        let mut roots = Vec::new();
+        let mut remaining = MAX_CLAUDE_ROOT_DIRECTORIES;
+        find_nested_claude_projects(&base, 0, &mut remaining, &mut roots);
+        assert_eq!(roots, vec![visible]);
+        roots.clear();
+        let mut remaining = 1;
+        find_nested_claude_projects(&base, 0, &mut remaining, &mut roots);
+        assert!(roots.is_empty());
+        assert_eq!(remaining, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_discovery_does_not_follow_directory_links() {
+        let base = tmp_projects_dir("symlink-root");
+        let workspace = base.join("workspace");
+        let external = base.join("external/.claude/projects");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::os::unix::fs::symlink(base.join("external"), workspace.join("linked")).unwrap();
+        let mut roots = Vec::new();
+        let mut remaining = MAX_CLAUDE_ROOT_DIRECTORIES;
+        find_nested_claude_projects(&workspace, 0, &mut remaining, &mut roots);
+        assert!(roots.is_empty());
     }
 
     #[test]

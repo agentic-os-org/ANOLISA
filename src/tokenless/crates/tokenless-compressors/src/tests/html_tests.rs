@@ -366,6 +366,90 @@ fn code_blocks_keep_language_and_verbatim_whitespace() {
 }
 
 #[test]
+fn code_block_fences_outgrow_the_longest_run_and_keep_three_tick_minimum() {
+    for (code, length) in [
+        ("", 3),
+        ("plain text", 3),
+        ("a`b", 3),
+        ("a``b", 3),
+        ("```", 4),
+        ("a``b`````c```d", 6),
+    ] {
+        let html = page(&format!(
+            "<p>{PARAGRAPH}</p><pre><code class=\"language-sh\">{code}</code></pre>"
+        ));
+        let fence = "`".repeat(length);
+        let view = HtmlExtractor.render(&html).unwrap();
+        assert_eq!(
+            body_of(&view),
+            format!("{PARAGRAPH}\n\n{fence}sh\n{code}\n{fence}"),
+            "code={code:?}"
+        );
+    }
+}
+
+#[test]
+fn code_block_fence_selection_is_bounded_for_long_backtick_runs() {
+    // A fetched page controls the run length. The old prefix-probing loop
+    // takes seconds here; the budget leaves ample room for one linear scan.
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(run.len() + 1);
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><pre class=\"lang-sh\">a{run}b</pre>"
+    ));
+    let started = std::time::Instant::now();
+    let view = HtmlExtractor.render(&html).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH}\n\n{fence}sh\na{run}b\n{fence}")
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "code block rendering took {elapsed:?}"
+    );
+}
+
+#[test]
+fn inline_code_spans_containing_double_backticks_keep_one_fence() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><p>Run <code>a``b</code>, <kbd>ctl``alt</kbd> and <samp>x `` y</samp>,          plain <code>a`b</code> stays.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}
+
+Run ```a``b```, ```ctl``alt``` and ```x `` y```, plain ``a`b`` stays."
+        )
+    );
+}
+
+#[test]
+fn inline_code_fence_choice_scans_a_long_backtick_run_once() {
+    // Fence selection is one linear pass over the span text: probing with
+    // `contains` for every prefix length is quadratic in the run length,
+    // and untrusted HTML controls that length (a 64 KiB run inside a code
+    // element stalled the quadratic form for seconds through the real
+    // compress path). A large run here doubles as the complexity guard.
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(64 * 1024 + 1);
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><p>Run <code>a{run}b</code> now.</p>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}
+
+Run {fence}a{run}b{fence} now."
+        )
+    );
+}
+
+#[test]
 fn lists_nest_and_ordered_lists_honor_start() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><ul><li>one<ul><li>one.a</li><li>one.b</li></ul></li>\
@@ -713,6 +797,72 @@ fn unbalanced_brackets_in_link_text_drop_the_link() {
         format!(
             "{PARAGRAPH} see [1] and ] here [cite [1]](/b) open [ [`a[b`](/d) \
              `] a ] b ![[ok]](/j.png)"
+        )
+    );
+}
+
+#[test]
+fn zero_rowspan_preserves_columns_in_its_row_group() {
+    for rowspan in ["0", "00", " 0 ", "3"] {
+        let html = page(&format!(
+            "<p>{PARAGRAPH}</p><table>\
+             <thead><tr><th>Region</th><th>Service</th><th>Count</th></tr></thead>\
+             <tbody><tr><td rowspan=\"{rowspan}\">EU</td><td>api</td><td>10</td></tr>\
+             <tr><td>worker</td><td>20</td></tr><tr><td>database</td><td>30</td></tr>\
+             </tbody></table>"
+        ));
+        assert_eq!(
+            body_of(&HtmlExtractor.render(&html).unwrap()),
+            format!(
+                "{PARAGRAPH}\n\n| Region | Service | Count |\n| --- | --- | --- |\n\
+                 | EU | api | 10 |\n|  | worker | 20 |\n|  | database | 30 |"
+            ),
+            "rowspan={rowspan:?}"
+        );
+    }
+}
+
+#[test]
+fn zero_rowspans_stop_at_each_row_group() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table>\
+         <thead><tr><th rowspan=\"0\">Region</th><th>Service</th><th>Count</th></tr>\
+         <tr><th>Name</th><th>Instances</th></tr></thead>\
+         <tbody><tr><td rowspan=\"0\">EU</td><td>api</td><td>10</td></tr>\
+         <tr><td>worker</td><td>20</td></tr></tbody>\
+         <tbody><tr><td rowspan=\"0\">US</td><td>web</td><td>30</td></tr>\
+         <tr><td>batch</td><td>40</td></tr></tbody>\
+         <tfoot><tr><td rowspan=\"0\">All</td><td>total</td><td>100</td></tr>\
+         <tr><td>expected</td><td>100</td></tr></tfoot></table>"
+    ));
+    assert_eq!(
+        body_of(&HtmlExtractor.render(&html).unwrap()),
+        format!(
+            "{PARAGRAPH}\n\n| Region | Service | Count |\n| --- | --- | --- |\n\
+             |  | Name | Instances |\n| EU | api | 10 |\n|  | worker | 20 |\n\
+             | US | web | 30 |\n|  | batch | 40 |\n| All | total | 100 |\n\
+             |  | expected | 100 |"
+        )
+    );
+}
+
+#[test]
+fn zero_rowspan_combines_with_colspan_after_the_first_row() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><table>\
+         <thead><tr><th>Region</th><th>Zone</th><th>Service</th><th>Count</th></tr></thead>\
+         <tbody><tr><td>US</td><td>east</td><td>web</td><td>5</td></tr>\
+         <tr><td rowspan=\"0\" colspan=\"2\">EU</td><td>api</td><td>10</td></tr>\
+         <tr></tr><tr><td>worker</td><td>20</td></tr>\
+         <tr><td>database</td><td>30</td></tr></tbody>\
+         <tbody><tr><td>AU</td><td>west</td><td>batch</td><td>40</td></tr></tbody></table>"
+    ));
+    assert_eq!(
+        body_of(&HtmlExtractor.render(&html).unwrap()),
+        format!(
+            "{PARAGRAPH}\n\n| Region | Zone | Service | Count |\n| --- | --- | --- | --- |\n\
+             | US | east | web | 5 |\n| EU |  | api | 10 |\n|  |\n\
+             |  |  | worker | 20 |\n|  |  | database | 30 |\n| AU | west | batch | 40 |"
         )
     );
 }

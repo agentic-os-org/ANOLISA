@@ -6,7 +6,7 @@
 //! recycled PID.
 
 use std::io::Read;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -201,7 +201,7 @@ pub(super) fn spawn_compactor(
     session_id: &str,
     kind: CompactionKind,
 ) -> std::io::Result<ActiveCompaction> {
-    let mut command = Command::new(program);
+    let mut command = crate::adapter::command_with_trusted_startup_path(program);
     command.args([
         "--headless",
         "--workspace",

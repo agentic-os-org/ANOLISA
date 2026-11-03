@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Relative markdown link checker for the documentation tree.
 
-Scans docs/**/*.md plus the root and component README files, extracts
-relative links, and verifies each target exists in the repository.
+Scans docs/**/*.md, contribution guides, archived Copilot Shell docs, and README entry points,
+extracts relative links, and verifies each target exists in the repository.
 External URLs, mailto and pure in-page anchors are skipped.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 # Inline links and images: [text](target) / ![alt](target) — both follow the
 # same relative path resolution rules, so a single pattern covers them.
@@ -27,25 +29,31 @@ def repo_root() -> Path:
 
 
 def files_to_check(root: Path) -> list[Path]:
-    # Scope: the published docs tree, root-level docs, and component README
-    # entry points. Deep in-tree docs (design notes, SKILL.md assets) are
-    # intentionally excluded to keep the gate focused on reader-facing paths.
+    # Keep archived reader-facing docs checked after they leave the website.
+    # Deep design notes and SKILL.md assets remain outside this gate.
     out = subprocess.run(
         [
             "git",
             "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
             "docs/**/*.md",
+            "contribute/**/*.md",
             ":(glob)docs/*.md",
             ":(glob)*.md",
             ":(glob)src/*/README*.md",
+            ":(glob)src/*/CONTRIBUTING*.md",
             ":(glob)src/*/python/*/README*.md",
+            ":(glob)deprecated/copilot-shell/README*.md",
+            ":(glob)deprecated/copilot-shell/docs/**/*.md",
         ],
         capture_output=True,
-        text=True,
         check=True,
         cwd=root,
     )
-    return [root / line for line in out.stdout.splitlines() if line]
+    return [root / os.fsdecode(name) for name in out.stdout.split(b"\0") if name]
 
 
 def check_file(md: Path, root: Path) -> list[str]:
@@ -57,7 +65,7 @@ def check_file(md: Path, root: Path) -> list[str]:
         target = match.group(1)
         if target.startswith(SKIP_PREFIXES):
             continue
-        path_part = target.split("#", 1)[0]
+        path_part = unquote(target.split("#", 1)[0])
         if not path_part:
             continue
         resolved = (md.parent / path_part).resolve()

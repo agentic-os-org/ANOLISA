@@ -1,6 +1,7 @@
-use crate::chrome_trace::{ChromeTraceEvent, ns_to_us};
+use crate::chrome_trace::{ChromeTraceEvent, ns_to_us, truncate_at_char_boundary};
 use crate::probes::sslsniff::SslEvent;
 use serde::{Deserialize, Serialize};
+use std::cell::OnceCell;
 use std::fmt;
 use std::rc::Rc;
 
@@ -39,6 +40,14 @@ pub struct ParsedSseEvent {
     source_event: Rc<SslEvent>,
     /// Whether this is a synthetic "done" marker (e.g., from chunked end "0\r\n\r\n")
     is_synthetic_done: bool,
+    parsed_body: Option<Rc<ParsedBody>>,
+    capture_source: Option<Rc<SslEvent>>,
+}
+
+#[derive(Debug)]
+struct ParsedBody {
+    value: serde_json::Value,
+    bytes: OnceCell<Vec<u8>>,
 }
 
 impl ParsedSseEvent {
@@ -59,6 +68,8 @@ impl ParsedSseEvent {
             data_len,
             source_event,
             is_synthetic_done: false,
+            parsed_body: None,
+            capture_source: None,
         }
     }
 
@@ -73,16 +84,69 @@ impl ParsedSseEvent {
             data_len: 0,
             source_event,
             is_synthetic_done: true,
+            parsed_body: None,
+            capture_source: None,
         }
     }
 
     /// Parse data as JSON value
     pub fn json_body(&self) -> Option<serde_json::Value> {
-        serde_json::from_slice::<serde_json::Value>(self.data()).ok()
+        self.with_json(|value| value.cloned())
+    }
+
+    /// Retain reduced JSON without materializing bytes for semantic delivery.
+    pub(crate) fn from_json(
+        id: Option<String>,
+        event: Option<String>,
+        retry: Option<u64>,
+        value: serde_json::Value,
+        source: SslEvent,
+    ) -> Self {
+        let mut result = Self::new(id, event, retry, 0, 0, Rc::new(source));
+        result.parsed_body = Some(Rc::new(ParsedBody {
+            value,
+            bytes: OnceCell::new(),
+        }));
+        result
+    }
+
+    /// Borrow reduced JSON, parsing only events that still carry raw bytes.
+    pub(crate) fn with_json<T>(&self, read: impl FnOnce(Option<&serde_json::Value>) -> T) -> T {
+        if let Some(body) = &self.parsed_body {
+            read(Some(&body.value))
+        } else {
+            read(serde_json::from_slice(self.data()).ok().as_ref())
+        }
+    }
+
+    /// Move reduced JSON when its owning aggregation is consumed.
+    pub(crate) fn into_json_body(mut self) -> Option<serde_json::Value> {
+        if let Some(body) = self.parsed_body.take() {
+            Some(Rc::try_unwrap(body).map_or_else(|shared| shared.value.clone(), |body| body.value))
+        } else {
+            serde_json::from_slice(self.data()).ok()
+        }
+    }
+
+    /// Charge parsed JSON and any lazily requested byte representation.
+    pub(crate) fn parsed_retained_bytes(&self) -> usize {
+        self.parsed_body.as_ref().map_or(0, |body| {
+            std::mem::size_of::<ParsedBody>()
+                + crate::utils::retained::json_bytes(&body.value)
+                + body.bytes.get().map_or(0, Vec::capacity)
+        })
     }
 
     /// Get data (zero-copy)
     pub fn data(&self) -> &[u8] {
+        if let Some(body) = &self.parsed_body {
+            return body.bytes.get_or_init(|| {
+                serde_json::to_vec(&body.value).unwrap_or_else(|error| {
+                    log::warn!("Cannot serialize reduced SSE event: {error}");
+                    Vec::new()
+                })
+            });
+        }
         let buf_len = self.source_event.buf.len();
         let start = self.data_offset.min(buf_len);
         let end = (self.data_offset + self.data_len).min(buf_len);
@@ -107,45 +171,49 @@ impl ParsedSseEvent {
     /// - DashScope/Bailian native protocol: a terminal `finish_reason` inside
     ///   the `output` **object**. It never sends `data: [DONE]`.
     pub fn is_done(&self) -> bool {
-        if self.is_synthetic_done {
+        self.with_json(|json| self.is_done_with_json(json))
+    }
+
+    /// Whether completion came from HTTP framing rather than SSE payload.
+    pub(crate) fn is_synthetic_done(&self) -> bool {
+        self.is_synthetic_done
+    }
+
+    /// Reuse the JSON parsed by an incremental consumer for terminator detection.
+    pub(crate) fn is_done_with_json(&self, json: Option<&serde_json::Value>) -> bool {
+        if self.is_synthetic_done || self.event.as_deref() == Some("message_stop") {
             return true;
         }
-        // Anthropic SSE: event field is "message_stop"
-        if self.event.as_deref() == Some("message_stop") {
+        if json.is_none() && matches!(self.body_str().trim(), "[DONE]" | "[END]") {
             return true;
         }
-        // OpenAI Responses API: do NOT terminate based on event field alone.
-        // The `response.completed` data field routinely exceeds 16KB (echoes
-        // instructions + tools + output), so the first TLS chunk only has
-        // the event header + truncated data. The stream must stay open to
-        // receive remaining chunks; it will terminate via the HTTP chunked
-        // end marker `0\r\n\r\n` (synthetic done) or when the data-field
-        // JSON is fully parseable (check below).
-        let data = self.data();
-        let text = String::from_utf8_lossy(data);
-        let trimmed = text.trim();
-        // OpenAI style
-        if trimmed == "[DONE]" || trimmed == "[END]" {
-            return true;
-        }
-        // Anthropic style: data contains {"type":"message_stop"}
-        // Responses API style: data contains {"type":"response.completed",...}
-        if trimmed.starts_with('{') {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                let t = v.get("type").and_then(|t| t.as_str());
-                if t == Some("message_stop")
-                    || t == Some("response.completed")
-                    || t == Some("response.failed")
-                    || t == Some("response.incomplete")
-                {
-                    return true;
-                }
-                if Self::is_dashscope_native_done(&v) {
-                    return true;
-                }
-            }
-        }
-        false
+        Self::json_is_done(json)
+    }
+
+    /// Detect JSON terminators without allocating an owned SSE event.
+    pub(crate) fn json_is_done(json: Option<&serde_json::Value>) -> bool {
+        json.is_some_and(|value| {
+            matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some(
+                    "message_stop"
+                        | "response.completed"
+                        | "response.failed"
+                        | "response.incomplete"
+                )
+            ) || Self::is_dashscope_native_done(value)
+                || value
+                    .get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|candidates| {
+                        candidates.iter().any(|candidate| {
+                            candidate
+                                .get("finishReason")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|reason| !reason.is_empty())
+                        })
+                    })
+        })
     }
 
     /// DashScope/Bailian native protocol terminator detection.
@@ -181,12 +249,36 @@ impl ParsedSseEvent {
 
     /// Get data length
     pub fn data_len(&self) -> usize {
-        self.data_len
+        if self.parsed_body.is_some() {
+            self.data().len()
+        } else {
+            self.data_len
+        }
+    }
+
+    pub(crate) fn data_offset(&self) -> usize {
+        self.data_offset
     }
 
     /// Get reference to source SslEvent
     pub fn source_event(&self) -> &SslEvent {
         &self.source_event
+    }
+
+    /// Preserve framing bytes when multiline data needs a separate joined payload.
+    pub(crate) fn with_capture_source(mut self, source: Rc<SslEvent>) -> Self {
+        self.capture_source = Some(source);
+        self
+    }
+
+    /// Original TLS read used by the stateful framing and continuation paths.
+    pub(crate) fn capture_event(&self) -> &SslEvent {
+        self.capture_source.as_deref().unwrap_or(&self.source_event)
+    }
+
+    /// Release framing provenance once the continuation buffer has consumed it.
+    pub(crate) fn release_capture_source(&mut self) {
+        self.capture_source = None;
     }
 }
 
@@ -438,9 +530,17 @@ impl SSEEvent {
         // Build args with SSE information
         let mut args = serde_json::Map::new();
 
-        // Add data (truncated for display if very long)
+        // Add data (truncated for display if very long). The cut must land on
+        // a character boundary: `data` is the decoded SSE body and a
+        // multi-byte character straddling byte 500 panicked the whole
+        // conversion (the aggregator turns every parsed event into a trace
+        // event).
         let data_preview = if self.data.len() > 500 {
-            format!("{}... ({} bytes total)", &self.data[..500], self.data.len())
+            format!(
+                "{}... ({} bytes total)",
+                truncate_at_char_boundary(&self.data, 500),
+                self.data.len()
+            )
         } else {
             self.data.clone()
         };
@@ -482,6 +582,46 @@ impl SSEEvent {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reduced_json_stays_unserialized_and_moves_into_delivery() {
+        let value = serde_json::json!({"candidates":[{"finishReason":"STOP"}], "text":"汉字🙂"});
+        let event = ParsedSseEvent::from_json(
+            None,
+            None,
+            None,
+            value.clone(),
+            make_event(b"").metadata_only(),
+        );
+        assert!(event.is_done());
+        assert_eq!(event.json_body(), Some(value.clone()));
+        let body = event.parsed_body.as_ref().unwrap();
+        assert!(body.bytes.get().is_none());
+        let address = body.value.get("text").unwrap().as_str().unwrap().as_ptr();
+        let moved = event.into_json_body().unwrap();
+        assert_eq!(moved["text"].as_str().unwrap().as_ptr(), address);
+        assert_eq!(moved, value);
+    }
+
+    #[test]
+    fn reduced_json_materializes_bytes_only_for_raw_consumers() {
+        let value = serde_json::json!({"payload":"hello"});
+        let event = ParsedSseEvent::from_json(
+            None,
+            None,
+            None,
+            value.clone(),
+            make_event(b"").metadata_only(),
+        );
+        let before = event.parsed_retained_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(event.data()).unwrap(),
+            value
+        );
+        assert_eq!(event.data_len(), event.data().len());
+        assert!(event.parsed_retained_bytes() > before);
+        assert_eq!(event.clone().into_json_body(), Some(value));
+    }
+
     fn make_event(data: &[u8]) -> Rc<SslEvent> {
         Rc::new(SslEvent {
             source: 0,
@@ -497,6 +637,43 @@ mod tests {
             is_handshake: false,
             ssl_ptr: 0x1,
         })
+    }
+
+    #[test]
+    fn sse_trace_preview_cuts_on_char_boundary() {
+        // 499 ASCII bytes then multi-byte characters straddling offset 500:
+        // the byte-index slice panicked here, aborting the trace conversion.
+        let mut data = "a".repeat(499);
+        data.push_str("中中中");
+        let event = SSEEvent {
+            id: None,
+            event: None,
+            data,
+            retry: None,
+        };
+        let trace = event.to_chrome_trace_event(1, 1, 0);
+        let preview = trace
+            .args
+            .as_ref()
+            .and_then(|args| args.get("data"))
+            .and_then(|v| v.as_str())
+            .expect("data preview");
+        assert!(preview.starts_with(&"a".repeat(499)));
+        assert!(
+            preview.contains("(508 bytes total)"),
+            "preview must report the full byte length: {preview}"
+        );
+        assert_eq!(trace.args.as_ref().unwrap()["data_length"], 508);
+
+        // Short data is untouched.
+        let short = SSEEvent {
+            id: None,
+            event: None,
+            data: "hello".to_string(),
+            retry: None,
+        };
+        let short_trace = short.to_chrome_trace_event(1, 1, 0);
+        assert_eq!(short_trace.args.as_ref().unwrap()["data"], "hello");
     }
 
     #[test]
@@ -826,6 +1003,35 @@ mod tests {
         container.events.push(SSEEvent::new("e2"));
         let traces = container.to_chrome_trace_events(1, 1, 0);
         assert_eq!(traces.len(), 2);
+    }
+
+    #[test]
+    fn test_is_done_gemini_terminal_finish_reason() {
+        let data = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11}}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(
+            parsed.is_done(),
+            "a chunk whose candidate carries a non-empty finishReason is the Gemini terminator"
+        );
+    }
+
+    #[test]
+    fn test_is_done_gemini_middle_chunks_keep_stream_open() {
+        // No finishReason field at all.
+        let data =
+            br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"index":0}]}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(!parsed.is_done());
+        // An explicit null finishReason is a middle chunk, not a terminator.
+        let data = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"finishReason":null,"index":0}]}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(
+            !parsed.is_done(),
+            "explicit null finishReason must keep the stream open"
+        );
     }
 
     #[test]

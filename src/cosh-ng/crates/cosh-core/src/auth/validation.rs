@@ -52,10 +52,14 @@ pub(super) fn validate_auth_response(
         }
     }
 
+    // A blank base_url is equivalent to an absent one: apply_auth_credentials
+    // persists an empty string when the template has no builtin value, and the
+    // shell prefills that value back when the provider is re-edited.
     let base_url = response
         .values
         .get("base_url")
         .map(String::as_str)
+        .filter(|url| !url.trim().is_empty())
         .or(template.builtin_base_url.as_deref());
     if let Some(base_url) = base_url {
         validate_base_url(base_url)?;
@@ -200,6 +204,32 @@ mod tests {
                 "model".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn treats_blank_base_url_as_absent() {
+        // Regression: apply_auth_credentials persists `base_url = ""` for the
+        // aliyun template (no builtin value), and the shell prefills that value
+        // when the provider is re-edited. A blank value must validate like an
+        // absent one or every re-auth fails with invalid base_url.
+        let template = template("aliyun");
+        for blank in ["", "   "] {
+            let ecs = response(
+                "aliyun",
+                &[("auth_source", "ecs_ram_role"), ("base_url", blank)],
+            );
+            assert_eq!(validate_auth_response(&template, &ecs), Ok(()));
+
+            let manual = response(
+                "aliyun",
+                &[
+                    ("access_key_id", "ak-test"),
+                    ("access_key_secret", "sk-test"),
+                    ("base_url", blank),
+                ],
+            );
+            assert_eq!(validate_auth_response(&template, &manual), Ok(()));
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::{AuditEventType, AuditStore, SqliteConfig};
+use anyhow::Context;
 use structopt::StructOpt;
 
 /// Audit query subcommand
@@ -32,14 +33,41 @@ pub struct AuditCommand {
     /// `--exclude "command -v" --exclude grepconf`. The hidden count is reported.
     #[structopt(long)]
     pub exclude: Vec<String>,
+
+    /// Override the database path
+    ///
+    /// Reads a copy of the database instead of the configured default — for
+    /// example a database copied from another host, or one written to the
+    /// `$HOME/.local/share/agentsight/` fallback directory.
+    #[structopt(long)]
+    pub db: Option<String>,
+}
+
+/// Resolve the optional `--type` filter into an [`AuditEventType`].
+///
+/// Unknown values are rejected instead of silently ignored: a typo like
+/// `--type llm_calls` used to fall through to "no filter" and return every
+/// audit event with exit code 0, which is worse than an error for a
+/// machine-facing command (`token --period` and `interruption --type` reject
+/// invalid values the same way, via structopt possible_values).
+fn resolve_event_type(raw: Option<&str>) -> Result<Option<AuditEventType>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    raw.parse::<AuditEventType>().map(Some).map_err(|_| {
+        format!(
+            "invalid --type '{raw}': valid values are 'llm' (llm_call) and \
+             'process' (process_action)"
+        )
+    })
 }
 
 impl AuditCommand {
     pub fn execute(&self) {
-        let db_path = SqliteConfig::default().db_path();
+        let db_path = self.db_path();
 
-        if !db_path.exists() {
-            eprintln!("Database file not found: {db_path:?}");
+        if let Err(error) = agentsight::check_data_file(&db_path) {
+            eprintln!("{error}");
             std::process::exit(1);
         }
 
@@ -56,43 +84,96 @@ impl AuditCommand {
             }
         };
 
-        let event_type = self
-            .event_type
-            .as_ref()
-            .and_then(|t| t.parse::<AuditEventType>().ok());
-
-        if self.summary {
-            if !self.exclude.is_empty() {
-                eprintln!(
-                    "Note: --exclude is not applied to --summary (summary always reflects the full dataset)."
-                );
+        let event_type = match resolve_event_type(self.event_type.as_deref()) {
+            Ok(event_type) => event_type,
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
             }
-            self.print_summary(&store);
-            return;
-        }
+        };
 
-        if let Some(pid) = self.pid {
-            self.query_by_pid(&store, pid, event_type);
-        } else {
-            self.query_by_time(&store, event_type);
+        if let Err(error) = self.run(&store, event_type) {
+            eprintln!("{error:#}");
+            std::process::exit(1);
         }
     }
 
-    fn query_by_time(&self, store: &AuditStore, event_type: Option<AuditEventType>) {
+    /// Resolve the database path: `--db` reads a copy of the database (a
+    /// database copied from another host, or one in a non-default data
+    /// directory); without it the configured default is used.
+    fn db_path(&self) -> std::path::PathBuf {
+        self.db
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| SqliteConfig::default().db_path())
+    }
+
+    /// Run the requested query and report whether it succeeded.
+    ///
+    /// A query that fails used to print to stderr and exit 0, so a script (or
+    /// `--json`) could not tell it apart from "no events in the window": the
+    /// output was empty either way. `execute` maps the error to a non-zero
+    /// exit, the same way the open and `--type` failures above do.
+    fn run(&self, store: &AuditStore, event_type: Option<AuditEventType>) -> anyhow::Result<()> {
+        if self.summary {
+            for note in self.summary_notes(event_type) {
+                eprintln!("{note}");
+            }
+            return self.print_summary(store);
+        }
+
+        if let Some(pid) = self.pid {
+            self.query_by_pid(store, pid, event_type)
+        } else {
+            self.query_by_time(store, event_type)
+        }
+    }
+
+    fn query_by_time(
+        &self,
+        store: &AuditStore,
+        event_type: Option<AuditEventType>,
+    ) -> anyhow::Result<()> {
         let hours = self.last.unwrap_or(24);
         let since_ns = super::hours_ago_ns(hours);
 
         match store.query_since(since_ns, event_type) {
-            Ok(records) => self.output_records(&records, &format!("Last {hours} hours")),
-            Err(e) => eprintln!("Query failed: {e}"),
+            Ok(records) => {
+                self.output_records(&records, &format!("Last {hours} hours"));
+                Ok(())
+            }
+            Err(e) => Err(e).context("Query failed"),
         }
     }
 
-    fn query_by_pid(&self, store: &AuditStore, pid: u32, event_type: Option<AuditEventType>) {
-        match store.query_by_pid(pid, event_type) {
-            Ok(records) => self.output_records(&records, &format!("PID {pid}")),
-            Err(e) => eprintln!("Query failed: {e}"),
-        }
+    fn query_by_pid(
+        &self,
+        store: &AuditStore,
+        pid: u32,
+        event_type: Option<AuditEventType>,
+    ) -> anyhow::Result<()> {
+        let records = self
+            .query_pid_records(store, pid, event_type)
+            .context("Query failed")?;
+        let hours = self.last.unwrap_or(24);
+        self.output_records(&records, &format!("PID {pid}, last {hours} hours"));
+        Ok(())
+    }
+
+    /// Resolve the `--last` window and fetch the pid's records.
+    ///
+    /// Split out of [`Self::query_by_pid`] so tests can assert on the rows the
+    /// command would print: the pid path used to drop `--last` entirely and
+    /// return every row ever recorded for the pid.
+    fn query_pid_records(
+        &self,
+        store: &AuditStore,
+        pid: u32,
+        event_type: Option<AuditEventType>,
+    ) -> anyhow::Result<Vec<agentsight::AuditRecord>> {
+        let hours = self.last.unwrap_or(24);
+        let since_ns = super::hours_ago_ns(hours);
+        store.query_by_pid(pid, since_ns, event_type)
     }
 
     fn is_excluded(&self, record: &agentsight::AuditRecord) -> bool {
@@ -173,7 +254,32 @@ impl AuditCommand {
         }
     }
 
-    fn print_summary(&self, store: &AuditStore) {
+    /// Filters that `--summary` cannot honour, one note each.
+    ///
+    /// The summary aggregates the whole window and always covers both event
+    /// kinds, so a filter given beside it is silently dropped and the totals
+    /// read as if they came from that filter. `--pid` and `--exclude` already
+    /// said so; `--type` did not, so `audit --summary --type llm` printed a
+    /// number that looked like the LLM half while counting process actions
+    /// too.
+    fn summary_notes(&self, event_type: Option<AuditEventType>) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.pid.is_some() {
+            notes.push("Note: --pid is not applied to --summary.".to_string());
+        }
+        if event_type.is_some() {
+            notes.push("Note: --type is not applied to --summary.".to_string());
+        }
+        if !self.exclude.is_empty() {
+            notes.push(
+                "Note: --exclude is not applied to --summary (summary always reflects the full dataset)."
+                    .to_string(),
+            );
+        }
+        notes
+    }
+
+    fn print_summary(&self, store: &AuditStore) -> anyhow::Result<()> {
         let hours = self.last.unwrap_or(24);
         let since_ns = super::hours_ago_ns(hours);
 
@@ -203,8 +309,9 @@ impl AuditCommand {
                         }
                     }
                 }
+                Ok(())
             }
-            Err(e) => eprintln!("Summary query failed: {e}"),
+            Err(e) => Err(e).context("Summary query failed"),
         }
     }
 }
@@ -240,7 +347,21 @@ mod tests {
             json,
             summary: false,
             exclude,
+            db: None,
         }
+    }
+
+    #[test]
+    fn db_path_honours_the_override_and_falls_back_to_the_default() {
+        // `--db` must reach the query path: reverting the wiring (returning
+        // the default unconditionally) makes this fail.
+        let mut c = cmd(vec![], false);
+        assert_eq!(c.db_path(), SqliteConfig::default().db_path());
+        c.db = Some("/tmp/agentsight_audit_override.db".into());
+        assert_eq!(
+            c.db_path(),
+            std::path::PathBuf::from("/tmp/agentsight_audit_override.db")
+        );
     }
 
     #[test]
@@ -270,5 +391,198 @@ mod tests {
         // the filtered / hidden-count paths in output_records.
         cmd(vec!["grepconf".to_string()], false).output_records(&records, "test");
         cmd(vec!["grepconf".to_string()], true).output_records(&records, "test");
+    }
+
+    #[test]
+    fn resolve_event_type_accepts_absence_and_both_aliases() {
+        assert!(matches!(resolve_event_type(None), Ok(None)));
+        for raw in ["llm", "llm_call"] {
+            assert!(
+                matches!(
+                    resolve_event_type(Some(raw)),
+                    Ok(Some(AuditEventType::LlmCall))
+                ),
+                "{raw} must resolve to LlmCall"
+            );
+        }
+        for raw in ["process", "process_action"] {
+            assert!(
+                matches!(
+                    resolve_event_type(Some(raw)),
+                    Ok(Some(AuditEventType::ProcessAction))
+                ),
+                "{raw} must resolve to ProcessAction"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_event_type_rejects_unknown_values() {
+        // Before this guard a typo like "llm_calls" was silently dropped and
+        // the query returned BOTH event types with exit code 0 — worse than an
+        // error for a machine-facing command.
+        for raw in ["llm_calls", "processes", ""] {
+            let Err(error) = resolve_event_type(Some(raw)) else {
+                panic!("{raw:?} must be rejected, not silently treated as no filter");
+            };
+            assert!(
+                error.contains("--type"),
+                "{raw:?}: error must name the flag: {error}"
+            );
+            assert!(
+                error.contains("llm") && error.contains("process"),
+                "{raw:?}: error must list the valid values: {error}"
+            );
+        }
+    }
+
+    /// A read-only store whose `audit_events` table holds two `llm_call` rows
+    /// for pid 4242: one a minute old and one 30 days old. Returns the recent
+    /// timestamp so tests can assert which row survived the window.
+    fn pid_window_store(name: &str) -> (AuditStore, std::path::PathBuf, u64) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos() as u64;
+        let recent_ns = now_ns - 60 * 1_000_000_000;
+        let old_ns = now_ns - 30 * 24 * 3_600_000_000_000;
+
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_audit_pid_window_{name}_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    timestamp_ns INTEGER NOT NULL,
+                    pid INTEGER NOT NULL,
+                    ppid INTEGER,
+                    comm TEXT NOT NULL,
+                    duration_ns INTEGER DEFAULT 0,
+                    extra TEXT,
+                    session_id TEXT
+                );",
+            )
+            .unwrap();
+            let extra = serde_json::json!({
+                "provider": "openai",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "is_sse": true,
+            })
+            .to_string();
+            for timestamp_ns in [recent_ns, old_ns] {
+                conn.execute(
+                    "INSERT INTO audit_events
+                     (event_type, timestamp_ns, pid, comm, duration_ns, extra)
+                     VALUES ('llm_call', ?1, 4242, 'agent', 0, ?2)",
+                    rusqlite::params![timestamp_ns as i64, extra],
+                )
+                .unwrap();
+            }
+        }
+        let store = AuditStore::open_read_only_existing(&path, "audit_events").unwrap();
+        (store, path, recent_ns)
+    }
+
+    #[test]
+    fn pid_query_honours_last_window() {
+        let (store, path, recent_ns) = pid_window_store("window");
+        // The CLI dropped `self.last` on the pid path and the store query had
+        // no timestamp bound, so `--pid 4242 --last 1` returned the 30-day-old
+        // row too.
+        let mut c = cmd(vec![], false);
+        c.pid = Some(4242);
+        c.last = Some(1);
+        let records = c.query_pid_records(&store, 4242, None).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            records.len(),
+            1,
+            "--pid must only return rows inside the --last window"
+        );
+        assert_eq!(records[0].timestamp_ns, recent_ns);
+    }
+
+    /// An `audit_events` table that exists but lacks the columns the queries
+    /// select: opening succeeds (the store only asserts the table exists) and
+    /// every query fails, like an old or damaged database does.
+    fn stale_schema_store(name: &str) -> (AuditStore, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_stale_audit_{name}_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE audit_events (id INTEGER PRIMARY KEY);")
+                .unwrap();
+        }
+        let store = AuditStore::open_read_only_existing(&path, "audit_events").unwrap();
+        (store, path)
+    }
+
+    #[test]
+    fn query_failures_surface_instead_of_exiting_zero() {
+        // A failed query used to print to stderr and exit 0, so a script (or
+        // `--json`) could not tell it apart from "no events in the window".
+        let c = cmd(vec![], true);
+        let (store, path) = stale_schema_store("query");
+        let result = c.run(&store, None);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "a failed audit query must be reported as an error"
+        );
+    }
+
+    /// Every filter the summary drops is named, and only those.
+    ///
+    /// `--type` was the one filter given beside `--summary` that produced no
+    /// note, so `audit --summary --type llm` printed totals that read as the
+    /// LLM half of the window while counting process actions as well.
+    #[test]
+    fn summary_names_every_filter_it_cannot_honour() {
+        let mut c = cmd(vec![], false);
+        assert!(c.summary_notes(None).is_empty(), "no filter, no note");
+
+        c.pid = Some(42);
+        c.exclude = vec!["grepconf".into()];
+        assert_eq!(
+            c.summary_notes(Some(AuditEventType::LlmCall)),
+            [
+                "Note: --pid is not applied to --summary.",
+                "Note: --type is not applied to --summary.",
+                "Note: --exclude is not applied to --summary (summary always reflects the full dataset).",
+            ]
+        );
+
+        // A filter on its own still produces its own note.
+        let only_type = cmd(vec![], false);
+        assert_eq!(
+            only_type.summary_notes(Some(AuditEventType::LlmCall)),
+            ["Note: --type is not applied to --summary."]
+        );
+    }
+
+    #[test]
+    fn summary_failures_surface_instead_of_exiting_zero() {
+        let mut c = cmd(vec![], true);
+        c.summary = true;
+        let (store, path) = stale_schema_store("summary");
+        let result = c.run(&store, None);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "a failed audit summary must be reported as an error"
+        );
     }
 }

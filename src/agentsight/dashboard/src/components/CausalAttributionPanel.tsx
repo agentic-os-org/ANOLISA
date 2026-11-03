@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { runCausalAttribution } from '../utils/apiClient';
+import { truncateText } from '../utils/text';
 import type {
   CausalAttrib,
   CausalFinding,
@@ -238,9 +239,7 @@ function NodeRect({
     };
   // Truncate the evaluator's summary so it fits within the node width. The
   // full text is shown in the detail panel below the graph.
-  const shortTag = (node.tag || '').length > 14
-    ? `${(node.tag || '').slice(0, 13)}…`
-    : (node.tag || '');
+  const shortTag = truncateText(node.tag || '', 13);
 
   return (
     <g style={{ cursor: 'pointer' }} onClick={onClick}>
@@ -379,7 +378,7 @@ function CausalGraph({
               </div>
             ) : (
               <p className="text-sm text-gray-600 italic mb-2">
-                {(selected.plain || '').slice(0, 200)}
+                {truncateText(selected.plain || '', 200)}
               </p>
             )}
 
@@ -498,6 +497,11 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   const [selectedAltIdx, setSelectedAltIdx] = useState<number | null>(null);
   const [stageIdx, setStageIdx] = useState(0);
   const [elapsed, setElapsed] = useState(0);
+  // Version token for the active (session, round, scope). An attribution run
+  // takes seconds; if the user switches rounds while one is in flight, its
+  // response describes the old key and must not be rendered — or filed — as
+  // the new one's result.
+  const requestVersion = useRef(0);
 
   // Stage definitions with estimated durations (seconds)
   const stages = [
@@ -508,8 +512,13 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
 
   // Load prior runs for this (session, round, scope) on mount. If there's at
   // least one, auto-display the most recent so the user sees their last
-  // result without re-running the LLM pipeline.
+  // result without re-running the LLM pipeline. A key change also invalidates
+  // any in-flight run (bump the version) and clears the previous key's case:
+  // leaving it up would render the old round's verdict under the new label.
   useEffect(() => {
+    requestVersion.current += 1;
+    setLoading(false);
+    setError(null);
     const past = readHistory(sessionId, roundIndex, idKind);
     setHistory(past);
     if (past.length > 0) {
@@ -517,14 +526,18 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
       setCaseData(latest.caseData);
       setComplaint(latest.complaint);
       setCached(true);
-      setSelectedAltIdx(null);
+    } else {
+      setCaseData(null);
+      setCached(false);
     }
+    setSelectedAltIdx(null);
   }, [sessionId, roundIndex, idKind]);
 
   const canRun = complaint.trim().length > 0 && !loading;
 
   const run = async (force: boolean) => {
     if (!canRun) return;
+    const version = requestVersion.current;
     setLoading(true);
     setError(null);
     setStageIdx(0);
@@ -532,6 +545,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
 
     // Animate stage progression based on estimated time per stage
     const timer = window.setInterval(() => {
+      if (requestVersion.current !== version) return;
       setElapsed((prev) => {
         const next = prev + 1;
         let cumulative = 0;
@@ -555,6 +569,10 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
         id_kind: idKind,
       };
       const res = await runCausalAttribution(req);
+      // The key changed while the request was in flight: this result belongs
+      // to the round the user has left, so discard it instead of renaming the
+      // old verdict, graph, and history under the new round's label.
+      if (requestVersion.current !== version) return;
       setCaseData(res.case);
       setCached(res.cached);
       setStageIdx(stages.length); // mark complete
@@ -568,10 +586,12 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
       );
       setHistory(next);
     } catch (e) {
-      setError(e instanceof Error ? e.message : '归因失败');
+      if (requestVersion.current === version) {
+        setError(e instanceof Error ? e.message : '归因失败');
+      }
     } finally {
       window.clearInterval(timer);
-      setLoading(false);
+      if (requestVersion.current === version) setLoading(false);
     }
   };
 

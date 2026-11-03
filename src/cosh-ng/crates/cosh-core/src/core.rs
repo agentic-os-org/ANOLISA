@@ -272,7 +272,7 @@ impl CoshCore {
     /// reserve inside [`crate::compaction::estimate_prefix_tokens`] instead
     /// of being rendered here.
     pub(crate) fn estimate_prefix_tokens(&self) -> u64 {
-        let system_prompt = ContextBuilder::build_system_prompt_with_extensions(
+        let mut system_prompt = ContextBuilder::build_system_prompt_with_extensions(
             &self.cwd(),
             &self.tool_names(),
             &[],
@@ -280,6 +280,8 @@ impl CoshCore {
             self.config.ai.output_language.as_deref(),
             self.extension_context.as_deref(),
         );
+        self.workspace
+            .append_model_guidance(&mut system_prompt, self.tools.contains("shell"));
         let declarations = serde_json::to_string(&self.tools.declarations()).unwrap_or_default();
         crate::compaction::estimate_prefix_tokens(&system_prompt, &declarations)
     }
@@ -557,7 +559,7 @@ impl CoshCore {
             extra_params: self.extra_params.clone(),
         };
 
-        let system_prompt = ContextBuilder::build_system_prompt_with_extensions(
+        let mut system_prompt = ContextBuilder::build_system_prompt_with_extensions(
             &self.cwd(),
             &self.tool_names(),
             &skill_summaries,
@@ -565,6 +567,8 @@ impl CoshCore {
             self.config.ai.output_language.as_deref(),
             self.extension_context.as_deref(),
         );
+        self.workspace
+            .append_model_guidance(&mut system_prompt, self.tools.contains("shell"));
         // Runtime prefix estimate (P): system prompt + serialized tool
         // declarations + the compaction module's reserve for hook context
         // injected mid-run.

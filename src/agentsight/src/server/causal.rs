@@ -263,7 +263,10 @@ struct Attribution {
     #[serde(default)]
     title: Option<String>,
     /// Agent's actual final conclusion, quoted verbatim from the last step's
-    /// response — used to populate the "关键矛盾" panel deterministically.
+    /// response. Anchored to that step's text before the "关键矛盾" panel uses
+    /// it: a quote the transcript does not carry is replaced by the genuine
+    /// final response, so the panel never speaks for the agent with words it
+    /// never wrote.
     #[serde(default)]
     actual_conclusion: Option<String>,
     /// Other candidates the evaluator considers plausible, sorted by
@@ -274,6 +277,31 @@ struct Attribution {
 }
 
 // ─── Endpoint ────────────────────────────────────────────────────────────────
+
+/// Scopes `id_kind` can name. Omitted means "infer from the value shape".
+const ID_KINDS: [&str; 2] = ["session", "conversation"];
+
+/// Reject an `id_kind` the endpoint cannot honor.
+///
+/// The field is documented as naming what `session_id` carries, and the
+/// dashboard types it as `'session' | 'conversation'`, but every other token
+/// fell back to session scope: an attribution then covered the whole session
+/// while the caller believed it had asked for one conversation, with no error
+/// to notice.
+fn parse_id_kind(id_kind: Option<&str>) -> Result<Option<&str>, HttpResponse> {
+    match id_kind {
+        None => Ok(None),
+        Some(kind) if ID_KINDS.contains(&kind) => Ok(Some(kind)),
+        Some(kind) => Err(HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "invalid_id_kind",
+            "message": format!(
+                "unknown id_kind '{kind}': expected one of {}",
+                ID_KINDS.join(", ")
+            ),
+            "valid_id_kinds": ID_KINDS,
+        }))),
+    }
+}
 
 /// POST /api/causal-attribution
 ///
@@ -293,6 +321,14 @@ pub async fn run_causal_attribution(
         }));
     }
 
+    // `id_kind` is a closed set; the value shape cannot disambiguate a typo
+    // from a real scope, so reject an unknown token instead of silently
+    // attributing the whole session.
+    let id_kind = match parse_id_kind(req.id_kind.as_deref()) {
+        Ok(id_kind) => id_kind,
+        Err(response) => return response,
+    };
+
     let opt = match state.optimize.as_ref() {
         Some(o) => Arc::clone(o),
         None => {
@@ -310,7 +346,7 @@ pub async fn run_causal_attribution(
     // attribute only the events under a specific conversation_id; we keep
     // that id verbatim and pass it to load_trajectory. Any other scope
     // goes through the legacy resolver (32 hex → session UUID fallback).
-    let is_conversation_scope = req.id_kind.as_deref() == Some("conversation");
+    let is_conversation_scope = id_kind == Some("conversation");
     let resolved_session_id = if is_conversation_scope {
         log::info!(
             "Causal attribution: conversation scope — using '{}' as conversation_id directly",
@@ -345,7 +381,7 @@ pub async fn run_causal_attribution(
         "sess"
     };
     let cache_key = (
-        format!("{}:{}", scope_tag, resolved_session_id),
+        format!("{scope_tag}:{resolved_session_id}"),
         req.round_index,
     );
     if !req.force {
@@ -419,7 +455,7 @@ pub async fn run_causal_attribution(
         &resolved_session_id,
         genai_store.as_deref(),
         trajectory_store.as_deref(),
-        req.id_kind.as_deref(),
+        id_kind,
     ) {
         Ok(t) => t,
         Err(e) => {
@@ -1190,6 +1226,19 @@ fn is_agent(step: &Step) -> bool {
     step.source == StepSource::Agent
 }
 
+/// Index of the step that anchors a round's outcome.
+///
+/// The last substantive Agent message is the delivery; trailing bookkeeping
+/// heartbeats (empty message) and System steps carry no answer, so they must
+/// not be labelled the conclusion. Falls back to any non-user step so a round
+/// without an agent message still renders an endpoint.
+fn last_delivery_index(steps: &[Step]) -> Option<usize> {
+    steps
+        .iter()
+        .rposition(|s| is_agent(s) && !s.message.trim().is_empty())
+        .or_else(|| steps.iter().rposition(|s| !is_user(s)))
+}
+
 fn calls_of(step: &Step) -> &[ToolCall] {
     step.tool_calls.as_deref().unwrap_or(&[])
 }
@@ -1256,7 +1305,7 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
             let found: Option<String> = conn
                 .query_row(sql, [incoming], |r| r.get::<_, String>(0))
                 .ok();
-            log::info!("resolver: conversation_id lookup → {:?}", found);
+            log::info!("resolver: conversation_id lookup → {found:?}");
             if found.is_some() {
                 return found;
             }
@@ -1272,13 +1321,13 @@ fn resolve_to_session_id(db_path: &std::path::Path, incoming: &str) -> Option<St
         let found: Option<String> = conn
             .query_row(sql, [incoming], |r| r.get::<_, String>(0))
             .ok();
-        log::info!("resolver: trace_id lookup → {:?}", found);
+        log::info!("resolver: trace_id lookup → {found:?}");
         if found.is_some() {
             return found;
         }
     }
 
-    log::info!("resolver: no mapping for '{}' — passthrough", incoming);
+    log::info!("resolver: no mapping for '{incoming}' — passthrough");
     None
 }
 
@@ -1397,9 +1446,7 @@ fn probe_atif_column(
 
         for column in text_columns {
             let sample_sql = format!(
-                "SELECT \"{col}\" FROM \"{table}\" WHERE \"{col}\" IS NOT NULL LIMIT 1",
-                col = column,
-                table = table,
+                "SELECT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL LIMIT 1",
             );
             let sample: Option<String> = conn
                 .query_row(&sample_sql, [], |r| r.get::<_, String>(0))
@@ -1415,17 +1462,8 @@ fn probe_atif_column(
             // typical of local trajectory stores).
             let session_column = find_session_column(&conn, &table)?;
             let rows_sql = match session_column.as_deref() {
-                Some(col) => format!(
-                    "SELECT \"{col}\" FROM \"{table}\" WHERE \"{sid_col}\" = ?1",
-                    col = column,
-                    table = table,
-                    sid_col = col,
-                ),
-                None => format!(
-                    "SELECT \"{col}\" FROM \"{table}\"",
-                    col = column,
-                    table = table,
-                ),
+                Some(col) => format!("SELECT \"{column}\" FROM \"{table}\" WHERE \"{col}\" = ?1",),
+                None => format!("SELECT \"{column}\" FROM \"{table}\"",),
             };
             let mut rows = match conn.prepare(&rows_sql) {
                 Ok(s) => s,
@@ -1448,7 +1486,12 @@ fn probe_atif_column(
             };
             for value in values {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value) {
-                    if session_matches(&parsed, session_id) {
+                    // `scoped`: the SQL above filtered by the session column,
+                    // so a document without a session_id field is still known
+                    // to belong to the requested session. In the unscoped
+                    // branch the whole table was scanned, and a row without
+                    // session_id must not be attributed to every caller.
+                    if session_matches(&parsed, session_id, session_column.is_some()) {
                         return Ok(Some(value));
                     }
                 }
@@ -1477,14 +1520,17 @@ fn find_session_column(conn: &rusqlite::Connection, table: &str) -> Result<Optio
         .find(|n| n == "session_id" || n.to_lowercase().contains("session_id")))
 }
 
-/// Best-effort check that a parsed ATIF document carries the requested session
-/// id — used when the hosting table has no dedicated session_id column.
-fn session_matches(doc: &serde_json::Value, session_id: &str) -> bool {
+/// Best-effort check that a parsed ATIF document belongs to the requested
+/// session.
+///
+/// `scoped` says whether the SQL query that produced the document already
+/// filtered on a session column. A document without a top-level `session_id`
+/// is only acceptable in that case: during an unscoped full-table scan
+/// accepting it would return an arbitrary row for any requested session.
+fn session_matches(doc: &serde_json::Value, session_id: &str, scoped: bool) -> bool {
     match doc.get("session_id").and_then(|v| v.as_str()) {
         Some(s) => s == session_id,
-        // No session_id field on the document → accept; the caller has
-        // already scoped the query to a specific session row.
-        None => true,
+        None => scoped,
     }
 }
 
@@ -1678,10 +1724,7 @@ fn normalize_kind(raw: &str) -> String {
         // Fall through: keep the raw string but lowercase so the frontend's
         // defensive fallback style kicks in instead of crashing.
         other => {
-            log::warn!(
-                "causal-attribution: unknown verdict.kind {:?}, treating as ok",
-                other,
-            );
+            log::warn!("causal-attribution: unknown verdict.kind {other:?}, treating as ok",);
             "ok".to_string()
         }
     }
@@ -1811,7 +1854,7 @@ fn build_case(
     // it is withheld unless nothing else was selected, so a routine heartbeat at
     // the tail of a long session cannot drown out the real failure chain.
     if !alleging || selected_indices.is_empty() {
-        if let Some(i) = steps.iter().rposition(|s| !is_user(s)) {
+        if let Some(i) = last_delivery_index(steps) {
             if seen.insert(i) {
                 selected_indices.push(i);
             }
@@ -1831,7 +1874,7 @@ fn build_case(
         // Reference-only: the agent's last step is used to decide how to
         // label an endpoint node; it does NOT force that step into the
         // selected set (that decision lives above).
-        let last_agent_idx = steps.iter().rposition(|s| !is_user(s));
+        let last_agent_idx = last_delivery_index(steps);
 
         // Kind resolution: normalize the evaluator's free-form value first,
         // then apply anchor-role overrides for the user's first message and
@@ -2083,15 +2126,15 @@ fn build_contra(steps: &[Step], attr: &Attribution) -> Option<CausalContra> {
         .filter(|s| !s.message.is_empty())
         .map(|s| format!("用户原始任务：{}", truncate(&s.message, 400)))?;
 
-    // "Said" = what the agent delivered. Prefer the LLM-quoted actual
-    // conclusion (verbatim from the last response); fall back to the
-    // verdict/outcome_note which summarize the delivery failure in a way
-    // the user can still contrast with their intent.
-    let said = attr
-        .actual_conclusion
-        .clone()
-        .filter(|c| !c.trim().is_empty())
-        .map(|c| format!("agent 最终交付：{}", truncate(&c, 400)))
+    // "Said" = what the agent delivered. `actual_conclusion` is a quote the
+    // evaluator was told to copy verbatim from the final step, but a quote is
+    // model output like any other: left unverified it can paraphrase or invent
+    // a delivery and put it under this panel's authority. The quote is
+    // therefore anchored to the transcript — kept only when the final agent
+    // step actually carries it, otherwise replaced by that step's genuine
+    // response — so the contrast never rests on the evaluator's words alone.
+    // The verdict/outcome_note fallbacks remain for rounds with no agent text.
+    let said = final_delivery(steps, attr)
         .or_else(|| {
             attr.verdict
                 .clone()
@@ -2110,6 +2153,66 @@ fn build_contra(steps: &[Step], attr: &Attribution) -> Option<CausalContra> {
     } else {
         Some(CausalContra { saw, said })
     }
+}
+
+/// The agent's final delivery for the contra panel, anchored to the transcript.
+///
+/// Prefers the evaluator's `actual_conclusion` when it is genuinely quoted
+/// from the final agent step's message or observation text; otherwise excerpts
+/// that step's own message. The delivery is the last agent step that actually
+/// speaks: rounds may end in bookkeeping heartbeats whose empty message is not
+/// a delivery (the same no-op case `build_contra`'s observation axis skips),
+/// and anchoring against a heartbeat would reject a genuine quote from the
+/// real final response, demoting the panel to the evaluator's verdict.
+/// Returns `None` when no agent step carries a message, leaving the
+/// evaluation fallbacks to speak.
+fn final_delivery(steps: &[Step], attr: &Attribution) -> Option<String> {
+    let last_agent = steps
+        .iter()
+        .rev()
+        .find(|s| is_agent(s) && !s.message.trim().is_empty())?;
+    if let Some(quote) = attr
+        .actual_conclusion
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+    {
+        if quote_appears_in(quote, last_agent) {
+            return Some(format!("agent 最终交付：{}", truncate(quote, 400)));
+        }
+    }
+    let genuine = last_agent.message.trim();
+    Some(format!("agent 最终交付：{}", truncate(genuine, 400)))
+}
+
+/// Whether `quote` is a contiguous excerpt of one transcript field — the
+/// step's message, or one observation result's text.
+///
+/// The evaluator copies a "关键片段" and may differ in whitespace or wrap it in
+/// quotation marks, so both sides are whitespace-collapsed and the quote's
+/// surrounding marks trimmed before containment is checked — the same
+/// formatting variance the claim review accepts, without letting through text
+/// the transcript does not carry. Containment is per field: a quote that only
+/// matches when two fields are concatenated spans their seam, and no
+/// transcript entry actually carries it — that splice is precisely the
+/// fabricated exhibit this anchor exists to reject.
+fn quote_appears_in(quote: &str, step: &Step) -> bool {
+    const MARKS: &[char] = &['「', '」', '『', '』', '“', '”', '"', '\''];
+    let needle = collapse_whitespace(quote.trim_matches(MARKS));
+    if needle.is_empty() {
+        return false;
+    }
+    if collapse_whitespace(&step.message).contains(&needle) {
+        return true;
+    }
+    results_of(step).iter().any(|result| {
+        collapse_whitespace(&grounding::outcome::result_text(result)).contains(&needle)
+    })
+}
+
+/// Collapses every whitespace run to a single space.
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 /// Detail shown for a failed step: the error text if captured, else the step's

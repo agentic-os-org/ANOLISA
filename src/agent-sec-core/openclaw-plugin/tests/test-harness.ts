@@ -25,13 +25,18 @@ function createMockApi(pluginConfig?: Record<string, any>) {
 
   const api = {
     pluginConfig: pluginConfig ?? {},
+    runtime: { version: "2026.9.2" },
     logger: {
       info: (msg: string) => logs.push(`[INFO] ${msg}`),
       error: (msg: string) => logs.push(`[ERROR] ${msg}`),
       warn: (msg: string) => logs.push(`[WARN] ${msg}`),
       debug: (msg: string) => logs.push(`[DEBUG] ${msg}`),
     },
-    on: (hookName: string, handler: (...args: any[]) => Promise<any>, opts?: { priority?: number }) => {
+    on: (
+      hookName: string,
+      handler: (...args: any[]) => Promise<any>,
+      opts?: { priority?: number },
+    ) => {
       hooks.push({ hookName, handler, priority: opts?.priority ?? 0 });
     },
   };
@@ -63,7 +68,7 @@ export async function testCapability(
   if (missingMocks.length > 0) {
     throw new Error(
       `[${cap.id}] Missing mock events for registered hooks: ${missingMocks.join(", ")}. ` +
-      `Add these to mockEvents so the handler logic is actually exercised.`,
+        `Add these to mockEvents so the handler logic is actually exercised.`,
     );
   }
 

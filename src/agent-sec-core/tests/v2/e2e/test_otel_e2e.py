@@ -19,6 +19,8 @@ from urllib.parse import quote
 
 import pytest
 
+from tests.v2.e2e.conftest import _SOCKET_WAIT_SECONDS
+
 TRACE = "11111111111111111111111111111111"
 PARENT = "2222222222222222"
 CANARY = "DO_NOT_EXPORT_SECRET_PAYLOAD"
@@ -51,7 +53,23 @@ class OtelEnvironment:
     def start(self, authorize=True, stderr=None, **env):
         self.socket = self.directory / "daemon.sock"
         self.log = (self.directory / "daemon.log").open("w+")
-        command = [self.binaries["agent-sec-daemon"], "--socket", str(self.socket)]
+        config = self.directory / "skillsec.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "stateDir": str(self.directory / "skillsec-state"),
+                    "enableDefaultSkillDirs": False,
+                }
+            )
+        )
+        config.chmod(0o600)
+        command = [
+            self.binaries["agent-sec-daemon"],
+            "--socket",
+            str(self.socket),
+            "--skillsec-config",
+            str(config),
+        ]
         if authorize:
             command.extend(["--policy-admin-uid", str(os.getuid())])
         self.daemon = subprocess.Popen(
@@ -60,7 +78,7 @@ class OtelEnvironment:
             stdout=subprocess.PIPE,
             stderr=self.log if stderr is None else stderr,
         )
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
         while not self.socket.exists():
             assert self.daemon.poll() is None
             assert time.monotonic() < deadline
@@ -240,7 +258,18 @@ def test_schema_and_frame_budgets_are_independent(otel):
             "method": "policy.templates.create",
             "params": {
                 "policyName": "must-not-exist",
-                "template": {"kind": "prevent_file_deletion", "files": ["/example"]},
+                "template": {
+                    "specVersion": "0.1",
+                    "rules": [
+                        {
+                            "effect": "block",
+                            "category": "file",
+                            "action": "write",
+                            "target": {"type": "file", "path": "/example"},
+                            "where": {"operation": {"eq": "delete"}},
+                        }
+                    ],
+                },
             },
             "traceContext": {"version": 2},
         }
@@ -264,16 +293,44 @@ def test_schema_and_frame_budgets_are_independent(otel):
     )
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="requires a non-root kernel peer")
-def test_baggage_cannot_override_kernel_peer_authorization(otel):
-    otel.start(authorize=False, RUST_LOG="off")
+def test_baggage_cannot_override_kernel_peer_authorization(unauthorized_daemon):
+    # The system daemon stays root; only the IPC client drops privileges.
     for context in [
         None,
         {"version": 1, "baggage": "uid=0,role=administrator,agentsec.agent.name=root"},
         {"version": 1, "traceparent": "bad"},
     ]:
-        result = otel.call({"method": "policy.templates.list", "traceContext": context})
-        assert result["error"]["code"] == "permission_denied"
+        result = subprocess.run(
+            [
+                "/usr/bin/python3",
+                "-c",
+                """import socket, sys
+with socket.socket(socket.AF_UNIX) as stream:
+    stream.settimeout(5)
+    stream.connect(sys.argv[1])
+    stream.sendall(sys.argv[2].encode() + b'\\n')
+    data = b''
+    while not data.endswith(b'\\n'):
+        chunk = stream.recv(4096)
+        assert chunk and len(data) + len(chunk) < 65536
+        data += chunk
+    print(data.decode())
+""",
+                str(unauthorized_daemon.socket_path),
+                json.dumps(
+                    {"method": "policy.templates.list", "traceContext": context}
+                ),
+            ],
+            user=unauthorized_daemon.caller_uid,
+            group=unauthorized_daemon.caller_uid,
+            extra_groups=[],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["error"]["code"] == "permission_denied"
 
 
 def test_same_trace_requests_keep_distinct_unsampled_log_anchors(otel):
@@ -297,6 +354,9 @@ def test_same_trace_requests_keep_distinct_unsampled_log_anchors(otel):
     requests = {}
     for record in otel.records():
         fields = record["fields"]
+        # Process startup and maintenance records have no request context.
+        if fields["reason"] in {"startup_stage", "retention_stage"}:
+            continue
         correlation = json.loads(fields["correlation"])
         assert correlation["trace_id"] == TRACE
         assert correlation["span_id"] == correlation["request_span_id"]
@@ -420,6 +480,27 @@ def test_blocked_stderr_preserves_startup_responses_and_shutdown(otel, log_filte
         )
         assert scan.returncode == 0
         assert json.loads(scan.stdout)["verdict"] == "pass"
+        # SkillSec success output must not acquire the diagnostic worker's stderr lock.
+        skill_sec = subprocess.run(
+            [
+                otel.binaries["agent-sec-cli"],
+                "--socket",
+                str(otel.socket),
+                "skill-ledger",
+                "list-scanners",
+            ],
+            env=otel.env
+            | {"RUST_LOG": log_filter, "OTEL_BSP_MAX_QUEUE_SIZE": "invalid"},
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            timeout=10,
+            check=False,
+        )
+        assert skill_sec.returncode == 0
+        assert {item["name"] for item in json.loads(skill_sec.stdout)["scanners"]} >= {
+            "code-scanner",
+            "static-scanner",
+        }
         # Startup failure diagnostics also cannot delay an exit. The running
         # daemon owns the socket, so a second daemon must fail without serving.
         duplicate = subprocess.run(

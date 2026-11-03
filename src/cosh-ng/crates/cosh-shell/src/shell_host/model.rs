@@ -8,6 +8,7 @@ use nix::pty::Winsize;
 use crate::input::InputClassifier;
 use crate::types::{ShellEnvironmentSnapshot, ShellEvent};
 
+use super::login_effect::LoginEffectGuard;
 use super::raw_relay::interactive_sentinel::InputWaitStatus;
 use super::transcript::TranscriptRetention;
 
@@ -83,6 +84,29 @@ pub(super) struct ShellHistoryFileObserver(Arc<dyn Fn(PathBuf) + Send + Sync + '
 impl std::fmt::Debug for ShellHistoryFileObserver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ShellHistoryFileObserver")
+    }
+}
+
+/// Receives the managed shell's PATH once, after its startup files ran.
+#[derive(Clone)]
+pub(super) struct ShellStartupPathObserver(Arc<dyn Fn(Option<String>) + Send + Sync + 'static>);
+
+impl std::fmt::Debug for ShellStartupPathObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ShellStartupPathObserver")
+    }
+}
+
+impl ShellStartupPathObserver {
+    pub(super) fn new<F>(observer: F) -> Self
+    where
+        F: Fn(Option<String>) + Send + Sync + 'static,
+    {
+        Self(Arc::new(observer))
+    }
+
+    pub(super) fn observe(&self, path: Option<String>) {
+        (self.0)(path);
     }
 }
 
@@ -196,7 +220,9 @@ pub struct ShellHostConfig {
     pub(crate) assistance_control: Option<crate::input::AssistanceControl>,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
+    pub(super) shell_startup_path_observer: Option<ShellStartupPathObserver>,
     pub(super) transcript_retention: TranscriptRetention,
+    login_effect_guard: LoginEffectGuard,
 }
 
 impl ShellHostConfig {
@@ -226,7 +252,9 @@ impl ShellHostConfig {
             assistance_control: None,
             shell_environment_observer: None,
             shell_history_file_observer: None,
+            shell_startup_path_observer: None,
             transcript_retention: TranscriptRetention::Full,
+            login_effect_guard: LoginEffectGuard::new(),
         }
     }
 
@@ -253,6 +281,11 @@ impl ShellHostConfig {
 
     pub(crate) fn set_assistance_control(&mut self, control: crate::input::AssistanceControl) {
         self.assistance_control = Some(control);
+    }
+
+    /// Returns a clone sharing this host's login-effect state.
+    pub(crate) fn login_effect_guard(&self) -> LoginEffectGuard {
+        self.login_effect_guard.clone()
     }
 
     /// Installs the input-wait hint card frame renderer (#2196 review):
@@ -288,6 +321,13 @@ impl ShellHostConfig {
 
     pub(crate) fn clear_shell_history_file_observer(&mut self) {
         self.shell_history_file_observer = None;
+    }
+
+    pub(crate) fn set_shell_startup_path_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(Option<String>) + Send + Sync + 'static,
+    {
+        self.shell_startup_path_observer = Some(ShellStartupPathObserver::new(observer));
     }
 
     /// Bounds byte-transcript memory for the real interactive runtime. Public

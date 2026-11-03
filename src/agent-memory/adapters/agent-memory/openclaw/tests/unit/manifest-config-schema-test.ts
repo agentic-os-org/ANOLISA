@@ -66,7 +66,7 @@ function consumedKeys(): Set<string> {
 }
 
 /** The plugin-config table documented in
- *  `docs/user-guide/{en,zh}/token-saving/agent-memory.md`. */
+ *  `docs/user-guide/{en,zh}/agent-memory/index.md`. */
 const DOCUMENTED_CONFIG: Record<string, unknown> = {
   binaryPath: "/usr/bin/agent-memory",
   userId: "1000",

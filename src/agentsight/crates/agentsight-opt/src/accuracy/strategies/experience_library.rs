@@ -33,16 +33,28 @@ const REPEAT_MIN: usize = 3;
 /// An error retry chain must be at least this long.
 const ERROR_CHAIN_MIN: usize = 2;
 
-/// Backtrack command keywords (matched against lowercase cmd).
+/// Backtrack command keywords (matched against the lowercase command the
+/// call ran — see [`ExperienceLibraryStrategy::command_of`]).
 const BACKTRACK_KEYWORDS: &[&str] = &[
     "git reset",
     "git checkout --",
     "git revert",
-    "git stash",
     "git restore",
+    "git clean",
     "回退",
     "撤销",
 ];
+
+/// Whether a lowercase command is a reversal. `git stash` joins the list only
+/// when it changes the working tree: `git stash list` and `git stash show`
+/// inspect the stash and discard nothing, the same reason branch creation is
+/// not a backtrack for the cost ledger.
+fn is_backtrack_cmd(lc: &str) -> bool {
+    let stash = lc.contains("git stash")
+        && !lc.contains("git stash list")
+        && !lc.contains("git stash show");
+    BACKTRACK_KEYWORDS.iter().any(|k| lc.contains(k)) || stash
+}
 
 /// A Rust-computed inefficiency signal fed to the LLM.
 #[derive(Debug, Clone)]
@@ -81,15 +93,50 @@ impl ExperienceLibraryStrategy {
         Self
     }
 
+    /// The command a call ran, when its arguments carry one.
+    ///
+    /// [`ToolCallRecord::cmd`] is the argument JSON (see `types.rs`), not a
+    /// command, so matching `BACKTRACK_KEYWORDS` against it reads *arguments*
+    /// as actions: an `Edit` quoting `git reset --hard`, a `Grep` for
+    /// `git stash`, or a `Read` of `docs/回退.md` all signalled a reversal
+    /// no tool ever ran. Read the command argument instead, and treat a call
+    /// that does not carry one as not a backtrack. Same shape as the merged
+    /// `verify_before_done` helper (2479ca543).
+    fn command_of(call: &ToolCallRecord) -> Option<String> {
+        const COMMAND_KEYS: [&str; 3] = ["command", "cmd", "script"];
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&call.cmd) {
+            return COMMAND_KEYS
+                .iter()
+                .find_map(|k| json.get(k).and_then(|v| v.as_str()))
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+        }
+        // The summary is truncated, so a long argument string does not parse.
+        // A file-scoped call is never a command; for a command-scoped one the
+        // truncated summary *is* the command text.
+        call.target.is_none().then(|| call.cmd.clone())
+    }
+
     /// Compute all inefficiency signals from tool calls.
     fn compute_signals(calls: &[ToolCallRecord]) -> Vec<Signal> {
         let mut signals = Vec::new();
 
-        // 1. Repeat clusters: same (name, cmd) ≥ REPEAT_MIN.
+        // 1. Repeat clusters: same (name, target-or-cmd) ≥ REPEAT_MIN. A write
+        //    tool's `cmd` is the arguments JSON truncated at 50 chars, so two
+        //    rewrites of one file never share it; the recorded `target` is the
+        //    stable identity for write tools (see trace::file_target). Other
+        //    tools keep the command summary: repeated greps in one directory are
+        //    exploration, not rework.
+        fn cluster_key(c: &ToolCallRecord) -> (&str, &str) {
+            let target = crate::cost::is_write_tool(&c.name)
+                .then_some(c.target.as_deref())
+                .flatten();
+            (c.name.as_str(), target.unwrap_or(c.cmd.as_str()))
+        }
         let mut counts: HashMap<(&str, &str), (usize, &str)> = HashMap::new();
         for c in calls {
             let entry = counts
-                .entry((c.name.as_str(), c.cmd.as_str()))
+                .entry(cluster_key(c))
                 .or_insert((0, c.call_id.as_str()));
             entry.0 += 1;
         }
@@ -97,12 +144,17 @@ impl ExperienceLibraryStrategy {
             .into_iter()
             .filter(|(_, (n, _))| *n >= REPEAT_MIN)
             .collect();
-        clusters.sort_by_key(|&(_, (n, _))| std::cmp::Reverse(n));
+        // `counts` is a HashMap, whose iteration order is randomized per map
+        // instance, so clusters tying on repeat count kept the map's random
+        // order; the signal list fed to the LLM (and any lesson derived from
+        // it) then differed between runs of the same trace. Break ties by
+        // cluster key.
+        clusters.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
         for ((name, cmd), (n, first_id)) in clusters {
             let cmd_short: String = cmd.chars().take(80).collect();
             signals.push(Signal {
-                id: format!("repeat_cluster:{}:{}", name, cmd_short),
-                desc: format!("重复调用簇：{} `{}` 共 {} 次", name, cmd_short, n),
+                id: format!("repeat_cluster:{name}:{cmd_short}"),
+                desc: format!("重复调用簇：{name} `{cmd_short}` 共 {n} 次"),
                 first_call_id: first_id.to_string(),
             });
         }
@@ -135,10 +187,13 @@ impl ExperienceLibraryStrategy {
             }
         }
 
-        // 3. Backtrack commands.
+        // 3. Backtrack commands: the command a call ran, never its arguments.
         for c in calls {
-            let lc = c.cmd.to_lowercase();
-            if BACKTRACK_KEYWORDS.iter().any(|k| lc.contains(k)) {
+            let Some(command) = Self::command_of(c) else {
+                continue;
+            };
+            let lc = command.to_lowercase();
+            if is_backtrack_cmd(&lc) {
                 signals.push(Signal {
                     id: format!("backtrack:{}", c.call_id),
                     desc: format!(
@@ -194,8 +249,12 @@ impl Detector for ExperienceLibraryStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:experience_library"))
             .await
         {
-            Ok(v) => v,
+            Ok(v) => {
+                ctx.judgments.record_ok();
+                v
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[experience_library] LLM judgment failed: {e}");
                 return vec![];
             }
@@ -243,6 +302,50 @@ impl Detector for ExperienceLibraryStrategy {
 mod tests {
     use super::*;
 
+    fn call(name: &str, cmd: &str, i: usize) -> crate::types::ToolCallRecord {
+        crate::types::ToolCallRecord {
+            name: name.into(),
+            call_id: format!("{name}-{i}"),
+            start: i as f64,
+            dur: 1.0,
+            cmd: cmd.into(),
+            err: false,
+            target: None,
+            result_tokens: None,
+        }
+    }
+
+    #[test]
+    fn repeat_cluster_signals_break_count_ties_by_key() {
+        // Two clusters with the same repeat count: the counts map is a
+        // HashMap, whose iteration order is randomized per map instance, so
+        // a count-only sort could emit the clusters' signals in either
+        // order.
+        let calls: Vec<crate::types::ToolCallRecord> = [("zeta", "grep z"), ("alpha", "grep a")]
+            .iter()
+            .flat_map(|(name, cmd)| (0..3).map(move |i| call(name, cmd, i)))
+            .collect();
+
+        for _ in 0..16 {
+            let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+            let repeat_ids: Vec<&str> = signals
+                .iter()
+                .filter(|s| s.id.starts_with("repeat_cluster:"))
+                .map(|s| s.id.as_str())
+                .collect();
+            assert_eq!(
+                repeat_ids.len(),
+                2,
+                "both clusters are signalled: {repeat_ids:?}"
+            );
+            assert!(
+                repeat_ids[0].starts_with("repeat_cluster:alpha:")
+                    && repeat_ids[1].starts_with("repeat_cluster:zeta:"),
+                "a count tie must not follow the map's iteration order: {repeat_ids:?}"
+            );
+        }
+    }
+
     fn make_call(name: &str, cmd: &str, start: f64, err: bool) -> ToolCallRecord {
         ToolCallRecord {
             name: name.into(),
@@ -251,6 +354,7 @@ mod tests {
             dur: 1.0,
             cmd: cmd.into(),
             err,
+            target: None,
             result_tokens: None,
         }
     }
@@ -273,6 +377,104 @@ mod tests {
         assert!(signals[0].id.starts_with("repeat_cluster:"));
     }
 
+    /// Inspecting the stash discards nothing, so it must not raise the
+    /// backtrack signal — the same reason the branch-creation form
+    /// `git checkout -b` is absent from the keyword list.
+    #[test]
+    fn stash_inspection_is_not_a_backtrack_signal() {
+        let calls = vec![
+            make_call("Bash", "git stash list", 1.0, false),
+            make_call("Bash", "git stash show -p stash@{0}", 2.0, false),
+        ];
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            signals.iter().all(|s| !s.id.starts_with("backtrack:")),
+            "a stash listing is not a reversal: {:?}",
+            signals.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+
+        let reverting = vec![make_call("Bash", "git stash pop", 3.0, false)];
+        let signals = ExperienceLibraryStrategy::compute_signals(&reverting);
+        assert!(
+            signals.iter().any(|s| s.id.starts_with("backtrack:")),
+            "a stash pop still rewinds the working tree"
+        );
+    }
+
+    /// `cmd` is the arguments JSON truncated at 50 chars, so two edits of one
+    /// file never share a cluster key even though rewriting a file repeatedly is
+    /// exactly the rework this signal exists to surface. The recorded `target`
+    /// (ecb61effb) is the stable identity for write tools.
+    #[test]
+    fn repeat_cluster_groups_rewrites_of_one_file() {
+        let mut calls = vec![
+            make_call(
+                "Edit",
+                "{\"file_path\":\"src/a.rs\",\"old_string\":\"x\"",
+                1.0,
+                false,
+            ),
+            make_call(
+                "Edit",
+                "{\"file_path\":\"src/a.rs\",\"old_string\":\"y\"",
+                2.0,
+                false,
+            ),
+            make_call(
+                "Edit",
+                "{\"file_path\":\"src/a.rs\",\"old_string\":\"z\"",
+                3.0,
+                false,
+            ),
+        ];
+        for c in &mut calls {
+            c.target = Some("src/a.rs".to_string());
+        }
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.id.starts_with("repeat_cluster:Edit:")),
+            "three rewrites of one file must cluster: {signals:?}"
+        );
+    }
+
+    /// Grouping by target must stay scoped to write tools: repeated greps in one
+    /// directory with different patterns are normal exploration.
+    #[test]
+    fn repeat_cluster_ignores_non_write_targets() {
+        let mut calls = vec![
+            make_call(
+                "Grep",
+                "{\"pattern\":\"alpha\",\"path\":\"src\"}",
+                1.0,
+                false,
+            ),
+            make_call(
+                "Grep",
+                "{\"pattern\":\"beta\",\"path\":\"src\"}",
+                2.0,
+                false,
+            ),
+            make_call(
+                "Grep",
+                "{\"pattern\":\"gamma\",\"path\":\"src\"}",
+                3.0,
+                false,
+            ),
+        ];
+        for c in &mut calls {
+            c.target = Some("src".to_string());
+        }
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.id.starts_with("repeat_cluster:Grep:src")),
+            "different grep patterns must not become one repeat cluster: {signals:?}"
+        );
+    }
+
     #[test]
     fn error_chain_detected() {
         let calls = vec![
@@ -292,5 +494,62 @@ mod tests {
         let signals = ExperienceLibraryStrategy::compute_signals(&calls);
         assert_eq!(signals.len(), 1);
         assert!(signals[0].id.starts_with("backtrack:"));
+    }
+
+    /// `cmd` is the arguments JSON (see `types.rs`), not a command: quoting a
+    /// reversal in a file's contents, grepping for one, or reading a path that
+    /// names one is not running it. Same class as verify_before_done
+    /// (2479ca543): the keyword table must not let arguments decide the
+    /// signal.
+    #[test]
+    fn arguments_mentioning_a_reversal_are_not_backtrack_signals() {
+        let calls = vec![
+            make_call(
+                "Edit",
+                r#"{"file_path":"src/a.rs","new_string":"git reset --hard"}"#,
+                1.0,
+                false,
+            ),
+            make_call(
+                "Grep",
+                r#"{"pattern":"git stash","path":"src"}"#,
+                2.0,
+                false,
+            ),
+            make_call("Read", r#"{"file_path":"docs/回退.md"}"#, 3.0, false),
+            make_call(
+                "Write",
+                r#"{"file_path":"todo.md","content":"撤销上次提交"}"#,
+                4.0,
+                false,
+            ),
+        ];
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        assert!(
+            !signals.iter().any(|s| s.id.starts_with("backtrack:")),
+            "arguments that mention a reversal must not become backtrack signals: {signals:?}"
+        );
+    }
+
+    /// Both encodings a command-scoped call arrives in still signal: the
+    /// compact argument JSON (`command` key) and the truncated plain-text
+    /// summary a long command degrades to.
+    #[test]
+    fn backtrack_commands_still_signal_in_both_encodings() {
+        let calls = vec![
+            make_call("Bash", r#"{"command":"git revert HEAD~2"}"#, 1.0, false),
+            make_call("Bash", "git restore --source=HEAD~1 src/", 2.0, false),
+        ];
+        let signals = ExperienceLibraryStrategy::compute_signals(&calls);
+        let backtracks: Vec<&str> = signals
+            .iter()
+            .filter(|s| s.id.starts_with("backtrack:"))
+            .map(|s| s.first_call_id.as_str())
+            .collect();
+        assert_eq!(
+            backtracks,
+            vec!["Bash_1", "Bash_2"],
+            "real reversals must still signal: {signals:?}"
+        );
     }
 }

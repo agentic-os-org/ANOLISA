@@ -31,6 +31,32 @@ pub struct SummaryCommand {
     /// Output as JSON
     #[structopt(long)]
     pub json: bool,
+
+    /// Override the sessions database path
+    ///
+    /// Reads a copy of the databases from another host or a non-default data
+    /// directory; the interruption database is read from the same directory,
+    /// matching the default on-disk layout.
+    #[structopt(long)]
+    pub db: Option<String>,
+
+    /// Override the tokenless stats database path
+    ///
+    /// The tokenless store lives outside the AgentSight databases, so `--db`
+    /// does not move it: a report over a copy still reads the running host's
+    /// own `stats.db`. Point this at a copy to keep the whole report free of
+    /// live data.
+    #[structopt(long)]
+    pub tokenless_db: Option<String>,
+
+    /// Scope the session and interruption totals to one agent
+    ///
+    /// Each section keeps the match its own store applies: sessions compare
+    /// the label the session listing resolves (recorded agent name, falling
+    /// back to the process name), interrupts compare `agent_name` only, the
+    /// column `interruption list --agent` filters. Both are case-insensitive.
+    #[structopt(long)]
+    pub agent: Option<String>,
 }
 
 /// Sessions + token totals from genai_events.db.
@@ -58,13 +84,43 @@ struct InterruptionStats {
 }
 
 impl SummaryCommand {
+    /// Resolve the sessions database path: `--db` reads a copy of the
+    /// databases from another host or a non-default data directory; without
+    /// it the default location is used.
+    fn db_path(&self) -> std::path::PathBuf {
+        self.db
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(GenAISqliteStore::default_path)
+    }
+
+    /// Resolve the tokenless stats database path: `--tokenless-db` reads a
+    /// copy instead of the running host's own store; without it the default
+    /// location is used.
+    fn tokenless_db_path(&self) -> std::path::PathBuf {
+        self.tokenless_db
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(default_stats_path)
+    }
+
     pub fn execute(&self) {
         let (start_ns, end_ns) = time_range_ns(self.last);
 
-        let sessions = gather_sessions(&GenAISqliteStore::default_path(), start_ns, end_ns);
-        let interruptions = gather_interruptions(&interruption_db_path(), start_ns, end_ns);
-        let (tokenless, tokenless_available) =
-            gather_tokenless(&default_stats_path(), start_ns, end_ns);
+        let agent = self.agent.as_deref();
+        let genai_db = self.db_path();
+        let sessions = gather_sessions(&genai_db, start_ns, end_ns, agent);
+        let interruptions =
+            gather_interruptions(&interruption_db_path(&genai_db), start_ns, end_ns, agent);
+        // The tokenless statistics database records a saving against a session
+        // but never an agent, so an agent-scoped report cannot attribute it.
+        // Leaving the host-wide totals in would put two different scopes in
+        // one report; the section says so instead (see print_text/print_json).
+        let (tokenless, tokenless_available) = if agent.is_some() {
+            (TokenlessWindowSummary::default(), false)
+        } else {
+            gather_tokenless(&self.tokenless_db_path(), start_ns, end_ns)
+        };
 
         if self.json {
             self.print_json(&sessions, &interruptions, &tokenless, tokenless_available);
@@ -80,7 +136,10 @@ impl SummaryCommand {
         tokenless: &TokenlessWindowSummary,
         tokenless_available: bool,
     ) {
-        println!("AgentSight Summary (last {}h)", self.last);
+        match self.agent.as_deref() {
+            Some(agent) => println!("AgentSight Summary (last {}h, agent {agent})", self.last),
+            None => println!("AgentSight Summary (last {}h)", self.last),
+        }
         println!();
 
         println!("Sessions      {}", sessions.count);
@@ -103,7 +162,9 @@ impl SummaryCommand {
         }
         println!();
 
-        if !tokenless_available {
+        if self.agent.is_some() {
+            println!("Tokenless     not recorded per agent, so it is left out");
+        } else if !tokenless_available {
             println!("Tokenless     not available (stats.db not found)");
         } else if tokenless.records > 0 {
             println!(
@@ -127,6 +188,7 @@ impl SummaryCommand {
     ) {
         let output = build_json(
             self.last,
+            self.agent.as_deref(),
             sessions,
             interruptions,
             tokenless,
@@ -141,12 +203,13 @@ impl SummaryCommand {
 /// text view — is unit-testable without spawning the binary.
 fn build_json(
     window_hours: u64,
+    agent: Option<&str>,
     sessions: &SessionStats,
     interruptions: &InterruptionStats,
     tokenless: &TokenlessWindowSummary,
     tokenless_available: bool,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut output = serde_json::json!({
         "window_hours": window_hours,
         "sessions": {
             "count": sessions.count,
@@ -171,14 +234,20 @@ fn build_json(
             "saved_tokens": tokenless.saved_tokens(),
             "saved_percent": tokenless.saved_percent(),
         },
-    })
+    });
+    // Only an agent-scoped report names its scope and the source it cannot
+    // carry; an unscoped report keeps its exact previous shape.
+    if let Some(agent) = agent {
+        output["agent"] = serde_json::json!(agent);
+    }
+    output
 }
 
 // ─── Data gathering (each source degrades independently) ─────────────────────
 
 /// Sessions and token totals from genai_events.db. Returns zeros if the
 /// database is absent or unreadable.
-fn gather_sessions(path: &Path, start_ns: i64, end_ns: i64) -> SessionStats {
+fn gather_sessions(path: &Path, start_ns: i64, end_ns: i64, agent: Option<&str>) -> SessionStats {
     if !path.exists() {
         return SessionStats::default();
     }
@@ -201,15 +270,25 @@ fn gather_sessions(path: &Path, start_ns: i64, end_ns: i64) -> SessionStats {
             return SessionStats::default();
         }
     };
-    let mut stats = SessionStats {
-        count: sessions.len(),
-        ..Default::default()
-    };
-    for s in &sessions {
+    let mut stats = SessionStats::default();
+    for s in sessions
+        .iter()
+        .filter(|s| agent.is_none_or(|agent| agent_label_matches(s.agent_name.as_deref(), agent)))
+    {
+        stats.count += 1;
         stats.input_tokens += s.total_input_tokens;
         stats.output_tokens += s.total_output_tokens;
     }
     stats
+}
+
+/// Whether a resolved agent label is the one the caller asked for.
+///
+/// The scan is on the label the queries already resolve — `agent_name`,
+/// falling back to `process_name` — and case-insensitive, matching the
+/// `COLLATE NOCASE` filters the stores use for the same flag.
+fn agent_label_matches(label: Option<&str>, wanted: &str) -> bool {
+    label.is_some_and(|label| label.eq_ignore_ascii_case(wanted))
 }
 
 /// Interruptions tallied by severity from interruption_events.db.
@@ -217,7 +296,12 @@ fn gather_sessions(path: &Path, start_ns: i64, end_ns: i64) -> SessionStats {
 /// `resolved_filter = None` deliberately counts **every** interruption in the
 /// window, resolved or not: a summary reports what happened during the window,
 /// not just the still-open items (which is what `interruption count` shows).
-fn gather_interruptions(path: &Path, start_ns: i64, end_ns: i64) -> InterruptionStats {
+fn gather_interruptions(
+    path: &Path,
+    start_ns: i64,
+    end_ns: i64,
+    agent: Option<&str>,
+) -> InterruptionStats {
     if !path.exists() {
         return InterruptionStats::default();
     }
@@ -233,7 +317,9 @@ fn gather_interruptions(path: &Path, start_ns: i64, end_ns: i64) -> Interruption
             return InterruptionStats::default();
         }
     };
-    let rows = match store.list(start_ns, end_ns, None, None, None, None, i64::MAX) {
+    // `agent` goes to the store: the same `COLLATE NOCASE` filter
+    // `interruption list --agent` uses, so both commands select one row set.
+    let rows = match store.list(start_ns, end_ns, agent, None, None, None, i64::MAX) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("warning: cannot query interruptions: {e}");
@@ -266,9 +352,10 @@ fn gather_tokenless(path: &Path, start_ns: i64, end_ns: i64) -> (TokenlessWindow
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// interruption_events.db lives next to the genai database.
-fn interruption_db_path() -> std::path::PathBuf {
-    GenAISqliteStore::default_path()
+/// interruption_events.db lives next to the genai database, including when
+/// `--db` points at a copy of the databases in another directory.
+fn interruption_db_path(genai_db: &Path) -> std::path::PathBuf {
+    genai_db
         .parent()
         .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
         .join("interruption_events.db")
@@ -276,11 +363,9 @@ fn interruption_db_path() -> std::path::PathBuf {
 
 /// Compute (start_ns, end_ns) for the last N hours from now.
 fn time_range_ns(hours: u64) -> (i64, i64) {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as i64;
+    // A pre-epoch realtime clock degrades to 0 (the `epoch_nanos` family
+    // contract) instead of unwrapping the elapsed-time error.
+    let now_ns = agentsight::utils::epoch_nanos(std::time::SystemTime::now()) as i64;
     // Saturate so an absurd --last (up to u64::MAX) degrades to "everything"
     // (start far in the past) instead of overflowing into an inverted/garbage
     // window. Guard the u64->i64 cast first so a value >= 2^63 cannot flip sign.
@@ -310,6 +395,7 @@ mod tests {
         };
         let v = build_json(
             24,
+            None,
             &sessions,
             &InterruptionStats::default(),
             &tokenless,
@@ -332,6 +418,7 @@ mod tests {
         };
         let v = build_json(
             12,
+            None,
             &sessions,
             &InterruptionStats::default(),
             &TokenlessWindowSummary::default(),
@@ -341,6 +428,36 @@ mod tests {
         assert_eq!(v["sessions"]["count"], 2);
         assert_eq!(v["sessions"]["total_tokens"], 140);
         assert_eq!(v["tokenless"]["available"], false);
+        // Without `--agent` the report keeps its exact previous shape: the
+        // scope key is the only addition and it is absent, so a script that
+        // reads these keys keeps working byte for byte.
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "window_hours": 12,
+                "sessions": {
+                    "count": 2,
+                    "input_tokens": 100,
+                    "output_tokens": 40,
+                    "total_tokens": 140,
+                },
+                "interruptions": {
+                    "total": 0,
+                    "critical": 0,
+                    "high": 0,
+                    "medium": 0,
+                    "low": 0,
+                },
+                "tokenless": {
+                    "available": false,
+                    "records": 0,
+                    "before_tokens": 0,
+                    "after_tokens": 0,
+                    "saved_tokens": 0,
+                    "saved_percent": 0.0,
+                },
+            })
+        );
     }
 
     #[test]
@@ -355,12 +472,187 @@ mod tests {
         assert!(s2 < e2);
     }
 
+    #[test]
+    fn db_path_honours_the_override_and_keeps_the_sibling_interruption_db() {
+        // `--db` must reach the gather calls: reverting the wiring (returning
+        // the default unconditionally) makes this fail. The interruption
+        // database must move with it — it lives next to the genai database.
+        let plain = SummaryCommand {
+            last: 24,
+            json: false,
+            db: None,
+            tokenless_db: None,
+            agent: None,
+        };
+        assert_eq!(plain.db_path(), GenAISqliteStore::default_path());
+
+        let copied = SummaryCommand {
+            last: 24,
+            json: false,
+            db: Some("/tmp/agentsight_summary_copy/genai_events.db".into()),
+            tokenless_db: None,
+            agent: None,
+        };
+        let genai = copied.db_path();
+        assert_eq!(
+            genai,
+            std::path::PathBuf::from("/tmp/agentsight_summary_copy/genai_events.db")
+        );
+        assert_eq!(
+            interruption_db_path(&genai),
+            std::path::PathBuf::from("/tmp/agentsight_summary_copy/interruption_events.db")
+        );
+    }
+
+    #[test]
+    fn tokenless_db_path_honours_the_override_and_falls_back_to_the_default() {
+        // `--tokenless-db` must reach the gather call: reverting the wiring
+        // (returning the default unconditionally) makes this fail. The
+        // tokenless store is the one source `--db` cannot move, so without
+        // this flag a report over a copy still reads the local host's stats.db.
+        let plain = SummaryCommand {
+            last: 24,
+            json: false,
+            db: None,
+            tokenless_db: None,
+            agent: None,
+        };
+        assert_eq!(plain.tokenless_db_path(), default_stats_path());
+
+        let copied = SummaryCommand {
+            last: 24,
+            json: false,
+            db: None,
+            tokenless_db: Some("/tmp/agentsight_summary_copy/stats.db".into()),
+            agent: None,
+        };
+        assert_eq!(
+            copied.tokenless_db_path(),
+            std::path::PathBuf::from("/tmp/agentsight_summary_copy/stats.db")
+        );
+    }
+
+    #[test]
+    fn agent_scopes_the_session_and_interruption_totals() {
+        // `--agent` was the one filter `summary` lacked while every other
+        // agent-attributed view had it: the report could only answer for the
+        // whole host. Reverting the wiring — ignoring the flag in the two
+        // gather calls — leaves both totals host-wide and fails this test.
+        let dir = std::env::temp_dir().join(format!(
+            "test_summary_agent_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let genai_db = dir.join("genai_events.db");
+        {
+            let store = GenAISqliteStore::new_with_path(
+                &genai_db,
+                agentsight::config::PeriodicStoragePolicy::default(),
+            )
+            .unwrap();
+            drop(store);
+            let conn = rusqlite::Connection::open(&genai_db).unwrap();
+            for (call, agent, input, output) in [
+                ("call-a", "agent-a", 100_i64, 10_i64),
+                ("call-b", "agent-b", 200, 20),
+            ] {
+                conn.execute(
+                    "INSERT INTO genai_events (event_type, session_id, call_id, agent_name,
+                     model, input_tokens, output_tokens, start_timestamp_ns, event_json)
+                     VALUES ('llm_call', 'sess-' || ?1, ?1, ?2, 'gpt-4', ?3, ?4, ?5, '{}')",
+                    rusqlite::params![call, agent, input, output, 1_000_i64],
+                )
+                .unwrap();
+            }
+        }
+
+        let all = gather_sessions(&genai_db, 0, i64::MAX, None);
+        assert_eq!(all.count, 2, "without --agent both sessions count");
+        let only_a = gather_sessions(&genai_db, 0, i64::MAX, Some("agent-a"));
+        assert_eq!(only_a.count, 1);
+        assert_eq!(only_a.input_tokens, 100);
+        assert_eq!(only_a.output_tokens, 10);
+        // The same case-insensitive match the store filters use.
+        assert_eq!(
+            gather_sessions(&genai_db, 0, i64::MAX, Some("AGENT-A")).count,
+            1
+        );
+        assert_eq!(
+            gather_sessions(&genai_db, 0, i64::MAX, Some("agent-missing")).count,
+            0
+        );
+
+        let interruption_db = dir.join("interruption_events.db");
+        {
+            use agentsight::interruption::{InterruptionEvent, InterruptionType};
+            let store = InterruptionStore::new_with_path(&interruption_db).unwrap();
+            for agent in ["agent-a", "agent-b"] {
+                store
+                    .insert(&InterruptionEvent::new(
+                        InterruptionType::LlmError,
+                        Some("sess-1".to_string()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(agent.to_string()),
+                        1_000,
+                        None,
+                    ))
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            gather_interruptions(&interruption_db, 0, i64::MAX, None).total,
+            2
+        );
+        let filtered = gather_interruptions(&interruption_db, 0, i64::MAX, Some("agent-a"));
+        assert_eq!(filtered.total, 1);
+        assert_eq!(
+            filtered.high + filtered.critical + filtered.medium + filtered.low,
+            1
+        );
+
+        // A scoped report names its scope in JSON and says why the tokenless
+        // section is absent instead of leaving host-wide numbers beside it.
+        let scoped = build_json(
+            24,
+            Some("agent-a"),
+            &only_a,
+            &filtered,
+            &TokenlessWindowSummary::default(),
+            false,
+        );
+        assert_eq!(scoped["agent"], "agent-a");
+
+        // The scoped text view names its scope and says why the tokenless
+        // section is missing instead of showing host-wide savings.
+        let scoped_cmd = SummaryCommand {
+            last: 24,
+            json: false,
+            db: None,
+            tokenless_db: None,
+            agent: Some("agent-a".to_string()),
+        };
+        scoped_cmd.print_text(
+            &only_a,
+            &filtered,
+            &TokenlessWindowSummary::default(),
+            false,
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── Independent degradation matrix ──────────────────────────────────────
     // Each source must contribute zeros (tokenless: unavailable) when its DB is
     // missing or has the wrong schema, without panicking — so one broken source
-    // never aborts the whole report. The genai/interruption DB paths are
-    // hardcoded in production, so these inject paths directly (the live ECS
-    // collector holds the real DBs open, so they cannot be moved to E2E this).
+    // never aborts the whole report.
 
     fn unique_tmp(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -384,12 +676,12 @@ mod tests {
     #[test]
     fn gather_sessions_degrades_to_zero() {
         let missing = unique_tmp("sess_missing");
-        let s = gather_sessions(&missing, 0, i64::MAX);
+        let s = gather_sessions(&missing, 0, i64::MAX, None);
         assert_eq!(s.count, 0);
         assert_eq!(s.input_tokens, 0);
 
         let bad = wrong_schema_db("sess_badschema");
-        let s2 = gather_sessions(&bad, 0, i64::MAX);
+        let s2 = gather_sessions(&bad, 0, i64::MAX, None);
         assert_eq!(s2.count, 0, "wrong-schema genai db must degrade, not panic");
         let _ = std::fs::remove_file(&bad);
     }
@@ -397,11 +689,11 @@ mod tests {
     #[test]
     fn gather_interruptions_degrades_to_zero() {
         let missing = unique_tmp("int_missing");
-        let i = gather_interruptions(&missing, 0, i64::MAX);
+        let i = gather_interruptions(&missing, 0, i64::MAX, None);
         assert_eq!(i.total, 0);
 
         let bad = wrong_schema_db("int_badschema");
-        let i2 = gather_interruptions(&bad, 0, i64::MAX);
+        let i2 = gather_interruptions(&bad, 0, i64::MAX, None);
         assert_eq!(i2.total, 0, "wrong-schema interruption db must degrade");
         let _ = std::fs::remove_file(&bad);
     }
@@ -437,11 +729,27 @@ mod tests {
         SummaryCommand {
             last: 24,
             json: false,
+            db: None,
+            tokenless_db: None,
+            agent: None,
         }
         .execute();
         SummaryCommand {
             last: 1,
             json: true,
+            db: None,
+            tokenless_db: None,
+            agent: None,
+        }
+        .execute();
+        // A scoped run skips the tokenless source entirely; drive that path
+        // too so the branch is not left uncovered.
+        SummaryCommand {
+            last: 1,
+            json: false,
+            db: None,
+            tokenless_db: None,
+            agent: Some("agent-from-the-host".to_string()),
         }
         .execute();
     }
@@ -475,6 +783,9 @@ mod tests {
         let text_cmd = SummaryCommand {
             last: 24,
             json: false,
+            db: None,
+            tokenless_db: None,
+            agent: None,
         };
         // Saved-activity + non-zero sessions/interruptions branches.
         text_cmd.print_text(&populated_sessions, &populated_ints, &populated_tl, true);
@@ -496,6 +807,9 @@ mod tests {
         SummaryCommand {
             last: 24,
             json: true,
+            db: None,
+            tokenless_db: None,
+            agent: None,
         }
         .print_json(&populated_sessions, &populated_ints, &populated_tl, true);
     }

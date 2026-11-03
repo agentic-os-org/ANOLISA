@@ -63,15 +63,21 @@ impl ObservabilityWriter {
         self
     }
 
-    /// Appends one validated observability record.
+    /// Appends one validated observability record with its trusted UID.
     ///
     /// Named `write` to match v1, and like v1 it surfaces failures.
     ///
     /// # Errors
     ///
     /// Propagates serialization and filesystem failures.
-    pub fn write(&self, record: &ObservabilityRecord) -> Result<(), EventLogError> {
-        self.inner.write_or_raise(record)
+    pub fn write(&self, record: &ObservabilityRecord, uid: u32) -> Result<(), EventLogError> {
+        #[derive(serde::Serialize)]
+        struct Entry<'a> {
+            #[serde(flatten)]
+            record: &'a ObservabilityRecord,
+            uid: u32,
+        }
+        self.inner.write_or_raise(&Entry { record, uid })
     }
 
     /// Returns the underlying generic writer.

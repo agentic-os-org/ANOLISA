@@ -1,15 +1,18 @@
 // Owner: shell_host. Routing lives in osc/routing.rs; the pending-handoff
 // claim lives in osc/handoff_claim.rs; alt-screen tracking in osc/alt_screen.rs.
-// CurrentCommand state and display-window helpers are owned by osc/command.rs.
+// CurrentCommand state and display-window helpers are owned by osc/command.rs;
+// relay-facing input events live in osc/input_events.rs.
 mod alt_screen;
 mod command;
 mod event_store;
 mod handoff_claim;
 mod handoff_echo;
+mod input_events;
 mod marker_sequence;
 mod prompt_epoch;
 mod routing;
 mod slash_guard_echo;
+mod startup_environment;
 mod transcript_store;
 
 use alt_screen::AltScreenTracker;
@@ -23,10 +26,10 @@ use handoff_echo::PendingHandoffEcho;
 use marker_sequence::resume_abandoned_prefix;
 use marker_sequence::{find_bytes, osc_prefix_suffix_len, HistoryFileTracker, Marker};
 use slash_guard_echo::PendingSlashGuardEcho;
+use startup_environment::{normalize_shell_path, StartupEnvironmentGate, SHELL_PATH_MAX_BYTES};
 
-use std::collections::HashSet;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
@@ -52,7 +55,6 @@ const ERASE_TO_END_OF_SCREEN: &[u8] = b"\x1b[J";
 const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
 const BEL: u8 = b'\x07';
 const OSC_CANDIDATE_MAX_BYTES: usize = 64 * 1024;
-const SHELL_PATH_MAX_BYTES: usize = 8 * 1024;
 
 #[cfg(test)]
 thread_local! {
@@ -107,6 +109,7 @@ pub(super) struct OscParser {
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
     history_file_tracker: HistoryFileTracker,
+    startup_environment: StartupEnvironmentGate,
     /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
     /// relay; prompt_ready raises it, preexec lowers it.
     main_prompt_gate: crate::raw_input::MainPromptGate,
@@ -125,6 +128,9 @@ pub(super) struct OscParser {
     /// invalidation barrier; a fresh command-less prompt report
     /// (`ShellReady`) re-arms it.
     pty_input_barrier_pushed: bool,
+    /// Tracks prompt occupancy independently from cwd validity because every
+    /// `precmd`, including command completion, establishes a fresh prompt.
+    prompt_input_barrier_pushed: bool,
     /// #2196 R7: bounded last-visible-line tracker for the active command,
     /// fed incrementally per PTY chunk; owned by osc/command.rs.
     visible_tail: VisibleTailTracker,
@@ -312,6 +318,9 @@ impl OscParser {
         {
             return Ok(());
         }
+        if self.observe_startup_environment(&marker) {
+            return Ok(());
+        }
 
         // A trusted protocol boundary ends the one-shot submission window.
         // Any incomplete candidate is ordinary terminal output and fails open.
@@ -400,6 +409,9 @@ impl OscParser {
             }
             "precmd" => {
                 self.prompt_ready_display_start = None;
+                // Every precmd establishes a fresh prompt, including the
+                // command-completion path that does not emit `ShellReady`.
+                self.prompt_input_barrier_pushed = false;
                 let Some(current) = self.current.take() else {
                     let prompt_cwd = marker.physical_cwd.clone();
                     self.intervention_cuts.push(self.clean.position());
@@ -501,6 +513,7 @@ impl OscParser {
         shell_path_names: Option<Vec<String>>,
         shell_path_suffixes: Option<Vec<String>>,
     ) {
+        self.startup_environment.close();
         self.shell_prompt_cwd.set(prompt_cwd.clone());
         self.shell_path_command_names
             .set(shell_path_names, shell_path_suffixes);
@@ -758,67 +771,6 @@ impl OscParser {
         }
     }
 
-    pub(super) fn push_control_event(&mut self, input: &str) {
-        self.push_self_session_input_event(
-            "control",
-            "control input observed while relaying to bash",
-            Some(input),
-        );
-    }
-
-    /// Observe-only soft-newline shortcut signal on a passthrough path
-    /// (#1721 T-c): the bytes were relayed to bash unchanged; the runtime
-    /// may surface a one-time discoverability tip at the next prompt-ready.
-    pub(super) fn push_soft_newline_shortcut_event(&mut self) {
-        self.push_self_session_input_event(
-            "soft_newline_shortcut",
-            "soft-newline shortcut observed while relaying to bash",
-            None,
-        );
-    }
-
-    /// #1932 F5: a multi-line bracketed paste was relayed straight to bash;
-    /// the runtime may attach a multi-line entry hint to a failure insight.
-    pub(super) fn push_multiline_paste_event(&mut self) {
-        self.push_self_session_input_event(
-            "multiline_paste",
-            "multi-line bracketed paste relayed to bash",
-            None,
-        );
-    }
-
-    /// #1721 D13: forwards prompt-draft card lifecycle events (open/changed/
-    /// submit/cancel) to the runtime as structured JSON payloads.
-    pub(super) fn push_prompt_draft_event(&mut self, action: &str, payload: Option<&str>) {
-        self.push_self_session_input_event("prompt_draft", action, payload);
-    }
-
-    pub(super) fn push_shell_input_activity_event(&mut self, empty: bool) {
-        self.push_self_session_input_event(
-            "shell_input",
-            if empty {
-                "input empty"
-            } else {
-                "input editing"
-            },
-            None,
-        );
-    }
-
-    /// User bytes were written to the shell's PTY: whatever the shell
-    /// does with them (a custom `accept-line` binding cannot be told
-    /// apart from editing keys in the byte stream), a previously
-    /// reported prompt cwd stops being provably current until a fresh
-    /// cwd-bearing marker arrives. Consecutive writes collapse into
-    /// one barrier event; a new prompt report re-arms it.
-    pub(super) fn push_shell_pty_input_event(&mut self) {
-        if self.pty_input_barrier_pushed {
-            return;
-        }
-        self.pty_input_barrier_pushed = true;
-        self.push_self_session_input_event("shell_pty_input", "write", None);
-    }
-
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {
         self.push_self_session_input_event("card", action, Some(value));
     }
@@ -954,33 +906,6 @@ fn command_finished_event(
             capture: None,
         },
     }
-}
-
-fn normalize_shell_path(path: &str) -> String {
-    let mut seen = HashSet::new();
-    path.split(':')
-        .filter_map(normalize_absolute_path)
-        .filter(|entry| seen.insert(entry.clone()))
-        .collect::<Vec<_>>()
-        .join(":")
-}
-
-fn normalize_absolute_path(value: &str) -> Option<String> {
-    let path = Path::new(value);
-    if !path.is_absolute() {
-        return None;
-    }
-    let mut normalized = PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::CurDir => {}
-            Component::ParentDir => normalized.push(".."),
-            Component::Normal(part) => normalized.push(part),
-            Component::Prefix(_) => return None,
-        }
-    }
-    Some(normalized.to_string_lossy().into_owned())
 }
 
 fn known_clean_control_len(bytes: &[u8]) -> Option<usize> {

@@ -166,8 +166,14 @@ mod tests {
 
     #[test]
     fn test_conversation_turn_type_eq() {
-        assert_eq!(ConversationTurnType::UserMessage, ConversationTurnType::UserMessage);
-        assert_ne!(ConversationTurnType::ToolCall, ConversationTurnType::ToolResponse);
+        assert_eq!(
+            ConversationTurnType::UserMessage,
+            ConversationTurnType::UserMessage
+        );
+        assert_ne!(
+            ConversationTurnType::ToolCall,
+            ConversationTurnType::ToolResponse
+        );
     }
 
     #[test]
@@ -176,7 +182,7 @@ mod tests {
             role: "user".to_string(),
             raw_content: "Hello".to_string(),
         };
-        let debug = format!("{:?}", block);
+        let debug = format!("{block:?}");
         assert!(debug.contains("user"));
     }
 

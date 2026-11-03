@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hermes.checkpoint_manager import (
     CheckpointManager,
     CheckpointResult,
@@ -43,6 +45,20 @@ class TestMapErrorToMessage:
     def test_cwd_scan_failed(self):
         msg = map_error_to_message("cwd scan failed: io error")
         assert "retryable" in msg.lower()
+
+    @pytest.mark.parametrize("code", ["UnsupportedWorkspacePath", "InternalError"])
+    def test_path_encoding_error_precedes_generic_filename_substrings(self, code):
+        token = r"./snap/timeout-insufficient\\377"
+        stderr = (
+            f'\x1b[31mError [{code}]: rename destination cannot be represented as UTF-8: '
+            f'"{token}"\x1b[0m'
+        )
+        msg = map_error_to_message(stderr, {"id": "snap1"})
+        assert "NOT retryable until the filename is fixed" in msg
+        assert "rename destination" in msg
+        assert token in msg
+        assert "snap1" in msg
+        assert "\x1b" not in msg
 
     def test_have_cwd_inside_workspace(self):
         msg = map_error_to_message("processes have cwd inside workspace")

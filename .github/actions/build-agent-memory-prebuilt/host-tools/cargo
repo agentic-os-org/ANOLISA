@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Cross may query Cargo on the host, but release compilation must stay in Docker.
+set -euo pipefail
+command="${1:-}"
+if [[ "$command" == +* ]]; then command="${2:-}"; fi
+case "$command" in
+    build|rustc|test|check|clippy|run)
+        echo 'ERROR: refusing Cross fallback to host compilation' >&2
+        exit 1
+        ;;
+esac
+exec "$AGENT_MEMORY_HOST_CARGO" "$@"

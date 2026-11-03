@@ -9,6 +9,7 @@
 //! checkpoints WAL data and deletes oldest rows without running `VACUUM`.
 
 mod events;
+mod maintenance;
 mod pending;
 mod resource;
 mod resource_timeline;
@@ -17,17 +18,21 @@ mod session;
 mod stats;
 #[cfg(test)]
 mod tests;
+mod tokenless;
+#[cfg(test)]
+mod write_tests;
 
 use agentsight_sqlite_lifecycle::{ConnectionMode, ConnectionOptions, open_connection};
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{BatchConfig, PeriodicStoragePolicy};
 
-/// SQL mirror of [`TokenRecord::billed_input_tokens`], as a `CASE` expression
-/// over the raw columns.
+/// SQL mirror of [`TokenRecord::billed_input_tokens`], accounting for legacy
+/// rows that stored provider-reported input separately from cache counters.
 ///
 /// Anthropic reports `cache_creation_tokens` / `cache_read_tokens` outside
 /// `input_tokens`, so they add to the billed input. OpenAI-compatible gateways
@@ -36,10 +41,8 @@ use crate::config::{BatchConfig, PeriodicStoragePolicy};
 /// cannot call the Rust helper, so the rule is restated here — keep the two in
 /// sync.
 ///
-/// Deriving totals from the raw columns instead of reading the stored
-/// `total_tokens` also corrects rows written before this rule existed, since
-/// `input_tokens` and the cache columns have always held what the provider
-/// reported.
+/// New rows store semantic input tokens (including cache tokens) and mark
+/// that representation. Older rows retain their provider-reported values.
 ///
 /// Expands to a string literal so callers assemble their query with `concat!`
 /// into a fixed `&'static str`, honouring the storage-layer rule that SQL is
@@ -49,15 +52,17 @@ use crate::config::{BatchConfig, PeriodicStoragePolicy};
 /// [`TokenRecord::billed_input_tokens`]: crate::analyzer::TokenRecord::billed_input_tokens
 macro_rules! billed_input_col {
     () => {
-        "CASE WHEN LOWER(COALESCE(provider, '')) = 'anthropic' \
-         THEN input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0) \
-         ELSE input_tokens END"
+        "CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0) \
+         WHEN LOWER(COALESCE(provider, '')) = 'anthropic' \
+         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0) \
+         ELSE COALESCE(input_tokens, 0) END"
     };
 }
 pub(crate) use billed_input_col;
 
 // Re-export public types from sub-modules
 pub use events::TraceEventDetail;
+pub(crate) use maintenance::MaintenanceCursor;
 pub use pending::{PendingCallInfo, PendingOrigin, SseEnrichment};
 pub use resource::ResourceSample;
 pub use resource_timeline::{SessionPhase, SessionResourceTimeline};
@@ -66,13 +71,17 @@ pub use stats::{
     AgentActivitySummary, AgentTokenSummary, LatencyMetricsSummary, MetricPercentiles,
     ModelTimeseriesBucket, TimeseriesBucket,
 };
+pub use tokenless::{SavedTokenlessRecord, TokenlessRecordError};
+
+// Bound writer occupancy without adding a delay or another completion queue.
+const MAX_WRITE_BATCH: usize = 4;
 
 /// SQLite-backed GenAI event storage
 pub struct GenAISqliteStore {
     conn: Mutex<Connection>,
     db_path: PathBuf,
     /// Batch insert configuration: events are buffered until `max_size` or
-    /// `flush_ms` is reached, then written inside a single SQLite transaction.
+    /// `flush_ms` is reached, then written in short SQLite transactions.
     batch_config: BatchConfig,
     /// Buffered events waiting to be flushed.
     pending: Mutex<Vec<crate::genai::semantic::GenAISemanticEvent>>,
@@ -80,9 +89,41 @@ pub struct GenAISqliteStore {
     last_flush: Mutex<Instant>,
     /// Retention and capacity settings supplied by the owning runtime.
     storage_policy: PeriodicStoragePolicy,
+    /// Background maintenance yields to capture instead of waiting for write locks.
+    maintenance_only: bool,
+    capture_priority: Arc<AtomicUsize>,
+}
+
+/// Prevent new maintenance transactions while a capture write needs the writer.
+pub(crate) struct CaptureWriteGuard(Arc<AtomicUsize>);
+
+impl Drop for CaptureWriteGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl GenAISqliteStore {
+    /// Delegate commit-time checkpoints to the registered maintenance worker.
+    pub(crate) fn use_managed_checkpoints(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| format!("GenAI checkpoint configuration mutex poisoned: {error}"))?;
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&conn)?;
+        Ok(())
+    }
+
+    /// Keep maintenance from repeatedly acquiring SQLite's writer ahead of capture.
+    pub(crate) fn prioritize_capture(&self) -> CaptureWriteGuard {
+        self.capture_priority.fetch_add(1, Ordering::AcqRel);
+        CaptureWriteGuard(Arc::clone(&self.capture_priority))
+    }
+
+    fn capture_has_priority(&self) -> bool {
+        self.maintenance_only && self.capture_priority.load(Ordering::Acquire) != 0
+    }
+
     /// Create a new GenAI SQLite store at the default path.
     pub fn new(storage_policy: PeriodicStoragePolicy) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Self::default_path();
@@ -120,6 +161,43 @@ impl GenAISqliteStore {
             pending: Mutex::new(Vec::new()),
             last_flush: Mutex::new(Instant::now()),
             storage_policy: PeriodicStoragePolicy::default(),
+            maintenance_only: false,
+            capture_priority: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// Open a separate connection for the registered background maintenance job.
+    ///
+    /// The capture store owns the schema, WAL setup, and shared writer priority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the existing database cannot be opened or configured.
+    pub(crate) fn open_maintenance_existing(
+        path: &std::path::Path,
+        storage_policy: PeriodicStoragePolicy,
+        capture: &Self,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let conn = open_connection(
+            path,
+            ConnectionOptions {
+                mode: ConnectionMode::ReadWriteExisting,
+                busy_timeout: Duration::ZERO,
+                enable_wal: false,
+            },
+        )?;
+        // Checkpoint explicitly between batches so a delete cannot trigger a
+        // large automatic checkpoint while retaining the SQLite writer lock.
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+            batch_config: BatchConfig::default(),
+            pending: Mutex::new(Vec::new()),
+            last_flush: Mutex::new(Instant::now()),
+            storage_policy,
+            maintenance_only: true,
+            capture_priority: Arc::clone(&capture.capture_priority),
         })
     }
 
@@ -138,6 +216,8 @@ impl GenAISqliteStore {
             pending: Mutex::new(Vec::new()),
             last_flush: Mutex::new(Instant::now()),
             storage_policy,
+            maintenance_only: false,
+            capture_priority: Arc::new(AtomicUsize::new(0)),
         };
         store.init_tables()?;
 
@@ -156,12 +236,8 @@ impl GenAISqliteStore {
         Ok(store)
     }
 
-    /// Flush any buffered events to SQLite.
-    ///
-    /// Events are written through `store_event` which handles prune/retry.
-    /// The batch value comes from reducing the number of flush calls (fewer
-    /// fsync/WAL checkpoints), not from wrapping in a single transaction
-    /// (which would require refactoring the Mutex-based conn access).
+    /// Flush buffered events in short transactions, falling back to per-event
+    /// prune/retry on failure and retaining failed events for the next flush.
     pub fn flush(&self) {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if pending.is_empty() {
@@ -170,13 +246,40 @@ impl GenAISqliteStore {
         let events: Vec<_> = pending.drain(..).collect();
         drop(pending); // release lock before writing
 
+        // Events whose insert failed (SQLITE_BUSY/LOCKED/IOERR, a constraint
+        // violation, or SQLITE_FULL after the prune retries) are re-queued at
+        // the front of the buffer so the next flush retries them instead of
+        // dropping up to `max_size` completed LLM calls.
+        let mut failed = Vec::new();
         let mut ok_count = 0usize;
-        for event in &events {
-            if let Err(e) = self.store_event(event) {
-                log::warn!("Failed to store GenAI event in batch flush: {e}");
-            } else {
-                ok_count += 1;
+        let mut remaining = events.into_iter();
+        loop {
+            let batch: Vec<_> = remaining.by_ref().take(MAX_WRITE_BATCH).collect();
+            if batch.is_empty() {
+                break;
             }
+            match self.try_store_batch(&batch, false) {
+                Ok(true) => ok_count += batch.len(),
+                result => {
+                    if let Err(error) = result {
+                        log::warn!("GenAI batch rolled back; retrying individual events: {error}");
+                    }
+                    for event in batch {
+                        match self.store_event(&event) {
+                            Ok(()) => ok_count += 1,
+                            Err(error) => {
+                                log::warn!("Failed to store GenAI event in batch flush: {error}");
+                                failed.push(event);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !failed.is_empty() {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            failed.append(&mut pending);
+            *pending = failed;
         }
         if ok_count > 0 {
             log::debug!("Batch-flushed {ok_count} GenAI events");

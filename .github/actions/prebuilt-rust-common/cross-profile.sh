@@ -16,8 +16,8 @@ GNU228_X86_BASE="docker.io/dockcross/manylinux_2_28-x64@sha256:263b776c5dc6ae7e5
 GNU228_X86_IMAGE="anolisa/rust-release-builder:gnu2.28-x86_64"
 GNU228_X86_IMAGE_ID="sha256:0a5c24bde830394d0fb585a4c7c2021b315e394bf3a3e3abb22401b70e4b35db"
 GNU228_ARM_BASE="docker.io/dockcross/manylinux_2_28-aarch64@sha256:63d09e1726a914c85b0087aa00b966df896fac962095310b915332f0135bfd74"
-GNU228_ARM_IMAGE="anolisa/rust-release-builder:gnu2.28-aarch64"
-GNU228_ARM_IMAGE_ID="sha256:8c0788e130476253259a838d7ddad7d04a34778d60ab391f6fabaf007639a2dd"
+GNU228_ARM_IMAGE="anolisa/rust-release-builder:gnu2.28-aarch64-agentsight"
+GNU228_ARM_IMAGE_ID="sha256:a60fbfb3f5bf4f5d6787ef0737fc3df7919a8da527f903fd71b4e838c443b736"
 DARWIN_IMAGE="anolisa/rust-release-builder:darwin11-aarch64"
 DARWIN_IMAGE_ID="sha256:f43abc5ea60980fe1a452607ebc481ea0636bb6e6f0acbd03f7ed1f5064459e1"
 DARWIN_X86_IMAGE="anolisa/rust-release-builder:darwin11-x86_64"
@@ -141,15 +141,26 @@ verify_linux_profile() {
             clang-devel llvm-devel elfutils-libelf-devel systemd-devel \
             fuse3-devel openssl-devel zlib-devel libzstd-devel \
             pkgconf-pkg-config >/dev/null
+        docker run --rm --entrypoint sh "$image" -c '
+            set -eu
+            test -f /usr/include/fuse3/fuse.h
+            readelf -h /usr/lib64/libfuse3.so.3 | grep -Fq X86-64
+            pkg-config --exists fuse3
+        '
     elif [ "$profile" = gnu2.28-aarch64 ]; then
         docker run --rm --entrypoint sh "$image" -c '
             set -eu
-            sysroot="$(aarch64-unknown-linux-gnu-gcc --print-sysroot)"
+            sysroot=/usr/xcc/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot
             test -f "$sysroot/usr/include/openssl/ssl.h"
             readelf -h "$sysroot/usr/lib64/libssl.so.1.1" | grep -Fq AArch64
-            PKG_CONFIG_SYSROOT_DIR="$sysroot" \
+            test -f "$sysroot/usr/include/libelf.h"
+            readelf -h "$sysroot/usr/lib64/libelf.so.1" | grep -Fq AArch64
+            clang --version >/dev/null
+            test -f "$sysroot/usr/include/fuse3/fuse.h"
+            readelf -h "$sysroot/usr/lib64/libfuse3.so.3" | grep -Fq AArch64
+            PKG_CONFIG_PATH= PKG_CONFIG_SYSROOT_DIR="$sysroot" \
                 PKG_CONFIG_LIBDIR="$sysroot/usr/lib64/pkgconfig:$sysroot/usr/share/pkgconfig" \
-                pkg-config --exists openssl
+                pkg-config --exists openssl fuse3
         '
     elif [ "$profile" = gnu2.17-x86_64 ]; then
         docker run --rm --entrypoint sh "$image" -c \
@@ -314,8 +325,13 @@ run_profile() {
     else
         if [ "$profile" = gnu2.17-aarch64 ] || [ "$profile" = gnu2.28-aarch64 ]; then
             local sysroot=/usr/xcc/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot
-            container_opts+=" --env=PKG_CONFIG_SYSROOT_DIR=$sysroot"
-            container_opts+=" --env=PKG_CONFIG_LIBDIR=$sysroot/usr/lib64/pkgconfig:$sysroot/usr/share/pkgconfig"
+            container_opts+=" --env=CC_aarch64_unknown_linux_gnu=$linker"
+            container_opts+=" --env=CXX_aarch64_unknown_linux_gnu=aarch64-unknown-linux-gnu-g++"
+            container_opts+=" --env=AR_aarch64_unknown_linux_gnu=$archiver"
+            container_opts+=" --env=HOST_CC=gcc --env=HOST_CXX=g++ --env=HOST_AR=ar"
+            container_opts+=" --env=PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=$sysroot"
+            container_opts+=" --env=PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu=$sysroot/usr/lib64/pkgconfig:$sysroot/usr/share/pkgconfig"
+            container_opts+=" --env=PKG_CONFIG_PATH_aarch64_unknown_linux_gnu="
         fi
         env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
             "$image_env=$image" \

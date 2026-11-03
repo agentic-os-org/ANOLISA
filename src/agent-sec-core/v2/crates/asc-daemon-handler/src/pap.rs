@@ -5,9 +5,9 @@ use std::sync::Arc;
 use asc_daemon_core::{PolicyAdministration, PolicyAdministrationError, Principal, ResourcePage};
 use asc_daemon_protocol::method::{BindingMethod, PapMethod, PolicyMethod, ScopeMethod};
 use asc_daemon_protocol::{
-    CreateBindingParams, CreatePolicyParams, CreateScopeParams, DaemonResponse, ListParams,
-    ListResult, MAX_DAEMON_ERROR_MESSAGE_BYTES, RequestId, ResourceParams, RevisionParams,
-    UpdateBindingParams, UpdatePolicyParams, UpdateScopeParams, error_code,
+    CreatePolicyParams, CreateScopeParams, DaemonResponse, ListParams, ListResult,
+    MAX_DAEMON_ERROR_MESSAGE_BYTES, RequestId, ResourceParams, RevisionParams, UpdatePolicyParams,
+    error_code,
 };
 
 const INVALID_PARAMETER_MESSAGE: &str = "request parameters are invalid";
@@ -110,23 +110,27 @@ fn dispatch_scope(
     match method {
         ScopeMethod::Create => {
             let input: CreateScopeParams = decode(params)?;
-            encode(application.create_scope(principal, &input.selector)?)
+            encode(application.create_scope_assignment(
+                principal,
+                &input.selector,
+                &input.policy_templates,
+            )?)
         }
-        ScopeMethod::Update => {
-            let input: UpdateScopeParams = decode(params)?;
-            encode(application.update_scope(principal, &input.scope_id, &input.selector)?)
+        ScopeMethod::Retry => {
+            let input: ResourceParams = decode(params)?;
+            encode(application.retry_scope(principal, &input.id)?)
         }
         ScopeMethod::Get => {
-            let input: RevisionParams = decode(params)?;
-            encode(application.get_scope(principal, &input.id, input.revision)?)
+            let input: ResourceParams = decode(params)?;
+            encode(application.get_scope(principal, &input.id)?)
         }
         ScopeMethod::List => {
             let input: ListParams = decode(params)?;
             encode_page(application.list_scopes(principal, input.limit, input.offset)?)
         }
         ScopeMethod::Delete => {
-            let input: RevisionParams = decode(params)?;
-            encode(application.delete_scope_revision(principal, &input.id, input.revision)?)
+            let input: ResourceParams = decode(params)?;
+            encode(application.delete_scope(principal, &input.id)?)
         }
     }
 }
@@ -138,27 +142,6 @@ fn dispatch_binding(
     principal: &Principal,
 ) -> Result<serde_json::Value, PapDispatchError> {
     match method {
-        BindingMethod::Create => {
-            let input: CreateBindingParams = decode(params)?;
-            encode(application.create_binding(
-                principal,
-                &input.policy_id,
-                input.policy_revision,
-                &input.scope_id,
-                input.scope_revision,
-            )?)
-        }
-        BindingMethod::Update => {
-            let input: UpdateBindingParams = decode(params)?;
-            encode(application.update_binding(
-                principal,
-                &input.binding_id,
-                &input.policy_id,
-                input.policy_revision,
-                &input.scope_id,
-                input.scope_revision,
-            )?)
-        }
         BindingMethod::Get => {
             let input: ResourceParams = decode(params)?;
             encode(application.get_binding(principal, &input.id)?)
@@ -166,10 +149,6 @@ fn dispatch_binding(
         BindingMethod::List => {
             let input: ListParams = decode(params)?;
             encode_page(application.list_bindings(principal, input.limit, input.offset)?)
-        }
-        BindingMethod::Delete => {
-            let input: ResourceParams = decode(params)?;
-            encode(application.delete_binding(principal, &input.id)?)
         }
     }
 }

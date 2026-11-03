@@ -26,7 +26,7 @@
 //!   * **Delegated managed/adopted** — U5: `dnf update` through the
 //!     delegated executor, then re-observe and refresh the cached
 //!     observation. dnf picks the target version. After the record refresh
-//!     persisted, the package-owned contract snapshot is refreshed too
+//!     persisted, the distribution-owned contract snapshot is refreshed too
 //!     ([`complete_delegated_update`]); a refresh failure demotes the
 //!     operation to `partial` instead of overstating it as `ok`.
 //!   * **Delegated observed** — U6: refuses; management consent (`adopt`)
@@ -1312,11 +1312,13 @@ pub(crate) mod tests {
     use anolisa_platform::pkg_query::PackageVersion;
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
+    use crate::commands::common::redact_known_urls;
+
     use super::self_update::application::{
         SelfUpdateApplicationOutcome, SelfUpdateApplied, SelfUpdateChange, SelfUpdateExecution,
         SelfUpdateFailure, SelfUpdateFailureContext, SelfUpdateOps, SelfUpdateRequest,
-        append_self_update_log as append_self_update_log_with_intent, redact_known_urls,
-        run_application_with_deps, run_self_update_with_deps as run_self_update_with_intent,
+        append_self_update_log as append_self_update_log_with_intent, run_application_with_deps,
+        run_self_update_with_deps as run_self_update_with_intent,
     };
 
     #[allow(clippy::too_many_arguments)]
@@ -1716,6 +1718,35 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    /// The terminal channel must match the audit channel's hygiene: the
+    /// failure CliError is rendered verbatim on stderr by
+    /// `self_update::handle` (`return Err(failure.error)`), and it embeds
+    /// the FetchManifest Display, which quotes the full endpoint — an
+    /// `ANOLISA_UPDATE_URL` internal mirror can carry credentials in it.
+    #[test]
+    fn terminal_error_echoes_credentialed_update_url() {
+        let endpoint = "https://ci:s3cret-token@mirror.invalid/release.toml";
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure =
+            run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                .expect_err("an unreachable manifest endpoint must not report success");
+
+        let reason = failure.error.reason();
+        assert!(
+            !reason.contains("s3cret-token"),
+            "the terminal error must not echo the endpoint credential: {reason}"
+        );
+        assert!(
+            reason.contains("failed to fetch release manifest"),
+            "the terminal error must still name the failed step: {reason}"
+        );
     }
 
     /// The endpoint stays recorded in a form that carries no credentials, so a
@@ -3042,7 +3073,7 @@ pub(crate) mod tests {
         assert_eq!(record.status, LifecycleStatus::Installed);
     }
 
-    /// Publish a package-owned contract in the FHS package datadir plus the
+    /// Publish a distribution-owned contract in the FHS package datadir plus the
     /// stale pre-update snapshot an earlier install left behind, as an RPM
     /// upgrade of the package would leave them.
     pub(crate) fn seed_package_contract_and_stale_snapshot(
@@ -3130,7 +3161,7 @@ pub(crate) mod tests {
                 ObjectStatus::Installed,
             ),
         );
-        // A stale snapshot without a package-owned contract: nothing
+        // A stale snapshot without a distribution-owned contract: nothing
         // authoritative exists to refresh from, so it must stay untouched.
         let layout = common::resolve_layout(&c);
         let snapshot =
@@ -3873,43 +3904,64 @@ sha256 = "{sha}"
     fn raw_update_upgrades_to_latest_and_preserves_ownership() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
-        seed_installed_raw(&c, "foo", "0.1.0", b"old v1 binary\n");
+        seed_installed_raw(&c, "skillfs", "0.1.0", b"old v1 binary\n");
         // A datadir contract that only the delegated refresh would consult;
         // an owned update must never copy it over the owned manifest.
         let layout = common::resolve_layout(&c);
+        let registry = layout.contract_path("skillfs");
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry, "distribution registry").unwrap();
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut legacy = StateStore::load(&state_path, 0).unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut legacy
+            .find_mut(ObjectKind::Component, "skillfs")
+            .unwrap()
+            .binding
+        {
+            artifact.files.push(OwnedFile {
+                path: registry.clone(),
+                ..artifact.files[0].clone()
+            });
+        }
+        legacy.save(&state_path).unwrap();
         let package_datadir = layout.package_datadir().expect("package datadir");
-        let contract = FsLayout::component_contract_path(&package_datadir, "foo");
+        let contract = FsLayout::component_contract_path(&package_datadir, "skillfs");
         std::fs::create_dir_all(contract.parent().expect("contract parent"))
             .expect("mkdir contract");
         std::fs::write(&contract, "framework = \"datadir\"\n").expect("write datadir contract");
-        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let new_body: &[u8] = b"#!/bin/sh\necho skillfs v2\n";
         publish_raw_repo(
             &tmp.path().join("repo"),
             &common::resolve_layout(&c),
-            "foo",
+            "skillfs",
             "0.2.0",
-            &raw_artifact("foo", "0.2.0", new_body),
+            &raw_artifact("skillfs", "0.2.0", new_body),
         );
         let rpm = FakeRpm::new("unused", None);
 
-        update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("raw update must succeed");
+        update_component_with_deps("skillfs", &c, &rpm, &rpm, false)
+            .expect("raw update must succeed");
 
         assert_eq!(
-            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            std::fs::read_to_string(&registry).unwrap(),
+            "distribution registry"
+        );
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("skillfs")).expect("read bin"),
             new_body,
             "binary must be replaced with the v2 payload"
         );
-        let manifest = FsLayout::component_manifest_snapshot_path(&layout.state_dir, "foo");
+        let manifest = FsLayout::component_manifest_snapshot_path(&layout.state_dir, "skillfs");
         assert_eq!(
             std::fs::read_to_string(&manifest).expect("read manifest"),
-            raw_manifest("foo", "0.2.0"),
+            raw_manifest("skillfs", "0.2.0"),
             "the manifest must be the owned artifact's, not the datadir contract"
         );
         assert!(
             !FsLayout::provenance_path_for_snapshot(&manifest).exists(),
             "an owned update must not publish contract provenance"
         );
-        let record = find_component(&c, "foo");
+        let record = find_component(&c, "skillfs");
         let artifact = owned_artifact(&record);
         assert_eq!(artifact.version, "0.2.0");
         assert_eq!(record.status, LifecycleStatus::Installed);
@@ -3923,7 +3975,10 @@ sha256 = "{sha}"
         );
         let store = load_store(&c);
         assert!(
-            store.operations.iter().any(|o| o.command == "update foo"),
+            store
+                .operations
+                .iter()
+                .any(|o| o.command == "update skillfs"),
             "update operation must be recorded"
         );
         assert!(
@@ -3933,6 +3988,73 @@ sha256 = "{sha}"
                 .map(|mut d| d.next().is_none())
                 .unwrap_or(true),
             "backups must be pruned after a successful update"
+        );
+    }
+
+    #[test]
+    fn raw_update_refuses_new_conflict_before_replacing_files() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body = b"old v1 binary\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+        let layout = common::resolve_layout(&c);
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut store = load_store(&c);
+        let mut other = find_component(&c, "foo");
+        other.name = "bar".to_string();
+        if let ProviderBinding::Owned { artifact } = &mut other.binding {
+            artifact.files.clear();
+        }
+        store.upsert(other);
+        store
+            .save(&state_path)
+            .expect("record incompatible component");
+
+        let new_manifest = raw_manifest("foo", "0.2.0").replace(
+            "version = \"0.2.0\"",
+            "version = \"0.2.0\"\nconflicts = [\"bar\"]",
+        );
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &tar_gz(&[
+                (".anolisa/component.toml", new_manifest.as_bytes()),
+                ("bin/foo", b"new incompatible binary\n"),
+            ]),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("an update must honor the new manifest's conflicts");
+        assert!(
+            err.reason()
+                .contains("conflicts with installed component 'bar'")
+        );
+        assert_eq!(std::fs::read(layout.bin_dir.join("foo")).unwrap(), old_body);
+        assert_eq!(owned_artifact(&find_component(&c, "foo")).version, "0.1.0");
+        assert!(load_store(&c).find(ObjectKind::Component, "bar").is_some());
+        assert_eq!(
+            std::fs::read_to_string(FsLayout::component_manifest_snapshot_path(
+                &layout.state_dir,
+                "foo",
+            ))
+            .expect("read preserved manifest"),
+            raw_manifest("foo", "0.1.0")
+        );
+
+        let mut store = load_store(&c);
+        assert!(store.remove(ObjectKind::Component, "bar"));
+        store
+            .save(&state_path)
+            .expect("remove incompatible component");
+        update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect("the same update must succeed after resolving the conflict");
+        assert_eq!(owned_artifact(&find_component(&c, "foo")).version, "0.2.0");
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).unwrap(),
+            b"new incompatible binary\n"
         );
     }
 
@@ -4043,9 +4165,25 @@ sha256 = "{sha}"
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
         let body: &[u8] = b"original v1 binary\n";
-        seed_installed_raw(&c, "foo", "0.1.0", body);
+        seed_installed_raw(&c, "skillfs", "0.1.0", body);
         let layout = common::resolve_layout(&c);
-        let bin = layout.bin_dir.join("foo");
+        let registry = layout.contract_path("skillfs");
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry, "distribution registry").unwrap();
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut legacy = StateStore::load(&state_path, 0).unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut legacy
+            .find_mut(ObjectKind::Component, "skillfs")
+            .unwrap()
+            .binding
+        {
+            artifact.files.push(OwnedFile {
+                path: registry.clone(),
+                ..artifact.files[0].clone()
+            });
+        }
+        legacy.save(&state_path).unwrap();
+        let bin = layout.bin_dir.join("skillfs");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -4055,13 +4193,13 @@ sha256 = "{sha}"
         publish_raw_repo(
             &tmp.path().join("repo"),
             &layout,
-            "foo",
+            "skillfs",
             "0.2.0",
-            &raw_artifact_missing_binary("foo", "0.2.0"),
+            &raw_artifact_missing_binary("skillfs", "0.2.0"),
         );
         let rpm = FakeRpm::new("unused", None);
 
-        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+        let err = update_component_with_deps("skillfs", &c, &rpm, &rpm, false)
             .expect_err("install of the new version must fail");
         assert_eq!(err.code(), "EXECUTION_FAILED");
         assert!(
@@ -4070,6 +4208,10 @@ sha256 = "{sha}"
             err.reason()
         );
 
+        assert_eq!(
+            std::fs::read_to_string(&registry).unwrap(),
+            "distribution registry"
+        );
         assert_eq!(
             std::fs::read(&bin).expect("read bin"),
             body,
@@ -4089,7 +4231,7 @@ sha256 = "{sha}"
             );
         }
         assert_eq!(
-            owned_artifact(&find_component(&c, "foo")).version,
+            owned_artifact(&find_component(&c, "skillfs")).version,
             "0.1.0",
             "failed update must not change the recorded version"
         );
@@ -4503,8 +4645,9 @@ sha256 = "{sha}"
         let old_body: &[u8] = b"installed 0.1.0\n";
         seed_installed_raw(&c, "foo", "0.1.0", old_body);
 
-        // v2's contract adds a system-package whose probe can never succeed, so
-        // the preflight fails on every host.
+        // v2's contract adds a system-package that can never be satisfied:
+        // its probe does not exist, and on a host without a native package
+        // family no resolution can answer for it either.
         let deps = r#"
 [[component.dependencies]]
 name = "absent-tool"
@@ -4530,8 +4673,14 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
             .expect_err("update must refuse when the new artifact adds an unmet dependency");
         assert_eq!(err.code(), "EXECUTION_FAILED");
+        // Linux preflight reports "missing runtime dependencies"; hosts
+        // without a native package family (macOS) refuse the same update at
+        // system-package resolution — "runtime dependencies require manual
+        // recovery … cannot determine system package". Both wordings carry
+        // the gate's marker, and the unchanged-file asserts below pin the
+        // real contract: refused, nothing effectively changed.
         assert!(
-            err.reason().contains("missing runtime dependencies"),
+            err.reason().contains("runtime dependencies"),
             "error must come from the runtime preflight, got: {}",
             err.reason()
         );
@@ -4546,6 +4695,113 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             owned_artifact(&find_component(&c, "foo")).version,
             "0.1.0",
             "refused update must not change the recorded version"
+        );
+    }
+
+    /// A v2 contract that adds a hook phase no anolisa command runs is the
+    /// same authoring defect a fresh install refuses; the update path must
+    /// run the identical check in download-verify, so the dead phase cannot
+    /// be smuggled in through `anolisa update`. Pins that the refusal leaves
+    /// the installed files and the recorded state untouched.
+    #[test]
+    fn raw_update_refuses_when_new_artifact_adds_strict_dead_hook_phase() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body: &[u8] = b"installed 0.1.0\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+
+        // v2's contract adds a strict pre_restart: valid manifest
+        // vocabulary, but no anolisa command resolves it and strict
+        // requires it to run.
+        let manifest = format!(
+            "{}{}",
+            raw_manifest("foo", "0.2.0"),
+            "\n[[component.hooks]]\nphase = \"pre_restart\"\nscript = \"{datadir}/hooks/foo/pre-restart.sh\"\nstrict = true\n"
+        );
+        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let artifact = tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/foo", new_body),
+        ]);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &artifact,
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("update must refuse a strict phase no command runs");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("no anolisa command runs"),
+            "refusal must name the dead phase, got: {}",
+            err.reason()
+        );
+        assert!(
+            err.reason().contains("strict"),
+            "refusal must state the strict contract, got: {}",
+            err.reason()
+        );
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            old_body,
+            "refused update must not change the old binary"
+        );
+        assert_eq!(
+            owned_artifact(&find_component(&c, "foo")).version,
+            "0.1.0",
+            "refused update must not change the recorded version"
+        );
+    }
+
+    /// The non-strict twin is the default capability limitation: the
+    /// update proceeds — a new version must not be blocked just because
+    /// it declares one hook the current CLI will not execute — and the
+    /// dead phase is surfaced as a warning instead.
+    #[test]
+    fn raw_update_proceeds_when_new_artifact_adds_non_strict_dead_hook_phase() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body: &[u8] = b"installed 0.1.0\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+
+        let manifest = format!(
+            "{}{}",
+            raw_manifest("foo", "0.2.0"),
+            "\n[[component.hooks]]\nphase = \"pre_restart\"\nscript = \"{datadir}/hooks/foo/pre-restart.sh\"\nstrict = false\n"
+        );
+        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let artifact = tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/foo", new_body),
+        ]);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &artifact,
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect("a non-strict dead phase must not block the update");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            new_body,
+            "the update must place the new binary"
+        );
+        assert_eq!(
+            owned_artifact(&find_component(&c, "foo")).version,
+            "0.2.0",
+            "the update must record the new version"
         );
     }
 

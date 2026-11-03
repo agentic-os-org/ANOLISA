@@ -974,10 +974,18 @@ fn repeated_versions_hit_captured_budget_then_recover_after_close() {
     // Stay just below the LRU per-entry ceiling, but keep more historical
     // versions alive than the LRU can retain. Only eight fit the handle budget.
     let payload_size = 8 * 1024 * 1024 - 64;
-    let fixture = MountFixture::normal(|src| {
-        seed_skill(src, "web", "# Initial\n");
-        seed_skill(src, "other", "# Initial\n");
-    });
+    // The payloads exceed the default per-file SKILL.md ceiling, which the
+    // mount refuses to serve; raise it so this test exercises the budget.
+    let fixture = MountFixture::normal_with_config(
+        |src| {
+            seed_skill(src, "web", "# Initial\n");
+            seed_skill(src, "other", "# Initial\n");
+        },
+        MountConfig {
+            max_skill_size: Some(payload_size),
+            ..MountConfig::default()
+        },
+    );
     let physical = fixture.source_skill_path("web").join("SKILL.md");
     let path = fixture.skill_path("web").join("SKILL.md");
     std::fs::write(

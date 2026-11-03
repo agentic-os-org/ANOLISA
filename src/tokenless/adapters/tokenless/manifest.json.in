@@ -74,6 +74,19 @@
         "uninstall": "qoder/scripts/uninstall.sh"
       }
     },
+    "qwenwork": {
+      "compatibleVersions": "1.2.5 || 1.3.2",
+      "method": "plugin",
+      "pluginId": "tokenless",
+      "capabilities": {
+        "hooks": ["rewrite", "compress-response", "compress-toon"]
+      },
+      "actions": {
+        "detect":    "qwenwork/scripts/detect.sh",
+        "install":   "qwenwork/scripts/install.sh",
+        "uninstall": "qwenwork/scripts/uninstall.sh"
+      }
+    },
     "claude-code": {
       "compatibleVersions": ">=2.0.0",
       "method": "plugin",

@@ -4,16 +4,12 @@ use asc_policy_types::policy::PreparedPolicy;
 use asc_policy_types::scope::PreparedScope;
 
 use crate::error::PapError;
-use crate::model::{Page, PolicyRevisionState, ScopeRevisionState};
+use crate::model::{Page, PolicyRevisionState};
 
 /// Persistence port owned by PAP.
 ///
-/// TODO(policy-pagination-bounds): before a concrete repository is exposed
-/// through a bounded daemon transport, pass a server-owned aggregate byte
-/// budget through all three list paths. Define encoded-size accounting so an
-/// implementation can reject an individually oversized first record before
-/// decoding/materializing it and stop before a page exceeds the remaining
-/// budget.
+/// Repositories bound serialized records and list pages to the transport budget.
+/// A page may contain fewer than `limit` items; advance by its actual item count.
 ///
 /// All list implementations must apply pagination in the repository. They
 /// first order the complete matching result as documented by the individual
@@ -69,71 +65,67 @@ pub trait PapRepository: Send + Sync {
         revision: Revision,
     ) -> Result<PreparedPolicy, PapError>;
 
-    /// Creates or replaces the current Scope record.
-    ///
-    /// Implementations must atomically accept a changed record only when its
-    /// revision is exactly the next never-reused revision for the Scope identity.
-    /// An exact replay of the current record is idempotent; every other stale,
-    /// reused, or skipped revision must return [`PapError::Conflict`]. A successful
-    /// changed write replaces the previously retained content; only the current
-    /// record remains.
-    ///
+    /// Atomically validates exact current policy snapshots and inserts an immutable Scope.
     /// # Errors
-    /// Returns conflict or persistence failures.
+    /// Rejects reused IDs, stale snapshots, invalid assignments, and storage failures.
     fn put_scope(&self, scope: &PreparedScope) -> Result<PreparedScope, PapError>;
 
-    /// Gets Scope allocation state and its optional current record.
-    ///
+    /// Reads an assignment, including deletion intent.
     /// # Errors
-    /// Returns a persistence failure when the query cannot complete.
-    fn get_scope_revision_state(
-        &self,
-        id: &ResourceId,
-    ) -> Result<Option<ScopeRevisionState>, PapError>;
+    /// Returns not-found or storage failures.
+    fn get_scope(&self, id: &ResourceId) -> Result<PreparedScope, PapError>;
 
-    /// Gets the current Scope only when its revision equals `revision`.
-    ///
+    /// Lists assignments in identity order.
     /// # Errors
-    /// Returns not-found or persistence failures.
-    fn get_scope(&self, id: &ResourceId, revision: Revision) -> Result<PreparedScope, PapError>;
-
-    /// Lists current Scope records ordered by Scope identity ascending.
-    ///
-    /// # Errors
-    /// Returns a persistence failure when the query cannot complete.
+    /// Returns storage failures.
     fn list_scopes(&self, limit: u32, offset: u32) -> Result<Page<PreparedScope>, PapError>;
 
-    /// Deletes the current Scope content when its revision equals `revision`.
-    ///
-    /// Implementations retain the allocation head as a tombstone so a later
-    /// update of the same identity cannot reuse the deleted revision.
-    ///
+    /// Reads immutable assignment, PID pin and nonretiring instances atomically.
     /// # Errors
-    /// Returns not-found, conflict, or persistence failures.
-    fn delete_scope_revision(
+    /// Returns not-found or storage failures.
+    fn scope_discovery_seed(&self, id: &ResourceId) -> Result<crate::ScopeDiscoverySeed, PapError>;
+
+    /// Stable-ID pagination for recovery that may remove earlier Scope rows.
+    /// # Errors
+    /// Returns invalid page bounds or storage failures.
+    fn scan_scopes(
+        &self,
+        after: Option<&ResourceId>,
+        limit: usize,
+    ) -> Result<Vec<PreparedScope>, PapError>;
+
+    /// Closes child admission before the discovery worker is joined.
+    /// Returns `None` for a previously completed deletion; unknown IDs are errors.
+    /// # Errors
+    /// Returns not-found or storage failures.
+    fn begin_scope_delete(&self, id: &ResourceId) -> Result<Option<PreparedScope>, PapError>;
+
+    /// Records discovery termination and requests all owned Binding deletions.
+    /// Removes an empty Scope only after its worker has stopped.
+    /// # Errors
+    /// Returns storage failures or conflict if deletion was not admitted.
+    fn finish_scope_discovery(
         &self,
         id: &ResourceId,
-        revision: Revision,
-    ) -> Result<PreparedScope, PapError>;
+    ) -> Result<Vec<asc_policy_repository::BindingIntentReceipt>, PapError>;
 
-    /// Inserts a fresh Binding (`expected: None`) or conditionally replaces an
-    /// existing Binding (`Some`). Compare the expected spec and complete status (including error) under
-    /// the same transaction as the write. An update of an absent ID is `NotFound`;
-    /// it must never insert. Creation uses a fresh server-generated ID at revision 1.
-    ///
-    /// Only changed specs increment revision. Same-spec Apply retries and Delete
-    /// requests keep revision and deployments. Clear the status error for a new
-    /// request; scheduling progress belongs to the caller, not this repository.
-    /// Delete intent cannot return to Apply. Repeated requests that do not change
-    /// the record preserve its status explanation. No dispatch occurs in this operation.
-    ///
+    /// Admits missing instances and retires absent ones atomically with Scope lifecycle.
+    /// Returns only changed Binding intents; terminal failures are not implicitly retried.
     /// # Errors
-    /// Returns not-found, operation-in-progress, conflict or persistence failures.
-    fn update_binding(
+    /// Rejects inactive Scopes or storage failures.
+    fn sync_scope_instances(
         &self,
-        expected: Option<&BindingView>,
-        binding: &BindingView,
-    ) -> Result<BindingView, PapError>;
+        id: &ResourceId,
+        instances: &[asc_policy_types::process_discovery::ProcessIdentity],
+    ) -> Result<Vec<asc_policy_repository::BindingIntentReceipt>, PapError>;
+
+    /// Explicitly retries failed owned Bindings, preserving nonterminal retry budgets.
+    /// # Errors
+    /// Returns not-found or storage failures.
+    fn retry_scope(
+        &self,
+        id: &ResourceId,
+    ) -> Result<Vec<asc_policy_repository::BindingIntentReceipt>, PapError>;
 
     /// Atomically fail only the supplied ID, revision and pending status.
     /// Set the failed phase and status error in the same transaction; preserve
@@ -143,7 +135,7 @@ pub trait PapRepository: Send + Sync {
     /// Returns persistence failures; a non-pending expectation is a conflict.
     fn fail_pending_binding(
         &self,
-        expected: &BindingView,
+        expected: &asc_policy_repository::BindingIntentReceipt,
         reason: crate::EnqueueError,
     ) -> Result<bool, PapError>;
 

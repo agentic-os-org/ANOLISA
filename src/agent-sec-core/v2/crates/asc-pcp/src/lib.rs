@@ -1,4 +1,4 @@
-//! Synchronous, process-local Binding reconciliation core.
+//! Synchronous Binding reconciliation core over repository and target ports.
 //!
 //! The caller owns notification delivery and retry timers. A call owns its
 //! Binding execution slot through all target I/O and bookkeeping. No detached

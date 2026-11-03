@@ -65,6 +65,10 @@ const WEAK_SIGNAL_WINDOW: usize = 200;
 
 /// Markers of a user or policy stop. Matching any means the call never ran to
 /// completion by the agent's choice (spec R2 / B1).
+///
+/// Compared case-insensitively like the failure signatures: the casing is the
+/// tool's choice, not the protocol's, and a prompt reported as
+/// `user denied permission` is the same stop as `User denied permission`.
 const INTERCEPTION_MARKERS: &[&str] = &[
     "The user doesn't want to proceed",
     "User denied permission",
@@ -91,17 +95,54 @@ const FAILURE_SIGNATURES: &[&str] = &[
     "file has not been read yet",
     "only edit on /",
     "no such file or directory",
+    // An operating-system refusal is this call's own failure, the reading the
+    // other two scanners of the same tool results already give it: the
+    // interruption detector and the grader both read the prose spelling and
+    // the `EACCES` / `EPERM` errno spellings, and keep them among the signals
+    // that carry an outcome. Without them a denied write matched no rule and
+    // classified as a certain success, so its result stayed in the evidence
+    // pool and could ground the very paths the call failed to reach. A user's
+    // own refusal is not this: R2 above matches the interception wordings and
+    // decides those payloads first, and a provider-declared success
+    // short-circuits in R1.
+    "permission denied",
+    "eacces",
+    "eperm",
+    // The same refusal in the wording the C library prints: `EPERM` reads
+    // "Operation not permitted", which carries neither of the spellings
+    // above. The detector's unauthorized-action scan reads this wording; a
+    // mount or an unprivileged chown that reported it here fell through to
+    // the default arm and was graded a certain success, keeping its result in
+    // the evidence pool to ground the paths the call had just been refused.
+    "operation not permitted",
     "upstream server not found",
     "tool execution failed:",
     "error during web fetch for",
 ];
 
+/// Class markers of a downstream system's exception (spec B4).
+///
+/// Quoted inside an otherwise successful payload they are only annotations,
+/// but one that opens the payload is this call's own failure, so the same list
+/// serves both rules.
+const EXCEPTION_MARKERS: &[&str] = &["java.lang.", "NullPointerException", "SQLException"];
+
 /// Commands whose whole purpose is to ask whether something exists. A non-zero
 /// exit from these is the answer, not a fault (spec B3).
-const PROBE_COMMANDS: &[&str] = &["ls", "test", "which", "stat", "pgrep", "ping"];
+///
+/// `[` and `[[` are the POSIX and bash spellings of `test`, so they answer the
+/// same question and belong to the same list.
+const PROBE_COMMANDS: &[&str] = &["ls", "test", "[", "[[", "which", "stat", "pgrep", "ping"];
 
 /// Payload markers meaning the call never actually produced output (spec B8).
 const PLACEHOLDER_MARKERS: &[&str] = &["pending-post-tool-use"];
+
+/// Error tokens that open a line of a flagless payload (spec R5).
+///
+/// Compared case-insensitively, like the anchored signatures above and the
+/// sibling scans of the same payloads: the condition is the tool's, not the
+/// protocol's, so its spelling varies.
+const WEAK_ERROR_TOKENS: &[&str] = &["error:", "exception:"];
 
 /// Classify one tool call against the observation result correlated to it.
 ///
@@ -131,16 +172,27 @@ pub fn classify_call(call: &ToolCall, result: Option<&ObservationResult>) -> Cal
         );
     }
 
-    // R1 — the provider's own flag. Note that an explicit `false` is *not*
-    // treated as proof of success: the flag is only ever `true` or absent in
-    // the measured corpus, so a `false` would be an untested code path. Letting
-    // it fall through can only add evidence, never excuse a real failure.
+    // R1 — the provider's flag describes this invocation, unlike error text
+    // in a successfully read log. Stops still outrank it, and an empty or
+    // pending payload cannot provide success evidence.
     if result.is_error() == Some(true) {
         return with_nested(
             verdict(
                 CallStatus::Failed,
                 Confidence::High,
                 "R1",
+                quote_from(&text, 0),
+            ),
+            nested,
+        );
+    }
+
+    if result.is_error() == Some(false) && !is_placeholder_or_empty(&text) {
+        return with_nested(
+            verdict(
+                CallStatus::Ok,
+                Confidence::High,
+                "R1(success)",
                 quote_from(&text, 0),
             ),
             nested,
@@ -279,8 +331,29 @@ fn quote_from(text: &str, byte_idx: usize) -> Option<String> {
     Some(text[start..].chars().take(QUOTE_LIMIT).collect())
 }
 
+/// First byte offset at which any marker occurs, compared ASCII
+/// case-insensitively.
+///
+/// Every marker is ASCII, so matching over the payload's bytes cannot fold a
+/// non-ASCII character into an ASCII one: a hit always starts on a char
+/// boundary of `text` and can be quoted from directly. Lowercasing the whole
+/// payload first, as `find_signature` does, would shift the offsets whenever
+/// non-ASCII input changes length, so that route still needs the char-boundary
+/// fallback and can quote from a different place than the marker.
 fn find_any(text: &str, markers: &[&str]) -> Option<usize> {
-    markers.iter().filter_map(|m| text.find(m)).min()
+    let haystack = text.as_bytes();
+    markers
+        .iter()
+        .filter_map(|marker| {
+            let needle = marker.as_bytes();
+            if needle.is_empty() {
+                return None;
+            }
+            haystack
+                .windows(needle.len())
+                .position(|window| window.eq_ignore_ascii_case(needle))
+        })
+        .min()
 }
 
 fn find_signature(text: &str) -> Option<usize> {
@@ -309,6 +382,23 @@ fn find_signature(text: &str) -> Option<usize> {
         hit = Some(0);
     }
 
+    // An exception that opens the payload is this call's own failure exactly
+    // as a leading traceback is, and the same class names serve both rules.
+    // `nested_error` reports only an exception quoted *inside* a payload —
+    // it skips offset 0 for precisely this reason — but nothing here handled
+    // a leading one, so a tool whose crash is the payload's first line was
+    // graded Ok, while its error text stayed usable as evidence for the very
+    // values it mentions.
+    if hit.is_none() {
+        let head = lower.trim_start();
+        if EXCEPTION_MARKERS.iter().any(|marker| {
+            head.get(..marker.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(marker))
+        }) {
+            hit = Some(0);
+        }
+    }
+
     // An HTTP error status counts only at the start of a line, so that a URL or
     // a sentence mentioning "HTTP 404" does not trip it.
     if hit.is_none() {
@@ -326,7 +416,13 @@ fn http_error_line(text: &str) -> Option<usize> {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("HTTP ") {
+        // Both spellings are status lines: a raw HTTP response (and `curl -i`)
+        // starts `HTTP/1.1 500 ...`, while some tool wrappers drop the version.
+        let status = trimmed
+            .strip_prefix("HTTP/")
+            .and_then(|rest| rest.split_once(' ').map(|(_, status)| status))
+            .or_else(|| trimmed.strip_prefix("HTTP "));
+        if let Some(rest) = status {
             let mut digits = rest.chars();
             let first = digits.next();
             if matches!(first, Some('4') | Some('5'))
@@ -347,34 +443,73 @@ fn http_error_line(text: &str) -> Option<usize> {
 /// protocol field: a live capture emits `(Command exited with code 1)`, which
 /// the single `Exit code ` marker missed, dropping a structured exit code down
 /// to the weak text heuristic and grading a certain failure as a guess.
-const EXIT_CODE_MARKERS: &[&str] = &["exit code ", "exited with code ", "exit status "];
+///
+/// The status may be separated from the words by spaces, a colon or an equals
+/// sign, the separators the detector's and grader's twin scans already accept
+/// on the same payloads (`exit code: 1`, `exit code=2`).
+const EXIT_CODE_MARKERS: &[&str] = &["exit code", "exited with code", "exit status"];
+
+/// Wrapper a live capture puts in front of the marker, as in
+/// `(Command exited with code 1)`.
+const EXIT_CODE_WRAPPER: &str = "Command ";
 
 /// Last reported exit code in the payload plus its offset.
 ///
 /// The last occurrence wins because chained commands emit one per sub-command
 /// and only the final one describes the call as a whole.
+///
+/// Only a line that *reports* a code counts, the same anchoring `http_error_line`
+/// applies to `HTTP 4xx`. A payload that merely quotes the wording — a file the
+/// agent read, a log line, a comment — is describing something else entirely,
+/// and reading it as this call's exit status turned a successful call into a
+/// certain failure whose observation then left the evidence pool.
 fn last_exit_code(text: &str) -> Option<(i64, usize)> {
-    let lower = text.to_lowercase();
     let mut found: Option<(i64, usize)> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some((code, marker_at)) = reported_exit_code(line, offset) {
+            // Keep the latest position across all spellings, not just within
+            // one, so a mixed payload still reports its final code.
+            if found.is_none_or(|(_, at)| marker_at >= at) {
+                found = Some((code, marker_at));
+            }
+        }
+        offset += line.len();
+    }
+    found
+}
+
+/// The exit code one line reports, with the marker's absolute byte offset.
+///
+/// The marker has to open the line, optionally inside the parenthetical and
+/// `Command ` wrapper a live capture uses.
+fn reported_exit_code(line: &str, offset: usize) -> Option<(i64, usize)> {
+    let mut rest = line.trim_start();
+    let mut at = offset + (line.len() - rest.len());
+    if let Some(after_paren) = rest.strip_prefix('(') {
+        rest = after_paren;
+        at += 1;
+    }
+    if let Some(head) = rest.get(..EXIT_CODE_WRAPPER.len()) {
+        if head.eq_ignore_ascii_case(EXIT_CODE_WRAPPER) {
+            rest = &rest[EXIT_CODE_WRAPPER.len()..];
+            at += EXIT_CODE_WRAPPER.len();
+        }
+    }
+    let lower = rest.to_lowercase();
     for marker in EXIT_CODE_MARKERS {
-        let mut cursor = 0;
-        while let Some(rel) = lower[cursor..].find(marker) {
-            let marker_at = cursor + rel;
-            let digits: String = lower[marker_at + marker.len()..]
+        if let Some(tail) = lower.strip_prefix(marker) {
+            let digits: String = tail
+                .trim_start_matches([' ', ':', '='])
                 .chars()
                 .take_while(|c| c.is_ascii_digit())
                 .collect();
             if let Ok(code) = digits.parse::<i64>() {
-                // Keep the latest position across all spellings, not just
-                // within one, so a mixed payload still reports its final code.
-                if found.is_none_or(|(_, at)| marker_at >= at) {
-                    found = Some((code, marker_at));
-                }
+                return Some((code, at));
             }
-            cursor = marker_at + marker.len();
         }
     }
-    found
+    None
 }
 
 /// Whether the call is an existence/availability probe.
@@ -385,14 +520,7 @@ fn is_probe(call: &ToolCall) -> bool {
     let Some(command) = command_of(call) else {
         return false;
     };
-    // `&&`, `||`, `;` and `|` are all built from these three characters, so
-    // splitting per character and dropping empty pieces covers every separator
-    // without needing a multi-string pattern.
-    let segments: Vec<&str> = command
-        .split([';', '|', '&'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments = command_segments(&command);
     !segments.is_empty()
         && segments.iter().all(|segment| {
             segment
@@ -406,21 +534,107 @@ fn is_probe(call: &ToolCall) -> bool {
         })
 }
 
+/// Shell command separators, unrolled into the segments they delimit.
+///
+/// `;`, `|`, `&&`, `||` and a newline chain commands, and so does a bare `&`.
+/// The character `&` on its own is *not* enough to split on, though: inside
+/// `2>&1`, `1>&2`, `&>` and `>&` it belongs to a redirection, which describes
+/// where a stream goes rather than where the next command starts. Splitting per
+/// character turned `ls /nope 2>&1` into `["ls /nope 2>", "1"]`, and the stray
+/// `1` — whose head is not a probe command — made a probe whose non-zero exit
+/// *is* the answer get graded as a real failure.
+fn command_segments(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let separator_len = match bytes[i] {
+            b'\n' | b';' | b'|' => 1,
+            b'&' => match bytes.get(i + 1) {
+                // `&>` / `&>>` redirect stdout and stderr.
+                Some(b'>') => 0,
+                Some(b'&') => 2,
+                // `<&`/`>&` duplication, written `>&2` or `2>&1`: the `&`
+                // follows the `>` that opened the redirection.
+                _ if i > 0 && bytes[i - 1] == b'>' => 0,
+                _ => 1,
+            },
+            _ => 0,
+        };
+        if separator_len == 0 {
+            i += 1;
+            continue;
+        }
+        segments.push(command[start..i].trim());
+        i += separator_len;
+        start = i;
+    }
+    segments.push(command[start..].trim());
+    segments.retain(|segment| !segment.is_empty());
+    segments
+}
+
 /// Shell command carried by a call, when it has one.
-fn command_of(call: &ToolCall) -> Option<&str> {
-    call.arguments
+///
+/// Two argument shapes carry the same command. The shell-tool calls the
+/// trajectory formats in this tree produce write it as a string
+/// (`{"command": "ls -l"}`), while a Codex `local_shell_call` keeps its
+/// `action` object verbatim, so the command arrives as an argv array
+/// (`{"type": "exec", "command": ["ls", "-l"]}`) — the shape
+/// `agentsight-trajectory-collector` maps and asserts
+/// (`codex.rs::test_tool_call_variants`). Reading the key as a string only
+/// made the argv form look like a call that runs no command at all: a probe
+/// whose non-zero exit *is* the answer was graded a certain failure and its
+/// result left the evidence pool, and the echo guard never ran on it, so the
+/// agent's own command line stayed in the pool to ground the very path it
+/// then claimed.
+///
+/// The array is joined with single spaces, the spelling the echo guard
+/// compares against: a shell echoes the invocation it was given, and the
+/// element boundaries are all the quoting the trajectory keeps.
+pub(super) fn command_of(call: &ToolCall) -> Option<String> {
+    let raw = call
+        .arguments
         .get("command")
-        .or_else(|| call.arguments.get("cmd"))
-        .and_then(|v| v.as_str())
+        .or_else(|| call.arguments.get("cmd"))?;
+    match raw {
+        serde_json::Value::String(command) => Some(command.clone()),
+        serde_json::Value::Array(argv) => {
+            let parts = argv
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        _ => None,
+    }
 }
 
 fn is_placeholder_or_empty(text: &str) -> bool {
-    text.trim().is_empty() || PLACEHOLDER_MARKERS.iter().any(|m| text.contains(m))
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // The placeholder IS the whole payload (spec B8), so the marker only
+    // counts in a payload made of that one line. The same anchoring
+    // `last_exit_code` applies to exit codes: a payload that merely quotes
+    // the marker — a file the agent read, a grep over this source — is
+    // describing something else, and reading it as "no output" turned a
+    // successful call into Unknown whose observation left the evidence pool.
+    trimmed.lines().count() == 1 && PLACEHOLDER_MARKERS.iter().any(|m| trimmed.contains(m))
 }
 
 /// Byte offset of a line inside the opening window that begins with an error
 /// token. Returns `None` when the only error words sit further in, which is the
 /// case the spec's B2 guard is built around.
+///
+/// The token is matched case-insensitively: the anchored signatures are, for
+/// the same reason — `error:` is the tool's own spelling of the condition —
+/// and the sibling scans that read these payloads (the grader's error signal,
+/// the opt ledger's error markers) match it that way. Only the capital
+/// spelling counted here, so one letter decided whether a flagless failure
+/// stayed in the evidence pool.
 fn weak_error_prefix(text: &str) -> Option<usize> {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
@@ -428,7 +642,11 @@ fn weak_error_prefix(text: &str) -> Option<usize> {
             return None;
         }
         let trimmed = line.trim_start();
-        if trimmed.starts_with("Error:") || trimmed.starts_with("Exception:") {
+        if WEAK_ERROR_TOKENS.iter().any(|token| {
+            trimmed
+                .get(..token.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(token))
+        }) {
             return Some(offset);
         }
         offset += line.len();
@@ -441,8 +659,7 @@ fn weak_error_prefix(text: &str) -> Option<usize> {
 /// Only reported when it is not at the very start, since a leading exception is
 /// this call's own failure and is handled by [`find_signature`].
 fn nested_error(text: &str) -> Option<String> {
-    const NESTED_MARKERS: &[&str] = &["java.lang.", "NullPointerException", "SQLException"];
-    let idx = NESTED_MARKERS
+    let idx = EXCEPTION_MARKERS
         .iter()
         .filter_map(|m| text.find(m))
         .min()

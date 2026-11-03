@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Related documents: [Design](../design/audit-log.md),
+Related documents: [Design](../design/en/audit-log.md),
 [ADR-009](../adr/ADR-009-audit-event-segment-and-sls-contract.md), and
 [ADR-010](../adr/ADR-010-audit-operations-retention-and-export-policy.md)
 
@@ -64,12 +64,12 @@ Use only the existing files:
 [audit]
 mode = "best_effort" # best_effort | required
 retention_days = 30
-max_disk_bytes = 1073741824
+max_disk_bytes = 104857600
 ```
 
 Rules:
 
-- Built-in defaults are `best_effort`, 30 days, and 1 GiB.
+- Built-in defaults are `best_effort`, 30 days, and 100 MiB.
 - If the system file contains `[audit]`, its table is authoritative for all three settings. Omitted
   values use built-in defaults; user configuration cannot override them.
 - If system `[audit]` is absent, user `[audit]` may override defaults.
@@ -353,7 +353,7 @@ Run the production `build_sls_record()` path using identical fixed Core/session/
 1. A capture/no-op audit sink.
 2. A real tempfile audit sink.
 
-Assert identical serialized SLS bytes, the same 32 fields/types/values/order, the same append count
+Assert identical serialized SLS bytes, the same 33 fields/types/values/order, the same append count
 and turn boundaries, identical pre-created-file output, and unchanged missing/unwritable-file exit
 behavior. The test-only no-op proves side-path independence; it is not a production disable switch.
 

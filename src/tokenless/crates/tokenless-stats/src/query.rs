@@ -362,6 +362,9 @@ pub fn format_list(records: &[StatsRecord], limit: usize) -> String {
 
 /// Format a single record showing before/after text content.
 /// If before and after are identical, shows original text with "(no compression)" note.
+/// An empty or absent after text stays visible behind an explicit placeholder:
+/// it is a real compression result (e.g. content stripped to nothing) or a row
+/// stored without content, and the record's metrics may still show savings.
 pub fn format_show(record: &StatsRecord) -> String {
     let before = record.before_text.as_deref().unwrap_or("");
     let after = record.after_text.as_deref().unwrap_or("");
@@ -372,8 +375,8 @@ pub fn format_show(record: &StatsRecord) -> String {
 
     let mut output = String::new();
 
-    if before == after || after.is_empty() {
-        // No compression happened or no after text
+    if before == after {
+        // No compression happened: identical text in and out.
         output.push_str("=== Original (no compression) ===\n");
         output.push_str(before);
         if !before.is_empty() && !before.ends_with('\n') {
@@ -386,9 +389,19 @@ pub fn format_show(record: &StatsRecord) -> String {
             output.push('\n');
         }
         output.push_str("\n=== After ===\n");
-        output.push_str(after);
-        if !after.is_empty() && !after.ends_with('\n') {
-            output.push('\n');
+        if after.is_empty() {
+            // Say which of the two non-compressed states this is instead of
+            // hiding it behind the "(no compression)" label.
+            if record.after_text.is_some() {
+                output.push_str("  (after content is empty)\n");
+            } else {
+                output.push_str("  (after content not stored)\n");
+            }
+        } else {
+            output.push_str(after);
+            if !after.ends_with('\n') {
+                output.push('\n');
+            }
         }
     }
 
@@ -650,6 +663,38 @@ mod tests {
 
         let output = format_show(&r);
         assert!(output.contains("no text content stored"));
+    }
+
+    #[test]
+    fn test_format_show_empty_after_is_not_no_compression() {
+        // A compression that stripped all content records real savings
+        // (400 -> 0 tokens here); `stats show` must not relabel it as
+        // "(no compression)" and hide the empty result.
+        let mut r = test_record();
+        r.after_text = Some(String::new());
+        r.after_chars = 0;
+        r.after_tokens = 0;
+
+        let output = format_show(&r);
+        assert!(!output.contains("no compression"));
+        assert!(output.contains("=== Before ==="));
+        assert!(output.contains("original text"));
+        assert!(output.contains("=== After ==="));
+        assert!(output.contains("after content is empty"));
+    }
+
+    #[test]
+    fn test_format_show_missing_after_is_not_no_compression() {
+        // before_text stored but after_text absent (legacy rows, external
+        // writers): show the stored side, not a false "no compression" label.
+        let mut r = test_record();
+        r.after_text = None;
+
+        let output = format_show(&r);
+        assert!(!output.contains("no compression"));
+        assert!(output.contains("=== Before ==="));
+        assert!(output.contains("original text"));
+        assert!(output.contains("after content not stored"));
     }
 
     #[test]

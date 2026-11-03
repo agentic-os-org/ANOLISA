@@ -1,0 +1,3 @@
+# Golden fixtures include intentional CRLF, mixed endings, and byte-exact hashes.
+crates/tokenless-compressors/tests/fixtures/** -text
+crates/tokenless-schema/tests/fixtures/** -text

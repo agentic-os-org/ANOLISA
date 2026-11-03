@@ -187,12 +187,24 @@ pub(super) fn try_exclusive_lock(file: &File) -> io::Result<bool> {
     }
 }
 
+/// Waits for the exclusive advisory lock.
+///
+/// Blocking is only used where every holder does bounded work and no holder ever
+/// waits on a lock the caller already owns, so the wait cannot be part of a cycle.
+/// A crashed holder cannot wedge it either: the kernel drops an flock when its
+/// descriptor goes away.
+pub(super) fn exclusive_lock(file: &File) -> io::Result<()> {
+    flock(file, FlockOperation::LockExclusive)
+        .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+}
+
 pub(super) fn unlock_file(file: &File) {
     let _ = flock(file, FlockOperation::Unlock);
 }
 
-pub(super) struct SessionLock {
+pub(crate) struct SessionLock {
     pub(super) file: File,
+    pub(super) created: bool,
 }
 
 impl Drop for SessionLock {

@@ -26,7 +26,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,17 @@ const MAX_FAST_FAILURES: u32 = 5;
 /// Poll interval while waiting on the worker child.
 const WORKER_POLL_MS: u64 = 200;
 /// How long the client waits for the mount to become ready before failing.
-const READY_TIMEOUT_MS: u64 = 10_000;
+///
+/// The worker pays the full mount startup cost before the FUSE session
+/// serves: the 24-command environment probe (`EnvironmentProfile::detect`
+/// spawns one `which` per whitelisted command) plus store discovery and the
+/// session start. On a host with slow process spawns (WSL, network home
+/// directories) that probe alone was measured at ~10 s, so a 10 s budget
+/// tore down a worker that was still probing — the readiness failure
+/// surfaced an empty worker log tail, the classic still-starting shape.
+/// 30 s keeps the same slow-startup regime inside the budget while the
+/// failure path (supervisor died, worker crashed) still reports quickly.
+const READY_TIMEOUT_MS: u64 = 30_000;
 /// How long `stop` waits for processes to exit / the mount to disappear.
 const STOP_TIMEOUT_MS: u64 = 10_000;
 
@@ -63,6 +73,18 @@ pub enum DesiredState {
     Stopped,
 }
 
+/// Validated config-mode roots and effective behavior fixed at managed start.
+/// Absence in old state retains positional-mode request matching.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedMountConfig {
+    /// Canonical roots, deduplicated in precedence order.
+    pub sources: Vec<PathBuf>,
+    /// Effective permission for users other than the mounter.
+    pub allow_other: bool,
+    /// Effective read-only setting, including the multi-source requirement.
+    pub read_only: bool,
+}
+
 /// On-disk record describing a managed mount instance.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ManagedState {
@@ -70,9 +92,74 @@ pub struct ManagedState {
     pub instance_id: String,
     pub mountpoint: String,
     pub source: String,
+    /// Config-mode identity; absent for legacy positional managed mounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_config: Option<ManagedMountConfig>,
     pub worker_program: String,
     pub worker_args: Vec<String>,
     pub desired_state: DesiredState,
+}
+
+/// Sequence that makes every staging path unique inside this process.
+static STATE_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// How many staging names one save may try before giving up. A name can only
+/// be taken by an entry stranded by a crashed save under the same pid.
+const MAX_STAGING_ATTEMPTS: usize = 16;
+
+/// Create the exclusive staging file for one state save, next to `path`.
+///
+/// The name carries the target's file name plus the pid (separating
+/// processes) and a fresh sequence number from `counter` (separating saves
+/// inside one process, threads included), so no two saves ever share a path
+/// and no call can unlink, write through, or publish another call's staging
+/// entry. `create_new` refuses to write through an entry already sitting at
+/// a candidate name — a planted symlink included — and the next name is used
+/// instead; only the writer that created a staging file may remove it.
+///
+/// `counter` is a parameter (and production passes the process-global
+/// [`STATE_STAGING_SEQUENCE`]) so the security tests can inject a private
+/// counter and know the exact candidate names their save will try,
+/// independently of what other tests running in parallel do to the global
+/// one — a pre-planted entry is then guaranteed to be hit, not merely
+/// likely.
+fn create_staging_file(
+    path: &Path,
+    counter: &AtomicU64,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "state path has no parent directory to stage in",
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "state path has no file name to stage under",
+        )
+    })?;
+    let prefix = file_name.to_string_lossy();
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let candidate = dir.join(format!(
+            ".{prefix}.{}.{}.tmp",
+            std::process::id(),
+            counter.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "every candidate staging path for the managed state file is taken",
+    ))
 }
 
 impl ManagedState {
@@ -83,14 +170,44 @@ impl ManagedState {
     }
 
     fn save(&self, path: &Path) -> Result<(), Box<dyn Error>> {
-        let raw = serde_json::to_string_pretty(self)?;
-        // Write-and-rename for atomicity so a concurrent reader never sees a
-        // half-written file.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, raw)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        self.save_with_counter(path, &STATE_STAGING_SEQUENCE)
     }
+
+    /// [`Self::save`] with the staging-sequence source injected. Production
+    /// always saves through [`Self::save`] and the process-global counter;
+    /// tests pass a private counter so the candidate names their save will
+    /// try are fully deterministic under default parallel `cargo test`.
+    fn save_with_counter(&self, path: &Path, counter: &AtomicU64) -> Result<(), Box<dyn Error>> {
+        let raw = serde_json::to_string_pretty(self)?;
+        write_staged(path, &raw, counter)
+    }
+}
+
+/// Publish a complete state or resolved mount file using exclusive staging.
+fn write_staged(path: &Path, raw: &str, counter: &AtomicU64) -> Result<(), Box<dyn Error>> {
+    let (tmp, mut file) = create_staging_file(path, counter)?;
+    let result = (|| {
+        use std::io::Write;
+        file.write_all(raw.as_bytes())?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        // Remove only the staging entry created by this call.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(Into::into)
+}
+
+fn save_mount_config(
+    config: &ManagedMountConfig,
+    mountpoint: &Path,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let file = super::mount_file::MountFile {
+        mountpoint: mountpoint.to_path_buf(),
+        sources: config.sources.clone(),
+    };
+    write_staged(path, &toml::to_string(&file)?, &STATE_STAGING_SEQUENCE)
 }
 
 /// Filesystem paths for a managed mount instance.
@@ -100,6 +217,8 @@ pub struct ManagedPaths {
     pub worker_pid: PathBuf,
     pub supervisor_log: PathBuf,
     pub worker_log: PathBuf,
+    /// Owned resolved mount specification replayed by config-mode workers.
+    pub mount_config: PathBuf,
 }
 
 impl ManagedPaths {
@@ -111,6 +230,7 @@ impl ManagedPaths {
             worker_pid: dir.join(format!("{instance_id}.worker.pid")),
             supervisor_log: dir.join(format!("{instance_id}.supervisor.log")),
             worker_log: dir.join(format!("{instance_id}.worker.log")),
+            mount_config: dir.join(format!("{instance_id}.mount.toml")),
         }
     }
 }
@@ -214,7 +334,26 @@ pub fn normalize_mountpoint(mountpoint: &Path) -> PathBuf {
 /// Stable, collision-resistant instance id derived from a normalized path.
 ///
 /// Combines a sanitized basename (for human readability) with a hash of the
-/// full path (for uniqueness).
+/// full path (for uniqueness). The id must never start with a dash: it is
+/// passed as the value of `--instance` (a leading `-` makes the argument
+/// parser read it as an option, so the supervisor dies before writing its
+/// pid file) and it prefixes every runtime file name. A dot-prefixed
+/// mountpoint — the shape every test harness's tempdir has — sanitizes to a
+/// leading dash, so leading dashes are stripped before the readable prefix
+/// is cut.
+///
+/// Only dashes are stripped. Every other id shape the sanitizer can emit —
+/// in particular a leading underscore — was already a valid `--instance`
+/// value and file-name prefix, so a live supervisor may be sitting on those
+/// exact runtime files when the binary is upgraded. Stripping a leading
+/// underscore too would silently rename such an instance (`/mnt/_skills`
+/// used `_skills-<hash>`): `stop` would miss the incumbent's state and pid
+/// files and report success while the old supervisor kept running — free to
+/// remount after any later unmount — and a new `mount --managed` would race
+/// a competing supervisor for the mountpoint. Preserving every non-dash
+/// prefix keeps pre-existing ids byte-identical, and dash-leading ids never
+/// worked (the supervisor died in argument parsing, before writing any
+/// state), so there is nothing to migrate.
 pub fn instance_id_for(normalized: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     normalized.as_os_str().hash(&mut hasher);
@@ -232,6 +371,7 @@ pub fn instance_id_for(normalized: &Path) -> String {
                 '-'
             }
         })
+        .skip_while(|c| *c == '-')
         .take(24)
         .collect();
     let base = if base.is_empty() {
@@ -262,6 +402,40 @@ pub fn build_worker_args(raw_args: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Replay the frozen mount file and effective options, preserving other args.
+fn build_config_worker_args(
+    raw_args: &[String],
+    config: &ManagedMountConfig,
+    path: &Path,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let path = path
+        .to_str()
+        .ok_or("managed mount config path is not valid UTF-8")?;
+    let mut out = build_worker_args(raw_args);
+    let config_index = out
+        .iter()
+        .position(|arg| arg == "--config" || arg.starts_with("--config="))
+        .ok_or("managed mount configuration requires --config")?;
+    if out[config_index] == "--config" {
+        let value = out
+            .get_mut(config_index + 1)
+            .ok_or("managed --config requires a path")?;
+        *value = path.to_string();
+    } else {
+        out[config_index] = format!("--config={path}");
+    }
+    for (enabled, flag) in [
+        (config.allow_other, "--allow-other"),
+        (config.read_only, "--read-only"),
+    ] {
+        if enabled && !out.iter().any(|arg| arg == flag) {
+            let option_end = out.iter().position(|arg| arg == "--").unwrap_or(out.len());
+            out.insert(option_end, flag.to_string());
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -309,15 +483,14 @@ pub enum MountState {
 /// How long to keep retrying unmount of a stale endpoint before giving up.
 const UNMOUNT_TIMEOUT_MS: u64 = 3_000;
 
-/// Whether the mountpoint currently appears in `/proc/mounts`.
+/// Whether the mountpoint currently appears in `/proc/mounts`. Matching is
+/// byte-exact against the escape-decoded mount field (see
+/// [`skillfs_fuse::proc_mounts`]): a lossy UTF-8 view would conflate a
+/// mounted invalid-byte path with a different queried U+FFFD path.
 pub fn is_mounted(mountpoint: &Path) -> bool {
-    let target = mountpoint.to_string_lossy();
-    match std::fs::read_to_string("/proc/mounts") {
-        Ok(info) => info
-            .lines()
-            .any(|line| line.split_whitespace().nth(1) == Some(&*target)),
-        Err(_) => false,
-    }
+    use std::os::unix::ffi::OsStrExt;
+    let mounts = std::fs::read("/proc/mounts").unwrap_or_default();
+    skillfs_fuse::proc_mounts::mounts_contain_target(&mounts, mountpoint.as_os_str().as_bytes())
 }
 
 /// Classify the mountpoint: distinguish a healthy mount from a dead FUSE
@@ -341,9 +514,15 @@ fn is_mount_ready(mountpoint: &Path) -> bool {
 
 /// Attempt a single unmount pass: `fusermount3 -u`, then `umount` as a
 /// fallback. Returns `true` if the mountpoint is gone afterward.
+///
+/// The mountpoint is passed as the raw OS string, matching the byte-exact
+/// `is_mounted` probe: `to_string_lossy()` would turn an invalid-byte
+/// mountpoint into a different (nonexistent) path, so fusermount3 would
+/// fail and only the `umount` fallback would address the real mount.
 fn unmount_once(mountpoint: &Path) -> bool {
     let _ = std::process::Command::new("fusermount3")
-        .args(["-u", &mountpoint.to_string_lossy()])
+        .arg("-u")
+        .arg(mountpoint.as_os_str())
         .output();
     if !is_mounted(mountpoint) {
         return true;
@@ -382,12 +561,28 @@ fn clear_mount(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
 // Client: `skillfs mount --managed ...`
 // ---------------------------------------------------------------------------
 
+/// Whether the recorded state of a live managed instance matches the
+/// requested mountpoint, input mode, roots and config-mode effective options.
+///
+/// Pure so the refusal can be tested without a live supervisor.
+fn active_instance_matches(
+    state: &ManagedState,
+    source_norm: &Path,
+    mountpoint_norm: &Path,
+    mount_config: Option<&ManagedMountConfig>,
+) -> bool {
+    state.source == source_norm.to_string_lossy()
+        && state.mountpoint == mountpoint_norm.to_string_lossy()
+        && state.mount_config.as_ref() == mount_config
+}
+
 /// Entry point for a managed mount request. Validates the source, writes the
 /// managed state, spawns a detached supervisor, and waits for readiness.
 pub fn run_client(
     raw_args: &[String],
     source: &Path,
     mountpoint: &Path,
+    mount_config: Option<ManagedMountConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // Fast, client-side validation so operators get an immediate error
     // instead of a readiness timeout when the source is wrong. Deeper
@@ -425,6 +620,36 @@ pub fn run_client(
     // incumbent over the mountpoint.
     if let Some(pid) = read_pid(&paths.supervisor_pid) {
         if pid_alive(pid) {
+            // The instance id is derived from the mountpoint, so a second
+            // `--managed` request for the same mountpoint but a different
+            // source resolves to this instance. Reporting it as "already
+            // active" would leave the caller believing the new source is
+            // served; refuse instead.
+            //
+            // The recorded state is the only proof of what the incumbent
+            // serves, so a missing or corrupt state file must not be
+            // skipped either: fail explicitly and leave the incumbent
+            // running rather than vouching for an unverified source.
+            let active = ManagedState::load(&paths.state).map_err(|e| {
+                format!(
+                    "managed supervisor (pid {pid}) is active for {} but its state \
+                     cannot be read ({e}); run `skillfs stop {}` first",
+                    normalized.display(),
+                    normalized.display()
+                )
+            })?;
+            if !active_instance_matches(&active, &source_norm, &normalized, mount_config.as_ref()) {
+                return Err(format!(
+                    "managed mount '{}' is already active from source '{}' (requested '{}'); \
+                     source order, input mode, or effective options may differ; \
+                     run `skillfs stop {}` first",
+                    active.mountpoint,
+                    active.source,
+                    source_norm.display(),
+                    normalized.display()
+                )
+                .into());
+            }
             if is_mount_ready(&normalized) {
                 info!(
                     mountpoint = %normalized.display(),
@@ -477,38 +702,41 @@ pub fn run_client(
                 mountpoint = %normalized.display(),
                 "found orphan managed worker without a live supervisor; replacing it"
             );
-            send_signal(pid, libc::SIGTERM);
-            let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
-            while pid_alive(pid) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if pid_alive(pid) {
-                send_signal(pid, libc::SIGKILL);
-            }
         }
-        let _ = std::fs::remove_file(&paths.worker_pid);
     }
-    if is_mounted(&normalized) {
-        clear_mount(&normalized)?;
-    }
-    let _ = std::fs::remove_file(&paths.supervisor_pid);
+    teardown_instance(&paths, &normalized)?;
 
     let worker_program = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable: {e}"))?;
-    let worker_args = build_worker_args(raw_args);
+    let worker_args = match &mount_config {
+        Some(config) => build_config_worker_args(raw_args, config, &paths.mount_config)?,
+        None => build_worker_args(raw_args),
+    };
+
+    if let Some(config) = &mount_config {
+        save_mount_config(config, &normalized, &paths.mount_config)?;
+    }
 
     let state = ManagedState {
         schema_version: STATE_SCHEMA_VERSION,
         instance_id: instance_id.clone(),
         mountpoint: normalized.to_string_lossy().to_string(),
         source: source_norm.to_string_lossy().to_string(),
+        mount_config,
         worker_program: worker_program.to_string_lossy().to_string(),
         worker_args,
         desired_state: DesiredState::Mounted,
     };
-    state.save(&paths.state)?;
+    if let Err(error) = state.save(&paths.state) {
+        let _ = std::fs::remove_file(&paths.mount_config);
+        return Err(error);
+    }
 
-    spawn_supervisor(&worker_program, &instance_id, &paths)?;
+    if let Err(error) = spawn_supervisor(&worker_program, &instance_id, &paths) {
+        let _ = std::fs::remove_file(&paths.state);
+        let _ = std::fs::remove_file(&paths.mount_config);
+        return Err(error);
+    }
 
     // Wait for readiness.
     let deadline = Instant::now() + Duration::from_millis(READY_TIMEOUT_MS);
@@ -532,6 +760,13 @@ pub fn run_client(
             if !pid_alive(pid) {
                 break;
             }
+        }
+        // State is published before spawning the supervisor, so both files
+        // disappearing means cleanup, not the initial window before PID write.
+        if matches!(paths.supervisor_pid.try_exists(), Ok(false))
+            && matches!(paths.state.try_exists(), Ok(false))
+        {
+            break;
         }
         if Instant::now() >= deadline {
             break;
@@ -636,7 +871,8 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         .map_err(|e| format!("failed to load managed state for '{instance_id}': {e}"))?;
     let mountpoint = PathBuf::from(&state.mountpoint);
 
-    write_pid(&paths.supervisor_pid, std::process::id())?;
+    write_pid(&paths.supervisor_pid, std::process::id())
+        .inspect_err(|_| finish(&paths, &mountpoint))?;
     install_term_handler();
     info!(
         instance = %instance_id,
@@ -659,8 +895,11 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
             .create(true)
             .append(true)
             .open(&paths.worker_log)
-            .map_err(|e| format!("failed to open worker log: {e}"))?;
-        let worker_err = worker_out.try_clone()?;
+            .map_err(|e| format!("failed to open worker log: {e}"))
+            .inspect_err(|_| finish(&paths, &mountpoint))?;
+        let worker_err = worker_out
+            .try_clone()
+            .inspect_err(|_| finish(&paths, &mountpoint))?;
 
         let start = Instant::now();
         let mut child = std::process::Command::new(&state.worker_program)
@@ -669,9 +908,21 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
             .stdout(std::process::Stdio::from(worker_out))
             .stderr(std::process::Stdio::from(worker_err))
             .spawn()
-            .map_err(|e| format!("failed to spawn worker: {e}"))?;
+            .map_err(|e| format!("failed to spawn worker: {e}"))
+            .inspect_err(|_| finish(&paths, &mountpoint))?;
         let worker_pid = child.id();
-        let _ = write_pid(&paths.worker_pid, worker_pid);
+        // teardown_instance uses this file to signal the worker directly when
+        // the supervisor is gone. A missing file loses only that fallback:
+        // clear_mount() in teardown still unmounts, and a successful unmount
+        // makes the FUSE loop return and the worker exit — so the worker is
+        // orphaned only when unmount also fails or the worker is stuck. The
+        // warn makes the lost fallback visible for diagnosing that case.
+        if let Err(error) = write_pid(&paths.worker_pid, worker_pid) {
+            warn!(
+                error = %error,
+                "failed to write worker pid file; stop cannot signal this worker directly if the supervisor dies"
+            );
+        }
         info!(worker_pid, "managed worker started");
 
         // Wait for the worker, watching for shutdown.
@@ -684,7 +935,16 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
                     "stopping managed worker (desired state cleared)"
                 );
                 send_signal(worker_pid as i32, libc::SIGTERM);
-                let _ = wait_child_timeout(&mut child, Duration::from_millis(STOP_TIMEOUT_MS));
+                if let Err(e) = wait_for_shutdown(&mountpoint, || {
+                    child.try_wait().map(|status| status.is_some())
+                }) {
+                    warn!(error = %e, "managed worker shutdown failed");
+                }
+                if matches!(child.try_wait(), Ok(None)) {
+                    warn!(worker_pid, "managed worker shutdown timed out; forcing");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 let _ = std::fs::remove_file(&paths.worker_pid);
                 finish(&paths, &mountpoint);
                 return Ok(());
@@ -745,11 +1005,30 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
                     mountpoint = %mountpoint.display(),
                     "managed worker keeps failing fast; giving up crash-loop remount"
                 );
-                // Mark the instance stopped so nothing resurrects it, then fall
-                // through to finish(): unmount and clear residual state.
-                if let Ok(mut state) = ManagedState::load(&paths.state) {
-                    state.desired_state = DesiredState::Stopped;
-                    let _ = state.save(&paths.state);
+                // Best-effort persistence of the stopped marker. A failure
+                // here is not itself a resurrection: finish() below deletes
+                // the state file, and current_desired_state() treats a
+                // missing or unreadable state as Stopped, so the common
+                // path still converges. The log makes the swallowed error
+                // visible so operators can see when the marker was not
+                // written; only a stale pre-Mounted state that survives
+                // cleanup could mislead a later start.
+                match ManagedState::load(&paths.state) {
+                    Ok(mut state) => {
+                        state.desired_state = DesiredState::Stopped;
+                        if let Err(error) = state.save(&paths.state) {
+                            warn!(
+                                error = %error,
+                                "failed to persist stopped marker; the state file may be stale"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "failed to load state for stopped marker; treating as stopped"
+                        );
+                    }
                 }
                 break;
             }
@@ -769,6 +1048,11 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         backoff_ms = (backoff_ms.saturating_mul(2)).min(MAX_BACKOFF_MS);
     }
 
+    // No worker is alive on this path (shutdown during backoff or crash-loop
+    // exhaustion), so only a stale endpoint can need cleanup.
+    if let Err(e) = clear_mount(&mountpoint) {
+        warn!(error = %e, "failed to unmount during supervisor cleanup");
+    }
     finish(&paths, &mountpoint);
     Ok(())
 }
@@ -781,33 +1065,80 @@ fn current_desired_state(state_path: &Path) -> DesiredState {
         .unwrap_or(DesiredState::Stopped)
 }
 
-fn wait_child_timeout(child: &mut std::process::Child, timeout: Duration) -> std::io::Result<()> {
-    let deadline = Instant::now() + timeout;
+// Keep retrying while the worker owns backing cleanup. After a successful
+// unmount, wait only for its exit; never unmount after forcing that owner out.
+fn wait_for_shutdown(
+    mountpoint: &Path,
+    mut exited: impl FnMut() -> std::io::Result<bool>,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
+    let mut unmounted = false;
     loop {
-        match child.try_wait()? {
-            Some(_) => return Ok(()),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_millis(WORKER_POLL_MS));
-            }
+        let processes_gone = exited()?;
+        if !unmounted {
+            unmounted = !is_mounted(mountpoint) || unmount_once(mountpoint);
         }
+        if (unmounted && processes_gone) || Instant::now() >= deadline {
+            return if unmounted {
+                Ok(())
+            } else {
+                Err(format!(
+                    "failed to unmount '{}' via fusermount3 and umount",
+                    mountpoint.display()
+                )
+                .into())
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// Final cleanup: ensure the mount is gone and remove instance state.
-fn finish(paths: &ManagedPaths, mountpoint: &Path) {
-    if is_mounted(mountpoint) {
-        if let Err(e) = clear_mount(mountpoint) {
-            warn!(error = %e, "failed to unmount during supervisor cleanup");
+/// Remove runtime files only when config-mode unmount is confirmed.
+/// The mount-table read is explicit so unreadable tables cannot mean absence.
+fn remove_instance_files(
+    paths: &ManagedPaths,
+    mountpoint: &Path,
+    mounts: std::io::Result<Vec<u8>>,
+) -> Result<(), Box<dyn Error>> {
+    use std::os::unix::ffi::OsStrExt;
+    let state = ManagedState::load(&paths.state).ok();
+    let config_mode = paths.mount_config.try_exists().unwrap_or(true)
+        || state
+            .as_ref()
+            .is_some_and(|state| state.mount_config.is_some());
+    if config_mode {
+        let unmounted = mounts.map(|mounts| {
+            !skillfs_fuse::proc_mounts::mounts_contain_target(
+                &mounts,
+                mountpoint.as_os_str().as_bytes(),
+            )
+        });
+        if !matches!(unmounted, Ok(true)) {
+            // Retain a stopped record and its frozen specification so a later
+            // stop can retry; an uncertain mount must never lose its snapshot.
+            if let Some(mut state) = state {
+                state.desired_state = DesiredState::Stopped;
+                let _ = state.save(&paths.state);
+            }
+            return Err(format!(
+                "cannot confirm unmount of '{}'; managed config state retained",
+                mountpoint.display()
+            )
+            .into());
         }
     }
     let _ = std::fs::remove_file(&paths.worker_pid);
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
+    let _ = std::fs::remove_file(&paths.mount_config);
+    Ok(())
+}
+
+/// Remove instance state after worker shutdown or crash-loop exhaustion.
+fn finish(paths: &ManagedPaths, mountpoint: &Path) {
+    if let Err(error) = remove_instance_files(paths, mountpoint, std::fs::read("/proc/mounts")) {
+        warn!(%error, "managed supervisor retained state for a later stop");
+    }
     info!(mountpoint = %mountpoint.display(), "managed supervisor exiting");
 }
 
@@ -816,13 +1147,29 @@ fn finish(paths: &ManagedPaths, mountpoint: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Tear down a managed instance: mark it stopped, signal the supervisor
-/// (falling back to the worker), wait for exit, unmount, and remove residual
+/// (falling back to the worker), unmount, wait for exit, and remove residual
 /// pid/state files. Returns the unmount result so callers can surface a cleanup
 /// failure; every other step is best-effort.
 ///
 /// Shared by `stop` and by the client's startup-abort path so neither has to
-/// duplicate the signal/wait/unmount sequence.
+/// duplicate the signal/unmount/wait sequence.
 fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<dyn Error>> {
+    teardown_instance_with_shutdown(
+        paths,
+        mountpoint,
+        |processes_gone| wait_for_shutdown(mountpoint, || Ok(processes_gone())),
+        || std::fs::read("/proc/mounts"),
+    )
+}
+
+// Inject only the shutdown outcome and final mount-table read so tests exercise
+// the same stopped marker and cleanup gates without a live FUSE mount.
+fn teardown_instance_with_shutdown(
+    paths: &ManagedPaths,
+    mountpoint: &Path,
+    shutdown: impl FnOnce(&dyn Fn() -> bool) -> Result<(), Box<dyn Error>>,
+    read_mounts: impl FnOnce() -> std::io::Result<Vec<u8>>,
+) -> Result<(), Box<dyn Error>> {
     // Clear desired state first so the supervisor will not remount even if a
     // remount races with our signal.
     if let Ok(mut state) = ManagedState::load(&paths.state) {
@@ -850,45 +1197,26 @@ fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<
         }
     }
 
-    // Wait for the managed processes to exit. The supervisor unmounts cleanly
-    // on SIGTERM, so once it is gone the mount is normally already down; any
-    // remaining endpoint is cleared explicitly below.
-    let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
-    loop {
-        let sup_gone = sup_pid.is_none_or(|p| !pid_alive(p));
-        let worker_gone = worker_pid.is_none_or(|p| !pid_alive(p));
-        if sup_gone && worker_gone {
-            break;
-        }
-        if Instant::now() >= deadline {
-            warn!("teardown timed out waiting for clean shutdown; forcing");
-            if let Some(p) = sup_pid {
-                if pid_alive(p) {
-                    send_signal(p, libc::SIGKILL);
-                }
+    let processes_gone =
+        || sup_pid.is_none_or(|p| !pid_alive(p)) && worker_pid.is_none_or(|p| !pid_alive(p));
+    let unmount_result = shutdown(&processes_gone);
+    if !processes_gone() {
+        warn!("teardown timed out waiting for clean shutdown; forcing");
+        for p in [sup_pid, worker_pid].into_iter().flatten() {
+            if pid_alive(p) {
+                send_signal(p, libc::SIGKILL);
             }
-            if let Some(p) = worker_pid {
-                if pid_alive(p) {
-                    send_signal(p, libc::SIGKILL);
-                }
-            }
-            break;
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
 
-    // Ensure the mount is gone, clearing any stale/dead endpoint a killed
-    // worker left behind. The error is surfaced after state cleanup.
-    let unmount_result = if is_mounted(mountpoint) {
-        clear_mount(mountpoint)
-    } else {
-        Ok(())
-    };
-
-    // Best-effort final cleanup of any residual state files.
-    let _ = std::fs::remove_file(&paths.worker_pid);
-    let _ = std::fs::remove_file(&paths.supervisor_pid);
-    let _ = std::fs::remove_file(&paths.state);
+    // Config state must survive a failed stop, including an unreadable mount
+    // table. Positional instances retain their existing best-effort cleanup.
+    let config_mode = paths.mount_config.try_exists().unwrap_or(true)
+        || ManagedState::load(&paths.state).is_ok_and(|state| state.mount_config.is_some());
+    if config_mode && unmount_result.is_err() {
+        return unmount_result;
+    }
+    remove_instance_files(paths, mountpoint, read_mounts())?;
 
     unmount_result
 }
@@ -909,21 +1237,23 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     // stop timeout on processes that do not exist (handles stale or
     // non-managed dead mounts).
     if !had_state {
-        let _ = std::fs::remove_file(&paths.worker_pid);
-        let _ = std::fs::remove_file(&paths.supervisor_pid);
-        match classify_mount(&normalized) {
-            MountState::NotMounted => {
-                println!(
-                    "skillfs: no managed mount at {} (already stopped)",
-                    normalized.display()
-                );
-            }
-            // Present (ready or a stale/dead endpoint): unmount it, surfacing
-            // an error if cleanup cannot complete.
-            _ => {
-                clear_mount(&normalized)?;
-                println!("skillfs: unmounted {}", normalized.display());
-            }
+        if matches!(paths.mount_config.try_exists(), Ok(false)) {
+            // Preserve the legacy no-state PID cleanup even if unmount fails.
+            let _ = std::fs::remove_file(&paths.worker_pid);
+            let _ = std::fs::remove_file(&paths.supervisor_pid);
+        }
+        let was_mounted = classify_mount(&normalized) != MountState::NotMounted;
+        if was_mounted {
+            clear_mount(&normalized)?;
+        }
+        remove_instance_files(&paths, &normalized, std::fs::read("/proc/mounts"))?;
+        if was_mounted {
+            println!("skillfs: unmounted {}", normalized.display());
+        } else {
+            println!(
+                "skillfs: no managed mount at {} (already stopped)",
+                normalized.display()
+            );
         }
         return Ok(());
     }
@@ -945,6 +1275,45 @@ mod tests {
         assert_eq!(a, b, "instance id must be deterministic");
     }
 
+    /// A live supervisor pid with a missing or corrupt state file must
+    /// fail the request with the explicit state error instead of falling
+    /// through to an "already active" success: the state is the only
+    /// proof of which source the incumbent serves. (Previously a ready
+    /// mount with unreadable state reported success.)
+    #[test]
+    fn unreadable_incumbent_state_fails_instead_of_already_active() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let normalized = normalize_mountpoint(mountpoint.path());
+        let paths = ManagedPaths::new(&instance_id_for(&normalized));
+        secure_runtime_dir().expect("runtime dir");
+        // The test process itself plays the live supervisor: its pid is
+        // alive by definition.
+        std::fs::write(&paths.supervisor_pid, std::process::id().to_string())
+            .expect("write supervisor pid");
+
+        let err = run_client(&[], source.path(), mountpoint.path(), None)
+            .expect_err("a missing state file must fail the request");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("state cannot be read") && msg.contains("skillfs stop"),
+            "expected the explicit state-read failure, got: {msg}"
+        );
+
+        // Corrupt state fails the same way, without touching the
+        // incumbent.
+        std::fs::write(&paths.state, "{not json").expect("write corrupt state");
+        let err = run_client(&[], source.path(), mountpoint.path(), None)
+            .expect_err("a corrupt state file must fail the request");
+        assert!(
+            err.to_string().contains("state cannot be read"),
+            "expected the explicit state-read failure, got: {err}"
+        );
+
+        std::fs::remove_file(&paths.supervisor_pid).ok();
+        std::fs::remove_file(&paths.state).ok();
+    }
+
     #[test]
     fn instance_id_differs_for_different_paths() {
         let a = instance_id_for(Path::new("/tmp/mount-a"));
@@ -953,10 +1322,71 @@ mod tests {
     }
 
     #[test]
+    fn is_mounted_matches_escaped_and_invalid_byte_paths() {
+        // The matcher lives in skillfs_fuse::proc_mounts (unit-tested there);
+        // this pins the wiring: escaped mountpoints match their real path and
+        // an invalid-byte mount never collides with a U+FFFD query.
+        let mounts = b"fuse.skillfs /mnt/my\\040skills fuse.skillfs rw 0 0\nfuse.skillfs /mnt/\xff fuse.skillfs rw 0 0\n";
+        assert!(skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            b"/mnt/my skills"
+        ));
+        assert!(!skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            "/mnt/\u{FFFD}".as_bytes()
+        ));
+        assert!(skillfs_fuse::proc_mounts::mounts_contain_target(
+            mounts,
+            b"/mnt/\xff"
+        ));
+    }
+
+    #[test]
     fn instance_id_includes_sanitized_basename() {
         let id = instance_id_for(Path::new("/var/run/my.mount point"));
         // Non-alphanumerics in the basename become dashes.
         assert!(id.starts_with("my-mount-point-"), "got: {id}");
+    }
+
+    #[test]
+    fn instance_id_never_leads_with_a_dash() {
+        // A dot-prefixed mountpoint — the shape every test harness tempdir
+        // has — used to sanitize to a leading dash, which the supervisor's
+        // `--instance` argument rejected as an option-looking value: the
+        // supervisor died before writing its pid file and the client
+        // reported a readiness timeout with an empty worker log.
+        let id = instance_id_for(Path::new("/tmp/.tmpAbCdEf"));
+        assert!(
+            id.starts_with("tmpAbCdEf-"),
+            "the dot must not become a leading dash, got: {id}"
+        );
+        assert!(
+            id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()),
+            "ids are argv values and file-name prefixes; they must start alphanumeric, got: {id}"
+        );
+        // A basename of only non-alphanumerics still yields the root
+        // fallback, and uniqueness rides on the path hash either way.
+        let dots = instance_id_for(Path::new("/tmp/..."));
+        assert!(dots.starts_with("root-"), "got: {dots}");
+    }
+
+    #[test]
+    fn instance_id_preserves_the_legacy_underscore_prefix() {
+        // Ids that never started with a dash were always valid
+        // `--instance` values and runtime file-name prefixes, so a live
+        // supervisor may be sitting on their state/pid files when the
+        // binary is upgraded. Stripping the leading underscore as well
+        // would rename the instance across the upgrade: `stop` would miss
+        // the incumbent's files and report success while the old
+        // supervisor kept running (free to remount later), and a new
+        // `mount --managed` would race a competing supervisor. Only the
+        // leading dash — the one shape that never worked — is stripped.
+        let id = instance_id_for(Path::new("/mnt/_skills"));
+        assert!(id.starts_with("_skills-"), "got: {id}");
+        // A legacy-valid id that already mixes allowed non-alphanumerics
+        // must survive verbatim too.
+        let mixed = instance_id_for(Path::new("/mnt/_-skills"));
+        assert!(mixed.starts_with("_-skills-"), "got: {mixed}");
     }
 
     #[test]
@@ -1004,6 +1434,80 @@ mod tests {
     }
 
     #[test]
+    fn config_worker_args_freeze_both_config_forms_and_effective_options() {
+        let config = ManagedMountConfig {
+            sources: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            allow_other: true,
+            read_only: true,
+        };
+        for config_args in [
+            vec!["--config", "/original.toml"],
+            vec!["--config=/original.toml"],
+        ] {
+            let raw: Vec<String> = [
+                vec!["--verbose", "mount", "--managed", "--allow-other"],
+                config_args,
+                vec!["--log-file", "/logs/worker-{pid}.log", "--"],
+            ]
+            .concat()
+            .into_iter()
+            .map(String::from)
+            .collect();
+            let args = build_config_worker_args(&raw, &config, Path::new("/resolved.toml"))
+                .expect("resolved worker args");
+            assert!(!args.iter().any(|arg| arg.contains("original.toml")));
+            assert!(args.iter().any(|arg| arg.contains("/resolved.toml")));
+            for flag in ["--foreground", "--allow-other", "--read-only", "--verbose"] {
+                assert_eq!(args.iter().filter(|arg| arg.as_str() == flag).count(), 1);
+            }
+            assert_eq!(args.last().map(String::as_str), Some("--"));
+            assert!(
+                args.windows(2)
+                    .any(|args| { args == ["--log-file", "/logs/worker-{pid}.log"] })
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_mount_config_survives_original_edits_and_deletion() {
+        let dir = tempfile::tempdir().expect("config tempdir");
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).expect("source directory");
+        let original = dir.path().join("original.toml");
+        let resolved = dir.path().join("resolved.toml");
+        let input = super::super::mount_file::MountFile {
+            mountpoint: dir.path().join("mount"),
+            sources: vec![source.clone(), source],
+        };
+        std::fs::write(&original, toml::to_string(&input).expect("input TOML"))
+            .expect("write original");
+        let file = super::super::mount_file::load(&original)
+            .expect("load original")
+            .expect("mount config")
+            .validate()
+            .expect("validated config");
+        assert_eq!(file.sources.len(), 1, "canonical duplicates collapse");
+        let config = ManagedMountConfig {
+            sources: file.sources.clone(),
+            allow_other: false,
+            read_only: false,
+        };
+        save_mount_config(&config, &file.mountpoint, &resolved).expect("save resolved config");
+        for delete in [false, true] {
+            if delete {
+                std::fs::remove_file(&original).expect("delete original config");
+            } else {
+                std::fs::write(&original, "invalid replacement config").expect("edit original");
+            }
+            let replay = super::super::mount_file::load(&resolved)
+                .expect("read frozen config")
+                .expect("frozen mount config");
+            assert_eq!(replay.mountpoint, file.mountpoint);
+            assert_eq!(replay.sources, file.sources);
+        }
+    }
+
+    #[test]
     fn state_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
@@ -1012,6 +1516,7 @@ mod tests {
             instance_id: "mnt-000000000000dead".to_string(),
             mountpoint: "/mnt/skillfs".to_string(),
             source: "/srv/skills".to_string(),
+            mount_config: None,
             worker_program: "/usr/bin/skillfs".to_string(),
             worker_args: vec![
                 "mount".to_string(),
@@ -1034,6 +1539,386 @@ mod tests {
         assert_eq!(json, "\"stopped\"");
         let parsed: DesiredState = serde_json::from_str("\"mounted\"").unwrap();
         assert_eq!(parsed, DesiredState::Mounted);
+    }
+
+    fn sample_state(instance_id: &str) -> ManagedState {
+        ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            instance_id: instance_id.to_string(),
+            mountpoint: "/mnt/skillfs".to_string(),
+            source: "/srv/skills".to_string(),
+            mount_config: None,
+            worker_program: "/usr/bin/skillfs".to_string(),
+            worker_args: vec![
+                "mount".to_string(),
+                "--foreground".to_string(),
+                "/srv/skills".to_string(),
+                "/mnt/skillfs".to_string(),
+            ],
+            desired_state: DesiredState::Mounted,
+        }
+    }
+
+    #[test]
+    fn legacy_state_without_config_identity_remains_positional() {
+        let mut legacy = sample_state("legacy");
+        let json = serde_json::to_string(&legacy).expect("legacy JSON");
+        assert!(!json.contains("mount_config"));
+        legacy = serde_json::from_str(&json).expect("read old state shape");
+        assert!(legacy.mount_config.is_none());
+        // Legacy request matching intentionally does not compare worker options.
+        legacy.worker_args.push("--allow-other".to_string());
+        legacy.worker_args.push("--read-only".to_string());
+        assert!(active_instance_matches(
+            &legacy,
+            Path::new("/srv/skills"),
+            Path::new("/mnt/skillfs"),
+            None,
+        ));
+        let config = ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills")],
+            allow_other: false,
+            read_only: false,
+        };
+        assert!(!active_instance_matches(
+            &legacy,
+            Path::new("/srv/skills"),
+            Path::new("/mnt/skillfs"),
+            Some(&config),
+        ));
+    }
+
+    #[test]
+    fn config_identity_includes_order_mode_and_effective_options() {
+        let mut state = sample_state("config");
+        let config = ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills"), PathBuf::from("/srv/extra")],
+            allow_other: false,
+            read_only: true,
+        };
+        state.mount_config = Some(config.clone());
+        let matches = |request: Option<&ManagedMountConfig>| {
+            active_instance_matches(
+                &state,
+                Path::new("/srv/skills"),
+                Path::new("/mnt/skillfs"),
+                request,
+            )
+        };
+        assert!(matches(Some(&config)));
+        assert!(!matches(None));
+        let mut changed = config.clone();
+        changed.sources.reverse();
+        assert!(!matches(Some(&changed)));
+        changed = config.clone();
+        changed.sources[1] = PathBuf::from("/srv/other");
+        assert!(!matches(Some(&changed)));
+        changed = config.clone();
+        changed.allow_other = true;
+        assert!(!matches(Some(&changed)));
+        changed = config;
+        changed.read_only = false;
+        assert!(!matches(Some(&changed)));
+    }
+
+    #[test]
+    fn managed_cleanup_removes_only_owned_resolved_config() {
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let original = tempfile::NamedTempFile::new().expect("user config");
+        std::fs::write(original.path(), "user config unchanged").expect("user config bytes");
+        let normalized = normalize_mountpoint(mountpoint.path());
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        state.mountpoint = normalized.to_string_lossy().to_string();
+        state.mount_config = Some(ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills")],
+            allow_other: false,
+            read_only: false,
+        });
+        std::fs::write(&paths.mount_config, "owned frozen spec").expect("owned config");
+        for mounts in [
+            Ok(format!("skillfs {} fuse rw 0 0\n", normalized.display()).into_bytes()),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unreadable mount table",
+            )),
+        ] {
+            state.save(&paths.state).expect("mounted config state");
+            std::fs::write(&paths.supervisor_pid, "supervisor pid fixture")
+                .expect("supervisor pid");
+            std::fs::write(&paths.worker_pid, "worker pid fixture").expect("worker pid");
+            remove_instance_files(&paths, &normalized, mounts)
+                .expect_err("busy or unknown mount must preserve config state");
+            assert!(paths.mount_config.exists());
+            assert!(paths.supervisor_pid.exists());
+            assert!(paths.worker_pid.exists());
+            let retained = ManagedState::load(&paths.state).expect("retained state");
+            assert_eq!(retained.desired_state, DesiredState::Stopped);
+            assert!(retained.mount_config.is_some());
+        }
+        for cleanup in 0..2 {
+            std::fs::write(&paths.mount_config, "owned frozen spec").expect("owned config");
+            match cleanup {
+                0 => finish(&paths, &normalized),
+                _ => teardown_instance(&paths, &normalized).expect("teardown"),
+            }
+            assert!(!paths.mount_config.exists());
+            assert_eq!(
+                std::fs::read_to_string(original.path()).expect("original config survives"),
+                "user config unchanged"
+            );
+        }
+    }
+
+    fn assert_config_stop_retained_then_retry(
+        unmount_result: Result<(), Box<dyn Error>>,
+        mounts: impl FnOnce(&Path) -> std::io::Result<Vec<u8>>,
+    ) {
+        let runtime = tempfile::tempdir().expect("runtime tempdir");
+        let original = tempfile::NamedTempFile::new().expect("user config");
+        std::fs::write(original.path(), "user config unchanged").expect("user config bytes");
+        let mountpoint = Path::new("/mnt/skillfs");
+        let paths = ManagedPaths {
+            state: runtime.path().join("instance.state.json"),
+            supervisor_pid: runtime.path().join("instance.supervisor.pid"),
+            worker_pid: runtime.path().join("instance.worker.pid"),
+            supervisor_log: runtime.path().join("instance.supervisor.log"),
+            worker_log: runtime.path().join("instance.worker.log"),
+            mount_config: runtime.path().join("instance.mount.toml"),
+        };
+        let mut state = sample_state("instance");
+        state.mount_config = Some(ManagedMountConfig {
+            sources: vec![PathBuf::from("/srv/skills")],
+            allow_other: false,
+            read_only: false,
+        });
+        state.save(&paths.state).expect("mounted config state");
+        std::fs::write(&paths.mount_config, "owned frozen spec").expect("owned config");
+        // Non-numeric fixtures exercise PID-file retention without signaling.
+        std::fs::write(&paths.supervisor_pid, "supervisor pid fixture").expect("supervisor pid");
+        std::fs::write(&paths.worker_pid, "worker pid fixture").expect("worker pid");
+
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint,
+            |processes_gone| {
+                assert!(processes_gone());
+                assert_eq!(
+                    ManagedState::load(&paths.state)
+                        .expect("stopped before shutdown")
+                        .desired_state,
+                    DesiredState::Stopped
+                );
+                unmount_result
+            },
+            || mounts(mountpoint),
+        )
+        .expect_err("failed or unconfirmed unmount must retain managed state");
+
+        let retained = ManagedState::load(&paths.state).expect("retained state");
+        assert_eq!(retained.desired_state, DesiredState::Stopped);
+        assert_eq!(retained.mount_config, state.mount_config);
+        assert_eq!(retained.worker_args, state.worker_args);
+        assert!(paths.supervisor_pid.exists());
+        assert!(paths.worker_pid.exists());
+        assert_eq!(
+            std::fs::read_to_string(&paths.mount_config).expect("retained frozen config"),
+            "owned frozen spec"
+        );
+
+        // Retry the same production teardown path against the retained record.
+        teardown_instance_with_shutdown(
+            &paths,
+            mountpoint,
+            |processes_gone| {
+                assert!(processes_gone());
+                Ok(())
+            },
+            || Ok(Vec::new()),
+        )
+        .expect("successful stop retry");
+        assert!(!paths.state.exists());
+        assert!(!paths.mount_config.exists());
+        assert!(!paths.supervisor_pid.exists());
+        assert!(!paths.worker_pid.exists());
+        assert_eq!(
+            std::fs::read_to_string(original.path()).expect("original config survives"),
+            "user config unchanged"
+        );
+    }
+
+    #[test]
+    fn managed_stop_keeps_config_after_busy_unmount_and_retries() {
+        // Even an absent final mount-table entry must not override failure.
+        assert_config_stop_retained_then_retry(
+            Err(std::io::Error::from_raw_os_error(libc::EBUSY).into()),
+            |_| Ok(Vec::new()),
+        );
+    }
+
+    #[test]
+    fn managed_stop_keeps_config_when_mount_remains_and_retries() {
+        assert_config_stop_retained_then_retry(Ok(()), |mountpoint| {
+            Ok(format!("skillfs {} fuse rw 0 0\n", mountpoint.display()).into_bytes())
+        });
+    }
+
+    #[test]
+    fn managed_stop_keeps_config_when_mount_table_is_unreadable_and_retries() {
+        assert_config_stop_retained_then_retry(Ok(()), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unreadable mount table",
+            ))
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_does_not_publish_through_a_planted_staging_entry() {
+        // A fixed staging path makes any entry already sitting there the
+        // publication vehicle: writing through a symlink would clobber its
+        // target and rename the link itself onto the state path. Plant
+        // entries at the legacy fixed name and at the first candidates of a
+        // private counter (injected via `save_with_counter`), so the save
+        // deterministically hits every planted name — parallel tests can no
+        // longer advance the sequence between the plant and the save and
+        // leave the collision unexercised.
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("mnt-0000dead.state.json");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        // Legacy fixed staging name (`with_extension("json.tmp")`).
+        std::os::unix::fs::symlink(&victim, state_path.with_extension("json.tmp")).unwrap();
+        let counter = AtomicU64::new(0);
+        // The first two candidates this save must refuse and skip.
+        let planted: Vec<PathBuf> = (0..2)
+            .map(|seq| {
+                dir.path().join(format!(
+                    ".mnt-0000dead.state.json.{}.{}.tmp",
+                    std::process::id(),
+                    seq
+                ))
+            })
+            .collect();
+        for candidate in &planted {
+            std::os::unix::fs::symlink(&victim, candidate).unwrap();
+        }
+
+        sample_state("mnt-0000dead")
+            .save_with_counter(&state_path, &counter)
+            .unwrap();
+
+        // The save really collided with both planted candidates: a private
+        // counter starting at 0 makes the save consume 0, 1 (refused) and
+        // then 2 (created), and exactly that.
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            3,
+            "the save must have refused both planted candidates and \
+             published on the third name"
+        );
+        // The skipped entries are still the planted symlinks, untouched.
+        for candidate in &planted {
+            assert!(
+                std::fs::symlink_metadata(candidate)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "a refused candidate must be left as-is, not removed: {candidate:?}"
+            );
+        }
+        assert!(
+            !std::fs::symlink_metadata(&state_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the published state must be a regular file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "untouched",
+            "no planted staging entry may be written through"
+        );
+        let loaded = ManagedState::load(&state_path).unwrap();
+        assert_eq!(loaded.instance_id, "mnt-0000dead");
+        assert_eq!(loaded.desired_state, DesiredState::Mounted);
+    }
+
+    #[test]
+    fn concurrent_saves_in_one_process_all_publish() {
+        // Every save must own its staging path. With one path shared by all
+        // saves in the process, concurrent callers truncate each other's
+        // staging bytes and the last rename can publish a torn file.
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("mnt-0000beef.state.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|worker| {
+                let state_path = state_path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut state = sample_state("mnt-0000beef");
+                    state.mountpoint = format!("/mnt/skillfs-{worker}");
+                    barrier.wait();
+                    (0..40).filter(|_| state.save(&state_path).is_ok()).count()
+                })
+            })
+            .collect();
+        let published: usize = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .sum();
+        assert_eq!(published, 320, "every concurrent save must publish");
+        // Whichever save won, the published state is complete, never torn.
+        let loaded = ManagedState::load(&state_path).unwrap();
+        assert_eq!(loaded.instance_id, "mnt-0000beef");
+        assert_eq!(loaded.desired_state, DesiredState::Mounted);
+    }
+
+    #[test]
+    fn save_leaves_a_foreign_staging_entry_alone() {
+        // Only the call that created a staging file may remove it: an entry
+        // left by a crashed save (or a concurrent writer) must survive a
+        // failing save's cleanup. The entry is planted at the first
+        // candidate of a private counter (injected via `save_with_counter`),
+        // so this save deterministically collides with it regardless of
+        // parallel tests advancing the process-global sequence.
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("mnt-0000cafe.state.json");
+        let counter = AtomicU64::new(0);
+        let foreign = dir.path().join(format!(
+            ".mnt-0000cafe.state.json.{}.0.tmp",
+            std::process::id()
+        ));
+        std::fs::write(&foreign, "foreign leftover").unwrap();
+
+        sample_state("mnt-0000cafe")
+            .save_with_counter(&state_path, &counter)
+            .unwrap();
+
+        // The save collided with the foreign entry (candidate 0 refused)
+        // and published on the next name — exactly two counter draws.
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "the save must have refused the foreign candidate and \
+             published on the next name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&foreign).unwrap(),
+            "foreign leftover",
+            "a foreign staging entry must be left alone"
+        );
+        assert!(ManagedState::load(&state_path).is_ok());
     }
 
     #[test]
@@ -1110,6 +1995,41 @@ mod tests {
             err.to_string().contains("symlink"),
             "expected symlink rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn active_instance_matches_only_the_recorded_source_and_mountpoint() {
+        let state = ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            instance_id: "abc".to_string(),
+            mountpoint: "/mnt/skills".to_string(),
+            source: "/srv/src-a".to_string(),
+            mount_config: None,
+            worker_program: "/usr/bin/skillfs".to_string(),
+            worker_args: vec![],
+            desired_state: DesiredState::Mounted,
+        };
+        let mnt = Path::new("/mnt/skills");
+        assert!(active_instance_matches(
+            &state,
+            Path::new("/srv/src-a"),
+            mnt,
+            None
+        ));
+        // Same mountpoint, different source: the instance id collides, so the
+        // request must be refused rather than reported as already active.
+        assert!(!active_instance_matches(
+            &state,
+            Path::new("/srv/src-b"),
+            mnt,
+            None
+        ));
+        assert!(!active_instance_matches(
+            &state,
+            Path::new("/srv/src-a"),
+            Path::new("/mnt/other"),
+            None
+        ));
     }
 
     #[test]

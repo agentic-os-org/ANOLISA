@@ -28,7 +28,10 @@ fn pct(tokens: usize, total: f64) -> f64 {
 }
 
 /// Compute summary statistics from children nodes.
-fn compute_summary(children: &[TokenBreakdownNode], event_total: usize) -> BTreeMap<String, SummaryItem> {
+fn compute_summary(
+    children: &[TokenBreakdownNode],
+    event_total: usize,
+) -> BTreeMap<String, SummaryItem> {
     let mut summary: BTreeMap<String, SummaryItem> = BTreeMap::new();
     let event_total_f64 = event_total as f64;
 
@@ -55,9 +58,16 @@ fn compute_summary(children: &[TokenBreakdownNode], event_total: usize) -> BTree
 /// Builds an events array with:
 /// - "request" event: system_prompt + individual messages in original order
 /// - "response" event (if response data present): content + reasoning_content + tool_calls
+///
+/// `model_name` is the model the caller asked to tokenize for; it is reported
+/// in [`ChatMLTokenBreakdown::model_name`]. It cannot be derived from the
+/// tokenizer, whose own name is the file it was loaded from — every
+/// auto-downloaded tokenizer is `tokenizer.json`, so that reported the literal
+/// string "tokenizer".
 pub fn compute_breakdown(
     doc: &ClassifiedDocument,
     tokenizer: &LlmTokenizer,
+    model_name: &str,
 ) -> Result<ChatMLTokenBreakdown> {
     // === Build request event ===
 
@@ -111,14 +121,24 @@ pub fn compute_breakdown(
         let mut resp_children = Vec::new();
 
         // content
-        let mut content_tokens = 0usize;
-        let mut content_chars = 0usize;
+        //
+        // `resp.content` holds one entry per streamed delta, so the entries
+        // are fragments of one answer, not independent documents. Summing a
+        // count per fragment counts the boundary a tokenizer sees inside a
+        // word split across deltas (`"hel"` + `"lo"` is two tokens where
+        // `"hello"` is one) and overstates the answer. The aggregate must
+        // come from the joined text; the per-item counts stay for display.
+        let content_text: String = resp.content.concat();
+        let content_tokens = if content_text.is_empty() {
+            0
+        } else {
+            tokenizer.count_with_special_tokens(&content_text)?
+        };
+        let content_chars = content_text.chars().count();
         let mut content_items = Vec::new();
         for (idx, text) in resp.content.iter().enumerate() {
             let t = tokenizer.count_with_special_tokens(text)?;
             let c = text.chars().count();
-            content_tokens += t;
-            content_chars += c;
             content_items.push(ResponseItem {
                 index: idx,
                 tokens: t,
@@ -143,18 +163,17 @@ pub fn compute_breakdown(
         });
 
         // reasoning_content
-        let (reasoning_tokens, reasoning_chars) =
-            if let Some(ref text) = resp.reasoning_content {
-                if text.is_empty() {
-                    (0, 0)
-                } else {
-                    let t = tokenizer.count_with_special_tokens(text)?;
-                    let c = text.chars().count();
-                    (t, c)
-                }
-            } else {
+        let (reasoning_tokens, reasoning_chars) = if let Some(ref text) = resp.reasoning_content {
+            if text.is_empty() {
                 (0, 0)
-            };
+            } else {
+                let t = tokenizer.count_with_special_tokens(text)?;
+                let c = text.chars().count();
+                (t, c)
+            }
+        } else {
+            (0, 0)
+        };
         resp_children.push(TokenBreakdownNode {
             name: "reasoning_content".to_string(),
             label: "推理内容".to_string(),
@@ -245,6 +264,26 @@ pub fn compute_breakdown(
     }
     request_children.append(&mut message_nodes);
 
+    // 历史消息和实时消息 — reuse the per-message token counts already
+    // computed for the request children instead of re-running the
+    // tokenizer over every message a second time. Aggregated before
+    // `request_children` moves into the request event below.
+    let mut history_tokens = 0usize;
+    let mut history_count = 0usize;
+    let mut realtime_tokens = 0usize;
+    let mut realtime_count = 0usize;
+    for node in request_children.iter().skip(1) {
+        // skip(1) drops the system_prompt node; the rest are message
+        // nodes carrying is_history and their token counts.
+        if node.is_history.unwrap_or(false) {
+            history_tokens += node.tokens;
+            history_count += 1;
+        } else {
+            realtime_tokens += node.tokens;
+            realtime_count += 1;
+        }
+    }
+
     let request_event = EventNode {
         event_type: "request".to_string(),
         label: "请求".to_string(),
@@ -268,15 +307,10 @@ pub fn compute_breakdown(
 
     // Build top-level summary: by_role and by_history
     let mut top_summary: BTreeMap<String, BTreeMap<String, SummaryItem>> = BTreeMap::new();
-    
+
     // === by_role: original structure (input/output by label) ===
     let mut by_role: BTreeMap<String, SummaryItem> = BTreeMap::new();
     for event in &events {
-        let category = if event.event_type == "request" {
-            "input"
-        } else {
-            "output"
-        };
         if let Some(ref event_summary) = event.summary {
             for (label, item) in event_summary {
                 let entry = by_role.entry(label.clone()).or_insert(SummaryItem {
@@ -294,59 +328,50 @@ pub fn compute_breakdown(
         item.percentage = pct(item.tokens, total_f64);
     }
     top_summary.insert("by_role".to_string(), by_role);
-    
+
     // === by_history: 系统提示词、历史消息、实时消息 ===
     let mut by_history: BTreeMap<String, SummaryItem> = BTreeMap::new();
-    
+
     // 系统提示词
     let sys_tokens = system_tokens;
     if sys_tokens > 0 {
-        by_history.insert("系统提示词".to_string(), SummaryItem {
-            count: 1,
-            tokens: sys_tokens,
-            percentage: pct(sys_tokens, total_f64),
-        });
+        by_history.insert(
+            "系统提示词".to_string(),
+            SummaryItem {
+                count: 1,
+                tokens: sys_tokens,
+                percentage: pct(sys_tokens, total_f64),
+            },
+        );
     }
-    
-    // 历史消息和实时消息
-    let mut history_tokens = 0usize;
-    let mut history_count = 0usize;
-    let mut realtime_tokens = 0usize;
-    let mut realtime_count = 0usize;
-    
-    for turn in doc.messages.iter() {
-        let tokens = tokenizer.count_with_special_tokens(&turn.content)?;
-        if turn.is_history {
-            history_tokens += tokens;
-            history_count += 1;
-        } else {
-            realtime_tokens += tokens;
-            realtime_count += 1;
-        }
-    }
-    
+
     if history_tokens > 0 {
-        by_history.insert("历史消息".to_string(), SummaryItem {
-            count: history_count,
-            tokens: history_tokens,
-            percentage: pct(history_tokens, total_f64),
-        });
+        by_history.insert(
+            "历史消息".to_string(),
+            SummaryItem {
+                count: history_count,
+                tokens: history_tokens,
+                percentage: pct(history_tokens, total_f64),
+            },
+        );
     }
     if realtime_tokens > 0 {
-        by_history.insert("实时消息".to_string(), SummaryItem {
-            count: realtime_count,
-            tokens: realtime_tokens,
-            percentage: pct(realtime_tokens, total_f64),
-        });
+        by_history.insert(
+            "实时消息".to_string(),
+            SummaryItem {
+                count: realtime_count,
+                tokens: realtime_tokens,
+                percentage: pct(realtime_tokens, total_f64),
+            },
+        );
     }
-    
+
     top_summary.insert("by_history".to_string(), by_history);
 
     Ok(ChatMLTokenBreakdown {
-        model_name: tokenizer.model_name().to_string(),
+        model_name: model_name.to_string(),
         total_tokens,
         summary: Some(top_summary),
         events,
     })
 }
-

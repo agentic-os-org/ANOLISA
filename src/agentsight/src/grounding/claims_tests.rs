@@ -191,6 +191,27 @@ fn url_query_strings_are_not_split_on_equals() {
 }
 
 #[test]
+fn a_non_url_http_prefixed_token_yields_its_number() {
+    // `http_code=242391` is a key=value fact token (curl -w style), not a
+    // URL: the structural split must expose the value, or a fabricated
+    // figure in such a token escapes the grounding check entirely. The URL
+    // protection stays: a scheme-prefixed URL is still not split.
+    let numbers = texts_of(&extract_claims("http_code=242391"), ClaimClass::Number);
+    assert!(
+        numbers.contains(&"242391".to_string()),
+        "a non-URL http-prefixed fact token must give up its value; got {numbers:?}"
+    );
+
+    let claims = extract_claims("see https://a.test/search?q=242391&page=2");
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Url),
+        vec!["https://a.test/search?q=242391&page=2"],
+        "the URL guard must keep sparing real URLs"
+    );
+    assert!(texts_of(&claims, ClaimClass::Number).is_empty());
+}
+
+#[test]
 fn non_ascii_prose_does_not_panic() {
     let claims = extract_claims("这是一段中文说明，包含数字 242391 和路径 /tmp/输出.log");
     assert!(!claims.is_empty());
@@ -318,6 +339,48 @@ fn a_markdown_link_is_not_one_glued_url() {
 }
 
 #[test]
+fn a_slash_inside_prose_is_not_a_path_claim() {
+    // `CI/CD`, `3/4` and `MB/s` are prose, not file paths, but a bare
+    // `contains('/')` classified them as Path — a hard class that anchors a
+    // finding, so an answer that merely mentions one could be reported as
+    // fabricated.
+    for text in [
+        "构建 CI/CD 流水线",
+        "耗时 3/4 秒",
+        "带宽 12 MB/s",
+        "输入/输出",
+        "and/or",
+    ] {
+        let claims = extract_claims(text);
+        assert!(
+            !claims.iter().any(|c| c.class == ClaimClass::Path),
+            "{text} must not produce a path claim: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn real_paths_are_still_path_claims() {
+    for (text, expected) in [
+        (
+            "patched /etc/agentsight/config.json",
+            "/etc/agentsight/config.json",
+        ),
+        // Edge trimming drops the leading `.` of `./x`, so the claim text is
+        // the trimmed token; a single slash plus a file name stays a path.
+        ("cat scripts/run.sh", "scripts/run.sh"),
+        ("see src/grounding/claims.rs", "src/grounding/claims.rs"),
+        ("edit config/agentsight.toml", "config/agentsight.toml"),
+    ] {
+        let claims = extract_claims(text);
+        assert!(
+            texts_of(&claims, ClaimClass::Path).contains(&expected.to_string()),
+            "{text} must still report {expected}: {claims:?}"
+        );
+    }
+}
+
+#[test]
 fn a_number_in_chinese_prose_is_still_a_claim() {
     // Verbatim from a live capture of a fabricated answer. Chinese prose puts no
     // spaces around punctuation, so `8081。其配置文件名为` is one whitespace-
@@ -399,4 +462,66 @@ fn a_grouped_number_survives_a_decorated_token() {
         json_values.contains(&244_618.0) && json_values.contains(&312.0),
         "structural commas must still split: {json:?}"
     );
+}
+
+#[test]
+fn json_arrays_preserve_individual_numeric_facts() {
+    for text in [
+        r#"[119,120]"#,
+        r#"[119, 120]"#,
+        r#"{"counts":[119,120]}"#,
+        r#"{"nested":[[119],{"count":120}]}"#,
+    ] {
+        let values: Vec<_> = extract_claims(text)
+            .iter()
+            .filter_map(|c| c.value)
+            .collect();
+        assert_eq!(values, vec![119.0, 120.0], "{text}");
+    }
+    let values: Vec<_> = extract_claims("[119.5,-240,1.2e3,true,null]")
+        .iter()
+        .filter_map(|c| c.value)
+        .collect();
+    assert_eq!(values, vec![119.5, -240.0, 1200.0]);
+    assert!(extract_claims("[1,2]").is_empty());
+}
+
+#[test]
+fn json_strings_keep_human_numeric_grouping() {
+    for text in ["Recorded count: 119,120", r#"{"count":"119,120"}"#] {
+        let values: Vec<_> = extract_claims(text)
+            .iter()
+            .filter_map(|c| c.value)
+            .collect();
+        assert_eq!(values, vec![119120.0], "{text}");
+    }
+    let claims = extract_claims(
+        r#"{"count": 119, "path": "/tmp/report.txt", "version": "1.2.3", "url": "https://example.test/api"}"#,
+    );
+    for class in [
+        ClaimClass::Number,
+        ClaimClass::Path,
+        ClaimClass::Version,
+        ClaimClass::Url,
+    ] {
+        assert!(claims.iter().any(|c| c.class == class), "{class:?}");
+    }
+}
+
+#[test]
+fn json_object_keys_keep_their_numeric_facts() {
+    // A payload keyed by a number, as a status-code histogram is, carries that
+    // number exactly as an array element does. The typed replay that replaces
+    // the text pass's numbers must read keys as well as values, or a figure the
+    // payload did hold disappears from the claims and from the evidence pool.
+    for (text, expected) in [
+        (r#"{"404":119,"500":120}"#, vec![404.0, 500.0, 119.0, 120.0]),
+        (r#"{"counts":{"404":119}}"#, vec![404.0, 119.0]),
+    ] {
+        let values: Vec<_> = extract_claims(text)
+            .iter()
+            .filter_map(|c| c.value)
+            .collect();
+        assert_eq!(values, expected, "{text}");
+    }
 }

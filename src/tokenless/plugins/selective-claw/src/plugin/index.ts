@@ -8,13 +8,14 @@ import { SelectiveContextEngine } from "../engine.js";
 import { createSummarizer } from "../summarize.js";
 
 function resolveConfig(api: OpenClawPluginApi): SelectiveClawConfig {
-  const pluginConfig = api.config ?? {};
+  const pluginConfig = api.pluginConfig ?? {};
   const stateDir = process.env.OPENCLAW_STATE_DIR?.trim() || join(homedir(), ".openclaw");
+  const dbPath = pluginConfig.dbPath ?? join(stateDir, "selective-claw.db");
 
   return {
     enabled: pluginConfig.enabled ?? DEFAULT_CONFIG.enabled,
     freshTailTurns: pluginConfig.freshTailTurns ?? DEFAULT_CONFIG.freshTailTurns,
-    dbPath: pluginConfig.dbPath ?? join(stateDir, "selective-claw.db"),
+    dbPath: dbPath.startsWith("~/") ? join(homedir(), dbPath.slice(2)) : dbPath,
   };
 }
 
@@ -25,7 +26,7 @@ function getRuntimeLlmComplete(api: OpenClawPluginApi) {
     : undefined;
 }
 
-function createExpandTurnTool(engine: SelectiveContextEngine) {
+function createExpandTurnTool(engine: SelectiveContextEngine, boundSessionId?: string) {
   return {
     name: "expand_turn",
     label: "Expand Turn",
@@ -46,7 +47,7 @@ function createExpandTurnTool(engine: SelectiveContextEngine) {
     },
     async execute(_toolCallId: string, params: any) {
       const turnIds = Array.isArray(params?.turn_ids) ? params.turn_ids : [];
-      const sessionId = engine.getActiveSessionId();
+      const sessionId = boundSessionId ?? engine.getActiveSessionId();
       if (sessionId === null || turnIds.length === 0) {
         return {
           content: [{ type: "text" as const, text: JSON.stringify({ found: 0, turns: [] }) }],
@@ -83,7 +84,7 @@ export default function activate(api: OpenClawPluginApi): void {
 
   if (typeof api.registerTool === "function") {
     (api.registerTool as any)(
-      (_ctx: any) => createExpandTurnTool(engine),
+      (ctx: { sessionId?: string }) => createExpandTurnTool(engine, ctx?.sessionId),
       { name: "expand_turn" },
     );
   }

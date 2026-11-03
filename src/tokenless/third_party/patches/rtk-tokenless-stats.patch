@@ -223,19 +223,28 @@ index 89376bf..de9c222 100644
  anyhow = "1.0"
  # Console code page decoding for child-process output. Kept off the
 diff --git a/src/core/tracking.rs b/src/core/tracking.rs
-index f5d1a39..f4f332c 100644
+index f5d1a39..45e64ae 100644
 --- a/src/core/tracking.rs
 +++ b/src/core/tracking.rs
-@@ -1731,6 +1731,8 @@ impl TimedExecution {
+@@ -1731,6 +1731,9 @@ impl TimedExecution {
          let input_tokens = estimate_tokens(input);
          let output_tokens = estimate_tokens(output);
 
++        record_tokenless_outcome(output != input);
 +        record_to_tokenless_stats(original_cmd, rtk_cmd, input, output);
 +
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1792,6 +1794,206 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1764,6 +1767,7 @@ impl TimedExecution {
+     /// ```
+     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
+         let elapsed_ms = self.start.elapsed().as_millis() as u64;
++        record_tokenless_outcome(false);
+         // input_tokens=0, output_tokens=0 won't dilute savings statistics
+         if let Ok(tracker) = Tracker::new() {
+             let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+@@ -1792,6 +1796,228 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
 
@@ -311,6 +320,28 @@ index f5d1a39..f4f332c 100644
 +mod tokenless_home;
 +#[path = "../../../../crates/tokenless-stats/src/path_policy.rs"]
 +mod tokenless_path_policy;
++use tokenless_path_policy as path_policy;
++// The producer shares the store with Core, which owns begin/consume operations.
++#[allow(dead_code)]
++#[path = "../../../../crates/tokenless-stats/src/rtk_outcome.rs"]
++mod tokenless_rtk_outcome;
++
++fn record_tokenless_outcome(changed: bool) {
++    let context = (
++        std::env::var("TOKENLESS_RTK_RUN_ID"),
++        std::env::var("TOKENLESS_RTK_ORDINAL"),
++        std::env::var("TOKENLESS_DATA_DIR"),
++    );
++    let (Ok(run), Ok(ordinal), Ok(data_dir)) = context else {
++        return;
++    };
++    let Ok(ordinal) = ordinal.parse::<usize>() else {
++        return;
++    };
++    // Missing receipts retain RTK ownership; diagnostics must not alter tool output.
++    let _ = tokenless_rtk_outcome::OutcomeStore::open(std::path::Path::new(&data_dir), false)
++        .and_then(|store| store.record(&run, ordinal, changed));
++}
 +
 +fn tokenless_trusted_home_dir() -> Option<std::path::PathBuf> {
 +    let home = tokenless_home::get_home_dir();
@@ -442,7 +473,7 @@ index f5d1a39..f4f332c 100644
  #[cfg(test)]
  mod tests {
      use super::*;
-@@ -1804,6 +2006,65 @@ mod tests {
+@@ -1804,6 +2030,65 @@ mod tests {
      /// and can race on the same global env var under parallel `cargo test`.
      static ENV_LOCK: Mutex<()> = Mutex::new(());
 

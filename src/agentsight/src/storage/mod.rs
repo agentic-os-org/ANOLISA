@@ -36,6 +36,7 @@ pub use sqlite::{
 };
 
 // Re-export unified storage
+pub(crate) use unified::MaintenanceCursor;
 pub use unified::{SqliteConfig, Storage, StorageBackend};
 
 /// Check if a custom data file path exists

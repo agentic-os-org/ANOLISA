@@ -431,6 +431,197 @@ pub(crate) fn copy_materialized_resource(
     Ok(())
 }
 
+/// Outcome of removing one materialized resource on disable.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct MaterializedRemoval {
+    /// Receipt-recorded entries that were deleted.
+    pub removed: usize,
+    /// Destination root left in place because it still holds entries the
+    /// receipt does not own (user or runtime files) or files whose content
+    /// no longer matches the receipt.
+    pub kept_root: Option<PathBuf>,
+}
+
+/// Remove exactly the entries a receipt materialized under `resource_id`.
+///
+/// The destination is shared framework state (for example
+/// `~/.openclaw/skills/<name>`), so a whole-tree delete would also destroy
+/// files ANOLISA never wrote: content the user added, or a same-named skill
+/// that existed before enable. Only recorded entries whose bytes still match
+/// the receipt are deleted; directories are removed only once empty, deepest
+/// first, ending with the root. Anything else stays and is reported.
+pub(crate) fn remove_materialized_resource(
+    claim: &AdapterClaim,
+    resource_id: &str,
+    ops: &dyn AdapterOps,
+) -> Result<MaterializedRemoval, AdapterError> {
+    let root = match claim.resource(resource_id).map(|resource| &resource.kind) {
+        Some(ClaimResourceKind::OwnedPath { path } | ClaimResourceKind::ExternalPath { path }) => {
+            path.clone()
+        }
+        _ => {
+            return Err(invalid_materialized(
+                claim,
+                format!("materialized resource '{resource_id}' is not a filesystem root"),
+            ));
+        }
+    };
+    match std::fs::symlink_metadata(&root) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MaterializedRemoval::default());
+        }
+        Ok(meta) if meta.is_dir() => {}
+        // A file or symlink where the receipt recorded a directory is not
+        // ANOLISA's output; leave it and keep the receipt for a retry.
+        Ok(_) => {
+            return Err(AdapterError::Io {
+                path: root.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "materialized root is no longer a directory",
+                ),
+            });
+        }
+        Err(source) => return Err(AdapterError::Io { path: root, source }),
+    }
+    let mut outcome = MaterializedRemoval::default();
+    let mut directories = BTreeSet::new();
+    for file in claim
+        .materialized_files
+        .iter()
+        .filter(|file| file.resource_id == resource_id)
+    {
+        validate_relative(&file.relative_path)
+            .map_err(|reason| invalid_materialized(claim, reason))?;
+        let path = root.join(&file.relative_path);
+        if has_replaced_materialized_parent(&root, &path) {
+            outcome.kept_root = Some(root.clone());
+            continue;
+        }
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if !dir.starts_with(&root) {
+                break;
+            }
+            directories.insert(dir.to_path_buf());
+            parent = dir.parent();
+        }
+        match std::fs::symlink_metadata(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            _ => {}
+        }
+        // A file the user edited after enable is theirs now; keep it.
+        if verify_file(
+            &path,
+            file.kind,
+            file.sha256.as_deref(),
+            file.symlink_target.as_deref(),
+        )
+        .is_err()
+        {
+            outcome.kept_root = Some(root.clone());
+            continue;
+        }
+        if ops.remove_path(&path)? {
+            outcome.removed += 1;
+        }
+    }
+    directories.insert(root.clone());
+    let mut directories = directories.into_iter().collect::<Vec<_>>();
+    directories.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in directories {
+        if has_replaced_materialized_parent(&root, &dir) {
+            outcome.kept_root = Some(root.clone());
+            continue;
+        }
+        // Only real directories: a recorded parent replaced by a file or a
+        // symlink is not ANOLISA's to delete.
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            if dir.exists() || std::fs::symlink_metadata(&dir).is_ok() {
+                outcome.kept_root = Some(root.clone());
+            }
+            continue;
+        }
+        match ops.remove_path(&dir) {
+            Ok(_) => {}
+            Err(AdapterError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::DirectoryNotEmpty =>
+            {
+                outcome.kept_root = Some(root.clone());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(outcome)
+}
+
+fn has_replaced_materialized_parent(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let mut parent = root.to_path_buf();
+    if !std::fs::symlink_metadata(&parent).is_ok_and(|meta| meta.is_dir()) {
+        return true;
+    }
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(meta) if meta.is_dir() => {}
+            // Missing ancestors mean there is no entry left to remove.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+            // Inspect each prefix without following links: matching leaf
+            // bytes do not confer ownership of a redirected destination.
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// Whether a receipt-declared materialized root already holds content that
+/// the prior receipt for the same component does not own, so enable would
+/// write into (and a later disable clean up) a directory ANOLISA never
+/// created: a user's own same-named skill or another component's output.
+pub(crate) fn foreign_materialized_roots(
+    next: &AdapterClaim,
+    prior: Option<&AdapterClaim>,
+) -> Vec<PathBuf> {
+    let owned_by_prior = |root: &Path| {
+        prior.is_some_and(|prior| {
+            prior.resources.iter().any(|resource| match &resource.kind {
+                ClaimResourceKind::OwnedPath { path }
+                | ClaimResourceKind::ExternalPath { path } => path == root,
+                _ => false,
+            })
+        })
+    };
+    let resource_ids = next
+        .materialized_files
+        .iter()
+        .map(|file| file.resource_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut foreign = Vec::new();
+    for resource_id in resource_ids {
+        let Some(
+            ClaimResourceKind::OwnedPath { path: root }
+            | ClaimResourceKind::ExternalPath { path: root },
+        ) = next.resource(resource_id).map(|resource| &resource.kind)
+        else {
+            continue;
+        };
+        let occupied = match std::fs::symlink_metadata(root) {
+            Ok(meta) if meta.is_dir() => std::fs::read_dir(root)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(true),
+            Ok(_) => true,
+            Err(_) => false,
+        };
+        if occupied && !owned_by_prior(root) {
+            foreign.push(root.clone());
+        }
+    }
+    foreign
+}
+
 /// Remove outputs owned only by a prior receipt before replacing it.
 ///
 /// Exact-entry removal deliberately leaves unrelated files in materialized
@@ -757,10 +948,19 @@ fn relative_below_root_aliases(
     if path == lexical_root || path == canonical_root {
         return None;
     }
-    path.strip_prefix(lexical_root)
+    if let Ok(relative) = path
+        .strip_prefix(lexical_root)
         .or_else(|_| path.strip_prefix(canonical_root))
-        .ok()
-        .map(Path::to_path_buf)
+    {
+        return Some(relative.to_path_buf());
+    }
+    // Resolve parent aliases without following the managed leaf: its literal
+    // symlink target remains part of the package inventory's identity.
+    let resolved = std::fs::canonicalize(path.parent()?)
+        .ok()?
+        .join(path.file_name()?);
+    let relative = resolved.strip_prefix(canonical_root).ok()?;
+    (!relative.as_os_str().is_empty()).then(|| relative.to_path_buf())
 }
 
 fn io_verdict(path: &Path, action: &str, err: std::io::Error) -> ManagedMatch {
@@ -1340,7 +1540,10 @@ mod tests {
         };
 
         let revision = source_revision(&inventory, &lexical_root, &[]).expect("source revision");
-        assert_eq!(revision.source_root, release_root);
+        assert_eq!(
+            revision.source_root,
+            release_root.canonicalize().expect("canonical release root")
+        );
         assert_eq!(revision.files.len(), 1);
         assert_eq!(revision.files[0].relative_path, PathBuf::from("hook.py"));
         assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
@@ -1356,6 +1559,167 @@ mod tests {
         .expect("materialized files");
         assert_eq!(copied.len(), 1);
         assert_eq!(copied[0].relative_path, PathBuf::from("hook.py"));
+    }
+
+    #[cfg(unix)]
+    fn parent_alias_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, ManagedInventory) {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let base = tmp.path().canonicalize().expect("canonical base");
+        let real = base.join("real");
+        let alias = base.join("alias");
+        let release = real.join("releases/v2");
+        std::fs::create_dir_all(&release).expect("release root");
+        std::fs::write(release.join("hook.py"), b"managed").expect("managed file");
+        symlink(&real, &alias).expect("parent alias");
+        symlink("releases/v2", real.join("current")).expect("source root symlink");
+        let inventory = ManagedInventory {
+            files: vec![ManagedFile {
+                path: alias.join("releases/v2/hook.py"),
+                kind: ManagedInventoryKind::File,
+                sha256: Some(sha256(b"managed")),
+                symlink_target: None,
+            }],
+        };
+        (tmp, alias.join("current"), release, inventory)
+    }
+
+    #[cfg(unix)]
+    fn parent_alias_mappings(source: &Path) -> Vec<MaterializedMapping> {
+        vec![MaterializedMapping {
+            resource_id: "copy".into(),
+            source_root: source.to_path_buf(),
+            excluded_prefixes: Vec::new(),
+        }]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_scopes_versioned_source_and_materialized_files() {
+        let (_tmp, source, release, inventory) = parent_alias_fixture();
+        let revision = source_revision(&inventory, &source, &[]).expect("source revision");
+        assert_eq!(revision.source_root, release);
+        assert_eq!(revision.files.len(), 1);
+        assert_eq!(revision.files[0].relative_path, PathBuf::from("hook.py"));
+        assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
+        let mappings = parent_alias_mappings(&source);
+        let copied = materialized_files(&inventory, &mappings).expect("materialized files");
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].relative_path, PathBuf::from("hook.py"));
+        let canonical_inventory = ManagedInventory {
+            files: vec![ManagedFile {
+                path: release.join("hook.py"),
+                ..inventory.files[0].clone()
+            }],
+        };
+        assert_eq!(
+            source_revision(&canonical_inventory, &source, &[]).expect("control"),
+            revision
+        );
+        assert_eq!(
+            materialized_files(&canonical_inventory, &mappings).expect("control"),
+            copied
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_preserves_leaf_symlink_identity() {
+        use std::os::unix::fs::symlink;
+        let (_tmp, source, release, mut inventory) = parent_alias_fixture();
+        let leaf = release.join("current.py");
+        symlink("missing.py", &leaf).expect("dangling leaf");
+        inventory.files[0] = ManagedFile {
+            path: inventory.files[0].path.with_file_name("current.py"),
+            kind: ManagedInventoryKind::Symlink,
+            sha256: None,
+            symlink_target: Some(PathBuf::from("missing.py")),
+        };
+        let revision = source_revision(&inventory, &source, &[]).expect("source revision");
+        assert_eq!(revision.files[0].relative_path, PathBuf::from("current.py"));
+        assert_eq!(revision.files[0].kind, RevisionFileKind::Symlink);
+        assert_eq!(
+            revision.files[0].symlink_target,
+            Some(PathBuf::from("missing.py"))
+        );
+        assert_eq!(verify_managed_bundle(&revision), ManagedMatch::Matched);
+        let copied = materialized_files(&inventory, &parent_alias_mappings(&source))
+            .expect("materialized metadata");
+        assert_eq!(copied[0].kind, RevisionFileKind::Symlink);
+        assert_eq!(copied[0].relative_path, PathBuf::from("current.py"));
+        assert_eq!(copied[0].symlink_target, Some(PathBuf::from("missing.py")));
+        std::fs::remove_file(&leaf).expect("remove leaf");
+        symlink("different.py", &leaf).expect("replace leaf");
+        assert!(
+            matches!(verify_managed_bundle(&revision), ManagedMatch::Changed(reason) if reason.contains("target changed"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_excludes_outside_files_and_root_entries() {
+        use std::os::unix::fs::symlink;
+        let (tmp, source, release, mut inventory) = parent_alias_fixture();
+        let outside = tmp.path().join("outside");
+        let outside_alias = tmp.path().join("outside-alias");
+        std::fs::create_dir_all(&outside).expect("outside root");
+        std::fs::write(outside.join("hook.py"), b"managed").expect("outside file");
+        symlink(&outside, &outside_alias).expect("outside alias");
+        inventory.files.push(ManagedFile {
+            path: outside_alias.join("hook.py"),
+            ..inventory.files[0].clone()
+        });
+        inventory.files.push(ManagedFile {
+            path: inventory.files[0]
+                .path
+                .parent()
+                .expect("release alias")
+                .to_path_buf(),
+            kind: ManagedInventoryKind::Symlink,
+            sha256: None,
+            symlink_target: Some(release),
+        });
+        let revision = source_revision(&inventory, &source, &[]).expect("source revision");
+        assert_eq!(revision.files.len(), 1);
+        assert_eq!(revision.files[0].relative_path, PathBuf::from("hook.py"));
+        let copied = materialized_files(&inventory, &parent_alias_mappings(&source))
+            .expect("materialized files");
+        assert_eq!(copied.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_deduplicates_paths_but_rejects_conflicting_metadata() {
+        let (_tmp, source, release, mut inventory) = parent_alias_fixture();
+        inventory.files.push(ManagedFile {
+            path: release.join("hook.py"),
+            ..inventory.files[0].clone()
+        });
+        let mappings = parent_alias_mappings(&source);
+        assert_eq!(
+            source_revision(&inventory, &source, &[])
+                .expect("source revision")
+                .files
+                .len(),
+            1
+        );
+        assert_eq!(
+            materialized_files(&inventory, &mappings)
+                .expect("materialized files")
+                .len(),
+            1
+        );
+        inventory.files[1].sha256 = Some(sha256(b"different"));
+        assert!(
+            source_revision(&inventory, &source, &[])
+                .expect_err("conflicting source")
+                .contains("conflicting metadata")
+        );
+        assert!(
+            materialized_files(&inventory, &mappings)
+                .expect_err("conflicting materialized files")
+                .contains("conflicting metadata")
+        );
     }
 
     #[test]

@@ -23,10 +23,15 @@ Line-delimited JSON over stdin/stdout, one JSON object per line:
                          {"ready": false, "error": "..."}   (then exit 1)
   request:               {"messages": [...], "model": "...", "model_limit": N,
                           "variant": "pure_stage"|"router"}
+                         Truthy variant values must be strings; missing or falsy
+                         values retain the legacy pure_stage default.
   response:              {"ok": true, "messages": [...], "compress_ms": ...,
                           "tokens_before": N, "tokens_after": N,
                           "transforms_applied": [...], "timing": {...}}
                          {"ok": false, "error": "..."}
+
+Unexpected decode or result-metadata failures return an error for that request;
+startup and stream failures can still terminate the worker.
 
 Kept as a long-lived process rather than one invocation per scenario: importing
 importing it costs far more than a single compression, so per-call spawning would
@@ -205,9 +210,7 @@ def _build_pipelines() -> dict[str, Any]:
 
     return {
         "pure_stage": TransformPipeline(transforms=stages(), provider=provider),
-        "router": TransformPipeline(
-            transforms=[*stages(), ContentRouter()], provider=provider
-        ),
+        "router": TransformPipeline(transforms=[*stages(), ContentRouter()], provider=provider),
     }
 
 
@@ -237,48 +240,58 @@ def main() -> int:
     )
 
     for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
         try:
-            request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _emit({"ok": False, "error": f"bad request json: {exc}"})
-            continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError as exc:
+                _emit({"ok": False, "error": f"bad request json: {exc}"})
+                continue
+            if not isinstance(request, dict):
+                _emit({"ok": False, "error": "bad request: not a JSON object"})
+                continue
 
-        messages = request.get("messages")
-        if not isinstance(messages, list):
-            _emit({"ok": False, "error": "request has no messages list"})
-            continue
-        variant = request.get("variant") or "pure_stage"
-        pipeline = pipelines.get(variant)
-        if pipeline is None:
-            _emit({"ok": False, "error": f"unknown variant {variant!r}"})
-            continue
-        model = request.get("model") or "benchmark-model"
-        model_limit = request.get("model_limit") or 200_000
+            messages = request.get("messages")
+            if not isinstance(messages, list):
+                _emit({"ok": False, "error": "request has no messages list"})
+                continue
+            # Preserve legacy falsy defaults; validate only the normalized truthy value.
+            variant = request.get("variant") or "pure_stage"
+            if not isinstance(variant, str):
+                _emit({"ok": False, "error": "request variant must be a string"})
+                continue
+            pipeline = pipelines.get(variant)
+            if pipeline is None:
+                _emit({"ok": False, "error": f"unknown variant {variant!r}"})
+                continue
+            model = request.get("model") or "benchmark-model"
+            model_limit = request.get("model_limit") or 200_000
 
-        try:
-            start = time.perf_counter()
-            result = pipeline.apply(messages, model, model_limit=model_limit)
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-        except Exception as exc:  # noqa: BLE001 - a failing scenario degrades, not aborts
+            try:
+                start = time.perf_counter()
+                result = pipeline.apply(messages, model, model_limit=model_limit)
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+            except Exception as exc:  # noqa: BLE001 - a failing scenario degrades, not aborts
+                _emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+                continue
+
+            _emit(
+                {
+                    "ok": True,
+                    "variant": variant,
+                    "messages": result.messages,
+                    "compress_ms": elapsed_ms,
+                    "tokens_before": result.tokens_before,
+                    "tokens_after": result.tokens_after,
+                    "transforms_applied": list(result.transforms_applied),
+                    "timing": dict(result.timing),
+                    "warnings": list(result.warnings),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - one failed request must not lose later lines
             _emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-            continue
-
-        _emit(
-            {
-                "ok": True,
-                "variant": variant,
-                "messages": result.messages,
-                "compress_ms": elapsed_ms,
-                "tokens_before": result.tokens_before,
-                "tokens_after": result.tokens_after,
-                "transforms_applied": list(result.transforms_applied),
-                "timing": dict(result.timing),
-                "warnings": list(result.warnings),
-            }
-        )
 
     return 0
 

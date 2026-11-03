@@ -311,16 +311,16 @@ impl AuditStore {
     pub fn count_by(&self, field: &str) -> Result<Vec<AuditCountBy>, AuditError> {
         let sql = match field {
             "event_type" => {
-                "SELECT COALESCE(event_type, 'unknown'), COUNT(*) FROM security_events GROUP BY event_type ORDER BY COUNT(*) DESC"
+                "SELECT COALESCE(event_type, 'unknown'), COUNT(*) FROM security_events GROUP BY COALESCE(event_type, 'unknown') ORDER BY COUNT(*) DESC"
             }
             "result" => {
-                "SELECT COALESCE(result, 'unknown'), COUNT(*) FROM security_events GROUP BY result ORDER BY COUNT(*) DESC"
+                "SELECT COALESCE(result, 'unknown'), COUNT(*) FROM security_events GROUP BY COALESCE(result, 'unknown') ORDER BY COUNT(*) DESC"
             }
             "policy_id" => {
-                "SELECT COALESCE(policy_id, 'unknown'), COUNT(*) FROM security_events GROUP BY policy_id ORDER BY COUNT(*) DESC"
+                "SELECT COALESCE(policy_id, 'unknown'), COUNT(*) FROM security_events GROUP BY COALESCE(policy_id, 'unknown') ORDER BY COUNT(*) DESC"
             }
             "destination_class" => {
-                "SELECT COALESCE(destination_class, 'unknown'), COUNT(*) FROM security_events GROUP BY destination_class ORDER BY COUNT(*) DESC"
+                "SELECT COALESCE(destination_class, 'unknown'), COUNT(*) FROM security_events GROUP BY COALESCE(destination_class, 'unknown') ORDER BY COUNT(*) DESC"
             }
             _ => return Err(AuditError::InvalidFilter(field.into())),
         };

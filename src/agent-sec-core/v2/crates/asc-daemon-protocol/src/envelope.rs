@@ -22,6 +22,30 @@ pub struct DaemonRequest {
     pub compatibility: Option<crate::CompatibilityV1>,
 }
 
+/// V1 request envelope used by legacy clients.
+///
+/// Attribution is accepted for wire compatibility only; socket credentials
+/// remain the sole source of query ownership and authorization.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct V1Request {
+    /// Exact method name, resolved and authorized by the normal dispatcher.
+    #[serde(deserialize_with = "deserialize_method")]
+    pub method: String,
+    /// Legacy flat query parameters, with duplicate keys rejected.
+    #[serde(default = "empty_object", deserialize_with = "deserialize_params")]
+    pub params: Value,
+    /// Legacy correlation labels; never trusted as an `OTel` identity.
+    #[serde(default)]
+    pub trace_context: serde_json::Map<String, Value>,
+    /// Response dialect selector; never a source of authorization.
+    #[serde(default)]
+    pub caller: Option<String>,
+    /// Optional caller deadline in milliseconds, bounded by the service.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 fn empty_object() -> Value {
     Value::Object(serde_json::Map::new())
 }
@@ -141,5 +165,21 @@ impl<'de> Visitor<'de> for StrictValueVisitor {
             values.insert(key, value.0);
         }
         Ok(StrictValue(Value::Object(values)))
+    }
+}
+
+#[cfg(test)]
+mod v1_tests {
+    use super::V1Request;
+
+    #[test]
+    fn legacy_query_params_cannot_bypass_strict_decoding() {
+        for payload in [
+            r#"{"method":"obs.sessions.list","trace_context":{},"params":{"owner_uid":1000,"owner_uid":0}}"#,
+            r#"{"method":"obs.sessions.list","trace_context":{},"params":[]}"#,
+            r#"{"method":"obs.sessions.list","trace_context":{},"role":"administrator"}"#,
+        ] {
+            assert!(serde_json::from_str::<V1Request>(payload).is_err());
+        }
     }
 }

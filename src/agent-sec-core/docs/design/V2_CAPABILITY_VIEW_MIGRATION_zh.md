@@ -41,7 +41,7 @@
 
 ### 2.1 共享 E2E：同一份用例跑两个环境
 
-`tests/e2e/cli/test_capabilities_e2e.py` 是唯一一份用例集（80 个参数化用例），由两个安装环境共用：
+`tests/e2e/cli/test_capabilities_e2e.py` 是唯一一份由两个安装环境共用的 capability view 用例集：
 
 | 目标 | 环境 | 说明 |
 |---|---|---|
@@ -76,18 +76,14 @@ CLI 并 `diff` stdout/stderr/exit code，覆盖默认全矩阵（table 与 json�
 - `commands/capabilities.rs`：长短选项、三类错误的文案与退出码、默认表格、help 文案
 - `tests/capabilities.rs`：公共接口的稳定排序、逐对可选、无原始值泄漏、本地 Plan 判定
 
-## 3. 能力缺口表
+## 3. 已闭合的能力缺口
 
-本表只收录**必须在未来某个特定能力迁移时动手处理**的两项。沿用 V1 既有设计的边界、
-滚动迁移方式本身决定的形态（V2 用 Rust 重写即意味着实现 fork）、以及已接受的实现取舍，
-都不是缺口，列在 3.1 节。
+G1 与 G4 已在对应 V2 能力迁入后收敛，不再是后续工作包的输入。
 
-两项缺口都**不会自动消失**：它们不在 `Makefile` 的待迁移清单里，只能靠本节识别。
-
-| ID | 现象 | 影响面 | 处理时机与动作 | 关联位置 |
-|---|---|---|---|---|
-| **G1** | `PROMPT_SCANNER_L2_MODEL` 的 `default` 上报空字符串，且**不产生** `not a supported L2 backend` 诊断 | prompt-scan 的 L2 配置在 V2 上看不到默认值，配错 backend 时不会被提前提示。注意 V1 也有这条降级路径（原生扩展未构建时），但已部署的 V1 RPM 一定带扩展，因此这是与部署态 V1 的真实差异 | **prompt-scan 引擎迁入 V2 时**：改为向真实引擎查询默认 backend 与可选 backend 集合，并恢复 unsupported 诊断。本次不处理。用户文档（组件 README 与 user guide）同样**不加**过渡期说明：V1→V2 的用户面切换以 prompt-scan 引擎在 V2 补齐为前提，届时本缺口已消失、现有描述自然成立 | `capabilities/resolve.rs` 的 `EnvKind::Identifier` 分支；V1 对照 `agent-sec-cli/src/lib.rs::scanner_engine_info` |
-| **G4** | ANOLISA 数据根语法校验（绝对路径、无 `.`/`..` 段）将在 V2 内部出现两份 | 与 V1 的 fork 属预期（见 3.1 节 G2）；真正的待办是 skill-ledger 迁入 V2 后，V2 内部会同时存在本视图的副本与 skill-ledger 自己的实现 | **skill-ledger 迁入 V2 时**：把校验收敛到 V2 内单一实现并让视图复用。该迁移本身不会自动删掉本副本 | `capabilities/resolve.rs::valid_data_home` 与 `agent_sec_cli/skill_ledger/paths.py::valid_anolisa_data_home` |
+| ID | 收敛方式 | 验证 |
+|---|---|---|
+| **G1** | `PROMPT_SCANNER_L2_MODEL` 的默认值与支持集由 `asc-capability-prompt-scan` 导出；capability view 用同一 catalog 上报默认值并诊断未知 backend。 | `capabilities/resolve.rs` 单测与 V1/V2 共用的 `test_capabilities_e2e.py` 覆盖默认、支持与未知 backend。 |
+| **G4** | `asc-foundation-types::is_valid_anolisa_data_home` 成为唯一的绝对路径、无 `.`/`..` 段语法校验；capability view 与 Skill Ledger discovery 都复用它。 | foundation 单测、Skill Ledger discovery 集成测试，以及 V1/V2 共用的 capability E2E 覆盖相同路径集合。 |
 
 ### 3.1 非缺口：沿用 V1 设计 / 迁移方式决定的形态 / 已接受的取舍
 
@@ -96,22 +92,17 @@ CLI 并 `diff` stdout/stderr/exit code，覆盖默认全矩阵（table 与 json�
 
 | ID | 内容 | 为什么不是缺口 | 维护约定 |
 |---|---|---|---|
-| **G2** | agent/capability/env manifest 在 V1 Python 与 V2 Rust 各存一份 | V2 采用 contract-first 重写，Rust 侧 fork 一份 manifest 是迁移方式的既定形态；两代并存期结束（V1 下线、`view.py` 删除）后自然只剩一份 | 并存期间任何 manifest 改动（新增 agent、新增变量、改默认值/allowlist/timeout 上限）需双改；如要自动守卫，可加一条在同环境下比对两个 CLI JSON 输出（掩码 G1 字段）的漂移测试 |
-| **G3** | V2 上报 5 个 capability 的配置，但目前只有 code-scan 在 V2 有执行路径 | 前提是其余能力按与 V1 一致的语义迁回。在该前提下本视图无需任何适配：manifest 除 L2 标识符（G1）外全部是静态常量（bool / keyword / timeout / data-home），不依赖任何运行期代码，因此能力迁入 V2 不会触发视图侧改动 | 若某次迁移**破了「语义与 V1 一致」这个前提**（改变量名、改默认值、改 allowlist），那是该次迁移自带的契约变更，需在其 PR 里同步 manifest，不属于本视图的遗留缺口 |
+| **G2** | agent/capability/env manifest 在 V1 Python 与 V2 Rust 各存一份 | V2 采用 contract-first 重写，Rust 侧 fork 一份 manifest 是迁移方式的既定形态；两代并存期结束（V1 下线、`view.py` 删除）后自然只剩一份 | 并存期间任何 manifest 改动（新增 agent、新增变量、改默认值/allowlist/timeout 上限）需双改；V1/V2 共用的 capability E2E 覆盖两代共同语义。 |
+| **G3** | capability view 报告所有五个 capability 的环境配置 | 视图是静态环境变量投影；能力的执行路径可独立迁移，但变更环境变量语义时必须同步更新 manifest。 | 若某次迁移**破了「语义与 V1 一致」这个前提**（改变量名、改默认值、改 allowlist），那是该次迁移自带的契约变更，需在其 PR 里同步 manifest。 |
 | **G5** | `enabled` 只反映环境变量意图，不代表 Hook 已在 Agent 进程加载 | V1 的 `capabilities` 从设计上就是 environment-only 视图，从不探测目标 Agent 进程；V2 照搬。若将来确实需要「已加载」证明，那是一个新增的运行期探测能力，不是改本视图语义 | 命令 `--help` 长文本已声明该边界 |
 | **G6** | 非打印字符判定按 Unicode general category 复刻 Python `str.isprintable()`（拒绝 `Other` = `Cc`/`Cf`/`Cs`/`Co`/`Cn` 与 `Separator` = `Zs`/`Zl`/`Zp`，ASCII 空格除外），残余差异仅来自两侧 Unicode 数据版本不同 | 判定规则与 V1 一致，且复用 V1 prompt-scanner 已在用的 `unicode-properties`（同组件不引入第二个类别表实现）。该库 0.1.4 用 Unicode 17.0 数据，Python 3.11.6 的 `unicodedata` 是 14.0.0，因此「14.0 未分配、后续版本已分配」的码位上 V1 按 `Cn` 转义而 V2 按其真实类别放行（实测如 U+1E030、U+11F00）。这批码位是新分配的字母与符号，不含双向控制符或零宽字符，不构成视觉欺骗面 | 无。规则本身已收敛，版本偏移随两侧升级自然缩小；不要为此再手写码位表 |
 | **G7** | V1 `CapabilityRecord` 的 `hooks`/`source`/`config`/`config_path` 字段未实现 | 这些字段在 V1 的 `to_dict()` 里本就不进入 JSON，也不进入表格，属于内部中间态；V2 不实现即为等价 | 无 |
 | **G8** | timeout 采用 Rust 数字语义：`2_0`、全角 `２０` 等 Python 专有字面量判为非法值；小浮点按十进制输出（`1e-7` → `0.0000001`），V1 按 Python `repr` 输出 `1e-07` | 已接受的实现取舍：这些差异源自 Python `int()`/`float()` 与 `repr` 的语言特性，不是视图语义。V2 的行为是安全的——非法值回落到文档化默认值并给出可见诊断，不会被静默重新解释，也不会崩溃；`  20  `、`+20`、`1E5`、`0.5`、`3.0` 等常规形态两代一致 | 无。该取舍由 `resolve.rs` 的 `timeouts_reject_python_only_numeric_syntax` 与 `small_float_timeouts_are_reported_in_decimal_form` 两个单测钉住；这些取值**不得**加入两代共用的差分 e2e（会在其中一侧必然失败） |
 
-## 4. 缺口识别方法
+## 4. 后续迁移检查
 
-后续接手者按两层清单排查，不要只看其中一层：
+后续能力迁移先检查 `Makefile` 中 `test-e2e-rpm-v2` 剩余的 `--ignore` 行及其 pending 注释：
+一行对应一个尚未迁移的能力，能力迁移完成即删除对应行。
 
-1. **capability 级待迁移清单**：`Makefile` 中 `test-e2e-rpm-v2` 剩余的 `--ignore` 行及其
-   pending 注释，一行对应一个尚未迁移的能力；能力迁移完成即删除对应行。
-2. **capability 内部语义级待补清单**：本文第 3 节缺口表。对应条件满足时，在该能力的迁移 PR 中
-   同时更新缺口表（补全后删除该行，并在 PR 描述里说明验证方式）。
-
-两层清单并不重叠：`Makefile` 的清单只回答「哪个能力还没迁」，**不会**提示 G1、G4 这两个
-「迁完仍需额外动手」的项；因此迁移 prompt-scan 与 skill-ledger 时，除了删 `--ignore` 行，
-必须同时回看第 3 节。
+若迁移改变了 capability view 已报告的环境变量名称、默认值、allowlist、timeout 或路径语义，
+必须在同一 PR 更新 V1/V2 manifest、两代共用的 capability E2E，以及本记录的闭合状态。

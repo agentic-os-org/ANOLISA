@@ -1,11 +1,19 @@
 #![allow(clippy::vec_init_then_push)]
-//! HTTP/2 Frame Parser - stateless binary frame parser
+//! HTTP/2 Frame Parser - binary frame parser with bounded split-frame reassembly
 //!
-//! Parses HTTP/2 binary frames from raw SSL event data.
-//! Handles the connection preface and extracts individual frames.
+//! Parses HTTP/2 binary frames from raw SSL event data, handles the connection
+//! preface, and extracts individual frames. A frame split across two SSL reads
+//! is completed from a bounded per-connection prefix: a TLS record caps at
+//! 16 KiB while a maximum-size DATA frame is 16384+9 bytes, and the
+//! continuation of a split frame starts inside a payload, so it can never be
+//! recognized as a frame on its own.
 
 use super::frame::{Http2FrameType, ParsedHttp2Frame};
+use crate::config::DEFAULT_CONNECTION_CAPACITY;
 use crate::probes::sslsniff::SslEvent;
+use lru::LruCache;
+use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 /// HTTP/2 connection preface (RFC 7540 Section 3.5)
@@ -14,22 +22,102 @@ const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// HTTP/2 frame header size
 const FRAME_HEADER_SIZE: usize = 9;
 
-/// HTTP/2 frame parser (stateless)
-#[derive(Debug, Default)]
-pub struct Http2Parser;
+/// Largest incomplete frame retained per connection and direction.
+///
+/// A frame may declare up to 16 MiB-1 (RFC 7540 §4.2), but each captured read
+/// is at most 4 MiB and the HTTP/1 aggregator's per-connection body cap is
+/// 8 MiB. Matching that cap keeps reassembly within the same worst-case
+/// retention (capacity x cap) the rest of the aggregator is bounded by.
+const MAX_PENDING_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// Connection and direction identity for split-frame reassembly.
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+struct ReassemblyKey {
+    pid: u32,
+    ssl_ptr: u64,
+    rw: i32,
+}
+
+impl ReassemblyKey {
+    fn from_ssl_event(event: &SslEvent) -> Self {
+        Self {
+            pid: event.pid,
+            ssl_ptr: event.ssl_ptr,
+            rw: event.rw,
+        }
+    }
+}
+
+/// HTTP/2 frame parser with bounded per-connection split-frame reassembly.
+#[derive(Debug)]
+pub struct Http2Parser {
+    /// Incomplete frame tail per connection+direction. An entry with an empty
+    /// value marks a connection already identified as HTTP/2 and sitting on a
+    /// frame boundary; the entry itself routes the next read here even when it
+    /// starts inside a frame payload.
+    pending: RefCell<LruCache<ReassemblyKey, Vec<u8>>>,
+}
+
+impl Default for Http2Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Http2Parser {
     pub fn new() -> Self {
-        Self
+        // Clamp like the aggregator's caches: a zero capacity would otherwise
+        // panic instead of degrading to maximum eviction.
+        let capacity = NonZeroUsize::new(DEFAULT_CONNECTION_CAPACITY).unwrap_or(NonZeroUsize::MIN);
+        Self {
+            pending: RefCell::new(LruCache::new(capacity)),
+        }
     }
 
-    /// Parse all HTTP/2 frames from an SslEvent buffer
+    /// Whether `event` belongs to a connection+direction that is mid-frame or
+    /// already identified as HTTP/2, so it must be routed here by state before
+    /// any stateless heuristic.
+    pub fn is_tracking(&self, event: &SslEvent) -> bool {
+        self.pending
+            .borrow()
+            .contains(&ReassemblyKey::from_ssl_event(event))
+    }
+
+    /// Parse all HTTP/2 frames from an SslEvent buffer, completing a frame
+    /// split across reads from the retained prefix.
     pub fn parse(&self, event: Rc<SslEvent>) -> Vec<ParsedHttp2Frame> {
-        let data_len = event.buf_size() as usize;
-        let data = &event.buf[..data_len];
+        let key = ReassemblyKey::from_ssl_event(&event);
+        let pending = self.pending.borrow_mut().pop(&key);
+
+        // Merge the retained prefix with this read. The continuation alone
+        // starts inside a payload and could never be recognized as a frame; a
+        // merge past the cap drops the prefix (and the tracking entry) so a
+        // broken stream cannot pin memory.
+        let source = match pending {
+            Some(mut buffered) if !buffered.is_empty() => {
+                if buffered.len() + event.buf_size() as usize > MAX_PENDING_FRAME_BYTES {
+                    log::warn!(
+                        "HTTP/2 split frame exceeds {MAX_PENDING_FRAME_BYTES} bytes; dropping reassembly | pid={} ssl_ptr={:#x} rw={}",
+                        key.pid,
+                        key.ssl_ptr,
+                        key.rw,
+                    );
+                    return Vec::new();
+                }
+                buffered.extend_from_slice(&event.buf[..event.buf_size() as usize]);
+                let mut merged = (*event).clone();
+                merged.buf = buffered;
+                merged.len = merged.buf.len() as u32;
+                Rc::new(merged)
+            }
+            _ => Rc::clone(&event),
+        };
+
+        let data = &source.buf[..source.buf_size() as usize];
 
         let mut pos = 0;
         let mut frames = Vec::new();
+        let mut saw_frame = false;
 
         // Skip HTTP/2 connection preface if present
         if data.starts_with(HTTP2_PREFACE) {
@@ -55,7 +143,7 @@ impl Http2Parser {
 
             if payload_offset + length > data.len() {
                 log::debug!(
-                    "HTTP/2 frame @ {}: incomplete payload (need {} bytes, have {})",
+                    "HTTP/2 frame @ {}: incomplete payload (need {} bytes, have {}); retaining prefix for the next read",
                     pos,
                     length,
                     data.len() - payload_offset
@@ -63,13 +151,14 @@ impl Http2Parser {
                 break;
             }
 
+            saw_frame = true;
             let frame = ParsedHttp2Frame {
                 frame_type: Http2FrameType::from_u8(frame_type_byte),
                 flags,
                 stream_id,
                 payload_offset,
                 payload_len: length,
-                source_event: Rc::clone(&event),
+                source_event: Rc::clone(&source),
             };
 
             if frame.is_data()
@@ -97,6 +186,24 @@ impl Http2Parser {
             }
 
             pos = payload_offset + length;
+        }
+
+        // Retain the tail for the next read. A tail that does not start with a
+        // full frame header is only ever seen on a connection already being
+        // reassembled, which is also the only case where those bytes can
+        // belong to a frame whose prefix was captured earlier.
+        let tail = &data[pos..];
+        if saw_frame || data.starts_with(HTTP2_PREFACE) || !tail.is_empty() {
+            if tail.len() <= MAX_PENDING_FRAME_BYTES {
+                self.pending.borrow_mut().put(key, tail.to_vec());
+            } else {
+                log::warn!(
+                    "HTTP/2 frame prefix exceeds {MAX_PENDING_FRAME_BYTES} bytes; dropping connection state | pid={} ssl_ptr={:#x} rw={}",
+                    key.pid,
+                    key.ssl_ptr,
+                    key.rw,
+                );
+            }
         }
 
         frames
@@ -309,5 +416,33 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert!(frames[0].is_headers());
         assert_eq!(frames[0].stream_id, 171);
+    }
+
+    #[test]
+    fn test_split_frame_reassembled_across_reads() {
+        // A TLS record caps at 16 KiB while a maximum-size DATA frame is
+        // 16384+9 bytes, so a frame split across two SSL reads is ordinary.
+        // The continuation starts inside the payload, so it must be joined
+        // with the prefix retained from the first read.
+        let payload = br#"{"model":"gpt-4","messages":[{"role":"user"}]}"#;
+        let raw = build_frame(0, 0x01, 7, payload);
+        let cut = 9 + payload.len() / 2;
+        let parser = Http2Parser::new();
+
+        let mut frames = parser.parse(create_test_event(raw[..cut].to_vec()));
+        assert!(
+            frames.is_empty(),
+            "a truncated frame must not be emitted before its continuation"
+        );
+        frames.extend(parser.parse(create_test_event(raw[cut..].to_vec())));
+
+        assert_eq!(
+            frames.len(),
+            1,
+            "the split frame must complete exactly once"
+        );
+        assert!(frames[0].is_data());
+        assert_eq!(frames[0].stream_id, 7);
+        assert_eq!(frames[0].payload(), payload);
     }
 }

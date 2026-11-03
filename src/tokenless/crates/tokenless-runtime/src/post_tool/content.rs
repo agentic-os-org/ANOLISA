@@ -3,8 +3,9 @@
 //! Detection is a pure function of the content with bounded work. Most
 //! detectors inspect only the first [`MAX_SCAN_BYTES`] bytes / [`MAX_SCAN_LINES`]
 //! lines; JSON and build-log detection also sample bounded trailing content.
-//! No format is fully parsed — expensive parsing belongs inside the selected
-//! compressor, not in a detector that runs on every input. When no cheap signal
+//! Path-list detection validates every complete record in the byte-bounded
+//! prefix, rather than the line limit, using the compressor's shape validator.
+//! Full-input parsing belongs inside the selected compressor. When no cheap signal
 //! is decisive the detector prefers the more general class, and ultimately
 //! [`ContentType::PlainText`] or [`ContentType::Unknown`]; the Runtime routes
 //! unsupported domains to passthrough until their compressor is deliberately
@@ -19,6 +20,7 @@ mod source_code;
 mod stack_trace;
 mod tabular;
 
+use tokenless_compressors::SearchResultsCompressor;
 use tokenless_protocol::ContentType;
 
 /// Detection inspects at most this many leading bytes.
@@ -34,6 +36,15 @@ pub const MAX_SCAN_LINES: usize = 200;
 /// while content that *starts as* a traceback is [`ContentType::StackTrace`].
 #[must_use]
 pub fn detect(content: &str) -> ContentType {
+    // One leading byte-order mark is format, not content, for every domain's
+    // reader — the HTML tokenizer ignores it, JSON parsers skip it, and a
+    // spreadsheet exports its CSV with one. `trim_start` cannot strip it
+    // (U+FEFF is a format character, not whitespace), so a marked document
+    // kept the mark in front of every head-anchored signal and fell through
+    // to plain text in every domain except HTML, whose detector had learned
+    // to skip the mark itself. Strip it once here, for all of them; a second
+    // mark is content and stays.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let scan = scan_prefix(content);
     if scan.trim().is_empty() {
         return ContentType::Unknown;
@@ -67,6 +78,20 @@ pub fn detect(content: &str) -> ContentType {
     }
     if tabular::is_tabular(content) {
         return ContentType::Tabular;
+    }
+    // Retain established source/table routes when slash-bearing rows
+    // could also be interpreted as paths.
+    // Validate the entire byte sample so a bad record after line 200 cannot
+    // be hidden by the general line-based detection budget.
+    let path_scan = if scan.len() < content.len() {
+        // A byte-limited fragment can end inside a path or between CR and LF.
+        // Only complete received records are evidence for this strict detector.
+        scan.rfind('\n').map_or("", |end| &scan[..=end])
+    } else {
+        scan
+    };
+    if SearchResultsCompressor.is_path_list(path_scan) {
+        return ContentType::SearchResults;
     }
     ContentType::PlainText
 }

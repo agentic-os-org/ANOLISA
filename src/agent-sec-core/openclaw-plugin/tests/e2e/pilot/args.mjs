@@ -9,6 +9,8 @@ export function parseArgs(argv) {
     const arg = argv[index];
     if (arg === "--help" || arg === "-h") {
       parsed.help = true;
+    } else if (arg === "--pii-only") {
+      parsed.piiOnly = true;
     } else if (arg === "--skip-gateway") {
       parsed.skipGateway = true;
     } else if (arg === "--skip-failure-probes") {
@@ -33,6 +35,9 @@ export function parseArgs(argv) {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
+  if (parsed.piiOnly && parsed.skipGateway) {
+    throw new Error("--pii-only requires a live Gateway; it cannot be combined with --skip-gateway");
+  }
   return parsed;
 }
 
@@ -48,6 +53,7 @@ Options:
   --port <port>                Gateway port. Defaults to a free local port.
   --gateway-timeout-ms <ms>    Gateway health wait budget.
   --gateway-token <token>      Gateway token for local health checks.
+  --pii-only                   Run only the PII Gateway regression lane.
   --skip-gateway               Install and inspect without starting gateway.
   --skip-failure-probes        Skip negative hook probes.
 `);

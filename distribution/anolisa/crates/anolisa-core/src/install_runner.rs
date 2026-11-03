@@ -14,6 +14,7 @@
 //! create files outside those roots, so a failed install can roll back by
 //! deleting just the paths it returns.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -111,13 +112,19 @@ pub enum RenderMode {
     /// substitute layout placeholders (`{bindir}`, `{datadir}`, … plus
     /// `{component}`) inside UTF-8 file content against the final layout.
     AnolisaPathsV1,
+    /// Expand layout placeholders in the `command` field of a JSON object.
+    AnolisaJsonCommandV1,
 }
 
 impl RenderMode {
     /// Map a manifest `render` string to a supported mode. Returns `None`
     /// for values this CLI does not implement — callers must reject those.
     pub fn parse(value: &str) -> Option<Self> {
-        (value == crate::manifest::RENDER_ANOLISA_PATHS_V1).then_some(Self::AnolisaPathsV1)
+        match value {
+            crate::manifest::RENDER_ANOLISA_PATHS_V1 => Some(Self::AnolisaPathsV1),
+            crate::manifest::RENDER_ANOLISA_JSON_COMMAND_V1 => Some(Self::AnolisaJsonCommandV1),
+            _ => None,
+        }
     }
 }
 
@@ -563,12 +570,11 @@ impl<'a> InstallRunner<'a> {
             }
 
             let key = archive_source_key(file)?;
-            let index =
-                staged
-                    .index_for(&key)
-                    .ok_or_else(|| InstallError::MissingArchiveEntry {
-                        basename: key.clone(),
-                    })?;
+            let index = staged
+                .index_for(&key, file.source.is_some())
+                .ok_or_else(|| InstallError::MissingArchiveEntry {
+                    basename: key.clone(),
+                })?;
             // Rendering is the one case that needs the payload in memory: it
             // rewrites the whole content as text. Only single-file sources may
             // render (see `EntrySelector::build`), so a large directory
@@ -608,7 +614,7 @@ impl<'a> InstallRunner<'a> {
     /// not acquire a fixed directory owned by whichever user installs first.
     fn staging_parent(&self) -> Result<&Path, InstallError> {
         let cache_dir = &self.layout.cache_dir;
-        fs::create_dir_all(cache_dir).map_err(|source| InstallError::Io {
+        create_install_dir_all(cache_dir).map_err(|source| InstallError::Io {
             path: cache_dir.clone(),
             source,
         })?;
@@ -654,6 +660,37 @@ impl<'a> InstallRunner<'a> {
                     }
                 })?;
                 Ok(rendered.into_bytes())
+            }
+            RenderMode::AnolisaJsonCommandV1 => {
+                let mut document: serde_json::Value =
+                    serde_json::from_slice(bytes).map_err(|err| InstallError::Render {
+                        path: file.dest.clone(),
+                        reason: format!("invalid JSON document: {err}"),
+                    })?;
+                let command = document
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| InstallError::Render {
+                        path: file.dest.clone(),
+                        reason: "JSON document must have a string command field".to_string(),
+                    })?;
+                let rendered = crate::adapter::expand_layout_placeholders_content(
+                    command,
+                    self.layout,
+                    &[("component", spec.component.as_str())],
+                )
+                .map_err(|err| InstallError::Render {
+                    path: file.dest.clone(),
+                    reason: err.to_string(),
+                })?;
+                document["command"] = serde_json::Value::String(rendered);
+                let mut result =
+                    serde_json::to_vec_pretty(&document).map_err(|err| InstallError::Render {
+                        path: file.dest.clone(),
+                        reason: format!("cannot encode rendered JSON: {err}"),
+                    })?;
+                result.push(b'\n');
+                Ok(result)
             }
         }
     }
@@ -812,10 +849,10 @@ fn ensure_destination_vacant(dest: &Path) -> Result<(), InstallError> {
 /// Built before the archive is decoded so an entry no destination maps to is
 /// skipped without ever being written to staging.
 struct EntrySelector {
-    /// Exact keys: normalized full archive paths and legacy destination
-    /// basenames. Matched against an entry's full path *and* its basename,
-    /// mirroring the dual-keyed lookup this replaces.
-    keys: BTreeSet<String>,
+    /// Explicit single-file sources match only normalized full archive paths.
+    paths: BTreeSet<String>,
+    /// Legacy destination-only contracts match archive entry basenames.
+    basenames: BTreeSet<String>,
     /// Directory sources, trailing slash trimmed. An empty prefix (source
     /// `"/"`) selects the whole archive, as before.
     prefixes: Vec<String>,
@@ -823,7 +860,8 @@ struct EntrySelector {
 
 impl EntrySelector {
     fn build(files: &[ResolvedInstallFile]) -> Result<Self, InstallError> {
-        let mut keys = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        let mut basenames = BTreeSet::new();
         let mut prefixes = Vec::new();
         for file in files {
             match file.source.as_deref() {
@@ -843,17 +881,24 @@ impl EntrySelector {
                     let prefix = normalize_archive_key(source);
                     prefixes.push(prefix.trim_end_matches('/').to_string());
                 }
-                _ => {
-                    keys.insert(archive_source_key(file)?);
+                Some(_) => {
+                    paths.insert(archive_source_key(file)?);
+                }
+                None => {
+                    basenames.insert(archive_source_key(file)?);
                 }
             }
         }
-        Ok(Self { keys, prefixes })
+        Ok(Self {
+            paths,
+            basenames,
+            prefixes,
+        })
     }
 
     fn selects(&self, path_key: &str, basename: &str) -> bool {
-        self.keys.contains(path_key)
-            || self.keys.contains(basename)
+        self.paths.contains(path_key)
+            || self.basenames.contains(basename)
             || self.prefixes.iter().any(|prefix| {
                 archive_relative_under(path_key, prefix).is_some_and(|rel| !rel.is_empty())
             })
@@ -885,12 +930,12 @@ struct StagedEntry {
 struct StagedArchive {
     staging: StagingDir,
     entries: Vec<StagedEntry>,
-    /// Full archive path -> entry index. Drives directory-source expansion;
-    /// sorted iteration gives that expansion a stable order.
+    /// Full archive path -> entry index. Resolves explicit single-file sources
+    /// and drives directory expansion in a stable sorted order.
     full_paths: BTreeMap<String, usize>,
-    /// Basename *and* full archive path -> entry index. Duplicate keys are
-    /// last-write-wins in archive order, matching the previous behavior.
-    lookup: BTreeMap<String, usize>,
+    /// Legacy basename -> entry index. Duplicate basenames remain
+    /// last-write-wins in archive order, independently of explicit paths.
+    basenames: BTreeMap<String, usize>,
     /// Whether an entry has been reserved for a destination. A second claim
     /// gets its own hard link so each destination owns its staged file.
     claimed: Vec<bool>,
@@ -915,7 +960,7 @@ impl StagedArchive {
             staging,
             entries: Vec::new(),
             full_paths: BTreeMap::new(),
-            lookup: BTreeMap::new(),
+            basenames: BTreeMap::new(),
             claimed: Vec::new(),
             next_id: 0,
         };
@@ -943,11 +988,9 @@ impl StagedArchive {
                 continue;
             }
             let index = staged.spool_entry(&mut entry, &path_key, mode)?;
-            // Basename first, then the full path — the same insertion order as
-            // the map this replaces, so which entry wins a basename/full-path
-            // collision does not change.
-            staged.lookup.insert(basename, index);
-            staged.lookup.insert(path_key.clone(), index);
+            // Keep path and basename namespaces separate: a nested entry must
+            // not replace an explicit root-level source with the same basename.
+            staged.basenames.insert(basename, index);
             staged.full_paths.insert(path_key, index);
         }
         Ok(staged)
@@ -1004,8 +1047,12 @@ impl StagedArchive {
     }
 
     /// Entry index for an explicit archive `source` or legacy dest basename.
-    fn index_for(&self, key: &str) -> Option<usize> {
-        self.lookup.get(key).copied()
+    fn index_for(&self, key: &str, explicit_source: bool) -> Option<usize> {
+        if explicit_source {
+            self.full_paths.get(key).copied()
+        } else {
+            self.basenames.get(key).copied()
+        }
     }
 
     /// Entries under a directory source, as `(archive key, relative path,
@@ -1278,7 +1325,7 @@ fn create_symlink(link: &PreparedSymlink) -> Result<InstalledFile, InstallError>
         });
     }
     if let Some(parent) = link.dest.parent() {
-        fs::create_dir_all(parent).map_err(|source| InstallError::Io {
+        create_install_dir_all(parent).map_err(|source| InstallError::Io {
             path: parent.to_path_buf(),
             source,
         })?;
@@ -1342,7 +1389,7 @@ fn write_dest_atomic(
     let parsed_mode = parse_unix_mode(file.mode.as_deref(), dest)?;
 
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|source| InstallError::Io {
+        create_install_dir_all(parent).map_err(|source| InstallError::Io {
             path: parent.to_path_buf(),
             source,
         })?;
@@ -2740,13 +2787,101 @@ mod tests {
     }
 
     #[test]
-    fn render_mode_parse_accepts_only_v1() {
+    fn render_mode_parse_accepts_supported_modes() {
         assert_eq!(
             RenderMode::parse("anolisa-paths-v1"),
             Some(RenderMode::AnolisaPathsV1)
         );
         assert_eq!(RenderMode::parse("anolisa-paths-v2"), None);
+        assert_eq!(
+            RenderMode::parse("anolisa-json-command-v1"),
+            Some(RenderMode::AnolisaJsonCommandV1)
+        );
         assert_eq!(RenderMode::parse(""), None);
+    }
+
+    #[test]
+    fn json_command_render_escapes_layout_and_preserves_other_fields() {
+        let home = tempdir().unwrap();
+        let mut special = layout_for(home.path());
+        special.bin_dir = home.path().join("quoted\" and \\slashes/bin");
+        let layouts = [
+            layout_for(home.path()),
+            FsLayout::system(Some(home.path().to_path_buf())),
+            special,
+        ];
+        for layout in layouts {
+            let runner = InstallRunner::new(&layout);
+            let dest = layout.datadir.join("mcp.json");
+            let mut file = render_entry("mcp.json", dest);
+            file.render = Some(RenderSpec {
+                mode: RenderMode::AnolisaJsonCommandV1,
+                component: "agent-memory".to_string(),
+            });
+            let template = br#"{"command":"{bindir}/agent-memory","description":"{literal}"}"#;
+            let rendered = runner
+                .render_bytes(&file, file.render.as_ref().unwrap(), template)
+                .expect("JSON command rendered");
+            let value: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+            assert_eq!(
+                value["command"].as_str().unwrap(),
+                format!("{}/agent-memory", layout.bin_dir.display())
+            );
+            assert_eq!(value["description"], "{literal}");
+        }
+    }
+
+    #[test]
+    fn json_command_install_records_rendered_digest() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let template = br#"{"command":"{bindir}/agent-memory"}"#;
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("mcp.json", template)]),
+        );
+        let dest = layout.datadir.join("mcp.json");
+        let mut file = render_entry("mcp.json", dest.clone());
+        file.render = Some(RenderSpec {
+            mode: RenderMode::AnolisaJsonCommandV1,
+            component: "agent-memory".to_string(),
+        });
+        let outcome = runner
+            .install_mapped_fixture("tar_gz", &cached, &[file])
+            .expect("JSON descriptor installed");
+        let installed = fs::read(&dest).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&installed).unwrap();
+        assert_eq!(
+            document["command"].as_str().unwrap(),
+            format!("{}/agent-memory", layout.bin_dir.display())
+        );
+        assert_eq!(outcome.files[0].sha256, sha256_of(&installed));
+    }
+
+    #[test]
+    fn json_command_render_rejects_invalid_input_and_unknown_placeholders() {
+        let home = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let file = render_entry("mcp.json", layout.datadir.join("mcp.json"));
+        let spec = RenderSpec {
+            mode: RenderMode::AnolisaJsonCommandV1,
+            component: "agent-memory".to_string(),
+        };
+        for template in [
+            &b"not JSON"[..],
+            &b"{}"[..],
+            &b"{\"command\":42}"[..],
+            &b"{\"command\":\"{unknown}/agent-memory\"}"[..],
+        ] {
+            assert!(matches!(
+                runner.render_bytes(&file, &spec, template),
+                Err(InstallError::Render { .. })
+            ));
+        }
     }
 
     // -- disk staging (no whole-archive payload in memory) -------------------
@@ -3103,6 +3238,137 @@ mod tests {
             staging_dirs(&layout).is_empty(),
             "staging must be cleaned on the failure path"
         );
+    }
+
+    #[test]
+    fn explicit_archive_sources_do_not_collide_with_legacy_basenames() {
+        for nested_last in [true, false] {
+            let home = tempdir().unwrap();
+            let cache = tempdir().unwrap();
+            let layout = layout_for(home.path());
+            let runner = InstallRunner::new(&layout);
+            let root: &[u8] = b"root-payload";
+            let nested: &[u8] = b"nested-payload";
+            let entries = if nested_last {
+                [("tool", root), ("share/tool", nested)]
+            } else {
+                [("share/tool", nested), ("tool", root)]
+            };
+            let cached = write_cached(cache.path(), "payload.tar.gz", &build_tar_gz(&entries));
+            let root_dest = layout.bin_dir.join("root-tool");
+            let normalized_dest = layout.bin_dir.join("normalized-tool");
+            let nested_dest = layout.bin_dir.join("nested-tool");
+            let legacy_dest = layout.bin_dir.join("tool");
+            let entry = |source: &str, dest: PathBuf| ResolvedInstallFile {
+                source: Some(source.to_string()),
+                dest,
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            };
+            let files = [
+                entry("tool", root_dest.clone()),
+                entry("./tool", normalized_dest.clone()),
+                entry("share/tool", nested_dest.clone()),
+                ResolvedInstallFile::dest_only(legacy_dest.clone()),
+            ];
+            runner
+                .install_mapped_fixture("tar_gz", &cached, &files)
+                .expect("install exact sources and legacy basename together");
+            assert_eq!(fs::read(root_dest).unwrap(), root);
+            assert_eq!(fs::read(normalized_dest).unwrap(), root);
+            assert_eq!(fs::read(nested_dest).unwrap(), nested);
+            assert_eq!(
+                fs::read(legacy_dest).unwrap(),
+                if nested_last { nested } else { root }
+            );
+            assert!(staging_dirs(&layout).is_empty());
+        }
+    }
+
+    #[test]
+    fn explicit_archive_source_skips_unrequested_matching_basenames() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("tool", b"root"), ("share/tool", b"unrequested")]),
+        );
+        let file = ResolvedInstallFile {
+            source: Some("tool".to_string()),
+            dest: layout.bin_dir.join("tool"),
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+        let selector = EntrySelector::build(std::slice::from_ref(&file)).unwrap();
+        assert!(selector.selects("tool", "tool"));
+        assert!(!selector.selects("share/tool", "tool"));
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &[file])
+            .expect("prepare the exact source only");
+        assert_eq!(staged_files(&layout).len(), 1);
+        assert_eq!(prepared.regular[0].sha256, sha256_of(b"root"));
+        drop(prepared);
+        assert!(staging_dirs(&layout).is_empty());
+    }
+
+    #[test]
+    fn explicit_archive_source_requires_exact_path() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("share/tool", b"wrong-source")]),
+        );
+        let dest = layout.bin_dir.join("tool");
+        let file = ResolvedInstallFile {
+            source: Some("tool".to_string()),
+            dest: dest.clone(),
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+        let error = runner
+            .prepare_files("tar_gz", &cached, &[file])
+            .expect_err("a matching basename does not satisfy an explicit source");
+        assert!(
+            matches!(error, InstallError::MissingArchiveEntry { basename } if basename == "tool")
+        );
+        assert!(!dest.exists());
+        assert!(staging_dirs(&layout).is_empty());
+    }
+
+    #[test]
+    fn explicit_archive_source_keeps_duplicate_full_path_last_write_wins() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("tool", b"first"), ("tool", b"last")]),
+        );
+        let dest = layout.bin_dir.join("tool");
+        let file = ResolvedInstallFile {
+            source: Some("tool".to_string()),
+            dest: dest.clone(),
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+        runner
+            .install_mapped_fixture("tar_gz", &cached, &[file])
+            .expect("install the last entry at the exact source path");
+        assert_eq!(fs::read(dest).unwrap(), b"last");
+        assert!(staging_dirs(&layout).is_empty());
     }
 
     #[test]

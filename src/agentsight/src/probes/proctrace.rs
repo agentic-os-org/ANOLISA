@@ -6,12 +6,14 @@
 use crate::config;
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle, RingBufferBuilder,
+    Link, MapFlags, MapHandle, RingBufferBuilder,
     skel::{OpenSkel, SkelBuilder},
 };
 use std::{
+    collections::HashSet,
     mem::MaybeUninit,
     os::fd::AsFd,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -21,6 +23,7 @@ use std::{
 };
 
 use super::pidns::proc_root_is_init_pidns;
+use crate::utils::procfs::proc_root;
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
 #[allow(
@@ -34,9 +37,6 @@ mod bpf {
     include!(concat!(env!("OUT_DIR"), "/proctrace.rs"));
 }
 use bpf::*;
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-const POLL_TIMEOUT_MS: u64 = 100;
 
 // Re-export types from generated bindings
 pub type ProcEventHeader = bpf::proc_event_header;
@@ -534,7 +534,34 @@ impl ProcTrace {
     ///
     /// Both maps must contain the PID so that `trace_process_exit` in BPF can
     /// clean up via either lookup path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded filter maps still reject the insert
+    /// after one reap-and-retry. Losing a registration is a silent capture
+    /// gap -- `is_pid_traced()` drops every event of an unregistered pid -- so
+    /// callers must surface the failure rather than ignore it.
     pub fn add_traced_pid(&mut self, pid: u32) -> Result<()> {
+        let Err(err) = self.insert_traced_pid(pid) else {
+            return Ok(());
+        };
+        // A full table is usually stale rather than busy: user space inserts a
+        // pid asynchronously from the procmon ring buffer, so a short-lived
+        // process can exit -- running the BPF-side `sched_process_exit`
+        // cleanup before its key even lands -- and no later tracepoint will
+        // ever fire for that pid again. Reaping only on failure keeps the
+        // per-exec path free of extra procfs stats.
+        let reaped = self.reap_exited_traced_pids();
+        if reaped == 0 {
+            return Err(err);
+        }
+        log::warn!(
+            "traced_processes was full; reaped {reaped} exited pid(s) and retried pid {pid}"
+        );
+        self.insert_traced_pid(pid)
+    }
+
+    fn insert_traced_pid(&mut self, pid: u32) -> Result<()> {
         let key = pid.to_ne_bytes();
         let val = 1u32.to_ne_bytes();
         self.skel
@@ -547,6 +574,44 @@ impl ProcTrace {
             .child_pids()
             .update(&key, &val, libbpf_rs::MapFlags::ANY)
             .with_context(|| format!("failed to add pid {pid} to child_pids"))
+    }
+
+    /// Drop filter-map entries whose process is gone, returning how many went.
+    ///
+    /// Keys are collected before the first delete: a BPF hash iterator is not
+    /// guaranteed to visit the remaining keys once the map is mutated.
+    fn reap_exited_traced_pids(&mut self) -> usize {
+        let root = proc_root();
+        if !lists_processes(root) || !proc_root_is_init_pidns() {
+            // Without a usable procfs every pid looks exited. Reaping live
+            // agents is strictly worse than refusing one registration.
+            log::warn!(
+                "traced_processes is full but procfs root {root:?} lists no processes; not reaping"
+            );
+            return 0;
+        }
+        // BPF 自行写入的子进程使用 host PID；非初始命名空间不按本地编号回收。
+        // 两张表独立满载，必须同时回收 child-only 的残留键。
+        let maps = self.skel.maps();
+        let traced: HashSet<u32> = maps
+            .traced_processes()
+            .keys()
+            .chain(maps.child_pids().keys())
+            .filter_map(|key| <[u8; 4]>::try_from(key.as_slice()).ok())
+            .map(u32::from_ne_bytes)
+            .collect();
+        let total = traced.len();
+        let mut reaped = 0;
+        for pid in exited_pids(traced, root) {
+            let key = pid.to_ne_bytes();
+            let child_removed = self.skel.maps_mut().child_pids().delete(&key).is_ok();
+            let traced_removed = self.skel.maps_mut().traced_processes().delete(&key).is_ok();
+            if child_removed || traced_removed {
+                reaped += 1;
+            }
+        }
+        log::debug!("traced_processes reap: {reaped} of {total} entries had exited");
+        reaped
     }
 
     /// Remove a PID from the traced_processes and child_pids maps at runtime
@@ -612,6 +677,33 @@ impl ProcTrace {
         let binding = self.skel.maps();
         let map = binding.rb();
         MapHandle::try_clone(map).context("failed to create MapHandle from rb")
+    }
+
+    /// Create a handle to the shared per-CPU internal metrics map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the loaded map handle cannot be cloned.
+    pub fn internal_metrics_handle(&self) -> Result<MapHandle> {
+        let binding = self.skel.maps();
+        let map = binding.internal_metrics();
+        MapHandle::try_clone(map).context("failed to create MapHandle from internal_metrics")
+    }
+
+    /// Sum ring-buffer reservation failures across all CPUs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the map cannot be read or contains an unexpected
+    /// value width.
+    pub fn ring_buffer_dropped(&self) -> Result<u64> {
+        let binding = self.skel.maps();
+        let values = binding
+            .internal_metrics()
+            .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)
+            .context("failed to read internal_metrics")?
+            .ok_or_else(|| anyhow::anyhow!("internal_metrics key 0 is missing"))?;
+        sum_per_cpu_counter(&values)
     }
 
     /// Attach tracepoints for process tracking
@@ -683,22 +775,26 @@ impl ProcTrace {
             .context("failed to add ring buffer")?;
         let rb = rb_builder.build().context("failed to build ring buffer")?;
 
+        // Read the configured poll timeout on this thread before spawning so
+        // the poller observes exactly the value `AgentSight::new` published
+        // (crate::config::set_poll_timeout_ms), not whatever the global holds
+        // when the thread happens to get scheduled.
+        let poll_timeout = Duration::from_millis(crate::config::poll_timeout_ms());
+
         let handle = thread::Builder::new()
             .name("proctrace-poll".into())
             .spawn(move || {
-                let timeout = Duration::from_millis(POLL_TIMEOUT_MS);
-                loop {
-                    if stop_flag_inner.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match rb.poll(timeout) {
-                        Ok(_) => {}
-                        Err(e) if e.kind() == libbpf_rs::ErrorKind::Interrupted => break,
-                        Err(e) => {
-                            eprintln!("proctrace poll error: {e:#}");
-                            break;
-                        }
-                    }
+                let timeout = poll_timeout;
+                let outcome = super::drive_poll_loop(timeout, &stop_flag_inner, |timeout| {
+                    rb.poll(timeout)
+                        .map(|_| ())
+                        .map_err(|error| match error.kind() {
+                            libbpf_rs::ErrorKind::Interrupted => super::PollFailure::Interrupted,
+                            _ => super::PollFailure::Fatal(format!("{error:#}")),
+                        })
+                });
+                if let super::PollEnd::Failed(message) = outcome {
+                    eprintln!("proctrace poll error: {message}");
                 }
             })
             .context("failed to spawn poll thread")?;
@@ -718,6 +814,42 @@ impl ProcTrace {
     pub fn try_recv(&self) -> Option<VariableEvent> {
         self.rx.try_recv().ok()
     }
+}
+
+fn sum_per_cpu_counter(values: &[Vec<u8>]) -> Result<u64> {
+    values.iter().try_fold(0u64, |total, value| {
+        let bytes: [u8; 8] = value
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid internal_metrics value size"))?;
+        Ok(total.saturating_add(u64::from_ne_bytes(bytes)))
+    })
+}
+
+/// Whether `root` is a mounted procfs rather than an empty path prefix.
+///
+/// Pid 1 is the one entry every procfs has, so its absence means pid liveness
+/// cannot be decided through this root at all.
+fn lists_processes(root: &Path) -> bool {
+    root.join("1").is_dir()
+}
+
+/// The subset of `pids` that no longer has a `<root>/<pid>` directory.
+///
+/// A zombie still has its directory and is deliberately kept: its BPF-side
+/// exit cleanup has already run, so re-adding it would be the caller's bug,
+/// not a leak this sweep should paper over.
+fn exited_pids(pids: impl IntoIterator<Item = u32>, root: &Path) -> Vec<u32> {
+    pids.into_iter()
+        .filter(|pid| {
+            // 权限或 I/O 错误不能作为进程已退出的证据。
+            definitely_exited(std::fs::metadata(root.join(pid.to_string())))
+        })
+        .collect()
+}
+
+fn definitely_exited(entry: std::io::Result<std::fs::Metadata>) -> bool {
+    matches!(entry, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 // ─── Poll thread handle ─────────────────────────────────────────────────────
@@ -743,5 +875,74 @@ impl Drop for ProcPoller {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{definitely_exited, exited_pids, lists_processes, sum_per_cpu_counter};
+    use std::fs;
+
+    #[test]
+    fn per_cpu_counter_is_summed_without_overflow() {
+        let values = vec![
+            7u64.to_ne_bytes().to_vec(),
+            11u64.to_ne_bytes().to_vec(),
+            u64::MAX.to_ne_bytes().to_vec(),
+        ];
+        assert_eq!(
+            sum_per_cpu_counter(&values).expect("valid values"),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn per_cpu_counter_rejects_invalid_value_width() {
+        let error = sum_per_cpu_counter(&[vec![0; 4]]).expect_err("invalid width");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid internal_metrics value size")
+        );
+    }
+
+    #[test]
+    fn only_pids_without_a_procfs_entry_are_reaped() {
+        // The regression this guards: short-lived pids registered after their
+        // exit tracepoint fired stay in the 1024-entry filter map forever and
+        // eventually lock out real agents.
+        let root = tempfile::tempdir().expect("temp procfs root");
+        for pid in [1u32, 4242] {
+            fs::create_dir(root.path().join(pid.to_string())).expect("pid dir");
+        }
+
+        assert_eq!(
+            exited_pids([1, 4242, 7777, 9999], root.path()),
+            vec![7777, 9999]
+        );
+    }
+
+    #[test]
+    fn an_unmounted_root_is_not_treated_as_a_process_list() {
+        // A misconfigured procfs root makes every pid look exited; reaping on
+        // that basis would wipe the filter map for live agents.
+        let root = tempfile::tempdir().expect("temp procfs root");
+        assert!(!lists_processes(root.path()));
+
+        fs::create_dir(root.path().join("1")).expect("pid 1 dir");
+        assert!(lists_processes(root.path()));
+    }
+
+    #[test]
+    fn procfs_errors_do_not_evict_live_agents() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(!definitely_exited(Err(std::io::Error::from(kind))));
+        }
+        assert!(definitely_exited(Err(std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        ))));
     }
 }

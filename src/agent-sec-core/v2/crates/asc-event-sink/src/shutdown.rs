@@ -1,7 +1,7 @@
-//! Host-driven shutdown for the `SQLite` sinks.
+//! Host-driven shutdown for the process-global security-event `SQLite` sink.
 //!
-//! Migrated from the `atexit.register(_sqlite_writer.close)` calls in both v1
-//! `__init__.py` files.
+//! Migrated from v1 `security_events/__init__.py` shutdown registration.
+//! Configured sinks have their own explicit `close` methods.
 //!
 //! # Known semantic difference from v1
 //!
@@ -15,9 +15,9 @@
 
 use asc_sqlite_kernel::current_epoch;
 
-use crate::singletons::{initialized_observability_sqlite_writer, initialized_sqlite_writer};
+use crate::singletons::initialized_sqlite_writer;
 
-/// Closes every `SQLite` sink that was actually built.
+/// Closes the process-global security-event `SQLite` sink if it was built.
 ///
 /// Idempotent, and a no-op when no sink was ever accessed: an uninitialized slot
 /// is left alone rather than built, so shutdown never creates a database.
@@ -33,20 +33,13 @@ pub fn shutdown_sinks_at(now: f64) {
     if let Some(sink) = initialized_sqlite_writer() {
         sink.close_at(now);
     }
-    if let Some(sink) = initialized_observability_sqlite_writer() {
-        sink.close_at(now);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::singletons::{
-        install_observability_sqlite_writer_for_test, install_sqlite_writer_for_test,
-        reset_sinks_for_test,
-    };
-    use crate::test_support::{event, record, serial, temp_dir};
-    use asc_persistence_sqlite::observability::ObservabilitySqliteWriter;
+    use crate::singletons::{install_sqlite_writer_for_test, reset_sinks_for_test};
+    use crate::test_support::{event, serial, temp_dir};
     use asc_persistence_sqlite::security_events::SqliteEventWriter;
 
     #[test]
@@ -99,33 +92,5 @@ mod tests {
             !marker.exists(),
             "without an atexit hook, maintenance only happens when the host asks"
         );
-    }
-
-    #[test]
-    fn both_streams_are_closed() {
-        let _guard = serial();
-        let dir = temp_dir();
-        let security = dir.path().join("security-events.db");
-        let observability = dir.path().join("observability.db");
-
-        let security_sink =
-            install_sqlite_writer_for_test(SqliteEventWriter::new(&security).expect("writer"));
-        let observability_sink = install_observability_sqlite_writer_for_test(
-            ObservabilitySqliteWriter::new(&observability).expect("writer"),
-        );
-        security_sink.write(&event("e-1"));
-        observability_sink.write(&record());
-
-        shutdown_sinks_at(1000.0);
-
-        assert!(
-            dir.path().join("security-events.db.maintenance").exists(),
-            "the security stream was closed"
-        );
-        assert!(
-            dir.path().join("observability.db.maintenance").exists(),
-            "the observability stream was closed"
-        );
-        reset_sinks_for_test();
     }
 }

@@ -310,7 +310,7 @@ mod tests {
         let loaded = load_audit_settings_from(&paths).unwrap();
         assert_eq!(loaded.settings.mode, AuditMode::Required);
         assert_eq!(loaded.settings.retention_days, 30);
-        assert_eq!(loaded.settings.max_disk_bytes, 1024 * 1024 * 1024);
+        assert_eq!(loaded.settings.max_disk_bytes, 100 * 1024 * 1024);
     }
 
     #[test]

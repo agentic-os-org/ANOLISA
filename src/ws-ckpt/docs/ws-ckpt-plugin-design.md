@@ -1,6 +1,6 @@
 # ws-ckpt Plugin 设计文档
 
-> ws-ckpt 插件在 Agent 对话生命周期中**自动**为工作区建快照,出错能 rollback。本文档同时覆盖 [Hermes 插件](../src/plugins/hermes/)（Python）和 [OpenClaw 插件](../src/plugins/openclaw/)（TypeScript）——两者行为一致,差异仅在宿主 runtime 的 hook API 与语言生态。
+> ws-ckpt 插件在 Agent 对话生命周期中**自动**为工作区建快照,出错能 rollback。本文档同时覆盖 [Hermes 插件](../src/plugins/hermes/)（Python）和 [OpenClaw 插件](../src/plugins/openclaw/)（TypeScript）——两者共享自动快照与回滚行为；工具接口的差异在下文单独说明。
 >
 > 架构总览见 [ws-ckpt-design.md](./ws-ckpt-design.md)。
 
@@ -134,10 +134,17 @@ Plugin 把以下七个工具用 OpenAI Function Calling 格式注册到 runtime:
 | `ws-ckpt-config` | 查看 / 更新 plugin 配置 | — | `action`, `key`, `value` |
 | `ws-ckpt-checkpoint` | 手动创建快照 | `id` | `message`, `workspace` |
 | `ws-ckpt-rollback` | 回滚到指定快照或沿 parent 链回退或预览回滚 | — | `target`, `num_ancestors`/`numAncestors`, `workspace`, `preview` |
-| `ws-ckpt-list` | 列出工作区所有快照 | — | — |
+| `ws-ckpt-list` | 列出工作区快照；Hermes 可显式分页 | — | Hermes: `limit`, `cursor` |
 | `ws-ckpt-diff` | 对比两个快照 | `from`, `to` | — |
 | `ws-ckpt-delete` | 删除指定快照 | `snapshot` | `workspace` |
 | `ws-ckpt-status` | 查看 daemon + 工作区状态 | — | — |
+
+### Hermes 的 ws-ckpt-list 分页
+
+Hermes 接收可选 `limit` / `cursor`，返回单页 `{success, snapshots, next_cursor}` JSON 字符串；
+不传这两个键时保留完整表格 `{success, output}`。显式 null 无效，游标原样传递，
+仅 `next_cursor: null` 表示完成。校验与字段保留规则见[列表分页设计](design/list-pagination_zh.md#hermes-工具分页)。
+OpenClaw 的列表接口不在此变更范围。
 
 ### ws-ckpt-rollback 的 DAG 祖先回退
 

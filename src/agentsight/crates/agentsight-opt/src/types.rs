@@ -476,6 +476,11 @@ pub struct ToolCallRecord {
     pub dur: f64,        // duration in seconds
     pub cmd: String,     // command summary (truncated)
     pub err: bool,       // whether the call returned an error
+    /// File/path argument this call acts on, when the tool takes one
+    /// (file_path / path / notebook_path / filePath). `cmd` is a JSON blob
+    /// truncated at ~50 chars, so consumers needing the target read this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     #[serde(default)]
     pub result_tokens: Option<u64>, // token count from cost side (future use)
 }
@@ -665,6 +670,11 @@ pub struct PerfReport {
     pub items: Vec<PerfIssue>, // selected strategy rows
     pub considered: usize,     // data signals evaluated
     pub dismissed: usize,      // signals not matched by any strategy
+    /// Judgments that errored (transport/parse) — neither kept nor dismissed.
+    /// A report whose judgments all failed is returned as an error instead,
+    /// so this is only non-zero for partial failures.
+    #[serde(default)]
+    pub failed: usize,
     pub wall_secs: f64,
     /// Causal graph: signal → cause → strategy analysis chain.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1028,6 +1038,11 @@ pub struct WasteReport {
     pub items: Vec<WasteItem>, // worth-optimizing rows only
     pub considered: usize,     // candidates evaluated
     pub dismissed: usize,      // judged not worth optimizing
+    /// Judgments that errored (transport/parse) - neither kept nor dismissed.
+    /// A report whose judgments all failed is returned as an error instead,
+    /// so this is only non-zero for partial failures.
+    #[serde(default)]
+    pub failed: usize,
     pub model: String,
 }
 
@@ -1041,6 +1056,11 @@ pub struct AccuracyResult {
     /// 五字段正交归因结果（主渲染）；`failures` 保留兼容旧渲染。
     #[serde(default)]
     pub issues: Vec<AccIssue>,
+    /// Judgments that errored (transport/parse) — neither kept nor dismissed.
+    /// A result whose judgments all failed is returned as an error instead, so
+    /// this is only non-zero for partial failures.
+    #[serde(default)]
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

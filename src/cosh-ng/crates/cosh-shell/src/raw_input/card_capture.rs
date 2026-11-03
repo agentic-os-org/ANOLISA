@@ -184,6 +184,7 @@ impl CardInputState {
                 _ => PromptDraftEditor::default(),
             };
             self.draft_paste = false;
+            self.draft_selection = None;
         }
     }
 

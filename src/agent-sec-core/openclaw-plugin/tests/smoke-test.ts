@@ -25,6 +25,11 @@ const mockEvents: Record<string, Record<string, unknown>> = {
     senderId: "user-123",
     isGroup: false,
   },
+  before_agent_run: {
+    prompt: "hello world",
+    systemPrompt: "system prompt",
+    messages: [{ role: "user", content: "earlier message" }],
+  },
   before_prompt_build: {
     runId: "run-001",
     sessionId: "session-001",

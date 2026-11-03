@@ -20,6 +20,15 @@ dependencies = [
     # version, so declare it unconditionally to keep the whole 1.x support
     # range installable (harmless extra dependency for AgentScope 2.x users).
     "tqdm",
+    # AgentScope 1.0.17 and later import sqlalchemy.ext.asyncio at package
+    # import time but declare only plain "sqlalchemy", which stopped pulling
+    # greenlet in 2.1.0 (it now sits behind the "asyncio" extra). A clean
+    # install resolving AgentScope 1.x with SQLAlchemy 2.1 therefore fails at
+    # 'import agentscope'. Markers cannot condition on the resolved SQLAlchemy
+    # version, so declare greenlet unconditionally to keep the whole 1.x
+    # support range installable (AgentScope 2.x only needs it for its optional
+    # storage-sql extra, so this stays a harmless extra dependency).
+    "greenlet>=1",
 ]
 
 [tool.setuptools]

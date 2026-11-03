@@ -1,0 +1,46 @@
+# Run from src/aw with Claude SDK 0.2.88 in the selected Python environment.
+# Replace python3 with an absolute venv interpreter when needed.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: claude-sdk-hooks
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: auto
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    claude:
+      adapter: claude-sdk
+      argv: [python3, crates/aw-service/examples/claude-worker.py]
+  providers:
+    policy:
+      transport:
+        type: stdio
+        argv: [python3, crates/aw-service/examples/check-tool.py]
+        location: agent
+      timeout_ms: 2000
+      max_output_bytes: 65536
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: check-tool
+          provider: policy
+          effects: [observe, block]
+          on_error: block
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: record-tool
+          provider: policy
+          effects: [observe]
+          on_error: report

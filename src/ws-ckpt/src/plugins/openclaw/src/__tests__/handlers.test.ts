@@ -20,7 +20,7 @@ import {
   handleStatus,
   handleConfig,
 } from "../handlers.js";
-import { pluginState, UNAVAILABLE_MSG } from "../state.js";
+import { pluginState, UNAVAILABLE_MSG, takeRollbackWorkspaces } from "../state.js";
 import { CrontabManager } from "../cron.js";
 import type { BtrfsManager } from "../btrfs-manager.js";
 
@@ -136,6 +136,7 @@ describe("handlers — validation", () => {
     mockManager = {
       createCheckpoint: vi.fn(),
       rollback: vi.fn(),
+      getWorkspacePath: vi.fn().mockReturnValue("/ws"),
       listCheckpoints: vi.fn(),
       execDiffRaw: vi.fn(),
       getStatus: vi.fn(),
@@ -150,7 +151,7 @@ describe("handlers — validation", () => {
     pluginState.manager = origManager;
     pluginState.environmentReady = origReady;
     pluginState.resolvedConfig = origConfig;
-    pluginState.skipNextAutoCheckpoint = false;
+    pluginState.rollbackWorkspacesBySession.clear();
   });
 
   it("handleCheckpoint requires id", async () => {
@@ -194,41 +195,41 @@ describe("handlers — validation", () => {
       target: "snap1",
       message: "Rolled back to snap1",
     });
-    const r = await handleRollback("snap1");
+    const r = await handleRollback("snap1", undefined, undefined, false, { sessionKey: "test" });
     expect(r.isError).toBe(false);
     expect(r.text).toContain("snap1");
   });
 
-  it("handleRollback sets skipNextAutoCheckpoint on success", async () => {
+  it("handleRollback records the restored workspace on success", async () => {
     mockManager.rollback.mockResolvedValue({
       success: true,
       target: "snap1",
       message: "Rolled back to snap1",
     });
-    pluginState.skipNextAutoCheckpoint = false;
-    await handleRollback("snap1");
-    expect(pluginState.skipNextAutoCheckpoint).toBe(true);
+    pluginState.rollbackWorkspacesBySession.clear();
+    await handleRollback("snap1", undefined, undefined, false, { sessionKey: "test" });
+    expect(takeRollbackWorkspaces({ sessionKey: "test" })).toEqual(new Set(["/ws"]));
   });
 
-  it("handleRollback does not set skipNextAutoCheckpoint on preview", async () => {
+  it("handleRollback does not record a restored workspace on preview", async () => {
     mockManager.rollback.mockResolvedValue({
       success: true,
       target: "snap1",
       message: "Preview",
     });
-    pluginState.skipNextAutoCheckpoint = false;
-    await handleRollback("snap1", undefined, undefined, true);
-    expect(pluginState.skipNextAutoCheckpoint).toBe(false);
+    pluginState.rollbackWorkspacesBySession.clear();
+    await handleRollback("snap1", undefined, undefined, true, { sessionKey: "test" });
+    expect(takeRollbackWorkspaces({ sessionKey: "test" })).toBeUndefined();
   });
 
-  it("handleRollback does not set skipNextAutoCheckpoint on failure", async () => {
+  it("handleRollback does not record a restored workspace on failure", async () => {
     mockManager.rollback.mockResolvedValue({
       success: false,
       message: "failed",
     });
-    pluginState.skipNextAutoCheckpoint = false;
-    await handleRollback("snap1");
-    expect(pluginState.skipNextAutoCheckpoint).toBe(false);
+    pluginState.rollbackWorkspacesBySession.clear();
+    await handleRollback("snap1", undefined, undefined, false, { sessionKey: "test" });
+    expect(takeRollbackWorkspaces({ sessionKey: "test" })).toBeUndefined();
   });
 
   it("handleListCheckpoints empty", async () => {
@@ -321,6 +322,7 @@ describe("handlers — explicit workspace", () => {
     pluginState.manager = {
       createCheckpoint: vi.fn(),
       rollback: vi.fn(),
+      getWorkspacePath: vi.fn().mockReturnValue("/ws"),
       listCheckpoints: vi.fn(),
       getStore: vi.fn().mockReturnValue({ remove: vi.fn() }),
       execDiffRaw: vi.fn(),
@@ -439,7 +441,7 @@ describe("handlers — explicit workspace", () => {
   // --- rollback cwd inside default workspace ---
   it("rollback cwd inside default workspace", async () => {
     process.cwd = () => "/ws/sub";
-    const r = await handleRollback("snap1");
+    const r = await handleRollback("snap1", undefined, undefined, false, { sessionKey: "test" });
     expect(r.isError).toBe(true);
     expect(r.text).toContain("Refused");
   });
@@ -576,6 +578,56 @@ describe("handleConfig", () => {
     expect(pluginState.resolvedConfig!.workspace).toBe("/new/path");
     migrateSpy.mockRestore();
     persistSpy.mockRestore();
+  });
+
+  it("update workspace refuses when cwd is inside the new workspace", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const persistSpy = vi.spyOn(await import("../persist.js"), "persistConfig").mockReturnValue("");
+    process.cwd = () => "/new/path/sub";
+    const r = await handleConfig("update", "workspace", "/new/path");
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("Refused");
+    expect(pluginState.resolvedConfig!.workspace).toBe("/ws");
+    expect(migrateSpy).not.toHaveBeenCalled();
+    expect(persistSpy).not.toHaveBeenCalled();
+    migrateSpy.mockRestore();
+    persistSpy.mockRestore();
+  });
+
+  it("update workspace warns when setup of the new workspace fails", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const persistSpy = vi.spyOn(await import("../persist.js"), "persistConfig").mockReturnValue("");
+    const origManager = pluginState.manager;
+    pluginState.manager = { ensureWorkspace: vi.fn().mockResolvedValue(false) } as any;
+    try {
+      const r = await handleConfig("update", "workspace", "/new/path");
+      expect(r.isError).toBe(false);
+      expect(r.text).toContain("Config updated: workspace = /new/path");
+      expect(r.text).toContain("WARNING");
+      expect(r.text).toContain("setup failed");
+      expect(pluginState.resolvedConfig!.workspace).toBe("/new/path");
+    } finally {
+      pluginState.manager = origManager;
+      migrateSpy.mockRestore();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("update workspace reports clean success when setup succeeds", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const persistSpy = vi.spyOn(await import("../persist.js"), "persistConfig").mockReturnValue("");
+    const origManager = pluginState.manager;
+    pluginState.manager = { ensureWorkspace: vi.fn().mockResolvedValue(true) } as any;
+    try {
+      const r = await handleConfig("update", "workspace", "/new/path");
+      expect(r.isError).toBe(false);
+      expect(r.text).toContain("Config updated: workspace = /new/path");
+      expect(r.text).not.toContain("WARNING");
+    } finally {
+      pluginState.manager = origManager;
+      migrateSpy.mockRestore();
+      persistSpy.mockRestore();
+    }
   });
 
   it("update maxSnapshotsNum without value returns error", async () => {
@@ -831,6 +883,7 @@ describe("handleRollback — numAncestors", () => {
 
     mockManager = {
       rollback: vi.fn(),
+      getWorkspacePath: vi.fn().mockReturnValue("/ws"),
     };
     pluginState.manager = mockManager as unknown as BtrfsManager;
     pluginState.environmentReady = true;
@@ -882,5 +935,18 @@ describe("handleRollback — numAncestors", () => {
     const r = await handleRollback(undefined, undefined, 2);
     expect(r.isError).toBe(false);
     expect(mockManager.rollback).toHaveBeenCalledWith(undefined, 2, false);
+  });
+  it("update workspace rejects line breaks", async () => {
+    const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
+    const r = await handleConfig(
+      "update",
+      "workspace",
+      "/tmp/legit\n* * * * * touch /tmp/pwned",
+    );
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("single-line");
+    expect(pluginState.resolvedConfig!.workspace).toBe("/ws");
+    expect(migrateSpy).not.toHaveBeenCalled();
+    migrateSpy.mockRestore();
   });
 });

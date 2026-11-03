@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +21,36 @@ use ws_ckpt_common::{
 
 use crate::fs_watcher::WorkspaceWatcher;
 use crate::index_store;
+use crate::snapshot_mgr::ListKey;
+
+const HEALTH_ADVISORY_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Keep advisory samples available when periodic health diagnostics are disabled.
+pub(crate) fn effective_health_advisory_interval_secs(interval: u64) -> u64 {
+    if interval == 0 {
+        ws_ckpt_common::DEFAULT_HEALTH_CHECK_INTERVAL_SECS
+    } else {
+        interval
+    }
+}
+
+/// Outcome of the workspace quiescence check.
+///
+/// [`Quiescence::MonitoringUnavailable`] is the fail-closed verdict for a
+/// watch that is known stale (its inode is no longer behind the
+/// registration path) and could not be re-armed: the retired inode's flag
+/// is permanently silent, so treating it as "not writing" would assume
+/// quiescence without any monitoring behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quiescence {
+    /// No recent writes observed by a current (or absent) watcher.
+    Safe,
+    /// The watcher observed writes inside the quiet period.
+    Writing,
+    /// The watch is known stale and re-arming failed; quiescence cannot
+    /// be established.
+    MonitoringUnavailable,
+}
 
 /// Resolve parent aliases without following the final workspace symlink.
 ///
@@ -99,12 +129,19 @@ pub struct DaemonState {
     /// / `interval_secs == 0`). This replaces the old polling-based design
     /// where loops periodically woke up to check for config changes.
     pub config_notify: Notify,
+    // A retained permit ensures registry or interval changes during a sample
+    // trigger another refresh after the in-flight sample completes.
+    pub(crate) advisory_notify: Notify,
     /// Mount path for btrfs filesystem (convenience accessor, immutable)
     pub mount_path: PathBuf,
     /// Socket path (convenience accessor, immutable)
     pub socket_path: PathBuf,
     /// Storage backend (trait object for multi-backend support)
     pub backend: Arc<dyn StorageBackend>,
+    /// Last complete daemon-side sample used by the latency-sensitive advisory request.
+    advisory_cache: std::sync::RwLock<Option<HealthAdvisorySnapshot>>,
+    /// Prevents concurrent refresh paths from publishing out-of-order samples.
+    advisory_refresh_lock: Mutex<()>,
     /// Daemon start time for uptime calculation
     pub start_time: std::time::Instant,
     /// Lazy bootstrap guard for BtrfsLoop backend (runs at most once)
@@ -126,10 +163,21 @@ pub struct DaemonState {
     manifest_save_lock: Mutex<()>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HealthAdvisorySnapshot {
+    pub(crate) over_limit_workspace_count: u32,
+    pub(crate) fs_total_bytes: u64,
+    pub(crate) fs_used_bytes: u64,
+    refreshed_at: std::time::Instant,
+}
+
 pub struct WorkspaceState {
     pub ws_id: String,
     pub path: PathBuf,
     pub index: SnapshotIndex,
+    // Runtime-only order for cursor range queries. Snapshot membership and
+    // created_at changes must use insert_snapshot/remove_snapshot/replace_index.
+    snapshot_order: BTreeSet<ListKey>,
     /// Per-workspace policy override; `WorkspacePolicy::default()` when no
     /// `policy.toml` exists (i.e. inherit everything from global).
     pub policy: WorkspacePolicy,
@@ -145,6 +193,80 @@ pub struct WorkspaceState {
     pub policy_io_mu: Arc<Mutex<()>>,
 }
 
+impl WorkspaceState {
+    /// Runtime identity order used to seek within a cursor interval.
+    pub(crate) fn snapshot_keys(&self) -> &BTreeSet<ListKey> {
+        &self.snapshot_order
+    }
+
+    /// Add or replace metadata together with its chronological identity key.
+    pub(crate) fn insert_snapshot(&mut self, id: String, meta: ws_ckpt_common::SnapshotMeta) {
+        self.remove_snapshot(&id);
+        self.snapshot_order.insert(ListKey {
+            created_at: meta.created_at,
+            workspace_id: self.ws_id.clone(),
+            snapshot_id: id.clone(),
+        });
+        self.index.snapshots.insert(id, meta);
+    }
+
+    /// Remove metadata together with its chronological identity key.
+    pub(crate) fn remove_snapshot(&mut self, id: &str) -> Option<ws_ckpt_common::SnapshotMeta> {
+        let meta = self.index.snapshots.remove(id)?;
+        self.snapshot_order.remove(&ListKey {
+            created_at: meta.created_at,
+            workspace_id: self.ws_id.clone(),
+            snapshot_id: id.to_string(),
+        });
+        Some(meta)
+    }
+
+    /// Publish a durable index replacement without rebuilding unchanged keys.
+    pub(crate) fn replace_index(&mut self, index: SnapshotIndex) {
+        for (id, meta) in &self.index.snapshots {
+            if index
+                .snapshots
+                .get(id)
+                .is_none_or(|next| next.created_at != meta.created_at)
+            {
+                self.snapshot_order.remove(&ListKey {
+                    created_at: meta.created_at,
+                    workspace_id: self.ws_id.clone(),
+                    snapshot_id: id.clone(),
+                });
+            }
+        }
+        for (id, meta) in &index.snapshots {
+            if self
+                .index
+                .snapshots
+                .get(id)
+                .is_none_or(|old| old.created_at != meta.created_at)
+            {
+                self.snapshot_order.insert(ListKey {
+                    created_at: meta.created_at,
+                    workspace_id: self.ws_id.clone(),
+                    snapshot_id: id.clone(),
+                });
+            }
+        }
+        self.index = index;
+    }
+
+    fn rebuild_snapshot_order(&mut self) {
+        self.snapshot_order = self
+            .index
+            .snapshots
+            .iter()
+            .map(|(id, meta)| ListKey {
+                created_at: meta.created_at,
+                workspace_id: self.ws_id.clone(),
+                snapshot_id: id.clone(),
+            })
+            .collect();
+    }
+}
+
 impl DaemonState {
     pub fn new(config: DaemonConfig, backend: Arc<dyn StorageBackend>, state_dir: PathBuf) -> Self {
         let mount_path = config.mount_path.clone();
@@ -154,9 +276,12 @@ impl DaemonState {
             registry: std::sync::RwLock::new(WorkspaceRegistry::default()),
             config: std::sync::RwLock::new(config),
             config_notify: Notify::new(),
+            advisory_notify: Notify::new(),
             mount_path,
             socket_path,
             backend,
+            advisory_cache: std::sync::RwLock::new(None),
+            advisory_refresh_lock: Mutex::new(()),
             start_time: std::time::Instant::now(),
             bootstrapped: OnceCell::new(),
             watchers: std::sync::Mutex::new(HashMap::new()),
@@ -166,6 +291,105 @@ impl DaemonState {
             init_lock: Mutex::new(()),
             manifest_save_lock: Mutex::new(()),
         }
+    }
+
+    /// Returns a recent complete sample, or `None` while the cache is unavailable/stale.
+    pub(crate) fn health_advisory_snapshot(&self) -> Option<HealthAdvisorySnapshot> {
+        let max_age = effective_health_advisory_interval_secs(
+            self.config_snapshot().health_check_interval_secs,
+        )
+        .saturating_mul(2);
+        let cache = self
+            .advisory_cache
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        cache
+            .as_ref()
+            .filter(|sample| {
+                sample.refreshed_at.elapsed() <= std::time::Duration::from_secs(max_age)
+            })
+            .copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_health_advisory_snapshot(
+        &self,
+        over_limit_workspace_count: u32,
+        fs_total_bytes: u64,
+        fs_used_bytes: u64,
+        age: std::time::Duration,
+    ) {
+        *self
+            .advisory_cache
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = Some(HealthAdvisorySnapshot {
+            over_limit_workspace_count,
+            fs_total_bytes,
+            fs_used_bytes,
+            refreshed_at: std::time::Instant::now() - age,
+        });
+    }
+
+    /// Publishes a complete sample only after workspace and filesystem reads succeed.
+    ///
+    /// Failed or timed-out refreshes preserve the previous sample and its
+    /// original timestamp; readers still reject it after the freshness limit.
+    pub(crate) async fn refresh_health_advisory(&self) -> anyhow::Result<()> {
+        self.refresh_health_advisory_with_deadline(HEALTH_ADVISORY_REFRESH_TIMEOUT)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn refresh_health_advisory_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        self.refresh_health_advisory_with_deadline(timeout).await
+    }
+
+    async fn refresh_health_advisory_with_deadline(
+        &self,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let started_at = std::time::Instant::now();
+        let _refresh_guard = tokio::time::timeout(timeout, self.advisory_refresh_lock.lock())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for health advisory refresh slot"))?;
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        let result = tokio::time::timeout(
+            remaining,
+            crate::health_probe::scope(async {
+                let mut over_limit_workspace_count = 0_u32;
+                for workspace in self.all_workspaces() {
+                    let state = workspace.read().await;
+                    if state.index.snapshots.len() as u32 > ws_ckpt_common::ADVISORY_SNAPSHOT_LIMIT
+                    {
+                        over_limit_workspace_count = over_limit_workspace_count.saturating_add(1);
+                    }
+                }
+                let (fs_total_bytes, fs_used_bytes) = self.backend.get_usage().await?;
+                Ok(HealthAdvisorySnapshot {
+                    over_limit_workspace_count,
+                    fs_total_bytes,
+                    fs_used_bytes,
+                    refreshed_at: std::time::Instant::now(),
+                })
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "health advisory refresh timed out after {}ms",
+                timeout.as_millis()
+            ))
+        });
+
+        let sample = result?;
+        *self
+            .advisory_cache
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = Some(sample);
+        Ok(())
     }
 
     /// Acquires the per-workspace mutation mutex.
@@ -296,7 +520,18 @@ impl DaemonState {
             if let Some(ws_arc) = state.get_by_wsid(&ws_id) {
                 let mut ws = ws_arc.write().await;
                 let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
-                if index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await? {
+                let mut changed =
+                    index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await?;
+                let live_path = state.backend.data_root().join(&ws_id);
+                tracing::warn_span!("reconcile_live_head", ws_id = %ws_id).in_scope(|| {
+                    match index_store::reconcile_live_head(&live_path, &snapshot_dir, &mut ws.index)
+                    {
+                        Ok(moved) => changed |= moved,
+                        Err(e) => warn!("Skipping index head check for {ws_id}: {e:#}"),
+                    }
+                });
+                if changed {
+                    ws.rebuild_snapshot_order();
                     index_store::save(&state.index_dir(&ws_id), &ws.index)
                         .await
                         .with_context(|| format!("save reconciled index for {ws_id}"))?;
@@ -688,14 +923,17 @@ impl DaemonState {
             anyhow::bail!("workspace registration anchor {path:?} must be a user path outside backend storage");
         }
         index.workspace_path = path.clone();
-        let state = Arc::new(RwLock::new(WorkspaceState {
+        let mut workspace = WorkspaceState {
             ws_id: ws_id.clone(),
             path: path.clone(),
             index,
+            snapshot_order: BTreeSet::new(),
             policy,
             policy_failsafe: failsafe,
             policy_io_mu: Arc::new(Mutex::new(())),
-        }));
+        };
+        workspace.rebuild_snapshot_order();
+        let state = Arc::new(RwLock::new(workspace));
         {
             let mut registry = self.registry.write().unwrap_or_else(|err| err.into_inner());
             if registry.workspaces.contains_key(&ws_id) {
@@ -708,6 +946,7 @@ impl DaemonState {
             registry.path_to_wsid.insert(path, ws_id);
         }
         self.config_notify.notify_waiters();
+        self.advisory_notify.notify_one();
         Ok(())
     }
 
@@ -849,6 +1088,7 @@ impl DaemonState {
         // Symmetric with register: re-park/re-evaluate the
         // scheduler when a ws goes away. No-op when no one is parked.
         self.config_notify.notify_waiters();
+        self.advisory_notify.notify_one();
     }
 
     /// Register a file watcher for a workspace.
@@ -858,14 +1098,96 @@ impl DaemonState {
         }
     }
 
+    /// Re-arm the write watcher for `ws_id` after the backend swapped the
+    /// live subvolume behind the registration path (rollback). inotify
+    /// watches inodes, not paths, so the old watch keeps observing the
+    /// retired subvolume and the quiescence guard would be permanently
+    /// inert for the rest of the daemon's lifetime.
+    ///
+    /// Returns whether a current watch is in place afterwards: `false`
+    /// means the stored watch is known stale and re-arming failed, so
+    /// quiescence cannot be established from it.
+    pub fn rearm_watcher(&self, ws_id: &str, registration_path: &Path) -> bool {
+        match WorkspaceWatcher::start(registration_path) {
+            Ok(watcher) => {
+                self.register_watcher(ws_id.to_string(), watcher);
+                true
+            }
+            Err(e) => {
+                warn!(
+                    "failed to re-arm write watcher for {} after subvolume swap: {}",
+                    ws_id, e
+                );
+                false
+            }
+        }
+    }
+
+    /// True when the stored watch targets the inode currently behind the
+    /// registration path. A missing path keeps the existing watch (the
+    /// detached-registration guard already refuses operations there).
+    fn watcher_target_is_current(&self, ws_id: &str, registration_path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let watchers = match self.watchers.lock() {
+            Ok(w) => w,
+            Err(_) => return true,
+        };
+        let Some(w) = watchers.get(ws_id) else {
+            return true;
+        };
+        match std::fs::metadata(registration_path) {
+            Ok(meta) => w.target_identity() == (meta.dev(), meta.ino()),
+            Err(_) => true, // cannot disprove; keep the watch
+        }
+    }
+
     /// Check if a workspace is quiescent (no recent writes).
-    /// Returns true if safe to snapshot, or if no watcher is registered.
-    pub async fn check_workspace_quiescent(&self, ws_id: &str) -> bool {
+    ///
+    /// `registration_path` is supplied by the guarded flows, which call this
+    /// check while already holding the workspace's WRITE lock — for them the
+    /// workspace's own read lock is permanently unavailable, so the heal
+    /// path must not depend on it. Callers without the lock pass `None` and
+    /// the heal uses the workspace state opportunistically.
+    ///
+    /// Returns [`Quiescence::Safe`] when no watcher is registered (the
+    /// long-standing contract: registration alone gates the flows).
+    pub async fn check_workspace_quiescent(
+        &self,
+        ws_id: &str,
+        registration_path: Option<&Path>,
+    ) -> Quiescence {
+        // Defense in depth: rollback re-arms the watch proactively, but any
+        // other path that replaced the live subvolume (or a failed re-arm)
+        // would leave the watch on a dead inode — indistinguishable from a
+        // healthy one by the flag alone, since no events ever arrive. Heal
+        // it before deciding.
+        let heal_path = match registration_path {
+            Some(path) => Some(path.to_path_buf()),
+            // Lock-free callers only: guarded flows hold the write lock, so
+            // their try_read would always fail and the heal would never run.
+            None => self
+                .get_by_wsid(ws_id)
+                .and_then(|arc| arc.try_read().ok().map(|ws| ws.path.clone())),
+        };
+        let mut fresh_watch = false;
+        if let Some(path) = heal_path {
+            if !self.watcher_target_is_current(ws_id, &path) {
+                if self.rearm_watcher(ws_id, &path) {
+                    fresh_watch = true;
+                } else {
+                    // The watch is known stale and re-arming failed: monitoring
+                    // is unavailable, so quiescence cannot be established from
+                    // the retired inode's (permanently silent) flag. Report that
+                    // instead of assuming quiescence.
+                    return Quiescence::MonitoringUnavailable;
+                }
+            }
+        }
         // Extract the AtomicBool from the watcher without holding the lock across await
         let is_writing_arc = {
             let watchers = match self.watchers.lock() {
                 Ok(w) => w,
-                Err(_) => return true,
+                Err(_) => return Quiescence::Safe,
             };
             match watchers.get(ws_id) {
                 Some(w) => Some(std::sync::Arc::clone(&w.is_writing_flag())),
@@ -873,16 +1195,25 @@ impl DaemonState {
             }
         };
         match is_writing_arc {
-            None => true,
+            None => Quiescence::Safe,
             Some(flag) => {
-                if !flag.load(std::sync::atomic::Ordering::Acquire) {
-                    return true;
+                // A freshly re-armed watcher's flag starts false and is set
+                // asynchronously by its forwarder task, so an already-active
+                // writer has not necessarily been observed yet: the check
+                // must complete the quiet-period observation instead of
+                // taking the not-writing shortcut to Safe.
+                if !fresh_watch && !flag.load(std::sync::atomic::Ordering::Acquire) {
+                    return Quiescence::Safe;
                 }
                 // Wait 100ms quiet period
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 flag.store(false, std::sync::atomic::Ordering::Release);
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                !flag.load(std::sync::atomic::Ordering::Acquire)
+                if flag.load(std::sync::atomic::Ordering::Acquire) {
+                    Quiescence::Writing
+                } else {
+                    Quiescence::Safe
+                }
             }
         }
     }
@@ -969,8 +1300,17 @@ impl DaemonState {
                         rebuilt.snapshots.len(),
                         ws_id
                     );
-                    // Persist rebuilt index
-                    let _ = index_store::save(path, &rebuilt).await;
+                    // Persist rebuilt index. A failed save leaves the empty
+                    // on-disk index diverging from the in-memory one, so the
+                    // same rebuild repeats on every restart until it
+                    // succeeds — surface it instead of dropping it silently.
+                    if let Err(error) = index_store::save(path, &rebuilt).await {
+                        warn!(
+                            "Failed to persist rebuilt index for {}: {error:#}; \
+                             rebuild will repeat on next restart",
+                            ws_id
+                        );
+                    }
                     rebuilt
                 }
                 _ => index,
@@ -1086,6 +1426,63 @@ mod tests {
 
     fn test_state_dir() -> PathBuf {
         PathBuf::from("/tmp/test-state")
+    }
+
+    #[tokio::test]
+    async fn health_advisory_failures_preserve_sample_without_extending_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        state
+            .register_workspace(
+                "ws-busy".into(),
+                temp.path().to_path_buf(),
+                SnapshotIndex::new(temp.path().to_path_buf()),
+            )
+            .unwrap();
+        let workspace = state.get_by_wsid("ws-busy").unwrap();
+        let write_guard = workspace.write().await;
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(20))
+            .await
+            .is_err());
+        assert!(state.health_advisory_snapshot().is_none());
+
+        state.seed_health_advisory_snapshot(2, 100, 95, std::time::Duration::from_secs(20));
+        let original = state.advisory_cache.read().unwrap().unwrap();
+        for _ in 0..2 {
+            assert!(state
+                .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(20))
+                .await
+                .is_err());
+            let retained = state.advisory_cache.read().unwrap().unwrap();
+            assert_eq!(retained.refreshed_at, original.refreshed_at);
+            assert_eq!(retained.over_limit_workspace_count, 2);
+            assert_eq!((retained.fs_total_bytes, retained.fs_used_bytes), (100, 95));
+            assert!(state.health_advisory_snapshot().is_some());
+        }
+        drop(write_guard);
+
+        let _refresh_guard = state.advisory_refresh_lock.lock().await;
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(1))
+            .await
+            .is_err());
+        assert_eq!(
+            state.advisory_cache.read().unwrap().unwrap().refreshed_at,
+            original.refreshed_at
+        );
+
+        state.seed_health_advisory_snapshot(2, 100, 95, std::time::Duration::from_secs(601));
+        let expired_at = state.advisory_cache.read().unwrap().unwrap().refreshed_at;
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(1))
+            .await
+            .is_err());
+        assert_eq!(
+            state.advisory_cache.read().unwrap().unwrap().refreshed_at,
+            expired_at
+        );
+        assert!(state.health_advisory_snapshot().is_none());
     }
 
     #[test]
@@ -2142,5 +2539,281 @@ mod tests {
             &state.get_by_path(&path).unwrap(),
             &state.get_by_wsid(&entries[0].ws_id).unwrap()
         ));
+    }
+
+    // ── Watcher re-arm after inode swap (rollback) ─────────────────────
+
+    /// Registration layout with a symlink, like the daemon's own: register
+    /// the anchor, watch the resolved live directory.
+    fn watcher_fixture() -> (tempfile::TempDir, DaemonState, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("live");
+        std::fs::create_dir(&live).unwrap();
+        let anchor = root.path().join("ws");
+        std::os::unix::fs::symlink(&live, &anchor).unwrap();
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        state
+            .register_workspace(
+                "ws".to_string(),
+                anchor.clone(),
+                SnapshotIndex::new(anchor.clone()),
+            )
+            .unwrap();
+        (root, state, anchor)
+    }
+
+    fn stored_target(state: &DaemonState, ws_id: &str) -> (u64, u64) {
+        state
+            .watchers
+            .lock()
+            .unwrap()
+            .get(ws_id)
+            .map(|w| w.target_identity())
+            .expect("watcher must be registered")
+    }
+
+    /// Swap the live directory behind the registration symlink with plain
+    /// fs ops — the same shape as the btrfs rollback (rename aside, create
+    /// replacement, delete old), no btrfs needed.
+    fn swap_live_inode(root: &std::path::Path) {
+        let live = root.join("live");
+        let aside = root.join("live.rollback-tmp");
+        std::fs::rename(&live, &aside).unwrap();
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("canary"), "new subvolume").unwrap();
+        std::fs::remove_dir_all(&aside).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quiescence_check_self_heals_a_stale_watch() {
+        // Swap the inode WITHOUT going through rollback (simulating any
+        // other swap path or a failed proactive re-arm): the check must
+        // leave a stored watch targeting the new inode.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_eq!(
+            stored_target(&state, "ws"),
+            (new_meta.dev(), new_meta.ino()),
+            "the stale watch must have been re-armed onto the replacement inode"
+        );
+    }
+
+    #[tokio::test]
+    async fn rearm_is_a_noop_when_the_target_is_current() {
+        // Healthy path: no swap, the quiescence check must not churn the
+        // watcher (pinned via the monotonic seq).
+        let (_root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let seq = watcher.watch_seq();
+        state.register_watcher("ws".to_string(), watcher);
+
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .unwrap()
+                .get("ws")
+                .unwrap()
+                .watch_seq(),
+            seq,
+            "a current watch must not be re-armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rearm_survives_a_missing_registration_path() {
+        // Detached registration: the path cannot be resolved; the re-arm
+        // fails, the old watch is retained, and the quiescence check keeps
+        // today's contract (true — the detached-registration guard refuses
+        // operations anyway).
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let old_target = watcher.target_identity();
+        state.register_watcher("ws".to_string(), watcher);
+
+        std::fs::remove_file(root.path().join("ws")).unwrap();
+        assert!(!state.rearm_watcher("ws", &anchor));
+        assert_eq!(stored_target(&state, "ws"), old_target);
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_swap_leaves_a_stale_watch_that_the_guard_detects() {
+        // The hazard itself, pinned structurally: after the inode swap the
+        // OLD watch (left by a rollback that did not re-arm) targets an
+        // inode that is no longer behind the registration path — which is
+        // exactly what `watcher_target_is_current` exists to detect.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let stale_target = watcher.target_identity();
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_ne!(
+            stale_target,
+            (new_meta.dev(), new_meta.ino()),
+            "the swap must have changed the live inode"
+        );
+        assert!(
+            !state.watcher_target_is_current("ws", &anchor),
+            "a watch left on the retired inode must be detectable as stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn quiescence_check_does_not_deadlock_under_the_write_lock() {
+        // The guarded flows call check_workspace_quiescent while holding the
+        // workspace's write lock; the heal path must therefore never block
+        // on that lock. A regression to read().await hangs forever — this
+        // test fails via timeout instead.
+        let (_root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+
+        let arc = state.get_by_wsid("ws").expect("workspace");
+        let _write_guard = arc.write().await;
+
+        let check = state.check_workspace_quiescent("ws", Some(&anchor));
+        let verdict = tokio::time::timeout(std::time::Duration::from_secs(5), check)
+            .await
+            .expect("must not deadlock under the write lock");
+        assert_eq!(verdict, Quiescence::Safe);
+    }
+
+    #[tokio::test]
+    async fn quiescence_heals_a_stale_watch_under_the_caller_held_write_lock() {
+        // The reviewed gap: the guarded flows (legacy checkpoint, guarded
+        // checkpoint, guarded rollback) hold the workspace write lock when
+        // they call the check, so the old opportunistic try_read heal never
+        // ran and a stale watch survived every guarded round — its
+        // permanently silent flag kept approving snapshots of a live
+        // workspace. The caller now hands the registration path to the
+        // check, and the heal must run under that held lock.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+
+        let arc = state.get_by_wsid("ws").expect("workspace");
+        let _write_guard = arc.write().await;
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Safe
+        );
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_eq!(
+            stored_target(&state, "ws"),
+            (new_meta.dev(), new_meta.ino()),
+            "the stale watch must heal even while the write lock is held"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_the_caller_path_a_held_write_lock_still_defers_the_heal() {
+        // The None path keeps its documented opportunistic contract: under
+        // a held write lock it skips the heal this round (it cannot take
+        // the read lock). This pins why the guarded flows must pass the
+        // registration path instead.
+        use std::os::unix::fs::MetadataExt;
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        let stale_target = watcher.target_identity();
+        state.register_watcher("ws".to_string(), watcher);
+
+        swap_live_inode(root.path());
+        let new_meta = std::fs::metadata(&anchor).unwrap();
+        assert_ne!(stale_target, (new_meta.dev(), new_meta.ino()));
+
+        let arc = state.get_by_wsid("ws").expect("workspace");
+        let _write_guard = arc.write().await;
+        assert_eq!(
+            state.check_workspace_quiescent("ws", None).await,
+            Quiescence::Safe
+        );
+        assert_eq!(
+            stored_target(&state, "ws"),
+            stale_target,
+            "the opportunistic path must not heal under a held write lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_freshly_rearmed_watch_observes_an_already_active_writer() {
+        // The reviewed gap: after the heal re-arms a stale watch mid-write,
+        // the fresh watcher's flag starts false and is set asynchronously by
+        // its forwarder task, so the check must not shortcut to Safe before
+        // the quiet-period observation has seen an already-active writer.
+        // A writer that stays active across the whole check window plays the
+        // reviewer's container-reproduction role.
+        let (root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+        swap_live_inode(root.path());
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let stop = std::sync::Arc::clone(&stop);
+            let live = std::fs::canonicalize(&anchor).expect("live dir");
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let file = std::fs::File::create(live.join("busy.log")).unwrap();
+                let mut writer = std::io::BufWriter::new(file);
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    writeln!(writer, "busy").unwrap();
+                    writer.flush().unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            })
+        };
+
+        // The heal re-arms the stale watch while the writer is active; the
+        // check must complete the quiet-period observation and report the
+        // writer instead of trusting the fresh flag's initial false.
+        let verdict = state.check_workspace_quiescent("ws", Some(&anchor)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        assert_eq!(
+            verdict,
+            Quiescence::Writing,
+            "an already-active writer must be observed after the re-arm"
+        );
+
+        // Once the writer stops and the quiet period passes, the next check
+        // returns to Safe on the now-current watch.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Safe
+        );
     }
 }

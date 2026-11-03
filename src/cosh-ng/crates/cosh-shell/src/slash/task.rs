@@ -1,8 +1,8 @@
 //! Minimal persistent Task entrypoint backed by the local Gateway CLI.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::path::PathBuf;
+use std::process::{Output, Stdio};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -435,7 +435,7 @@ impl TaskTranscript {
 
 fn run_gateway(arguments: &[&str], stdin: Option<&[u8]>) -> Result<Output, String> {
     let program = gateway_executable()?;
-    let mut command = Command::new(program);
+    let mut command = crate::adapter::command_with_trusted_startup_path(program);
     if arguments.first() == Some(&"task") {
         command.arg("task");
         if let Some(socket) = configured_gateway_socket()? {
@@ -504,35 +504,7 @@ fn configured_gateway_socket() -> Result<Option<PathBuf>, String> {
 }
 
 fn gateway_executable() -> Result<PathBuf, String> {
-    if let Some(configured) = std::env::var_os("COSH_GATEWAY_EXECUTABLE") {
-        let configured = PathBuf::from(configured);
-        if !configured.is_absolute() {
-            return Err("COSH_GATEWAY_EXECUTABLE must be absolute".to_owned());
-        }
-        return Ok(configured);
-    }
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(parent) = current.parent() {
-            let sibling = parent.join("cosh-gateway");
-            if is_executable_file(&sibling) {
-                return Ok(sibling);
-            }
-        }
-    }
-    Ok(PathBuf::from("cosh-gateway"))
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_file()
-    }
+    crate::adapter::gateway_executable()
 }
 
 fn json_output(output: &Output) -> Result<Value, String> {

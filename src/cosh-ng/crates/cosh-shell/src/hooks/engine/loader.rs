@@ -44,7 +44,7 @@ pub(super) fn load_external_hook_configs(
     project_root: Option<PathBuf>,
     trusted: bool,
     max_hooks: usize,
-) -> Vec<LoadedExternalHookConfig> {
+) -> Result<Vec<LoadedExternalHookConfig>, ()> {
     #[cfg(unix)]
     {
         load_external_hook_configs_unix(dir, source, project_root, trusted, max_hooks)
@@ -54,7 +54,7 @@ pub(super) fn load_external_hook_configs(
     {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
-            Err(_) => return Vec::new(),
+            Err(_) => return Ok(Vec::new()),
         };
 
         let mut configs = Vec::new();
@@ -73,7 +73,7 @@ pub(super) fn load_external_hook_configs(
                 configs.push(LoadedExternalHookConfig { config });
             }
         }
-        configs
+        Ok(configs)
     }
 }
 
@@ -81,7 +81,7 @@ pub(super) fn load_project_external_hook_configs(
     project_root: &Path,
     trusted: bool,
     max_hooks: usize,
-) -> Vec<LoadedExternalHookConfig> {
+) -> Result<Vec<LoadedExternalHookConfig>, ()> {
     #[cfg(unix)]
     {
         load_project_external_hook_configs_unix(project_root, trusted, max_hooks)
@@ -188,13 +188,13 @@ fn load_external_hook_configs_unix(
     project_root: Option<PathBuf>,
     trusted: bool,
     max_hooks: usize,
-) -> Vec<LoadedExternalHookConfig> {
+) -> Result<Vec<LoadedExternalHookConfig>, ()> {
     let Ok(directory) = Dir::open(
         dir,
         OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::empty(),
     ) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     load_external_hook_configs_from_dir(directory, dir, source, project_root, trusted, max_hooks)
@@ -205,10 +205,10 @@ fn load_project_external_hook_configs_unix(
     project_root: &Path,
     trusted: bool,
     max_hooks: usize,
-) -> Vec<LoadedExternalHookConfig> {
+) -> Result<Vec<LoadedExternalHookConfig>, ()> {
     let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
     let Ok(root) = Dir::open(project_root, flags, Mode::empty()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Ok(cosh_dir) = Dir::openat(
         Some(root.as_raw_fd()),
@@ -216,7 +216,7 @@ fn load_project_external_hook_configs_unix(
         flags,
         Mode::empty(),
     ) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Ok(hooks_dir) = Dir::openat(
         Some(cosh_dir.as_raw_fd()),
@@ -224,7 +224,7 @@ fn load_project_external_hook_configs_unix(
         flags,
         Mode::empty(),
     ) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let display_dir = project_root.join(".cosh/hooks");
     load_external_hook_configs_from_dir(
@@ -245,29 +245,40 @@ fn load_external_hook_configs_from_dir(
     project_root: Option<PathBuf>,
     trusted: bool,
     max_hooks: usize,
-) -> Vec<LoadedExternalHookConfig> {
+) -> Result<Vec<LoadedExternalHookConfig>, ()> {
     let directory_fd = directory.as_raw_fd();
     let mut configs = Vec::new();
+    let mut candidates = 0;
+    let mut remaining = body_byte_limit(&source);
     for entry in directory.iter().flatten() {
-        if configs.len() >= max_hooks {
-            break;
-        }
         let name = entry.file_name();
         let name_bytes = name.to_bytes();
         if name_bytes == b"." || name_bytes == b".." {
             continue;
         }
-        // Reject the cheap directory-entry symlink signal before opening. The
-        // O_NOFOLLOW flag below remains authoritative for filesystems that do
-        // not expose d_type or race a replacement after readdir.
-        if entry.file_type() == Some(Type::Symlink) {
+        if source == ExternalHookSource::Project {
+            candidates += 1;
+            if candidates > super::MAX_EXTERNAL_HOOKS || configs.len() >= max_hooks {
+                return Err(());
+            }
+        } else if configs.len() >= max_hooks {
+            break;
+        }
+        // Reject the cheap directory-entry type signal before opening: only a
+        // regular file can be a hook, and opening anything else first is what let
+        // a FIFO in a project's `.cosh/hooks` block the open until a writer
+        // appeared. `d_type` is not guaranteed, so `O_NONBLOCK` plus the `fstat`
+        // below remain authoritative for filesystems that omit it or race a
+        // replacement after readdir; the same is true of `O_NOFOLLOW` for
+        // symlinks.
+        if matches!(entry.file_type(), Some(kind) if kind != Type::File) {
             continue;
         }
 
         let Ok(fd) = openat(
             Some(directory_fd),
             name,
-            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
             Mode::empty(),
         ) else {
             continue;
@@ -285,8 +296,14 @@ fn load_external_hook_configs_from_dir(
             continue;
         }
 
+        if remaining.is_some_and(|bytes| metadata.len() > bytes) {
+            return Err(());
+        }
         let mut content = String::new();
-        if file.read_to_string(&mut content).is_err() {
+        if read_hook_body(&mut file, &mut content, &mut remaining).is_err() {
+            if source == ExternalHookSource::Project {
+                return Err(());
+            }
             continue;
         }
         let path = display_dir.join(OsStr::from_bytes(name_bytes));
@@ -294,13 +311,121 @@ fn load_external_hook_configs_from_dir(
             config.source = source.clone();
             config.project_root = project_root.clone();
             config.trusted = trusted;
-            configs.push(LoadedExternalHookConfig {
-                config,
-                executable: Arc::new(file),
-            });
+            let Some(executable) = frozen_executable(&source, content.as_bytes(), file) else {
+                continue;
+            };
+            configs.push(LoadedExternalHookConfig { config, executable });
         }
     }
-    configs
+    Ok(configs)
+}
+
+fn read_hook_body(
+    file: &mut fs::File,
+    content: &mut String,
+    remaining: &mut Option<u64>,
+) -> std::io::Result<()> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let capacity = remaining.map_or(chunk.len(), |limit| {
+            limit.saturating_add(1).min(chunk.len() as u64) as usize
+        });
+        let read = file.read(&mut chunk[..capacity])?;
+        if read == 0 {
+            break;
+        }
+        if let Some(limit) = remaining {
+            *limit = limit.checked_sub(read as u64).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "hook tree exceeds size limit",
+                )
+            })?;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    *content = String::from_utf8(bytes).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "hook is not valid UTF-8")
+    })?;
+    Ok(())
+}
+
+// User hooks keep their existing behavior; all inspected project bodies,
+// including invalid headers, share one budget before parsing or sealing.
+fn body_byte_limit(source: &ExternalHookSource) -> Option<u64> {
+    match source {
+        ExternalHookSource::Project => Some(super::MAX_PROJECT_HOOK_FINGERPRINT_BYTES),
+        ExternalHookSource::User => None,
+    }
+}
+
+/// Freezes the verified bytes of a project hook so the fingerprint and the
+/// execution refer to one immutable object.
+///
+/// A pinned descriptor fixes the inode, not the content: the project can truncate
+/// and rewrite the same file after its fingerprint matched, and the executor reads
+/// the new bytes through that descriptor with no re-check. Only project hooks are
+/// frozen — they are the trust boundary — and a hook that cannot be frozen is not
+/// registered at all, because running it would execute bytes nobody verified.
+#[cfg(target_os = "linux")]
+fn frozen_executable(
+    source: &ExternalHookSource,
+    content: &[u8],
+    original: fs::File,
+) -> Option<Arc<fs::File>> {
+    if *source == ExternalHookSource::Project {
+        return Some(Arc::new(sealed_snapshot(content)?));
+    }
+    Some(Arc::new(original))
+}
+
+/// Non-Linux platforms have no memfd, so the bytes cannot be frozen. Hook
+/// execution there already depends on `/proc/self/fd`, which they do not provide
+/// either, so this keeps the previous behaviour rather than claiming a second
+/// guarantee that cannot be tested where it would run.
+#[cfg(not(target_os = "linux"))]
+fn frozen_executable(
+    _source: &ExternalHookSource,
+    _content: &[u8],
+    original: fs::File,
+) -> Option<Arc<fs::File>> {
+    Some(Arc::new(original))
+}
+
+/// Copies hook bytes into a sealed anonymous file and returns it read-execute only.
+///
+/// `F_SEAL_WRITE` plus `F_SEAL_SHRINK`/`F_SEAL_GROW` make the snapshot immutable at
+/// the kernel level, so not even its owner can change what was approved, and being
+/// anonymous it has no path a project could reach. Sealing happens after the write
+/// and after the mode change, since `F_SEAL_WRITE` would reject neither but a later
+/// write would be refused.
+#[cfg(target_os = "linux")]
+fn sealed_snapshot(content: &[u8]) -> Option<fs::File> {
+    use nix::fcntl::{fcntl, FcntlArg, SealFlag};
+    use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    let owned = memfd_create(
+        c"cosh-project-hook",
+        MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING,
+    )
+    .ok()?;
+    // Wrapping the owned descriptor makes the File close it on drop, which is the
+    // only lifetime an anonymous snapshot needs.
+    let mut file = fs::File::from(owned);
+    file.write_all(content).ok()?;
+    file.set_permissions(fs::Permissions::from_mode(0o500))
+        .ok()?;
+    fcntl(
+        file.as_raw_fd(),
+        FcntlArg::F_ADD_SEALS(
+            SealFlag::F_SEAL_WRITE | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW,
+        ),
+    )
+    .ok()?;
+    Some(file)
 }
 
 pub(super) fn parse_timeout(s: &str) -> u64 {

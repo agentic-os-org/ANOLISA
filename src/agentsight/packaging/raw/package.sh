@@ -41,7 +41,7 @@ normalize_arch() {
 
 validate_target() {
     case "$TARGET_OS-$TARGET_ARCH" in
-        linux-x86_64 | macos-aarch64) ;;
+        linux-x86_64 | linux-aarch64 | macos-aarch64) ;;
         *) die "unsupported AgentSight raw target: $TARGET_OS-$TARGET_ARCH" ;;
     esac
 }
@@ -52,8 +52,8 @@ require_file() {
 
 default_contract_path() {
     case "$TARGET_OS" in
-        linux) printf '%s/.anolisa/component.toml\n' "$SOURCE_ROOT" ;;
-        macos) printf '%s/.anolisa/component.macos.toml\n' "$SOURCE_ROOT" ;;
+        linux) printf '%s/packaging/anolisa/raw/component.toml\n' "$SOURCE_ROOT" ;;
+        macos) printf '%s/packaging/anolisa/raw/component.macos.toml\n' "$SOURCE_ROOT" ;;
     esac
 }
 
@@ -88,14 +88,13 @@ stage_payload() {
     install -p -m 0755 "$BIN_DIR/agentsight" "$stage/bin/agentsight"
     if [ "$TARGET_OS" = "linux" ]; then
         install -d -m 0755 "$stage/share/anolisa/agentsight"
-        install -p -m 0755 "$BIN_DIR/agentsight-enforcer" \
+        python3 "$DEFAULT_ROOT/scripts/copy-enforcer.py" "$ENFORCER_BIN" \
             "$stage/bin/agentsight-enforcer"
-        install -p -m 0755 "$SOURCE_ROOT/scripts/agentsight-start.sh" \
-            "$stage/bin/agentsight-start"
-        install -p -m 0644 \
-            "$SOURCE_ROOT/scripts/agentsight.service" \
-            "$SOURCE_ROOT/scripts/agentsight-enforcer.service" \
-            "$stage/share/anolisa/agentsight/"
+        # ANOLISA renders unit paths at installation; the launcher finds its sibling.
+        python3 "$SOURCE_ROOT/packaging/systemd/render.py" --bindir '{bindir}' \
+            --sibling-binary \
+            --launcher "$stage/bin/agentsight-start" \
+            --unitdir "$stage/share/anolisa/agentsight"
     fi
     normalize_modes "$stage"
 
@@ -117,6 +116,13 @@ COMMAND="${1:-}"
 [ "$COMMAND" = "stage" ] || [ "$COMMAND" = "package" ] || \
     die "usage: $0 {stage|package}"
 
+# Raw source paths remain a versioned ANOLISA contract, separate from system staging.
+[ "${RAW_LAYOUT_PROFILE:-anolisa}" = "anolisa" ] || \
+    die "raw packaging supports only RAW_LAYOUT_PROFILE=anolisa; use make install DESTDIR=... for component-owned installation"
+AWPRJ="${AWPRJ-anolisa}"
+[ "$AWPRJ" = anolisa ] || \
+    die "raw packages require AWPRJ=anolisa; cannot remap AWPRJ without updating the raw manifest and unit layout"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SOURCE_ROOT="${AGENTSIGHT_SOURCE_DIR:-$DEFAULT_ROOT}"
@@ -136,14 +142,17 @@ done
 BINARIES=("$BIN_DIR/agentsight")
 if [ "$TARGET_OS" = "linux" ]; then
     for input in \
-        "$SOURCE_ROOT/scripts/agentsight-start.sh" \
-        "$SOURCE_ROOT/scripts/agentsight.service" \
-        "$SOURCE_ROOT/scripts/agentsight-enforcer.service"; do
+        "$SOURCE_ROOT/packaging/systemd/render.py" \
+        "$SOURCE_ROOT/packaging/systemd/agentsight-start.sh.in" \
+        "$SOURCE_ROOT/packaging/systemd/agentsight.service.in" \
+        "$SOURCE_ROOT/packaging/systemd/agentsight-enforcer.service.in"; do
         require_file "$input"
     done
-    [ -x "$BIN_DIR/agentsight-enforcer" ] || \
-        die "missing executable: $BIN_DIR/agentsight-enforcer"
-    BINARIES+=("$BIN_DIR/agentsight-enforcer")
+    # Keep cross-target packaging prebuilt-only; never substitute a native rebuild.
+    ENFORCER_BIN="${ENFORCER_BIN:-$BIN_DIR/agentsight-enforcer}"
+    [ -x "$ENFORCER_BIN" ] || die "missing executable: $ENFORCER_BIN"
+    require_file "$ENFORCER_BIN.sha256"
+    BINARIES+=("$ENFORCER_BIN")
 fi
 
 VERSION="$(

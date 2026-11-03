@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
-use ws_ckpt_common::backend::SnapshotDeleteOutcome;
+use ws_ckpt_common::backend::{CreateAdmissionRefused, DiffError, SnapshotDeleteOutcome};
 use ws_ckpt_common::{ChangeType, DiffEntry};
 
 use crate::util::unescape_proc_mount;
@@ -466,10 +467,15 @@ struct FilesystemUsage {
 }
 
 impl FilesystemUsage {
-    fn deletion_risk(&self) -> SpaceRisk {
-        if self.malformed_usage
+    fn is_unreadable(&self) -> bool {
+        self.total == 0
+            || self.malformed_usage
             || self.malformed_metadata_profile
             || self.metadata_profiles.is_empty()
+    }
+
+    fn deletion_risk(&self) -> SpaceRisk {
+        if self.is_unreadable()
             || self
                 .metadata_profiles
                 .iter()
@@ -531,6 +537,46 @@ pub async fn assess_space_risk(fs_root: &Path) -> SpaceRisk {
     }
 }
 
+/// Admit one subvolume creation on `fs_root` (#7234). Refuses when deletion
+/// would already be guarded (High) or usage cannot be read: new subvolumes
+/// there feed the metadata pressure the guarded delete is trying to relieve.
+/// Every refusal is a [`CreateAdmissionRefused`] raised before any side effect.
+pub async fn ensure_create_allowed(fs_root: &Path) -> Result<()> {
+    let result = match get_filesystem_usage_details(fs_root).await {
+        Ok(usage) => ensure_usage_allows_create(fs_root, &usage),
+        Err(error) => Err(error.context(CreateAdmissionRefused(format!(
+            "refusing to create subvolume: cannot assess backend usage at {}",
+            fs_root.display()
+        )))),
+    };
+    if let Err(error) = &result {
+        warn!(error = %format!("{error:#}"), "subvolume creation refused");
+    }
+    result
+}
+
+fn ensure_usage_allows_create(fs_root: &Path, usage: &FilesystemUsage) -> Result<()> {
+    if usage.is_unreadable() {
+        return Err(CreateAdmissionRefused(format!(
+            "refusing to create subvolume: backend usage at {} is unreadable; check the output of \
+             `btrfs filesystem usage -b {}` and retry",
+            fs_root.display(),
+            fs_root.display()
+        ))
+        .into());
+    }
+    if usage.deletion_risk() == SpaceRisk::High {
+        return Err(CreateAdmissionRefused(format!(
+            "refusing to create subvolume: backend {} data or metadata usage is at/above {:.0}%; \
+             delete old checkpoints and retry once space is reclaimed",
+            fs_root.display(),
+            FS_DELETE_GUARD_THRESHOLD_PERCENT
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Resolve the btrfs subvolume (root) id of `path` via
 /// `btrfs inspect-internal rootid`. Must be called BEFORE deletion — the id
 /// is not resolvable once the subvolume is gone.
@@ -561,20 +607,23 @@ pub async fn get_subvolume_id(path: &Path) -> Result<u64> {
 /// kernel cleaner ("zombie" subvolumes) on the filesystem containing
 /// `fs_root`. These keep pinning backend space until drained (#3053).
 pub async fn list_deleted_subvolumes(fs_root: &Path) -> Result<Vec<u64>> {
-    let output = Command::new("btrfs")
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .args(["subvolume", "list", "-d"])
-        .arg(fs_root)
-        .output()
-        .await
-        .context("failed to execute btrfs subvolume list -d")?;
+    let mut command = Command::new("btrfs");
+    let output = run_deleted_subvolumes_command(&mut command, fs_root).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("btrfs subvolume list -d failed: {}", stderr.trim());
     }
     parse_deleted_subvolume_ids(&String::from_utf8_lossy(&output.stdout))
         .context("failed to parse btrfs subvolume list -d output")
+}
+
+async fn run_deleted_subvolumes_command(
+    command: &mut Command,
+    fs_root: &Path,
+) -> Result<std::process::Output> {
+    run_read_only_btrfs_command(command, &["subvolume", "list", "-d"], fs_root)
+        .await
+        .context("failed to execute btrfs subvolume list -d")
 }
 
 /// Parse `btrfs subvolume list -d` output and return ids of true zombie
@@ -1227,8 +1276,27 @@ pub async fn cleanup_snapshots_batch(
     fs_root: &Path,
     snapshot_ids: &[String],
 ) -> Vec<(String, SnapshotDeleteOutcome)> {
-    let paths: Vec<PathBuf> = snapshot_ids.iter().map(|id| snap_dir.join(id)).collect();
-    let outcomes = delete_subvolumes_space_aware(&paths, fs_root).await;
+    // Refuse ids that are not a single path component BEFORE any path is
+    // constructed: the batch contract keeps per-item outcomes, so an unsafe
+    // id fails its own entry while valid ids in the same batch still delete.
+    let mut slots: Vec<Option<SnapshotDeleteOutcome>> = snapshot_ids.iter().map(|_| None).collect();
+    let mut valid: Vec<(usize, PathBuf)> = Vec::new();
+    for (index, id) in snapshot_ids.iter().enumerate() {
+        match ensure_snapshot_id_is_single_component(id) {
+            Ok(()) => valid.push((index, snap_dir.join(id))),
+            Err(error) => slots[index] = Some(SnapshotDeleteOutcome::Failed(format!("{error:#}"))),
+        }
+    }
+    if !valid.is_empty() {
+        let valid_paths: Vec<PathBuf> = valid.iter().map(|(_, path)| path.clone()).collect();
+        let outcomes = delete_subvolumes_space_aware(&valid_paths, fs_root).await;
+        for ((index, _), outcome) in valid.into_iter().zip(outcomes) {
+            slots[index] = Some(outcome);
+        }
+    }
+    let outcomes = slots
+        .into_iter()
+        .map(|slot| slot.expect("every slot is filled"));
     snapshot_ids
         .iter()
         .cloned()
@@ -1371,10 +1439,260 @@ pub async fn diff_between_snapshots(snap_from: &Path, snap_to: &Path) -> Result<
         .context("diff task panicked")?
 }
 
+/// Name of the daemon-owned directory under the backend data root that
+/// holds internal diff temp snapshots: `<data-root>/.diff-tmp/<ws-id>/<random>`.
+///
+/// Internal temporary snapshots live OUTSIDE `snapshots/` on purpose: no
+/// workspace or snapshot recovery scan can then ever index a crash leftover
+/// as a phantom "still available" snapshot record, and no sweep can collide
+/// with a user-visible name — older daemon versions allowed users to create
+/// formal, even pinned, snapshots named `.diff-tmp-*`, so a name prefix
+/// proves nothing about ownership.
+pub(crate) const DIFF_TMP_DIR_NAME: &str = ".diff-tmp";
+
+/// Reject snapshot ids that are not a single, safe path component.
+///
+/// The guarded entry points validate ids with `validate_checkpoint_id_v2`,
+/// but the legacy IPC path forwards ids without upstream validation, and
+/// `Path::join` normalizes `./` components away, so a string check anywhere
+/// above the backend can be bypassed with ids like `./.diff-tmp-backup`.
+/// The backend is the one choke point both request families share, so every
+/// method that joins a snapshot id into a path validates here — the check is
+/// about the shape of the id, never about any reserved prefix.
+pub(crate) fn ensure_snapshot_id_is_single_component(snapshot_id: &str) -> Result<()> {
+    if snapshot_id.is_empty() {
+        bail!("snapshot id must not be empty");
+    }
+    if snapshot_id == "." || snapshot_id == ".." {
+        bail!("snapshot id must not be '.' or '..'");
+    }
+    if snapshot_id.contains('/') {
+        bail!(
+            "snapshot id must be a single path component (contains '/'): {:?}",
+            snapshot_id
+        );
+    }
+    if snapshot_id.contains('\0') {
+        bail!("snapshot id must not contain NUL: {:?}", snapshot_id);
+    }
+    Ok(())
+}
+
+/// Best-effort sweep of one workspace's internal diff temp directory.
+///
+/// Deletes crash-leftover temp snapshots (each a read-only subvolume pinning
+/// backend space exactly like the cleaner-stalled zombies of #3053) with the
+/// space-aware delete, so a full backend's kernel cleaner is still driven
+/// the same way as for user snapshots. Entries that are not directories —
+/// symlinks in particular — are REFUSED and left in place with a warning:
+/// the internal directory is daemon-owned, so an unexpected entry type means
+/// manual inspection, not silent deletion, and the path check never follows
+/// a symlink. Deletion failures warn and keep the entry: the sweep re-runs
+/// on that workspace's next diff and on every bootstrap, so a failed cleanup
+/// is retried instead of being treated as done.
+pub(crate) async fn sweep_diff_tmp_dir(tmp_dir: &Path, fs_root: &Path) -> Vec<String> {
+    // Leftover paths the caller must be told about: entries whose
+    // space-aware delete failed, non-directory entries the sweep refuses
+    // to touch, and the directory itself when it cannot even be scanned.
+    // Empty means fully cleaned.
+    let mut leftovers: Vec<String> = Vec::new();
+    let mut entries = match tokio::fs::read_dir(tmp_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return leftovers,
+        Err(error) => {
+            warn!(
+                "cannot scan internal diff temp directory {}: {:#}",
+                tmp_dir.display(),
+                error
+            );
+            leftovers.push(tmp_dir.display().to_string());
+            return leftovers;
+        }
+    };
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                warn!(
+                    "failed to scan internal diff temp directory {}: {:#}",
+                    tmp_dir.display(),
+                    error
+                );
+                leftovers.push(tmp_dir.display().to_string());
+                return leftovers;
+            }
+        };
+        let path = entry.path();
+        // Never follow symlinks: symlink_metadata describes the entry itself,
+        // so a link planted inside the daemon-owned directory is refused
+        // below instead of resolving to whatever it points at.
+        let file_type = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warn!(
+                    "failed to inspect internal diff temp entry {}: {:#}",
+                    path.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            warn!(
+                "internal diff temp entry {} is not a directory; refusing to clean it, \
+                 inspect and remove it manually",
+                path.display()
+            );
+            leftovers.push(path.display().to_string());
+            continue;
+        }
+        match delete_subvolume_space_aware(&path, fs_root).await {
+            Ok(()) => info!(
+                "removed temp diff snapshot {} left by an interrupted diff",
+                path.display()
+            ),
+            Err(error) => {
+                warn!(
+                    "failed to remove temp diff snapshot {}: {:#}; will retry on the next \
+                     diff or bootstrap",
+                    path.display(),
+                    error
+                );
+                leftovers.push(path.display().to_string());
+            }
+        }
+    }
+
+    leftovers
+}
+
+/// Bootstrap-time sweep of the whole internal diff temp root.
+///
+/// Runs inside `bootstrap`, which the daemon awaits before rebuilding
+/// workspace watchers or serving any request, so no live diff can exist and
+/// every entry under `<data-root>/.diff-tmp/<ws-id>/` is by construction a
+/// crash leftover. Each workspace directory is swept and then removed when
+/// empty; non-directory entries are refused and warned about, and failures
+/// stay for the next bootstrap or that workspace's next diff.
+pub(crate) async fn sweep_diff_tmp_root(diff_tmp_root: &Path, fs_root: &Path) {
+    let mut workspaces = match tokio::fs::read_dir(diff_tmp_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn!(
+                "cannot scan internal diff temp root {}: {:#}",
+                diff_tmp_root.display(),
+                error
+            );
+            return;
+        }
+    };
+    loop {
+        let entry = match workspaces.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                warn!(
+                    "failed to scan internal diff temp root {}: {:#}",
+                    diff_tmp_root.display(),
+                    error
+                );
+                return;
+            }
+        };
+        let ws_dir = entry.path();
+        let file_type = match tokio::fs::symlink_metadata(&ws_dir).await {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warn!(
+                    "failed to inspect internal diff temp workspace dir {}: {:#}",
+                    ws_dir.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            warn!(
+                "internal diff temp root entry {} is not a directory; refusing to clean \
+                 it, inspect and remove it manually",
+                ws_dir.display()
+            );
+            continue;
+        }
+        sweep_diff_tmp_dir(&ws_dir, fs_root).await;
+        if let Err(error) = tokio::fs::remove_dir(&ws_dir).await {
+            warn!(
+                "internal diff temp directory {} is not empty after the sweep ({:#}); \
+                 leftover entries retry on the next bootstrap or diff",
+                ws_dir.display(),
+                error
+            );
+        }
+    }
+}
+
+/// Warn about legacy-named `.diff-tmp-*` snapshots without touching them.
+///
+/// Older daemon versions created their diff temp snapshots inside
+/// `snapshots/<ws-id>/` and allowed users to create formal — even pinned —
+/// snapshots with the same prefix, so neither the name, the presence of an
+/// index record, nor the pin state can tell a historical user snapshot from
+/// a crash leftover. They are deliberately kept: inspect them and remove
+/// unwanted ones with the existing explicit delete command, which updates
+/// the index together with the disk state.
+pub(crate) async fn warn_legacy_diff_tmp_snapshots(snapshots_root: &Path) {
+    let mut workspaces = match tokio::fs::read_dir(snapshots_root).await {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    loop {
+        let entry = match workspaces.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(_) => return,
+        };
+        let ws_dir = entry.path();
+        let mut entries = match tokio::fs::read_dir(&ws_dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        let mut legacy: Vec<String> = Vec::new();
+        loop {
+            match entries.next_entry().await {
+                Ok(Some(snapshot)) => {
+                    if let Ok(name) = snapshot.file_name().into_string() {
+                        if name.starts_with(".diff-tmp-") {
+                            legacy.push(name);
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        if !legacy.is_empty() {
+            warn!(
+                "workspace snapshot directory {} holds legacy-named snapshot(s) [{}]: older \
+                 daemon versions allowed users to create formal snapshots with this prefix, so \
+                 they are kept untouched; inspect them and delete unwanted ones with the \
+                 explicit snapshot delete command so the index stays in sync",
+                ws_dir.display(),
+                legacy.join(", ")
+            );
+        }
+    }
+}
+
 /// Diff a snapshot against the live (writable) workspace subvolume.
 ///
-/// Creates a temporary read-only snapshot of `live_subvol` inside `snap_dir`,
-/// runs the diff, then removes the temporary snapshot regardless of outcome.
+/// Creates a temporary read-only snapshot of `live_subvol` inside `tmp_dir`
+/// (the workspace's daemon-owned directory under `<data-root>/.diff-tmp/`),
+/// runs the diff, then removes the temporary snapshot and the now-empty
+/// directory regardless of outcome.
 ///
 /// `fs_root` is the backend filesystem root used for space-risk assessment:
 /// the temp snapshot is read-only and shares extents (little space to free),
@@ -1384,31 +1702,53 @@ pub async fn diff_between_snapshots(snap_from: &Path, snap_to: &Path) -> Result<
 pub async fn diff_against_live(
     snap_from: &Path,
     live_subvol: &Path,
-    snap_dir: &Path,
+    tmp_dir: &Path,
     fs_root: &Path,
 ) -> Result<Vec<DiffEntry>> {
     use std::hash::{BuildHasher, Hasher, RandomState};
 
+    // Sweep leftovers from an interrupted prior diff BEFORE creating the new
+    // one. Both daemon diff entry points hold the workspace mutation lock
+    // across this call, so nothing else can own a live entry here; entries
+    // whose space-aware delete fails warn and stay for the next sweep
+    // instead of being treated as cleaned.
+    sweep_diff_tmp_dir(tmp_dir, fs_root).await;
+
+    // The temp snapshot is a subvolume creation too (#7234).
+    ensure_create_allowed(fs_root).await?;
+
+    tokio::fs::create_dir_all(tmp_dir).await.with_context(|| {
+        format!(
+            "failed to create internal diff temp directory {}",
+            tmp_dir.display()
+        )
+    })?;
+
     let h = RandomState::new().build_hasher().finish();
-    let tmp_snap = snap_dir.join(format!(".diff-tmp-{:06x}", h & 0xFFFFFF));
+    let tmp_snap = tmp_dir.join(format!("{:06x}", h & 0xFFFFFF));
 
-    // Clean up stale temp snapshot from a prior crash before creating a new one.
-    if path_exists_fallible(&tmp_snap).await? {
+    if let Err(e) = create_snapshot(live_subvol, &tmp_snap, true).await {
+        // Best-effort removal of whatever a partially failed create left
+        // behind; the directory itself only disappears when empty.
         let _ = delete_subvolume_space_aware(&tmp_snap, fs_root).await;
+        let _ = tokio::fs::remove_dir(tmp_dir).await;
+        return Err(e).context("failed to create temporary snapshot of live workspace for diff");
     }
-
-    create_snapshot(live_subvol, &tmp_snap, true)
-        .await
-        .context("failed to create temporary snapshot of live workspace for diff")?;
 
     let result = diff_between_snapshots(snap_from, &tmp_snap).await;
 
     // Reassess after the diff because send/receive activity can materially
     // change free data or metadata space. Cleanup still runs when diff fails.
     if let Err(e) = delete_subvolume_space_aware(&tmp_snap, fs_root).await {
-        warn!(error = %e, path = %tmp_snap.display(), "failed to remove temp diff snapshot");
+        warn!(
+            error = %e,
+            path = %tmp_snap.display(),
+            "failed to remove temp diff snapshot; will retry on the next diff or bootstrap"
+        );
     }
-
+    // Remove the per-diff directory when empty; a temp snapshot whose delete
+    // failed above stays put and is retried by the next sweep.
+    let _ = tokio::fs::remove_dir(tmp_dir).await;
     result
 }
 
@@ -1462,9 +1802,14 @@ fn diff_between_snapshots_blocking(snap_from: &Path, snap_to: &Path) -> Result<V
         bail!("btrfs receive --dump failed: {}", stderr.trim());
     }
 
-    let stdout = String::from_utf8_lossy(&receiver_output.stdout);
-    let entries = parse_btrfs_diff_output(&stdout);
-    Ok(entries)
+    parse_btrfs_diff_bytes(&receiver_output.stdout)
+}
+
+fn parse_btrfs_diff_bytes(output: &[u8]) -> Result<Vec<DiffEntry>> {
+    // btrfs-progs 6.1 escapes paths but emits some ignored metadata as raw bytes.
+    // Validate decoded path bytes in dump_path_token, not the entire dump stream.
+    let stdout = String::from_utf8_lossy(output);
+    parse_btrfs_diff_output(&stdout)
 }
 
 /// Parse `btrfs receive --dump` output into deduplicated DiffEntry items.
@@ -1473,31 +1818,35 @@ fn diff_between_snapshots_blocking(snap_from: &Path, snap_to: &Path) -> Result<V
 /// unlinks. A `link new dest=old` paired with `unlink old` encodes an `mv`
 /// (btrfs send emits no `rename` line for cross-snapshot mv).
 /// Phase 2 emits entries with precedence dedup (Renamed > Added > Deleted > Modified).
-fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
+fn parse_btrfs_diff_output(output: &str) -> Result<Vec<DiffEntry>> {
     let mut snapshot_prefix = String::new();
     let mut rename_map: HashMap<String, String> = HashMap::new();
     let mut link_pairs: Vec<(String, String)> = Vec::new();
     let mut unlinked: HashSet<String> = HashSet::new();
 
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_start();
         if line.is_empty() {
             continue;
         }
         if let Some(rest) = line.strip_prefix("snapshot") {
-            if let Some(name) = rest.split_whitespace().next() {
+            let name = first_token(rest, "snapshot", "path")?;
+            if !name.is_empty() {
                 snapshot_prefix = format!("{}/", name);
             }
         } else if let Some(rest) = line.strip_prefix("rename") {
-            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix, "rename")? {
                 rename_map.insert(src, dst);
             }
         } else if let Some(rest) = line.strip_prefix("link") {
-            if let Some((new_real, dest_path)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((new_real, dest_path)) = parse_dest_pair(rest, &snapshot_prefix, "link")? {
                 link_pairs.push((new_real, dest_path));
             }
         } else if let Some(rest) = line.strip_prefix("unlink") {
-            unlinked.insert(strip_snap_prefix(&first_token(rest), &snapshot_prefix));
+            unlinked.insert(strip_snap_prefix(
+                &first_token(rest, "unlink", "path")?,
+                &snapshot_prefix,
+            ));
         }
     }
 
@@ -1518,16 +1867,16 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
     let mut entries: Vec<DiffEntry> = Vec::new();
 
     for line in output.lines() {
-        let line = line.trim();
+        let line = line.trim_start();
         if line.is_empty() {
             continue;
         }
 
         if let Some(rest) = line.strip_prefix("mkfile") {
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map, "mkfile")?;
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Added, None);
         } else if let Some(rest) = line.strip_prefix("mkdir") {
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map, "mkdir")?;
             insert_dedup(
                 &mut seen,
                 &mut entries,
@@ -1538,7 +1887,7 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
         } else if let Some(rest) = line.strip_prefix("symlink") {
             // First token is the new symlink path (often a temp inode renamed
             // later); `dest=` is the link target string and isn't used.
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map, "symlink")?;
             insert_dedup(
                 &mut seen,
                 &mut entries,
@@ -1547,7 +1896,7 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
                 Some("symlink".to_string()),
             );
         } else if let Some(rest) = line.strip_prefix("link") {
-            if let Some((new_real, _)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((new_real, _)) = parse_dest_pair(rest, &snapshot_prefix, "link")? {
                 if let Some(old) = mv_renames.get(&new_real).cloned() {
                     insert_dedup(
                         &mut seen,
@@ -1567,12 +1916,12 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("unlink") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest, "unlink", "path")?, &snapshot_prefix);
             if !suppressed_unlinks.contains(&path) {
                 insert_dedup(&mut seen, &mut entries, path, ChangeType::Deleted, None);
             }
         } else if let Some(rest) = line.strip_prefix("rmdir") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest, "rmdir", "path")?, &snapshot_prefix);
             insert_dedup(
                 &mut seen,
                 &mut entries,
@@ -1582,7 +1931,7 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             );
         } else if let Some(rest) = line.strip_prefix("rename") {
             // temp→real renames are folded via rename_map; only emit the rest.
-            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix) {
+            if let Some((src, dst)) = parse_dest_pair(rest, &snapshot_prefix, "rename")? {
                 if !is_btrfs_temp_ref(&src) {
                     insert_dedup(
                         &mut seen,
@@ -1595,37 +1944,51 @@ fn parse_btrfs_diff_output(output: &str) -> Vec<DiffEntry> {
             }
         } else if let Some(rest) = line.strip_prefix("update_extent") {
             // `btrfs send --no-data` emits update_extent instead of write.
-            let path = resolve_path(rest, &snapshot_prefix, &rename_map);
+            let path = resolve_path(rest, &snapshot_prefix, &rename_map, "update_extent")?;
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         } else if let Some(rest) = line.strip_prefix("write") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest, "write", "path")?, &snapshot_prefix);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         } else if let Some(rest) = line.strip_prefix("truncate") {
-            let path = strip_snap_prefix(&first_token(rest), &snapshot_prefix);
+            let path = strip_snap_prefix(&first_token(rest, "truncate", "path")?, &snapshot_prefix);
             insert_dedup(&mut seen, &mut entries, path, ChangeType::Modified, None);
         }
         // Skip metadata-only ops: utimes, chown, chmod, set_xattr, remove_xattr, clone.
     }
 
-    entries
+    Ok(entries)
 }
 
 /// Strip the snapshot prefix from the first token of `rest`, then resolve
 /// through `rename_map` (temp → real) when applicable.
-fn resolve_path(rest: &str, snapshot_prefix: &str, rename_map: &HashMap<String, String>) -> String {
-    let path = strip_snap_prefix(&first_token(rest), snapshot_prefix);
-    rename_map.get(&path).cloned().unwrap_or(path)
+fn resolve_path(
+    rest: &str,
+    snapshot_prefix: &str,
+    rename_map: &HashMap<String, String>,
+    operation: &'static str,
+) -> Result<String> {
+    let path = strip_snap_prefix(&first_token(rest, operation, "path")?, snapshot_prefix);
+    Ok(rename_map.get(&path).cloned().unwrap_or(path))
 }
 
 /// Parse a `<src>  dest=<dst>` line tail into `(src, dst)`, both with the
 /// snapshot prefix stripped. `dest=` for `link`/mvs may carry a bare relative
 /// path (no prefix), which `strip_snap_prefix` no-ops cleanly.
-fn parse_dest_pair(rest: &str, snapshot_prefix: &str) -> Option<(String, String)> {
-    let rest = rest.trim();
-    let dest_pos = rest.find("dest=")?;
-    let src = strip_snap_prefix(&first_token(&rest[..dest_pos]), snapshot_prefix);
-    let dst = strip_snap_prefix(&first_token(&rest[dest_pos + 5..]), snapshot_prefix);
-    Some((src, dst))
+fn parse_dest_pair(
+    rest: &str,
+    snapshot_prefix: &str,
+    operation: &'static str,
+) -> Result<Option<(String, String)>> {
+    let (src, attributes) = dump_path_token(rest, operation, "source")?;
+    let Some(destination) = attributes.trim_start().strip_prefix("dest=") else {
+        return Ok(None);
+    };
+    let src = strip_snap_prefix(&src, snapshot_prefix);
+    let dst = strip_snap_prefix(
+        &first_token(destination, operation, "destination")?,
+        snapshot_prefix,
+    );
+    Ok(Some((src, dst)))
 }
 
 /// Insert a DiffEntry, dedup'd by path. Higher-precedence change_type wins
@@ -1668,9 +2031,66 @@ fn change_precedence(c: &ChangeType) -> u8 {
     }
 }
 
-/// Extract the first whitespace-delimited token from a string.
-fn first_token(s: &str) -> String {
-    s.split_whitespace().next().unwrap_or("").to_string()
+/// Decode the first path using btrfs-progs' dump escaping.
+fn first_token(s: &str, operation: &'static str, field: &'static str) -> Result<String> {
+    dump_path_token(s, operation, field).map(|(path, _)| path)
+}
+
+fn dump_path_token<'a>(
+    s: &'a str,
+    operation: &'static str,
+    field: &'static str,
+) -> Result<(String, &'a str)> {
+    let s = s.trim_start();
+    let bytes = s.as_bytes();
+    let mut decoded = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+        if bytes[index] != b'\\' || index + 1 == bytes.len() {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let escaped = bytes[index + 1];
+        let value = match escaped {
+            b'a' => Some(7),
+            b'b' => Some(8),
+            b'e' => Some(27),
+            b'f' => Some(12),
+            b'n' => Some(b'\n'),
+            b'r' => Some(b'\r'),
+            b't' => Some(b'\t'),
+            b'v' => Some(11),
+            b' ' | b'\\' => Some(escaped),
+            _ => None,
+        };
+        if let Some(value) = value {
+            decoded.push(value);
+            index += 2;
+        } else if index + 3 < bytes.len()
+            && bytes[index + 1..index + 4]
+                .iter()
+                .all(|byte| (b'0'..=b'7').contains(byte))
+            && escaped <= b'3'
+        {
+            let value = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            decoded.push(value);
+            index += 4;
+        } else {
+            decoded.push(b'\\');
+            index += 1;
+        }
+    }
+    // Decode after unescaping so octal-encoded UTF-8 bytes form one path.
+    // Replacement characters would merge distinct byte names during dedup.
+    let path = String::from_utf8(decoded).map_err(|_| DiffError::UnsupportedWorkspacePath {
+        operation,
+        field,
+        token: s[..index].to_string(),
+    })?;
+    Ok((path, &s[index..]))
 }
 
 /// Strip the snapshot name prefix (e.g. `./msg1-step1/`) from a path.
@@ -1705,16 +2125,8 @@ pub async fn get_filesystem_usage(mount_path: &Path) -> Result<(u64, u64)> {
 }
 
 async fn get_filesystem_usage_details(mount_path: &Path) -> Result<FilesystemUsage> {
-    // LC_ALL/LANG pinned to C: parsing matches English field names; a
-    // localized btrfs-progs output must fail closed into guarded deletion.
-    let output = Command::new("btrfs")
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .args(["filesystem", "usage", "-b"])
-        .arg(mount_path)
-        .output()
-        .await
-        .context("failed to execute btrfs filesystem usage")?;
+    let mut command = Command::new("btrfs");
+    let output = run_filesystem_usage_command(&mut command, mount_path).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1722,6 +2134,84 @@ async fn get_filesystem_usage_details(mount_path: &Path) -> Result<FilesystemUsa
     }
 
     parse_filesystem_usage_details(&String::from_utf8_lossy(&output.stdout))
+}
+
+async fn run_filesystem_usage_command(
+    command: &mut Command,
+    mount_path: &Path,
+) -> Result<std::process::Output> {
+    run_read_only_btrfs_command(command, &["filesystem", "usage", "-b"], mount_path)
+        .await
+        .context("failed to execute btrfs filesystem usage")
+}
+
+async fn run_read_only_btrfs_command(
+    command: &mut Command,
+    args: &[&str],
+    fs_root: &Path,
+) -> std::io::Result<std::process::Output> {
+    async fn read_pipe<R: AsyncRead + Unpin>(pipe: &mut Option<R>) -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        if let Some(pipe) = pipe {
+            pipe.read_to_end(&mut bytes).await?;
+        }
+        Ok(bytes)
+    }
+
+    // Bound optional health children through reaping, including kernel waits.
+    // Workspace mutations must never queue behind that health-only capacity.
+    let probe_slot = crate::health_probe::acquire_slot().await;
+    // Both parsers rely on English btrfs-progs field names.
+    let mut child = command
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .args(args)
+        .arg(fs_root)
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (keep_alive, cancelled) = tokio::sync::oneshot::channel::<()>();
+    // Keep ownership through caller cancellation: kill_on_drop alone leaves
+    // reaping to Tokio's best-effort orphan queue instead of an awaited wait.
+    let owner = tokio::spawn(async move {
+        let _probe_slot = probe_slot;
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let output = tokio::select! {
+            output = async {
+                let (status, stdout, stderr) = tokio::try_join!(
+                    child.wait(),
+                    read_pipe(&mut stdout_pipe),
+                    read_pipe(&mut stderr_pipe),
+                )?;
+                Ok(std::process::Output { status, stdout, stderr })
+            } => output,
+            _ = cancelled => Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "read-only btrfs probe cancelled",
+            )),
+        };
+        drop(stdout_pipe);
+        drop(stderr_pipe);
+        if output.is_err() {
+            let kill_error = child.start_kill().err();
+            // A killed child may remain in uninterruptible kernel sleep. Keep the
+            // health admission slot until it is reaped to avoid accumulating probes;
+            // refreshes and diagnostics can time out while the slot is occupied.
+            // Business queries bypass this admission slot.
+            child.wait().await.map_err(|error| {
+                warn!(%error, ?kill_error, "Failed to reap read-only Btrfs probe");
+                std::io::Error::other(format!("failed to reap read-only btrfs probe: {error}"))
+            })?;
+        }
+        output
+    });
+    let output = owner.await.map_err(|error| {
+        std::io::Error::other(format!("read-only btrfs probe task failed: {error}"))
+    })?;
+    drop(keep_alive);
+    output
 }
 
 /// Parse btrfs filesystem usage -b output to extract total and used bytes.
@@ -1926,6 +2416,325 @@ mod tests {
         REAL_BTRFS_TEST_LOCK.lock().await
     }
 
+    #[tokio::test]
+    async fn filesystem_usage_probe_drains_both_pipes_and_preserves_exit_status() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%200000s' o; printf '%200000s' e >&2; exit 7",
+            "_",
+        ]);
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_filesystem_usage_command(&mut command, Path::new("/mnt/test")),
+        )
+        .await
+        .expect("both output pipes must drain without deadlocking")
+        .expect("a nonzero child exit must still return its output");
+
+        let mut expected_stdout = vec![b' '; 200_000];
+        expected_stdout[199_999] = b'o';
+        let mut expected_stderr = vec![b' '; 200_000];
+        expected_stderr[199_999] = b'e';
+        assert_eq!(output.stdout.len(), 200_000);
+        assert_eq!(output.stderr.len(), 200_000);
+        assert_eq!(output.stdout, expected_stdout);
+        assert_eq!(output.stderr, expected_stderr);
+        assert_eq!(output.status.code(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn filesystem_usage_probe_preserves_spawn_error_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = Command::new(temp.path().join("missing-btrfs"));
+        let error = run_filesystem_usage_command(&mut command, Path::new("/mnt/test"))
+            .await
+            .expect_err("a nonexistent probe executable must fail");
+
+        assert!(format!("{error:#}").contains("failed to execute btrfs filesystem usage"));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().map(|err| err.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn health_probe_waits_for_cancelled_child_to_be_reaped_before_starting() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_pid_path = temp.path().join("first-probe.pid");
+        let first_pid_output = first_pid_path.clone();
+        let first = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "printf '%s\\n' \"$$\" > \"$1\"; exec sleep 30", "_"])
+                .arg(first_pid_output);
+            run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        let first_pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(&first_pid_path).await {
+                    if let Ok(pid) = pid.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first probe should record its pid before cancellation");
+        let first_proc = PathBuf::from(format!("/proc/{first_pid}"));
+        let first_proc_for_second = first_proc.clone();
+        let second_started_path = temp.path().join("second-probe.started");
+        let second_started_output = second_started_path.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "if [ -e \"$1\" ]; then printf 'first-present\\n'; else printf 'first-reaped\\n'; fi; printf started > \"$2\"",
+                    "_",
+                ])
+                .arg(first_proc_for_second)
+                .arg(second_started_output);
+            ready_tx.send(()).unwrap();
+            run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        ready_rx
+            .await
+            .expect("second probe task should be scheduled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first_was_live = first_proc.exists();
+        let second_started_before_cancel = second_started_path.exists();
+
+        first.abort();
+        assert!(first
+            .await
+            .expect_err("first probe caller should be aborted")
+            .is_cancelled());
+        let output = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .expect("second probe must complete after the canceled child is reaped")
+            .expect("second probe task should finish normally")
+            .expect("second probe should return its output");
+
+        assert!(
+            first_was_live,
+            "first probe must remain live until cancellation"
+        );
+        assert!(
+            !second_started_before_cancel,
+            "another read-only probe must not start while the first child is live"
+        );
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"first-reaped\n");
+        assert!(second_started_path.exists());
+    }
+
+    #[tokio::test]
+    async fn stalled_health_probe_does_not_block_business_queries() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("health.pid");
+        let child_pid_path = pid_path.clone();
+        let health = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", r#"printf '%s\n' "$$" > "$1"; exec sleep 30"#, "_"])
+                .arg(child_pid_path);
+            run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await {
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("health probe must start before testing business isolation");
+        let mut results = Vec::new();
+        for deleted in [false, true] {
+            let mut command = Command::new("sh");
+            command.args(["-c", r#"printf 'business-ready\n'"#, "_"]);
+            results.push(
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    if deleted {
+                        run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+                    } else {
+                        run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+                    }
+                })
+                .await,
+            );
+        }
+        let proc_entry = PathBuf::from(format!("/proc/{pid}"));
+        let health_was_live = proc_entry.exists();
+        health.abort();
+        assert!(health.await.unwrap_err().is_cancelled());
+        for _ in 0..100 {
+            if !proc_entry.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !proc_entry.exists(),
+            "health child must be reaped after cancellation"
+        );
+        assert!(
+            health_was_live,
+            "business queries must finish while the health probe is live"
+        );
+        for result in results {
+            let output = result
+                .expect("a stalled health probe must not queue business queries")
+                .expect("business query must return its output");
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"business-ready\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_health_owner_does_not_queue_business_queries() {
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(crate::health_probe::scope(async move {
+            let slot = crate::health_probe::acquire_slot().await;
+            // Model an owner whose child remains in a kernel wait after cancellation.
+            let owner = tokio::spawn(async move {
+                let _slot = slot;
+                release_rx.await.unwrap();
+            });
+            held_tx.send(owner).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        let owner = tokio::time::timeout(Duration::from_secs(5), held_rx)
+            .await
+            .expect("health owner must acquire capacity")
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+
+        let temp = tempfile::tempdir().unwrap();
+        let started = temp.path().join("next-health.started");
+        let started_output = started.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let next_health = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", r#"printf started > "$1""#, "_"])
+                .arg(started_output);
+            ready_tx.send(()).unwrap();
+            run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        ready_rx.await.unwrap();
+        let mut results = Vec::new();
+        for deleted in [false, true] {
+            let mut command = Command::new("sh");
+            command.args(["-c", "printf business-ready", "_"]);
+            results.push(
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    if deleted {
+                        run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+                    } else {
+                        run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+                    }
+                })
+                .await,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let health_started_while_held = started.exists();
+        release_tx.send(()).unwrap();
+        owner.await.unwrap();
+        let health_output = tokio::time::timeout(Duration::from_secs(5), next_health)
+            .await
+            .expect("next health child must finish after owner releases capacity")
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            !health_started_while_held,
+            "health capacity must remain occupied through owner cleanup"
+        );
+        assert!(health_output.status.success());
+        assert!(started.exists());
+        for result in results {
+            let output = result
+                .expect("business queries must bypass a canceled health owner")
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"business-ready");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_filesystem_usage_probe_kills_and_reaps_child() {
+        assert_cancelled_probe_is_reaped(false).await;
+        crate::health_probe::scope(assert_cancelled_probe_is_reaped(false)).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_deleted_subvolumes_probe_kills_and_reaps_child() {
+        assert_cancelled_probe_is_reaped(true).await;
+        crate::health_probe::scope(assert_cancelled_probe_is_reaped(true)).await;
+    }
+
+    async fn assert_cancelled_probe_is_reaped(list_deleted: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("btrfs-child.pid");
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "_"])
+            .arg(&pid_path);
+
+        let mut probe = Box::pin(async {
+            if list_deleted {
+                run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+            } else {
+                run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+            }
+        });
+        let pid = tokio::select! {
+            result = &mut probe => panic!("probe unexpectedly completed: {result:?}"),
+            pid = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(pid) = tokio::fs::read_to_string(&pid_path).await {
+                        if let Ok(pid) = pid.trim().parse::<u32>() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => pid.expect("shim should record its pid before cancellation"),
+        };
+        let cancel_started = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_millis(10), probe).await;
+        assert!(
+            result.is_err(),
+            "the injected probe child should exceed the deadline"
+        );
+
+        let proc_entry = PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..100 {
+            if !proc_entry.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !proc_entry.exists(),
+            "timed out btrfs child {pid} should be reaped after {:?}; status: {:?}; stat: {:?}",
+            cancel_started.elapsed(),
+            std::fs::read_to_string(proc_entry.join("status")),
+            std::fs::read_to_string(proc_entry.join("stat")),
+        );
+    }
+
     // NOTE: Real-btrfs tests require root, btrfs-progs, and the same mounted
     // test filesystem. The shared lock also covers the complete lifetime of
     // process-wide PATH shims, so `cargo test -- --ignored` is concurrency-safe.
@@ -2036,7 +2845,14 @@ mod tests {
             .await
             .unwrap();
 
-        let entries = diff_against_live(&snap1, &src, &base, &base).await.unwrap();
+        let entries = diff_against_live(
+            &snap1,
+            &src,
+            &base.join(DIFF_TMP_DIR_NAME).join("test-diff-live-src"),
+            &base,
+        )
+        .await
+        .unwrap();
         assert!(!entries.is_empty());
 
         // Cleanup
@@ -2059,7 +2875,7 @@ mod tests {
     fn parse_btrfs_diff_output_handles_common_ops() {
         // Use real `btrfs receive --dump` format: rename uses "dest=" syntax
         let output = "snapshot  ./snap  uuid=abc transid=42\nmkfile  ./snap/src/main.rs\nunlink  ./snap/old.txt\nrename  ./snap/old_name  dest=./snap/new_name\nwrite   ./snap/src/lib.rs\nmkdir   ./snap/new_dir\nrmdir   ./snap/old_dir\ntruncate  ./snap/data.bin\nupdate_extent  ./snap/src/config.rs  offset=0 len=128\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 8);
         assert_eq!(entries[0].change_type, ChangeType::Added); // mkfile
         assert_eq!(entries[0].path, "src/main.rs");
@@ -2083,7 +2899,7 @@ mod tests {
                        mkfile    ./msg1-step1/o262-119-0\n\
                        rename    ./msg1-step1/o262-119-0  dest=./msg1-step1/.gitignore\n\
                        utimes    ./msg1-step1/\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
 
         assert_eq!(entries.len(), 3, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "src/lib.rs");
@@ -2095,8 +2911,204 @@ mod tests {
     }
 
     #[test]
+    fn parse_btrfs_diff_preserves_dump_escaped_paths() {
+        // Captured from btrfs-progs 7.1 receive --dump using a synthetic v1 stream.
+        let output: String =
+            serde_json::from_str(include_str!("../../tests/fixtures/escaped-paths.json")).unwrap();
+        let entries = parse_btrfs_diff_output(&output).unwrap();
+        assert_eq!(
+            entries.len(),
+            8,
+            "distinct paths must not collapse: {entries:?}"
+        );
+        for path in [
+            "report one.txt",
+            "report two.txt",
+            "trailing ",
+            "tab\tline\n",
+            "slash\\name",
+            "中文.txt",
+        ] {
+            let entry = entries.iter().find(|entry| entry.path == path).unwrap();
+            assert_eq!(entry.change_type, ChangeType::Added);
+        }
+        let renamed = entries
+            .iter()
+            .find(|entry| entry.path == "new name")
+            .unwrap();
+        assert_eq!(renamed.change_type, ChangeType::Renamed);
+        assert_eq!(
+            renamed.detail.as_deref(),
+            Some("hasdest=name old → new name")
+        );
+        let moved = entries
+            .iter()
+            .find(|entry| entry.path == "moved name")
+            .unwrap();
+        assert_eq!(moved.change_type, ChangeType::Renamed);
+        assert_eq!(moved.detail.as_deref(), Some("old name → moved name"));
+    }
+
+    #[test]
+    fn parse_btrfs_diff_resolves_escaped_temp_renames_and_operations() {
+        let output = concat!(
+            "snapshot ./snap uuid=abc transid=1\n",
+            "mkfile ./snap/o261-118-0\n",
+            "rename ./snap/o261-118-0 dest=./snap/new\\ file\n",
+            "update_extent ./snap/new\\ file offset=0 len=2\n",
+            "write ./snap/modified\\ file offset=0 len=2\n",
+            "truncate ./snap/modified\\ file size=2\n",
+            "unlink ./snap/deleted\\ file\n",
+            "rmdir ./snap/deleted\\ dir\n",
+            "mkdir ./snap/added\\ dir\n",
+            "symlink ./snap/added\\ link dest=target\\ path\n",
+        );
+        let entries = parse_btrfs_diff_output(output).unwrap();
+        assert_eq!(entries.len(), 6);
+        for (path, kind) in [
+            ("new file", ChangeType::Added),
+            ("modified file", ChangeType::Modified),
+            ("deleted file", ChangeType::Deleted),
+            ("deleted dir", ChangeType::Deleted),
+            ("added dir", ChangeType::Added),
+            ("added link", ChangeType::Added),
+        ] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .unwrap()
+                    .change_type,
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn dump_path_tokens_decode_controls_and_keep_unknown_escapes() {
+        let first_token = |token| super::first_token(token, "mkfile", "path");
+        assert_eq!(
+            first_token(r"  a\ab\bc\ed\fe\nf\rg\th\vi\ j\\k\001\177  size=1").unwrap(),
+            "a\x07b\x08c\x1bd\x0ce\nf\rg\th\x0bi j\\k\x01\x7f"
+        );
+        assert_eq!(first_token("name\\ ").unwrap(), "name ");
+        assert_eq!(
+            first_token(r"literal\q\04\400").unwrap(),
+            r"literal\q\04\400"
+        );
+        assert_eq!(first_token("name\\").unwrap(), "name\\");
+        assert_eq!(first_token("\t \n").unwrap(), "");
+    }
+
+    #[test]
+    fn parse_btrfs_diff_rejects_non_utf8_paths_instead_of_merging() {
+        // Real dump: distinct invalid bytes and a valid replacement character.
+        let output: String =
+            serde_json::from_str(include_str!("../../tests/fixtures/non-utf8-paths.json")).unwrap();
+        let error = parse_btrfs_diff_output(&output).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot be represented as UTF-8"),
+            "{error:#}"
+        );
+        assert!(error.to_string().contains(r"bad\\377"), "{error:#}");
+    }
+
+    #[test]
+    fn parse_btrfs_diff_preserves_valid_replacement_and_literal_escapes() {
+        let output = concat!(
+            "snapshot ./snap uuid=abc transid=1\n",
+            "mkfile ./snap/bad\\357\\277\\275\n",
+            "mkfile ./snap/bad\\\\377\n",
+            "mkfile ./snap/bad\\\\376\n",
+        );
+        let entries = parse_btrfs_diff_output(output).unwrap();
+        assert_eq!(entries.len(), 3);
+        for path in ["bad�", r"bad\377", r"bad\376"] {
+            assert!(
+                entries.iter().any(|entry| entry.path == path),
+                "{entries:?}"
+            );
+        }
+        for escaped_byte in [r"\377", r"\376"] {
+            let invalid = format!("{output}mkfile ./snap/bad{escaped_byte}\n");
+            assert!(parse_btrfs_diff_output(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_btrfs_diff_propagates_non_utf8_errors_from_all_path_slots() {
+        for (operation, field) in [
+            (r"snapshot ./bad\377 uuid=abc transid=1", "path"),
+            (r"mkfile ./snap/bad\377", "path"),
+            (r"mkdir ./snap/bad\377", "path"),
+            (r"symlink ./snap/bad\377 dest=valid", "path"),
+            (r"rename ./snap/bad\377 dest=./snap/valid", "source"),
+            (r"rename ./snap/valid dest=./snap/bad\377", "destination"),
+            (r"link ./snap/bad\377 dest=valid", "source"),
+            (r"link ./snap/valid dest=bad\377", "destination"),
+            (r"unlink ./snap/bad\377", "path"),
+            (r"rmdir ./snap/bad\377", "path"),
+            (r"update_extent ./snap/bad\377 offset=0 len=1", "path"),
+            (r"write ./snap/bad\377 offset=0 len=1", "path"),
+            (r"truncate ./snap/bad\377 size=1", "path"),
+        ] {
+            let output = format!("snapshot ./snap uuid=abc transid=1\n{operation}\n");
+            let error = parse_btrfs_diff_bytes(output.as_bytes()).unwrap_err();
+            let Some(DiffError::UnsupportedWorkspacePath {
+                operation: actual_operation,
+                field: actual_field,
+                token,
+            }) = error.downcast_ref::<DiffError>()
+            else {
+                panic!("expected a typed path error for {operation}: {error:#}");
+            };
+            assert_eq!(
+                *actual_operation,
+                operation.split_whitespace().next().unwrap()
+            );
+            assert_eq!(*actual_field, field);
+            assert!(token.ends_with(r"bad\377"), "{operation}: {token:?}");
+            assert!(
+                error.to_string().contains(&format!(
+                    "{actual_operation} {field} cannot be represented as UTF-8"
+                )),
+                "{operation}: {error:#}"
+            );
+            assert!(error.to_string().contains(r"bad\\377"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn parse_btrfs_diff_ignores_raw_non_utf8_metadata() {
+        // btrfs-progs 6.1 prints these attributes with %s / %.*s, unlike paths.
+        let output = b"snapshot ./snap uuid=abc transid=1\n\
+            mkfile ./snap/valid\\ file\n\
+            set_xattr ./snap/valid\\ file name=user.\xff data=value len=5\n\
+            set_xattr ./snap/valid\\ file name=user.value data=\xff len=1\n\
+            remove_xattr ./snap/valid\\ file name=user.\xfe\n\
+            clone ./snap/valid\\ file offset=0 len=1 from=./source/\xff clone_offset=0\n";
+        let entries = parse_btrfs_diff_bytes(output).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "valid file");
+        assert_eq!(entries[0].change_type, ChangeType::Added);
+
+        // Lossy metadata decoding must never make an escaped invalid filename valid.
+        let mut invalid = output.to_vec();
+        invalid.extend_from_slice(b"mkfile ./snap/bad\\377\n");
+        let error = parse_btrfs_diff_bytes(&invalid).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<DiffError>(),
+            Some(DiffError::UnsupportedWorkspacePath {
+                operation: "mkfile",
+                field: "path",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn parse_btrfs_diff_output_empty() {
-        let entries = parse_btrfs_diff_output("");
+        let entries = parse_btrfs_diff_output("").unwrap();
         assert!(entries.is_empty());
     }
 
@@ -2382,6 +3394,12 @@ Metadata,DUP: Size: 1000, Used: 949
         let usage = parse_filesystem_usage_details(output).unwrap();
         assert!(usage.metadata_profiles.is_empty());
         assert_eq!(usage.deletion_risk(), SpaceRisk::High);
+        let error = ensure_usage_allows_create(Path::new("/mnt/test"), &usage)
+            .expect_err("unreadable usage must refuse creation");
+        let message = format!("{error:#}");
+        assert!(message.contains("backend usage at /mnt/test is unreadable"));
+        assert!(message.contains("btrfs filesystem usage -b /mnt/test"));
+        assert!(!message.contains("at/above"));
     }
 
     #[test]
@@ -2393,6 +3411,11 @@ Metadata,DUP: Size: 1000, Used: 950
 "#;
         let usage = parse_filesystem_usage_details(output).unwrap();
         assert_eq!(usage.deletion_risk(), SpaceRisk::High);
+        let error = ensure_usage_allows_create(Path::new("/mnt/test"), &usage)
+            .expect_err("high usage must refuse creation");
+        let message = format!("{error:#}");
+        assert!(message.contains("data or metadata usage is at/above 95%"));
+        assert!(!message.contains("unreadable"));
     }
 
     #[test]
@@ -2457,7 +3480,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
     #[test]
     fn parse_btrfs_diff_output_unknown_ops_are_skipped() {
         let output = "mkfile  new.txt\nchown  foo.txt\nxattr  bar.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].change_type, ChangeType::Added);
     }
@@ -2469,7 +3492,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       mkfile          ./snap_a_ro/o257-34321-0\n\
                       rename          ./snap_a_ro/o257-34321-0  dest=./snap_a_ro/foo.txt\n\
                       update_extent   ./snap_a_ro/foo.txt  offset=0 len=6\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "foo.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2481,7 +3504,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
         let output = "snapshot  ./snap_a_ro  uuid=abc transid=1\n\
                       symlink         ./snap_a_ro/o258-34321-0  dest=/etc/passwd\n\
                       rename          ./snap_a_ro/o258-34321-0  dest=./snap_a_ro/mylink\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "mylink");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2495,7 +3518,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       mkfile          ./snap_a_ro/o259-34321-0\n\
                       rename          ./snap_a_ro/o259-34321-0  dest=./snap_a_ro/target.txt\n\
                       link            ./snap_a_ro/hardlink_to_target  dest=target.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 2, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "target.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2511,7 +3534,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
         let output = "snapshot  ./snap_b_ro  uuid=abc transid=2\n\
                       link            ./snap_b_ro/bar.txt  dest=foo.txt\n\
                       unlink          ./snap_b_ro/foo.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "bar.txt");
         assert_eq!(entries[0].change_type, ChangeType::Renamed);
@@ -2526,7 +3549,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       rmdir   ./snap/foo\n\
                       mkfile  ./snap/o100-1-0\n\
                       rename  ./snap/o100-1-0  dest=./snap/foo\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "foo");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -2541,7 +3564,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       link    ./snap/bar  dest=foo\n\
                       link    ./snap/baz  dest=foo\n\
                       unlink  ./snap/foo\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 2, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "bar");
         assert_eq!(entries[0].change_type, ChangeType::Renamed);
@@ -2559,7 +3582,7 @@ Data+Metadata,single: Size: 2000, Used: 1900
                       update_extent   ./snap/foo.txt  offset=0 len=6\n\
                       mkfile          ./snap/o100-1-0\n\
                       rename          ./snap/o100-1-0  dest=./snap/foo.txt\n";
-        let entries = parse_btrfs_diff_output(output);
+        let entries = parse_btrfs_diff_output(output).unwrap();
         assert_eq!(entries.len(), 1, "entries: {:?}", entries);
         assert_eq!(entries[0].path, "foo.txt");
         assert_eq!(entries[0].change_type, ChangeType::Added);
@@ -3446,7 +4469,8 @@ proc /proc proc rw 0 0
             .expect("write change");
 
         let shim = BtrfsShim::install(None, false);
-        diff_against_live(&snap, &src, &mount, &mount)
+        let tmp_dir = mount.join(DIFF_TMP_DIR_NAME).join("test-diff-risk-src");
+        diff_against_live(&snap, &src, &tmp_dir, &mount)
             .await
             .expect("diff against live");
         let calls = shim.calls();
@@ -3502,6 +4526,25 @@ proc /proc proc rw 0 0
         );
         drop(shim);
         assert!(wait_clean_baseline(&mount).await, "baseline not restored");
+    }
+
+    /// #7234: a FAILED usage probe must refuse creation, like it guards deletion.
+    #[tokio::test]
+    #[ignore = "requires root + btrfs filesystem"]
+    async fn create_admission_refuses_when_usage_probe_fails() {
+        let _test_guard = lock_real_btrfs_test().await;
+        let mount = PathBuf::from("/mnt/btrfs-workspace");
+        ensure_create_allowed(&mount)
+            .await
+            .expect("baseline admits creation");
+
+        let shim = BtrfsShim::install(None, true);
+        let err = ensure_create_allowed(&mount)
+            .await
+            .expect_err("usage probe failure must refuse creation");
+        assert!(format!("{err:#}").contains("refusing to create subvolume"));
+        assert!(err.downcast_ref::<CreateAdmissionRefused>().is_some());
+        drop(shim);
     }
 
     /// Review P1-2: a FAILED usage probe must fail CLOSED — the delete goes
@@ -3662,5 +4705,32 @@ proc /proc proc rw 0 0
             wait_clean_baseline(&mount).await,
             "cleaner did not drain after the shared-sweep kick"
         );
+    }
+
+    /// The id check is about path shape, never about a reserved prefix: a
+    /// legacy-named `.diff-tmp-backup` id is a legal single component (old
+    /// daemon versions let users create such formal snapshots), while
+    /// separators, traversal, and the dot components are refused — including
+    /// the `./` spelling that `Path::join` would silently normalize away.
+    #[test]
+    fn snapshot_id_single_component_is_enforced() {
+        assert!(ensure_snapshot_id_is_single_component(".diff-tmp-backup").is_ok());
+        assert!(ensure_snapshot_id_is_single_component(".diff-tmp-000001").is_ok());
+        assert!(ensure_snapshot_id_is_single_component("ckpt-20261006T120000.000").is_ok());
+        assert!(ensure_snapshot_id_is_single_component(".hidden").is_ok());
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "./.diff-tmp-backup",
+            ".diff-tmp-backup/..",
+            "a\u{0}b",
+        ] {
+            assert!(
+                ensure_snapshot_id_is_single_component(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 }

@@ -11,7 +11,7 @@ use crate::llm::LlmClient;
 use crate::trace::TraceInventory;
 use crate::types::{AccIssue, AccRootCause, FixLocus, RootObject};
 
-use crate::accuracy::detector::{AnalysisCtx, Detector, RawIssue};
+use crate::accuracy::detector::{AnalysisCtx, Detector, JudgmentLog, RawIssue};
 use crate::accuracy::extract::SharedExtraction;
 use crate::accuracy::strategies::confirm_before_act::ConfirmBeforeActStrategy;
 use crate::accuracy::strategies::experience_library::ExperienceLibraryStrategy;
@@ -25,12 +25,14 @@ pub async fn run_strategies(
     inv: &TraceInventory,
     extraction: &SharedExtraction,
     repo_root: Option<&Path>,
+    judgments: &JudgmentLog,
 ) -> Vec<AccIssue> {
     let ctx = AnalysisCtx {
         inv,
         client,
         repo_root,
         extraction,
+        judgments,
     };
 
     // Build strategy list.
@@ -124,7 +126,16 @@ fn deduplicate(raw_issues: Vec<(&str, RawIssue)>) -> Vec<(&str, RawIssue)> {
         }
     }
 
-    best.into_values().collect()
+    // `best` is a HashMap, whose iteration order is randomized per map
+    // instance. `run_strategies` then sorts by (evidence_tier, symptom)
+    // only, so survivors that tie on both — e.g. the same command failing
+    // twice, one issue per anchor — kept the map's random order and the
+    // final issue list changed between runs of the same trace. Emit the
+    // survivors ordered by their dedup key so the later stable sort starts
+    // from a deterministic order.
+    let mut survivors: Vec<((String, String), (_, RawIssue))> = best.into_iter().collect();
+    survivors.sort_by(|a, b| a.0.cmp(&b.0));
+    survivors.into_iter().map(|(_, issue)| issue).collect()
 }
 
 /// Convert a `RawIssue` to a finalized `AccIssue` by applying rule-derived gates.
@@ -134,7 +145,7 @@ fn raw_to_acc_issue(raw: RawIssue, inv: &TraceInventory) -> AccIssue {
     let auto_patch = raw.evidence_tier.allows_auto_patch();
     let optimizable = !matches!(raw.primary_object, RootObject::Env | RootObject::Input);
 
-    // Recovered detection: anchored err later succeeded by same (name, cmd).
+    // Recovery requires the same recorded file target, not only its preview.
     let (evidence, at, recovered) = match raw.tool_call_id.as_deref() {
         Some(id) => {
             if let Some(rec) = inv.tool_calls.iter().find(|c| c.call_id == id) {
@@ -182,14 +193,17 @@ fn raw_to_acc_issue(raw: RawIssue, inv: &TraceInventory) -> AccIssue {
     }
 }
 
-/// Whether an errored call was later followed by a successful same-(name, cmd) call.
-/// Fixed: matches by (name, cmd) instead of just name to avoid false positives.
+/// Whether an errored call was later followed by a successful matching call.
 fn recovered_later(
     calls: &[crate::types::ToolCallRecord],
     errored: &crate::types::ToolCallRecord,
 ) -> bool {
     calls.iter().any(|c| {
-        c.name == errored.name && c.cmd == errored.cmd && c.start > errored.start && !c.err
+        c.name == errored.name
+            && c.cmd == errored.cmd
+            && c.target == errored.target
+            && c.start > errored.start
+            && !c.err
     })
 }
 
@@ -216,6 +230,7 @@ mod tests {
             dur: 1.0,
             cmd: cmd.into(),
             err,
+            target: None,
             result_tokens: None,
         }
     }
@@ -257,6 +272,45 @@ mod tests {
     }
 
     #[test]
+    fn dedup_orders_equal_tier_and_symptom_deterministically() {
+        // The same command failing twice yields one issue per anchor with
+        // identical (evidence_tier, symptom) — both survive dedup (distinct
+        // tool_call_id keys), and `run_strategies` then sorts by
+        // (evidence_tier, symptom) only, so their relative order followed
+        // the HashMap's randomized iteration order and the final issue
+        // list changed between runs of the same trace.
+        fn issue(call_id: &str) -> RawIssue {
+            RawIssue {
+                symptom: "声称完成但工具 bash 执行失败且未恢复: cargo build".into(),
+                defect_type: DefectType::Workflow,
+                primary_object: RootObject::Skill,
+                evidence_tier: EvidenceTier::L1,
+                tool_call_id: Some(call_id.into()),
+                detail: String::new(),
+                verify: String::new(),
+                fix: String::new(),
+            }
+        }
+
+        let input = vec![
+            ("verify_before_done", issue("call-z")),
+            ("verify_before_done", issue("call-a")),
+            ("verify_before_done", issue("call-m")),
+        ];
+
+        // Every `deduplicate` call builds a fresh HashMap, whose iteration
+        // order is randomized per map instance.
+        for _ in 0..16 {
+            let deduped = deduplicate(input.clone());
+            let ids: Vec<&str> = deduped
+                .iter()
+                .map(|(_, i)| i.tool_call_id.as_deref().unwrap())
+                .collect();
+            assert_eq!(ids, vec!["call-a", "call-m", "call-z"]);
+        }
+    }
+
+    #[test]
     fn recovered_matches_by_name_and_cmd() {
         let calls = vec![
             make_call("Bash", "git clone url1", 10.0, true),
@@ -269,6 +323,74 @@ mod tests {
             make_call("Bash", "git clone url1", 20.0, false), // same cmd → recovered
         ];
         assert!(recovered_later(&calls2, &calls2[0]));
+    }
+
+    fn recorded_file_issue(first_target: &str, second_target: &str) -> AccIssue {
+        let doc = serde_json::json!({
+            "schema_version":"ATIF-v1.7", "session_id":"fixture-session",
+            "agent":{"name":"fixture-agent","version":"1"},
+            "steps":[
+                {"step_id":1,"source":"agent","timestamp":"2026-10-10T00:00:01Z",
+                 "message":"read the first fixture file", "tool_calls":[
+                    {"tool_call_id":"first-read","function_name":"Read","arguments":{"file_path":first_target}}
+                 ], "observation":{"results":[
+                    {"source_call_id":"first-read","content":"fixture file not found", "extra":{"is_error":true}}
+                 ]}},
+                {"step_id":2,"source":"agent","timestamp":"2026-10-10T00:00:02Z",
+                 "message":"read the second fixture file", "tool_calls":[
+                    {"tool_call_id":"second-read","function_name":"Read","arguments":{"file_path":second_target}}
+                 ], "observation":{"results":[
+                    {"source_call_id":"second-read","content":"fixture text", "extra":{"is_error":false}}
+                 ]}}
+            ]
+        });
+        let schema: agentsight_atif::AtifTrajectory = serde_json::from_value(doc).unwrap();
+        let trajectory =
+            crate::atif::AtifTrajectory::from_json(&serde_json::to_string(&schema).unwrap())
+                .unwrap();
+        let inv = crate::trace::build_inventory(&trajectory);
+        assert_eq!(inv.tool_calls.len(), 2);
+        assert!(inv.tool_calls[0].err);
+        assert!(!inv.tool_calls[1].err);
+        assert_eq!(inv.tool_calls[0].cmd, inv.tool_calls[1].cmd);
+        assert_eq!(inv.tool_calls[0].target.as_deref(), Some(first_target));
+        assert_eq!(inv.tool_calls[1].target.as_deref(), Some(second_target));
+        raw_to_acc_issue(
+            RawIssue {
+                symptom: "first file read failed".into(),
+                defect_type: DefectType::Workflow,
+                primary_object: RootObject::Env,
+                evidence_tier: EvidenceTier::L2,
+                tool_call_id: Some("first-read".into()),
+                detail: String::new(),
+                verify: String::new(),
+                fix: String::new(),
+            },
+            &inv,
+        )
+    }
+
+    #[test]
+    fn a_successful_read_of_another_full_target_is_not_recovery() {
+        let prefix = "/fixture/a-long-directory-name/shared-nested-directory/configuration/";
+        let issue = recorded_file_issue(
+            &format!("{prefix}missing.txt"),
+            &format!("{prefix}present.txt"),
+        );
+        assert!(
+            !issue.recovered,
+            "another file's success does not recover the anchored failure"
+        );
+        assert_eq!(issue.tier, "user-failure");
+    }
+
+    #[test]
+    fn a_successful_retry_of_the_same_full_target_is_recovery() {
+        let target =
+            "/fixture/a-long-directory-name/shared-nested-directory/configuration/input.txt";
+        let issue = recorded_file_issue(target, target);
+        assert!(issue.recovered);
+        assert_eq!(issue.tier, "internal-lead");
     }
 
     #[test]

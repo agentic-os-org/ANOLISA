@@ -16,7 +16,7 @@
   "REC-CORE-008/read-failure",
   "REC-CORE-009/create-registration",
   "REC-CORE-009/update-registration",
-  "REC-CORE-010/recompute-after-storage-repair",
+  "REC-CORE-010/resume-write-after-storage-repair",
   "REC-CORE-011/semantic-rejection",
   "REC-CORE-012/fault-retry-exhausted",
   "REC-CORE-013/rejected",

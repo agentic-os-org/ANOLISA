@@ -190,6 +190,7 @@ pub(super) fn relay_candidate_line(
             match relay.input_classifier.classify(&line) {
                 InputDecision::Intercept { input, reason } => {
                     if reason == InterceptReason::Slash
+                        && relay.input_classifier.assistance_enabled()
                         && relay.slash_route_enabled
                         && relay.main_prompt_gate.is_at_prompt()
                         && relay.input_classifier.is_exact_slash_control_command(

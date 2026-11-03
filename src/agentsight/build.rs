@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 use libbpf_cargo::SkeletonBuilder;
 
 /// Read the Ring Buffer size (in MiB) from the `AGENTSIGHT_RING_BUFFER_MB`
@@ -12,7 +12,7 @@ use libbpf_cargo::SkeletonBuilder;
 /// validate at load time; common values are 8, 16, 32, 64.
 ///
 /// Default: 32 MiB (matches `common.h` fallback).
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn ring_buffer_clang_define() -> String {
     let mb = env::var("AGENTSIGHT_RING_BUFFER_MB")
         .ok()
@@ -28,7 +28,7 @@ fn ring_buffer_clang_define() -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn generate_skeleton(out: &mut PathBuf, name: &str, clang_define: &str) {
     let c_path = format!("src/bpf/{name}.bpf.c");
     let rs_name = format!("{name}.skel.rs");
@@ -36,16 +36,24 @@ fn generate_skeleton(out: &mut PathBuf, name: &str, clang_define: &str) {
 
     let mut builder = SkeletonBuilder::new();
     builder.source(&c_path);
+    // libbpf-cargo otherwise selects the architecture of its host build.
+    let bpf_arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => "x86",
+        Ok("aarch64") => "arm64",
+        other => panic!("unsupported BPF target architecture: {other:?}"),
+    };
+    let mut clang_args = vec![format!("-D__TARGET_ARCH_{bpf_arch}")];
     if !clang_define.is_empty() {
-        builder.clang_args([clang_define]);
+        clang_args.push(clang_define.to_owned());
     }
+    builder.clang_args(clang_args);
     builder.build_and_generate(&out).unwrap();
 
     out.pop();
     println!("cargo:rerun-if-changed={c_path}");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn generate_header(out: &mut PathBuf, name: &str) {
     let header_path = format!("src/bpf/{name}.h");
     let rs_name = format!("{name}.rs");
@@ -62,10 +70,11 @@ fn generate_header(out: &mut PathBuf, name: &str) {
     println!("cargo:rerun-if-changed={header_path}");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn generate_ebpf_artifacts(out: &mut PathBuf) {
     let ring_define = ring_buffer_clang_define();
     println!("cargo:rerun-if-env-changed=AGENTSIGHT_RING_BUFFER_MB");
+    println!("cargo:rerun-if-changed=src/bpf/common.h");
 
     generate_skeleton(out, "sslsniff", &ring_define);
     generate_header(out, "sslsniff");
@@ -88,7 +97,7 @@ fn generate_ebpf_artifacts(out: &mut PathBuf) {
     generate_skeleton(out, "tcpsniff", &ring_define);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn extract_header_decl_names(header: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for l in header.lines() {
@@ -121,7 +130,7 @@ fn extract_header_decl_names(header: &str) -> std::collections::BTreeSet<String>
     out
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn extract_ffi_export_names(src: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for l in src.lines() {
@@ -143,7 +152,7 @@ fn extract_ffi_export_names(src: &str) -> std::collections::BTreeSet<String> {
     out
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn check_ffi_header_drift(crate_dir: &str, header_path: &std::path::Path) {
     let ffi_path = PathBuf::from(crate_dir).join("src/ffi.rs");
     let ffi_src = std::fs::read_to_string(&ffi_path).unwrap_or_else(|e| {
@@ -189,7 +198,7 @@ fn check_ffi_header_drift(crate_dir: &str, header_path: &std::path::Path) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bpf-build"))]
 fn generate_c_header(crate_dir: &str) {
     let header_path = PathBuf::from(crate_dir)
         .join("include")
@@ -213,8 +222,8 @@ fn generate_c_header(crate_dir: &str) {
 }
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    {
+    #[cfg(all(target_os = "linux", feature = "bpf-build"))]
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         let mut out =
             PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"));
         generate_ebpf_artifacts(&mut out);
@@ -232,8 +241,8 @@ fn main() {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    {
+    #[cfg(all(target_os = "linux", feature = "bpf-build"))]
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         generate_c_header(&manifest_dir);
     }
 }

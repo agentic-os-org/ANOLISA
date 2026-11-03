@@ -8,13 +8,30 @@ use std::sync::Mutex;
 
 use rustix::fs::{mkdirat, open, openat, renameat, unlinkat, AtFlags, Dir, Mode, OFlags, RawMode};
 
-use super::io::{io_error, now_ms, open_file_time_ms, try_exclusive_lock, SessionLock};
+use super::io::{
+    exclusive_lock, io_error, now_ms, open_file_time_ms, try_exclusive_lock, SessionLock,
+};
 use super::listing::ListEntry;
 use super::{ProviderSessionId, SessionError};
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const STALE_TEMPORARY_FILE_MS: u64 = 60 * 60 * 1000;
+
+#[cfg(test)]
+thread_local! {
+    static TEMPORARY_SWEEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_temporary_sweep_count() {
+    TEMPORARY_SWEEPS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn temporary_sweep_count() -> usize {
+    TEMPORARY_SWEEPS.with(std::cell::Cell::get)
+}
 
 /// Builds a `Mode` portably: `RawMode` is `u32` on the linux_raw backend but
 /// `mode_t` (`u16`) on the libc backend, so the permission bits need a cast.
@@ -58,6 +75,18 @@ impl ScopedStorage {
 
     /// Opens the pinned directory, optionally creating missing components safely.
     pub(super) fn directory(&self, create: bool) -> Result<Option<File>, SessionError> {
+        self.directory_with_sweep(create, true)
+    }
+
+    pub(super) fn activity_directory(&self) -> Result<Option<File>, SessionError> {
+        self.directory_with_sweep(true, false)
+    }
+
+    fn directory_with_sweep(
+        &self,
+        create: bool,
+        sweep_temporary: bool,
+    ) -> Result<Option<File>, SessionError> {
         let mut pinned = self
             .pinned
             .lock()
@@ -76,7 +105,7 @@ impl ScopedStorage {
                 .map_err(|error| io_error("open scoped session directory", &self.path, error))?;
         }
         if create {
-            let sweep = !pinned.swept && pinned.directory.is_some();
+            let sweep = sweep_temporary && !pinned.swept && pinned.directory.is_some();
             if let Some(directory) = pinned.directory.as_ref() {
                 directory
                     .set_permissions(Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
@@ -84,7 +113,7 @@ impl ScopedStorage {
                         io_error("set private directory permissions", &self.path, error)
                     })?;
                 if sweep {
-                    self.sweep_stale_temporary_files(directory);
+                    self.sweep_stale_temporary_files(directory, false);
                 }
             }
             if sweep {
@@ -100,7 +129,9 @@ impl ScopedStorage {
     }
 
     /// Best-effort removal of temporary files left behind by crashed writers.
-    fn sweep_stale_temporary_files(&self, directory: &File) {
+    pub(super) fn sweep_stale_temporary_files(&self, directory: &File, managed_only: bool) {
+        #[cfg(test)]
+        TEMPORARY_SWEEPS.with(|count| count.set(count.get().saturating_add(1)));
         let Ok(entries) = Dir::read_from(directory) else {
             return;
         };
@@ -111,6 +142,20 @@ impl ScopedStorage {
             if !filename.starts_with('.') || !filename.ends_with(".tmp") {
                 continue;
             }
+            if managed_only {
+                let Some((session, staging)) = filename
+                    .strip_prefix('.')
+                    .and_then(|name| name.strip_suffix(".tmp"))
+                    .and_then(|name| name.split_once('.'))
+                else {
+                    continue;
+                };
+                if ProviderSessionId::parse(session).is_err()
+                    || ProviderSessionId::parse(staging).is_err()
+                {
+                    continue;
+                }
+            }
             let Ok(descriptor) = openat(
                 directory,
                 filename,
@@ -120,6 +165,15 @@ impl ScopedStorage {
                 continue;
             };
             let file = File::from(descriptor);
+            if managed_only
+                && !file.metadata().is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && metadata.uid() == nix::unistd::geteuid().as_raw()
+                        && metadata.nlink() == 1
+                })
+            {
+                continue;
+            }
             let modified_at_ms = open_file_time_ms(&file);
             if now_ms().saturating_sub(modified_at_ms) >= STALE_TEMPORARY_FILE_MS {
                 let _ = unlinkat(directory, filename, AtFlags::empty());
@@ -208,24 +262,156 @@ impl ScopedStorage {
         session_id: &ProviderSessionId,
     ) -> Result<SessionLock, SessionError> {
         let filename = format!(".{}.lock", session_id.as_str());
-        let path = self.path.join(&filename);
-        let descriptor = openat(
-            directory,
-            filename.as_str(),
-            OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            permission_mode(PRIVATE_FILE_MODE),
-        )
-        .map_err(|error| io_error("open lock", &path, rustix_error_to_io(error)))?;
-        let file = File::from(descriptor);
-        file.set_permissions(Permissions::from_mode(PRIVATE_FILE_MODE))
-            .map_err(|error| io_error("set private file permissions", &path, error))?;
+        let (file, path, created) = self.open_lock_file(directory, &filename)?;
         match try_exclusive_lock(&file) {
-            Ok(true) => Ok(SessionLock { file }),
+            Ok(true) => Ok(SessionLock { file, created }),
             Ok(false) => Err(SessionError::Conflict {
                 session_id: session_id.to_string(),
             }),
             Err(error) => Err(io_error("lock", &path, error)),
         }
+    }
+
+    /// Waits for a fixed-name lock, for locks that serialize a whole user rather
+    /// than one session.
+    pub(super) fn acquire_blocking_lock(
+        &self,
+        directory: &File,
+        filename: &str,
+    ) -> Result<SessionLock, SessionError> {
+        let (file, path, created) = self.open_lock_file(directory, filename)?;
+        exclusive_lock(&file).map_err(|error| io_error("lock", &path, error))?;
+        Ok(SessionLock { file, created })
+    }
+
+    /// Takes a process-lifetime activity lease for `session_id`.
+    pub(super) fn acquire_live_lease(
+        &self,
+        directory: &File,
+        session_id: &ProviderSessionId,
+    ) -> Result<SessionLock, SessionError> {
+        let (file, path, created) =
+            self.open_lock_file(directory, &live_lease_filename(session_id))?;
+        match try_exclusive_lock(&file) {
+            Ok(true) => Ok(SessionLock { file, created }),
+            Ok(false) => Err(SessionError::Conflict {
+                session_id: session_id.to_string(),
+            }),
+            Err(error) => Err(io_error("lock", &path, error)),
+        }
+    }
+
+    pub(super) fn acquire_compaction_lease(
+        &self,
+        directory: &File,
+        session_id: &ProviderSessionId,
+    ) -> Result<SessionLock, SessionError> {
+        let (file, path, created) =
+            self.open_lock_file(directory, &format!(".{session_id}.compact"))?;
+        match try_exclusive_lock(&file) {
+            Ok(true) => Ok(SessionLock { file, created }),
+            Ok(false) => Err(SessionError::Conflict {
+                session_id: session_id.to_string(),
+            }),
+            Err(error) => Err(io_error("lock", &path, error)),
+        }
+    }
+
+    /// Creates a lock file if needed and pins its private permissions.
+    fn open_lock_file(
+        &self,
+        directory: &File,
+        filename: &str,
+    ) -> Result<(File, PathBuf, bool), SessionError> {
+        let path = self.path.join(filename);
+        let (descriptor, created) = match openat(
+            directory,
+            filename,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            permission_mode(PRIVATE_FILE_MODE),
+        ) {
+            Ok(descriptor) => (descriptor, true),
+            Err(rustix::io::Errno::EXIST) => (
+                openat(
+                    directory,
+                    filename,
+                    OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+                .map_err(|error| io_error("open lock", &path, rustix_error_to_io(error)))?,
+                false,
+            ),
+            Err(error) => return Err(io_error("create lock", &path, rustix_error_to_io(error))),
+        };
+        let file = File::from(descriptor);
+        file.set_permissions(Permissions::from_mode(PRIVATE_FILE_MODE))
+            .map_err(|error| io_error("set private file permissions", &path, error))?;
+        Ok((file, path, created))
+    }
+
+    pub(super) fn remove_created_live_lease(
+        &self,
+        directory: &File,
+        id: &ProviderSessionId,
+        lease: &SessionLock,
+    ) -> Result<(), SessionError> {
+        self.remove_created_control(directory, &live_lease_filename(id), lease)
+    }
+
+    pub(super) fn remove_created_compaction_lease(
+        &self,
+        directory: &File,
+        id: &ProviderSessionId,
+        lease: &SessionLock,
+    ) -> Result<(), SessionError> {
+        self.remove_created_control(directory, &format!(".{id}.compact"), lease)
+    }
+
+    pub(super) fn remove_created_generation_lock(
+        &self,
+        directory: &File,
+        id: &ProviderSessionId,
+        lease: &SessionLock,
+    ) -> Result<(), SessionError> {
+        self.remove_created_control(directory, &format!(".{id}.lock"), lease)
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    fn remove_created_control(
+        &self,
+        directory: &File,
+        name: &str,
+        lease: &SessionLock,
+    ) -> Result<(), SessionError> {
+        if !lease.created {
+            return Ok(());
+        }
+        let path = self.path.join(name);
+        let current = match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(current) => current,
+            Err(rustix::io::Errno::NOENT) => return Ok(()),
+            Err(error) => {
+                return Err(io_error(
+                    "inspect activity lease",
+                    &path,
+                    rustix_error_to_io(error),
+                ))
+            }
+        };
+        let owned = lease
+            .file
+            .metadata()
+            .map_err(|error| io_error("inspect owned activity lease", &path, error))?;
+        if current.st_dev as u64 == owned.dev() && current.st_ino as u64 == owned.ino() {
+            unlinkat(directory, name, AtFlags::empty()).map_err(|error| {
+                io_error(
+                    "remove failed activity lease",
+                    &path,
+                    rustix_error_to_io(error),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     /// Atomically replaces one session through a same-directory temporary file.
@@ -300,8 +486,16 @@ impl ScopedStorage {
                 )
             }
         })?;
-        let lock_filename = format!(".{}.lock", session_id.as_str());
-        let _ = unlinkat(directory, lock_filename.as_str(), AtFlags::empty());
+        // The per-session control files go with the envelope. Budget eviction
+        // never reaches a leased session, so this only unlinks a lease whose
+        // envelope is being deleted explicitly; leaving the file behind would
+        // accumulate one empty inode per session ever run.
+        for filename in [
+            format!(".{}.lock", session_id.as_str()),
+            live_lease_filename(session_id),
+        ] {
+            let _ = unlinkat(directory, filename.as_str(), AtFlags::empty());
+        }
         Ok(())
     }
 }
@@ -318,6 +512,11 @@ fn directory_matches_path(directory: &File, path: &Path) -> bool {
 
 fn session_filename(session_id: &ProviderSessionId) -> String {
     format!("{}.json", session_id.as_str())
+}
+
+/// Activity-lease file for a session. Zero length: only its flock carries state.
+fn live_lease_filename(session_id: &ProviderSessionId) -> String {
+    format!(".{}.live", session_id.as_str())
 }
 
 fn open_directory_path(path: &Path, create: bool) -> io::Result<Option<File>> {

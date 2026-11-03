@@ -8,6 +8,7 @@ use super::template::generic_progress_template;
 pub(crate) enum BuildLogFormat {
     Cargo,
     Pytest,
+    Unittest,
     Npm,
     Jest,
     Go,
@@ -37,6 +38,7 @@ pub(crate) enum RoutineFamily {
     CargoTestPass,
     PytestPass,
     PytestProgress,
+    UnittestPass,
     NpmFetch,
     NpmSpinner,
     JestPass,
@@ -54,6 +56,7 @@ impl RoutineFamily {
             Self::CargoTestPass => "passing test",
             Self::PytestPass => "passing test",
             Self::PytestProgress => "test progress",
+            Self::UnittestPass => "passing test",
             Self::NpmFetch => "package fetch",
             Self::NpmSpinner => "spinner progress",
             Self::JestPass => "passing test suite",
@@ -94,6 +97,10 @@ pub(crate) fn format_evidence(format: BuildLogFormat, line: &str) -> Evidence {
                 && [" PASSED", " FAILED", " SKIPPED", " XFAIL", " XPASS"]
                     .iter()
                     .any(|marker| trimmed.contains(marker)),
+        ),
+        BuildLogFormat::Unittest => (
+            is_unittest_run_summary(trimmed),
+            unittest_outcome(trimmed).is_some(),
         ),
         BuildLogFormat::Npm => (
             trimmed.starts_with("npm ERR!") || trimmed.starts_with("npm error"),
@@ -192,6 +199,8 @@ fn is_diagnostic(trimmed: &str, lower: &str, format: BuildLogFormat) -> bool {
         || matches!(format, BuildLogFormat::Npm) && trimmed.starts_with("npm ERR!")
         || matches!(format, BuildLogFormat::Go) && trimmed.starts_with("--- FAIL:")
         || matches!(format, BuildLogFormat::Jest) && trimmed.starts_with("FAIL ")
+        || matches!(format, BuildLogFormat::Unittest)
+            && unittest_outcome(trimmed).is_some_and(|outcome| outcome != "ok")
 }
 
 fn contains_signal_word(value: &str, signal: &str) -> bool {
@@ -214,6 +223,10 @@ fn is_summary(trimmed: &str, lower: &str, format: BuildLogFormat) -> bool {
         || trimmed.starts_with("test result:")
         || matches!(format, BuildLogFormat::Cargo) && trimmed.starts_with("Finished ")
         || matches!(format, BuildLogFormat::Pytest) && is_pytest_summary(trimmed, lower)
+        || matches!(format, BuildLogFormat::Unittest)
+            && (is_unittest_run_summary(trimmed)
+                || trimmed == "OK"
+                || starts_any(trimmed, &["OK (", "FAILED ("]))
         || matches!(format, BuildLogFormat::Npm)
             && (lower.starts_with("added ")
                 || lower.starts_with("removed ")
@@ -288,6 +301,9 @@ fn routine_family(
                 None
             }
         }
+        BuildLogFormat::Unittest => {
+            (unittest_outcome(trimmed) == Some("ok")).then_some(RoutineFamily::UnittestPass)
+        }
         BuildLogFormat::Make => is_compiler_command(trimmed).then_some(RoutineFamily::MakeCompile),
         BuildLogFormat::Generic => generic_progress_template(trimmed)
             .is_some_and(|template| generic_templates.contains(&template))
@@ -321,6 +337,45 @@ fn is_pytest_summary(line: &str, lower: &str) -> bool {
         .iter()
         .any(|outcome| lower.contains(outcome))
         && (line.starts_with('=') || line.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
+fn unittest_outcome(line: &str) -> Option<&str> {
+    let (description, outcome) = line.rsplit_once(" ... ")?;
+    let (method, case) = description.strip_suffix(')')?.split_once(" (")?;
+    // Require a test identity, not prose or a Django migration ending in OK.
+    if !(method.starts_with("test") || method == "runTest")
+        || !method.chars().all(|c| c.is_alphanumeric() || c == '_')
+        || !case.contains('.')
+        || !case
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_alphanumeric() || c == '_'))
+    {
+        return None;
+    }
+    (matches!(
+        outcome,
+        "ok" | "FAIL" | "ERROR" | "expected failure" | "unexpected success"
+    ) || outcome.starts_with("skipped "))
+    .then_some(outcome)
+}
+
+fn is_unittest_run_summary(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("Ran ") else {
+        return false;
+    };
+    let Some((count, rest)) = rest.split_once(' ') else {
+        return false;
+    };
+    let Some(duration) = rest
+        .strip_prefix("tests in ")
+        .or_else(|| rest.strip_prefix("test in "))
+        .and_then(|duration| duration.strip_suffix('s'))
+    else {
+        return false;
+    };
+    !count.is_empty()
+        && count.bytes().all(|byte| byte.is_ascii_digit())
+        && duration.trim_end().parse::<f64>().is_ok()
 }
 
 fn is_pytest_progress(line: &str) -> bool {

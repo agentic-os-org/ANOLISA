@@ -24,10 +24,24 @@ pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, Kerne
         let uri = format!("file:{}?mode=ro", encode_uri_path(path));
         Connection::open_with_flags(
             uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?
     } else {
-        Connection::open(path)?
+        // The writable open carries `SQLITE_OPEN_NOFOLLOW` (SQLite >= 3.36,
+        // unix): the kernel refuses a symlinked final component atomically at
+        // the open, closing the window between the store's pre-open `lstat`
+        // gate and this call. The flag set is `Connection::open`'s default
+        // (read-write, create, no mutex, URI) plus that refusal.
+        Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?
     };
 
     conn.pragma_update(None, "busy_timeout", 200)?;
@@ -97,6 +111,20 @@ mod tests {
             .expect_err("mode=ro must not create the database");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_rejects_a_symlinked_database() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().expect("temp dir");
+        let target = dir.path().join("target.db");
+        open_connection(&target, false).expect("create target");
+        let link = dir.path().join("linked.db");
+        symlink(&target, &link).expect("symlink");
+
+        assert!(open_connection(&link, true).is_err());
+    }
+
     #[test]
     fn writable_open_creates_the_file() {
         let dir = TempDir::new().expect("temp dir");
@@ -124,5 +152,45 @@ mod tests {
         }
         let conn = open_connection(&path, true).expect("open read-only");
         assert_eq!(scalar_pragma(&conn, "query_only"), 1);
+    }
+
+    #[test]
+    fn a_writable_open_refuses_a_final_component_symlink() {
+        // `SQLITE_OPEN_NOFOLLOW` is the atomic refusal behind the store's
+        // pre-open `lstat` gate: whatever lands on the path between that
+        // check and this call, the open itself must not follow a
+        // final-component symlink. A link to an existing database and a
+        // dangling link are both refused at the open, with neither target
+        // touched.
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().expect("temp dir");
+        let target = dir.path().join("elsewhere.db");
+        {
+            let conn = open_connection(&target, false).expect("seed target");
+            conn.execute_batch("CREATE TABLE t (a INTEGER)")
+                .expect("create");
+        }
+        let seeded_len = fs::metadata(&target).expect("target").len();
+
+        let link = dir.path().join("events.db");
+        symlink(&target, &link).expect("symlink to an existing database");
+        open_connection(&link, false)
+            .expect_err("the writable open must not follow a final-component symlink");
+        assert_eq!(
+            fs::metadata(&target).expect("target").len(),
+            seeded_len,
+            "the refused open must not touch the link target"
+        );
+
+        let dangling = dir.path().join("dangling.db");
+        let nowhere = dir.path().join("nowhere.db");
+        symlink(&nowhere, &dangling).expect("dangling symlink");
+        open_connection(&dangling, false).expect_err("a dangling link must not be created through");
+        assert!(
+            !nowhere.exists(),
+            "the dangling link's target must stay unmaterialized"
+        );
     }
 }

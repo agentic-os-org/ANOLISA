@@ -6,7 +6,9 @@ from pathlib import Path
 _AGENT_SEC_CORE_DIR = Path(__file__).resolve().parents[3]
 _AGENTS_PATH = _AGENT_SEC_CORE_DIR / "AGENTS.md"
 _MANIFEST_PATH = _AGENT_SEC_CORE_DIR / "cosh-extension" / "cosh-extension.json"
-_COMPONENT_MANIFEST_PATH = _AGENT_SEC_CORE_DIR / ".anolisa" / "component.toml"
+_COMPONENT_MANIFEST_PATH = (
+    _AGENT_SEC_CORE_DIR / "packaging" / "anolisa" / "component.toml"
+)
 _SKILL_PATH = _AGENT_SEC_CORE_DIR / "skills" / "security-observability" / "SKILL.md"
 
 
@@ -63,6 +65,9 @@ def test_security_observability_skill_documents_cli_and_output_contracts() -> No
     assert "category`、`event_type`、`trace_id`" in content
     assert "--limit '<matching_count_or_safe_page_size>'" in content
     assert "--count" in content
+    assert "UDS peer UID" in content
+    assert "`events --session-id` 使用原始 session ID" in content
+    assert "root 返回所有 UID 下匹配该 ID 的事件" in content
 
     event_fields = {
         "event_id",

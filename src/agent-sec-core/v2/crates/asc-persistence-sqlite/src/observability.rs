@@ -1,7 +1,7 @@
 //! Observability `SQLite` binding: table spec, repository, policy.
 //!
-//! This stream passes **no** migrator to the kernel: it is still at schema
-//! revision 1, so generic convergence is all it needs.
+//! Every writer supplies a trusted UID. The owner column stays nullable so
+//! revision-1 stores converge without backfilling an owner for historical rows.
 
 pub mod policy;
 pub mod reader;

@@ -1,7 +1,7 @@
 {
   "id": "agent-sec",
   "name": "Agent Security",
-  "version": "0.13.0",
+  "version": "1.1.2",
   "description": "Security hooks powered by agent-sec-cli",
   "activation": {
     "onCapabilities": ["hook"]
@@ -18,7 +18,7 @@
       "piiScanUserInput": {
         "type": "boolean",
         "default": true,
-        "description": "扫描本轮用户输入中的 PII 和凭据"
+        "description": "Scan model-entry text on stable OpenClaw >=2026.5.12, inbound text on older hosts, and tool/model boundaries"
       },
       "piiIncludeLowConfidence": {
         "type": "boolean",
@@ -101,8 +101,8 @@
       "description": "检测到 DENY 时直接拦截请求，不转发给 LLM"
     },
     "piiScanUserInput": {
-      "label": "PII 用户输入扫描",
-      "description": "扫描本轮用户输入中的 PII 和凭据"
+      "label": "PII checks",
+      "description": "Scan model-entry text on stable OpenClaw >=2026.5.12, inbound text on older hosts, and tool/model boundaries"
     },
     "piiIncludeLowConfidence": {
       "label": "PII 低置信度 findings",

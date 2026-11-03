@@ -83,7 +83,7 @@ Start tracing of AI agent activity.
 
 **Linux**: Full eBPF-based tracing (probes → parser → aggregator → storage). Also runs trajectory collector if `features.trajectory_collection.enabled` is set.
 
-**Linux without privileges**: `--no-ebpf` skips the probes and runs the trajectory collector alone, so unprivileged sandboxes and containers still collect trajectories. The flag implies trajectory collection regardless of `features.trajectory_collection.enabled`, since it is the only remaining data source. Data derived from eBPF — token metering, audit events, interruption detection — is unavailable in this mode.
+**Linux without privileges**: `--no-ebpf` skips the probes and runs the trajectory collector alone, so unprivileged sandboxes and containers still collect trajectories. The collector supports Claude Agent SDK/Claude Code, Qoder, Codex, and Cursor JSONL sessions plus Hermes `state.db`; expose a non-standard SDK config through `CLAUDE_CONFIG_DIR`, or supply per-tenant workspace roots through `features.trajectory_collection.scan_dirs`. The flag implies trajectory collection regardless of `features.trajectory_collection.enabled`, since it is the only remaining data source. Data derived from eBPF — token metering, audit events, interruption detection — is unavailable in this mode.
 
 **macOS**: Trajectory collection only — scans local JSONL session files (Claude Code, Qoder, Codex, Cursor), converts to ATIF v1.7, and stores in `trajectories.db`. No eBPF.
 
@@ -136,6 +136,9 @@ agentsight audit --pid 12345 --type llm
 
 # Summary statistics
 agentsight audit --summary
+
+# Read a database copied from another host
+agentsight audit --db /backup/agentsight/agentsight.db
 ```
 
 ### `agentsight serve`
@@ -182,8 +185,8 @@ cd src/agentsight
 # Build frontend and embed into frontend-dist/ (required before cargo build)
 make build-frontend
 
-# Then build the Rust binary with the embedded UI
-make build
+# Then build only the Rust binary with the embedded UI
+make build-binary
 
 # Or do both in one step
 make build-all
@@ -247,6 +250,25 @@ npm run dev          # starts webpack-dev-server on http://localhost:3004
 
 When finished, run `make build-frontend && cargo build --release` to embed the updated UI.
 
+### Resource Benchmarking (Linux)
+
+[`scripts/benchmark/single_run/resource_run.sh`](scripts/benchmark/single_run/resource_run.sh)
+measures AgentSight RSS and CPU with configurable Agent count and output tok/s,
+defaulting to 32 Agents, 100 tok/s each, and 60 seconds. It prints average/peak RSS,
+host RAM shares, average/P95/peak CPU (100% = one logical CPU), and load/capture
+checks. Cooperative CPU pacing defaults to 25% of one logical CPU with delayed delivery;
+`--cpu-budget-percent N` overrides the configured target (`0` disables pacing). Load-window and response-drain statistics are separate. It supports Git A/B comparisons with
+`--ab --baseline REF --candidate REF`. `--ring-buffer-mb N` sets the ring buffer
+size; reported probe drops invalidate the comparison. Tracing requires root or eBPF capabilities;
+the script requests sudo by default. See the [benchmark usage guide](scripts/docs/BENCHMARK_USAGE.md)
+for one-command examples, working-tree snapshots and reports.
+
+Add `--ffi` to build and measure a minimal C FFI consumer instead of the CLI.
+`--ffi-api typed|v2` selects typed callbacks (default) or JSON envelope callbacks;
+`--candidate-lib PATH` and `--baseline-lib PATH` accept prebuilt shared libraries.
+The measurement includes AgentSight threads, FFI conversion, receipt forwarding and the small C host baseline.
+FFI readiness and capture validation use callback receipts independently of SQLite storage.
+
 ## Quick Start
 
 ### Prerequisites
@@ -304,18 +326,18 @@ sudo yum install agentsight
 ```
 
 Installs:
-- `/usr/local/bin/agentsight` — CLI binary
-- `/usr/local/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight` — CLI binary
+- `/usr/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight-start` — trace/serve supervisor
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight system unit
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — enforcement system unit
 
-The RPM is a Linux system package. Its units are installed but not enabled by
-default; when both units run, AgentSight is ordered after the enforcer.
+The RPM is a Linux system package. When both units run, AgentSight is ordered
+after the enforcer.
 
 ### Start the Service
 
-Both package routes leave the units stopped and disabled. Start the main unit
-when you are ready to begin collection:
+Start the main unit when you are ready to begin collection:
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -336,7 +358,7 @@ starting a foreground tracer.
 For node-wide collection in Kubernetes, use the DaemonSet manifest and runtime
 image under `src/agentsight/packaging/` (`k8s/daemonset.yaml` and
 `docker/Dockerfile`). See the
-[deployment guide](../../docs/user-guide/en/agent-observability/agentsight/deployment.md#kubernetes-daemonset-node-wide)
+[deployment guide](../../docs/user-guide/en/agentsight/deployment.md#kubernetes-daemonset-node-wide)
 for prerequisites and verification.
 
 ### Build from Source
@@ -353,10 +375,35 @@ make build-all
 
 The binary is output to `target/release/agentsight`. On supported Linux systems,
 `make build-all` also invokes `scripts/build-enforcer.sh` to build the attested
-ActPlane `target/release/agentsight-enforcer` binary. `make build-mac` does not
-build the enforcer.
+ActPlane enforcer in a new private directory. The script prints its absolute
+path; keep the adjacent `.sha256` receipt and pass that exact path as
+`ENFORCER_BIN` to the raw packager. A shared `target/release/agentsight-enforcer`
+is not a verified build result. `make build-mac` does not build the enforcer.
+
+For Linux cross builds, `scripts/build-enforcer.sh --target
+<aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` selects the target explicitly;
+without arguments it builds for the host. `CARGO` may select a prepared Cross
+wrapper, but must honor the requested target. Both Linux architectures use the
+same raw payload layout and source-owned
+`packaging/anolisa/raw/component.toml`. macOS ARM64 uses
+`packaging/anolisa/raw/component.macos.toml` and ships only the main executable. Cross
+compiling macOS from Linux requires `--no-default-features --features server` to
+skip the optional `bpf-build` host dependencies. Remove
+the private enforcer directory only after packaging has consumed its receipt.
 
 > `cargo build --release` only compiles Rust. It does not rebuild the embedded Dashboard UI, so use `make build-all` for user-facing builds.
+
+### GitHub prebuilt artifacts
+
+Release Preview builds Linux x86_64, Linux ARM64 and macOS ARM64 from the selected
+source commit; formal releases additionally require `sight/v<version>` to point
+at that commit. Each target produces `agentsight-<version>-<os>-<arch>.tar.gz`,
+its `.sha256`, a CycloneDX `.cdx.json` SBOM and the SBOM's `.sha256` (12 files in
+all). Linux targets require glibc 2.28; macOS ARM64 retains the 11.0 baseline.
+The action builds the embedded viewer and invokes this component's packager and
+contract from the same revision. Linux SBOMs include the attested enforcer's
+actual dependency graph. Download verification covers all three targets before
+Release publication. It does not attest ARM64 real-kernel eBPF behavior.
 
 ### Build on macOS
 
@@ -405,13 +452,18 @@ Open `http://127.0.0.1:7396` to view the Agent Dashboard. `trace` scans local AI
 sudo agentsight trace
 ```
 
+## Offline analysis
+
+Use `--stats-only` with the standalone analyzer or batch script for local perf/cost statistics without credentials or model requests.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
+
 ## Configuration
 
 AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/config.json`; falls back to embedded defaults if absent).
 
 ### SQLite Storage (`storage`)
 
-`agentsight.json` schema v4 gives every AgentSight-owned SQLite store the same three policy keys:
+`agentsight.json` schema v5 gives every AgentSight-owned SQLite store the same three policy keys:
 `retention_days`, `max_db_size_mb`, and `check_interval_secs`. A zero value disables the
 corresponding age, capacity, or scheduled-maintenance rule. Primary and GenAI maintenance default
 to 60 seconds; reuse, causal, and enforcement stores also have explicit policies. One lightweight
@@ -420,7 +472,7 @@ per-database locks coordinate `trace` and `serve`. Cleanup removes expired recor
 before size pruning, and targets 90% logical usage after physical allocation crosses the limit;
 automatic maintenance never runs `VACUUM` and leaves freed pages reusable. The Dashboard Settings
 page shows policy, capacity, coverage, and worker health without exposing database paths. See the
-[configuration guide](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#sqlite-storage-policies).
+[configuration guide](../../docs/user-guide/en/agentsight/configuration.md#sqlite-storage-policies).
 
 ### Feature Flags (`features`)
 
@@ -446,14 +498,45 @@ Configure buffer caps to prevent unbounded memory growth:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `event_channel_capacity` | 10,000 | Bounded channel capacity for probe events |
-| `event_channel_policy` | `"backpressure"` | Full-channel policy: `backpressure` / `drop_newest` / `sample` |
+| `event_channel_policy` | `"backpressure"` | Wait for a queue slot after byte admission; `drop_newest` and `sample:N` remain available |
 | `event_channel_max_bytes_mb` | 64 | Byte budget for queued probe events (one SSL record reaches 4 MiB, so the slot count alone cannot bound memory) |
 | `pending_genai_max_count` | 1,000 | Max pending events awaiting session_id |
-| `pending_genai_max_bytes_mb` | 64 | Max bytes for pending events |
+| `pending_genai_max_bytes_mb` | 16 | Max bytes for pending events |
 | `pid_cache_size` | 1,024 | PID → agent_name LRU cache size |
+| `connection_capacity` | 128 | HTTP connection cache entries; use at least the expected concurrency and restart tracing |
 | `max_connection_body_mb` | 8 | Per-connection HTTP body buffer cap |
-| `connection_idle_timeout_secs` | 60 | HTTP connection idle timeout (seconds) |
-| `ring_buffer_mb` | 32 | eBPF Ring Buffer size (must be power of 2) |
+| `connection_idle_timeout_secs` | 60 | Soft inactivity timeout for pending SQLite snapshots |
+| `connection_hard_timeout_secs` | 300 | Finalize inactive calls as incomplete and release them; 0 disables the timeout |
+| `connection_max_bytes_mb` | 64 | Shared HTTP/1 + HTTP/2 retained payload budget |
+| `ffi_channel_max_bytes_mb` | 64 | FFI payload budget, including active callbacks |
+| `max_sse_retained_mb` | 2 | Per-stream SSE payload limit |
+| `retain_raw_sse` | `false` | Preserve original SSE sequences for raw export or debugging |
+| `ring_buffer_mb` | 64 | eBPF Ring Buffer size (must be power of 2) |
+
+Semantic-only delivery reduces SSE deltas and releases raw TLS buffers during the stream.
+In-flight connections active within the last 5 seconds are protected from capacity eviction,
+including request assembly and response waiting; when all
+entries are protected, new connections are rejected with `abandon_reason=capacity_rejected`.
+Completed HTTP/1 connections reserve their slot for 5 seconds using only an identifier and
+timestamp, allowing the next keep-alive request to reuse it without retaining payloads.
+Resource removals report bounded metadata with `incomplete=true` and `metadata_only=true`.
+Hard byte limits still permit forced reclamation.
+Probe and FFI queues enforce byte limits alongside their slot limits and count rejected events.
+These budgets cover retained payloads; process RSS also includes the ring buffer, decoder working
+memory and allocator overhead. See the [configuration reference](../../docs/user-guide/en/agentsight/configuration.md#runtime-limits)
+for timeout, raw capture and overload behavior.
+
+Configuration schema v5 ships these defaults. Startup upgrades back up and replace older config
+files; reapply custom rules and settings from the backup. The implementation is described in
+[HTTP payload ownership and memory limits](docs/design/payload-memory.md).
+
+### Runtime Metrics Export
+
+Set `AGENTSIGHT_METRICS_FILE` to write Prometheus runtime metrics to a file.
+`AGENTSIGHT_METRICS_INTERVAL_SECS` sets the minimum time between updates in
+positive whole seconds (default: `1`). A final snapshot is written on shutdown
+regardless of this interval. The interval setting has no effect when the metrics
+file is not enabled.
 
 ### Minimal Memory Configuration
 
@@ -482,6 +565,11 @@ For resource-constrained environments, disable non-essential features and reduce
 
 > With this config: idle RSS ~24–30 MB, with event traffic ~35–40 MB.
 
+## ATIF export
+
+Use `scripts/batch-analyze.py --export-atif DIRECTORY` to save converted Claude/Qoder ATIF locally without invoking an analyzer.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
+
 ## Supported LLM Providers
 
 Token parsing supports multiple LLM API formats:
@@ -491,6 +579,11 @@ Token parsing supports multiple LLM API formats:
 - Google Gemini
 - Qwen (with native chat template support)
 
+## Batch concurrency
+
+The batch script accepts opt-in `--jobs 1..8` (default 1), with bounded concurrent invocations and ordered output.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
+
 ## Origins
 
 This project is derived from [https://github.com/eunomia-bpf/agentsight.git](https://github.com/eunomia-bpf/agentsight.git).
@@ -498,3 +591,5 @@ This project is derived from [https://github.com/eunomia-bpf/agentsight.git](htt
 ## License
 
 Apache License 2.0 — see [LICENSE](../../LICENSE) for details.
+
+Remote Tokenless statistics can be recorded through the optional `tokenless_api` configuration; see [configuration](../../docs/user-guide/en/agentsight/configuration.md#tokenless-statistics-api).

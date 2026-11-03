@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|mcp__workspace__bash|mcp__qw-builtin__mcp_workspace_bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" rewrite_hook.py --agent-id qwenwork",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${QODER_PLUGIN_ROOT}/hooks/run-hook.sh\" compress_response_hook.py --agent-id qwenwork",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -19,13 +19,16 @@ use crate::accuracy::extract::CompletionClaim;
 /// Keywords indicating a verification / test action in tool commands.
 const VERIFY_KEYWORDS: &[&str] = &[
     "test",
+    "unittest",
     "pytest",
     "jest",
     "mocha",
     "vitest",
     "cargo test",
     "build",
+    "rebuild",
     "compile",
+    "recompile",
     "make",
     "cmake",
     "lint",
@@ -124,11 +127,74 @@ impl VerifyBeforeDoneStrategy {
             return false;
         }
 
-        if final_answer_lower.contains(&call.name.to_lowercase()) {
+        if Self::contains_word(final_answer_lower, &call.name.to_lowercase()) {
             return true;
         }
-        let cmd_lower = call.cmd.to_lowercase();
+        let Some(command) = Self::command_of(call) else {
+            return false;
+        };
+        let cmd_lower = command.to_lowercase();
         cmd_lower.chars().count() >= 4 && final_answer_lower.contains(&cmd_lower)
+    }
+
+    /// True when `needle` occurs in `haystack` as a whole word.
+    ///
+    /// Both tables below are matched against free-form text, where a plain
+    /// `contains` lets one word hide inside another: "already" contains
+    /// "read" (acknowledging a failed `Read`), and "latest.log" contains
+    /// "test" (satisfying the test keyword). Require a non-word character on
+    /// both sides. A trailing plural `s` still counts, so "run tests" remains
+    /// a test run.
+    ///
+    /// Only ASCII alphanumerics are word characters: every needle is ASCII,
+    /// while Chinese prose writes tool names flush against CJK characters
+    /// ("bash命令执行失败"). Treating CJK as a word character would hide that
+    /// acknowledgement.
+    fn contains_word(haystack: &str, needle: &str) -> bool {
+        fn is_word_char(c: char) -> bool {
+            c.is_ascii_alphanumeric() || c == '_'
+        }
+
+        if needle.is_empty() {
+            return false;
+        }
+        haystack.match_indices(needle).any(|(start, _)| {
+            let before_ok = haystack[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word_char(c));
+            let rest = &haystack[start + needle.len()..];
+            let after_ok = match rest.chars().next() {
+                None => true,
+                Some(c) if !is_word_char(c) => true,
+                Some('s' | 'S') => rest[1..].chars().next().is_none_or(|c| !is_word_char(c)),
+                Some(_) => false,
+            };
+            before_ok && after_ok
+        })
+    }
+
+    /// The command a call ran, when its arguments carry one.
+    ///
+    /// [`ToolCallRecord::cmd`] is the argument JSON (see `types.rs`), not a
+    /// command, so matching the keyword tables against it reads *arguments* as
+    /// actions: a `Read` of `src/tests/foo.rs` or a todo titled "run tests"
+    /// satisfied `VERIFY_KEYWORDS`, and quoting a file path in the final
+    /// answer satisfied the acknowledgement check. Read the command argument
+    /// instead, and treat a call that does not carry one as not a command.
+    fn command_of(call: &ToolCallRecord) -> Option<String> {
+        const COMMAND_KEYS: [&str; 3] = ["command", "cmd", "script"];
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&call.cmd) {
+            return COMMAND_KEYS
+                .iter()
+                .find_map(|k| json.get(k).and_then(|v| v.as_str()))
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+        }
+        // The summary is truncated, so a long argument string does not parse.
+        // A file-scoped call is never a command; for a command-scoped one the
+        // truncated summary *is* the command text.
+        call.target.is_none().then(|| call.cmd.clone())
     }
 
     /// Oracle (b): claims success but never ran any verification action.
@@ -141,8 +207,13 @@ impl VerifyBeforeDoneStrategy {
         }
 
         let has_verification = ctx.inv.tool_calls.iter().any(|call| {
-            let cmd_lower = call.cmd.to_lowercase();
-            VERIFY_KEYWORDS.iter().any(|kw| cmd_lower.contains(kw))
+            let Some(command) = Self::command_of(call) else {
+                return false;
+            };
+            let cmd_lower = command.to_lowercase();
+            VERIFY_KEYWORDS
+                .iter()
+                .any(|kw| Self::contains_word(&cmd_lower, kw))
         });
 
         if has_verification {
@@ -189,6 +260,7 @@ impl Detector for VerifyBeforeDoneStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy::detector::JudgmentLog;
     use crate::accuracy::extract::SharedExtraction;
     use crate::llm::LlmClient;
     use crate::trace::TraceInventory;
@@ -201,7 +273,17 @@ mod tests {
             dur: 1.0,
             cmd: cmd.into(),
             err,
+            target: None,
             result_tokens: None,
+        }
+    }
+
+    /// A file-scoped call, as `trace.rs` records one: `target` is the path the
+    /// call acts on and `cmd` is the argument JSON.
+    fn make_file_call(name: &str, cmd: &str, target: &str, start: f64) -> ToolCallRecord {
+        ToolCallRecord {
+            target: Some(target.into()),
+            ..make_call(name, cmd, start, false)
         }
     }
 
@@ -213,12 +295,14 @@ mod tests {
         inv: &'a TraceInventory,
         client: &'a LlmClient,
         extraction: &'a SharedExtraction,
+        judgments: &'a JudgmentLog,
     ) -> AnalysisCtx<'a> {
         AnalysisCtx {
             inv,
             client,
             repo_root: None,
             extraction,
+            judgments,
         }
     }
 
@@ -239,7 +323,8 @@ mod tests {
         };
         let client = make_client();
         let extraction = SharedExtraction::default();
-        let ctx = make_ctx(&inv, &client, &extraction);
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
 
         let issues = VerifyBeforeDoneStrategy::find_unrecovered_errors(&ctx, &claims());
         assert_eq!(issues.len(), 1);
@@ -260,7 +345,8 @@ mod tests {
         };
         let client = make_client();
         let extraction = SharedExtraction::default();
-        let ctx = make_ctx(&inv, &client, &extraction);
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
 
         let issues = VerifyBeforeDoneStrategy::find_unrecovered_errors(&ctx, &claims());
         assert!(issues.is_empty());
@@ -284,5 +370,183 @@ mod tests {
             "有一步失败了",
             &call
         ));
+    }
+
+    /// Chinese prose writes a Latin tool name flush against the following
+    /// character. Those CJK characters are boundaries, not part of the word,
+    /// so the failure admission still acknowledges the call.
+    #[test]
+    fn cjk_character_after_a_tool_name_is_a_boundary() {
+        let call = make_call("Bash", "cargo run", 1.0, true);
+        assert!(VerifyBeforeDoneStrategy::is_error_acknowledged(
+            "bash命令执行失败，未能完成",
+            &call
+        ));
+    }
+
+    /// `cmd` is the argument JSON, so matching `VERIFY_KEYWORDS` against it
+    /// counted a *path* as a verification action: a trace that only read and
+    /// edited files under `tests/` looked like it had run the suite, and the
+    /// "claims done without verifying" finding was suppressed.
+    #[test]
+    fn file_paths_are_not_verification_actions() {
+        let inv = TraceInventory {
+            tool_calls: vec![
+                make_file_call(
+                    "Read",
+                    r#"{"file_path":"src/tests/foo.rs"}"#,
+                    "src/tests/foo.rs",
+                    1.0,
+                ),
+                make_file_call(
+                    "Edit",
+                    r#"{"file_path":"tests/test_api.py","new_string":"assert x"}"#,
+                    "tests/test_api.py",
+                    2.0,
+                ),
+            ],
+            user_turns: vec![],
+            final_answer: "全部完成".into(),
+            skill_contract: None,
+        };
+        let client = make_client();
+        let extraction = SharedExtraction::default();
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
+
+        let issue = VerifyBeforeDoneStrategy::check_no_verification(&ctx, &claims());
+        assert!(
+            issue.is_some(),
+            "reading and editing test files is not a verification action"
+        );
+    }
+
+    /// The other direction: a real verification command still counts.
+    #[test]
+    fn a_test_command_is_a_verification_action() {
+        let inv = TraceInventory {
+            tool_calls: vec![make_call(
+                "Bash",
+                r#"{"command":"cargo test --all"}"#,
+                1.0,
+                false,
+            )],
+            user_turns: vec![],
+            final_answer: "全部完成".into(),
+            skill_contract: None,
+        };
+        let client = make_client();
+        let extraction = SharedExtraction::default();
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
+
+        assert!(VerifyBeforeDoneStrategy::check_no_verification(&ctx, &claims()).is_none());
+    }
+
+    /// The stdlib runner names the test action "unittest"; "test" alone no
+    /// longer matches inside it, so the runner needs its own keyword.
+    #[test]
+    fn python_unittest_is_a_verification_action() {
+        let inv = TraceInventory {
+            tool_calls: vec![make_call(
+                "Bash",
+                r#"{"command":"python -m unittest discover -s tests"}"#,
+                1.0,
+                false,
+            )],
+            user_turns: vec![],
+            final_answer: "全部完成".into(),
+            skill_contract: None,
+        };
+        let client = make_client();
+        let extraction = SharedExtraction::default();
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
+
+        assert!(VerifyBeforeDoneStrategy::check_no_verification(&ctx, &claims()).is_none());
+    }
+
+    /// Acknowledging a failure by quoting the command now matches the command
+    /// argument; comparing the final answer against the argument JSON never
+    /// could.
+    #[test]
+    fn acknowledged_by_quoting_the_command() {
+        let call = make_call("Bash", r#"{"command":"cargo test --all"}"#, 1.0, true);
+        assert!(VerifyBeforeDoneStrategy::is_error_acknowledged(
+            "有一步失败了：cargo test --all 没能跑通",
+            &call
+        ));
+    }
+
+    /// A tool name inside an unrelated word is not a mention of the tool:
+    /// "already" contains "read", so a generic failure admission used to
+    /// acknowledge every failed `Read` call and suppress the L1 issue.
+    #[test]
+    fn embedded_words_do_not_acknowledge_a_failed_tool() {
+        let inv = TraceInventory {
+            tool_calls: vec![make_call(
+                "Read",
+                r#"{"file_path":"src/lib.rs"}"#,
+                1.0,
+                true,
+            )],
+            user_turns: vec![],
+            final_answer: "I already fixed the error".into(),
+            skill_contract: None,
+        };
+        let client = make_client();
+        let extraction = SharedExtraction::default();
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
+
+        let issues = VerifyBeforeDoneStrategy::find_unrecovered_errors(&ctx, &claims());
+        assert_eq!(
+            issues.len(),
+            1,
+            "\"already\" is not a mention of the failed Read tool"
+        );
+
+        // A real token still acknowledges the failure.
+        let call = make_call("Read", r#"{"file_path":"src/lib.rs"}"#, 1.0, true);
+        assert!(VerifyBeforeDoneStrategy::is_error_acknowledged(
+            "the read failed on src/lib.rs",
+            &call
+        ));
+    }
+
+    /// Verification keywords are matched against command lines, where a
+    /// substring is not an action: "latest.log" used to satisfy "test".
+    #[test]
+    fn keywords_inside_longer_words_are_not_verification() {
+        let inv = TraceInventory {
+            tool_calls: vec![make_call(
+                "Bash",
+                r#"{"command":"cat latest.log"}"#,
+                1.0,
+                false,
+            )],
+            user_turns: vec![],
+            final_answer: "全部完成".into(),
+            skill_contract: None,
+        };
+        let client = make_client();
+        let extraction = SharedExtraction::default();
+        let judgments = JudgmentLog::default();
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
+
+        assert!(
+            VerifyBeforeDoneStrategy::check_no_verification(&ctx, &claims()).is_some(),
+            "\"latest\" is not a test run"
+        );
+
+        // The plural spelling still counts as a verification action.
+        let inv = TraceInventory {
+            tool_calls: vec![make_call("Bash", r#"{"command":"run tests"}"#, 1.0, false)],
+            user_turns: vec![],
+            final_answer: "全部完成".into(),
+            skill_contract: None,
+        };
+        let ctx = make_ctx(&inv, &client, &extraction, &judgments);
+        assert!(VerifyBeforeDoneStrategy::check_no_verification(&ctx, &claims()).is_none());
     }
 }

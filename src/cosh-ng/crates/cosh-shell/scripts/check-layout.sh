@@ -401,6 +401,110 @@ EOF
 fi
 
 section "Integration test layout"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "violation: python3 is required for recursive test-layer auditing"
+  record_failure
+elif ! python3 - <<'PY'
+import hashlib
+import pathlib
+import re
+import sys
+
+crate = pathlib.Path("crates/cosh-shell")
+tests = crate / "tests"
+sources = [path.resolve() for path in pathlib.Path("crates").glob("*/src")]
+logic = (tests / "logic").resolve()
+legacy_helper = (tests / "support/tools.rs").resolve()
+legacy_helper_sha256 = "a92869db3d0426394582437a492b11bd4a8068d07f9ab2a2206281e0f8ac0005"
+legacy_consumer = tests / "logic/tools.rs"
+legacy_consumer_sha256 = "985d0bb7dffd8826e33e715c99cabc17a8a196a25afc783e88b451128e194f85"
+legacy_reference = re.compile(r"\bsupport_tools\b")
+legacy_binding = re.compile(r'#\[path = "support/tools.rs"\]\s*mod support_tools;')
+spawn = re.compile(
+    r"Command\s*::\s*new\s*\(|process\s*::\s*Command\b|"
+    r"process\s*::\s*\{[^}]*\bCommand\b|CommandExt\b|"
+    r"libc\s*::\s*fork\b|posix_spawn\b|\.\s*pre_exec\s*\(|"
+    r"\bopenpty\s*\(|CARGO_BIN_EXE_cosh-shell"
+)
+code_include = re.compile(r"\binclude\s*!\s*[({\[]")
+string_literal = r'(?:r(?P<hashes>#{0,})"(?P<raw>.*?)"(?P=hashes)|"(?P<normal>[^"]*)")'
+path_attribute = re.compile(r'#\s*\[[^\]]*\bpath\s*=\s*' + string_literal + r'[^\]]*\]', re.S)
+failures = []
+
+def report(path, text, match, reason):
+    line = text.count("\n", 0, match.start()) + 1 if match else 1
+    failures.append(f"{path}:{line}: violation: {reason}")
+
+def target_path(path, literal):
+    value = literal.group("raw") if literal.group("raw") is not None else literal.group("normal")
+    return (path.parent / value).resolve()
+
+def escaped_code_reference(literal):
+    normal = literal.group("normal")
+    return normal is not None and "\\" in normal
+
+def crosses_logic_layer(path, target, reference):
+    if logic in target.parents:
+        return False
+    # Freeze the existing tools fixture; new helper imports cannot hide spawns.
+    if path == tests / "logic.rs" and target == legacy_helper:
+        binding = legacy_binding.search(path.read_text())
+        return (
+            hashlib.sha256(target.read_bytes()).hexdigest() != legacy_helper_sha256
+            or binding is None
+            or binding.start() != reference.start()
+        )
+    return True
+
+def is_production_source(target):
+    return any(root == target or root in target.parents for root in sources)
+
+for path, expected in ((legacy_helper, legacy_helper_sha256), (legacy_consumer, legacy_consumer_sha256)):
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        report(path, "", None, "frozen legacy tools fixture changed")
+
+for path in sorted(tests.rglob("*.rs")):
+    text = path.read_text()
+    is_logic = path == tests / "logic.rs" or tests / "logic" in path.parents
+    if is_logic:
+        for match in legacy_reference.finditer(text):
+            binding = legacy_binding.search(text) if path == tests / "logic.rs" else None
+            if path == legacy_consumer:
+                continue
+            if binding and binding.start() <= match.start() < binding.end():
+                continue
+            report(path, text, match, "logic escapes through the frozen legacy tools helper")
+        for match in spawn.finditer(text):
+            report(path, text, match, "logic layer contains subprocess/binary/PTY code")
+    for match in code_include.finditer(text):
+        literal = re.match(r'\s*' + string_literal, text[match.end():], re.S)
+        if literal is None:
+            report(path, text, match, "test code include must use a literal test-fixture path")
+        elif escaped_code_reference(literal):
+            report(path, text, match, "ordinary code-reference path contains a backslash; use a raw string")
+        elif is_production_source(target_path(path, literal)):
+            report(path, text, match, "test includes a production-source copy")
+        elif is_logic and crosses_logic_layer(path, target_path(path, literal), match):
+            report(path, text, match, "logic source reference crosses test layer")
+    for match in path_attribute.finditer(text):
+        if escaped_code_reference(match):
+            report(path, text, match, "ordinary code-reference path contains a backslash; use a raw string")
+            continue
+        target = target_path(path, match)
+        if is_production_source(target):
+            report(path, text, match, "test module points into production source")
+        elif is_logic and crosses_logic_layer(path, target, match):
+            report(path, text, match, "logic source reference crosses test layer")
+
+for failure in failures:
+    print(failure)
+if failures:
+    sys.exit(1)
+print("ok: recursive logic boundaries and test source references")
+PY
+then
+  record_failure
+fi
 for target in raw_cli shell_host logic protocol; do
   file="crates/cosh-shell/tests/${target}.rs"
   if [ -f "$file" ]; then

@@ -52,8 +52,8 @@ require_file() {
 
 default_contract_path() {
     case "$TARGET_OS" in
-        linux) printf '%s/.anolisa/component.toml\n' "$SOURCE_ROOT" ;;
-        macos) printf '%s/.anolisa/component.macos.toml\n' "$SOURCE_ROOT" ;;
+        linux) printf '%s/packaging/anolisa/raw/component.toml\n' "$SOURCE_ROOT" ;;
+        macos) printf '%s/packaging/anolisa/raw/component.macos.toml\n' "$SOURCE_ROOT" ;;
     esac
 }
 
@@ -98,10 +98,7 @@ stage_payload() {
         "$stage/libexec/anolisa/cosh-ng" \
         "$stage/share/doc/cosh-ng"
     install -p -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
-    install -p -m 0755 "$BIN_DIR/cosh-cli" "$stage/bin/cosh-cli"
-    install -p -m 0755 "$BIN_DIR/cosh-core" "$BIN_DIR/cosh-gateway" \
-        "$BIN_DIR/cosh-shell" \
-        "$stage/libexec/anolisa/cosh-ng/"
+    cosh_copy_binaries "$BIN_DIR" "$stage" /bin /libexec/anolisa/cosh-ng
     install -p -m 0755 \
         "$SCRIPT_DIR/assets/bin/cosh" \
         "$SCRIPT_DIR/assets/bin/cosh-switch" \
@@ -113,9 +110,7 @@ stage_payload() {
         install -p -m 0644 \
             "$SOURCE_ROOT/packaging/systemd/cosh-gateway@.service.in" \
             "$stage/share/anolisa/cosh-ng/"
-        install -p -m 0644 \
-            "$SOURCE_ROOT/skills/manage-task-checkpoints/SKILL.md" \
-            "$stage/share/anolisa/skills/manage-task-checkpoints/SKILL.md"
+        cosh_copy_skills "$SOURCE_ROOT" "$stage/share/anolisa/skills"
     fi
     install -p -m 0644 "$SOURCE_ROOT/LICENSE" "$stage/share/doc/cosh-ng/LICENSE"
     install -p -m 0644 "$SOURCE_ROOT/README.md" "$stage/share/doc/cosh-ng/README.md"
@@ -141,7 +136,12 @@ COMMAND="${1:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=packaging/payload.sh
+source "$SCRIPT_DIR/../payload.sh"
 SOURCE_ROOT="${COSH_NG_SOURCE_DIR:-$DEFAULT_ROOT}"
+# Existing raw manifests describe the ANOLISA profile, not arbitrary layouts.
+AWPRJ="${AWPRJ-anolisa}"
+[ "$AWPRJ" = anolisa ] || die 'raw packages require AWPRJ=anolisa; use make install for independent file installation'
 BIN_DIR="${BIN_DIR:-$SOURCE_ROOT/target/release}"
 TARGET_OS="$(normalize_os "${TARGET_OS:-$(detect_os)}")"
 TARGET_ARCH="$(normalize_arch "${TARGET_ARCH:-$(detect_arch)}")"
@@ -160,7 +160,7 @@ for input in \
     "$SCRIPT_DIR/assets/bin/cosh-switch"; do
     require_file "$input"
 done
-for binary in cosh-cli cosh-core cosh-gateway cosh-shell; do
+for binary in cosh-cli $COSH_PRIVATE_BINARIES; do
     [ -x "$BIN_DIR/$binary" ] || die "missing executable: $BIN_DIR/$binary"
 done
 

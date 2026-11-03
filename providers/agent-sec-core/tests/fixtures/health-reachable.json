@@ -1,0 +1,9 @@
+{
+  "api_version": "aw-sec-core-health/v1alpha1",
+  "helper_installed": true,
+  "socket_configured": true,
+  "backend": "authenticated_reachable",
+  "admission": "unknown",
+  "check_result": "unknown",
+  "code": null
+}

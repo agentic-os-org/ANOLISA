@@ -1,0 +1,13 @@
+[package]
+name = "aw-exec"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Bounded command execution for AW native hooks and Provider transports"
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }

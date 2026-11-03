@@ -1,0 +1,21 @@
+Cisco Static Scanner adapter notice
+===================================
+
+This package implements a static-only Skill scanner for agent-sec-core.  The
+rule coverage and analyzer boundaries are derived from the Cisco AI Defense
+skill-scanner StaticAnalyzer design, but this adapter intentionally does not
+vendor the full cisco-ai-skill-scanner package and does not include or invoke
+YARA support.
+
+The bundled rules are best-effort static heuristics.  They are intended to
+surface common suspicious patterns during Skill certification, not to provide
+complete malware detection or bypass-resistant analysis.
+
+Upstream project:
+  https://github.com/cisco-ai-defense/skill-scanner
+
+Relevant upstream component:
+  skill_scanner/core/analyzers/static.py
+
+Upstream license:
+  Apache License 2.0

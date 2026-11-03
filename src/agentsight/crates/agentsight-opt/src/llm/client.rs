@@ -244,6 +244,23 @@ impl LlmClient {
             return stripped.to_string();
         }
 
+        // A text wrapper may precede an array of objects. Keep its outer
+        // array before considering an inner object, but do not mistake
+        // incidental bracketed prose for JSON.
+        if let Some(start) = stripped.find('[') {
+            if let Some(end) = stripped.rfind(']') {
+                let contains_first_object = stripped
+                    .find('{')
+                    .is_none_or(|object| start < object && object < end);
+                if end > start && contains_first_object {
+                    let candidate = &stripped[start..=end];
+                    if serde_json::from_str::<Vec<serde_json::Value>>(candidate).is_ok() {
+                        return candidate.to_string();
+                    }
+                }
+            }
+        }
+
         // Object-rooted responses (or free text containing an object): use
         // the outermost { ... } span.
         if let Some(start) = stripped.find('{') {
@@ -511,6 +528,67 @@ mod tests {
             "[{\"session_id\":\"a\"},{\"session_id\":\"b\"}]"
         );
         assert_eq!(LlmClient::extract_json(" no json "), "no json");
+    }
+
+    #[test]
+    fn wrapped_object_arrays_keep_their_top_level_shape() {
+        for raw in [
+            r#"Here is the ranking: [{"session_id":"a","relevance":"high","reason":"first fixture match"},{"session_id":"b","relevance":"medium","reason":"second fixture match"}]"#,
+            "Here is the ranking:\n```json\n[{\"session_id\":\"a\",\"relevance\":\"high\",\"reason\":\"first fixture match\"},{\"session_id\":\"b\",\"relevance\":\"medium\",\"reason\":\"second fixture match\"}]\n```\n",
+        ] {
+            let cleaned = LlmClient::extract_json(raw);
+            let items: Vec<serde_json::Value> = serde_json::from_str(&cleaned)
+                .expect("text wrappers must not turn an array into inner objects");
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["session_id"], "a");
+            assert_eq!(items[1]["session_id"], "b");
+        }
+    }
+
+    #[test]
+    fn wrapped_objects_keep_their_nested_array() {
+        let cleaned = LlmClient::extract_json(r#"Result: {"items":[1,2]} afterword"#);
+        let object: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
+        assert_eq!(object["items"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn incidental_bracketed_prose_does_not_replace_a_wrapped_object() {
+        let cleaned = LlmClient::extract_json(r#"Result [section]: {"items":[1,2]} afterword"#);
+        let object: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
+        assert_eq!(object["items"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn literal_json_arrays_in_prose_keep_the_previous_object_precedence() {
+        for raw in [r#"Result [1,2]: {"a":1}"#, r#"Result []: {"a":1}"#] {
+            let object: serde_json::Value =
+                serde_json::from_str(&LlmClient::extract_json(raw)).unwrap();
+            assert_eq!(object, serde_json::json!({"a": 1}));
+        }
+    }
+
+    #[test]
+    fn wrapped_json_quotes_keep_literal_braces_and_brackets() {
+        let raw = r#"Here is the ranking: [{"session_id":"a","reason":"literal [note] and {example}"},{"session_id":"b"}]"#;
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&LlmClient::extract_json(raw)).unwrap();
+        assert_eq!(items[0]["reason"], "literal [note] and {example}");
+        assert_eq!(items.len(), 2);
+        let raw = r#"Result: {"items":[1,2],"note":"[literal] {literal}"} afterword"#;
+        let object: serde_json::Value =
+            serde_json::from_str(&LlmClient::extract_json(raw)).unwrap();
+        assert_eq!(object["note"], "[literal] {literal}");
+    }
+
+    #[test]
+    fn unmatched_brackets_in_prose_preserve_the_object_fallback() {
+        let raw = r#"Previous ] then [note: {"a":1}"#;
+        assert_eq!(LlmClient::extract_json(raw), r#"{"a":1}"#);
+        assert_eq!(
+            LlmClient::extract_json("no JSON response"),
+            "no JSON response"
+        );
     }
 
     #[test]

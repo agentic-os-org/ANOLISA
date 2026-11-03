@@ -524,7 +524,26 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_marker_input(
     current_dir: &Path,
     steps: &[(&str, &[u8])],
 ) -> String {
+    run_raw_cli_binary_with_args_env_current_dir_and_marker_input(
+        Path::new(env!("CARGO_BIN_EXE_cosh-shell")),
+        adapter,
+        extra_args,
+        envs,
+        current_dir,
+        steps,
+    )
+}
+
+pub(crate) fn run_raw_cli_binary_with_args_env_current_dir_and_marker_input(
+    binary: &Path,
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+    steps: &[(&str, &[u8])],
+) -> String {
     run_raw_cli_marker_input_inner(
+        binary,
         adapter,
         extra_args,
         envs,
@@ -541,6 +560,7 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_marker_input(
     steps: &[(&str, &[u8])],
 ) -> String {
     run_raw_cli_marker_input_inner(
+        Path::new(env!("CARGO_BIN_EXE_cosh-shell")),
         adapter,
         extra_args,
         envs,
@@ -551,6 +571,7 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_marker_input(
 }
 
 fn run_raw_cli_marker_input_inner(
+    binary: &Path,
     adapter: &str,
     extra_args: &[&str],
     envs: &[(&str, &str)],
@@ -560,7 +581,6 @@ fn run_raw_cli_marker_input_inner(
 ) -> String {
     let _run_guard = raw_cli_run_guard(run_mode);
     let mut input_readiness = RawCliInputReadiness::new();
-    let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut command = Command::new(binary);
     command
         .current_dir(current_dir)
@@ -630,7 +650,7 @@ fn run_raw_cli_marker_input_inner(
 }
 
 struct RawCliInputReadiness {
-    directory: PathBuf,
+    _directory: tempfile::TempDir,
     request_path: PathBuf,
     token: String,
     next_request: u64,
@@ -638,19 +658,22 @@ struct RawCliInputReadiness {
 
 impl RawCliInputReadiness {
     fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "cosh-raw-cli-input-ready-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).expect("create raw CLI input readiness directory");
-        let request_path = directory.join("request");
-        let token = format!("cosh-input-ready-{}-{nanos}", std::process::id());
+        let directory = tempfile::Builder::new()
+            .prefix("cosh-raw-cli-input-ready-")
+            .tempdir()
+            .expect("create exclusive raw CLI input readiness directory");
+        let request_path = directory.path().join("request");
+        let token = format!(
+            "cosh-input-ready-{}-{}",
+            std::process::id(),
+            directory
+                .path()
+                .file_name()
+                .expect("readiness directory name")
+                .to_string_lossy(),
+        );
         Self {
-            directory,
+            _directory: directory,
             request_path,
             token,
             next_request: 0,
@@ -693,12 +716,6 @@ impl RawCliInputReadiness {
         }
         stripped.extend_from_slice(&output[cursor..]);
         stripped
-    }
-}
-
-impl Drop for RawCliInputReadiness {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -1307,4 +1324,35 @@ pub(crate) fn compact_terminal_words(text: &str) -> String {
 
 fn display_width(text: &str) -> usize {
     Span::raw(text).width()
+}
+
+pub(crate) fn assert_marker_input_readiness_paths_are_exclusive() {
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                RawCliInputReadiness::new()
+            })
+        })
+        .collect();
+    let mut probes: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    let paths: std::collections::HashSet<_> =
+        probes.iter().map(|probe| &probe.request_path).collect();
+    assert_eq!(
+        paths.len(),
+        probes.len(),
+        "independent readiness writers must never alias"
+    );
+    for (index, probe) in probes.iter_mut().enumerate() {
+        probe.next_request = index as u64;
+        assert_eq!(probe.request(), index as u64 + 1);
+    }
+    let survivor = probes.pop().unwrap();
+    drop(probes);
+    assert_eq!(fs::read_to_string(&survivor.request_path).unwrap(), "4");
 }

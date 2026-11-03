@@ -1,0 +1,57 @@
+# Copy this file and replace /absolute/path placeholders before running it.
+# All four targets share the same policy; native profiles remain separate.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: shared-tool-policy
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: /absolute/path/to/aw-state
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [qodercli]
+    openclaw:
+      adapter: openclaw
+      argv: [openclaw, gateway, run]
+    qwenpaw:
+      adapter: qwenpaw
+      argv: [qwenpaw, app]
+    hermes:
+      adapter: hermes
+      argv: [hermes, chat]
+  providers:
+    check-tool:
+      transport:
+        type: stdio
+        location: agent
+        argv: [/usr/bin/python3, /absolute/path/to/check-tool.py]
+      timeout_ms: 1000
+      max_output_bytes: 32
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: check-marker
+          provider: check-tool
+          effects: [block]
+          reason_code: demo_marker_denied
+          on_error: block
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: observe-completion
+          provider: check-tool
+          effects: [observe]
+          reason_code: demo_tool_observed
+          on_error: report

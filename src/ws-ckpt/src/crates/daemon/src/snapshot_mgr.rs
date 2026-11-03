@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -148,7 +149,7 @@ pub(crate) async fn delete_snapshots_locked(
         let removed_set = removed.iter().cloned().collect();
         ws.index.prune_chain(&removed_set);
         for id in &removed {
-            ws.index.snapshots.remove(id);
+            ws.remove_snapshot(id);
             ws.index.governed_evidence.remove(id);
             ws.index.recovered_orphans.remove(id);
         }
@@ -234,12 +235,30 @@ pub async fn checkpoint(
     // 2. Acquire write lock after the mutation mutex.
     let mut ws = arc.write().await;
 
-    // 2a. Check write-lock quiescence (inotify-based)
-    if !state.check_workspace_quiescent(&ws.ws_id).await {
-        return Ok(Response::Error {
-            code: ErrorCode::WriteLockConflict,
-            message: "Workspace has active write operations. Please wait and retry.".to_string(),
-        });
+    // 2a. Check write-lock quiescence (inotify-based). The workspace write
+    // lock is held here, so the registration path is handed to the check
+    // directly instead of its opportunistic (never-runnable) heal path.
+    match state
+        .check_workspace_quiescent(&ws.ws_id, Some(&ws.path))
+        .await
+    {
+        crate::state::Quiescence::Safe => {}
+        crate::state::Quiescence::Writing => {
+            return Ok(Response::Error {
+                code: ErrorCode::WriteLockConflict,
+                message: "Workspace has active write operations. Please wait and retry."
+                    .to_string(),
+            })
+        }
+        crate::state::Quiescence::MonitoringUnavailable => {
+            return Ok(Response::Error {
+                code: ErrorCode::WriteLockConflict,
+                message:
+                    "Write monitoring is unavailable (the write watcher is stale and re-arming \
+                     failed). Please retry after the watcher recovers."
+                        .to_string(),
+            })
+        }
     }
 
     // 3. Check snapshot ID uniqueness within this workspace
@@ -266,27 +285,32 @@ pub async fn checkpoint(
         });
     }
 
-    // 5. Disk space note: btrfs snapshot creation is a pure metadata/COW
-    //    operation that succeeds even on a full disk, so we do NOT block
-    //    checkpoint here.  Space reporting is still available via `ws-ckpt status`
-    //    and the health-check scheduler.
+    // 5. Disk space: the backend refuses subvolume creation under data or
+    //    metadata pressure before any side effect (#7234).
 
     // 6. Construct paths
     let snap_dir = state.index_dir(&ws.ws_id);
     // make sure index directory exists
     tokio::fs::create_dir_all(&snap_dir).await?;
 
-    // 7. Create readonly snapshot via backend
+    // 7. Parse metadata BEFORE the backend creates the subvolume. A parse
+    //    failure after `create_snapshot` would strand an on-disk snapshot the
+    //    index never records: `list` cannot see it, `delete` answers
+    //    SnapshotNotFound, a same-ID retry fails with a raw btrfs EEXIST, and
+    //    only a daemon restart adopts it as a pinned recovered orphan. The
+    //    guarded V2 path validates metadata first for the same reason.
+    let parsed_metadata = match metadata {
+        Some(ref s) => Some(serde_json::from_str(s).context("invalid metadata JSON")?),
+        None => None,
+    };
+
+    // 8. Create readonly snapshot via backend
     state
         .backend
         .create_snapshot(&ws.ws_id, &snapshot_id)
         .await?;
 
-    // 8. Build metadata
-    let parsed_metadata = match metadata {
-        Some(ref s) => Some(serde_json::from_str(s)?),
-        None => None,
-    };
+    // 9. Build metadata
     let meta = SnapshotMeta {
         message,
         metadata: parsed_metadata,
@@ -297,29 +321,29 @@ pub async fn checkpoint(
         child_ids: vec![ws_ckpt_common::LIVE_CHILD.to_string()],
     };
 
-    // 9. Update index (maintain DAG bidirectional pointers)
+    // 10. Update index (maintain DAG bidirectional pointers)
     if let Some(old_head) = ws.index.head.clone() {
         if let Some(hm) = ws.index.snapshots.get_mut(&old_head) {
             hm.child_ids.retain(|c| c != ws_ckpt_common::LIVE_CHILD);
             hm.child_ids.push(snapshot_id.clone());
         }
     }
-    ws.index.snapshots.insert(snapshot_id.clone(), meta);
+    ws.insert_snapshot(snapshot_id.clone(), meta);
     ws.index.head = Some(snapshot_id.clone());
 
-    // 10. Persist index
+    // 11. Persist index
     index_store::save(&snap_dir, &ws.index).await?;
 
-    // 10a. Release write lock before save_manifest (try_read inside
+    // 11a. Release write lock before save_manifest (try_read inside
     //      collect_workspace_entries would fail while write lock is held)
     drop(ws);
 
-    // 10b. Save manifest
+    // 11b. Save manifest
     if let Err(e) = state.save_manifest().await {
         tracing::warn!("save_manifest failed after checkpoint: {:#}", e);
     }
 
-    // 11. Return success
+    // 12. Return success
     Ok(Response::CheckpointOk { snapshot_id })
 }
 
@@ -370,6 +394,11 @@ pub async fn rollback(
 
     // 5. Rollback via backend (includes warmup, snapshot, cleanup)
     state.backend.rollback(&ws.ws_id, &resolved_id).await?;
+
+    // 5a. The backend swapped the live subvolume (rename aside + snapshot
+    // recreate + delete). The inotify watch still names the retired inode,
+    // so re-arm it or every later checkpoint's quiescence check is a no-op.
+    state.rearm_watcher(&ws.ws_id, &ws.path);
 
     // 6. Update head + migrate LIVE_CHILD
     if let Some(old_head) = ws.index.head.clone() {
@@ -447,21 +476,28 @@ fn resolve_rollback_target(
     num_ancestors: Option<u32>,
 ) -> Result<String, Box<Response>> {
     if let Some(n) = num_ancestors {
-        return index
-            .ancestor(n as usize)
-            .map(|(id, _)| id.clone())
-            .map_err(|e| {
-                Box::new(Response::Error {
-                    code: ErrorCode::SnapshotNotFound,
-                    message: e.to_string(),
-                })
-            });
+        // The ancestor walk returns index keys verbatim: an index poisoned
+        // before the id guard existed can carry a rejected id (`__live__`,
+        // `..`) at its head or mid-chain, and the selected key drives the
+        // same backend join as a name-resolved one — so it re-passes the
+        // full id validation too.
+        let (id, _) = index.ancestor(n as usize).map_err(|e| {
+            Box::new(Response::Error {
+                code: ErrorCode::SnapshotNotFound,
+                message: e.to_string(),
+            })
+        })?;
+        if let Err(reason) = ws_ckpt_common::validate_snapshot_id(id) {
+            return Err(Box::new(Response::Error {
+                code: ErrorCode::InvalidPath,
+                message: format!("ancestor selection resolved to a rejected id: {reason}"),
+            }));
+        }
+        return Ok(id.clone());
     }
 
     if let Some(target) = to {
-        return index
-            .resolve_by_prefix(target)
-            .map(|(id, _)| id.clone())
+        return resolve_snapshot_id(index, target)
             .map_err(|err| Box::new(snapshot_resolve_error_response(target, err)));
     }
 
@@ -572,17 +608,15 @@ const LIST_CURSOR_VERSION: u8 = 1;
 const MAX_CURSOR_LEN: usize = 16 * 1024;
 const TARGET_LIST_PAGE_SIZE: u64 = 1024 * 1024;
 
+/// Stable list order shared by runtime keys and serialized cursor bounds.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct ListKey {
-    created_at: DateTime<Utc>,
-    workspace_id: String,
-    snapshot_id: String,
-}
-
-impl ListKey {
-    fn sort_key(&self) -> (DateTime<Utc>, &str, &str) {
-        (self.created_at, &self.workspace_id, &self.snapshot_id)
-    }
+pub(crate) struct ListKey {
+    /// Creation time is the primary chronological ordering field.
+    pub(crate) created_at: DateTime<Utc>,
+    /// Workspace identity breaks creation-time ties across workspaces.
+    pub(crate) workspace_id: String,
+    /// Snapshot identity makes the order total within a workspace.
+    pub(crate) snapshot_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -681,58 +715,46 @@ pub async fn list_snapshot_page(
     };
     let after = decoded.as_ref().map(|cursor| &cursor.after);
     let cursor_upper = decoded.as_ref().map(|cursor| &cursor.upper);
-    // Keep at most limit + 1 identity keys. Compare borrowed fields before
-    // allocating candidate keys; the index is still scanned once per page.
+    // Seek directly past the cursor in each workspace's runtime order. Keep
+    // only limit + 1 identities globally; metadata is cloned during assembly.
     let candidate_cap = limit.saturating_add(1);
     let mut candidates: BTreeMap<ListKey, Arc<RwLock<WorkspaceState>>> = BTreeMap::new();
     let mut observed_upper: Option<ListKey> = None;
     for arc in arcs {
         let ws = arc.read().await;
-        let mut workspace_upper = None;
-        for (id, meta) in &ws.index.snapshots {
-            if orphans_only && !ws.index.recovered_orphans.contains(id) {
-                continue;
+        if orphans_only && ws.index.recovered_orphans.is_empty() {
+            continue;
+        }
+        let eligible =
+            |key: &&ListKey| !orphans_only || ws.index.recovered_orphans.contains(&key.snapshot_id);
+        // Existing timestamps may lie ahead of the wall clock after a clock
+        // correction. Preserve the first page's maximum observed key.
+        if cursor_upper.is_none() {
+            if let Some(key) = ws.snapshot_keys().iter().rev().find(eligible) {
+                if observed_upper.as_ref().is_none_or(|current| key > current) {
+                    observed_upper = Some(key.clone());
+                }
             }
-            let key = (meta.created_at, ws.ws_id.as_str(), id.as_str());
-            // Existing timestamps may lie ahead of the wall clock after a clock
-            // correction. Capture the maximum observed key, not Utc::now().
-            if cursor_upper.is_none() && workspace_upper.is_none_or(|current| key > current) {
-                workspace_upper = Some(key);
-            }
-            if cursor_upper.is_some_and(|upper| key > upper.sort_key())
-                || after.is_some_and(|after| key <= after.sort_key())
-            {
-                continue;
-            }
+        }
+        let bounds = (
+            after.map_or(Unbounded, Excluded),
+            cursor_upper.map_or(Unbounded, Included),
+        );
+        for key in ws.snapshot_keys().range(bounds) {
             if candidates.len() == candidate_cap
                 && candidates
                     .last_key_value()
-                    .is_some_and(|(last, _)| key >= last.sort_key())
+                    .is_some_and(|(last, _)| key >= last)
             {
+                // The remaining keys from this workspace are later still.
+                break;
+            }
+            if orphans_only && !ws.index.recovered_orphans.contains(&key.snapshot_id) {
                 continue;
             }
-            candidates.insert(
-                ListKey {
-                    created_at: meta.created_at,
-                    workspace_id: ws.ws_id.clone(),
-                    snapshot_id: id.clone(),
-                },
-                Arc::clone(&arc),
-            );
+            candidates.insert(key.clone(), Arc::clone(&arc));
             if candidates.len() > candidate_cap {
                 candidates.pop_last();
-            }
-        }
-        if let Some(key) = workspace_upper {
-            if observed_upper
-                .as_ref()
-                .is_none_or(|current| key > current.sort_key())
-            {
-                observed_upper = Some(ListKey {
-                    created_at: key.0,
-                    workspace_id: key.1.to_string(),
-                    snapshot_id: key.2.to_string(),
-                });
             }
         }
     }
@@ -907,28 +929,48 @@ pub async fn diff_snapshots(
 
 /// Resolve a snapshot reference (ID or prefix) to its ID.
 ///
+/// The reference is not necessarily the final id — `__live__` can be the
+/// unique prefix of the valid id `__live__backup` — so the dispatcher
+/// boundary only rejects shapes no valid id can contain
+/// ([`ws_ckpt_common::validate_snapshot_ref`]). The resolved key is what
+/// joins paths and drives backend calls, so it re-passes the full
+/// [`ws_ckpt_common::validate_snapshot_id`]: a pre-poisoned index key
+/// (traversal shape, `..`, reserved marker) must stay unreachable even
+/// though an innocuous-looking reference prefix-matches it.
+///
 /// Returns `ResolveError` directly so callers can map it to a user-facing
-/// `Response::Error { code: SnapshotNotFound, .. }` rather than bubbling up
-/// as an opaque `InternalError` via the dispatcher's anyhow fallback.
+/// `Response::Error` (`SnapshotNotFound` for lookup failures, `InvalidPath`
+/// for `Unsafe`) rather than bubbling up as an opaque `InternalError` via
+/// the dispatcher's anyhow fallback.
 fn resolve_snapshot_id(
     index: &ws_ckpt_common::SnapshotIndex,
     reference: &str,
 ) -> Result<String, ResolveError> {
-    index.resolve_by_prefix(reference).map(|(id, _)| id.clone())
+    let (id, _) = index.resolve_by_prefix(reference)?;
+    ws_ckpt_common::validate_snapshot_id(id).map_err(ResolveError::Unsafe)?;
+    Ok(id.clone())
 }
 
-/// Build a `SnapshotNotFound` response from a `ResolveError`.
+/// Build an error response from a `ResolveError`.
 fn snapshot_resolve_error_response(reference: &str, err: ResolveError) -> Response {
-    let message = match err {
-        ResolveError::NotFound => format!("snapshot not found: {}", reference),
-        ResolveError::Ambiguous(n) => {
-            format!("ambiguous snapshot prefix '{}': {} matches", reference, n)
-        }
+    let (code, message) = match err {
+        ResolveError::NotFound => (
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot not found: {}", reference),
+        ),
+        ResolveError::Ambiguous(n) => (
+            ErrorCode::SnapshotNotFound,
+            format!("ambiguous snapshot prefix '{}': {} matches", reference, n),
+        ),
+        ResolveError::Unsafe(reason) => (
+            ErrorCode::InvalidPath,
+            format!(
+                "snapshot reference '{}' resolved to a rejected id: {}",
+                reference, reason
+            ),
+        ),
     };
-    Response::Error {
-        code: ErrorCode::SnapshotNotFound,
-        message,
-    }
+    Response::Error { code, message }
 }
 
 /// Cleanup old snapshots for a workspace, keeping the most recent `keep` unpinned ones.
@@ -1009,6 +1051,9 @@ pub async fn cleanup_snapshots(
 }
 
 #[cfg(test)]
+mod pagination_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
@@ -1050,9 +1095,7 @@ mod tests {
                 let mut ws = arc.write().await;
                 let created_at = Utc::now();
                 for id in ["a", "b", "c"] {
-                    ws.index
-                        .snapshots
-                        .insert(id.into(), make_snapshot_meta_at(false, created_at));
+                    ws.insert_snapshot(id.into(), make_snapshot_meta_at(false, created_at));
                 }
                 ws.index.recovered_orphans.extend(["a".into(), "c".into()]);
             }
@@ -1109,7 +1152,7 @@ mod tests {
             {
                 let mut ws = arc.write().await;
                 for (id, seconds) in [("a", 0), ("b", 1)] {
-                    ws.index.snapshots.insert(
+                    ws.insert_snapshot(
                         id.into(),
                         make_snapshot_meta_at(false, future + Duration::seconds(seconds)),
                     );
@@ -1138,7 +1181,7 @@ mod tests {
                     .snapshot_id,
                 "b"
             );
-            arc.write().await.index.snapshots.insert(
+            arc.write().await.insert_snapshot(
                 "c".into(),
                 make_snapshot_meta_at(false, future + Duration::seconds(2)),
             );
@@ -1183,16 +1226,14 @@ mod tests {
                 Some("x".repeat((u64::from(MAX_FRAME_SIZE) - overhead - 100) as usize));
             {
                 let mut ws = arc.write().await;
-                ws.index
-                    .snapshots
-                    .insert(first.snapshot_id.clone(), entry.meta);
-                ws.index.snapshots.insert(
+                ws.insert_snapshot(first.snapshot_id.clone(), entry.meta);
+                ws.insert_snapshot(
                     upper.snapshot_id.clone(),
                     make_snapshot_meta_at(false, created_at),
                 );
                 // Simulate deletion/recreation between candidate selection and page assembly.
                 if replaced {
-                    ws.index.snapshots.insert(
+                    ws.insert_snapshot(
                         skipped.snapshot_id.clone(),
                         make_snapshot_meta_at(false, created_at + Duration::seconds(1)),
                     );
@@ -1363,9 +1404,7 @@ mod tests {
             let arc = self.state.get_by_wsid(&self.ws_id).unwrap();
             arc.write()
                 .await
-                .index
-                .snapshots
-                .insert(snapshot_id.to_string(), make_snapshot_meta(false));
+                .insert_snapshot(snapshot_id.to_string(), make_snapshot_meta(false));
         }
     }
 
@@ -1755,6 +1794,94 @@ mod tests {
             }
             other => panic!("expected SnapshotAlreadyExists, got {other:?}"),
         }
+    }
+
+    // ── Checkpoint metadata validation ordering ──
+
+    #[tokio::test]
+    async fn checkpoint_invalid_metadata_creates_no_backend_snapshot() {
+        // `metadata` must be parsed BEFORE the backend snapshot is created.
+        // Parsing after the create strands an on-disk snapshot the index never
+        // records: `list` cannot see it, `delete` answers SnapshotNotFound,
+        // a same-ID retry fails with a raw btrfs EEXIST, and only the next
+        // daemon restart adopts it as a pinned recovered orphan.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_root = tmp.path().join("meta-order-data");
+        let backend = Arc::new(PartialFailBackend::new(
+            data_root.clone(),
+            std::iter::empty(),
+        ));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend.clone() as Arc<dyn StorageBackend>,
+            tmp.path().join("state"),
+        ));
+
+        let ws_id = "ws-meta-order";
+        let subvol = data_root.join(ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        std::fs::write(subvol.join("content"), b"non-empty").unwrap();
+        let ws_path = tmp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
+        state
+            .register_workspace(
+                ws_id.to_string(),
+                ws_path.clone(),
+                SnapshotIndex::new(ws_path),
+            )
+            .unwrap();
+
+        let err = checkpoint(
+            &state,
+            ws_id,
+            "snap-1",
+            None,
+            Some("{not json".into()),
+            false,
+        )
+        .await
+        .expect_err("invalid metadata JSON must fail the checkpoint");
+
+        assert_eq!(
+            backend
+                .create_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "backend create_snapshot must not run for invalid metadata"
+        );
+        assert!(
+            format!("{err:#}").contains("invalid metadata JSON"),
+            "error should explain the metadata failure, got: {err:#}"
+        );
+
+        // The failed attempt left the ID unrecorded, so a corrected retry
+        // proceeds to the backend instead of tripping over a leftover
+        // subvolume from the rejected request.
+        assert!(matches!(
+            checkpoint(
+                &state,
+                ws_id,
+                "snap-1",
+                None,
+                Some(r#"{"k":1}"#.into()),
+                false
+            )
+            .await
+            .unwrap(),
+            Response::CheckpointOk { .. }
+        ));
+        assert_eq!(
+            backend
+                .create_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the corrected retry must reach the backend exactly once"
+        );
+        assert!(matches!(
+            list_snapshot_page(&state, Some(ws_id), 10, None, false).await.unwrap(),
+            Response::ListPageOk { snapshots, next_cursor: None }
+                if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "snap-1")
+        ));
     }
 
     // ── SnapshotMeta pinned logic test ──
@@ -2169,7 +2296,7 @@ mod tests {
             async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
                 unimplemented!()
             }
-            async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
                 unimplemented!()
             }
             async fn cleanup_snapshots(
@@ -2400,7 +2527,7 @@ mod tests {
         async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
             unimplemented!()
         }
-        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
             unimplemented!()
         }
         async fn diff(
@@ -2645,6 +2772,12 @@ mod tests {
         assert_eq!(on_disk.snapshots["snap-3"].parent_id, None);
         assert_eq!(on_disk.governed_evidence.len(), 1);
         assert!(on_disk.governed_evidence.contains_key("snap-3"));
+        drop(ws);
+        assert!(matches!(
+            list_snapshot_page(&state, Some("ws-partial"), 10, None, false).await.unwrap(),
+            Response::ListPageOk { snapshots, next_cursor: None }
+                if matches!(snapshots.as_slice(), [SnapshotListItem::Full(entry)] if entry.id == "snap-3")
+        ));
     }
 
     /// Chain fixture: snap-1 <- ... <- snap-`n`, head at snap-n carrying the
@@ -2767,7 +2900,7 @@ mod tests {
         }
         index.snapshots.get_mut("snap-5").unwrap().pinned = true;
         index.snapshots.get_mut("snap-1").unwrap().missing = true;
-        arc.write().await.index = index.clone();
+        arc.write().await.replace_index(index.clone());
         index_store::save(&fx.state.index_dir(&fx.ws_id), &index)
             .await
             .unwrap();
@@ -2822,6 +2955,13 @@ mod tests {
                 panic!("expected list response");
             };
             assert_eq!(listed.len(), 6);
+            for orphans_only in [false, true] {
+                let expected_count = if orphans_only { 3 } else { 6 };
+                assert!(matches!(
+                    list_snapshot_page(&restarted, Some(&fx.ws_id), 10, None, orphans_only).await.unwrap(),
+                    Response::ListPageOk { snapshots, next_cursor: None } if snapshots.len() == expected_count
+                ));
+            }
             for (from, to) in [("snap-4", None), ("snap-1", Some("snap-4"))] {
                 assert!(matches!(
                     diff_snapshots(&restarted, &fx.ws_id, from, to)

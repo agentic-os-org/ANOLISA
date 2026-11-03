@@ -28,7 +28,8 @@ mod unified;
 pub use unified::Aggregator;
 
 // Re-export aggregated result
-pub use result::AggregatedResult;
+pub(crate) use http::RemovedConnection;
+pub use result::{AggregatedResult, RemoveReason};
 
 // Re-export HTTP types
 pub use http::{

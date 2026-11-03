@@ -50,7 +50,7 @@ pub(crate) enum EnvKind {
         default: &'static str,
         max: Option<f64>,
     },
-    /// Opaque prompt-scanner L2 backend name; see gap G1.
+    /// Prompt-scanner L2 backend name.
     Identifier,
     /// ANOLISA data root, validated syntactically without touching the filesystem.
     DataHome { default: &'static str },

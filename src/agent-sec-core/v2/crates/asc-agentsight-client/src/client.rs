@@ -22,8 +22,8 @@ pub use reconciliation::{
     AGENTSIGHT_PREPARED_APPLY_FORMAT, AgentSightClientFactory, DEFAULT_AGENTSIGHT_ROUTE,
 };
 
-const BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v1";
-const BINDING_PLAN_SCHEMA_VERSION: u16 = 1;
+const BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v2";
+const BINDING_PLAN_SCHEMA_VERSION: u16 = 2;
 const ACTPLANE_POLICY_MEDIA_TYPE: &str = "application/vnd.actplane.dsl.v1";
 const MAX_PLAN_BYTES: usize = 1024 * 1024;
 const BINDING_ID_NAME_PREFIX: &str = "urn:agentseccore:agentsight-binding:";
@@ -63,6 +63,7 @@ pub struct AgentSightClient<T, R> {
     transport: T,
     process_identity: R,
     reconcile_route: Option<String>,
+    endpoint: Option<String>,
 }
 
 impl<T, R> AgentSightClient<T, R> {
@@ -72,6 +73,7 @@ impl<T, R> AgentSightClient<T, R> {
             transport,
             process_identity,
             reconcile_route: None,
+            endpoint: None,
         }
     }
 }
@@ -94,10 +96,9 @@ impl AgentSightClient<UreqAgentSightTransport, ProcProcessIdentityResolver> {
         token_file: impl AsRef<Path>,
     ) -> Result<Self, AgentSightClientConfigError> {
         let transport = UreqAgentSightTransport::from_token_file(base_url, token_file)?;
-        Ok(Self::with_dependencies(
-            transport,
-            ProcProcessIdentityResolver,
-        ))
+        let mut client = Self::with_dependencies(transport, ProcProcessIdentityResolver);
+        client.endpoint = Some(crate::transport::normalize_base_url(base_url)?);
+        Ok(client)
     }
 }
 
@@ -106,16 +107,26 @@ where
     T: AgentSightTransport,
     R: ProcessIdentityResolver,
 {
+    #[tracing::instrument(skip_all, name = "policy.agentsight.apply", fields(target_id = %request_body.binding_id))]
     fn post_request(
         &self,
         request_body: &ApplyBindingRequest,
         body: Vec<u8>,
     ) -> Result<AgentSightDeploymentState, AgentSightClientError> {
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_agentsight",
+            target_id = %request_body.binding_id, "AgentSight Apply started"
+        );
         let response = self.send(&AgentSightHttpRequest {
             method: AgentSightHttpMethod::Post,
             path: ENFORCEMENT_BINDINGS_PATH.to_owned(),
             body: Some(body),
         })?;
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_agentsight",
+            target_id = %request_body.binding_id, status = response.status,
+            "AgentSight Apply response received"
+        );
         if !(200..300).contains(&response.status) {
             return Err(classify_http_error(response.status, &response.body));
         }
@@ -140,6 +151,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip_all, name = "policy.agentsight.delete", fields(target_id = %target_binding_id))]
     fn delete_target_id(
         &self,
         target_binding_id: Uuid,
@@ -281,9 +293,6 @@ struct AgentSightSourceBinding {
     policy_id: ResourceId,
     policy_revision: Revision,
     scope_id: ResourceId,
-    // Earlier v1 plans omitted this informational field.
-    #[serde(default)]
-    scope_revision: Option<Revision>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,7 +310,10 @@ struct AgentSightPolicyPlan {
     deny_unknown_fields
 )]
 enum AgentSightScopePlan {
-    ProcessTree { root_pid: i32 },
+    ProcessTree {
+        root_pid: i32,
+        process: asc_policy_types::process_discovery::ProcessIdentity,
+    },
 }
 
 struct DecodedPlan {
@@ -312,6 +324,7 @@ struct DecodedPlan {
     policy_revision: Revision,
     root_pid: i32,
     policy_dsl: String,
+    process: asc_policy_types::process_discovery::ProcessIdentity,
 }
 
 impl DecodedPlan {
@@ -350,13 +363,16 @@ fn decode_plan(plan: &TargetBindingPlan) -> Result<DecodedPlan, AgentSightClient
         policy_id,
         policy_revision,
         scope_id: _scope_id,
-        scope_revision: _scope_revision,
     } = plan.source;
     if plan.policy.media_type != ACTPLANE_POLICY_MEDIA_TYPE || plan.policy.content.is_empty() {
         return Err(rejected("AGENTSIGHT_UNSUPPORTED_POLICY_ARTIFACT"));
     }
-    let AgentSightScopePlan::ProcessTree { root_pid } = plan.scope;
-    if root_pid <= 0 {
+    let AgentSightScopePlan::ProcessTree { root_pid, process } = plan.scope;
+    if root_pid <= 0
+        || u32::try_from(root_pid).ok() != Some(process.pid)
+        || process.start_time == 0
+        || process.pid_namespace.is_empty()
+    {
         return Err(rejected("AGENTSIGHT_INVALID_SCOPE"));
     }
     Ok(DecodedPlan {
@@ -367,6 +383,7 @@ fn decode_plan(plan: &TargetBindingPlan) -> Result<DecodedPlan, AgentSightClient
         policy_revision,
         root_pid,
         policy_dsl: plan.policy.content,
+        process,
     })
 }
 

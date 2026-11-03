@@ -31,6 +31,242 @@ use super::types::{
     OpenAiSseChunk,
 };
 
+/// Upper bound on tool-call slots reconstructed from one streamed response.
+///
+/// `index` comes off the wire and slots are allocated up to that value, so the
+/// same bound the semantic builder applies to the DashScope native envelope
+/// keeps a malformed or hostile value from selecting an unrelated slot.
+const MAX_TOOL_CALL_SLOTS: u64 = 256;
+
+/// Bounded per-item state shared by live parsing and drain enrichment.
+///
+/// Responses argument events identify their output item, so a new call must
+/// not flush a previous call that can still receive deltas. Unidentified
+/// compatible-provider events retain the sequential, most-recent-call fallback.
+#[derive(Default)]
+pub(crate) struct ResponsesToolCalls {
+    calls: Vec<ResponseToolCall>,
+    current: Option<usize>,
+}
+
+struct ResponseToolCall {
+    index: Option<u64>,
+    item_id: Option<String>,
+    id: String,
+    name: String,
+    arguments: String,
+    done: bool,
+}
+
+impl ResponsesToolCalls {
+    /// Apply a call lifecycle event without redirecting unknown item IDs.
+    pub(crate) fn observe(&mut self, event: &serde_json::Value) {
+        let kind = event.get("type").and_then(|v| v.as_str());
+        let index = event.get("output_index").and_then(|v| v.as_u64());
+        if event.get("output_index").is_some() && index.is_none() {
+            return;
+        }
+        let added = kind == Some("response.output_item.added");
+        let item_done = kind == Some("response.output_item.done");
+        let item = event.get("item");
+        let item_id = if added || item_done {
+            item.and_then(|i| i.get("id"))
+        } else {
+            event.get("item_id")
+        }
+        .and_then(|v| v.as_str());
+        let identified = index.is_some() || item_id.is_some();
+        let position = if identified {
+            self.calls.iter().position(|call| {
+                let matches = index.is_some_and(|i| call.index == Some(i))
+                    || item_id.is_some_and(|id| call.item_id.as_deref() == Some(id));
+                let conflict = index.zip(call.index).is_some_and(|(a, b)| a != b)
+                    || item_id
+                        .zip(call.item_id.as_deref())
+                        .is_some_and(|(a, b)| a != b);
+                matches && !conflict
+            })
+        } else {
+            self.current
+        };
+
+        match kind {
+            Some("response.output_item.added") => {
+                let Some(item) = item else { return };
+                if !matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call" | "custom_tool_call")
+                ) {
+                    return;
+                }
+                // A reused index with a different item ID is contradictory;
+                // retaining both would make index-only deltas ambiguous.
+                if identified
+                    && position.is_none()
+                    && self.calls.iter().any(|call| {
+                        index.is_some_and(|i| call.index == Some(i))
+                            || item_id.is_some_and(|id| call.item_id.as_deref() == Some(id))
+                    })
+                {
+                    return;
+                }
+                // Repeated identified add events must not duplicate the call.
+                if identified && position.is_some() {
+                    self.current = position;
+                    return;
+                }
+                if self.calls.len() >= MAX_TOOL_CALL_SLOTS as usize {
+                    self.current = None;
+                    return;
+                }
+                self.calls.push(ResponseToolCall {
+                    index,
+                    item_id: item_id.map(str::to_owned),
+                    id: item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    name: item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    arguments: item
+                        .get("arguments")
+                        .or_else(|| item.get("input"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    done: false,
+                });
+                self.current = Some(self.calls.len() - 1);
+            }
+            Some("response.function_call_arguments.delta") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    if !call.done {
+                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                            call.arguments.push_str(delta);
+                        }
+                    }
+                }
+            }
+            Some("response.function_call_arguments.done") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    // A full done payload supersedes partial captured deltas.
+                    if let Some(arguments) = event.get("arguments").and_then(|v| v.as_str()) {
+                        call.arguments = arguments.to_owned();
+                    }
+                    call.done = true;
+                }
+                if !identified {
+                    self.current = None;
+                }
+            }
+            // A custom tool calls its payload "input" rather than
+            // "arguments", and streams it on its own event pair. Handling
+            // only the function-call pair left a cut custom tool call with
+            // an empty payload while a cut function call kept its partial
+            // arguments.
+            Some("response.custom_tool_call_input.delta") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    if !call.done {
+                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                            call.arguments.push_str(delta);
+                        }
+                    }
+                }
+            }
+            Some("response.custom_tool_call_input.done") => {
+                if let Some(call) = position.and_then(|p| self.calls.get_mut(p)) {
+                    // A full done payload supersedes partial captured deltas.
+                    if let Some(input) = event.get("input").and_then(|v| v.as_str()) {
+                        call.arguments = input.to_owned();
+                    }
+                    call.done = true;
+                }
+                if !identified {
+                    self.current = None;
+                }
+            }
+            Some("response.output_item.done") => {
+                let Some(item) = item else { return };
+                if !matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call" | "custom_tool_call")
+                ) {
+                    return;
+                }
+                let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let arguments = item
+                    .get("arguments")
+                    .or_else(|| item.get("input"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if let Some(p) = position {
+                    // The done item is authoritative: it supersedes whatever
+                    // partial deltas the capture caught, and fills identity
+                    // fields the added event may have carried empty.
+                    let call = &mut self.calls[p];
+                    if !call_id.is_empty() {
+                        call.id = call_id.to_owned();
+                    }
+                    if !name.is_empty() {
+                        call.name = name.to_owned();
+                    }
+                    if !arguments.is_empty() {
+                        call.arguments = arguments.to_owned();
+                    }
+                    call.done = true;
+                    // After a completed item, an unidentified follow-up event
+                    // belongs to a new call, matching the arguments-done path.
+                    if !identified {
+                        self.current = None;
+                    }
+                    return;
+                }
+                // No known call and no identity to anchor one: nothing to
+                // update and nothing safe to register.
+                if !identified {
+                    return;
+                }
+                // A capture that started mid-stream missed the added event,
+                // so the done item is the only complete record of the call.
+                // Recover it — unless this identity contradicts an existing
+                // call, which cannot be ordered safely.
+                if self.calls.iter().any(|call| {
+                    index.is_some_and(|i| call.index == Some(i))
+                        || item_id.is_some_and(|id| call.item_id.as_deref() == Some(id))
+                }) {
+                    return;
+                }
+                if self.calls.len() >= MAX_TOOL_CALL_SLOTS as usize {
+                    self.current = None;
+                    return;
+                }
+                self.calls.push(ResponseToolCall {
+                    index,
+                    item_id: item_id.map(str::to_owned),
+                    id: call_id.to_owned(),
+                    name: name.to_owned(),
+                    arguments: arguments.to_owned(),
+                    done: true,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Emit every known call once, in output-item arrival order.
+    pub(crate) fn into_calls(self) -> impl Iterator<Item = (String, String, String)> {
+        self.calls
+            .into_iter()
+            .filter(|call| !call.name.is_empty())
+            .map(|call| (call.id, call.name, call.arguments))
+    }
+}
+
 /// Parser for OpenAI Chat Completions API
 ///
 /// Provides methods to parse JSON request and response bodies
@@ -64,13 +300,59 @@ impl OpenAIParser {
             return Self::normalize_responses_request(body);
         }
 
+        // Legacy `/v1/completions` request: the input is a top-level `prompt`
+        // (string, or an array for the batch form) and there is no `messages`
+        // array. The path is an admitted inference endpoint, so rejecting the
+        // body dropped the recorded prompt, the output cap the token-limit
+        // rules read, and the streaming flag. Project it onto the chat shape.
+        if body.get("model").is_some()
+            && body.get("messages").is_none()
+            && body.get("prompt").is_some()
+        {
+            return Self::normalize_legacy_completion_request(body);
+        }
+
         // Quick validation - must have model and messages fields
         if body.get("model").is_none() || body.get("messages").is_none() {
             log::trace!("OpenAI request missing required fields: model or messages");
             return None;
         }
 
-        match serde_json::from_value::<OpenAIRequest>(body.clone()) {
+        // Modern chat clients send the output cap as `max_completion_tokens`
+        // (the o-series accepts only that spelling). Copy it onto the legacy
+        // key the typed request reads — an explicit `max_tokens` always wins —
+        // the same way `normalize_responses_request` maps `max_output_tokens`.
+        // Only a value the typed field can hold is copied: a malformed or
+        // out-of-range value used to be ignored as an unknown key, and it must
+        // not turn the whole request into a parse failure. A serde alias would
+        // instead reject a request carrying both spellings as a duplicate
+        // field, losing the request.
+        let mut body = body.clone();
+        // An explicit null is not a cap: without this check it shadowed a
+        // valid `max_completion_tokens` and the typed field stayed None.
+        if body
+            .get("max_tokens")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            if let Some(cap) = body
+                .get("max_completion_tokens")
+                .and_then(|cap| cap.as_u64())
+                .and_then(|cap| u32::try_from(cap).ok())
+            {
+                body["max_tokens"] = serde_json::json!(cap);
+            }
+        }
+
+        // The chat protocol also admits `stop` as a single string where the
+        // typed field reads an array. Rejecting that spelling failed the whole
+        // typed parse, so the recorded call lost its prompt, its output cap
+        // and its streaming flag. Rewrite it onto the array shape, the same
+        // normalization `normalize_legacy_completion_request` applies.
+        if let Some(serde_json::Value::String(stop)) = body.get("stop").cloned() {
+            body["stop"] = serde_json::json!([stop]);
+        }
+
+        match serde_json::from_value::<OpenAIRequest>(body) {
             Ok(request) => {
                 log::debug!(
                     "Parsed OpenAI request: model={}, messages={}",
@@ -86,6 +368,43 @@ impl OpenAIParser {
         }
     }
 
+    /// Project a legacy `/v1/completions` request onto the chat shape.
+    ///
+    /// The protocol differs from chat completions in three places this
+    /// parser reads: the input rides a top-level `prompt` (one string, or an
+    /// array of independent prompts), `stop` may be a single string, and
+    /// `logprobs` is the number of alternatives to return where chat spells
+    /// it a boolean. Rewrite those onto the chat shape and leave every other
+    /// field alone, so the typed reader sees one shape either way.
+    fn normalize_legacy_completion_request(body: &serde_json::Value) -> Option<OpenAIRequest> {
+        let prompt = body.get("prompt")?;
+        let prompts: Vec<&str> = match prompt {
+            serde_json::Value::String(text) => vec![text.as_str()],
+            serde_json::Value::Array(items) => {
+                items.iter().filter_map(serde_json::Value::as_str).collect()
+            }
+            _ => return None,
+        };
+        let messages: Vec<serde_json::Value> = prompts
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .map(|text| serde_json::json!({"role": "user", "content": text}))
+            .collect();
+        // An empty prompt is not a conversation turn; the request still
+        // carries its sampling parameters, so it parses with no messages.
+        let mut normalized = body.clone();
+        normalized["messages"] = serde_json::Value::Array(messages);
+        if let Some(serde_json::Value::String(stop)) = body.get("stop").cloned() {
+            normalized["stop"] = serde_json::json!([stop]);
+        }
+        if body.get("logprobs").is_some_and(|v| v.is_number()) {
+            // Chat's boolean asks for the alternatives; the legacy integer
+            // chooses how many, which this typed field cannot hold.
+            normalized["logprobs"] = serde_json::json!(true);
+        }
+        serde_json::from_value::<OpenAIRequest>(normalized).ok()
+    }
+
     fn normalize_responses_request(body: &serde_json::Value) -> Option<OpenAIRequest> {
         let mut normalized = body.clone();
         let input = body.get("input")?;
@@ -96,14 +415,39 @@ impl OpenAIParser {
         }
         if let Some(text) = input.as_str() {
             messages.push(serde_json::json!({"role": "user", "content": text}));
-        } else if let Some(arr) = input.as_array() {
+        } else {
+            let arr = input.as_array()?;
             for item in arr {
                 if item.get("role").is_some() {
                     let mut msg = item.clone();
                     if let Some(parts) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
                         for part in parts.iter_mut() {
-                            if part.get("type").and_then(|t| t.as_str()) == Some("input_text") {
-                                part["type"] = serde_json::json!("text");
+                            // A replayed turn carries `input_text` for user
+                            // items and `output_text` for assistant items; the
+                            // typed content reader only knows the chat tag
+                            // "text", so both must be renamed. This mirrors
+                            // the raw parser, which accepts any block with a
+                            // `text` field whatever its type.
+                            // A refused assistant turn replays the answer as a
+                            // part typed `refusal`, keeping the text in
+                            // `refusal`; renaming it the same way gives the
+                            // typed reader the chat shape instead of dropping
+                            // the answer as an unmodeled part.
+                            match part.get("type").and_then(|t| t.as_str()) {
+                                Some("input_text") | Some("output_text") => {
+                                    part["type"] = serde_json::json!("text");
+                                }
+                                Some("refusal") => {
+                                    if part.get("text").is_none() {
+                                        if let Some(refusal) =
+                                            part.get("refusal").and_then(|r| r.as_str())
+                                        {
+                                            part["text"] = serde_json::json!(refusal);
+                                        }
+                                    }
+                                    part["type"] = serde_json::json!("text");
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -113,6 +457,53 @@ impl OpenAIParser {
                         "input_text" => {
                             let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             messages.push(serde_json::json!({"role": "user", "content": text}));
+                        }
+                        // A replayed conversation sends the assistant's tool
+                        // request and the tool output as role-less typed items.
+                        // They carry the chat shape downstream consumers read:
+                        // an assistant message with `tool_calls`, and a tool
+                        // message paired by `call_id`. Flattening them into a
+                        // user message holding their JSON dropped the whole
+                        // tool interaction from the recorded request. A custom
+                        // (freeform) tool is replayed the same way, with its
+                        // text in `input` instead of `arguments`.
+                        "function_call" | "custom_tool_call" => {
+                            messages.push(serde_json::json!({
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "id": item.get("call_id"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": item
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default(),
+                                        "arguments": item
+                                            .get("arguments")
+                                            .or_else(|| item.get("input"))
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Null),
+                                    },
+                                }],
+                            }));
+                        }
+                        "function_call_output" | "custom_tool_call_output" => {
+                            // `content` must be text: the chat content type is
+                            // string-or-parts, so a structured output is carried
+                            // as its JSON text and re-parsed by the consumer.
+                            let output = match item
+                                .get("output")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null)
+                            {
+                                serde_json::Value::String(text) => text,
+                                other => other.to_string(),
+                            };
+                            messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": item.get("call_id"),
+                                "content": output,
+                            }));
                         }
                         _ => {
                             messages.push(
@@ -124,13 +515,30 @@ impl OpenAIParser {
                     messages.push(item.clone());
                 }
             }
-        } else {
-            return None;
         }
 
         normalized["messages"] = serde_json::Value::Array(messages);
         if let Some(stream) = body.get("stream") {
             normalized["stream"] = stream.clone();
+        }
+        // The Responses API spells the output cap `max_output_tokens`; the
+        // normalized chat view must carry it into `max_tokens` so the
+        // downstream consumers of the chat shape (token-limit interruption
+        // rules, telemetry) see the cap.
+        // Only a value the typed field can hold is copied, as for the chat
+        // `max_completion_tokens`: anything else was an unknown key before and
+        // must not turn the whole request into a parse failure.
+        if body
+            .get("max_tokens")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            if let Some(cap) = body
+                .get("max_output_tokens")
+                .and_then(|cap| cap.as_u64())
+                .and_then(|cap| u32::try_from(cap).ok())
+            {
+                normalized["max_tokens"] = serde_json::json!(cap);
+            }
         }
 
         serde_json::from_value::<OpenAIRequest>(normalized).ok()
@@ -170,7 +578,8 @@ impl OpenAIParser {
 
         // Try standard response format first (has id and choices)
         if body.get("id").is_some() && body.get("choices").is_some() {
-            match serde_json::from_value::<OpenAIResponse>(body.clone()) {
+            let body = Self::normalize_legacy_completion_choices(body);
+            match serde_json::from_value::<OpenAIResponse>(body) {
                 Ok(response) => {
                     log::debug!(
                         "Parsed OpenAI response: id={}, model={}, choices={}",
@@ -205,12 +614,72 @@ impl OpenAIParser {
         None
     }
 
+    /// Project a legacy `/v1/completions` body onto the chat shape.
+    ///
+    /// The protocol is an admitted LLM path, but its answer rides
+    /// `choices[].text` instead of a `message` object, and `OpenAIChoice`
+    /// requires the message. Deserializing the raw body therefore failed and
+    /// the recorded response was dropped whole — no output message, no finish
+    /// reason. Rewrite each choice so the generated text becomes the message
+    /// content, leaving a choice that already carries a message untouched.
+    fn normalize_legacy_completion_choices(body: &serde_json::Value) -> serde_json::Value {
+        let Some(choices) = body.get("choices").and_then(|c| c.as_array()) else {
+            return body.clone();
+        };
+        if choices
+            .iter()
+            .all(|choice| choice.get("message").is_some() || choice.get("text").is_none())
+        {
+            return body.clone();
+        }
+
+        let mut body = body.clone();
+        let choices: Vec<serde_json::Value> = choices
+            .iter()
+            .map(|choice| {
+                if choice.get("message").is_some() {
+                    return choice.clone();
+                }
+                let Some(text) = choice.get("text").and_then(|t| t.as_str()) else {
+                    return choice.clone();
+                };
+                let mut choice = choice.clone();
+                if let Some(obj) = choice.as_object_mut() {
+                    obj.insert(
+                        "message".to_string(),
+                        serde_json::json!({"role": "assistant", "content": text}),
+                    );
+                }
+                choice
+            })
+            .collect();
+        body["choices"] = serde_json::Value::Array(choices);
+        body
+    }
+
     fn normalize_responses_response(body: &serde_json::Value) -> Option<OpenAIResponse> {
         let output = body.get("output")?.as_array()?;
 
         let mut content_parts: Vec<String> = Vec::new();
+        let mut reasoning_parts: Vec<String> = Vec::new();
+        let mut refusal_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut finish_reason = Some("stop".to_string());
+        // An incomplete response carries its reason in incomplete_details.
+        // Surface the ones with chat-completions spellings so a truncated or
+        // policy-filtered answer is not reported as a clean completion: the
+        // cap maps to "length" and the provider's safety cut maps to
+        // "content_filter", which the interruption detector's SafetyFilter
+        // rule and the chat-completions path both key on.
+        let incomplete = body.get("status").and_then(|v| v.as_str()) == Some("incomplete");
+        let incomplete_reason = incomplete
+            .then(|| {
+                body.pointer("/incomplete_details/reason")
+                    .and_then(|v| v.as_str())
+            })
+            .flatten();
+        let output_capped = incomplete_reason == Some("max_output_tokens");
+        let output_filtered = incomplete_reason == Some("content_filter");
 
         for item in output {
             let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -218,29 +687,63 @@ impl OpenAIParser {
                 "message" => {
                     if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
                         for part in content {
-                            if part
-                                .get("type")
-                                .and_then(|t| t.as_str())
-                                .map(|t| t == "output_text")
-                                .unwrap_or(false)
-                            {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    content_parts.push(text.to_string());
+                            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match part_type {
+                                "output_text" => {
+                                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                        content_parts.push(text.to_string());
+                                    }
                                 }
+                                // A refusal is the model's answer for this
+                                // turn, delivered as its own content part.
+                                "refusal" => {
+                                    if let Some(refusal) =
+                                        part.get("refusal").and_then(|r| r.as_str())
+                                    {
+                                        refusal_parts.push(refusal.to_string());
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
                 }
-                "function_call" => {
+                // A custom (freeform) tool answers under its own item name and
+                // carries its text in `input` instead of `arguments`, exactly
+                // as the replayed request of the same call does. Reading only
+                // `function_call` dropped the call from the recorded response
+                // while the request side kept it.
+                "function_call" | "custom_tool_call" => {
+                    let arguments = item
+                        .get("arguments")
+                        .or_else(|| item.get("input"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let tc = serde_json::json!({
                         "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
                         "type": "function",
                         "function": {
                             "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                            "arguments": item.get("arguments").and_then(|v| v.as_str()).unwrap_or(""),
+                            "arguments": arguments,
                         }
                     });
                     tool_calls.push(tc);
+                }
+                // Reasoning items carry their text as `content` blocks
+                // (dashscope reasoning_text) and/or `summary` blocks (the
+                // o-series default when the thinking itself is not returned).
+                // Accept blocks with a "text" field regardless of type, like
+                // the request-side content reader.
+                "reasoning" => {
+                    for key in ["content", "summary"] {
+                        if let Some(blocks) = item.get(key).and_then(|c| c.as_array()) {
+                            for part in blocks {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    reasoning_parts.push(text.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -251,6 +754,14 @@ impl OpenAIParser {
             "role": "assistant",
             "content": if message_content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(message_content) },
         });
+        let reasoning_content = reasoning_parts.join("");
+        if !reasoning_content.is_empty() {
+            message["reasoning_content"] = serde_json::Value::String(reasoning_content);
+        }
+        let refusal_content = refusal_parts.join("");
+        if !refusal_content.is_empty() {
+            message["refusal"] = serde_json::Value::String(refusal_content);
+        }
         if !tool_calls.is_empty() {
             message["tool_calls"] = serde_json::Value::Array(tool_calls);
             finish_reason = Some("tool_calls".to_string());
@@ -272,7 +783,13 @@ impl OpenAIParser {
             "choices": [{
                 "index": 0,
                 "message": message,
-                "finish_reason": finish_reason,
+                "finish_reason": if output_capped {
+                    Some("length".to_string())
+                } else if output_filtered {
+                    Some("content_filter".to_string())
+                } else {
+                    finish_reason
+                },
             }],
             "usage": usage_val,
         });
@@ -280,59 +797,177 @@ impl OpenAIParser {
         serde_json::from_value::<OpenAIResponse>(resp).ok()
     }
 
+    /// Answer text of a finished `message` output item, or `None`.
+    ///
+    /// A `response.output_item.done` for a message item carries the whole
+    /// answer in its `content[]` parts, the shape the token extractor's
+    /// `read_output_item` reads. Reasoning items also carry text, but it is
+    /// the thinking rather than the answer: they are skipped here and read
+    /// by `closing_reasoning_item_text` into the reasoning buffer, the way
+    /// `read_output_item` routes them to its thinking half.
+    fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+            return None;
+        }
+        let parts = item.get("content")?.as_array()?;
+        let text: String = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Refusal text of a finished `message` output item, or `None`.
+    ///
+    /// The answer a model declines to give is its own content part, typed
+    /// `refusal` and carrying the text in `refusal` rather than `text` — the
+    /// shape the non-streaming normalizer and the token extractor read. A
+    /// capture that attached after the refusal deltas has this part as its
+    /// only copy of the answer, so it is read here as well; the deltas win
+    /// over it in `aggregate_responses_sse_chunks`, as they do for text.
+    fn closing_message_item_refusal(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+            return None;
+        }
+        let parts = item.get("content")?.as_array()?;
+        let refusal: String = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(|t| t.as_str()) == Some("refusal"))
+            .filter_map(|part| part.get("refusal").and_then(|r| r.as_str()))
+            .collect();
+        (!refusal.is_empty()).then_some(refusal)
+    }
+
+    /// Thinking text of a finished `reasoning` output item, or `None`.
+    ///
+    /// The closing item carries the thinking in its `content[]` parts
+    /// (dashscope `reasoning_text`) and/or `summary[]` (the o-series default),
+    /// the same two fields the token extractor's `read_output_item` routes to
+    /// its thinking half. Reading them in that order keeps this fallback
+    /// identical to the drain path.
+    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
+            return None;
+        }
+        let text: String = ["content", "summary"]
+            .iter()
+            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
-        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
-        let mut tc_name = String::new();
-        let mut tc_id = String::new();
-        let mut tc_args = String::new();
+        let mut saw_text_delta = false;
+        // Answer text carried by a closing event, kept aside until the whole
+        // stream is read: a delta captured later supersedes it.
+        let mut closing_text: Option<String> = None;
+        // Reasoning items are kept aside on the same delta-wins rule as the
+        // answer, but unlike it they are not repeats of one another: an
+        // agentic response interleaves a reasoning item with each call it
+        // precedes, and every item carries different thinking. The buffer
+        // therefore accumulates them in arrival order.
+        let mut closing_reasoning_text = String::new();
+        let mut saw_reasoning_delta = false;
+        let mut reasoning_buf = String::new();
+        let mut saw_refusal_delta = false;
+        // The refusal carried by the closing message item, kept aside on the
+        // same delta-wins rule as the text above: the deltas repeat it.
+        let mut closing_refusal: Option<String> = None;
+        let mut refusal_buf = String::new();
+        let mut calls = ResponsesToolCalls::default();
         let mut model = String::new();
         let mut resp_id = String::new();
         let mut usage: Option<serde_json::Value> = None;
+        // Set by the terminal `response.incomplete` event when the stream
+        // was cut by the output cap.
+        let mut output_capped = false;
+        let mut output_filtered = false;
+        // Whether the capture saw a terminal event. A truncated capture has
+        // no authoritative finish reason, and reporting a clean "stop" makes
+        // callers treat the still-running turn as finished.
+        let mut completed = false;
 
         for chunk in chunks {
+            calls.observe(chunk);
             let event_type = chunk.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "response.output_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_text_delta = true;
+                        }
                         content_buf.push_str(delta);
                     }
                 }
-                "response.output_item.added" => {
-                    if let Some(item) = chunk.get("item") {
-                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                            tc_name = item
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tc_id = item
-                                .get("call_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tc_args.clear();
+                // The closing events carry the finalized answer and repeat
+                // what the deltas delivered, so they are read only when no
+                // non-empty delta was captured: a capture that attached after
+                // the deltas, or whose delta events were dropped, has these
+                // events as its only copy of the text. The drain path applies
+                // the same delta-wins rule in `merge_response_output_text`.
+                // Both of them repeat the same answer, so the second one
+                // replaces the first rather than appending to it.
+                "response.output_text.done" => {
+                    if !saw_text_delta {
+                        if let Some(text) = chunk.get("text").and_then(|t| t.as_str()) {
+                            closing_text = Some(text.to_string());
                         }
                     }
                 }
-                "response.function_call_arguments.delta" => {
-                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
-                        tc_args.push_str(delta);
+                "response.output_item.done" => {
+                    if !saw_text_delta {
+                        if let Some(text) = Self::closing_message_item_text(chunk) {
+                            closing_text = Some(text);
+                        }
+                    }
+                    if !saw_reasoning_delta {
+                        if let Some(text) = Self::closing_reasoning_item_text(chunk) {
+                            closing_reasoning_text.push_str(&text);
+                        }
+                    }
+                    if !saw_refusal_delta {
+                        if let Some(refusal) = Self::closing_message_item_refusal(chunk) {
+                            closing_refusal = Some(refusal);
+                        }
                     }
                 }
-                "response.function_call_arguments.done" => {
-                    if !tc_name.is_empty() {
-                        tool_calls.push(serde_json::json!({
-                            "id": tc_id,
-                            "type": "function",
-                            "function": {"name": tc_name, "arguments": tc_args}
-                        }));
-                        tc_name.clear();
-                        tc_id.clear();
-                        tc_args.clear();
+                // Reasoning models stream their thinking as text deltas on
+                // the same event channel (qwen3-coder via dashscope sends
+                // reasoning_text, the o-series summary_text); both belong in
+                // the chat view's reasoning_content like the chat-completions
+                // reasoning_content delta.
+                "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_reasoning_delta = true;
+                        }
+                        reasoning_buf.push_str(delta);
+                    }
+                }
+                "response.refusal.delta" => {
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_refusal_delta = true;
+                        }
+                        refusal_buf.push_str(delta);
+                    }
+                }
+                "response.refusal.done" => {
+                    // The done event carries the finalized text; the deltas
+                    // may be missing when capture started mid-stream.
+                    if let Some(refusal) = chunk.get("refusal").and_then(|r| r.as_str()) {
+                        refusal_buf.clear();
+                        refusal_buf.push_str(refusal);
                     }
                 }
                 "response.completed" => {
+                    completed = true;
                     if let Some(resp) = chunk.get("response") {
                         model = resp
                             .get("model")
@@ -353,6 +988,43 @@ impl OpenAIParser {
                         });
                     }
                 }
+                // A capped stream terminates with response.incomplete
+                // instead of response.completed: the terminal event carries
+                // the final usage, and the cap reason must surface as the
+                // chat-completions "length" finish rather than a clean
+                // "stop".
+                "response.incomplete" => {
+                    completed = true;
+                    if let Some(resp) = chunk.get("response") {
+                        model = resp
+                            .get("model")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(id) = resp.get("id").and_then(|i| i.as_str()) {
+                            if !id.is_empty() {
+                                resp_id = id.to_string();
+                            }
+                        }
+                        usage = resp.get("usage").map(|u| {
+                            serde_json::json!({
+                                "prompt_tokens": u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "completion_tokens": u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "total_tokens": u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                            })
+                        });
+                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete") {
+                            match resp
+                                .pointer("/incomplete_details/reason")
+                                .and_then(|v| v.as_str())
+                            {
+                                Some("max_output_tokens") => output_capped = true,
+                                Some("content_filter") => output_filtered = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 "response.created" => {
                     if let Some(resp) = chunk.get("response") {
                         if resp_id.is_empty() {
@@ -368,24 +1040,63 @@ impl OpenAIParser {
             }
         }
 
-        // Flush any in-flight tool call (truncated stream without "done" event)
-        if !tc_name.is_empty() {
-            tool_calls.push(serde_json::json!({
-                "id": tc_id,
-                "type": "function",
-                "function": {"name": tc_name, "arguments": tc_args}
-            }));
+        if content_buf.is_empty() {
+            if let Some(text) = closing_text {
+                content_buf = text;
+            }
         }
+        if reasoning_buf.is_empty() {
+            reasoning_buf = closing_reasoning_text;
+        }
+        if refusal_buf.is_empty() {
+            if let Some(refusal) = closing_refusal {
+                refusal_buf = refusal;
+            }
+        }
+
+        // Flush any in-flight tool call (truncated stream without "done" event)
+        let tool_calls: Vec<_> = calls
+            .into_calls()
+            .map(|(id, name, arguments)| {
+                serde_json::json!({"id": id, "type": "function",
+                "function": {"name": name, "arguments": arguments}})
+            })
+            .collect();
 
         let mut message = serde_json::json!({
             "role": "assistant",
             "content": if content_buf.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(content_buf) },
         });
-        let finish_reason = if !tool_calls.is_empty() {
+        if !reasoning_buf.is_empty() {
+            message["reasoning_content"] = serde_json::Value::String(reasoning_buf);
+        }
+        if !refusal_buf.is_empty() {
+            message["refusal"] = serde_json::Value::String(refusal_buf);
+        }
+        // The calls are part of the output whatever ended the stream; only
+        // the finish reason below gives way to a cut, as in the
+        // non-streaming normalizer.
+        let has_tool_calls = !tool_calls.is_empty();
+        if has_tool_calls {
             message["tool_calls"] = serde_json::Value::Array(tool_calls);
-            "tool_calls"
+        }
+        let finish_reason = if output_capped {
+            // The cap ended the stream: report the truncation even when a
+            // tool call was in flight (its arguments may be cut mid-JSON,
+            // so a normal "tool_calls" terminal would overstate the turn).
+            Some("length".to_string())
+        } else if output_filtered {
+            Some("content_filter".to_string())
+        } else if !completed {
+            // The capture ended without `response.completed` or
+            // `response.incomplete`: the stream was truncated, so no
+            // terminal reason was observed. The drain merger leaves the
+            // same `None` instead of fabricating a clean stop.
+            None
+        } else if has_tool_calls {
+            Some("tool_calls".to_string())
         } else {
-            "stop"
+            Some("stop".to_string())
         };
 
         let resp = serde_json::json!({
@@ -400,16 +1111,100 @@ impl OpenAIParser {
         serde_json::from_value::<OpenAIResponse>(resp).ok()
     }
 
+    /// Text of a cumulative message frame's `content` field: a plain string,
+    /// or the concatenated text of an array of content parts.
+    fn snapshot_text(content: Option<&serde_json::Value>) -> String {
+        match content {
+            Some(serde_json::Value::String(text)) => text.clone(),
+            Some(serde_json::Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        }
+    }
+
+    /// Apply the cumulative-snapshot rule to one text fragment list: a
+    /// snapshot that extends the text so far replaces it, anything else
+    /// appends — the rule the drain merger's `accumulate_text` applies, so
+    /// both paths fold a repeated whole-message frame to the same answer.
+    fn accumulate_snapshot(parts: &mut Vec<String>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if text.starts_with(parts.concat().as_str()) {
+            parts.clear();
+        }
+        parts.push(text.to_string());
+    }
+
+    /// Fold one wire tool call into the accumulator slot it names.
+    ///
+    /// The key is `(choice index, tool-call index)`: OpenAI defines the
+    /// tool-call index per choice, so two choices naming their call index 0
+    /// are two different calls.
+    ///
+    /// `whole` marks a cumulative frame's call: its id, name and arguments
+    /// replace the slot's values instead of extending them, because the frame
+    /// repeats the complete call rather than a fragment of it.
+    fn merge_tool_call(
+        tool_call_map: &mut std::collections::HashMap<(u32, u32), (String, String, String)>,
+        idx: (u32, u32),
+        tc: &serde_json::Value,
+        whole: bool,
+    ) {
+        let entry = tool_call_map
+            .entry(idx)
+            .or_insert_with(|| (String::new(), String::new(), String::new()));
+        if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+            if !id.is_empty() {
+                entry.0 = id.to_string();
+            }
+            // 空字符串不覆盖已有的 id
+        }
+        let Some(func) = tc.get("function") else {
+            return;
+        };
+        if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                entry.1 = name.to_string();
+            }
+            // Empty string must not overwrite an existing name: some
+            // backends (e.g. deepseek models on DashScope) repeat
+            // name:"" on every continuation delta.
+        }
+        if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+            if whole {
+                if !args.is_empty() {
+                    entry.2 = args.to_string();
+                }
+            } else {
+                entry.2.push_str(args);
+            }
+        }
+    }
+
     /// Aggregate SSE chunks into a single OpenAIResponse
     fn aggregate_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         use std::collections::HashMap;
 
         let mut content_parts: Vec<String> = Vec::new();
         let mut reasoning_parts: Vec<String> = Vec::new();
+        let mut refusal_parts: Vec<String> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut first_chunk: Option<&serde_json::Value> = None;
-        // Merge tool_call deltas by index: index -> (id, name, arguments_accumulated)
-        let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
+        // Merge tool_call deltas by (choice, index): the wire index is scoped
+        // to its choice, so every choice starts its calls at index 0 and the
+        // key must carry both or two choices' calls fold into one slot.
+        let mut tool_call_map: HashMap<(u32, u32), (String, String, String)> = HashMap::new();
+        // Slot each choice is currently extending, for index-less compatible
+        // streams whose call boundary is not on the wire.
+        let mut current_slot: HashMap<u32, u32> = HashMap::new();
+        // Legacy `function_call` deltas (pre-`tool_calls` spelling): the name
+        // arrives once, the arguments as string fragments, so they accumulate
+        // the same way the indexed tool_calls above do.
+        let mut legacy_function_call: Option<(String, String)> = None;
 
         for chunk in chunks {
             // Try to parse as OpenAiSseChunk
@@ -419,9 +1214,63 @@ impl OpenAIParser {
                 }
                 // Extract content delta for aggregation
                 for choice in &sse_chunk.choices {
+                    // A cumulative whole-message frame repeats the answer so
+                    // far instead of an increment (some OpenAI-compatible
+                    // gateways close with one). Every other consumer of the
+                    // stream reads that shape; dropping the frame because it
+                    // carries `message` instead of `delta` lost its text, its
+                    // whole tool calls and its terminal finish reason.
+                    if let Some(snapshot) = choice.message.as_ref() {
+                        Self::accumulate_snapshot(
+                            &mut content_parts,
+                            &Self::snapshot_text(snapshot.get("content")),
+                        );
+                        if let Some(reasoning) =
+                            snapshot.get("reasoning_content").and_then(|v| v.as_str())
+                        {
+                            Self::accumulate_snapshot(&mut reasoning_parts, reasoning);
+                        }
+                        if let Some(refusal) = snapshot.get("refusal").and_then(|v| v.as_str()) {
+                            Self::accumulate_snapshot(&mut refusal_parts, refusal);
+                        }
+                        let snapshot_calls = snapshot
+                            .get("tool_calls")
+                            .and_then(|v| v.as_array())
+                            .map(|calls| calls.as_slice())
+                            .unwrap_or_default();
+                        for (call_pos, tc) in snapshot_calls.iter().enumerate() {
+                            // The frame carries whole calls, so a missing
+                            // `index` names the call by its position.
+                            let idx = tc
+                                .get("index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(call_pos as u64);
+                            if idx >= MAX_TOOL_CALL_SLOTS {
+                                log::debug!(
+                                    "[OpenAI] dropping snapshot tool_call with out-of-range index {idx}"
+                                );
+                                continue;
+                            }
+                            Self::merge_tool_call(
+                                &mut tool_call_map,
+                                (choice.index, idx as u32),
+                                tc,
+                                true,
+                            );
+                        }
+                    }
                     if let Some(content) = &choice.delta.content {
                         if !content.is_empty() {
                             content_parts.push(content.clone());
+                        }
+                    }
+                    // Legacy `/v1/completions` streams carry each fragment on
+                    // the choice itself. The delta object is always present
+                    // (it defaults), so without this arm every chunk looks
+                    // empty and the answer closes as an empty response.
+                    if let Some(text) = &choice.text {
+                        if !text.is_empty() {
+                            content_parts.push(text.clone());
                         }
                     }
                     // Extract reasoning_content delta
@@ -430,36 +1279,94 @@ impl OpenAIParser {
                             reasoning_parts.push(reasoning.clone());
                         }
                     }
+                    // Extract refusal delta (arrives instead of content)
+                    if let Some(refusal) = &choice.delta.refusal {
+                        if !refusal.is_empty() {
+                            refusal_parts.push(refusal.clone());
+                        }
+                    }
                     // Extract and merge tool_call deltas by index
                     if let Some(calls) = &choice.delta.tool_calls {
                         for tc in calls {
-                            let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let entry = tool_call_map
-                                .entry(idx)
-                                .or_insert_with(|| (String::new(), String::new(), String::new()));
-                            if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                                if !id.is_empty() {
-                                    entry.0 = id.to_string();
-                                }
-                                // 空字符串不覆盖已有的 id
-                            }
-                            if let Some(func) = tc.get("function") {
-                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                    if !name.is_empty() {
-                                        entry.1 = name.to_string();
+                            // `index` comes off the wire. A value outside the
+                            // slot range must not be truncated into another
+                            // slot, which would overwrite a valid tool call's
+                            // id, name and arguments.
+                            let idx = match tc.get("index").and_then(|v| v.as_u64()) {
+                                Some(idx) => idx,
+                                None => {
+                                    // Unindexed compatible streams keep the
+                                    // sequential fallback: a fragment that
+                                    // carries a name starts the next call,
+                                    // unnamed fragments extend the call they
+                                    // belong to. Keying every index-less
+                                    // fragment to slot 0 folded a later call
+                                    // into the first one's slot.
+                                    let starts_call = tc
+                                        .get("function")
+                                        .and_then(|func| func.get("name"))
+                                        .and_then(|v| v.as_str())
+                                        .is_some_and(|name| !name.is_empty());
+                                    if starts_call {
+                                        // Allocate within the current choice,
+                                        // so a second choice's first call
+                                        // does not extend the first choice's
+                                        // last slot.
+                                        tool_call_map
+                                            .keys()
+                                            .filter(|(choice_idx, _)| *choice_idx == choice.index)
+                                            .map(|(_, slot)| u64::from(*slot))
+                                            .max()
+                                            .map_or(0, |slot| slot.saturating_add(1))
+                                    } else {
+                                        u64::from(
+                                            current_slot.get(&choice.index).copied().unwrap_or(0),
+                                        )
                                     }
-                                    // Empty string must not overwrite an existing name: some
-                                    // backends (e.g. deepseek models on DashScope) repeat
-                                    // name:"" on every continuation delta.
                                 }
-                                if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-                                    entry.2.push_str(args);
-                                }
+                            };
+                            if idx >= MAX_TOOL_CALL_SLOTS {
+                                log::debug!(
+                                    "[OpenAI] dropping SSE tool_call with out-of-range index {idx}"
+                                );
+                                continue;
                             }
+                            let idx = idx as u32;
+                            current_slot.insert(choice.index, idx);
+                            Self::merge_tool_call(
+                                &mut tool_call_map,
+                                (choice.index, idx),
+                                tc,
+                                false,
+                            );
                         }
                     }
-                    if finish_reason.is_none() && choice.finish_reason.is_some() {
-                        finish_reason = choice.finish_reason.clone();
+                    // Legacy function_call delta: the pre-`tool_calls`
+                    // spelling streams its single tool request as
+                    // `delta.function_call` fragments. The typed field exists
+                    // but was never read, and the aggregated message below
+                    // hardcoded `function_call: None` — dropping the streamed
+                    // call exactly where the whole-message form is converted.
+                    if let Some(fc) = &choice.delta.function_call {
+                        let entry = legacy_function_call
+                            .get_or_insert_with(|| (String::new(), String::new()));
+                        if let Some(name) = fc.get("name").and_then(|v| v.as_str()) {
+                            if !name.is_empty() {
+                                entry.0 = name.to_string();
+                            }
+                        }
+                        if let Some(args) = fc.get("arguments").and_then(|v| v.as_str()) {
+                            entry.1.push_str(args);
+                        }
+                    }
+                    // The last non-null value is decisive: a multi-choice
+                    // stream finishes each choice on its own chunk, and every
+                    // other reader (the interruption detector, the drain
+                    // merger) reads the last one. Keeping the first reported
+                    // an earlier choice's `stop` for a call whose final choice
+                    // was cut.
+                    if let Some(reason) = choice.finish_reason.as_ref() {
+                        finish_reason = Some(reason.clone());
                     }
                 }
             }
@@ -469,7 +1376,7 @@ impl OpenAIParser {
         let tool_calls = if tool_call_map.is_empty() {
             None
         } else {
-            let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
+            let mut sorted_indices: Vec<(u32, u32)> = tool_call_map.keys().cloned().collect();
             sorted_indices.sort();
             let merged: Vec<serde_json::Value> = sorted_indices
                 .into_iter()
@@ -504,6 +1411,11 @@ impl OpenAIParser {
                     } else {
                         Some(reasoning_parts.join(""))
                     };
+                    let combined_refusal = if refusal_parts.is_empty() {
+                        None
+                    } else {
+                        Some(refusal_parts.join(""))
+                    };
                     OpenAIResponse {
                         id: chunk.id,
                         object: "chat.completion".to_string(),
@@ -515,8 +1427,13 @@ impl OpenAIParser {
                                 role: MessageRole::Assistant,
                                 content: Some(OpenAIContent::Text(combined_content)),
                                 reasoning_content: combined_reasoning,
-                                refusal: None,
-                                function_call: None,
+                                refusal: combined_refusal,
+                                // The aggregated legacy `function_call`, in
+                                // the whole-message shape the converters
+                                // (#5348) turn into a ToolCall part.
+                                function_call: legacy_function_call.map(|(name, arguments)| {
+                                    serde_json::json!({"name": name, "arguments": arguments})
+                                }),
                                 tool_calls,
                                 tool_call_id: None,
                                 name: None,
@@ -541,9 +1458,23 @@ impl OpenAIParser {
     /// # Returns
     /// * `true` if the path matches OpenAI endpoints
     pub fn matches_path(path: &str) -> bool {
-        path.contains("/v1/chat/completions")
+        // The bare spellings (a gateway whose base URL carries no `/v1`)
+        // must stay in lockstep with `parser::llm::is_llm_api_path`, which
+        // admits them: a bare-path call gets a llm_call row, so it must also
+        // be deep-parsed, or its output messages are lost.
+        path.contains("/chat/completions")
+            || path.contains("/completions")
+            || path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
-            || path.contains("/v1/responses")
+            // The Responses API's per-id sub-endpoints (GET retrieve, POST
+            // cancel, DELETE) share the /v1/responses prefix but are not
+            // inference calls: the retrieval response IS the stored
+            // response object (object=="response" + output[] + usage), so
+            // deep-parsing a poll would re-record the create call's output
+            // and re-count its usage tokens as a second llm_call. Must
+            // stay in lockstep with parser::llm::is_llm_api_path.
+            || (path.contains("/v1/responses")
+                && !path.contains("/v1/responses/"))
     }
 }
 
@@ -572,6 +1503,135 @@ mod tests {
         let request = request.unwrap();
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 1);
+    }
+
+    /// Modern chat clients send the output cap as `max_completion_tokens`
+    /// (the o-series accepts only that spelling); the typed request used to
+    /// drop it, so `LLMRequest.max_tokens` stayed `None` and neither the
+    /// TokenLimit rule nor the `gen_ai.request.max_tokens` telemetry saw it.
+    #[test]
+    fn test_parse_request_reads_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("modern chat request");
+        assert_eq!(request.max_tokens, Some(2048));
+    }
+
+    /// A request carrying both spellings must still parse, with `max_tokens`
+    /// winning — a serde alias would reject it as a duplicate field and lose
+    /// the whole request.
+    #[test]
+    fn test_parse_request_prefers_max_tokens_over_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("both spellings must parse");
+        assert_eq!(request.max_tokens, Some(100));
+    }
+
+    /// A null legacy spelling is not a cap. Before this check it was "present"
+    /// to `Option::is_none`, so the newer key that carried the real cap was
+    /// never copied and `LLMRequest.max_tokens` stayed `None`.
+    #[test]
+    fn test_parse_request_null_max_tokens_falls_back_to_the_newer_spelling() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": null,
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must parse");
+        assert_eq!(request.max_tokens, Some(2048));
+    }
+
+    #[test]
+    fn test_parse_responses_request_null_max_tokens_falls_back_to_max_output_tokens() {
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [{"role": "user", "content": "hi"}],
+            "max_tokens": null,
+            "max_output_tokens": 4096
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must parse");
+        assert_eq!(request.max_tokens, Some(4096));
+    }
+
+    /// A malformed cap used to be ignored as an unknown key; reading it must
+    /// not turn the whole request into a parse failure.
+    #[test]
+    fn test_parse_request_ignores_a_malformed_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": "2048"
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must still parse");
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    /// A cap that does not fit the typed u32 field must be ignored like any
+    /// other malformed value, not copied over and rejected by serde.
+    #[test]
+    fn test_parse_request_ignores_an_out_of_range_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 4_294_967_296u64
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must still parse");
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    /// Chat's `stop` parameter accepts one sequence as a bare string as well
+    /// as the array the typed field reads. The chat branch rejected the whole
+    /// typed parse on that spelling, so the recorded call lost its prompt, its
+    /// output cap and its streaming flag — the legacy branch already
+    /// normalizes the same shape.
+    #[test]
+    fn test_parse_request_reads_a_string_stop_sequence() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "stop": "\n"
+        });
+
+        let request =
+            OpenAIParser::parse_request(&json).expect("a string stop sequence must still parse");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.max_tokens, Some(100));
+        assert_eq!(request.stop, Some(vec!["\n".to_string()]));
+    }
+
+    /// The array spelling the typed field already reads must pass through the
+    /// normalization untouched.
+    #[test]
+    fn test_parse_request_keeps_an_array_stop_sequence() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": ["\n", "User:"]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("an array stop must parse");
+        assert_eq!(
+            request.stop,
+            Some(vec!["\n".to_string(), "User:".to_string()])
+        );
     }
 
     #[test]
@@ -620,6 +1680,52 @@ mod tests {
 
         let request = OpenAIParser::parse_request(&json);
         assert!(request.is_none());
+    }
+
+    /// A legacy `/v1/completions` request carries its input on `prompt`, not
+    /// on a `messages` array, and it spells two sampling knobs differently:
+    /// `stop` may be a single string and `logprobs` is the number of
+    /// alternatives to return (chat spells it a boolean). The path is an
+    /// admitted inference endpoint, so the typed parser must read the request
+    /// — otherwise the recorded call has no prompt, no output cap (the
+    /// token-limit and context-overflow rules read it) and no streaming flag.
+    #[test]
+    fn test_parse_request_legacy_completion_prompt() {
+        let json = serde_json::json!({
+            "model": "gpt-3.5-turbo-instruct",
+            "prompt": "The capital of France is",
+            "max_tokens": 8,
+            "temperature": 0.2,
+            "stop": "\n",
+            "logprobs": 5,
+            "stream": true
+        });
+
+        let request =
+            OpenAIParser::parse_request(&json).expect("a legacy completion request must parse");
+        assert_eq!(request.model, "gpt-3.5-turbo-instruct");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, MessageRole::User);
+        assert_eq!(
+            request.messages[0].content.as_ref().map(|c| c.as_text()),
+            Some("The capital of France is".to_string())
+        );
+        assert_eq!(request.max_tokens, Some(8));
+        assert_eq!(request.stream, Some(true));
+        // The single-stop spelling becomes the array the chat shape uses.
+        assert_eq!(request.stop, Some(vec!["\n".to_string()]));
+
+        // The batch form is one prompt per element.
+        let batch = serde_json::json!({
+            "model": "gpt-3.5-turbo-instruct",
+            "prompt": ["first", "second"]
+        });
+        let request = OpenAIParser::parse_request(&batch).expect("a batch request must parse");
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(
+            request.messages[1].content.as_ref().map(|c| c.as_text()),
+            Some("second".to_string())
+        );
     }
 
     #[test]
@@ -682,6 +1788,69 @@ mod tests {
         assert!(response.is_none());
     }
 
+    /// OpenAI-compatible gateways slim the response body: GLM's
+    /// `/api/paas/v4/chat/completions` returns `{id, choices, created, model,
+    /// request_id}` with no `object`. The identity fields are metadata the
+    /// record can live without, but a required one failed the whole
+    /// deserialization and `parse_response` dropped the response — the call
+    /// looked empty and lost its finish reason and usage.
+    #[test]
+    fn test_parse_response_slim_compatible_body_without_object() {
+        let json = serde_json::json!({
+            "id": "1097830983179126888",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "created": 1_778_000_000u64,
+            "model": "glm-4.7",
+            "request_id": "req-42",
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("a slimmed body must still parse");
+        assert_eq!(resp.id, "1097830983179126888");
+        assert_eq!(resp.model, "glm-4.7");
+        assert_eq!(resp.choices.len(), 1);
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello"),
+            other => panic!("the answer must survive the slim body: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = resp.usage.expect("the usage must survive the slim body");
+        assert_eq!(usage.total_tokens, 4);
+    }
+
+    /// `/v1/completions` is an admitted LLM path, but its answer rides
+    /// `choices[].text` instead of a `message` object. `OpenAIChoice.message`
+    /// is a required field, so the whole response failed to deserialize and
+    /// `parse_response` returned `None`, dropping the recorded output.
+    #[test]
+    fn test_parse_response_legacy_completion_choice_text() {
+        let json = serde_json::json!({
+            "id": "cmpl-123",
+            "object": "text_completion",
+            "created": 1_677_652_288u64,
+            "model": "gpt-3.5-turbo-instruct",
+            "choices": [{
+                "index": 0,
+                "text": "The capital of France is Paris.",
+                "finish_reason": "stop"
+            }]
+        });
+
+        let resp =
+            OpenAIParser::parse_response(&json).expect("a legacy completion body must still parse");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => {
+                assert_eq!(text, "The capital of France is Paris.")
+            }
+            other => panic!("the generated text must reach the message: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
     #[test]
     fn test_matches_path() {
         assert!(OpenAIParser::matches_path("/v1/chat/completions"));
@@ -691,6 +1860,28 @@ mod tests {
         ));
         assert!(!OpenAIParser::matches_path("/v1/messages"));
         assert!(!OpenAIParser::matches_path("/v1/embeddings"));
+    }
+
+    #[test]
+    fn bare_chat_completions_paths_reach_the_deep_parse_gate() {
+        use crate::MessageParser;
+
+        // The row gate (`parser::llm::is_llm_api_path`) admits the bare
+        // spellings a gateway whose base URL carries no `/v1` produces, so
+        // such a call gets a llm_call row. This deep-parse gate must stay in
+        // lockstep with it: without the bare spellings the row is recorded,
+        // never parsed, and a non-streaming response is left with empty
+        // output messages (a false `empty_response` interruption; ATIF and
+        // skill_metrics lose the response content).
+        assert!(OpenAIParser::matches_path("/chat/completions"));
+        assert!(OpenAIParser::matches_path("/completions"));
+        assert!(OpenAIParser::matches_path(
+            "https://gw.internal/chat/completions"
+        ));
+        assert!(MessageParser::is_llm_api_path("/chat/completions"));
+        // Neighbouring non-inference paths stay out.
+        assert!(!OpenAIParser::matches_path("/v1/embeddings"));
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/count_tokens"));
     }
 
     #[test]
@@ -743,6 +1934,32 @@ mod tests {
         // bare /responses should NOT match (too broad, would catch non-LLM traffic)
         assert!(!OpenAIParser::matches_path("/responses"));
         assert!(!OpenAIParser::matches_path("/api/survey/responses"));
+    }
+
+    #[test]
+    fn test_matches_path_rejects_responses_sub_endpoints() {
+        // GET /v1/responses/{id} (retrieve), POST /v1/responses/{id}/cancel
+        // and DELETE /v1/responses/{id} share the /v1/responses prefix but
+        // are not inference calls: the retrieval response IS the stored
+        // response object (object=="response" + output[] + usage), so
+        // deep-parsing a poll would re-record the create call's output and
+        // re-count its usage tokens as a second llm_call.
+        assert!(!OpenAIParser::matches_path("/v1/responses/resp_abc123"));
+        assert!(!OpenAIParser::matches_path(
+            "https://api.openai.com/v1/responses/resp_abc123"
+        ));
+        assert!(!OpenAIParser::matches_path(
+            "/v1/responses/resp_abc123/cancel"
+        ));
+        // The create endpoint keeps matching, in both bare-path and
+        // full-URL shapes.
+        assert!(OpenAIParser::matches_path("/v1/responses"));
+        assert!(OpenAIParser::matches_path(
+            "https://api.openai.com/v1/responses"
+        ));
+        assert!(OpenAIParser::matches_path(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+        ));
     }
 
     #[test]
@@ -800,6 +2017,94 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_request_responses_role_less_tool_items() {
+        // A replayed Responses conversation sends the assistant's tool request
+        // and the tool output as role-less typed items. The normalizer used to
+        // flatten both into a user message holding their raw JSON, so the
+        // recorded request carried no tool interaction at all.
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "list /tmp"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "list_dir",
+                    "arguments": "{\"path\":\"/tmp\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "a.txt"
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("parses");
+        assert_eq!(
+            request.messages.len(),
+            3,
+            "each Responses item must keep its own message"
+        );
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        let tool_calls = request.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the function_call item must become a tool call");
+        assert_eq!(tool_calls[0]["id"], serde_json::json!("call_1"));
+        assert_eq!(
+            tool_calls[0]["function"]["name"],
+            serde_json::json!("list_dir")
+        );
+        assert_eq!(request.messages[2].role, MessageRole::Tool);
+        assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_parse_request_responses_custom_tool_items() {
+        // A custom (freeform) tool call is replayed the same way as a function
+        // call, with its text in `input` instead of `arguments`: Codex sends
+        // its apply_patch edits like this. Both items used to be flattened
+        // into user messages holding their raw JSON.
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "fix the typo"},
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_2",
+                    "output": "Success"
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("parses");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        let tool_calls = request.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the custom_tool_call item must become a tool call");
+        assert_eq!(tool_calls[0]["id"], serde_json::json!("call_2"));
+        assert_eq!(
+            tool_calls[0]["function"]["name"],
+            serde_json::json!("apply_patch")
+        );
+        assert_eq!(
+            tool_calls[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** End Patch")
+        );
+        assert_eq!(request.messages[2].role, MessageRole::Tool);
+        assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_2"));
+    }
+
+    #[test]
     fn test_parse_request_responses_role_with_typed_content() {
         let json = serde_json::json!({
             "model": "gpt-4.1",
@@ -823,6 +2128,35 @@ mod tests {
         assert_eq!(req.model, "gpt-4.1");
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, MessageRole::User);
+    }
+
+    /// A replayed assistant turn in a Responses request carries `output_text`
+    /// parts. Normalization renamed only `input_text`, so the typed content
+    /// reader skipped the unmodeled part and stored the assistant message
+    /// empty — contradicting the raw parser, which accepts any block with a
+    /// `text` field whatever its type.
+    #[test]
+    fn test_parse_request_responses_assistant_output_text_is_kept() {
+        let json = serde_json::json!({
+            "model": "gpt-4.1",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "question"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "prior answer"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]}
+            ]
+        });
+
+        let req = OpenAIParser::parse_request(&json).expect("Responses request must parse");
+        assert_eq!(req.messages.len(), 3);
+        assert_eq!(
+            req.messages[1]
+                .content
+                .as_ref()
+                .expect("assistant content")
+                .as_text(),
+            "prior answer",
+            "a replayed output_text part must survive typed normalization"
+        );
     }
 
     #[test]
@@ -895,6 +2229,49 @@ mod tests {
         );
     }
 
+    /// A whole Responses body can answer with a custom (freeform) tool call,
+    /// the same item the request side already replays. The normalizer matched
+    /// only `function_call`, so the call vanished from the recorded response
+    /// while its replayed request kept it.
+    #[test]
+    fn test_parse_response_responses_custom_tool_call() {
+        let json = serde_json::json!({
+            "id": "resp_ctc001",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5",
+            "output": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_001",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch",
+                    "status": "completed"
+                }
+            ],
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("the response must parse");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the custom tool call must become a tool call");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_patch"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("apply_patch"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** End Patch")
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
+    }
+
     #[test]
     fn test_aggregate_responses_sse_chunks_text() {
         let chunks = vec![
@@ -922,6 +2299,240 @@ mod tests {
         let usage = resp.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 2);
+    }
+
+    /// The Responses protocol streams a refusal as its own events; the
+    /// aggregation listened for text/tool-call events only.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_refusal() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_r2", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": " with that."}),
+            serde_json::json!({"type": "response.refusal.done", "refusal": "I can't help with that."}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r2", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp =
+            OpenAIParser::parse_response(&body).expect("Responses SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    /// A capture that attached after the refusal deltas carries the whole
+    /// refusal only in the closing `response.output_item.done` for the message
+    /// item, whose part is typed `refusal` and keeps the text in `refusal`.
+    /// `closing_message_item_text` read only `text`, so the message view had
+    /// no answer at all while the token extractor counted the refusal.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_refusal_from_item_done() {
+        let item_done = serde_json::json!({"type": "response.output_item.done",
+            "item": {"type": "message", "role": "assistant", "content": [
+                {"type": "refusal", "refusal": "I can't help with that."}]}});
+
+        let closing_only = serde_json::Value::Array(vec![
+            serde_json::json!({"type": "response.created",
+                "response": {"id": "resp_r3", "model": "gpt-5"}}),
+            item_done.clone(),
+            serde_json::json!({"type": "response.completed",
+                "response": {"id": "resp_r3", "model": "gpt-5", "status": "completed"}}),
+        ]);
+        let resp = OpenAIParser::parse_response(&closing_only)
+            .expect("the closing refusal must still aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that."),
+            "the closing message item is the only copy of the refusal"
+        );
+        assert!(
+            resp.choices[0].message.content.is_none(),
+            "a refusal is not answer text"
+        );
+
+        // The deltas plus the closing item repeat the same text: it must be
+        // counted once, as the text path already does.
+        let complete = serde_json::Value::Array(vec![
+            serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": " with that."}),
+            item_done,
+        ]);
+        let resp = OpenAIParser::parse_response(&complete).expect("the refusal must aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that."),
+            "the closing item must not append the deltas a second time"
+        );
+    }
+
+    /// A non-streaming Responses body carries the refusal as a content part
+    /// (`{"type":"refusal","refusal":…}`); the normalizer read only
+    /// `output_text` parts.
+    #[test]
+    fn test_normalize_responses_refusal_content_part() {
+        let body = serde_json::json!({
+            "id": "resp_nr1",
+            "object": "response",
+            "created_at": 1_786_504_982u64,
+            "model": "gpt-5",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "refusal", "refusal": "I can't help with that."}]
+            }]
+        });
+        let resp = OpenAIParser::parse_response(&body).expect("a Responses body should normalize");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    /// A replayed refused assistant turn carries the same `refusal` content
+    /// part in a Responses request. The normalization only renamed the `text`
+    /// tag, so the typed content reader skipped the refusal part and the
+    /// recorded request showed an empty assistant answer.
+    #[test]
+    fn test_parse_request_responses_refusal_part_is_kept() {
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "do the thing"},
+                {"role": "assistant", "content": [
+                    {"type": "refusal", "refusal": "I can't help with that."}
+                ]},
+                {"role": "user", "content": "why not"}
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("Responses request must parse");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        assert_eq!(
+            request.messages[1]
+                .content
+                .as_ref()
+                .expect("assistant content")
+                .as_text(),
+            "I can't help with that.",
+            "a replayed refusal part must survive typed normalization"
+        );
+
+        // A part that carries its own `text` keeps it: renaming the type must
+        // not move the text out from under a provider that spells both.
+        let with_text = serde_json::json!({
+            "model": "gpt-5",
+            "input": [{"role": "assistant", "content": [
+                {"type": "refusal", "text": "kept", "refusal": "I can't"}
+            ]}]
+        });
+        let request =
+            OpenAIParser::parse_request(&with_text).expect("the mixed part must still parse");
+        assert_eq!(
+            request.messages[0]
+                .content
+                .as_ref()
+                .expect("assistant content")
+                .as_text(),
+            "kept"
+        );
+    }
+
+    /// Reasoning models stream their thinking as `response.reasoning_text.delta`
+    /// / `response.reasoning_summary_text.delta` events (qwen3-coder via
+    /// dashscope `/v1/responses`, o-series via OpenAI). The aggregator matched
+    /// neither, so a reasoning Responses stream kept only its final text — the
+    /// chat-completions and Anthropic paths both carry reasoning, and the
+    /// token extractor and the latency marker already count these deltas.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_r001", "model": "qwen3-coder-plus", "status": "queued"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "reasoning", "id": "rs_001"}}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Think "}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "step by step"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "message", "id": "msg_001", "role": "assistant"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "The answer"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r001", "model": "qwen3-coder-plus", "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 8, "total_tokens": 18}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let response = OpenAIParser::parse_response(&body);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think step by step"),
+            "reasoning deltas must concatenate into reasoning_content"
+        );
+        let content = resp.choices[0].message.content.as_ref().unwrap();
+        match content {
+            OpenAIContent::Text(t) => assert_eq!(t, "The answer"),
+            _ => panic!("expected text content"),
+        }
+    }
+
+    /// A summary-only reasoning stream (o-series default: the thinking itself
+    /// is not returned, only its summary) must reach the same field.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning_summary() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.reasoning_summary_text.delta", "delta": "concise plan"}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "done"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r002", "model": "o-series", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("response");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("concise plan")
+        );
+    }
+
+    #[test]
+    fn test_parse_response_responses_reasoning_item() {
+        // Non-streaming counterpart: the reasoning arrives as an output item
+        // with summary (OpenAI) or content (dashscope) text blocks, which the
+        // normalizer skipped while it copied message and function_call items.
+        let json = serde_json::json!({
+            "id": "resp_r101",
+            "object": "response",
+            "status": "completed",
+            "model": "qwen3-coder-plus",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_101",
+                    "summary": [{"type": "summary_text", "text": "pondered"}],
+                    "content": [{"type": "reasoning_text", "text": "Think "}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_101",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "42"}]
+                }
+            ],
+            "usage": {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("response");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think pondered"),
+            "content reasoning text comes first, then the summary"
+        );
+        let content = resp.choices[0].message.content.as_ref().unwrap();
+        match content {
+            OpenAIContent::Text(t) => assert_eq!(t, "42"),
+            _ => panic!("expected text content"),
+        }
     }
 
     #[test]
@@ -1022,6 +2633,294 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_response_responses_incomplete_max_output_tokens() {
+        // A Responses API call that hit its output cap ends with
+        // status="incomplete" and incomplete_details.reason="max_output_tokens".
+        // The normalized chat view must surface that as finish_reason
+        // "length" instead of a normal "stop", or the interruption
+        // detector reports a capped answer as a clean completion.
+        let json = serde_json::json!({
+            "id": "resp_cap001",
+            "object": "response",
+            "created_at": 1780560263,
+            "model": "qwen-plus",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{
+                "content": [{"text": "partial answer", "type": "output_text"}],
+                "id": "msg_cap001",
+                "role": "assistant",
+                "status": "incomplete",
+                "type": "message"
+            }],
+            "usage": {"input_tokens": 57, "output_tokens": 1024, "total_tokens": 1081}
+        });
+
+        let response = OpenAIParser::parse_response(&json);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(resp.choices[0].finish_reason, Some("length".to_string()));
+        match &resp.choices[0].message.content {
+            Some(OpenAIContent::Text(t)) => assert_eq!(t, "partial answer"),
+            _ => panic!("expected text content"),
+        }
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.completion_tokens, 1024);
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_chunks_incomplete() {
+        // A capped Responses stream terminates with response.incomplete —
+        // not response.completed. That terminal event carries the final
+        // usage, and the aggregated view must report finish_reason
+        // "length" with that usage instead of a clean "stop" with none.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cap_sse", "model": "qwen-plus", "status": "queued"}}),
+            serde_json::json!({"type": "response.in_progress"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "message", "id": "msg_001", "role": "assistant"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp_cap_sse",
+                "model": "qwen-plus",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 50, "output_tokens": 1024, "total_tokens": 1074}
+            }}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let response = OpenAIParser::parse_response(&body);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(resp.id, "resp_cap_sse");
+        assert_eq!(resp.choices[0].finish_reason, Some("length".to_string()));
+        let content = resp.choices[0].message.content.as_ref().unwrap();
+        match content {
+            OpenAIContent::Text(t) => assert_eq!(t, "partial"),
+            _ => panic!("expected text content"),
+        }
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 50);
+        assert_eq!(usage.completion_tokens, 1024);
+    }
+
+    #[test]
+    fn test_parse_response_responses_incomplete_content_filter() {
+        // A response the provider's safety policy cut short ends with
+        // status="incomplete" and incomplete_details.reason="content_filter".
+        // The chat-completions path passes a provider "content_filter"
+        // finish straight through, and the interruption detector's
+        // SafetyFilter rule keys on exactly that spelling — so the
+        // normalized Responses view must surface it too, not "stop".
+        let json = serde_json::json!({
+            "id": "resp_filtered",
+            "object": "response",
+            "created_at": 1780560263,
+            "model": "qwen-plus",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "output": [{
+                "content": [{"text": "partial answer", "type": "output_text"}],
+                "id": "msg_filtered",
+                "role": "assistant",
+                "status": "incomplete",
+                "type": "message"
+            }],
+            "usage": {"input_tokens": 57, "output_tokens": 1024, "total_tokens": 1081}
+        });
+
+        let response = OpenAIParser::parse_response(&json);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("content_filter".to_string())
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_chunks_content_filter() {
+        // The streaming form: the terminal response.incomplete event carries
+        // reason="content_filter", and the aggregated view must report the
+        // same finish_reason its non-streaming twin does.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cf_sse", "model": "qwen-plus", "status": "queued"}}),
+            serde_json::json!({"type": "response.in_progress"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "message", "id": "msg_002", "role": "assistant"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp_cf_sse",
+                "model": "qwen-plus",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
+                "usage": {"input_tokens": 50, "output_tokens": 1024, "total_tokens": 1074}
+            }}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let response = OpenAIParser::parse_response(&body);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("content_filter".to_string())
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_without_terminal_event_keeps_finish_unknown() {
+        // A capture that ends before `response.completed`/`response.incomplete`
+        // has no authoritative finish reason. Fabricating "stop" made the
+        // builder treat the still-running turn as terminal and evict its
+        // conversation anchor; the drain merger already leaves `None` here.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cut", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a truncated stream still aggregates");
+        assert_eq!(resp.choices[0].finish_reason, None);
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "partial"),
+            other => panic!("the captured text must stay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_truncated_tool_call_keeps_finish_unknown() {
+        // A cut stream can already hold a tool call. The old code reported
+        // "tool_calls" (a terminal reason) and evicted the anchor even though
+        // the call's arguments may be incomplete; the cut must win.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cut_tc", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "function_call", "id": "item_1", "call_id": "call_cut", "name": "read_file", "arguments": ""}}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"path\":"}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a truncated stream still aggregates");
+        assert_eq!(resp.choices[0].finish_reason, None);
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the captured call must stay");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("id").and_then(|v| v.as_str()),
+            Some("call_cut")
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_completed_still_reports_stop() {
+        // The terminal event is what makes "stop" authoritative.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_ok", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "done"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_ok", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a completed stream aggregates");
+        assert_eq!(resp.choices[0].finish_reason, Some("stop".to_string()));
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_incomplete_keeps_tool_calls() {
+        // A stream cut after the model already emitted a function call: the
+        // terminal reason outranks "tool_calls", but the call itself is part
+        // of the output and must stay on the message, as it does for the
+        // non-streaming response and the chat-completions stream.
+        for reason in ["max_output_tokens", "content_filter"] {
+            let chunks = vec![
+                serde_json::json!({"type": "response.created", "response": {"id": "resp_cut_tc", "model": "qwen-plus"}}),
+                serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_cut"}}),
+                serde_json::json!({"type": "response.function_call_arguments.delta", "delta": "{\"city\":\"Beijing\"}"}),
+                serde_json::json!({"type": "response.function_call_arguments.done", "arguments": "{\"city\":\"Beijing\"}"}),
+                serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+                serde_json::json!({"type": "response.incomplete", "response": {
+                    "id": "resp_cut_tc",
+                    "model": "qwen-plus",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": reason},
+                    "usage": {"input_tokens": 50, "output_tokens": 1024, "total_tokens": 1074}
+                }}),
+            ];
+
+            let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+                .expect("should aggregate");
+            let expected = if reason == "max_output_tokens" {
+                "length"
+            } else {
+                "content_filter"
+            };
+            assert_eq!(resp.choices[0].finish_reason, Some(expected.to_string()));
+            let tc = resp.choices[0]
+                .message
+                .tool_calls
+                .as_ref()
+                .unwrap_or_else(|| panic!("{reason}: the emitted call must be kept"));
+            assert_eq!(tc.len(), 1);
+            assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_cut");
+            assert_eq!(
+                tc[0]
+                    .get("function")
+                    .unwrap()
+                    .get("arguments")
+                    .unwrap()
+                    .as_str()
+                    .unwrap(),
+                "{\"city\":\"Beijing\"}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_request_responses_max_output_tokens() {
+        // The Responses API spells the output cap max_output_tokens; the
+        // normalized chat view must carry it into max_tokens so downstream
+        // consumers (token-limit interruption rules, telemetry) see the cap.
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": "Hello",
+            "max_output_tokens": 512
+        });
+        let request = OpenAIParser::parse_request(&json);
+        assert!(request.is_some());
+        assert_eq!(request.unwrap().max_tokens, Some(512));
+    }
+
+    /// The Responses cap is copied onto `max_tokens` like the chat
+    /// `max_completion_tokens`, so a value the typed u32 field cannot hold
+    /// must be ignored the same way rather than fail the whole request.
+    #[test]
+    fn test_parse_request_responses_ignores_an_unusable_max_output_tokens() {
+        for cap in [
+            serde_json::json!("512"),
+            serde_json::json!(4_294_967_296u64),
+            serde_json::json!(-1),
+        ] {
+            let json = serde_json::json!({
+                "model": "gpt-5",
+                "input": "Hello",
+                "max_output_tokens": cap
+            });
+            let request = OpenAIParser::parse_request(&json)
+                .unwrap_or_else(|| panic!("{cap}: the request must still parse"));
+            assert_eq!(request.max_tokens, None, "{cap}");
+            assert_eq!(request.messages.len(), 1, "{cap}");
+        }
+    }
+
+    #[test]
     fn test_aggregate_responses_sse_truncated_no_done() {
         // Simulate a truncated stream: output_item.added + argument deltas but NO done event
         let chunks = vec![
@@ -1054,6 +2953,103 @@ mod tests {
         );
     }
 
+    /// The truncated-stream shape for a custom tool call: the item is
+    /// announced with an empty input, then only
+    /// `response.custom_tool_call_input.delta` fragments arrive and the
+    /// stream is cut before any done event. A function call keeps its partial
+    /// arguments in that shape; the custom tool call landed with empty
+    /// arguments because its streaming input events were not handled.
+    #[test]
+    fn test_aggregate_responses_sse_truncated_custom_tool_input() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_ctc_trunc", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "custom_tool_call", "id": "ctc_trunc", "call_id": "call_patch", "name": "apply_patch", "input": ""}}),
+            serde_json::json!({"type": "response.custom_tool_call_input.delta", "delta": "*** Begin Patch\n"}),
+            serde_json::json!({"type": "response.custom_tool_call_input.delta", "delta": "*** Update File: a.rs\n"}),
+            // NO response.custom_tool_call_input.done and no output_item.done
+            // — the stream was cut mid-input.
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_ctc_trunc", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the stream must aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the cut custom tool call must survive");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_patch"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("apply_patch"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** Update File: a.rs\n"),
+            "the partial custom tool input must be kept like function arguments"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_two_calls_without_done() {
+        // Two function calls in flight with no
+        // `response.function_call_arguments.done` (the truncated shape the
+        // post-loop flush exists for). Starting the second call used to clear
+        // the first one's name/id/arguments, so only the last call survived.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_par", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_1"}}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "delta": "{\"city\":\"Beijing\"}"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_time", "call_id": "call_2"}}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "delta": "{\"zone\":\"UTC\"}"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_par", "model": "gpt-5", "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("should aggregate");
+
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("both calls must be reported");
+        assert_eq!(
+            tc.len(),
+            2,
+            "a second in-flight call must not discard the first: {tc:?}"
+        );
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_1");
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "get_weather"
+        );
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
+        assert_eq!(tc[1].get("id").unwrap().as_str().unwrap(), "call_2");
+        assert_eq!(
+            tc[1]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "{\"zone\":\"UTC\"}"
+        );
+    }
+
     #[test]
     fn test_aggregate_responses_sse_chunks_tool_call() {
         let chunks = vec![
@@ -1082,6 +3078,204 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"city\":\"Beijing\"}"
+        );
+    }
+
+    /// The same call streamed instead of replayed: a custom tool's item
+    /// arrives as `response.output_item.added` / `.done` with type
+    /// `custom_tool_call` and its input under `input`. The item router accepted
+    /// only `function_call`, so the call was dropped from the streamed answer
+    /// the replay reader keeps.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_custom_tool_call() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_ctc002", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "custom_tool_call", "id": "ctc_002", "call_id": "call_patch", "name": "apply_patch", "input": ""}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "custom_tool_call", "id": "ctc_002", "call_id": "call_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_ctc002", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the stream must aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the streamed custom tool call must survive");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], serde_json::json!("call_patch"));
+        assert_eq!(tc[0]["function"]["name"], serde_json::json!("apply_patch"));
+        assert_eq!(
+            tc[0]["function"]["arguments"],
+            serde_json::json!("*** Begin Patch\n*** End Patch")
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_chunks_tool_call_from_done_event() {
+        // The done event carries the complete arguments. A capture that
+        // missed the deltas (stream joined late, events dropped) must not
+        // record an empty argument list.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_d01", "model": "qwen-plus"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_d01"}}),
+            serde_json::json!({"type": "response.function_call_arguments.done", "arguments": "{\"city\":\"Beijing\"}"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_d01", "model": "qwen-plus", "status": "completed", "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("response parses");
+        let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
+    }
+
+    /// A capture that attached after the deltas carries the answer only in the
+    /// closing `response.output_text.done` event. The aggregator read deltas
+    /// and tool-call events, and treated nothing else as a Responses stream,
+    /// so such a capture produced a null message even though the token
+    /// extractor counted its text.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_text_from_done_event() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_text.done", "text": "Hello world"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_d02", "model": "qwen-plus", "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("the closing text must still parse");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello world"),
+            other => panic!("the answer must survive the missing deltas: {other:?}"),
+        }
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("stop".to_string()),
+            "a completed stream closes with its own finish reason"
+        );
+    }
+
+    /// The same late-join shape one level up: the whole answer arrives in the
+    /// closing `response.output_item.done` for a `message` item. The
+    /// aggregator only looked at that event for function calls, so the text
+    /// was dropped even though the token extractor read it.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_text_from_item_done() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello world"}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_d03", "model": "qwen-plus", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("the closing item must still parse");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello world"),
+            other => panic!("the answer must survive the missing deltas: {other:?}"),
+        }
+    }
+
+    /// The reasoning counterpart of the late-join `message` item above: a
+    /// capture that attached after the thinking deltas carries the whole
+    /// thinking only in the closing `response.output_item.done` for the
+    /// `reasoning` item. The aggregator skipped every reasoning item there,
+    /// so the message view lost thinking the token extractor counted.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning_from_item_done() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_001", "content": [{"type": "reasoning_text", "text": "Think "}], "summary": [{"type": "summary_text", "text": "step by step"}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "The answer"}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r003", "model": "qwen3-coder-plus", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("the closing item must still parse");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think step by step"),
+            "the reasoning item's thinking must survive the missing deltas"
+        );
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "The answer"),
+            other => panic!("the answer must stay answer text: {other:?}"),
+        }
+    }
+
+    /// A closing reasoning item repeats thinking the deltas already delivered,
+    /// so it must not replace or duplicate them.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_reasoning_delta_wins() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Think "}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_002", "content": [{"type": "reasoning_text", "text": "Think step by step"}]}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "The answer"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r004", "model": "qwen3-coder-plus", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("response");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Think "),
+            "a captured reasoning delta supersedes the closing item"
+        );
+    }
+
+    /// An agentic Responses stream interleaves reasoning items with the calls
+    /// they precede, so one response can carry several of them: `reasoning`,
+    /// `function_call`, `reasoning`, `message`. A capture that attached after
+    /// the thinking deltas has only the closing `response.output_item.done`
+    /// events, and they carry different text rather than a repeat of the same
+    /// answer. Keeping the last one dropped the earlier thinking from the
+    /// message view.
+    ///
+    /// Both views lost it: the token extractor's `merge_response_output_text`
+    /// applied the same last-wins replacement to a closing reasoning item, so
+    /// the two halves agreed on the wrong answer rather than disagreeing. Each
+    /// reader now accumulates its own closing items.
+    #[test]
+    fn test_aggregate_responses_sse_keeps_every_closing_reasoning_item() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_010", "content": [{"type": "reasoning_text", "text": "Check the logs. "}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "function_call", "id": "fc_010", "call_id": "call_010", "name": "read_log", "arguments": "{}"}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_011", "summary": [{"type": "summary_text", "text": "Then retry."}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r010", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the closing items must still aggregate");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Check the logs. Then retry."),
+            "every closing reasoning item carries different thinking and must be kept"
+        );
+
+        // Accumulating the closing items must not weaken the delta-wins rule:
+        // when the thinking arrived as deltas, the closing items repeat it and
+        // are dropped whatever their number.
+        let with_deltas = vec![
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Check the logs. "}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Then retry."}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_012", "content": [{"type": "reasoning_text", "text": "Check the logs. "}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_013", "content": [{"type": "reasoning_text", "text": "Then retry."}]}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "Done"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r011", "model": "gpt-5", "status": "completed"}}),
+        ];
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(with_deltas))
+            .expect("the deltas must still aggregate");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Check the logs. Then retry."),
+            "delivered deltas supersede every closing reasoning item"
         );
     }
 
@@ -1128,6 +3322,595 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"file_path\": \"/tmp/a.md\"}"
+        );
+    }
+
+    /// A legacy `/v1/completions` stream carries each fragment on
+    /// `choices[].text` instead of a `delta` object, so the aggregation walked
+    /// past every chunk and closed the response with an empty answer.
+    #[test]
+    fn test_aggregate_sse_chunks_legacy_completion_text() {
+        let chunk = |text: &str, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "cmpl-legacy",
+                "object": "text_completion",
+                "created": 1_786_504_982u64,
+                "model": "gpt-3.5-turbo-instruct",
+                "choices": [{"index": 0, "text": text, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk("The capital of ", None),
+            chunk("France is Paris.", Some("stop")),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a legacy completion stream must still aggregate");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => {
+                assert_eq!(text, "The capital of France is Paris.")
+            }
+            other => panic!("the streamed fragments must reach the message: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    /// OpenAI-compatible gateways slim their SSE chunks the same way they slim
+    /// the plain body: GLM streams `{id, model, choices}` with no `object`,
+    /// `created` or choice `index`. A required identity field failed the
+    /// chunk's deserialization, the aggregation silently skipped every chunk
+    /// (`if let Ok`), and the stream looked empty — an `empty_response` false
+    /// positive with no finish reason.
+    #[test]
+    fn test_aggregate_sse_chunks_slim_compatible_chunks() {
+        let chunks = vec![
+            serde_json::json!({
+                "id": "1097830983179126888",
+                "model": "glm-4.7",
+                "choices": [{"delta": {"role": "assistant", "content": "Hello"}, "finish_reason": null}]
+            }),
+            serde_json::json!({
+                "id": "1097830983179126888",
+                "model": "glm-4.7",
+                "choices": [{"delta": {"content": " world"}, "finish_reason": null}]
+            }),
+            serde_json::json!({
+                "id": "1097830983179126888",
+                "model": "glm-4.7",
+                "choices": [{"delta": {}, "finish_reason": "stop"}]
+            }),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a slimmed stream must still aggregate");
+        assert_eq!(resp.id, "1097830983179126888");
+        assert_eq!(resp.model, "glm-4.7");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello world"),
+            other => panic!("the slimmed chunks must keep their delta text: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    /// A refusal arrives as `delta.refusal` with no content delta. The
+    /// aggregation ignored the field and hardcoded `refusal: None` on the
+    /// aggregated message, so the refusal text never reached the response.
+    #[test]
+    fn test_aggregate_sse_chunks_refusal_delta() {
+        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-refusal",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "gpt-4o",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"refusal": "I can't help with that."}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"refusal": " Ask something else."}),
+                Some("stop"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that. Ask something else.")
+        );
+    }
+
+    /// Legacy `function_call` streams: the single tool request arrives as
+    /// `delta.function_call` fragments (the name once, then bare argument
+    /// fragments), the pre-`tool_calls` spelling. The aggregation hardcoded
+    /// `function_call: None`, so a streamed legacy call was dropped exactly
+    /// where the whole-message form is read.
+    #[test]
+    fn test_aggregate_sse_chunks_legacy_function_call_delta() {
+        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-legacy",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "gpt-3.5-turbo",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"function_call": {"name": "get_weather", "arguments": ""}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function_call": {"arguments": "{\"city\":"}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function_call": {"arguments": "\"Beijing\"}"}}),
+                Some("function_call"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("function_call".to_string())
+        );
+        let fc = resp.choices[0]
+            .message
+            .function_call
+            .as_ref()
+            .expect("the legacy streamed call must survive aggregation");
+        assert_eq!(fc.get("name").unwrap().as_str().unwrap(), "get_weather");
+        assert_eq!(
+            fc.get("arguments").unwrap().as_str().unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
+    }
+
+    /// `index` is wire input: a value outside the slot range must not be
+    /// truncated into another slot, which would overwrite a valid tool call's
+    /// id, name and arguments in the recorded message.
+    #[test]
+    fn test_aggregate_sse_chunks_rejects_absurd_tool_call_index() {
+        let chunk = |tc: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "gpt-4o",
+                "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": null}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"index": 0, "id": "call_a", "type": "function", "function": {"name": "alpha", "arguments": "{\"x\":1}"}}),
+            ),
+            chunk(
+                serde_json::json!({"index": 4294967296u64, "id": "call_b", "type": "function", "function": {"name": "beta", "arguments": "{\"y\":2}"}}),
+            ),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            1,
+            "the out-of-range index must not be merged into slot 0: {tc:?}"
+        );
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_a");
+        let func = tc[0].get("function").unwrap();
+        assert_eq!(func.get("name").unwrap().as_str().unwrap(), "alpha");
+        assert_eq!(
+            func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"x\":1}"
+        );
+    }
+
+    /// A chat-completions choice can carry a cumulative `message` snapshot
+    /// instead of a `delta`: SysOM's Copilot stream sends nothing else, and
+    /// some OpenAI-compatible gateways close with a whole `message` as the
+    /// final frame. A chunk without `delta` failed typed deserialization and
+    /// was skipped whole, so the aggregation lost the snapshot's text, its
+    /// tool calls and its terminal `finish_reason` while every other consumer
+    /// of the same stream (the drain merger, the token fold) reads that shape.
+    #[test]
+    fn test_aggregate_sse_chunks_reads_cumulative_message_snapshots() {
+        let chunk = |choice: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-snapshot",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [choice]
+            })
+        };
+        let chunks = vec![
+            chunk(serde_json::json!({"index": 0, "delta": {"content": "Do"}})),
+            chunk(serde_json::json!({
+                "index": 0,
+                "message": {"role": "assistant", "content": "Done"},
+                "finish_reason": "stop"
+            })),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        assert!(
+            matches!(
+                resp.choices[0].message.content.as_ref(),
+                Some(OpenAIContent::Text(text)) if text == "Done"
+            ),
+            "the closing snapshot completes the answer the deltas started"
+        );
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("stop".to_string()),
+            "the terminal reason rides the snapshot frame"
+        );
+    }
+
+    /// A snapshot frame's `content` can be an array of content parts, and the
+    /// frame repeats `reasoning_content` and `refusal` whole: each folds by
+    /// the same cumulative rule as the text, so a snapshot that extends the
+    /// deltas so far replaces them and an unrelated one appends.
+    #[test]
+    fn test_aggregate_sse_chunks_folds_snapshot_parts_reasoning_and_refusal() {
+        let chunk = |choice: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-snapshot",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [choice]
+            })
+        };
+        let chunks = vec![
+            chunk(serde_json::json!({
+                "index": 0,
+                "delta": {"content": "Hel", "reasoning_content": "Think", "refusal": "Sorry"}
+            })),
+            chunk(serde_json::json!({
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Hel"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+                        {"type": "text", "text": "lo"}
+                    ],
+                    "reasoning_content": "Thinking",
+                    "refusal": "No"
+                },
+                "finish_reason": "stop"
+            })),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        let message = &resp.choices[0].message;
+        assert!(
+            matches!(message.content.as_ref(), Some(OpenAIContent::Text(text)) if text == "Hello"),
+            "the parts' text joins and replaces the prefix the deltas streamed"
+        );
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("Thinking"),
+            "a reasoning snapshot extending the deltas replaces them"
+        );
+        assert_eq!(
+            message.refusal.as_deref(),
+            Some("SorryNo"),
+            "an unrelated refusal snapshot appends"
+        );
+    }
+
+    /// A snapshot frame repeats whole tool calls: each replaces the slot it
+    /// names instead of extending the streamed fragments, an index-less call
+    /// takes its list position, an empty field keeps the slot's value, and a
+    /// call whose index is past the slot cap is dropped.
+    #[test]
+    fn test_aggregate_sse_chunks_replaces_tool_calls_from_snapshot() {
+        let chunk = |choice: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-snapshot",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [choice]
+            })
+        };
+        let chunks = vec![
+            chunk(serde_json::json!({
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_a",
+                    "function": {"name": "read_file", "arguments": "{\"path\":"}
+                }]}
+            })),
+            chunk(serde_json::json!({
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "",
+                            "function": {"name": "", "arguments": "{\"path\":\"/tmp/a.md\"}"}
+                        },
+                        {
+                            "id": "call_b",
+                            "function": {"name": "write_file", "arguments": ""}
+                        },
+                        {
+                            "index": 4096,
+                            "id": "call_far",
+                            "function": {"name": "dropped", "arguments": "{}"}
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            })),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+        assert_eq!(tc.len(), 2, "the out-of-range call is dropped: {tc:?}");
+        assert_eq!(tc[0]["id"], "call_a", "an empty id keeps the streamed one");
+        assert_eq!(tc[0]["function"]["name"], "read_file");
+        assert_eq!(
+            tc[0]["function"]["arguments"], "{\"path\":\"/tmp/a.md\"}",
+            "the whole call replaces the streamed fragment instead of extending it"
+        );
+        assert_eq!(
+            tc[1]["id"], "call_b",
+            "an index-less call takes its position"
+        );
+        assert_eq!(tc[1]["function"]["name"], "write_file");
+        assert_eq!(tc[1]["function"]["arguments"], "");
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    /// Compatible providers stream Chat tool calls without an `index`: a
+    /// fragment that carries the name starts a call, unnamed fragments extend
+    /// the call they belong to. Keying every index-less fragment to slot 0
+    /// made the second call's name overwrite the first call's name and
+    /// concatenated both calls' argument fragments into one invalid JSON
+    /// string, so the recorded message held one mangled call instead of two.
+    #[test]
+    fn test_aggregate_sse_chunks_unindexed_sequential_tool_calls() {
+        let chunk = |tc: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"id": "call_a", "function": {"name": "read_file", "arguments": "{\"path\":"}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function": {"arguments": "\"/tmp/a.md\"}"}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"id": "call_b", "function": {"name": "write_file", "arguments": "{\"path\":\"/tmp/b.md\"}"}}),
+                Some("tool_calls"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            2,
+            "a name starts a new call; the second call must not overwrite the first: {tc:?}"
+        );
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_a");
+        assert_eq!(tc[0]["function"]["name"].as_str().unwrap(), "read_file");
+        assert_eq!(
+            tc[0]["function"]["arguments"].as_str().unwrap(),
+            "{\"path\":\"/tmp/a.md\"}"
+        );
+        assert_eq!(tc[1].get("id").unwrap().as_str().unwrap(), "call_b");
+        assert_eq!(tc[1]["function"]["name"].as_str().unwrap(), "write_file");
+        assert_eq!(
+            tc[1]["function"]["arguments"].as_str().unwrap(),
+            "{\"path\":\"/tmp/b.md\"}"
+        );
+    }
+
+    /// OpenAI defines `tool_calls[].index` per choice: every choice starts at
+    /// 0. Keying the slot only by that wire index folded a second choice's
+    /// call into the first choice's slot, so the aggregated message reported
+    /// one call made of two different names and spliced argument fragments.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_each_choices_tool_calls_apart() {
+        let chunk = |choice: u32, tc: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-2",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": choice, "delta": {"tool_calls": [tc]}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                0,
+                serde_json::json!({"index": 0, "id": "call_a", "function": {"name": "read_file", "arguments": "{\"path\":"}}),
+                None,
+            ),
+            chunk(
+                1,
+                serde_json::json!({"index": 0, "id": "call_b", "function": {"name": "write_file", "arguments": "{\"path\":"}}),
+                None,
+            ),
+            chunk(
+                0,
+                serde_json::json!({"index": 0, "function": {"arguments": "\"/tmp/a.md\"}"}}),
+                None,
+            ),
+            chunk(
+                1,
+                serde_json::json!({"index": 0, "function": {"arguments": "\"/tmp/b.md\"}"}}),
+                Some("tool_calls"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            2,
+            "each choice's index 0 is a different call: {tc:?}"
+        );
+        let rendered: Vec<(String, String)> = tc
+            .iter()
+            .map(|call| {
+                (
+                    call["function"]["name"].as_str().unwrap_or("").to_string(),
+                    call["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            rendered.contains(&(
+                "read_file".to_string(),
+                "{\"path\":\"/tmp/a.md\"}".to_string()
+            )),
+            "choice 0's call must keep its own arguments: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&(
+                "write_file".to_string(),
+                "{\"path\":\"/tmp/b.md\"}".to_string()
+            )),
+            "choice 1's call must keep its own arguments: {rendered:?}"
+        );
+    }
+
+    /// The same per-choice scoping applies to the snapshot shape: a gateway
+    /// that closes with a whole `message` per choice repeats each choice's
+    /// call, and both choices name their call index 0.
+    #[test]
+    fn test_aggregate_sse_chunks_snapshots_keep_each_choices_tool_calls_apart() {
+        let snapshot = |choice: u32, id: &str, name: &str, path: &str| {
+            serde_json::json!({
+                "id": "chatcmpl-3",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{
+                    "index": choice,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": path}
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })
+        };
+        let chunks = vec![
+            snapshot(0, "call_a", "read_file", "{\"path\":\"/tmp/a.md\"}"),
+            snapshot(1, "call_b", "write_file", "{\"path\":\"/tmp/b.md\"}"),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            2,
+            "each choice's snapshot is a different call: {tc:?}"
+        );
+        assert_eq!(tc[0]["function"]["name"].as_str().unwrap(), "read_file");
+        assert_eq!(tc[1]["function"]["name"].as_str().unwrap(), "write_file");
+    }
+
+    /// A multi-choice stream finishes each choice on its own chunk. Keeping the
+    /// *first* non-null finish reason therefore reports an earlier choice's
+    /// `stop` for a call whose last choice was cut by the safety filter — the
+    /// same "last is decisive" rule the interruption detector and the drain
+    /// merger follow.
+    #[test]
+    fn test_aggregate_sse_chunks_reads_the_last_choices_finish_reason() {
+        let chunk = |choice: u32, finish: &str| {
+            serde_json::json!({
+                "id": "chatcmpl-4",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": choice, "delta": {"content": "x"}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(0, "stop"),
+            serde_json::json!({
+                "id": "chatcmpl-4",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": 1, "delta": {"content": "y"}, "finish_reason": null}]
+            }),
+            chunk(1, "content_filter"),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].finish_reason.as_deref(),
+            Some("content_filter"),
+            "the last choice's finish reason is decisive, not the first"
         );
     }
 }

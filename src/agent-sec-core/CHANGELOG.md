@@ -1,5 +1,202 @@
 # Changelog
 
+## [1.1.2] - Unreleased
+
+### Changed
+
+- Install the security runtime, framework integrations and skills through separate RPMs.
+
+## 1.1.1
+
+**Breaking Changes**
+
+- Removed the unsupported `--cgroup-id` flag from `scope create`; cgroup assignment
+  was never accepted by PAP or the AgentSight Adapter, and the flag now fails locally
+  with exit code 2. Select target processes with `--pid`, `--process-name`, or
+  `--executable` instead. (#9134)
+
+**Code Scanning**
+
+- Evaluated command strings passed to Python process APIs (`os.system`, `os.popen`,
+  `subprocess`) against the existing Shell rules, with native rule IDs, severity, and
+  evidence retained; dynamically built commands and argv arrays remain uninferred.
+  (#9128)
+
+**Skill Ledger Runtime**
+
+- Added `skillsec` as the primary `agent-sec-cli` command group name, retaining
+  `skill-ledger` as a compatible alias with identical arguments, output, and exit
+  codes. (#8907)
+- Escaped the YAML-sensitive characters that JSON quoting leaves literal in a pending
+  Skill placeholder, so accepted Skill names containing control characters or Unicode
+  separators survive publication and frontmatter parsing unchanged. (#8948)
+
+## 1.1.0
+
+**Breaking Changes**
+
+- Switched source builds and installs to the V2 Rust CLI and host-level systemd
+  daemon, replacing the source-build Python runtime, user sandbox, and venv
+  layout; source-install scripts must migrate to the V2 hook-facing command
+  surface. (#3510)
+
+**V2 Policy & Daemon Runtime**
+
+- Rejected stale policy reconciliation results atomically, tracked real write-receipt
+  versions, and let newer Delete intents supersede exhausted Apply retries, with
+  deterministic crash-recovery coverage for SQLite persistence. (#6944)
+
+**Storage Safety**
+
+- Fell back to `/var/lib/agent-sec/policy/policy-state.db` for default Policy storage
+  when the primary directory is unsafe, checking both candidates before initialization
+  and rejecting conflicting databases with actionable diagnostics. (#8782)
+
+**Skill Ledger Runtime**
+
+- Raised a typed `SkillLedgerError` instead of a raw `NotADirectoryError` when
+  `skill export --output` points to an existing file. (#6105)
+
+**Build & Packaging**
+
+- Updated rustls to 0.23.45 to address a Dependabot security advisory. (#7783)
+
+**Raw Packaging**
+
+- Added a Linux x86_64 sec-core prebuilt raw-archive release target with SHA-256 and
+  CycloneDX SBOM sidecars. (#8461)
+
+## 1.0.1
+
+**Breaking Changes**
+
+- Removed SkillSec key rotation: `rotate-keys` and `init --force-keys` are rejected before any
+  write, and the current signing key is retained. Scanned and certified Skills are remembered as
+  exact paths in the daemon's `managedSkillDirs`; remove an entry and restart the daemon to revoke
+  it. (#7629)
+
+**Skill Ledger Runtime**
+
+- Authorized and scanned standard system and local-user Skill directories by default through
+  `enableDefaultSkillDirs`, deriving user homes from local account records in the daemon. (#7419)
+- Kept SkillFS notify acceptance within the 64 KiB session response frame so accepted notifies
+  are no longer dropped and retried. (#7188)
+
+**V2 Policy & Daemon Runtime**
+
+- Verified that the connected daemon runs as root before V2 clients send requests, and replaced
+  the legacy shell health check with the `agent-sec-daemon-health` probe. (#7122)
+- Limited daemon connections per user, reserving connections for root so other users cannot
+  starve it. (#7103)
+- Retained `CAP_SYS_PTRACE` in `agent-sec-core.service` so Scope discovery can read protected
+  process links. (#7404)
+- Ran observability-store retention while the daemon is active, including startup catch-up. (#7099)
+- Removed the process-local policy engine repository and prevented polling lock starvation. (#7111)
+
+**Storage Safety**
+
+- Rejected symlinked and non-regular read-only SQLite database paths instead of following them. (#7295)
+- Rejected symlinked and non-regular writable SQLite database paths before opening them. (#7296)
+
+**V2 Security Operations**
+
+- Stripped information-separator characters from `capabilities` environment values and filters
+  as V1 does. (#7194)
+
+**Build & Packaging**
+
+- Changed the default agent-sec-core RPM build target to V2 while keeping an explicit V1 target. (#7563)
+
+**Testing & CI**
+
+- Restored the V2 workspace clippy gate for prompt-scan crates. (#6680)
+
+## 1.0.0
+
+**Breaking Changes**
+
+- Security operations require a running root daemon; the CLI does not start it or execute locally.
+  Manage `agent-sec-core.service` with system `systemctl`; the default socket is
+  `/run/agent-sec-core/daemon.sock`. (#3217)
+- `AGENT_SEC_DATA_DIR` and `AGENT_SEC_MODEL_SERVICE_*` are now daemon-wide settings; CLI/hook
+  exports no longer apply. Configure the daemon environment and restart. Storage defaults to
+  `/var/log/agent-sec`, without per-user fallbacks; test isolation requires a separate test daemon,
+  data directory, and socket. (#7283)
+- Shared-store queries isolate by trusted OS UID, not account lifetime; root sees all UIDs.
+  Reusing a UID exposes its retained records to the new account. Keep UIDs stable and have
+  administrators handle old data and permissions before reassignment. (#7277)
+- PII custom rules now use `/etc/agent-sec/pii-checker/rules.yaml` instead of the per-user default.
+  Move custom rules there and restart the daemon to apply changes. (#3286)
+- Skill Ledger uses a shared system signing key; V1 keys, keyrings and history are not imported.
+  Rescan Skills to establish V2 trust; key rotation requires root. (#3295)
+- Skill operations require administrator-configured `managedSkillDirs` or authenticated SkillFS
+  mounts. All local users can operate managed Skills; no per-user Skill ACLs are provided. (#3295)
+- V1 per-user Security Events and Observability history is not automatically imported into the
+  V2 system store. No supported cross-store import tool is shipped; preserve V1 data. (#6605)
+- Legacy `harden`, `verify` and `log-sandbox` commands are unavailable in the V2 CLI.
+  Update dependent scripts before switching to V2.
+
+**V2 Security Operations**
+
+- Added native V2 PII scanning with V1-compatible CLI and Hook contracts. (#3286)
+- Added V2 prompt scanning through the daemon and CLI, including loopback-only model classification. (#3384)
+- Added local-model LLM mode for V2 code scanning. (#6596)
+- Restored owner-scoped V2 security-event queries and the `events` CLI command. (#6745)
+- Added V2 observability recording through the CLI and daemon. (#3397)
+- Added V2 observability queries, reports, reviews, and owner-scoped correlation through the daemon. (#6826)
+- Reported the V2 prompt-scan L2 default and unsupported model overrides through `agent-sec-cli capabilities`. (#6595)
+- Corrected PII card and email detection boundaries to reduce false warnings and preserve sentence punctuation. (#6597)
+- Added CI/CD and cloud token-prefix detection to V2 PII scans. (#6219)
+- Added compound credential field-name detection to V2 PII scans. (#6234)
+
+**Skill Ledger Runtime**
+
+- Migrated Skill Ledger scanning, signing, activation, and recovery to the V2 daemon. (#3295)
+- Migrated Agent hooks to V2 daemon-owned Skill Ledger trust and command handling. (#3505)
+- Cleaned failed Skill Ledger export artifacts so callers can retry the same output directory. (#4004)
+- Retained all Skill Ledger rollback backups for later recovery and inspection. (#3989)
+- Reclaimed stale private-key temporary files after interrupted Skill Ledger initialization or rotation. (#4430)
+- Reported signed-but-unscanned directories as Skill Ledger warnings. (#4447)
+- Detected credential material outside hidden directories in Skill Ledger scans. (#6201)
+- Reported FIFOs, sockets, and device nodes in Skill Ledger scans. (#6211)
+- Rejected oversized Skill Ledger worker frames before spawning a worker. (#5671)
+
+**V2 Policy & Daemon Runtime**
+
+- Added persisted V2 policy assignments and AgentSight reconciliation. (#6931)
+- Started the V2 daemon automatically after installation. (#6846)
+- Ran V2 security-event retention while the daemon is active, including startup catch-up and failure retries. (#6679)
+- Preserved daemon cancellation behavior during V2 worker shutdown. (#3470)
+
+**Build & Packaging**
+
+- Added reproducible offline V2 RPM builds and installed-artifact validation. (#3257)
+- Changed the raw package to install V2 CLI and daemon binaries with the system service. (#6551)
+
+**Agent Hook Integrations**
+
+- Updated OpenClaw plugin deployment and runtime compatibility for OpenClaw 2.0. (#3408)
+- Moved OpenClaw PII scanning to the supported model-entry gate while retaining legacy-host compatibility. (#3503)
+- Moved OpenClaw prompt scanning to the supported model-entry gate. (#6571)
+- Kept Codex PII and Code Scanner Hooks fail-open for non-object input payloads. (#6341)
+- Kept the Codex PII Hook fail-open for non-object scan results. (#6654)
+- Aligned V2 Code Scanner contracts across CLI, daemon, and installed RPM behavior. (#6822)
+- Restricted PII scanning to the current model prompt. (#6970)
+- Bounded approval descriptions before they reach the security decision flow. (#6972)
+- Preserved native device identity checks for V2 storage and export operations. (#6955)
+
+## 0.13.2
+
+**Build & Packaging**
+
+- Enabled ANOLISA RPM adapter installation to discover hook and skill payloads split across agent-sec-core subpackages. (#3480)
+
+## 0.13.1
+
+**OpenClaw Hook Integration**
+
+- Updated OpenClaw plugin deployment and runtime compatibility for OpenClaw 2.0, including capability consent and SQLite-backed session evidence. (#3440)
+
 ## 0.13.0
 
 **V2 Policy & Daemon Runtime**

@@ -1,9 +1,11 @@
 //! Phase 4: Index Worker + Tier B integration tests.
 //!
 //! These tests need the inotify/FSEvents watcher; they sleep briefly to give
-//! events time to land. Time budgets are conservative (≤ 2s per case).
+//! events time to land. Most cases resolve in ≤ 2s; the stale-row regressions
+//! poll for up to 4s before declaring failure.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -69,6 +71,85 @@ fn full_scan_indexes_existing_files() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].path, "notes/a.md");
     assert!(hits[0].snippet.contains("rust") || hits[0].snippet.contains("Rust"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_search_tool_reports_row_decode_error() {
+    let (_tmp, mut svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    index
+        .reindex_file("notes/known.md", "deploymentmarker", 100, 16, None)
+        .unwrap();
+    assert_eq!(
+        svc.memory_search("deploymentmarker", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let conn = rusqlite::Connection::open(index.db_path()).unwrap();
+    conn.busy_timeout(Duration::from_secs(5)).unwrap();
+    // Fault injection in a private test database, not a normal write path.
+    let changed = conn
+        .execute(
+            "UPDATE files SET mtime_ms = 'invalid' WHERE path = ?1",
+            ["notes/known.md"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    let err = svc
+        .memory_search("deploymentmarker", 5, None, None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // With no embedding provider, vector mode falls back to the same scoped BM25 path.
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("vector"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    // Exercise hybrid with a deterministic provider and no vector rows.
+    svc.embedding = Some(Arc::new(KeywordEmbedding { dim: 8 }));
+    let err = svc
+        .memory_search("deploymentmarker", 5, Some("hybrid"), None, None)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Sqlite(rusqlite::Error::InvalidColumnType(_, _, _))
+    ));
+
+    let log = std::fs::read_to_string(svc.mount.audit_log_path()).unwrap();
+    let failed: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|entry: &serde_json::Value| {
+            entry["tool"] == "memory_search" && entry["ok"] == false
+        })
+        .collect();
+    assert_eq!(failed.len(), 3, "one failed audit per search error");
+    for (entry, mode) in failed
+        .iter()
+        .zip(["bm25", "bm25(fallback from vector)", "hybrid"])
+    {
+        assert_eq!(
+            entry["path"],
+            format!("{mode}:len={}", "deploymentmarker".len())
+        );
+        assert!(
+            entry["error"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid column type")
+        );
+        assert!(!entry.to_string().contains("deploymentmarker"));
+    }
 }
 
 #[test]
@@ -142,6 +223,113 @@ fn skips_binary_extensions() {
         .memory_search("fake-png-bytes", 5, None, None, None)
         .unwrap();
     assert!(hits.is_empty(), "binary file got indexed: {hits:?}");
+}
+
+/// Poll until `query` stops returning hits, up to `deadline_ms`. Returns the
+/// last hit list so the caller can report what survived.
+fn wait_until_no_hits(
+    svc: &MemoryService,
+    query: &str,
+    deadline_ms: u64,
+) -> Vec<agent_memory::index::SearchHit> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(deadline_ms);
+    let mut last = svc.memory_search(query, 5, None, None, None).unwrap();
+    while !last.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        last = svc.memory_search(query, 5, None, None, None).unwrap();
+    }
+    last
+}
+
+#[test]
+fn unindexes_file_that_grows_past_size_cap() {
+    let (_tmp, svc) = setup();
+    // A small, indexable .log file (the `.log` extension is on the indexable
+    // list, and log files grow) with a distinctive keyword.
+    svc.write("logs/app.log", "kernel snapshot marker", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2)); // README + this file
+    let hits = svc.memory_search("kernel", 5, None, None, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "logs/app.log");
+
+    // Grow the same file past the 4 MiB indexable cap (raw write so the
+    // watcher, not the service, handles the event).
+    let big = "x".repeat(5 * 1024 * 1024);
+    std::fs::write(svc.mount.root.join("logs/app.log"), big).unwrap();
+
+    // The modify flush must drop the entry, exactly like full_scan's
+    // seen-set pruning would — not keep serving the pre-growth body.
+    let last = wait_until_no_hits(&svc, "kernel", 4000);
+    assert!(
+        last.is_empty(),
+        "stale hit survived growing past the size cap: {last:?}"
+    );
+}
+
+#[test]
+fn unindexes_file_that_becomes_non_utf8() {
+    let (_tmp, svc) = setup();
+    svc.write("notes/binary.md", "mojibake marker text", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2));
+    assert_eq!(
+        svc.memory_search("mojibake", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Overwrite the file with bytes that are not valid UTF-8.
+    std::fs::write(
+        svc.mount.root.join("notes/binary.md"),
+        [0xff_u8, 0xfe, 0x00, 0x80, 0x81, 0x82],
+    )
+    .unwrap();
+
+    let last = wait_until_no_hits(&svc, "mojibake", 4000);
+    assert!(
+        last.is_empty(),
+        "stale hit survived a non-UTF-8 overwrite: {last:?}"
+    );
+}
+
+#[test]
+fn directory_events_do_not_cascade_delete_the_subtree() {
+    // A directory attribute event must not delete anything under it. Since
+    // ab5f41cc's (mtime, size) dedup, phase 2c skips the files that phase 1
+    // expanded out of the directory, so nothing re-upserts them within the
+    // same flush: a cascading `to_remove` now shows up here as an empty hit
+    // list, and in the vector case below as a lost embedding.
+    let (_tmp, svc) = setup();
+    svc.write("notes/deep/a.md", "cascade guard marker", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2));
+    assert_eq!(
+        svc.memory_search("cascade", 5, None, None, None)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A pure directory attribute event (chmod on the directory itself)
+    // used to push the directory path into to_remove, which
+    // cascade-deletes every indexed row under it — vectors included.
+    // Directory events must be skipped: a same-name directory replacing
+    // a file cannot arrive without the file's own Remove event.
+    let dir = svc.mount.root.join("notes");
+    let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&dir, perms).unwrap();
+
+    std::thread::sleep(Duration::from_millis(1500));
+    let hits = svc.memory_search("cascade", 5, None, None, None).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "a directory attribute event must not drop the subtree: {hits:?}"
+    );
+    assert_eq!(hits[0].path, "notes/deep/a.md");
 }
 
 #[test]
@@ -413,6 +601,149 @@ fn search_category_filter_works() {
     assert!(hits.is_empty(), "expected no hits for unknown category");
 }
 
+/// Regression for GH-4366. `search_category_filter_works` above uses `top_k=10`
+/// with two files, so the SQL `LIMIT` never truncates anything and a
+/// client-side (post-LIMIT) category filter looks correct. Here the window
+/// *is* exhausted by one category: bm25 ranks the six `facts/lesson/` files
+/// that repeat every query term above the six `facts/interest/` files that
+/// mention them once, so filtering after the limit returned zero interest
+/// hits. The filter now runs in SQL, before the limit.
+#[test]
+fn search_category_filter_applies_before_limit() {
+    let (_tmp, svc) = setup();
+    let baseline = svc.index.as_ref().unwrap().count().unwrap();
+
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/lesson").unwrap();
+    for i in 0..6 {
+        svc.write(
+            &format!("facts/lesson/01JLESSON{i}QWERTYUIOP.md"),
+            &format!(
+                "---\ncategory: lesson\ntitle: quantum lattice dynamics {i}\n---\n\n\
+                 quantum lattice dynamics quantum lattice dynamics \
+                 quantum lattice dynamics variant {i}"
+            ),
+            false,
+        )
+        .unwrap();
+        svc.write(
+            &format!("facts/interest/01JINTEREST{i}QWERTY.md"),
+            &format!(
+                "---\ncategory: interest\ntitle: quantum interest {i}\n---\n\n\
+                 The agent noted a quantum lattice once ({i})."
+            ),
+            false,
+        )
+        .unwrap();
+    }
+    assert!(wait_for_index(&svc, baseline + 12));
+
+    // Premise: with no filter the top-5 window is entirely lesson facts.
+    let unfiltered = svc
+        .memory_search("quantum lattice dynamics", 5, None, None, None)
+        .unwrap();
+    assert_eq!(unfiltered.len(), 5, "expected a full top_k window");
+    assert!(
+        unfiltered
+            .iter()
+            .all(|h| h.path.starts_with("facts/lesson/")),
+        "premise broken, the unfiltered top-5 window is not all lesson facts:\n{unfiltered:#?}"
+    );
+
+    // The requested category still fills the window.
+    let hits = svc
+        .memory_search("quantum lattice dynamics", 5, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+        "category=interest returned other paths:\n{hits:#?}"
+    );
+}
+
+/// Regression for the P2 review on this PR. Moving the category filter into SQL
+/// as a `LIKE` also changed its case behaviour: SQLite folds ASCII case in
+/// `LIKE`, while the Rust-side `filter_by_category` this replaced compared the
+/// path component with a case-sensitive `==`. A store holding both
+/// `facts/interest/` and `facts/Interest/` therefore returned the mixed-case
+/// file for `category="interest"` (seven hits where base returned six), and at
+/// `top_k=5` that file occupied a slot that a requested-category fact should
+/// have filled. The filter is a case-sensitive `GLOB` now.
+#[test]
+fn search_category_filter_is_case_sensitive() {
+    let (_tmp, svc) = setup();
+    let baseline = svc.index.as_ref().unwrap().count().unwrap();
+
+    // Distinct directories on the case-sensitive filesystems CI runs on.
+    svc.mkdir("facts/interest").unwrap();
+    svc.mkdir("facts/Interest").unwrap();
+    for i in 0..6 {
+        svc.write(
+            &format!("facts/interest/01JCSCASE{i}QWERTYU.md"),
+            &format!(
+                "---\ncategory: interest\ntitle: quantum interest {i}\n---\n\n\
+                 The agent noted a quantum lattice once ({i})."
+            ),
+            false,
+        )
+        .unwrap();
+    }
+    // Repeats the query terms, so bm25 ranks it above all six lowercase facts.
+    svc.write(
+        "facts/Interest/mixedcase.md",
+        "---\ncategory: Interest\ntitle: mixed case sibling\n---\n\n\
+         quantum lattice quantum lattice quantum lattice",
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_index(&svc, baseline + 7));
+
+    // Premise: the mixed-case sibling is inside the unfiltered top-5 window, so
+    // a case-insensitive filter would spend one of those five slots on it.
+    let unfiltered = svc
+        .memory_search("quantum lattice", 5, None, None, None)
+        .unwrap();
+    assert_eq!(unfiltered.len(), 5, "expected a full top_k window");
+    assert!(
+        unfiltered
+            .iter()
+            .any(|h| h.path == "facts/Interest/mixedcase.md"),
+        "premise broken, the mixed-case fact is not in the window:\n{unfiltered:#?}"
+    );
+
+    // All six lowercase matches come back and nothing else.
+    let hits = svc
+        .memory_search("quantum lattice", 10, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        6,
+        "expected the six lowercase matches:\n{hits:#?}"
+    );
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+        "category=interest returned other paths:\n{hits:#?}"
+    );
+
+    // At top_k=5 the mixed-case file no longer displaces a requested fact: the
+    // five slots are all lowercase interest facts.
+    let hits = svc
+        .memory_search("quantum lattice", 5, None, Some("interest"), None)
+        .unwrap();
+    assert_eq!(hits.len(), 5, "expected a full top_k of interest hits");
+    assert!(
+        hits.iter().all(|h| h.path.starts_with("facts/interest/")),
+        "mixed-case file took a top_k slot:\n{hits:#?}"
+    );
+
+    // The mixed-case category is still reachable on its own terms.
+    let hits = svc
+        .memory_search("quantum lattice", 10, None, Some("Interest"), None)
+        .unwrap();
+    let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, vec!["facts/Interest/mixedcase.md"]);
+}
+
 // ---------- vector / hybrid search with an embedding provider ----------
 //
 // Regression for the "Cannot start a runtime from within a runtime" panic
@@ -440,6 +771,38 @@ impl EmbeddingProvider for KeywordEmbedding {
             v[1] = 1.0;
         } else {
             v[2] = 1.0;
+        }
+        Ok(Embedding { vector: v })
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dim
+    }
+}
+
+/// Provider mock that can be switched to failing mid-test: once `fail` is
+/// set, `embed` returns `Other("provider down")`, which `embed_sync` maps
+/// to `None` — the silent vector loss that
+/// `directory_attrib_event_keeps_vectors_when_embed_fails` reproduces.
+struct FlakyEmbedding {
+    dim: usize,
+    fail: AtomicBool,
+}
+
+#[async_trait]
+impl EmbeddingProvider for FlakyEmbedding {
+    async fn embed(&self, text: &str) -> agent_memory::Result<Embedding> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(MemoryError::Other("provider down".into()));
+        }
+        let mut v = vec![0.0_f32; self.dim];
+        let t = text.to_lowercase();
+        if t.contains("rust") {
+            v[0] = 1.0;
+        } else if t.contains("python") {
+            v[1] = 1.0;
+        } else {
+            v[3] = 1.0;
         }
         Ok(Embedding { vector: v })
     }
@@ -567,4 +930,116 @@ async fn full_scan_backfills_vectors_for_preexisting_files() {
         "vector search found no hits after backfill"
     );
     assert_eq!(hits[0].path, "notes/a.md");
+}
+
+// ---------- agent scope on the synchronous reindex ----------
+
+/// `reindex_file` is the path `memory_observe` uses to make a fresh note
+/// searchable before the notify watcher's debounce fires. It has to tag the
+/// row with the observing agent exactly like the watcher's flush and full-scan
+/// paths do: an untagged row is invisible under `isolated:<agent>` — which
+/// defeats the immediate-recall guarantee the synchronous upsert exists for —
+/// and is shared with every *other* agent under `filter:<agent>`.
+///
+/// The note is deliberately never written to disk, so the watcher cannot
+/// re-tag it behind our back and both assertions are about this call alone.
+#[test]
+fn reindex_file_tags_the_row_with_the_observing_agent() {
+    let (_tmp, svc) = setup();
+    let index = svc.index.as_ref().unwrap();
+    let mtime_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    index
+        .reindex_file(
+            "notes/observed/virtual.md",
+            "the deploy codename is zephyr",
+            mtime_ms,
+            27,
+            Some("alpha"),
+        )
+        .unwrap();
+
+    let own: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("isolated:alpha"), None)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        own.iter().any(|p| p == "notes/observed/virtual.md"),
+        "isolated:alpha cannot see the row attributed to it: {own:?}"
+    );
+
+    let others: Vec<String> = index
+        .search_scoped("zephyr", 5, Some("filter:beta"), None)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
+    assert!(
+        !others.iter().any(|p| p == "notes/observed/virtual.md"),
+        "filter:beta must not see a row tagged for alpha: {others:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_attrib_event_keeps_vectors_when_embed_fails() {
+    // A directory attribute event must not cascade-delete the subtree's
+    // vectors. Since ab5f41cc's (mtime, size) dedup, phase 2c skips the
+    // files phase 1 expanded out of the directory, so nothing re-upserts
+    // them within the same flush: a cascading `to_remove` empties the BM25
+    // hit list (the sibling test above) and permanently loses the vector
+    // here, because embed_sync returns None while the provider errors.
+    // What does NOT come back is the vector — store.remove drops the
+    // vector row too, and upsert_vec only happens when embed_sync returns
+    // Some, which a failing provider never does. So: index a file under
+    // notes/, break the provider, then chmod the directory (a pure
+    // IN_ATTRIB event — no file inside notes/ changed). The vector must
+    // survive; a directory that reached the cascading `to_remove` would lose it until a re-embed.
+    //
+    // multi_thread is required: the worker drives embed_sync from its own
+    // std thread via the runtime handle IndexHandle::open captures on the
+    // calling thread. The assertion queries search_vec with an explicit
+    // vector so the failing provider cannot take the query side down with
+    // it.
+    let (_tmp, mut svc) = setup();
+    let mock = Arc::new(FlakyEmbedding {
+        dim: 8,
+        fail: AtomicBool::new(false),
+    });
+    svc.embedding = Some(mock.clone());
+    let new_index = IndexHandle::open(&svc.mount, Some(mock.clone()), 0.01, 0.3, true).unwrap();
+    svc.index = Some(Arc::new(new_index));
+
+    svc.write("notes/deep/a.md", "cascade vector marker", false)
+        .unwrap();
+    assert!(wait_for_index(&svc, 2), "BM25 index did not reach 2 rows");
+    // Vectors are flushed in the same batch as the rows; the extra beat
+    // makes the pre-assertion independent of that batching detail.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let q = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let hits = svc.index.as_ref().unwrap().search_vec(&q, 5).unwrap();
+    assert!(
+        hits.iter().any(|h| h.path == "notes/deep/a.md"),
+        "vector missing before the directory event: {hits:?}"
+    );
+
+    // Provider goes down: every re-embed attempt now silently no-ops.
+    mock.fail.store(true, Ordering::SeqCst);
+
+    let dir = svc.mount.root.join("notes");
+    let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&dir, perms).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let hits = svc.index.as_ref().unwrap().search_vec(&q, 5).unwrap();
+    assert!(
+        hits.iter().any(|h| h.path == "notes/deep/a.md"),
+        "directory attribute event dropped the subtree's vectors: {hits:?}"
+    );
 }

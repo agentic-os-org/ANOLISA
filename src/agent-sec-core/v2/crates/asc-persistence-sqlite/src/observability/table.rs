@@ -1,20 +1,36 @@
 //! The `observability_events` table contract.
 //!
-//! Transcribed from v1 `observability/models.py`. The `extra_columns` list is
-//! empty on purpose: this stream has only ever had revision 1, so there is
-//! nothing to converge.
+//! Revision 2 adds trusted UID ownership. Every new write supplies a concrete
+//! UID, but the column stays nullable so revision-1 stores converge by
+//! `ALTER TABLE ADD COLUMN` and keep their pre-ownership rows as unknown (`NULL`).
 
-use asc_sqlite_kernel::{ColumnSpec, IndexSpec, TableSpec};
+use asc_sqlite_kernel::{ColumnSpec, ExtraColumn, IndexSpec, TableSpec};
+
+/// Trusted-owner column definition shared by the fresh-create and legacy paths.
+///
+/// Nullable on purpose: revision-1 databases gain this column through
+/// `ALTER TABLE ADD COLUMN`, which cannot backfill an owner for historical rows.
+/// The text must be byte-identical in [`COLUMNS`] and [`EXTRA_COLUMNS`] because
+/// the differential harness compares `PRAGMA table_info` across both paths.
+const OWNER_COLUMN: &str = "INTEGER CHECK(uid BETWEEN 0 AND 4294967295)";
 
 /// The single table this stream writes.
 pub const OBSERVABILITY_TABLES: &[TableSpec] = &[TableSpec {
     name: "observability_events",
+    strict: false,
+    constraints: &[],
     columns: COLUMNS,
     indexes: INDEXES,
-    extra_columns: &[],
+    extra_columns: EXTRA_COLUMNS,
 }];
 
-/// Columns in v1 `ObservabilityEventRecord` declaration order.
+/// Revision-1 databases converge by adding the nullable owner column.
+const EXTRA_COLUMNS: &[ExtraColumn] = &[ExtraColumn {
+    name: "uid",
+    definition: OWNER_COLUMN,
+}];
+
+/// V1 business columns followed by nullable daemon UID ownership.
 ///
 /// The primary key is a plain `INTEGER PRIMARY KEY`, i.e. a rowid alias, which is
 /// why `list_runs` can break ties on `id` when two records share an
@@ -71,9 +87,13 @@ const COLUMNS: &[ColumnSpec] = &[
         name: "tool_call_id",
         definition: "TEXT",
     },
+    ColumnSpec {
+        name: "uid",
+        definition: OWNER_COLUMN,
+    },
 ];
 
-/// Indexes in v1 `__table_args__` order.
+/// Business lookup indexes followed by owner-scoped query indexes.
 const INDEXES: &[IndexSpec] = &[
     IndexSpec {
         name: "idx_observability_observed_at_epoch",
@@ -91,6 +111,14 @@ const INDEXES: &[IndexSpec] = &[
         name: "idx_observability_session_run_observed_at_epoch",
         columns: &["session_id", "run_id", "observed_at_epoch"],
     },
+    IndexSpec {
+        name: "idx_observability_owner_time",
+        columns: &["uid", "observed_at_epoch", "id"],
+    },
+    IndexSpec {
+        name: "idx_observability_owner_session_run_time",
+        columns: &["uid", "session_id", "run_id", "observed_at_epoch", "id"],
+    },
 ];
 
 #[cfg(test)]
@@ -104,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn column_order_matches_v1() {
+    fn columns_include_nullable_uid() {
         let names: Vec<&str> = COLUMNS.iter().map(|column| column.name).collect();
         assert_eq!(
             names,
@@ -119,12 +147,21 @@ mod tests {
                 "metadata_json",
                 "call_id",
                 "tool_call_id",
+                "uid",
             ]
+        );
+        let uid = COLUMNS
+            .iter()
+            .find(|column| column.name == "uid")
+            .expect("uid");
+        assert!(
+            !uid.definition.contains("NOT NULL"),
+            "owner column must stay nullable for legacy convergence"
         );
     }
 
     #[test]
-    fn index_names_and_column_order_match_v1() {
+    fn indexes_include_owner_scope() {
         let rendered: Vec<String> = INDEXES
             .iter()
             .map(|index| format!("{}({})", index.name, index.columns.join(",")))
@@ -136,15 +173,27 @@ mod tests {
                 "idx_observability_hook_observed_at_epoch(hook,observed_at_epoch)",
                 "idx_observability_session_observed_at_epoch(session_id,observed_at_epoch)",
                 "idx_observability_session_run_observed_at_epoch(session_id,run_id,observed_at_epoch)",
+                "idx_observability_owner_time(uid,observed_at_epoch,id)",
+                "idx_observability_owner_session_run_time(uid,session_id,run_id,observed_at_epoch,id)",
             ]
         );
     }
 
     #[test]
-    fn there_are_no_convergent_columns() {
-        assert!(
-            OBSERVABILITY_TABLES[0].extra_columns.is_empty(),
-            "this stream has only ever had revision 1"
-        );
+    fn legacy_convergence_adds_owner_column() {
+        let extra: Vec<&str> = OBSERVABILITY_TABLES[0]
+            .extra_columns
+            .iter()
+            .map(|column| column.name)
+            .collect();
+        assert_eq!(extra, vec!["uid"]);
+        // Both paths must render the identical column definition so a fresh
+        // create and a legacy ALTER produce the same `PRAGMA table_info`.
+        let created = COLUMNS
+            .iter()
+            .find(|column| column.name == "uid")
+            .expect("uid");
+        let converged = &OBSERVABILITY_TABLES[0].extra_columns[0];
+        assert_eq!(created.definition, converged.definition);
     }
 }

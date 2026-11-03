@@ -1,0 +1,19 @@
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.1.16"
+
+[component.platform]
+os = ["linux"]
+arch = ["x86_64", "aarch64"]
+
+[component.layout]
+modes = ["user", "system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/os-skills/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "share/anolisa/skills/"
+target = "{datadir}/skills"

@@ -1338,17 +1338,16 @@ static int te_file_update_cb(__u32 i, void *vc)
 
 	if (i >= MAX_TAINT_UPDATES)
 		return 1;
-	struct taint_update *up = bpf_map_lookup_elem(&ts_updates, &i);
-	if (!up)
+	const struct taint_update *u = bpf_map_lookup_elem(&ts_updates, &i);
+	if (!u)
 		return 1;
-	struct taint_update u = *up;
-	if (u.op != c->op)
+	if (u->op != c->op)
 		return 0;
-	if (u.domain_id != c->domain_id)
+	if (u->domain_id != c->domain_id)
 		return 0;
-	if (!te_path_match(u.match, c->target, u.target))
+	if (!te_path_match(u->match, c->target, u->target))
 		return 0;
-	te_update_accum(c, &u);
+	te_update_accum(c, u);
 	return 0;
 }
 

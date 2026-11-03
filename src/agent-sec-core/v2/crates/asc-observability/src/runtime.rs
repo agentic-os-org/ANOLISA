@@ -12,6 +12,47 @@ mod logs;
 use logs::{DiagnosticWriter, LogWorker};
 use tracing_subscriber::{Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
+struct CorrelatedJson;
+
+impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for CorrelatedJson
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+    N: for<'writer> tracing_subscriber::fmt::FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        context: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let mut json = String::new();
+        tracing_subscriber::fmt::format()
+            .json()
+            .with_current_span(false)
+            .with_span_list(false)
+            .format_event(
+                context,
+                tracing_subscriber::fmt::format::Writer::new(&mut json),
+                event,
+            )?;
+        let mut record: serde_json::Value =
+            serde_json::from_str(&json).map_err(|_| std::fmt::Error)?;
+        let fields = record.as_object_mut().ok_or(std::fmt::Error)?;
+        // Capture on the emitting thread, before the bounded writer queues the record.
+        let correlation = crate::snapshot();
+        for (key, value) in [
+            ("trace_id", correlation.trace_id),
+            ("span_id", correlation.span_id),
+            ("request_span_id", correlation.request_span_id),
+        ] {
+            if let Some(value) = value {
+                fields.insert(key.into(), value.into());
+            }
+        }
+        writeln!(writer, "{record}")
+    }
+}
+
 /// Process-owned SDK lifetime. Construct and shut down from synchronous main.
 pub struct TelemetryRuntime {
     provider: SdkTracerProvider,
@@ -99,6 +140,7 @@ pub fn init_runtime(service_name: &'static str) -> Result<TelemetryRuntime, &'st
         .with_writer(writer.clone())
         .with_current_span(false)
         .with_span_list(false)
+        .event_format(CorrelatedJson)
         .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
             metadata.target() == "asc_observability::diagnostic"
         }))

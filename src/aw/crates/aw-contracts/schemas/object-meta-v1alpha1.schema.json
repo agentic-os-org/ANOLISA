@@ -1,0 +1,618 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1",
+  "title": "AW public object metadata v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "uid",
+    "createdAt",
+    "producer"
+  ],
+  "properties": {
+    "uid": {
+      "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+    },
+    "createdAt": {
+      "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/timestamp",
+      "description": "Producer wall-clock time of object creation, retained across replay; not an expiry or monotonic deadline."
+    },
+    "producer": {
+      "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/producer"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^!-~]"
+      }
+    },
+    "nativeIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "not": {
+        "pattern": "[\\u0000-\\u001f\\u007f]"
+      }
+    },
+    "adapterId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z]",
+      "not": {
+        "pattern": "[^a-z0-9-]"
+      }
+    },
+    "reasonCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^a-z0-9._-]"
+      },
+      "description": "Namespaced code (<owner>.<code>). AW owns aw; vocabularies are maintained by field domain in the public-object design. Consumers preserve unknown codes.",
+      "pattern": "^[a-z][a-z0-9_-]*\\.[a-z][a-z0-9_-]*$"
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "not": {
+        "pattern": "[^0-9T:.Z-]"
+      }
+    },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "value": {
+          "$ref": "https://agentic-os.sh/schemas/aw/common/v1#/$defs/digest"
+        }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producerId",
+        "scopeId",
+        "generation"
+      ],
+      "properties": {
+        "producerId": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+        },
+        "scopeId": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+        },
+        "generation": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapterId",
+        "bindingId",
+        "instanceId",
+        "configRevision",
+        "sessionId",
+        "turnId",
+        "toolCallId"
+      ],
+      "properties": {
+        "adapterId": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/adapterId"
+        },
+        "bindingId": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+        },
+        "instanceId": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+        },
+        "configRevision": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/digest"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/nativeIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/nativeIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "toolCallId": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/nativeIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "nativeReferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "turnId",
+        "toolCallId",
+        "modelCallId"
+      ],
+      "properties": {
+        "sessionId": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/nativeIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/nativeIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "toolCallId": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/nativeIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modelCallId": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/nativeIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "association": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "basis",
+        "verifiedFields",
+        "gaps"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "verified",
+            "unverified",
+            "unassociated"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "runtime",
+            "native_callback",
+            "native_session",
+            "none"
+          ]
+        },
+        "verifiedFields": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "sessionId",
+              "turnId",
+              "toolCallId"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 3,
+          "uniqueItems": true
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/reasonCode"
+          },
+          "minItems": 0,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "Association-domain reasons describing missing or unverified request identity."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "verified"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "basis": {
+                "not": {
+                  "const": "none"
+                }
+              },
+              "verifiedFields": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "unverified",
+                  "unassociated"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verifiedFields": {
+                "maxItems": 0
+              },
+              "gaps": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unassociated"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "basis": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "eventName": {
+      "enum": [
+        "instance.started",
+        "instance.ended",
+        "input.submit",
+        "turn.ended",
+        "tool.before",
+        "tool.after"
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "scope",
+        "interval",
+        "observedAt",
+        "gaps",
+        "truncated"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "unknown",
+            "partial",
+            "complete",
+            "unavailable"
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "level",
+            "events"
+          ],
+          "properties": {
+            "level": {
+              "enum": [
+                "instance",
+                "turn",
+                "tool"
+              ]
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/eventName"
+              },
+              "minItems": 1,
+              "maxItems": 6,
+              "uniqueItems": true
+            }
+          }
+        },
+        "interval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "start",
+            "end"
+          ],
+          "properties": {
+            "start": {
+              "anyOf": [
+                {
+                  "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "description": "Coverage query bounds in one clock domain chosen by the producer; known bounds satisfy start <= end. Use null for bounds that cannot be mapped to that domain."
+        },
+        "observedAt": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/timestamp",
+          "description": "Producer wall-clock time of the coverage assessment; not the time of the covered events."
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/reasonCode"
+          },
+          "minItems": 0,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "Coverage-domain reasons describing unavailable, incomplete or unmeasured observation."
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "interval": {
+                "properties": {
+                  "start": {
+                    "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/timestamp"
+                  },
+                  "end": {
+                    "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/timestamp"
+                  }
+                }
+              },
+              "gaps": {
+                "maxItems": 0
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "unknown",
+                  "partial",
+                  "unavailable"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "gaps": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "kind",
+        "uid",
+        "producer",
+        "digest"
+      ],
+      "properties": {
+        "apiVersion": {
+          "enum": [
+            "runtime.aw/v1alpha1",
+            "audit.aw/v1alpha1"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "ExecutionEvent",
+            "AuditRecord"
+          ]
+        },
+        "uid": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/identifier"
+        },
+        "producer": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/producer"
+        },
+        "digest": {
+          "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/digest"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "apiVersion": {
+              "const": "runtime.aw/v1alpha1"
+            },
+            "kind": {
+              "const": "ExecutionEvent"
+            }
+          }
+        },
+        {
+          "properties": {
+            "apiVersion": {
+              "const": "audit.aw/v1alpha1"
+            },
+            "kind": {
+              "const": "AuditRecord"
+            }
+          }
+        }
+      ]
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "reasonCode"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled",
+            "incomplete"
+          ]
+        },
+        "reasonCode": {
+          "anyOf": [
+            {
+              "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/reasonCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "completed"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reasonCode": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "failed",
+                  "cancelled",
+                  "incomplete"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reasonCode": {
+                "$ref": "https://agentic-os.sh/schemas/aw/object-meta/v1alpha1#/$defs/reasonCode"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

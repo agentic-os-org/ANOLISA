@@ -70,6 +70,8 @@ def _run_hook(input_data, *, env_override=None):
 
 _MOCK_CLI_SCRIPT = f"#!{sys.executable}\n" + textwrap.dedent("""\
     import os, sys
+    if "init" in sys.argv:
+        sys.exit(0)
     output = os.environ.get("_MOCK_CLI_OUTPUT", "")
     rc = int(os.environ.get("_MOCK_CLI_RC", "0"))
     if output:
@@ -162,6 +164,27 @@ class TestFailOpen:
     def test_empty_stdin_allows(self):
         output = _run_hook("")
         assert output == {}
+
+    @pytest.mark.parametrize("input_data", [None, [], "text", 42, False])
+    def test_non_object_json_allows(self, input_data):
+        assert _run_hook(json.dumps(input_data)) == {}
+
+    @pytest.mark.parametrize("cwd", [None, [], {}, 42, False])
+    def test_non_string_cwd_allows_before_skill_lookup(self, cwd, monkeypatch, capsys):
+        monkeypatch.setattr(
+            skill_ledger_hook.sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "$test-skill", "cwd": cwd})),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_build_skill_catalog",
+            lambda *_args: pytest.fail("invalid cwd must not reach skill lookup"),
+        )
+
+        skill_ledger_hook.main()
+
+        assert capsys.readouterr() == ("", "")
 
     def test_empty_prompt_allows(self, mock_cli):
         env = mock_cli(output=_DRIFTED_CHECK, extra={"SKILL_LEDGER_MODE": "deny"})
@@ -602,40 +625,6 @@ class TestSkillCatalog:
 # ---------------------------------------------------------------------------
 
 
-class TestKeyManagement:
-    """Test _keys_exist and _ensure_keys."""
-
-    def test_keys_exist_true(self, tmp_path, monkeypatch):
-        data_dir = tmp_path / "agent-sec" / "skill-ledger"
-        data_dir.mkdir(parents=True)
-        (data_dir / "key.pub").write_text("pub")
-        (data_dir / "key.enc").write_text("enc")
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-
-        assert skill_ledger_hook._keys_exist() is True
-
-    def test_keys_exist_false(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-        assert skill_ledger_hook._keys_exist() is False
-
-    def test_ensure_keys_skips_when_exist(self, tmp_path, monkeypatch):
-        data_dir = tmp_path / "agent-sec" / "skill-ledger"
-        data_dir.mkdir(parents=True)
-        (data_dir / "key.pub").write_text("pub")
-        (data_dir / "key.enc").write_text("enc")
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-
-        captured = {}
-
-        def fake_run(args, **kwargs):
-            captured["called"] = True
-            return subprocess.CompletedProcess(args, 0, "", "")
-
-        monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
-        skill_ledger_hook._ensure_keys({})
-        assert "called" not in captured  # should not have called subprocess
-
-
 # ---------------------------------------------------------------------------
 # Mode-based tests with real skill dir
 # ---------------------------------------------------------------------------
@@ -830,7 +819,7 @@ class TestMainMonkeypatch:
             raise OSError("not found")
 
         monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fail_run)
-        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+        monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
 
         output = self._run_main(
             monkeypatch,
@@ -861,7 +850,7 @@ class TestMainMonkeypatch:
             )
 
         monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
-        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+        monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
 
         self._run_main(
             monkeypatch,
@@ -895,7 +884,7 @@ class TestMainMonkeypatch:
             )
 
         monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
-        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+        monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
 
         self._run_main(
             monkeypatch,
@@ -927,7 +916,7 @@ class TestMainMonkeypatch:
             )
 
         monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
-        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+        monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
 
         output = self._run_main(
             monkeypatch,
@@ -973,7 +962,7 @@ class TestBlockStatuses:
             )
 
         monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
-        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+        monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
         monkeypatch.setattr(skill_ledger_hook, "MODE", "deny")
         monkeypatch.setattr(
             skill_ledger_hook.sys,
@@ -1006,7 +995,7 @@ class TestBlockStatuses:
             )
 
         monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
-        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+        monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
         monkeypatch.setattr(skill_ledger_hook, "MODE", "deny")
         monkeypatch.setattr(
             skill_ledger_hook.sys,
@@ -1037,7 +1026,7 @@ class TestBlockStatuses:
             )
 
         monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
-        monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: True)
+        monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
         monkeypatch.setattr(skill_ledger_hook, "MODE", "deny")
         monkeypatch.setattr(
             skill_ledger_hook.sys,
@@ -1055,3 +1044,54 @@ class TestBlockStatuses:
         skill_ledger_hook.main()
         out = capsys.readouterr().out
         assert out.strip() == ""
+
+
+@pytest.mark.parametrize(
+    "payload,exit_code,blocked",
+    [
+        ({"status": "deny"}, 1, True),
+        ({"status": "tampered"}, 1, True),
+        ({"status": "pass"}, 1, False),
+        ({"status": "error", "error": "private failure"}, 1, False),
+        ({"status": "deny"}, 2, False),
+        ({"status": []}, 0, False),
+        (None, 0, False),
+        ([], 0, False),
+    ],
+)
+def test_check_risk_exit_differs_from_execution_failure(
+    tmp_path, monkeypatch, capsys, payload, exit_code, blocked
+):
+    codex_home = tmp_path / ".codex"
+    _make_skill_dir(codex_home / "skills", "example")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: True)
+    monkeypatch.setattr(skill_ledger_hook, "MODE", "block")
+    monkeypatch.setattr(
+        skill_ledger_hook.sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "$example",
+                    "cwd": str(tmp_path),
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        skill_ledger_hook.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, exit_code, json.dumps(payload), "private failure"
+        ),
+    )
+    skill_ledger_hook.main()
+    output = capsys.readouterr()
+    if blocked:
+        assert json.loads(output.out)["decision"] == "block"
+    else:
+        assert not output.out.strip()
+        assert "skill-ledger" in output.err
+    assert "private failure" not in output.err

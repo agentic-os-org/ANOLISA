@@ -63,12 +63,39 @@ impl ConfirmBeforeActStrategy {
         Self
     }
 
+    /// The command a call ran, when its arguments carry one.
+    ///
+    /// [`ToolCallRecord::cmd`] is the argument JSON (see `types.rs`), not a
+    /// command, so matching [`SENSITIVE_KEYWORDS`] against it reads
+    /// *arguments* as actions: a `Read` of `docs/delete-guide.md` or an
+    /// `Edit` of `src/force-push.md` satisfied the keyword table and was
+    /// handed to the LLM as a sensitive write operation. Read the command
+    /// argument instead, and treat a call that does not carry one as not a
+    /// command.
+    fn command_of(call: &ToolCallRecord) -> Option<String> {
+        const COMMAND_KEYS: [&str; 3] = ["command", "cmd", "script"];
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&call.cmd) {
+            return COMMAND_KEYS
+                .iter()
+                .find_map(|k| json.get(k).and_then(|v| v.as_str()))
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+        }
+        // The summary is truncated, so a long argument string does not parse.
+        // A file-scoped call is never a command; for a command-scoped one the
+        // truncated summary *is* the command text.
+        call.target.is_none().then(|| call.cmd.clone())
+    }
+
     /// Rust oracle: collect sensitive-op candidates by keyword match.
     fn find_sensitive_ops(calls: &[ToolCallRecord]) -> Vec<&ToolCallRecord> {
         calls
             .iter()
             .filter(|c| {
-                let lc = c.cmd.to_lowercase();
+                let Some(command) = Self::command_of(c) else {
+                    return false;
+                };
+                let lc = command.to_lowercase();
                 SENSITIVE_KEYWORDS.iter().any(|k| lc.contains(k))
             })
             .collect()
@@ -124,11 +151,10 @@ impl Detector for ConfirmBeforeActStrategy {
         let messages = vec![
             ChatMessage::system(SYSTEM_PROMPT),
             ChatMessage::user(format!(
-                "## 用户各轮原话\n\n{}\n\n\
-                 ## 敏感写操作列表\n\n{}\n\n\
-                 ## 歧义提示\n\n{}\n\n\
-                 判断越权操作与歧义未确认情况。仅返回 JSON。",
-                user_turns_text, ops_text, ambiguity_text
+                "## 用户各轮原话\n\n{user_turns_text}\n\n\
+                 ## 敏感写操作列表\n\n{ops_text}\n\n\
+                 ## 歧义提示\n\n{ambiguity_text}\n\n\
+                 判断越权操作与歧义未确认情况。仅返回 JSON。"
             )),
         ];
 
@@ -137,8 +163,12 @@ impl Detector for ConfirmBeforeActStrategy {
             .chat_json_parsed_labeled(messages, Some("accuracy:confirm_before_act"))
             .await
         {
-            Ok(v) => v,
+            Ok(v) => {
+                ctx.judgments.record_ok();
+                v
+            }
             Err(e) => {
+                ctx.judgments.record_failure(&e);
                 tracing::warn!("[confirm_before_act] LLM judgment failed: {e}");
                 return vec![];
             }
@@ -202,7 +232,17 @@ mod tests {
             dur: 1.0,
             cmd: cmd.into(),
             err: false,
+            target: None,
             result_tokens: None,
+        }
+    }
+
+    /// A file-scoped call, as `trace.rs` records one: `target` is the path the
+    /// call acts on and `cmd` is the argument JSON.
+    fn make_file_call(name: &str, cmd: &str, target: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            target: Some(target.into()),
+            ..make_call(name, cmd)
         }
     }
 
@@ -218,5 +258,52 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert!(hits[0].cmd.contains("git push"));
         assert!(hits[1].cmd.contains("sudo"));
+    }
+
+    /// `cmd` is the argument JSON (see `types.rs`), so matching
+    /// `SENSITIVE_KEYWORDS` against it counted a *path* as a sensitive write:
+    /// reading `docs/delete-guide.md` or editing `src/force-push.md` put
+    /// reads and edits on the sensitive-write candidate list handed to the
+    /// LLM, spending a judgment on calls that executed no command at all.
+    #[test]
+    fn file_paths_are_not_sensitive_write_ops() {
+        let calls = vec![
+            make_file_call(
+                "Read",
+                r#"{"file_path":"docs/delete-guide.md"}"#,
+                "docs/delete-guide.md",
+            ),
+            make_file_call(
+                "Edit",
+                r#"{"file_path":"src/force-push.md","new_string":"x"}"#,
+                "src/force-push.md",
+            ),
+            make_file_call(
+                "Grep",
+                r#"{"query":"drop table","path":"migrations"}"#,
+                "migrations",
+            ),
+        ];
+        assert!(
+            ConfirmBeforeActStrategy::find_sensitive_ops(&calls).is_empty(),
+            "reading, editing, and grepping files is not a sensitive write operation"
+        );
+    }
+
+    /// The other direction: a real sensitive command still matches — both as
+    /// parsed argument JSON and in the truncated plain-text form.
+    #[test]
+    fn sensitive_commands_still_match() {
+        let calls = vec![
+            make_call("Bash", r#"{"command":"git push --force origin main"}"#),
+            make_call("Bash", "sudo systemctl restart nginx"),
+            make_call("Bash", r#"{"script":"rm -rf build"}"#),
+        ];
+        let hits = ConfirmBeforeActStrategy::find_sensitive_ops(&calls);
+        assert_eq!(
+            hits.len(),
+            3,
+            "command-scoped calls must keep matching in both encodings"
+        );
     }
 }

@@ -506,6 +506,11 @@ enum PendingCommand {
 #[derive(Debug, Clone)]
 struct PendingInstallEntry {
     last_mutation: Instant,
+    /// When the Worker may next examine this entry: one quiet window after
+    /// its own last mutation, then one quiet window after each check that
+    /// found the Skill incomplete. Worker wakeups are shared by all entries,
+    /// so this, not the wakeup, decides when the entry is read.
+    next_check_at: Instant,
     kind: MutationKind,
     paths: Vec<String>,
     notified: bool,
@@ -520,13 +525,18 @@ struct PendingInstallEntry {
 /// the controller checks whether the directory has a complete skill shape
 /// (directory exists, `SKILL.md` exists, `SKILL.md` can be parsed by the
 /// existing parser).  If complete, one aggregated ordinary mutation
-/// notification is emitted.  If incomplete, the entry stays pending and
-/// waits for the next mutation to restart the quiet window.
+/// notification is emitted.  If incomplete, the entry stays pending and is
+/// re-checked once per quiet window; a mutation of that Skill restarts its
+/// window.  Worker wakeups caused by other Skills' mutations do not re-check
+/// it.
 ///
 /// Pending skills are hidden from `/skills` listing and agent discovery
 /// but remain accessible for exact-path access so the installer can
 /// continue writing.
 pub struct PendingInstallController {
+    /// The per-file `SKILL.md` ceiling the mount was configured with;
+    /// `is_skill_complete` must refuse exactly what the reads refuse.
+    max_skill_size: usize,
     notify_controller: Arc<NotifyController>,
     timeout: Duration,
     source_root: std::path::PathBuf,
@@ -542,7 +552,13 @@ impl PendingInstallController {
         timeout: Duration,
         source_root: std::path::PathBuf,
     ) -> Arc<Self> {
-        Self::new_with_post_publish(notify_controller, timeout, source_root, None)
+        Self::new_with_post_publish(
+            notify_controller,
+            timeout,
+            source_root,
+            None,
+            skillfs_core::DEFAULT_MAX_SKILL_SIZE,
+        )
     }
 
     pub fn new_with_post_publish(
@@ -550,6 +566,7 @@ impl PendingInstallController {
         timeout: Duration,
         source_root: std::path::PathBuf,
         post_publish_controller: Option<Arc<PostPublishGraceController>>,
+        max_skill_size: usize,
     ) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let pending: Arc<Mutex<HashMap<String, PendingInstallEntry>>> =
@@ -582,6 +599,7 @@ impl PendingInstallController {
                     worker_timeout,
                     worker_source,
                     worker_pp,
+                    max_skill_size,
                     rx,
                 ));
             });
@@ -600,6 +618,7 @@ impl PendingInstallController {
             sender: tx,
             worker_handle: Mutex::new(join_handle),
             post_publish_controller,
+            max_skill_size,
         })
     }
 
@@ -632,6 +651,7 @@ impl PendingInstallController {
                 return false;
             }
             entry.last_mutation = Instant::now();
+            entry.next_check_at = entry.last_mutation + self.timeout;
             entry.kind = kind;
             if let Some(rel) = relative_path {
                 let p = rel.to_string_lossy().to_string();
@@ -644,10 +664,12 @@ impl PendingInstallController {
             if let Some(rel) = relative_path {
                 paths.push(rel.to_string_lossy().to_string());
             }
+            let now = Instant::now();
             guard.insert(
                 skill_name.to_string(),
                 PendingInstallEntry {
-                    last_mutation: Instant::now(),
+                    last_mutation: now,
+                    next_check_at: now + self.timeout,
                     kind,
                     paths,
                     notified: false,
@@ -695,7 +717,7 @@ impl PendingInstallController {
                         continue;
                     }
                     if now >= entry.last_mutation + self.timeout
-                        && is_skill_complete(&self.source_root, &key)
+                        && is_skill_complete(&self.source_root, &key, self.max_skill_size)
                     {
                         let kind = entry.kind;
                         let paths = std::mem::take(&mut entry.paths);
@@ -749,7 +771,11 @@ impl Drop for PendingInstallController {
 ///
 /// Uses `symlink_metadata` (no-follow) to prevent external symlinks
 /// from triggering a pending install notification.
-fn is_skill_complete(source_root: &std::path::Path, skill_name: &str) -> bool {
+fn is_skill_complete(
+    source_root: &std::path::Path,
+    skill_name: &str,
+    max_skill_size: usize,
+) -> bool {
     let skill_dir = source_root.join(skill_name);
     match std::fs::symlink_metadata(&skill_dir) {
         Ok(meta) if meta.file_type().is_dir() => {}
@@ -760,7 +786,9 @@ fn is_skill_complete(source_root: &std::path::Path, skill_name: &str) -> bool {
         Ok(meta) if meta.file_type().is_file() => {}
         _ => return false,
     }
-    match skillfs_core::parser::parse_skill_file(&skill_md) {
+    // The configured ceiling, not the default: the completeness probe must
+    // refuse exactly the manifests the mount's reads and listings refuse.
+    match skillfs_core::parser::parse_skill_file_with_limit(&skill_md, max_skill_size) {
         Ok(entry) => !entry.parse_status.is_error(),
         Err(_) => false,
     }
@@ -772,6 +800,7 @@ async fn pending_install_worker_loop(
     timeout: Duration,
     source_root: std::path::PathBuf,
     post_publish_controller: Option<Arc<PostPublishGraceController>>,
+    max_skill_size: usize,
     mut rx: mpsc::UnboundedReceiver<PendingCommand>,
 ) {
     debug!("pending-install worker starting");
@@ -782,8 +811,9 @@ async fn pending_install_worker_loop(
                 .values()
                 .filter(|entry| !entry.notified)
                 .map(|entry| {
-                    let fire_at = entry.last_mutation + timeout;
-                    fire_at.saturating_duration_since(Instant::now())
+                    entry
+                        .next_check_at
+                        .saturating_duration_since(Instant::now())
                 })
                 .min()
                 .unwrap_or(Duration::from_secs(60))
@@ -812,13 +842,16 @@ async fn pending_install_worker_loop(
                     if entry.notified {
                         continue;
                     }
-                    if now.duration_since(entry.last_mutation) >= timeout
-                        && is_skill_complete(&source_root, &key)
-                    {
+                    if now < entry.next_check_at {
+                        continue;
+                    }
+                    if is_skill_complete(&source_root, &key, max_skill_size) {
                         let kind = entry.kind;
                         let paths = std::mem::take(&mut entry.paths);
                         entry.notified = true;
                         due.push((key, kind, paths));
+                    } else {
+                        entry.next_check_at = now + timeout;
                     }
                 }
             }
@@ -1429,7 +1462,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            super::is_skill_complete(dir.path(), "good-skill"),
+            super::is_skill_complete(dir.path(), "good-skill", 1 << 20),
             "real dir + real SKILL.md must be complete"
         );
     }
@@ -1446,7 +1479,7 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&real, dir.path().join("link-skill")).unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "link-skill"),
+            !super::is_skill_complete(dir.path(), "link-skill", 1 << 20),
             "symlink skill dir must not be considered complete"
         );
     }
@@ -1464,7 +1497,7 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&real_md, skill.join("SKILL.md")).unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "sym-md-skill"),
+            !super::is_skill_complete(dir.path(), "sym-md-skill", 1 << 20),
             "symlink SKILL.md must not be considered complete"
         );
     }
@@ -1473,7 +1506,7 @@ mod tests {
     fn is_skill_complete_missing_dir() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "nonexistent"),
+            !super::is_skill_complete(dir.path(), "nonexistent", 1 << 20),
             "missing directory must not be complete"
         );
     }
@@ -1484,9 +1517,32 @@ mod tests {
         let skill = dir.path().join("no-md");
         std::fs::create_dir_all(&skill).unwrap();
         assert!(
-            !super::is_skill_complete(dir.path(), "no-md"),
+            !super::is_skill_complete(dir.path(), "no-md", 1 << 20),
             "missing SKILL.md must not be complete"
         );
+    }
+
+    #[test]
+    fn is_skill_complete_applies_the_configured_ceiling() {
+        // The completeness probe must refuse exactly the manifests the
+        // mount's reads refuse: under a 64 KiB ceiling a 96 KiB SKILL.md
+        // is not a complete skill; under the default ceiling it is.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sized-skill")).unwrap();
+        let mut content = String::from("---\nname: sized\ndescription: good\n---\n");
+        content.push_str(&"a".repeat(96 * 1024 - content.len()));
+        std::fs::write(dir.path().join("sized-skill/SKILL.md"), content).unwrap();
+
+        assert!(!super::is_skill_complete(
+            dir.path(),
+            "sized-skill",
+            64 * 1024
+        ));
+        assert!(super::is_skill_complete(
+            dir.path(),
+            "sized-skill",
+            skillfs_core::DEFAULT_MAX_SKILL_SIZE
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1672,6 +1728,199 @@ mod tests {
         assert!(client.is_empty());
         notify_ctrl.shutdown();
         ctrl.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // PendingInstallController
+    // -----------------------------------------------------------------------
+
+    /// TIDs of the live `skillfs-pending-install` worker threads.
+    ///
+    /// The kernel truncates a thread's `comm` to 15 bytes, so the name reads
+    /// back as `skillfs-pending`.
+    #[cfg(target_os = "linux")]
+    fn pending_worker_tids() -> Vec<u32> {
+        let mut tids = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/proc/self/task") else {
+            return tids;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(tid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let comm_path = format!("/proc/self/task/{tid}/comm");
+            if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+                if comm.trim_end().starts_with("skillfs-pending") {
+                    tids.push(tid);
+                }
+            }
+        }
+        tids
+    }
+
+    /// Serializes the tests that identify the Worker by thread name: two of
+    /// them running at once would each see the other's Worker.
+    #[cfg(target_os = "linux")]
+    static PENDING_WORKER_THREAD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Read syscalls (`syscr`) of one thread, from `/proc/self/task/<tid>/io`.
+    #[cfg(target_os = "linux")]
+    fn worker_read_syscalls(tid: u32) -> Option<u64> {
+        let io = std::fs::read_to_string(format!("/proc/self/task/{tid}/io")).ok()?;
+        io.lines()
+            .find_map(|line| line.strip_prefix("syscr:"))
+            .and_then(|value| value.trim().parse().ok())
+    }
+
+    /// An entry that is still incomplete when its quiet window expires is
+    /// re-examined on the quiet-window cadence, not once per runtime timer
+    /// tick: keeping the expired deadline as the Worker's next wakeup would
+    /// make it re-stat and re-parse `SKILL.md` until the next mutation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_worker_rechecks_an_incomplete_entry_once_per_quiet_window() {
+        let _serial = PENDING_WORKER_THREAD_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().to_path_buf();
+        let skill = source_root.join("half-installed");
+        std::fs::create_dir(&skill).unwrap();
+        // An empty SKILL.md parses with `ParseStatus::Error`, so the entry
+        // stays incomplete while `parse_skill_file` still reads the file.
+        std::fs::write(skill.join("SKILL.md"), "").unwrap();
+
+        let client = Arc::new(InMemoryNotifyClient::new());
+        let notify_ctrl = NotifyController::new(
+            client.clone(),
+            source_root.clone(),
+            Duration::from_millis(50),
+            5000,
+        );
+        let ctrl = PendingInstallController::new(
+            notify_ctrl.clone(),
+            Duration::from_millis(1000),
+            source_root.clone(),
+        );
+        assert!(ctrl.observe_mutation("half-installed", None, MutationKind::Create));
+
+        // Let the first quiet window expire so the Worker examines the entry
+        // once and finds it incomplete.
+        std::thread::sleep(Duration::from_millis(1400));
+        assert!(
+            ctrl.is_pending("half-installed"),
+            "setup: the entry must still be pending"
+        );
+        assert!(
+            client.is_empty(),
+            "setup: an incomplete Skill must not notify: {:?}",
+            client.events()
+        );
+
+        let tids = pending_worker_tids();
+        assert_eq!(
+            tids.len(),
+            1,
+            "expected one pending install worker: {tids:?}"
+        );
+        let Some(before) = worker_read_syscalls(tids[0]) else {
+            eprintln!("SKIP: /proc/<tid>/io is unavailable (CONFIG_TASK_IO_ACCOUNTING)");
+            ctrl.shutdown();
+            notify_ctrl.shutdown();
+            return;
+        };
+        // The next check is a full quiet window away, so an idle window reads
+        // SKILL.md zero times.
+        std::thread::sleep(Duration::from_millis(500));
+        let after = worker_read_syscalls(tids[0]);
+        ctrl.shutdown();
+        notify_ctrl.shutdown();
+
+        let Some(after) = after else {
+            eprintln!("SKIP: /proc/<tid>/io disappeared during the measurement");
+            return;
+        };
+        let checks = after - before;
+        assert!(
+            checks <= 5,
+            "the pending-install worker re-read the incomplete SKILL.md {checks} times in 500ms; \
+             an entry whose quiet window expired must be re-checked once per quiet window \
+             (or when the next mutation arrives), not on every timer tick"
+        );
+    }
+
+    /// Wakeups are global: every mutation of any pending Skill wakes the
+    /// Worker. An expired, still-incomplete entry must keep its own next
+    /// check time, so another Skill being written at a high rate does not
+    /// make the Worker re-read it on every one of those wakeups.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_worker_does_not_recheck_an_incomplete_entry_on_other_skills_wakeups() {
+        let _serial = PENDING_WORKER_THREAD_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().to_path_buf();
+        let skill = source_root.join("half-installed");
+        std::fs::create_dir(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "").unwrap();
+
+        let client = Arc::new(InMemoryNotifyClient::new());
+        let notify_ctrl = NotifyController::new(
+            client.clone(),
+            source_root.clone(),
+            Duration::from_millis(50),
+            5000,
+        );
+        let ctrl = PendingInstallController::new(
+            notify_ctrl.clone(),
+            Duration::from_millis(1000),
+            source_root.clone(),
+        );
+        assert!(ctrl.observe_mutation("half-installed", None, MutationKind::Create));
+
+        // The first quiet window expires and the Worker finds the entry
+        // incomplete; its next check is a full quiet window away.
+        std::thread::sleep(Duration::from_millis(1400));
+        assert!(
+            ctrl.is_pending("half-installed"),
+            "setup: the entry must still be pending"
+        );
+
+        let tids = pending_worker_tids();
+        assert_eq!(
+            tids.len(),
+            1,
+            "expected one pending install worker: {tids:?}"
+        );
+        let Some(before) = worker_read_syscalls(tids[0]) else {
+            eprintln!("SKIP: /proc/<tid>/io is unavailable (CONFIG_TASK_IO_ACCOUNTING)");
+            ctrl.shutdown();
+            notify_ctrl.shutdown();
+            return;
+        };
+        // Another Skill is installed in the meantime, one write every 5ms.
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(500) {
+            assert!(ctrl.observe_mutation("busy-install", None, MutationKind::Write));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let after = worker_read_syscalls(tids[0]);
+        ctrl.shutdown();
+        notify_ctrl.shutdown();
+
+        let Some(after) = after else {
+            eprintln!("SKIP: /proc/<tid>/io disappeared during the measurement");
+            return;
+        };
+        let reads = after - before;
+        assert!(
+            reads <= 5,
+            "the pending-install worker re-read the incomplete SKILL.md {reads} times while \
+             another Skill was being written; an expired entry must wait for its own next \
+             check, not for any Worker wakeup"
+        );
     }
 
     // -----------------------------------------------------------------------

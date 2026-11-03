@@ -1,0 +1,151 @@
+"""Keep scheduled native acceptance aligned with the registered Agent matrix."""
+
+import argparse
+import json
+import math
+import re
+from pathlib import Path
+
+from check import AW, git, output, sha
+from native_reports import validate_case
+from native_qoder import validate_pin
+from resident_contract import shards
+
+
+def load(root: Path) -> dict:
+    """Reject unaccounted Agents, empty suites and unpinned native runtimes."""
+    manifest = json.loads((root / "tests/native-matrix.json").read_text())
+    registered = json.loads((root / "tests/regression-matrix.json").read_text())["agents"]
+    if manifest.get("version") != 1 or set(manifest["agents"]) != set(registered):
+        raise ValueError("native acceptance must account for every registered Agent")
+    for agent, row in manifest["agents"].items():
+        if not row.get("owner"):
+            raise ValueError(f"{agent}: native acceptance needs an owner")
+        if row.get("mode") != "automated" or not row.get("boundary"):
+            raise ValueError(f"{agent}: declare automated coverage and its native boundary")
+        if not re.fullmatch(r"3\.\d+\.\d+", row.get("python", "")):
+            raise ValueError(f"{agent}: pin the Python runtime")
+        if not any(
+            row.get(key)
+            for key in (
+                "versions",
+                "source",
+                "npm_fixture",
+                "npm_packages",
+                "qoder_cli",
+            )
+        ):
+            raise ValueError(f"{agent}: pin the native runtime")
+        if "qoder_cli" in row:
+            validate_pin(row["qoder_cli"])
+        if agent == "qoder":
+            validate_pin(row.get("qoder_reload_cli", {}))
+            reload = [case for case in row.get("cases", []) if case["name"] == "runtime-reload"]
+            expected = [
+                "{python}", "crates/aw-cli/tests/fixtures/qoder/reload.py",
+                "--bin", "{bin}", "--output", "{output}/runtime-reload",
+            ]
+            if (
+                row["qoder_reload_cli"]["version"] != "1.1.73"
+                or len(reload) != 1
+                or reload[0]["argv"] != expected
+            ):
+                raise ValueError("qoder: require pinned 1.1.73 TUI idle reload acceptance")
+            validate_case(reload[0])
+            if (
+                reload[0]["report"] != "json"
+                or set(reload[0]["results"][0].get("cases", {}).get("names", []))
+                != {"prewarm", "add-hook", "remove-hook"}
+            ):
+                raise ValueError("qoder: require prewarm/add/remove native reload reports")
+        if agent in {"qoder", "qwenpaw"}:
+            security = [case for case in row.get("cases", []) if case["name"] == "sec-core"]
+            expected = {"allow", "scan-deny", "backend-error", "timeout-block"}
+            if len(security) != 1 or set(security[0]["results"][0]["cases"]["names"]) != expected:
+                raise ValueError(f"{agent}: require all four real sec-core native cases")
+            image = row.get("container", "")
+            if not re.fullmatch(r"ubuntu:24\.04@sha256:[0-9a-f]{64}", image):
+                raise ValueError(f"{agent}: pin the sec-core runtime container digest")
+            expected_argv = [
+                "{python}",
+                "crates/aw-cli/tests/fixtures/sec_core/native.py",
+                "--agent",
+                agent,
+                "--bin",
+                "{bin}",
+                "--agent-bin",
+                "{qoder}" if agent == "qoder" else "{qwenpaw}",
+                "--image",
+                image,
+                "--output",
+                "{output}/sec-core",
+            ]
+            if security[0]["argv"] != expected_argv:
+                raise ValueError(f"{agent}: sec-core argv must use the pinned native fixture")
+        for requirement in row.get("requirements", []):
+            if "==" not in requirement or any(c in requirement for c in "*<>;"):
+                raise ValueError(f"{agent}: use exact Python dependency versions")
+        if "source" in row:
+            sha(row["source"]["revision"])
+        if "npm_fixture" in row:
+            for name in ("package.json", "package-lock.json"):
+                if not (root / row["npm_fixture"] / name).is_file():
+                    raise ValueError(f"{agent}: missing locked npm fixture")
+        for package in row.get("npm_packages", []):
+            if not re.search(r"@\d+\.\d+\.\d+$", package):
+                raise ValueError(f"{agent}: pin the npm package")
+        cases = row.get("cases", [])
+        if not cases or len({case["name"] for case in cases}) != len(cases):
+            raise ValueError(f"{agent}: missing or duplicate native cases")
+        for case in cases:
+            if not 0 < case["timeout_seconds"] <= 2400:
+                raise ValueError(f"{agent}: native cases need bounded deadlines")
+            validate_case(case)
+            scripts = [arg for arg in case["argv"] if arg.endswith((".py", ".mjs"))]
+            if not scripts or any(not (root / script).is_file() for script in scripts):
+                raise ValueError(f"{agent}/{case['name']}: native test entrypoint is missing")
+    return manifest
+
+
+def select(manifest: dict, credential_free: bool = False) -> dict:
+    """Keep hosted-model acceptance explicit when validating an unmerged fork."""
+    return {
+        **manifest,
+        "agents": {
+            agent: row for agent, row in manifest["agents"].items()
+            if not credential_free or agent not in {"qoder", "qoder-sdk"}
+        },
+    }
+
+
+def plan(root: Path, expected: str, credential_free: bool = False) -> dict:
+    """Generate the job matrix from the tested checkout, never a second Agent list."""
+    if git("rev-parse", "HEAD", repo=root.parents[1]) != sha(expected):
+        raise ValueError("native plan checkout does not match candidate SHA")
+    manifest = select(load(root), credential_free)
+    return {
+        "include": [
+            {"agent": agent, "python": row["python"],
+             "minutes": math.ceil((sum(c["timeout_seconds"] + 20 for c in row["cases"]) + 1800) / 60)}
+            for agent, row in manifest["agents"].items()
+            if row["mode"] == "automated"
+        ]
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--credential-free", action="store_true")
+    args = parser.parse_args()
+    matrix = plan(AW, args.candidate_sha, args.credential_free)
+    resident = {"include": [
+        {"shard": name, "minutes": row["job_minutes"]}
+        for name, row in shards(load(AW)).items()
+    ]}
+    output(matrix=json.dumps(matrix, separators=(",", ":")),
+           resident_matrix=json.dumps(resident, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    main()

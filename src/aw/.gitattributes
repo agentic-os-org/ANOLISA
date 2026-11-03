@@ -1,0 +1,2 @@
+# Digest-verified resources: line endings are part of the byte identity.
+crates/aw-contracts/schemas/** -text

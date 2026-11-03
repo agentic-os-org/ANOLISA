@@ -13,16 +13,16 @@ SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TOKENLESS_ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
 REPO_ROOT="$(CDPATH='' cd "$TOKENLESS_ROOT/../.." && pwd -P)"
 
-DOC_EN_QUICKSTART="$REPO_ROOT/docs/user-guide/en/token-saving/tokenless/QUICKSTART.md"
-DOC_ZH_QUICKSTART="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/QUICKSTART.md"
-DOC_EN_MANUAL="$REPO_ROOT/docs/user-guide/en/token-saving/tokenless/user-manual.md"
-DOC_ZH_MANUAL="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/user-manual.md"
+DOC_EN_QUICKSTART="$REPO_ROOT/docs/user-guide/en/tokenless/index.md"
+DOC_ZH_QUICKSTART="$REPO_ROOT/docs/user-guide/zh/tokenless/index.md"
+DOC_EN_MANUAL="$REPO_ROOT/docs/user-guide/en/tokenless/index.md"
+DOC_ZH_MANUAL="$REPO_ROOT/docs/user-guide/zh/tokenless/index.md"
 DOC_SKILL="$REPO_ROOT/src/os-skills/ai/install-tokenless/SKILL.md"
-DOC_EN_TROUBLE="$REPO_ROOT/docs/user-guide/en/token-saving/tokenless/troubleshooting.md"
-DOC_ZH_TROUBLE="$REPO_ROOT/docs/user-guide/zh/token-saving/tokenless/troubleshooting.md"
+DOC_EN_TROUBLE="$REPO_ROOT/docs/user-guide/en/tokenless/troubleshooting.md"
+DOC_ZH_TROUBLE="$REPO_ROOT/docs/user-guide/zh/tokenless/troubleshooting.md"
 DOC_README_EN="$TOKENLESS_ROOT/README.md"
 DOC_README_ZH="$TOKENLESS_ROOT/README_zh.md"
-PACKAGE_NPM_JS="$TOKENLESS_ROOT/npm/scripts/package-npm.js"
+PACKAGE_NPM_JS="$TOKENLESS_ROOT/packaging/npm/package-npm.js"
 INSTALL_SH="$TOKENLESS_ROOT/scripts/install.sh"
 UNINSTALL_SH="$TOKENLESS_ROOT/scripts/uninstall.sh"
 
@@ -85,8 +85,12 @@ for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
   hasnt "$doc" "Windows or Linux with musl" "$lang QUICKSTART no longer merges Windows with musl"
   hasnt "$doc" "Windows 或使用 musl" "$lang QUICKSTART no longer merges Windows with musl (zh)"
 done
-has_re "$DOC_EN_QUICKSTART" '^\| Windows \|.*Not supported, use WSL2' "en QUICKSTART marks Windows unsupported for curl"
-has_re "$DOC_ZH_QUICKSTART" '^\| Windows \|.*暂不支持，请使用 WSL2' "zh QUICKSTART marks Windows unsupported for curl"
+has_re "$DOC_EN_QUICKSTART" '^\| Windows \| Not currently supported \| x64: supported \| Not supported, use WSL2 \|' "en QUICKSTART separates native Windows npm from curl support"
+has_re "$DOC_ZH_QUICKSTART" '^\| Windows \| 暂不支持 \| x64：支持 \| 暂不支持，请使用 WSL2 \|' "zh QUICKSTART separates native Windows npm from curl support"
+for doc in "$DOC_EN_QUICKSTART" "$DOC_ZH_QUICKSTART"; do
+  has "$doc" '@anolisa/tokenless-win32-x64' "manual lists the Windows npm build target"
+  has "$doc" 'os: win32, linux, darwin' "manual quotes the current npm platform manifest"
+done
 has_re "$DOC_EN_QUICKSTART" '^\| Linux with musl.*Source build only' "en QUICKSTART marks musl as source-build only"
 has_re "$DOC_ZH_QUICKSTART" '^\| 使用 musl 的 Linux.*仅源码构建' "zh QUICKSTART marks musl as source-build only"
 has "$DOC_EN_QUICKSTART" "source-build fallback is validated on Linux only" "en QUICKSTART states macOS has no source-build path"
@@ -120,7 +124,7 @@ has "$DOC_SKILL" "--purge" "SKILL documents the opt-in runtime-data purge"
 hasnt "$DOC_SKILL" "rm -f ~/.local/bin/tokenless ~/.local/bin/rtk ~/.local/bin/toon" "SKILL drops the blanket curl uninstall block"
 hasnt "$DOC_SKILL" "rm -rf ~/.tokenless" "SKILL no longer deletes runtime data unconditionally"
 has "$DOC_SKILL" "anolisa uninstall tokenless" "SKILL keeps the anolisa CLI uninstall path"
-has "$DOC_SKILL" "Windows is not supported" "SKILL states the Windows boundary"
+has "$DOC_SKILL" "Bash workflow requires WSL2 on Windows" "SKILL states the Windows workflow boundary"
 
 # --- troubleshooting: the curl method has an upgrade/uninstall story too -------
 # "Upgrade and uninstall" is the reference page the Quick Start links to, and it
@@ -140,7 +144,7 @@ for doc in "$DOC_EN_TROUBLE" "$DOC_ZH_TROUBLE"; do
 done
 
 # --- component README: the public install routes it advertises are real -------
-# npm/scripts/package-npm.js copies this README straight into the published npm
+# packaging/npm/package-npm.js copies this README straight into the published npm
 # package, so a README that denies the npm route contradicts the installation
 # the reader just completed.
 has "$PACKAGE_NPM_JS" "join(rootPkgDir, 'README.md')" \
@@ -156,14 +160,14 @@ for doc in "$DOC_README_EN" "$DOC_README_ZH"; do
 done
 hasnt "$DOC_README_EN" "are not a public" "en README no longer denies the npm route"
 hasnt "$DOC_README_ZH" "目前不能通过公开的" "zh README no longer denies the npm route"
-has "$DOC_README_EN" "still has no published package" "en README keeps the accurate Intel macOS caveat"
-has "$DOC_README_ZH" "Intel Mac" "zh README keeps the accurate Intel macOS caveat"
-has_re "$DOC_EN_QUICKSTART" 'tokenless-darwin-x64`.*not published yet' \
-  "en QUICKSTART marks the darwin-x64 platform package as unpublished"
-has_re "$DOC_ZH_QUICKSTART" 'tokenless-darwin-x64`.*尚未发布' \
-  "zh QUICKSTART marks the darwin-x64 platform package as unpublished"
-has "$DOC_SKILL" "Intel macOS (x86_64) has no published platform package" \
-  "SKILL states the Intel macOS boundary for the npm method"
+has "$DOC_README_EN" "packages are available from 0.9.0" "en README records published platform packages"
+has "$DOC_README_ZH" "从 0.9.0 开始提供" "zh README records published platform packages"
+hasnt "$DOC_EN_QUICKSTART" 'not published yet' \
+  "en QUICKSTART no longer marks platform packages as unpublished"
+hasnt "$DOC_ZH_QUICKSTART" '尚未发布' \
+  "zh QUICKSTART no longer marks platform packages as unpublished"
+has "$DOC_SKILL" 'Intel macOS (x86_64) uses the published' \
+  "SKILL states the published Intel macOS npm route"
 
 # --- Skill bundle: the new Skill must be deployable through the managed path --
 # declared_skills <manifest> <framework> prints one declared skill name per line.
@@ -191,31 +195,33 @@ check_bundle() {
   pass "$label [$fw] declares only skills that exist on disk"
 }
 
-# The two manifests are not interchangeable. src/os-skills/component.toml is the
-# source-tree manifest the *next* os-skills artifact is built from, so a new skill
-# belongs there immediately. distribution/anolisa/manifests/components/os-skills/
-# component.toml is the distribution contract for an artifact that is *already
-# published*: index.toml pins its version to a sha256 and a byte size. Declaring a
-# skill here that the pinned artifact does not contain makes `anolisa adapter
-# enable os-skills <framework>` fail while copying a source that does not exist,
-# so this one may only gain the skill together with a version bump and a new
-# index.toml entry.
+# The catalog version tracks the source component, while index.toml records
+# independently published artifacts and may lag behind it. A version sync alone
+# does not publish a new bundle, so install-tokenless belongs in the source
+# manifest until a release ships it through the managed distribution path.
 INDEX_TOML="$REPO_ROOT/distribution/anolisa/manifests/components/index.toml"
 [ -f "$INDEX_TOML" ] || { echo "FAIL missing file: $INDEX_TOML" >&2; exit 1; }
+SOURCE_VERSION=$(awk -F'"' '/^version = /{ print $2; exit }' "$BUNDLE_COMPONENT")
+[ -n "$SOURCE_VERSION" ] || fail "cannot read the os-skills source component version"
 DIST_VERSION=$(awk -F'"' '/^version = /{ print $2; exit }' "$BUNDLE_DISTRIBUTION")
 [ -n "$DIST_VERSION" ] || fail "cannot read the os-skills distribution contract version"
-pass "the os-skills distribution contract declares version $DIST_VERSION"
-grep -A2 '^component = "os-skills"$' "$INDEX_TOML" | grep -qF "version = \"$DIST_VERSION\"" \
-  || fail "os-skills $DIST_VERSION is not pinned in index.toml, so the contract describes no published artifact"
-pass "the os-skills distribution contract version is pinned to a published artifact"
+[ "$DIST_VERSION" = "$SOURCE_VERSION" ] \
+  || fail "os-skills catalog version $DIST_VERSION differs from source version $SOURCE_VERSION"
+pass "the os-skills catalog version $DIST_VERSION matches the source component"
+PUBLISHED_VERSIONS=$(awk -F'"' '
+  /^\[\[entries\]\]$/ { component = "" }
+  /^component = / { component = $2 }
+  component == "os-skills" && /^version = / { print $2 }
+' "$INDEX_TOML")
+[ -n "$PUBLISHED_VERSIONS" ] || fail "index.toml has no published os-skills artifact"
+pass "index.toml records published os-skills versions independently of the catalog"
 
 for fw in openclaw hermes; do
   check_bundle "src/os-skills/component.toml" "$BUNDLE_COMPONENT" "$fw"
-  # The distribution contract must stay consistent with the artifact it is pinned
-  # to: it may not declare the new skill yet, and everything it does declare must
-  # still exist on disk.
+  # The catalog may not advertise the new skill before its bundle is published,
+  # and everything it already declares must still exist on disk.
   if declared_skills "$BUNDLE_DISTRIBUTION" "$fw" | grep -qxF "$SKILL_NAME"; then
-    fail "manifests os-skills component.toml [$fw] declares $SKILL_NAME, which the pinned $DIST_VERSION artifact does not ship"
+    fail "manifests os-skills component.toml [$fw] declares $SKILL_NAME before a published bundle ships it"
   fi
   pass "manifests os-skills component.toml [$fw] does not declare $SKILL_NAME ahead of its artifact"
   while IFS= read -r name; do
@@ -245,7 +251,7 @@ pass "every on-disk OS Skill is declared in both bundle lists of the component m
 has "$BUNDLE_COMPONENT" 'source = "{datadir}/skills/install-tokenless/"' \
   "the component bundle points at the flattened RPM skill path"
 hasnt "$BUNDLE_DISTRIBUTION" 'source = "{datadir}/skills/install-tokenless/"' \
-  "the distribution bundle does not point at a skill its pinned artifact lacks"
+  "the distribution bundle does not point at a skill its published artifacts lack"
 has "$OS_SKILLS_INDEX_EN" "**install-tokenless**" "en OS Skills index lists the new skill"
 has "$OS_SKILLS_INDEX_ZH" "**install-tokenless**" "zh OS Skills index lists the new skill"
 
@@ -270,20 +276,17 @@ has "$UNINSTALL_SH" "another installation has taken over that path" \
   "uninstall.sh refuses a recorded path another installer replaced"
 has "$UNINSTALL_SH" "file_digest" "uninstall.sh verifies the recorded file identity"
 
-# --- Intel macOS: no route may be advertised that the release cannot deliver --
-# `@anolisa/tokenless-darwin-x64` is not on the registry, and the installer
-# refuses its source-build fallback on macOS, so every column of the Intel macOS
-# row has to read "not supported" until that package is published.
+# --- Intel macOS: npm is published; source builds remain Linux-only ----------
 has_re "$DOC_EN_QUICKSTART" \
-  '^\| macOS x86_64 \| Not currently supported \| Not currently supported \| Not currently supported \| Not currently supported \|$' \
-  "en QUICKSTART marks Intel macOS unsupported for every method"
+  '^\| macOS x86_64 \| Not currently supported \| Supported \| Supported \(npm path\) \| Supported \(npm path\) \|$' \
+  "en QUICKSTART marks Intel macOS npm routes supported"
 has_re "$DOC_ZH_QUICKSTART" \
-  '^\| macOS x86_64 \| 暂不支持 \| 暂不支持 \| 暂不支持 \| 暂不支持 \|$' \
-  "zh QUICKSTART marks Intel macOS unsupported for every method"
-hasnt "$DOC_EN_QUICKSTART" "npm and curl ship prebuilt binaries on macOS x86_64" \
-  "en QUICKSTART no longer claims prebuilt Intel macOS binaries"
-hasnt "$DOC_ZH_QUICKSTART" "npm 和 curl 方式在 macOS x86_64 上提供预编译二进制" \
-  "zh QUICKSTART no longer claims prebuilt Intel macOS binaries"
+  '^\| macOS x86_64 \| 暂不支持 \| 支持 \| 支持（npm 路径） \| 支持（npm 路径） \|$' \
+  "zh QUICKSTART marks Intel macOS npm routes supported"
+has "$DOC_EN_QUICKSTART" 'uses the published `@anolisa/tokenless-darwin-x64` package' \
+  "en QUICKSTART identifies the published Intel macOS package"
+has "$DOC_ZH_QUICKSTART" '使用已发布的 `@anolisa/tokenless-darwin-x64` 软件包' \
+  "zh QUICKSTART identifies the published Intel macOS package"
 hasnt "$DOC_EN_QUICKSTART" 'Use Method C with `TOKENLESS_FORCE_BUILD=1` there' \
   "en QUICKSTART does not send Intel macOS to a forced source build"
 hasnt "$DOC_ZH_QUICKSTART" '该平台请使用方式 C 并设置 `TOKENLESS_FORCE_BUILD=1`' \
@@ -439,7 +442,7 @@ for f in "$MAKEFILE" "$TEST_NPM_POSTINSTALL"; do
   [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
 done
 has "$MAKEFILE" "test-npm-postinstall-strict" "the Makefile has a strict postinstall test target"
-has "$MAKEFILE" "test-install-script test-install-docs test-npm-postinstall-strict" \
+has "$TOKENLESS_ROOT/packaging/npm.mk" "test-install-script test-install-docs test-npm-postinstall-strict" \
   "npm packaging runs the install-method suite where a usable node is guaranteed"
 has "$TEST_NPM_POSTINSTALL" "TOKENLESS_REQUIRE_NODE" \
   "the postinstall test can require a usable interpreter instead of skipping"
@@ -557,9 +560,8 @@ has "$DOC_ZH_TROUBLE" "都会保留**，脚本以非 0 退出" \
   "zh troubleshooting documents the retryable uninstall"
 has "$DOC_SKILL" "stops short" "SKILL documents the retryable uninstall"
 has "$DOC_SKILL" "fail-closed" "SKILL documents that staging is fail-closed"
-# The Skill is declared in the source-tree manifest, which the next os-skills
-# artifact is built from — not in the distribution contract, which is pinned to an
-# artifact that already exists and therefore cannot contain it yet.
+# The source-tree manifest can declare the Skill before a published bundle
+# provides it through the distribution catalog.
 has "$DOC_EN_QUICKSTART" "does not list it yet" \
   "en QUICKSTART does not claim the published os-skills bundle already ships the Skill"
 has "$DOC_ZH_QUICKSTART" "还没有它" \

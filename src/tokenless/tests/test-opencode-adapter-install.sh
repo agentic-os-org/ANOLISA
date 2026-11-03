@@ -123,6 +123,54 @@ else
     fail "unmanaged plugin file was modified"
 fi
 
+# A dry-run uninstall must preview the removal and leave the live link
+# in place, mirroring the installer's ANOLISA_DRY_RUN handling.
+rm -f "$PLUGIN_LINK"
+bash "$INSTALL_SH" >/dev/null
+dry_run_output="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)"
+if [ $? -eq 0 ] && [ -L "$PLUGIN_LINK" ] && [ "$(readlink "$PLUGIN_LINK")" = "$PLUGIN_SOURCE" ]; then
+    pass "dry-run uninstall preserves the managed plugin link"
+else
+    fail "dry-run uninstall removed or damaged the managed plugin link"
+fi
+case "$dry_run_output" in
+    *DRY-RUN:*) pass "dry-run uninstall previews the removal" ;;
+    *) fail "dry-run uninstall did not print a DRY-RUN preview" ;;
+esac
+if bash "$UNINSTALL_SH" >/dev/null; then
+    pass "real uninstall still removes the managed plugin link"
+else
+    fail "real uninstall stopped working"
+fi
+
+# A dry-run install must name every write the real path performs - including the
+# plugin directory it creates when it is missing - and perform none of them.
+rm -f "$PLUGIN_LINK"
+rm -rf "$CONFIG_DIR/plugins"
+dry_install_output="$(ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" 2>&1)"
+case "$dry_install_output" in
+    *"DRY-RUN: mkdir -p $CONFIG_DIR/plugins"*) pass "dry-run install previews the plugin directory it would create" ;;
+    *) fail "dry-run install does not name the plugin directory: ${dry_install_output}" ;;
+esac
+case "$dry_install_output" in
+    *"DRY-RUN: ln -s $PLUGIN_SOURCE $PLUGIN_LINK"*) pass "dry-run install previews the plugin link" ;;
+    *) fail "dry-run install does not name the plugin link: ${dry_install_output}" ;;
+esac
+if [ ! -d "$CONFIG_DIR/plugins" ] && [ ! -e "$PLUGIN_LINK" ]; then
+    pass "dry-run install creates neither the directory nor the link"
+else
+    fail "dry-run install wrote to the config directory"
+fi
+
+# With the directory already in place the real path creates nothing, so the
+# preview must not claim it would.
+mkdir -p "$CONFIG_DIR/plugins"
+present_output="$(ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" 2>&1)"
+case "$present_output" in
+    *"mkdir -p $CONFIG_DIR/plugins"*) fail "an existing plugin directory is still previewed as a creation" ;;
+    *) pass "an existing plugin directory is not previewed as a creation" ;;
+esac
+
 echo ""
 echo "OpenCode adapter tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

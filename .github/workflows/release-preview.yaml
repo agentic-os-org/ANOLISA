@@ -84,9 +84,11 @@ jobs:
         id: plan-prebuilt
         env:
           COMPONENT: ${{ inputs.component }}
+          TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}
         run: |
           python3 .github/actions/prebuilt-rust-common/plan_matrix.py \
-            --component "$COMPONENT" >> "$GITHUB_OUTPUT"
+            --component "$COMPONENT" \
+            --tokenless-source-root "$TOKENLESS_SOURCE_ROOT" >> "$GITHUB_OUTPUT"
 
       - name: Package source archive
         uses: ./.github/actions/package-source
@@ -124,6 +126,46 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Build OS Skills raw package
+        id: os-skills-prebuilt
+        if: matrix.component == 'os-skills'
+        uses: ./.github/actions/build-os-skills-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
+      - name: Build agent-memory precompiled package
+        id: agent-memory-prebuilt
+        if: matrix.component == 'agent-memory'
+        uses: ./.github/actions/build-agent-memory-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
+      - name: Build sec-core precompiled package
+        id: sec-core-prebuilt
+        if: matrix.component == 'agent-sec-core'
+        uses: ./.github/actions/build-sec-core-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
+      - name: Build agentsight precompiled package
+        id: agentsight-prebuilt
+        if: matrix.component == 'agentsight'
+        uses: ./.github/actions/build-agentsight-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
       - name: Build cosh-ng precompiled package
         id: cosh-ng-prebuilt
         if: matrix.component == 'cosh-ng'
@@ -145,6 +187,26 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ inputs.tokenless_source_tag }}
 
+      - name: Build ws-ckpt precompiled package
+        id: ws-ckpt-prebuilt
+        if: matrix.component == 'ws-ckpt'
+        uses: ./.github/actions/build-ws-ckpt-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
+      - name: Build skillfs precompiled package
+        id: skillfs-prebuilt
+        if: matrix.component == 'skillfs'
+        uses: ./.github/actions/build-skillfs-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
       - name: Build ANOLISA CLI precompiled package
         id: anolisa-prebuilt
         if: matrix.component == 'anolisa'
@@ -161,13 +223,25 @@ jobs:
         env:
           COMPONENT: ${{ matrix.component }}
           ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
+          AGENT_MEMORY_DIRECTORY: ${{ steps.agent-memory-prebuilt.outputs.artifact-directory }}
+          SEC_CORE_DIRECTORY: ${{ steps.sec-core-prebuilt.outputs.artifact-directory }}
+          OS_SKILLS_DIRECTORY: ${{ steps.os-skills-prebuilt.outputs.artifact-directory }}
+          AGENTSIGHT_DIRECTORY: ${{ steps.agentsight-prebuilt.outputs.artifact-directory }}
           COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
           TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+          WS_CKPT_DIRECTORY: ${{ steps.ws-ckpt-prebuilt.outputs.artifact-directory }}
+          SKILLFS_DIRECTORY: ${{ steps.skillfs-prebuilt.outputs.artifact-directory }}
         run: |
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
+            agent-memory) ARTIFACT_DIRECTORY="$AGENT_MEMORY_DIRECTORY" ;;
+            agent-sec-core) ARTIFACT_DIRECTORY="$SEC_CORE_DIRECTORY" ;;
+            os-skills) ARTIFACT_DIRECTORY="$OS_SKILLS_DIRECTORY" ;;
+            agentsight) ARTIFACT_DIRECTORY="$AGENTSIGHT_DIRECTORY" ;;
             cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
             tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            ws-ckpt) ARTIFACT_DIRECTORY="$WS_CKPT_DIRECTORY" ;;
+            skillfs) ARTIFACT_DIRECTORY="$SKILLFS_DIRECTORY" ;;
             *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
           esac
           if [ -z "$ARTIFACT_DIRECTORY" ]; then
@@ -208,6 +282,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout Tokenless source tag
+        if: inputs.tokenless_source_tag != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tokenless_source_tag) }}
+          path: tokenless-source
+          persist-credentials: false
+
       - name: Download precompiled packages
         uses: actions/download-artifact@v4
         with:
@@ -218,12 +300,14 @@ jobs:
         env:
           COMPONENT: ${{ inputs.component }}
           VERSION: ${{ inputs.version }}
+          TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}
         run: |
           python3 .github/actions/prebuilt-rust-common/verify-artifacts.py \
             --directory /tmp/prebuilt-preview \
             --component "$COMPONENT" \
             --version "$VERSION" \
-            --layout actions
+            --layout actions \
+            --tokenless-source-root "$TOKENLESS_SOURCE_ROOT"
 
       - name: Download Tokenless Python wheels
         if: inputs.component == 'tokenless'
@@ -237,9 +321,11 @@ jobs:
         if: inputs.component == 'tokenless'
         env:
           VERSION: ${{ inputs.version }}
+          TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}
         run: |
           python3 .github/actions/build-tokenless-prebuilt/verify-wheels.py \
             --directory /tmp/python-wheels-preview \
             --version "$VERSION" \
             --layout aggregate \
+            --tokenless-source-root "$TOKENLESS_SOURCE_ROOT" \
             --write-checksums /tmp/python-wheels-preview/SHA256SUMS-python-wheels.txt

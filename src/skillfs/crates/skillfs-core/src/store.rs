@@ -4,7 +4,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 use crate::parser;
-use crate::{CategoryMeta, ParseConfig, SkillEntry};
+use crate::{CategoryMeta, ParseConfig, ParseStatus, SkillEntry};
 
 // ---------------------------------------------------------------------------
 // LoadError
@@ -15,6 +15,15 @@ pub struct LoadError {
     pub path: std::path::PathBuf,
     pub error: String,
 }
+
+/// Reported for a Skill or category directory whose name cannot be
+/// represented as UTF-8.
+///
+/// Such a name is never a skill name — the canonical resolver rejects the
+/// path component (`invalid_canonical_path`) — so the loaders report the
+/// directory instead of surfacing it under a fallback name. Directories that
+/// are neither a Skill nor a category stay ignored whatever their name.
+const NON_UTF8_NAME_ERROR: &str = "directory name is not valid UTF-8";
 
 // ---------------------------------------------------------------------------
 // SkillStore
@@ -48,6 +57,11 @@ impl SkillStore {
     /// A subdirectory is treated as a **category** when it contains no
     /// `SKILL.md` of its own but has sub-subdirectories that contain
     /// `SKILL.md` files.
+    ///
+    /// Skills are keyed by directory leaf name, so two discovered skills
+    /// sharing a leaf name collide: one entry is kept deterministically
+    /// and the collision is returned as a `LoadError` (reported by the
+    /// internal insert_discovered helper used by both loaders).
     pub fn load_from_directory(&mut self, source: &Path, config: &ParseConfig) -> Vec<LoadError> {
         let mut errors = Vec::new();
         let mut loaded_count = 0usize;
@@ -81,32 +95,29 @@ impl SkillStore {
                 continue;
             }
 
-            // Skip hidden directories
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') {
-                    continue;
-                }
-            }
-
-            // Check max_skills limit (rough guard)
-            if loaded_count >= config.max_skills {
-                errors.push(LoadError {
-                    path: path.clone(),
-                    error: format!("max skills limit reached ({})", config.max_skills),
-                });
+            // Skip hidden directories, whatever the encoding of the name.
+            if is_hidden(&path) {
                 continue;
             }
+            // A name that is not valid UTF-8 is never a skill name: the
+            // canonical resolver rejects such a path component
+            // (`invalid_canonical_path`). It is only reported once the
+            // directory turns out to be a Skill or a category.
+            let name = path.file_name().and_then(|n| n.to_str());
 
             if is_category_dir(&path) {
                 // ---- Categorized layout ----
-                let cat_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                // The max_skills limit is enforced per nested skill by
+                // `load_skills_from_category`, so the category itself is
+                // never charged a slot or an error of its own.
+                let Some(name) = name else {
+                    errors.push(non_utf8_name_error(&path));
+                    continue;
+                };
+                let cat_name = name.to_string();
 
                 // Try to load _category.yaml
-                let cat_meta = load_category_meta(&path, &cat_name);
+                let cat_meta = load_category_meta(&path, &cat_name, config.max_skill_size);
                 self.categories.insert(cat_name.clone(), cat_meta);
 
                 // Load skills inside this category directory
@@ -115,22 +126,33 @@ impl SkillStore {
                 errors.extend(cat_errors);
             } else {
                 // ---- Flat layout ----
+                // Classify before enforcing the limit: a directory that is
+                // not a skill is skipped silently whether or not the limit
+                // has been reached, exactly as below the limit.
                 if !has_regular_skill_md(&path) {
                     continue;
                 }
+                if loaded_count >= config.max_skills {
+                    errors.push(LoadError {
+                        path: path.clone(),
+                        error: format!("max skills limit reached ({})", config.max_skills),
+                    });
+                    continue;
+                }
+                let Some(name) = name else {
+                    errors.push(non_utf8_name_error(&path));
+                    continue;
+                };
                 let skill_md = path.join("SKILL.md");
 
                 match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
                     Ok(mut entry) => {
-                        let dir_name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        entry.metadata.name = dir_name.clone();
+                        let dir_name = name.to_string();
+                        adopt_directory_name(&mut entry, &dir_name);
                         info!(name = %dir_name, "loaded skill");
-                        self.upsert(entry);
-                        self.skill_categories.insert(dir_name, String::new());
+                        if let Some(error) = self.insert_discovered(entry, "") {
+                            errors.push(error);
+                        }
                         loaded_count += 1;
                     }
                     Err(e) => {
@@ -145,6 +167,138 @@ impl SkillStore {
 
         info!(count = loaded_count, "finished loading skills");
         errors
+    }
+
+    /// Insert a discovered skill, reporting a same-key collision.
+    ///
+    /// The store keys skills by their directory leaf name — the key every
+    /// later lookup uses (`get`, `/skills` listings, the sync worker's
+    /// `Reparse` events) — so two valid skills that share a leaf name
+    /// (`alpha/notes` + `beta/notes`, or a flat `demo` plus a categorized
+    /// `catalog/demo`) collide on one entry. Instead of letting the later
+    /// `read_dir` winner silently overwrite the other, keep one entry
+    /// deterministically (the lexicographically smaller `source_path`
+    /// wins, mirroring the earlier-source-wins rule of the multi-source
+    /// loader) and return a `LoadError` describing the loser, so mount
+    /// logs and `sls validate` surface the collision. Re-discovering the
+    /// exact same path is an idempotent refresh and never collides.
+    fn insert_discovered(&mut self, entry: SkillEntry, category: &str) -> Option<LoadError> {
+        let name = entry.metadata.name.clone();
+        match self.skills.get(&name) {
+            Some(existing) if existing.source_path != entry.source_path => {
+                let (keep_new, dropped, kept) = if entry.source_path < existing.source_path {
+                    (
+                        true,
+                        existing.source_path.clone(),
+                        entry.source_path.clone(),
+                    )
+                } else {
+                    (
+                        false,
+                        entry.source_path.clone(),
+                        existing.source_path.clone(),
+                    )
+                };
+                if keep_new {
+                    self.skills.insert(name.clone(), entry);
+                    self.skill_categories
+                        .insert(name.clone(), category.to_string());
+                }
+                Some(LoadError {
+                    path: dropped.clone(),
+                    error: format!(
+                        "duplicate skill name '{name}': {} and {} share the same \
+                         directory name; keeping {}",
+                        dropped.display(),
+                        kept.display(),
+                        kept.display(),
+                    ),
+                })
+            }
+            _ => {
+                self.skills.insert(name.clone(), entry);
+                self.skill_categories.insert(name, category.to_string());
+                None
+            }
+        }
+    }
+
+    /// Post-load twin of the discovery insert for the write paths: the
+    /// skill-dir rename store sync, the mkdir placeholder, and the sync
+    /// worker's re-parse all land entries in an already-mounted store.
+    ///
+    /// The store keys skills by their directory leaf name, so a write that
+    /// lands a skill under a leaf another directory already owns must not
+    /// silently steal that key: `upsert` would replace the entry with zero
+    /// diagnostics, the shadowed skill would vanish from `/skills`, `sls
+    /// list`/`validate`, and skill-discover, and the live store would
+    /// diverge from what a fresh discovery scan of the same tree produces.
+    /// Apply the loaders' collision rule instead: the lexicographically
+    /// smaller `source_path` wins deterministically and the loser is
+    /// reported back for the caller to log. Re-inserting the same source
+    /// path stays an idempotent refresh.
+    ///
+    /// The comparison is by spelling: write-path callers must insert
+    /// under the canonical source-root spelling (an in-place mount's
+    /// `/proc/self/fd/<n>` alias is rewritten before the insert), so one
+    /// manifest's fd alias and real path can never collide with itself.
+    ///
+    /// The refresh also preserves the scanned category provenance: a
+    /// same-source re-parse keeps the category record the loaders wrote
+    /// (the staging-private view filters match that record, #8037, so
+    /// wiping it would surface a pre-seeded staging category's skill in
+    /// `/skills` and skill-discover until the next remount), while a
+    /// source replacement enters uncategorized — the new entry was never
+    /// scanned under the replaced entry's category and must not inherit
+    /// the record, mirroring `upsert`.
+    pub fn upsert_checked(&mut self, entry: SkillEntry) -> Option<LoadError> {
+        let refresh_category = match self.skills.get(&entry.metadata.name) {
+            Some(existing) if existing.source_path == entry.source_path => self
+                .skill_categories
+                .get(&entry.metadata.name)
+                .cloned()
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.insert_discovered(entry, &refresh_category)
+    }
+
+    /// The write-path insert with the staging carve-out the I2 contract
+    /// requires: `upsert_checked`'s collision rule treats every stored
+    /// entry as an equal contender for the leaf name, but a
+    /// staging-private incumbent — its adopted name or its scanned
+    /// category matching a staging pattern, per `is_staging_root` — is
+    /// installer-private residue the scan classified as a category (a
+    /// pre-seeded or crashed staging root, #8037), never a legitimate
+    /// owner of the leaf. An incoming entry from a different source
+    /// replaces it instead of losing the lexicographic tie, so a
+    /// completed ordinary install over a pre-scanned staging leaf
+    /// surfaces (the #8037 inbox control); the incumbent's category
+    /// record goes with it, keeping the rule that a replacement never
+    /// inherits the previous owner's category. A same-source refresh
+    /// behaves exactly like `upsert_checked`: the scanned category is
+    /// preserved.
+    pub fn upsert_checked_replacing_staging(
+        &mut self,
+        entry: SkillEntry,
+        is_staging_root: &dyn Fn(&str) -> bool,
+    ) -> Option<LoadError> {
+        let incumbent_staging = self
+            .skills
+            .get(&entry.metadata.name)
+            .is_some_and(|existing| {
+                existing.source_path != entry.source_path
+                    && (is_staging_root(&entry.metadata.name)
+                        || self
+                            .skill_categories
+                            .get(&entry.metadata.name)
+                            .is_some_and(|c| !c.is_empty() && is_staging_root(c)))
+            });
+        if incumbent_staging {
+            self.skills.remove(&entry.metadata.name);
+            self.skill_categories.remove(&entry.metadata.name);
+        }
+        self.upsert_checked(entry)
     }
 
     /// Load skills from a single category directory.
@@ -184,12 +338,16 @@ impl SkillStore {
                 continue;
             }
 
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') {
-                    continue;
-                }
+            if is_hidden(&path) {
+                continue;
             }
 
+            // Classify before enforcing the limit: a category child that is
+            // not a skill is skipped silently whether or not the limit has
+            // been reached, exactly as below the limit.
+            if !has_regular_skill_md(&path) {
+                continue;
+            }
             if *loaded_count >= config.max_skills {
                 errors.push(LoadError {
                     path: path.clone(),
@@ -197,23 +355,22 @@ impl SkillStore {
                 });
                 continue;
             }
-
-            if !has_regular_skill_md(&path) {
+            // Same rule as the top-level loader: a Skill whose name is not
+            // valid UTF-8 is reported, not loaded under a fallback name.
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                errors.push(non_utf8_name_error(&path));
                 continue;
-            }
+            };
             let skill_md = path.join("SKILL.md");
 
             match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
                 Ok(mut entry) => {
-                    let dir_name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    entry.metadata.name = dir_name.clone();
+                    let dir_name = name.to_string();
+                    adopt_directory_name(&mut entry, &dir_name);
                     info!(name = %dir_name, category = %cat_name, "loaded skill");
-                    self.upsert(entry);
-                    self.skill_categories.insert(dir_name, cat_name.to_string());
+                    if let Some(error) = self.insert_discovered(entry, cat_name) {
+                        errors.push(error);
+                    }
                     *loaded_count += 1;
                 }
                 Err(e) => {
@@ -229,8 +386,27 @@ impl SkillStore {
     }
 
     /// Insert or update a skill entry.
+    ///
+    /// The write path — mkdir placeholders, the sync worker's reparse
+    /// refresh, the rename refresh, the inbox install flow — keys
+    /// entries by their adopted name and carries no category of its
+    /// own. A same-source reparse refreshes the entry the loaders
+    /// scanned, so its category record stays; a changed `source_path`
+    /// means the record belongs to the entry being replaced (an
+    /// ordinary skill installed over a pre-scanned staging category's
+    /// leaf name, say), and keeping it would leave the staging-private
+    /// view filters acting on a category the new entry was never
+    /// scanned under — drop it instead.
     pub fn upsert(&mut self, entry: SkillEntry) {
-        self.skills.insert(entry.metadata.name.clone(), entry);
+        let name = entry.metadata.name.clone();
+        let source_replaced = match self.skills.get(&name) {
+            Some(existing) => existing.source_path != entry.source_path,
+            None => false,
+        };
+        if source_replaced {
+            self.skill_categories.remove(&name);
+        }
+        self.skills.insert(name, entry);
     }
 
     /// Remove a skill by name.
@@ -256,6 +432,18 @@ impl SkillStore {
         names
     }
 
+    /// The category a skill was discovered under, if any.
+    ///
+    /// A present record always names the category the live entry was
+    /// scanned under: the loaders insert it with the entry,
+    /// [`SkillStore::upsert`] and [`SkillStore::upsert_checked`] (the
+    /// write-path reparse and refresh surfaces) preserve it across a
+    /// same-source reparse and drop it when the entry's source changes,
+    /// and [`SkillStore::remove`] drops the record with the entry.
+    pub fn category_of(&self, name: &str) -> Option<&str> {
+        self.skill_categories.get(name).map(String::as_str)
+    }
+
     /// Get the number of skills.
     pub fn len(&self) -> usize {
         self.skills.len()
@@ -270,7 +458,10 @@ impl SkillStore {
     ///
     /// - `primary_list = None` -> (all_skills, empty), no filtering.
     /// - `primary_list = Some(list)` -> skills in list become primary (filtered
-    ///   to those present in store); all others become secondary.
+    ///   to those present in store); all others become secondary. Duplicate
+    ///   names in the list collapse to the first occurrence, matching the set
+    ///   semantics the secondary computation already applies — a view listing
+    ///   the same skill twice must not list it twice in `/skills`.
     pub fn split_primary(&self, primary_list: Option<&[String]>) -> (Vec<String>, Vec<String>) {
         match primary_list {
             None => {
@@ -278,9 +469,11 @@ impl SkillStore {
                 (all, Vec::new())
             }
             Some(list) => {
+                let mut seen = std::collections::HashSet::new();
                 let primary: Vec<String> = list
                     .iter()
                     .filter(|name| self.skills.contains_key(name.as_str()))
+                    .filter(|name| seen.insert(name.as_str()))
                     .cloned()
                     .collect();
                 let primary_set: std::collections::HashSet<&str> =
@@ -343,6 +536,69 @@ pub fn has_regular_skill_md(dir: &Path) -> bool {
     }
 }
 
+/// Returns `true` when the last component of `path` starts with `.`, checked
+/// on the raw bytes so a hidden name that is not valid UTF-8 is hidden too.
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."))
+}
+
+fn non_utf8_name_error(path: &Path) -> LoadError {
+    LoadError {
+        path: path.to_path_buf(),
+        error: NON_UTF8_NAME_ERROR.to_string(),
+    }
+}
+
+/// Whether `dest` names a skill directory the categorized loader would
+/// actually load: a real, non-hidden directory exactly one level below a
+/// real, non-hidden category container under `source` — a loadable
+/// `<source>/<category>/<skill>`.
+///
+/// This is the store's own layout determination (`is_category_dir` +
+/// `has_regular_skill_md` + the hidden-name and non-UTF-8 skips), factored
+/// out so other layers can apply the same judgment the loader does.
+/// Destinations the loader would never touch — a hidden category
+/// (`<source>/.archive/<skill>`), a hidden skill leaf, a non-UTF-8
+/// category or leaf name, a destination nested deeper than
+/// `<category>/<skill>`, or a parent that is itself a flat skill
+/// directory — are not loadable, and a rename landing there has removed
+/// the skill from the loadable set.
+pub fn is_loadable_categorized_skill(source: &Path, dest: &Path) -> bool {
+    let Some(category) = dest.parent() else {
+        return false;
+    };
+    // Exactly `<source>/<category>/<skill>`: a same-scope rename (the
+    // destination is another immediate child) is not a category move,
+    // and anything deeper than `<category>/<skill>` is never loaded.
+    if category.parent() != Some(source) {
+        return false;
+    }
+    // The same skip rules the loader applies before reading any layout:
+    // hidden names are never a category or a skill.
+    if is_hidden(category) || is_hidden(dest) {
+        return false;
+    }
+    // The loader only ever loads UTF-8 names: both the category scan and
+    // the nested-leaf scan reject a non-UTF-8 component before any layout
+    // is read (`non_utf8_name_error`). A destination under a non-UTF-8
+    // category — or with a non-UTF-8 leaf of its own — never enters the
+    // loadable set, so a rename landing there has removed the skill.
+    if category.file_name().and_then(|n| n.to_str()).is_none()
+        || dest.file_name().and_then(|n| n.to_str()).is_none()
+    {
+        return false;
+    }
+    // A symlinked category is never descended into by the loader
+    // (no-follow entry type), so it cannot make the destination loadable.
+    if !std::fs::symlink_metadata(category).is_ok_and(|meta| meta.file_type().is_dir()) {
+        return false;
+    }
+    // The parent must be a genuine category container and the
+    // destination a skill directory with a regular-file `SKILL.md`.
+    is_category_dir(category) && has_regular_skill_md(dest)
+}
+
 /// Returns `true` when `dir` looks like a category container:
 /// it has no `SKILL.md` of its own but contains at least one **real
 /// sub-directory** (not a symlink) that does have a `SKILL.md`.
@@ -363,21 +619,85 @@ fn is_category_dir(dir: &Path) -> bool {
     false
 }
 
+/// The store exposes every skill under its directory name; that adopted
+/// name must obey the same grammar the parser enforces for the
+/// frontmatter `name` (kebab-case, max 64 chars). When it does not, the
+/// entry is degraded — not skipped — so `skillfs list`/validate surfaces
+/// the problem instead of presenting a non-conforming name as a cleanly
+/// parsed skill.
+fn degrade_on_invalid_dir_name(entry: &mut SkillEntry, dir_name: &str) {
+    let mut issues = Vec::new();
+    parser::validate_name(dir_name, &mut issues);
+    if issues.is_empty() {
+        return;
+    }
+    let issue = format!("skill directory name `{dir_name}`: {}", issues.join("; "));
+    entry.parse_status = match entry.parse_status.clone() {
+        ParseStatus::Ok => ParseStatus::Degraded(issue),
+        ParseStatus::Degraded(existing) => ParseStatus::Degraded(format!("{existing}; {issue}")),
+        error @ ParseStatus::Error(_) => error,
+    };
+}
+
+/// Adopt a skill directory's name as the entry's authoritative identity
+/// and merge the name-grammar validation state into the entry.
+///
+/// The directory name is the store key regardless of what the frontmatter
+/// `name:` field says, so every producer that adopts a directory name —
+/// the store loaders, the FUSE sync worker re-parsing after a write, and
+/// the rename path re-parsing under a new directory — must go through
+/// this single entry point. Applying the adoption anywhere else would let
+/// a runtime re-parse overwrite a `Degraded` entry from the initial scan
+/// with a clean one for the same non-conforming directory.
+pub fn adopt_directory_name(entry: &mut SkillEntry, dir_name: &str) {
+    entry.metadata.name = dir_name.to_string();
+    degrade_on_invalid_dir_name(entry, dir_name);
+}
+
 /// Load `_category.yaml` from `dir` if present; fall back to a default meta
 /// with `name = cat_name`.
-fn load_category_meta(dir: &Path, cat_name: &str) -> CategoryMeta {
-    let yaml_path = dir.join("_category.yaml");
-    if yaml_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&yaml_path) {
-            if let Ok(meta) = serde_yaml::from_str::<CategoryMeta>(&content) {
-                return meta;
-            }
+///
+/// The file lives in the same source tree as the SKILL.md files, so the read
+/// is bounded by the same `ParseConfig` limit; a file that is not a regular
+/// file or is over the limit is treated as absent.
+fn load_category_meta(dir: &Path, cat_name: &str, max_size: usize) -> CategoryMeta {
+    if let Some(content) = read_category_yaml(&dir.join("_category.yaml"), max_size) {
+        if let Ok(meta) = serde_yaml::from_str::<CategoryMeta>(&content) {
+            return meta;
         }
     }
     CategoryMeta {
         name: cat_name.to_string(),
         description: String::new(),
     }
+}
+
+/// Read `path` as UTF-8 if it is a regular file of at most `max_size` bytes.
+///
+/// The open is non-blocking so a FIFO under this name cannot stall the load
+/// before the handle's own type is checked. A stat length is only a snapshot
+/// (the file can grow after it, and a FIFO reports 0), so the read itself is
+/// capped at `max_size + 1` bytes and an extra byte means over the limit.
+fn read_category_yaml(path: &Path, max_size: usize) -> Option<String> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut raw = Vec::new();
+    file.take(max_size as u64 + 1).read_to_end(&mut raw).ok()?;
+    if raw.len() > max_size {
+        return None;
+    }
+    String::from_utf8(raw).ok()
 }
 
 #[cfg(test)]
@@ -441,6 +761,175 @@ mod tests {
         assert_eq!(store.len(), 1);
         let retrieved = store.get("test-skill").unwrap();
         assert_eq!(retrieved.metadata.description, "Updated description");
+    }
+
+    #[test]
+    fn test_upsert_checked_keeps_the_discovery_winner() {
+        // The write paths (rename store sync, mkdir placeholder, sync
+        // re-parse) insert through upsert_checked so a same-leaf collision
+        // with a different source directory follows the loaders' rule: the
+        // lexicographically smaller source path keeps the key and the
+        // loser is reported, instead of a blind insert silently stealing
+        // the key.
+        let mut store = SkillStore::new();
+        let mut winner = create_test_entry("notes", "discovered skill", vec![]);
+        winner.source_path = std::path::PathBuf::from("/source/apple/notes/SKILL.md");
+        store.upsert(winner);
+
+        let mut renamed = create_test_entry("notes", "renamed skill", vec![]);
+        renamed.source_path = std::path::PathBuf::from("/source/banana/notes/SKILL.md");
+        let report = store.upsert_checked(renamed).expect("collision report");
+
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "discovered skill",
+            "the lexicographically smaller source path keeps the key"
+        );
+        assert!(
+            report.error.contains("duplicate skill name 'notes'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+
+        // A lexicographically smaller newcomer wins instead, still
+        // reporting the collision.
+        let mut smaller = create_test_entry("notes", "smaller path skill", vec![]);
+        smaller.source_path = std::path::PathBuf::from("/source/aardvark/notes/SKILL.md");
+        let report = store.upsert_checked(smaller).expect("collision report");
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "smaller path skill"
+        );
+        assert!(report.error.contains("duplicate skill name 'notes'"));
+
+        // Re-inserting the same source path is an idempotent refresh.
+        let mut refresh = create_test_entry("notes", "refreshed skill", vec![]);
+        refresh.source_path = std::path::PathBuf::from("/source/aardvark/notes/SKILL.md");
+        assert!(
+            store.upsert_checked(refresh).is_none(),
+            "re-inserting the same source path is an idempotent refresh"
+        );
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "refreshed skill"
+        );
+    }
+
+    #[test]
+    fn test_upsert_checked_refresh_preserves_the_scanned_category() {
+        // kongche-jbw follow-up on #7742: a same-source reparse refresh
+        // re-parses the manifest the scan discovered under its category,
+        // so the refresh must keep that provenance — the staging-private
+        // view filters match the scanned category (#8037), and wiping it
+        // surfaced a pre-seeded staging category's skill until the next
+        // remount. Replacing the source starts a new provenance: the new
+        // entry was never scanned under the replaced entry's category.
+        let mut store = SkillStore::new();
+        let mut staged = create_test_entry("web", "staged skill", vec![]);
+        staged.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        store.insert_discovered(staged, "pip-staging");
+
+        // Same-source refresh keeps the scanned category.
+        let mut refresh = create_test_entry("web", "refreshed skill", vec![]);
+        refresh.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        assert!(store.upsert_checked(refresh).is_none());
+        assert_eq!(
+            store.category_of("web"),
+            Some("pip-staging"),
+            "a same-source refresh must keep the scanned category record"
+        );
+
+        // A source replacement does not inherit the replaced entry's
+        // category (the #8037 rule, mirrored from `upsert`).
+        let mut replaced = create_test_entry("web", "replacement skill", vec![]);
+        replaced.source_path = std::path::PathBuf::from("/source/aardvark/web/SKILL.md");
+        let report = store.upsert_checked(replaced).expect("collision report");
+        assert!(
+            report.error.contains("duplicate skill name 'web'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+        assert!(
+            store.category_of("web").map(str::is_empty).unwrap_or(true),
+            "a source replacement must not inherit the previous owner's category, got {:?}",
+            store.category_of("web")
+        );
+    }
+
+    #[test]
+    fn test_upsert_checked_replacing_staging_drops_a_staging_incumbent() {
+        // The ordinary inbox replacement control (#8037): a staging
+        // half-install the scan classified as a category must not keep
+        // the leaf name against a real write-path entry — the completed
+        // ordinary skill replaces it, uncategorized, and no collision is
+        // reported because the incumbent was never a legitimate
+        // contender. A same-source refresh through the same entry point
+        // still keeps the scanned category.
+        let mut store = SkillStore::new();
+        let mut staged = create_test_entry("web", "staged skill", vec![]);
+        staged.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        store.insert_discovered(staged, "pip-staging");
+        let is_staging_root = |name: &str| name == "pip-staging";
+
+        // Same-source refresh: the staging provenance survives.
+        let mut refresh = create_test_entry("web", "refreshed staged skill", vec![]);
+        refresh.source_path = std::path::PathBuf::from("/source/pip-staging/web/SKILL.md");
+        assert!(
+            store
+                .upsert_checked_replacing_staging(refresh, &is_staging_root)
+                .is_none()
+        );
+        assert_eq!(
+            store.category_of("web"),
+            Some("pip-staging"),
+            "a same-source refresh must keep the scanned category record"
+        );
+
+        // The ordinary replacement from a different source takes the key.
+        let mut installed = create_test_entry("web", "installed skill", vec![]);
+        installed.source_path = std::path::PathBuf::from("/source/web/SKILL.md");
+        assert!(
+            store
+                .upsert_checked_replacing_staging(installed, &is_staging_root)
+                .is_none(),
+            "replacing a staging incumbent is not a collision"
+        );
+        assert_eq!(
+            store.get("web").unwrap().metadata.description,
+            "installed skill"
+        );
+        assert!(
+            store.category_of("web").map(str::is_empty).unwrap_or(true),
+            "the replacement must not inherit the staging category, got {:?}",
+            store.category_of("web")
+        );
+    }
+
+    #[test]
+    fn test_upsert_checked_replacing_staging_keeps_a_real_incumbent() {
+        // Two real skills sharing a leaf keep the loaders' rule under the
+        // replacing entry point too: the lexicographically smaller source
+        // path wins and the loser is reported.
+        let mut store = SkillStore::new();
+        let mut winner = create_test_entry("notes", "categorized skill", vec![]);
+        winner.source_path = std::path::PathBuf::from("/source/apple/notes/SKILL.md");
+        store.upsert(winner);
+
+        let mut renamed = create_test_entry("notes", "renamed skill", vec![]);
+        renamed.source_path = std::path::PathBuf::from("/source/banana/notes/SKILL.md");
+        let is_staging_root = |name: &str| name == "pip-staging";
+        let report = store
+            .upsert_checked_replacing_staging(renamed, &is_staging_root)
+            .expect("collision report");
+        assert!(
+            report.error.contains("duplicate skill name 'notes'"),
+            "report must name the duplicate, got: {}",
+            report.error
+        );
+        assert_eq!(
+            store.get("notes").unwrap().metadata.description,
+            "categorized skill"
+        );
     }
 
     #[test]
@@ -510,6 +999,84 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn oversized_category_meta_is_treated_as_absent() {
+        // _category.yaml lives in the same agent-writable source tree as the
+        // SKILL.md files, so the read is bound by the same ParseConfig limit.
+        // A file over the limit must fall back to the default meta instead of
+        // being read whole into memory.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // A category directory carries `_category.yaml` plus one skill
+        // subdir each holding its SKILL.md.
+        let cat_dir = temp_dir.path().join("team");
+        let skill_dir = cat_dir.join("team-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let oversized = format!("name: team\ndescription: {}\n", "x".repeat(2_048));
+        std::fs::write(cat_dir.join("_category.yaml"), oversized).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: team-skill\ndescription: d\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_024,
+            max_skills: 1000,
+        };
+
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+
+        assert!(errors.is_empty());
+        let meta = &store.categories["team"];
+        // Over the limit: the file is treated as absent and the default meta
+        // (name only, empty description) applies.
+        assert_eq!(meta.name, "team");
+        assert_eq!(meta.description, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_category_meta_is_treated_as_absent() {
+        // A FIFO reports length 0, so a size check alone passes it, and a
+        // blocking open/read waits for a writer that may stream without end.
+        // The load must refuse it as a non-regular file and finish.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cat_dir = temp_dir.path().join("team");
+        let skill_dir = cat_dir.join("team-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let fifo = std::ffi::CString::new(
+            cat_dir
+                .join("_category.yaml")
+                .into_os_string()
+                .into_encoded_bytes(),
+        )
+        .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: team-skill\ndescription: d\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let root = temp_dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut store = SkillStore::new();
+            let errors = store.load_from_directory(&root, &ParseConfig::default());
+            tx.send((errors.is_empty(), store.categories["team"].clone()))
+                .ok();
+        });
+
+        let (no_errors, meta) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("store load stalled on a FIFO _category.yaml");
+        assert!(no_errors);
+        assert_eq!(meta.name, "team");
+        assert_eq!(meta.description, "");
+    }
+
+    #[test]
     fn test_load_from_directory_empty() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let mut store = SkillStore::new();
@@ -561,6 +1128,168 @@ mod tests {
 
         assert!(errors.is_empty());
         assert!(store.is_empty());
+    }
+
+    /// Build a valid skill directory under `parent` whose directory name is
+    /// not valid UTF-8, e.g. a Latin-1 name coming out of an archive.
+    #[cfg(unix)]
+    fn create_non_utf8_skill_dir(parent: &Path) -> std::path::PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = parent.join(std::ffi::OsString::from_vec(b"caf\xe9".to_vec()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: caf\n---\nbody\n").unwrap();
+        dir
+    }
+
+    /// A directory whose name cannot be represented as UTF-8 must not be
+    /// surfaced as a skill: the canonical resolver rejects such a path
+    /// component (`invalid_canonical_path`), so the store must not invent a
+    /// skill named `unknown` for it.
+    #[test]
+    #[cfg(unix)]
+    fn test_load_from_directory_skips_non_utf8_skill_dir() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        create_non_utf8_skill_dir(temp_dir.path());
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+
+        assert!(
+            store.is_empty(),
+            "non-UTF-8 directory names must not surface as skills, got {:?}",
+            store.list()
+        );
+        assert!(
+            errors.iter().any(|e| e.error.contains("UTF-8")),
+            "the skipped directory should be reported, got {errors:?}"
+        );
+    }
+
+    /// Two non-UTF-8 skill directories must not collapse into one skill entry
+    /// sharing the fallback name.
+    #[test]
+    #[cfg(unix)]
+    fn test_load_from_directory_does_not_merge_non_utf8_skill_dirs() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        for name in [b"caf\xe9".to_vec(), b"na\xefve".to_vec()] {
+            let dir = temp_dir.path().join(std::ffi::OsString::from_vec(name));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: x\n---\nbody\n").unwrap();
+        }
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+
+        store.load_from_directory(temp_dir.path(), &config);
+
+        assert_eq!(
+            store.len(),
+            0,
+            "neither of the two non-UTF-8 directories is a loadable skill"
+        );
+    }
+
+    /// A non-UTF-8 child directory inside a category layout is skipped the
+    /// same way, and a non-UTF-8 category name must not attribute its skills
+    /// to a fallback category.
+    #[test]
+    #[cfg(unix)]
+    fn test_load_skills_from_category_skips_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let category = temp_dir.path().join("tools");
+        std::fs::create_dir(&category).unwrap();
+
+        // A well-formed skill and a non-UTF-8 sibling in the same category.
+        let good = category.join("alpha");
+        std::fs::create_dir(&good).unwrap();
+        std::fs::write(good.join("SKILL.md"), "---\nname: alpha\n---\nbody\n").unwrap();
+        create_non_utf8_skill_dir(&category);
+
+        // A second category whose own name is not UTF-8.
+        let weird_category = temp_dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"cat\xe9".to_vec()));
+        std::fs::create_dir(&weird_category).unwrap();
+        let nested = weird_category.join("beta");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), "---\nname: beta\n---\nbody\n").unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+
+        assert_eq!(
+            store.list(),
+            vec!["alpha"],
+            "only the UTF-8 named skill may load"
+        );
+        assert!(
+            errors.iter().any(|e| e.error.contains("UTF-8")),
+            "both skipped directories should be reported, got {errors:?}"
+        );
+    }
+
+    /// Only a Skill or category directory is reported for its name: a
+    /// non-UTF-8 directory without `SKILL.md`, or a hidden one, stays ignored
+    /// like any other unrelated or hidden directory, at the top level and
+    /// inside a category.
+    #[test]
+    #[cfg(unix)]
+    fn test_load_from_directory_ignores_non_utf8_non_skill_dirs() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let raw = |bytes: &[u8]| std::ffi::OsString::from_vec(bytes.to_vec());
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        let good = root.join("good");
+        std::fs::create_dir(&good).unwrap();
+        std::fs::write(good.join("SKILL.md"), "---\nname: good\n---\nbody\n").unwrap();
+        std::fs::create_dir(root.join(raw(b"unrelated-\xff"))).unwrap();
+        let hidden = root.join(raw(b".hidden-\xff"));
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("SKILL.md"), "---\nname: h\n---\nbody\n").unwrap();
+
+        let category = root.join("tools");
+        let alpha = category.join("alpha");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::write(alpha.join("SKILL.md"), "---\nname: alpha\n---\nbody\n").unwrap();
+        std::fs::create_dir(category.join(raw(b"empty-\xff"))).unwrap();
+        let hidden_child = category.join(raw(b".\xff"));
+        std::fs::create_dir(&hidden_child).unwrap();
+        std::fs::write(hidden_child.join("SKILL.md"), "---\nname: h\n---\nbody\n").unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+
+        let errors = store.load_from_directory(root, &config);
+
+        assert!(errors.is_empty(), "nothing to report, got {errors:?}");
+        assert_eq!(store.list(), vec!["alpha", "good"]);
     }
 
     #[test]
@@ -776,6 +1505,260 @@ mod tests {
         assert!(
             store.get("linknested").is_none(),
             "symlinked nested skill must not load"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Same-leaf-name collision tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn store_load_reports_cross_category_leaf_name_collision() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        for cat in ["alpha", "beta"] {
+            let dir = temp_dir.path().join(cat).join("notes");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: notes\ndescription: {cat}\n---\n"),
+            )
+            .unwrap();
+        }
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+
+        // Exactly one entry survives the shared key, and the collision is
+        // reported instead of silently dropping the loser.
+        assert_eq!(store.len(), 1);
+        assert_eq!(errors.len(), 1, "collision must surface, got {errors:?}");
+        // The deterministic winner is the lexicographically smaller path,
+        // independent of read_dir order.
+        let winner = temp_dir.path().join("alpha").join("notes").join("SKILL.md");
+        let loser = temp_dir.path().join("beta").join("notes").join("SKILL.md");
+        assert_eq!(store.get("notes").unwrap().source_path, winner);
+        assert_eq!(errors[0].path, loser);
+        assert!(errors[0].error.contains("notes"), "{}", errors[0].error);
+
+        // A rescan onto the same store keeps the same deterministic winner
+        // (never flip-flopping with read_dir order): re-discovering the
+        // winner's path is a silent refresh, and the still-existing loser
+        // is reported again on every scan while the collision persists.
+        let errors_again = store.load_from_directory(temp_dir.path(), &config);
+        assert_eq!(errors_again.len(), 1, "reload: {errors_again:?}");
+        assert_eq!(errors_again[0].path, loser);
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get("notes").unwrap().source_path, winner);
+    }
+
+    #[test]
+    fn store_load_reports_flat_and_categorized_leaf_name_collision() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let flat = temp_dir.path().join("demo");
+        std::fs::create_dir(&flat).unwrap();
+        std::fs::write(
+            flat.join("SKILL.md"),
+            "---\nname: demo\ndescription: flat\n---\n",
+        )
+        .unwrap();
+        let nested = temp_dir.path().join("catalog").join("demo");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: demo\ndescription: categorized\n---\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+
+        assert_eq!(store.len(), 1);
+        assert_eq!(errors.len(), 1, "collision must surface, got {errors:?}");
+        // `catalog/demo/SKILL.md` sorts before `demo/SKILL.md`.
+        assert_eq!(
+            store.get("demo").unwrap().source_path,
+            nested.join("SKILL.md")
+        );
+        assert_eq!(errors[0].path, flat.join("SKILL.md"));
+    }
+
+    #[test]
+    fn store_load_distinct_leaf_names_across_categories_both_load() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        for (cat, skill) in [("alpha", "notes"), ("beta", "journal")] {
+            let dir = temp_dir.path().join(cat).join(skill);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {skill}\ndescription: {cat}\n---\n"),
+            )
+            .unwrap();
+        }
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+
+        assert!(errors.is_empty(), "unexpected load errors: {errors:?}");
+        assert_eq!(store.len(), 2);
+        assert!(store.get("notes").is_some());
+        assert!(store.get("journal").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // split_primary duplicate-list tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn split_primary_dedups_primary_list_preserving_order() {
+        let mut store = SkillStore::new();
+        for name in ["github", "notion", "other"] {
+            store.upsert(create_test_entry(name, "skill", vec![]));
+        }
+
+        let list = vec![
+            "github".to_string(),
+            "github".to_string(),
+            "other".to_string(),
+        ];
+        let (primary, secondary) = store.split_primary(Some(&list));
+
+        assert_eq!(primary, vec!["github".to_string(), "other".to_string()]);
+        assert_eq!(secondary, vec!["notion".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // max_skills limit classification tests
+    // -----------------------------------------------------------------------
+
+    fn limit_config(max_skills: usize) -> ParseConfig {
+        ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills,
+        }
+    }
+
+    #[test]
+    fn store_max_skills_skips_non_skill_dirs_silently() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let skill = temp_dir.path().join("alpha");
+        std::fs::create_dir(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: alpha\ndescription: a\n---\n",
+        )
+        .unwrap();
+        let plain = temp_dir.path().join("not-a-skill");
+        std::fs::create_dir(&plain).unwrap();
+
+        let mut store = SkillStore::new();
+        let errors = store.load_from_directory(temp_dir.path(), &limit_config(0));
+
+        // The real skill still reports the limit as before...
+        assert_eq!(errors.len(), 1, "only the skill may error, got {errors:?}");
+        assert_eq!(errors[0].path, skill);
+        assert!(
+            errors[0].error.contains("max skills"),
+            "{}",
+            errors[0].error
+        );
+        // ...but the non-skill directory is skipped silently, exactly as
+        // it is below the limit.
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn store_max_skills_charges_category_skills_once() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let nested = temp_dir.path().join("cat").join("inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: inner\ndescription: i\n---\n",
+        )
+        .unwrap();
+        // A non-skill sibling inside the category must stay silent too.
+        std::fs::create_dir_all(temp_dir.path().join("cat").join("docs")).unwrap();
+
+        let mut store = SkillStore::new();
+        let errors = store.load_from_directory(temp_dir.path(), &limit_config(0));
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "the category must be charged once per skill, got {errors:?}"
+        );
+        assert_eq!(errors[0].path, nested);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn store_max_skills_limit_still_enforced_for_real_skills() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        for name in ["first", "second"] {
+            let dir = temp_dir.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\n"),
+            )
+            .unwrap();
+        }
+
+        let mut store = SkillStore::new();
+        let errors = store.load_from_directory(temp_dir.path(), &limit_config(1));
+
+        assert_eq!(store.len(), 1, "the first skill still loads");
+        assert_eq!(errors.len(), 1, "the second skill still errors");
+        assert!(errors[0].error.contains("max skills"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn loadable_categorized_skill_rejects_a_non_utf8_category() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let source = temp_dir.path();
+        let category = source.join(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
+        let dest = category.join("alpha");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "---\nname: alpha\n---\n").unwrap();
+
+        assert!(
+            !is_loadable_categorized_skill(source, &dest),
+            "the loader rejects a non-UTF-8 category name before any layout is read, so the destination is not loadable"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn loadable_categorized_skill_rejects_a_non_utf8_skill_leaf() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let source = temp_dir.path();
+        let category = source.join("category");
+        let dest = category.join(std::ffi::OsString::from_vec(vec![0xff]));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "---\nname: alpha\n---\n").unwrap();
+
+        assert!(
+            !is_loadable_categorized_skill(source, &dest),
+            "the loader rejects a non-UTF-8 nested skill leaf name, so the destination is not loadable"
         );
     }
 }

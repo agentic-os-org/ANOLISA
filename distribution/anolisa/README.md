@@ -42,6 +42,10 @@ anolisa update all
 `status` and `doctor` allow content edits to raw-installed `type = "config"`
 files while continuing to check their presence, permissions, and path safety.
 
+`logs --since <RFC3339>` applies an inclusive timestamp filter, accounting for
+offsets and fractional seconds. Records with unparseable timestamps are excluded
+only when `--since` is set.
+
 ### Tier 2 — Management
 
 | Command | Description |
@@ -55,14 +59,26 @@ files while continuing to check their presence, permissions, and path safety.
 | `env` | Show environment detection results |
 | `bug` | Generate a bug report (`--component cosh-ng` also summarizes the cosh-shell diagnostic bundle; `COSH_SHELL_BIN` overrides the binary) |
 
-Running `anolisa adapter enable <component> openclaw` accepts the plugin's
-declared capabilities when the host supports capability consent. This does
-not authorize an unsafe-install bypass.
+By default, `anolisa adapter enable <component> openclaw` accepts the plugin's
+declared capabilities when each host command supports capability consent.
+Add `--no-accept-capabilities` to withhold automatic consent during both
+installation and activation. This does not revoke existing host authorization
+or authorize an unsafe-install bypass.
 
 Enable the Tokenless local plugin with `anolisa adapter enable tokenless opencode`.
 ANOLISA manages its plugin link; restart OpenCode after enabling or disabling it.
-See the [adapter reference](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md#adapter)
+See the [adapter reference](../../docs/user-guide/en/getting-started/anolisa-cli.md#adapter)
 for custom configuration directories and existing-installation ownership.
+
+Enable Tokenless in QwenWorkCN native Bash and macOS workspace Shell sessions with
+`anolisa adapter enable tokenless qwenwork`. Restart the desktop application and
+check activation there; CLI status verifies files but reports activation as
+`unknown`. Existing script installations must be uninstalled before CLI enable.
+
+Cosh adapters select and enable their delivered user source through cosh's native
+registry. Use a cosh-ng build supporting conditional adapter source cleanup;
+restart existing cosh sessions after enable or disable. Status verifies catalog
+configuration and reports resident-session loading as `unknown`.
 
 ## Install Modes
 
@@ -89,11 +105,16 @@ installation even when the same component is already installed system-wide.
 | `-q, --quiet` | Suppress non-error output |
 | `--no-color` | Disable colored output |
 
-See the [full CLI guide](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md)
+See the [full CLI guide](../../docs/user-guide/en/getting-started/anolisa-cli.md)
 for command forms, scope behavior, and recovery workflows.
 
 RPM installs support Yum 3 and DNF 4. Use `sudo` with RPM `--dry-run`
 to check dependencies and conflicts before installing.
+
+For raw installs, `anolisa install <component> --backend raw --no-deps`
+skips runtime dependency checks and installation. It also works with `--all`;
+ensure the required dependencies are available before use. Successful installs
+print a reminder to stderr unless `--quiet` is set. RPM rejects this option.
 
 ## Architecture
 
@@ -112,6 +133,18 @@ The lifecycle planner separates ANOLISA-owned files from native-package
 authority and records crash-recovery intent before side effects. Component
 metadata is declared through `component.toml`.
 
+ANOLISA ships the RPM integration contracts in `share/anolisa/components/`.
+Component RPMs supply their runtime, plugins and skills independently; they do
+not need to install ANOLISA metadata. RPM install/adopt saves the distribution
+contract as a state snapshot for adapter management, while raw artifacts keep
+their own release-specific contract. `bash scripts/package-manifests.sh /absolute/manifests.tar.gz`
+assembles the data bundle consumed by `scripts/install-anolisa.sh`.
+Prebuilt archives and native npm packages include the same registry beside
+`bin/anolisa`; keep their `bin/` and `share/` trees together. A manually copied
+single binary needs the installer data bundle for RPM adapter management.
+The installer refuses to overwrite registry contracts still owned by older
+component RPMs; upgrade those packages first.
+
 The raw backend re-fetches the distribution index on every resolve and fails
 when the repository is unreachable. Legacy `cache_ttl_secs` and
 `offline_fallback` keys in `repo.toml` are still accepted for compatibility,
@@ -122,8 +155,8 @@ but the current raw backend ignores their values.
 - Linux (x86_64 / aarch64) or macOS 11+ (arm64 / x86_64, limited)
 
 Intel macOS prebuilt and npm support requires a release containing the
-`darwin-x64` platform package. The website installer remains ARM-only until
-that release is published and the installer is enabled separately.
+`darwin-x64` platform package. The website installer accepts both ARM and
+Intel Macs running macOS 11 or later.
 - Rust ≥ 1.93 (for source build)
 
 ## License

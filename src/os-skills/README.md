@@ -81,7 +81,20 @@ Markdown content with usage instructions, prerequisites, and examples.
 
 ## Installation
 
-### Extension (Recommended)
+### ANOLISA
+
+```bash
+anolisa install os-skills --backend raw
+```
+
+The GitHub Release and Preview workflows build Linux x86_64 and ARM64 raw
+archives from the same source commit. Each target provides a `.tar.gz` archive,
+its SHA256 checksum, a CycloneDX SBOM, and the SBOM checksum. The package
+installs the tracked skill directories under `{datadir}/skills`; no executable
+is compiled. CI checks the tag and source version for official releases.
+The local release pipeline still uses its existing configuration.
+
+### Extension
 
 Install all skills as a single extension:
 

@@ -96,6 +96,68 @@ fsync, rename, and best-effort parent fsync, so later legacy checkpoint,
 rollback, cleanup, delete, or orderly shutdown does not rewrite acknowledged
 evidence into an unsynchronized file.
 
+## Guarded rollback path representation
+
+Guarded rollback preview and the diff recomputed immediately before rollback
+require lossless UTF-8 paths. Btrfs dump paths are unescaped before UTF-8
+validation. Invalid path bytes return `UnsupportedWorkspacePath`, with the dump
+operation, path field (for example, `rename destination`), and original escaped
+token in the daemon diagnostic. Raw non-UTF-8 bytes in ignored metadata fields
+from btrfs-progs 6.1 do not fail path parsing.
+
+This rejection occurs before backend rollback. If an operation was already
+reserved, the daemon clears that reservation durably before returning the
+rejection; failure to clear it retains the existing uncertain-outcome behavior.
+Cosh maps the rejection to `CheckpointRestoreFailed`, `recoverable = false`,
+and `details.guarded_rollback_rejection = "unsupported_workspace_path"`. It keeps
+daemon diagnostic text private; use the ws-ckpt diff diagnostic to locate the
+affected path. An unchanged path cannot be fixed by retrying. Ordinary rollback
+without preview does not depend on this diff, but it does not provide the guarded
+diff-digest check.
+
+`UnsupportedWorkspacePath` is appended at bincode discriminant 16 in both
+ws-ckpt and cosh; existing rejection discriminants 0–15 remain unchanged. Deploy
+both components together to expose this classification. Older cosh clients
+cannot decode the new rejection and fail closed with a non-recoverable protocol
+error instead.
+
+Legacy `Diff` and `RollbackPreview` requests preserve the same typed path
+failure through the dispatcher as `ErrorCode::UnsupportedWorkspacePath`, appended
+at discriminant 13 in both ws-ckpt and cosh's mirrored `WsCkptErrorCode`. Other
+unclassified handler errors still use `InternalError`. The CLI prints the
+dedicated code with the operation, field, and escaped path token. Legacy cosh
+calls map it to `CheckpointRestoreFailed` with `recoverable = false`.
+
+OpenClaw and Hermes recognize `cannot be represented as UTF-8` before generic
+error substrings, preserving the diagnostic and stating that the failure is not
+retryable until the filename is fixed. This also recognizes diagnostics from an
+older daemon that labels the error `InternalError`. Hermes diff/rollback tool
+handlers apply the mapping before returning errors to the model. Deploy the
+daemon, CLI, and cosh together for the appended wire code; older CLI binaries
+cannot decode it. Update both plugins to receive the explicit retry guidance.
+
+## Backend space admission
+
+Btrfs backends refuse a new subvolume when backend data or metadata usage is
+at/above the 95% deletion guard, or when usage cannot be read. This covers the
+checkpoint snapshot, the rollback snapshot, and the diff temp snapshot used by
+rollback preview and revalidation. The refusal happens before any snapshot is
+created or the workspace is moved, so guarded checkpoint and rollback return
+`InsufficientSpace` instead of an uncertain outcome; a reserved rollback is
+cleared durably first. Retry the same request after cleanup reclaims space.
+Legacy requests return the existing `ErrorCode::DiskSpaceInsufficient` for the
+same refusal instead of `InternalError`.
+
+Cosh maps `InsufficientSpace` to `CheckpointCreateFailed` or
+`CheckpointRestoreFailed` with `recoverable = true` and
+`details.guarded_rejection` / `details.guarded_rollback_rejection =
+"insufficient_space"`, using its own fixed message. The daemon diagnostic stays
+private and is also logged by the daemon.
+
+`InsufficientSpace` is appended at bincode discriminant 12 for checkpoint
+rejections and 17 for rollback rejections in both ws-ckpt and cosh. Older cosh
+clients cannot decode it and fail closed with a non-recoverable protocol error.
+
 ## Compatibility and validation
 
 New request and response variants are appended to the bincode enums. All legacy

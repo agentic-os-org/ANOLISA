@@ -241,3 +241,108 @@ describe("CrontabManager.listInstalled", () => {
     expect(await CrontabManager.listInstalled("/ws")).toEqual([]);
   });
 });
+
+describe("cron line-break guard", () => {
+  it("sync fails closed on a newline workspace without touching the crontab", async () => {
+    const ok = await CrontabManager.sync(
+      "/tmp/legit\n* * * * * touch /tmp/pwned",
+      ["0 * * * *"],
+    );
+    expect(ok).toBe(false);
+    expect(mockRunCrontab).not.toHaveBeenCalled();
+  });
+
+  it("sync fails closed on a newline schedule without touching the crontab", async () => {
+    const ok = await CrontabManager.sync("/ws", ["*\n* * * * *"]);
+    expect(ok).toBe(false);
+    expect(mockRunCrontab).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// withLock ownership (appended)
+// ---------------------------------------------------------------------------
+
+const mockRmdirSync = rmdirSync as ReturnType<typeof vi.fn>;
+
+describe("withLock ownership", () => {
+  it("the owner removes the lock after the operation", async () => {
+    mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+
+    expect(await CrontabManager.sync("/ws", [])).toBe(true);
+    expect(mockRmdirSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("a timed-out caller must not evict the current holder's lock", async () => {
+    vi.useFakeTimers();
+    try {
+      // The lock directory exists and its owner never releases it.
+      mockMkdirSync.mockImplementation(() => {
+        const e = new Error("EEXIST") as NodeJS.ErrnoException;
+        e.code = "EEXIST";
+        throw e;
+      });
+      mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+
+      const pending = CrontabManager.sync("/ws", []);
+      await vi.advanceTimersByTimeAsync(5100);
+      // A contender must never read or rewrite the crontab without ownership.
+      expect(await pending).toBe(false);
+      expect(mockRunCrontab).not.toHaveBeenCalled();
+      // But the caller never owned the lock, so it must not remove it —
+      // doing so would admit a third writer while the holder still runs.
+      expect(mockRmdirSync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a caller blocked by a non-contention error also leaves the lock alone", async () => {
+    vi.useFakeTimers();
+    try {
+      mockMkdirSync.mockImplementation(() => {
+        const e = new Error("EACCES") as NodeJS.ErrnoException;
+        e.code = "EACCES";
+        throw e;
+      });
+      mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+
+      const pending = CrontabManager.sync("/ws", []);
+      await vi.advanceTimersByTimeAsync(5100);
+      expect(await pending).toBe(false);
+      expect(mockRunCrontab).not.toHaveBeenCalled();
+      expect(mockMkdirSync).toHaveBeenCalledTimes(1);
+      expect(mockRmdirSync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("withLock recovery", () => {
+  it("waits for the owner to release before touching the crontab", async () => {
+    vi.useFakeTimers();
+    try {
+      mockMkdirSync.mockImplementationOnce(() => {
+        throw Object.assign(new Error("busy"), { code: "EEXIST" });
+      });
+      mockRunCrontab.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+      const pending = CrontabManager.sync("/ws", []);
+      expect(mockRunCrontab).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await pending).toBe(true);
+      expect(mockRunCrontab).toHaveBeenCalledTimes(2);
+      expect(mockRmdirSync).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases its own lock when the operation throws", async () => {
+    mockRunCrontab.mockRejectedValueOnce(new Error("spawn failed"));
+    await expect(CrontabManager.sync("/ws", [])).rejects.toThrow(
+      "spawn failed",
+    );
+    expect(mockRmdirSync).toHaveBeenCalledTimes(1);
+  });
+});

@@ -18,6 +18,29 @@ pub struct AuditStore {
 }
 
 impl AuditStore {
+    /// Delete one expired row while a paced maintenance pass owns the writer.
+    pub(in crate::storage) fn purge_expired_step(&self, cutoff_ns: u64) -> anyhow::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (SELECT id FROM {} WHERE timestamp_ns < ?1 ORDER BY timestamp_ns LIMIT 1)",
+            self.table_name, self.table_name
+        );
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .execute(params![ns_to_sqlite(cutoff_ns, "purge cutoff")?])?)
+    }
+
+    /// Delegate commit-time checkpoints to the registered maintenance worker.
+    pub(in crate::storage) fn use_managed_checkpoints(&self) -> anyhow::Result<()> {
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&self.conn)?;
+        Ok(())
+    }
+
+    /// Copy WAL frames without waiting for the capture writer.
+    pub(in crate::storage) fn checkpoint_passive(&self) -> anyhow::Result<CheckpointOutcome> {
+        Ok(agentsight_sqlite_lifecycle::checkpoint_passive(&self.conn)?)
+    }
+
     /// Create a new AuditStore with default table name, automatically creating the table and indexes
     pub fn new(path: &Path) -> Result<Self> {
         Self::with_table(path, "audit_events")
@@ -82,24 +105,25 @@ impl AuditStore {
         let extra_json =
             serde_json::to_string(&record.extra).context("Failed to serialize extra")?;
 
+        // Refuse rather than wrap nanosecond values the table cannot hold.
+        let timestamp_ns = ns_to_sqlite(record.timestamp_ns, "timestamp")?;
+        let duration_ns = ns_to_sqlite(record.duration_ns, "duration")?;
+
         let sql = format!(
             "INSERT INTO {} (event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             self.table_name
         );
-        self.conn.execute(
-            &sql,
-            params![
-                event_type_str,
-                record.timestamp_ns as i64,
-                record.pid,
-                record.ppid.map(|v| v as i64),
-                record.comm,
-                record.duration_ns as i64,
-                extra_json,
-                record.session_id,
-            ],
-        )?;
+        self.conn.prepare_cached(&sql)?.execute(params![
+            event_type_str,
+            timestamp_ns,
+            record.pid,
+            record.ppid.map(|v| v as i64),
+            record.comm,
+            duration_ns,
+            extra_json,
+            record.session_id,
+        ])?;
 
         Ok(self.conn.last_insert_rowid())
     }
@@ -110,6 +134,7 @@ impl AuditStore {
         since_ns: u64,
         event_type: Option<AuditEventType>,
     ) -> Result<Vec<AuditRecord>> {
+        let since_ns = ns_to_sqlite(since_ns, "since bound")?;
         let (sql, type_str);
         let query_params: Vec<Box<dyn rusqlite::types::ToSql>>;
 
@@ -121,7 +146,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(since_ns as i64), Box::new(type_str.clone())];
+            query_params = vec![Box::new(since_ns), Box::new(type_str.clone())];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
@@ -129,7 +154,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(since_ns as i64)];
+            query_params = vec![Box::new(since_ns)];
         }
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -150,12 +175,18 @@ impl AuditStore {
         Ok(records)
     }
 
-    /// Query audit events by PID
+    /// Query audit events by PID within a time window.
+    ///
+    /// `since_ns` is explicit so the CLI's `--pid` path honours the same
+    /// `--last` window as [`Self::query_since`]; without a bound the pid query
+    /// returned every row ever recorded for the pid regardless of `--last`.
     pub fn query_by_pid(
         &self,
         pid: u32,
+        since_ns: u64,
         event_type: Option<AuditEventType>,
     ) -> Result<Vec<AuditRecord>> {
+        let since_ns = ns_to_sqlite(since_ns, "since bound")?;
         let (sql, type_str);
         let query_params: Vec<Box<dyn rusqlite::types::ToSql>>;
 
@@ -163,19 +194,23 @@ impl AuditStore {
             type_str = et.to_string();
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
-                 FROM {} WHERE pid = ?1 AND event_type = ?2
+                 FROM {} WHERE pid = ?1 AND timestamp_ns >= ?2 AND event_type = ?3
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(pid), Box::new(type_str.clone())];
+            query_params = vec![
+                Box::new(pid),
+                Box::new(since_ns),
+                Box::new(type_str.clone()),
+            ];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
-                 FROM {} WHERE pid = ?1
+                 FROM {} WHERE pid = ?1 AND timestamp_ns >= ?2
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(pid)];
+            query_params = vec![Box::new(pid), Box::new(since_ns)];
         }
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -201,7 +236,8 @@ impl AuditStore {
     /// Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64> {
         let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
-        let deleted = self.conn.execute(&sql, params![cutoff_ns as i64])?;
+        let cutoff_ns = ns_to_sqlite(cutoff_ns, "purge cutoff")?;
+        let deleted = self.conn.execute(&sql, params![cutoff_ns])?;
         Ok(deleted as u64)
     }
 
@@ -271,13 +307,14 @@ impl AuditStore {
 
     /// Get summary statistics since a given timestamp
     pub fn summary(&self, since_ns: u64) -> Result<AuditSummary> {
+        let since_ns = ns_to_sqlite(since_ns, "since bound")?;
         // Count by event type
         let total_llm_calls: u64 = self.conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
                 self.table_name
             ),
-            params![since_ns as i64],
+            params![since_ns],
             |row| row.get(0),
         )?;
 
@@ -286,7 +323,7 @@ impl AuditStore {
                 "SELECT COUNT(*) FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'process_action'",
                 self.table_name
             ),
-            params![since_ns as i64],
+            params![since_ns],
             |row| row.get(0),
         )?;
 
@@ -301,17 +338,38 @@ impl AuditStore {
                 "SELECT extra FROM {} WHERE timestamp_ns >= ?1 AND event_type = 'llm_call'",
                 self.table_name
             ))?;
-            let rows = stmt.query_map(params![since_ns as i64], |row| {
+            let rows = stmt.query_map(params![since_ns], |row| {
                 let extra_str: String = row.get(0)?;
                 Ok(extra_str)
             })?;
 
             for row in rows.flatten() {
                 if let Ok(extra) = serde_json::from_str::<serde_json::Value>(&row) {
-                    total_input_tokens += extra
+                    // Billed input mirrors `TokenRecord::billed_input_tokens`
+                    // and the `billed_input_col!` SQL rule used by the
+                    // token/metrics views: Anthropic reports cache creation
+                    // and cache read outside `input_tokens`, so they add up;
+                    // other providers already count cached tokens inside the
+                    // reported input, so adding them would inflate the total.
+                    let reported_input = extra
                         .get("input_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
+                    let provider = extra.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                    let billed_input = if provider.eq_ignore_ascii_case("anthropic") {
+                        reported_input
+                            + extra
+                                .get("cache_creation_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                            + extra
+                                .get("cache_read_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                    } else {
+                        reported_input
+                    };
+                    total_input_tokens += billed_input;
                     total_output_tokens += extra
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
@@ -334,7 +392,7 @@ impl AuditStore {
                     self.table_name
                 ),
             )?;
-            let rows = stmt.query_map(params![since_ns as i64], |row| {
+            let rows = stmt.query_map(params![since_ns], |row| {
                 let comm: String = row.get(0)?;
                 let extra_str: String = row.get(1)?;
                 Ok((comm, extra_str))
@@ -348,11 +406,15 @@ impl AuditStore {
             }
         }
 
+        // Both counts come from HashMaps, whose iteration order is randomized
+        // per process: a single-key sort made the reported order — and, for
+        // `top_commands`, which entries survive the top-10 cut — depend on the
+        // map order. Ties are broken by name.
         let mut providers: Vec<(String, u64)> = provider_counts.into_iter().collect();
-        providers.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        providers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         let mut top_commands: Vec<(String, u64)> = cmd_counts.into_iter().collect();
-        top_commands.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        top_commands.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         top_commands.truncate(10);
 
         Ok(AuditSummary {
@@ -364,6 +426,21 @@ impl AuditStore {
             top_commands,
         })
     }
+}
+
+/// Nanoseconds into the signed representation the audit tables use, refusing
+/// what SQLite cannot hold.
+///
+/// Representability is already enforced one layer up — `system_audit`'s
+/// `reject_unrepresentable_window` refuses it on the API and the sibling
+/// stores check the same conversion — because a wrap is silently wrong in
+/// both directions: a timestamp beyond `i64::MAX` becomes negative, sorts
+/// before every real row, and turns a "since year 2262" bound into "every
+/// row" (`query_since`) or a "purge everything" cutoff into "delete nothing"
+/// (`purge_before`).
+fn ns_to_sqlite(ns: u64, what: &str) -> Result<i64> {
+    i64::try_from(ns)
+        .map_err(|_| anyhow::anyhow!("{what} {ns}ns does not fit in SQLite's signed integer"))
 }
 
 /// Parse a database row into an AuditRecord
@@ -456,6 +533,38 @@ pub type SqliteStore = AuditStore;
 mod tests {
     use super::*;
 
+    fn llm_record(
+        provider: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        timestamp_ns: u64,
+    ) -> AuditRecord {
+        AuditRecord {
+            id: None,
+            event_type: AuditEventType::LlmCall,
+            timestamp_ns,
+            pid: 77,
+            ppid: None,
+            comm: "agent".to_string(),
+            duration_ns: 0,
+            extra: AuditExtra::LlmCall {
+                provider: Some(provider.to_string()),
+                model: None,
+                request_method: None,
+                request_path: None,
+                response_status: None,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                is_sse: true,
+            },
+            session_id: None,
+        }
+    }
+
     #[test]
     fn test_session_id_round_trip() {
         // Use an in-memory Connection to avoid tempfile dependency, then manually
@@ -547,7 +656,7 @@ mod tests {
         };
         store.insert(&record).unwrap();
 
-        let results = store.query_by_pid(43, None).unwrap();
+        let results = store.query_by_pid(43, 0, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, None);
     }
@@ -592,5 +701,219 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn test_summary_top_commands_are_stable_on_count_ties() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+        let store = AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        };
+
+        // 20 distinct commands recorded once each: every count ties at 1, so
+        // both the top-10 cut and its order used to follow the HashMap
+        // iteration order (randomized per process) and two runs over the same
+        // rows could list different commands.
+        for index in 0..20u32 {
+            store
+                .insert(&AuditRecord {
+                    id: None,
+                    event_type: AuditEventType::ProcessAction,
+                    timestamp_ns: 1_000_000_000 + u64::from(index),
+                    pid: 1000 + index,
+                    ppid: Some(1),
+                    comm: "bash".to_string(),
+                    duration_ns: 0,
+                    extra: AuditExtra::ProcessAction {
+                        filename: None,
+                        args: Some(format!("cmd-{index:02}")),
+                        exit_code: Some(0),
+                    },
+                    session_id: None,
+                })
+                .unwrap();
+        }
+
+        let summary = store.summary(0).unwrap();
+        let names: Vec<&str> = summary
+            .top_commands
+            .iter()
+            .map(|(command, _)| command.as_str())
+            .collect();
+        let expected: Vec<String> = (0..10).map(|index| format!("cmd-{index:02}")).collect();
+        assert_eq!(
+            names, expected,
+            "count ties must be broken by name, not by map order"
+        );
+    }
+
+    #[test]
+    fn test_summary_counts_anthropic_cache_tokens_as_billed_input() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+        let store = AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        };
+
+        // Anthropic reports cache creation/read outside `input_tokens`, so
+        // both are billed input — the same rule as
+        // `TokenRecord::billed_input_tokens` and the `billed_input_col!` SQL
+        // mirror in genai/mod.rs.
+        store
+            .insert(&llm_record("anthropic", 100, 10, 1_000, 500, 1))
+            .unwrap();
+        // OpenAI-compatible providers already include cached tokens inside
+        // `input_tokens`; adding their cache columns again inflates the total,
+        // so only the raw input may count.
+        store
+            .insert(&llm_record("openai", 200, 20, 3_000, 4_000, 2))
+            .unwrap();
+
+        let summary = store.summary(0).unwrap();
+        assert_eq!(summary.total_llm_calls, 2);
+        assert_eq!(
+            summary.total_input_tokens, 1_800,
+            "billed input = anthropic raw + cache, openai raw only"
+        );
+        assert_eq!(summary.total_output_tokens, 30);
+    }
+
+    /// In-memory store with the production schema, for the boundary tests.
+    fn in_memory_store() -> AuditStore {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+        AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        }
+    }
+
+    fn process_action_at(timestamp_ns: u64) -> AuditRecord {
+        AuditRecord {
+            id: None,
+            event_type: AuditEventType::ProcessAction,
+            timestamp_ns,
+            pid: 42,
+            ppid: Some(1),
+            comm: "bash".to_string(),
+            duration_ns: 0,
+            extra: AuditExtra::ProcessAction {
+                filename: Some("/bin/true".to_string()),
+                args: None,
+                exit_code: Some(0),
+            },
+            session_id: None,
+        }
+    }
+
+    /// The audit tables keep timestamps as i64 nanoseconds — the
+    /// representation the audit API already refuses unrepresentable values
+    /// for (`reject_unrepresentable_window`, and the sibling stores'
+    /// `TimestampOutOfRange`) — but this store's own conversions used a raw
+    /// `as i64`. A larger u64 wrapped into a negative number, so every caller
+    /// silently got the wrong result: `insert` stored a pre-1970 timestamp,
+    /// `query_since` answered EVERY row for a bound in the year 2262+, and
+    /// `purge_before` deleted nothing for a cutoff that means "purge
+    /// everything".
+    #[test]
+    fn nanoseconds_beyond_i64_are_refused_not_wrapped() {
+        let store = in_memory_store();
+        let beyond = u64::MAX; // one nanosecond past 2^63 ns (year 2262+)
+
+        assert!(
+            store.insert(&process_action_at(beyond)).is_err(),
+            "insert must refuse a timestamp that cannot be stored as i64 ns"
+        );
+        assert!(
+            store.query_since(beyond, None).is_err(),
+            "a since bound beyond i64 ns must be refused, not answer every row"
+        );
+        assert!(
+            store.purge_before(beyond).is_err(),
+            "a purge cutoff beyond i64 ns must be refused, not delete nothing"
+        );
+
+        // A duration is the same u64 nanosecond quantity.
+        let mut record = process_action_at(1_000);
+        record.duration_ns = beyond;
+        assert!(
+            store.insert(&record).is_err(),
+            "insert must refuse a duration that cannot be stored as i64 ns"
+        );
+
+        // Representable values keep working end to end.
+        store.insert(&process_action_at(1_000)).unwrap();
+        assert_eq!(store.query_since(1_000, None).unwrap().len(), 1);
+        assert_eq!(
+            store.purge_before(1_001).unwrap(),
+            1,
+            "a representable cutoff still purges"
+        );
+    }
+
+    /// `query_by_pid` and `summary` take the same u64 nanosecond window bound
+    /// as the entry points hardened above, but their own queries still used a
+    /// raw `as i64`, so a bound past `i64::MAX` wrapped negative and matched
+    /// every row instead of refusing.
+    #[test]
+    fn pid_and_summary_windows_refuse_beyond_i64() {
+        let store = in_memory_store();
+        store.insert(&process_action_at(1_000)).unwrap();
+        let beyond = u64::MAX;
+
+        assert!(
+            store.query_by_pid(42, beyond, None).is_err(),
+            "query_by_pid must refuse a since bound beyond i64 ns, not wrap it negative and match every row"
+        );
+        assert!(
+            store.summary(beyond).is_err(),
+            "summary must refuse a since bound beyond i64 ns, not wrap it negative and count the whole table"
+        );
+
+        // Representable bounds keep working.
+        assert_eq!(store.query_by_pid(42, 1_000, None).unwrap().len(), 1);
+        assert_eq!(store.summary(1_000).unwrap().total_process_actions, 1);
     }
 }

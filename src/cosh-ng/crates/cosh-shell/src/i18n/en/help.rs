@@ -178,6 +178,21 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashHooksAgentUnavailable => "(cosh-core backend unavailable)",
         MessageId::SlashExtensionsEmptyBody => "No extensions installed.",
         MessageId::SlashSkillsEmptyBody => "No skills found.",
+        MessageId::HelpSummaryBug => "open a pre-filled GitHub bug report",
+        MessageId::SlashBugTitle => "Report a bug",
+        MessageId::SlashBugLinkLine => {
+            "Open the link below to file a pre-filled issue; review it before submitting."
+        }
+        MessageId::SlashBugFormLine => {
+            "In the form, describe what happened and how to reproduce it."
+        }
+        MessageId::SlashBugLogsLine => {
+            "Logs: check the latest files in {path} and paste the relevant parts; remove tokens, keys, and private addresses first."
+        }
+        MessageId::SlashBugOpenedLine => "Opening the link in your browser.",
+        MessageId::SlashBugCopyLine => {
+            "No browser available here: copy the link into a browser on your local machine."
+        }
         _ => return None,
     })
 }

@@ -97,26 +97,32 @@ static DYNAMIC_LOGTAIL_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLo
 /// * 空字符串    → 清空动态路径，已激活的 `LogtailExporter`（`dynamic=true`）
 ///   下次 `export()` 时检测到 `logtail_path() == None` 直接跳过，实现可逆暂停。
 pub fn set_dynamic_logtail_path(path: &str) {
-    if let Ok(mut guard) = DYNAMIC_LOGTAIL_PATH.write() {
-        if path.is_empty() {
-            if guard.is_some() {
-                log::info!("Dynamic logtail path cleared (SLS uploads paused)");
-            }
-            *guard = None;
-        } else {
-            *guard = Some(path.to_string());
-            log::info!("Dynamic logtail path set: {path}");
+    // Recover a poisoned lock instead of silently skipping the update: the
+    // stored path is still valid, and a skipped update leaves the exporter
+    // writing to the previous path while the config handler reports the new one.
+    let mut guard = DYNAMIC_LOGTAIL_PATH
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if path.is_empty() {
+        if guard.is_some() {
+            log::info!("Dynamic logtail path cleared (SLS uploads paused)");
         }
+        *guard = None;
+    } else {
+        *guard = Some(path.to_string());
+        log::info!("Dynamic logtail path set: {path}");
     }
 }
 
 /// 检查 Logtail 导出是否启用（环境变量 SLS_LOGTAIL_FILE 是否设置，或动态路径已配置）
 pub fn logtail_enabled() -> bool {
     std::env::var(LOGTAIL_ENV_VAR).is_ok() || {
+        // Recover a poisoned lock: reporting "disabled" here would stop
+        // dynamic SLS uploads without any error.
         DYNAMIC_LOGTAIL_PATH
             .read()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 }
 
@@ -128,8 +134,12 @@ pub fn logtail_path() -> Option<String> {
     if let Ok(p) = std::env::var(LOGTAIL_ENV_VAR) {
         return Some(p);
     }
-    // 回退到动态配置路径
-    DYNAMIC_LOGTAIL_PATH.read().ok().and_then(|g| g.clone())
+    // 回退到动态配置路径。Recover a poisoned lock: reporting `None` here
+    // would silently stop dynamic SLS uploads.
+    DYNAMIC_LOGTAIL_PATH
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// 返回当前应写入 SLS Logtail 的所有活动路径。
@@ -180,10 +190,14 @@ pub struct LogtailExporter {
 }
 
 impl LogtailExporter {
-    /// 创建新的 Logtail 导出器
+    /// Create a Logtail exporter for the currently active path.
     ///
-    /// 从环境变量 `SLS_LOGTAIL_FILE` 读取路径，自动创建父目录。
-    /// 如果环境变量未设置，返回 `None`。
+    /// `SLS_LOGTAIL_FILE` wins and pins the exporter to that path for the
+    /// process lifetime (static env mode). When only the dynamic
+    /// `runtime.sls_logtail_path` provides the path, the exporter stays
+    /// dynamic: every `export()` re-reads `logtail_path()`, so clearing the
+    /// config path pauses uploads and changing it redirects them without a
+    /// restart. Returns `None` when no path is configured.
     ///
     /// `encryption_pem`：可选 RSA 公钥 PEM（通常来自 agentsight.json
     /// 的 `encryption.public_key`）。有值且解析成功则启用加密；
@@ -206,42 +220,30 @@ impl LogtailExporter {
                 "Logtail exporter: traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded"
             );
         }
+        // `SLS_LOGTAIL_FILE` is fixed for the process lifetime, so env mode
+        // stays static. A path that came only from `runtime.sls_logtail_path`
+        // must re-read `logtail_path()` on every export: the documented
+        // reversibility contract (clearing the path pauses uploads, changing
+        // it redirects them) cannot hold against a path frozen here.
+        let dynamic = std::env::var(LOGTAIL_ENV_VAR).is_err();
         Some(LogtailExporter {
             path,
             encryptor,
             trace_enabled,
-            dynamic: false,
+            dynamic,
             require_path_exists: false,
         })
     }
 
-    /// 创建默认路径的 Logtail 导出器。
-    ///
-    /// 固定写入 [`DEFAULT_SLS_LOGTAIL_PATH`]，不受 `SLS_LOGTAIL_FILE`
-    /// 环境变量或动态配置影响。用于非 sysom 模式下的本地默认 SLS 输出。
+    /// Write to the default local path only while its deployment gates allow it.
     pub fn new_default(encryption_pem: Option<&str>, trace_enabled: bool) -> Self {
-        let path = PathBuf::from(DEFAULT_SLS_LOGTAIL_PATH);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let encryptor = encryption_pem.and_then(MessageEncryptor::from_pem);
-        if encryptor.is_none() {
-            log::info!(
-                "Logtail exporter (default): encryption disabled (no public key configured)"
-            );
-        }
-        if !trace_enabled {
-            log::info!(
-                "Logtail exporter (default): traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded"
-            );
-        }
-        LogtailExporter {
-            path,
-            encryptor,
+        Self::new_with_path_dynamic(
+            DEFAULT_SLS_LOGTAIL_PATH,
+            encryption_pem,
             trace_enabled,
-            dynamic: false,
-            require_path_exists: true,
-        }
+            false,
+            true,
+        )
     }
 
     /// 从显式路径创建 Logtail 导出器（用于运行时动态激活）
@@ -253,7 +255,7 @@ impl LogtailExporter {
         encryption_pem: Option<&str>,
         trace_enabled: bool,
     ) -> Self {
-        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, true)
+        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, true, false)
     }
 
     /// 从显式路径创建固定路径的 Logtail 导出器。
@@ -265,21 +267,29 @@ impl LogtailExporter {
         encryption_pem: Option<&str>,
         trace_enabled: bool,
     ) -> Self {
-        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, false)
+        Self::new_with_path_dynamic(path_str, encryption_pem, trace_enabled, false, false)
     }
 
-    fn new_with_path_dynamic(
+    /// Construct a sink with the same path and deployment gates used at delivery.
+    pub(crate) fn new_with_path_dynamic(
         path_str: &str,
         encryption_pem: Option<&str>,
         trace_enabled: bool,
         dynamic: bool,
+        require_path_exists: bool,
     ) -> Self {
         let path = PathBuf::from(path_str);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
         let encryptor = encryption_pem.and_then(MessageEncryptor::from_pem);
-        let label = if dynamic { "dynamic" } else { "fixed" };
+        let label = if require_path_exists {
+            "default"
+        } else if dynamic {
+            "dynamic"
+        } else {
+            "fixed"
+        };
         if encryptor.is_none() {
             log::info!(
                 "Logtail exporter ({label}): encryption disabled (no public key configured)"
@@ -295,7 +305,7 @@ impl LogtailExporter {
             encryptor,
             trace_enabled,
             dynamic,
-            require_path_exists: false,
+            require_path_exists,
         }
     }
 
@@ -304,22 +314,11 @@ impl LogtailExporter {
         &self.path
     }
 
-    /// 将扁平化记录批量写入文件（append 模式）
-    ///
-    /// `dynamic=true` 时每次重新调用 `logtail_path()` 取最新路径；
-    /// 若动态路径已被 `set_dynamic_logtail_path("")` 清空（暂停语义），
-    /// 直接丢弃本批次，不报错。
-    fn write_batch(&self, events: &[GenAISemanticEvent]) {
+    fn output_path(&self) -> Option<PathBuf> {
         let target_path: PathBuf = if self.dynamic {
             match logtail_path() {
-                Some(p) if !p.is_empty() => {
-                    let p = PathBuf::from(p);
-                    if let Some(parent) = p.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    p
-                }
-                _ => return, // 动态路径已清空 → 暂停状态，丢弃本批次
+                Some(p) if !p.is_empty() => PathBuf::from(p),
+                _ => return None,
             }
         } else {
             self.path.clone()
@@ -331,7 +330,7 @@ impl LogtailExporter {
         if target_path == std::path::Path::new(DEFAULT_SLS_LOGTAIL_PATH)
             && default_path_telemetry_disabled()
         {
-            return;
+            return None;
         }
 
         // 部署检查：目标文件不存在（iLogtail 未部署）则跳过，不自动创建。
@@ -343,7 +342,19 @@ impl LogtailExporter {
                     "SLS default-path export skipped: target file {target_path:?} does not exist (iLogtail not deployed?); create it to enable uploads"
                 );
             });
+            return None;
+        }
+        Some(target_path)
+    }
+
+    fn write_batch(&self, events: &[GenAISemanticEvent]) {
+        let Some(target_path) = self.output_path() else {
             return;
+        };
+        if self.dynamic {
+            if let Some(parent) = target_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
         }
 
         let mut records =
@@ -390,6 +401,10 @@ impl LogtailExporter {
 }
 
 impl GenAIExporter for LogtailExporter {
+    fn is_active(&self) -> bool {
+        self.output_path().is_some()
+    }
+
     fn name(&self) -> &str {
         // Distinguish dynamic exporters so the runtime can replace an existing
         // dynamic exporter instead of accumulating duplicates when the SLS path
@@ -1088,6 +1103,47 @@ pub mod tests {
         set_dynamic_logtail_path("");
     }
 
+    /// A panic while the dynamic-path lock was held (the write guard is held
+    /// across the log calls) poisons it for the rest of the process. Setting,
+    /// clearing and reading the path must keep working: a silently skipped
+    /// update leaves the exporter writing to the old path while the config
+    /// handler reports the new one, and a silently failed read reports "no
+    /// path", which stops dynamic SLS uploads without any error.
+    #[test]
+    fn test_dynamic_path_recovers_from_poisoned_lock() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_logtail_state();
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = DYNAMIC_LOGTAIL_PATH.write().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(poisoned.is_err(), "dynamic path lock should be poisoned");
+        assert!(
+            DYNAMIC_LOGTAIL_PATH.write().is_err(),
+            "precondition: lock reports poisoning"
+        );
+
+        // A poisoned lock must not swallow the update...
+        set_dynamic_logtail_path("/poisoned-dynamic.log");
+        assert_eq!(
+            logtail_path(),
+            Some("/poisoned-dynamic.log".to_string()),
+            "a set path must be readable after the lock was poisoned"
+        );
+        assert!(
+            logtail_enabled(),
+            "a configured path must still report enabled"
+        );
+
+        // ...and clearing it must still take effect.
+        set_dynamic_logtail_path("");
+        assert_eq!(logtail_path(), None, "clearing must still take effect");
+        assert!(!logtail_enabled(), "a cleared path must report disabled");
+
+        reset_logtail_state();
+    }
+
     #[test]
     fn test_active_logtail_paths_default() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -1168,6 +1224,7 @@ pub mod tests {
         };
 
         let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        assert!(!exporter.is_active());
         exporter.export(&[event]);
 
         assert!(!tmp.exists());
@@ -1194,11 +1251,65 @@ pub mod tests {
         };
 
         let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        assert!(exporter.is_active());
         exporter.export(&[event]);
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.is_empty());
         assert!(content.contains("\"gen_ai.operation.name\""));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!exporter.is_active());
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
+    }
+
+    /// The startup exporter must honor a later change of the config path.
+    ///
+    /// When `SLS_LOGTAIL_FILE` is absent, `runtime.sls_logtail_path` is the
+    /// active path and its documented contract is reversible: clearing it
+    /// pauses uploads, changing it redirects them. Building the startup
+    /// exporter in static env mode froze the path, so a redirect kept
+    /// appending to the old file.
+    #[test]
+    fn test_startup_exporter_redirects_when_dynamic_path_changes() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_logtail_state();
+
+        let tmp =
+            std::env::temp_dir().join(format!("agentsight_startup_dynamic_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let p1 = tmp.join("p1.jsonl");
+        let p2 = tmp.join("p2.jsonl");
+
+        set_dynamic_logtail_path(p1.to_str().unwrap());
+        // Exactly how unified.rs builds the startup exporter for the enabled
+        // path (env var unset → the path came from runtime config).
+        let exporter = LogtailExporter::new(None, true).expect("enabled dynamic path");
+
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        assert!(exporter.is_active());
+        set_dynamic_logtail_path("");
+        assert!(!exporter.is_active());
+        exporter.export(std::slice::from_ref(&event));
+        assert!(
+            !p1.exists(),
+            "paused delivery must not create the previous path"
+        );
+
+        // The config path changes before the next batch is exported.
+        set_dynamic_logtail_path(p2.to_str().unwrap());
+        assert!(exporter.is_active());
+        exporter.export(&[event]);
+
+        assert!(
+            !p1.exists(),
+            "the exporter must not stay pinned to the path it was built with"
+        );
+        assert!(
+            p2.exists(),
+            "the exporter must follow the current dynamic path"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
         reset_logtail_state();
@@ -1326,6 +1437,60 @@ pub mod tests {
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("agent_crash"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
+    }
+
+    /// The export is a property of the store, not of each caller: four of the
+    /// seven insert sites had forgotten it, so the OOM-recovered and retry-storm
+    /// rows never reached SLS while they were present locally. Doing it on the
+    /// insert also means a row rejected as a duplicate is exported only once.
+    #[test]
+    fn a_new_interruption_is_exported_by_the_store() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_logtail_state();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_interruption_store_export_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("interruption.jsonl");
+        // SAFETY: tests acquire ENV_LOCK before mutating this variable.
+        unsafe { std::env::set_var(LOGTAIL_ENV_VAR, path.to_str().unwrap()) };
+
+        let store = crate::storage::sqlite::InterruptionStore::new_with_path(
+            &tmp.join("interruption_events.db"),
+        )
+        .expect("interruption store");
+        let mut event = InterruptionEvent::new(
+            crate::interruption::InterruptionType::AgentCrash,
+            Some("session-export".to_string()),
+            None,
+            Some("conv-export".to_string()),
+            None,
+            Some(4242),
+            Some("test-agent".to_string()),
+            1_000_000,
+            Some(serde_json::json!({"pid": 4242, "oom": true})),
+        );
+        event.interruption_id = "int-store-export".to_string();
+
+        store.insert(&event).expect("first insert");
+        // The same id again: `INSERT OR IGNORE` accepts it without writing, and
+        // the export must not repeat either.
+        store.insert(&event).expect("duplicate insert");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let exported = content
+            .lines()
+            .filter(|line| line.contains("int-store-export"))
+            .count();
+        assert_eq!(
+            exported, 1,
+            "the row must reach SLS exactly once: {content}"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
         reset_logtail_state();

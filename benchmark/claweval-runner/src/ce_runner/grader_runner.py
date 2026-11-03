@@ -36,9 +36,12 @@ import argparse
 import inspect
 import json
 import os
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any
 
 # Add claw-eval to path (repo root is two levels up from src/ce_runner/)
 _CLAW_EVAL_SRC = Path(__file__).resolve().parent.parent.parent / "claw-eval" / "src"
@@ -54,6 +57,30 @@ from claw_eval.trace.reader import load_trace
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _publish_graded_trace(trace_path: Path, events: list[dict[str, Any]]) -> None:
+    """Publish complete JSONL while keeping the previous trace on write failure."""
+    target = trace_path.resolve()
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    temporary: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=".ce-grade-",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            for event in events:
+                output.write(json.dumps(event, ensure_ascii=False) + "\n")
+        temporary.chmod(original_mode)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def grade_trace(trace_path: str, task_yaml_path: str, judge_config: dict | None = None,
@@ -150,28 +177,19 @@ def grade_trace(trace_path: str, task_yaml_path: str, judge_config: dict | None 
         "efficiency_tokens": scores.efficiency_tokens,
         "efficiency_wall_time_s": scores.efficiency_wall_time_s,
     }
-    try:
-        with open(trace_path) as _f:
-            _existing = [json.loads(line) for line in _f if line.strip()]
-        # Drop any prior grading_result (idempotent re-grading)
-        _existing = [e for e in _existing if e.get("type") != "grading_result"]
-        for ev in _existing:
-            if ev.get("type") == "trace_end":
-                # Preserve efficiency_* values already computed by converter when grader didn't set them
-                merged_scores = dict(ev.get("scores") or {})
-                merged_scores.update(real_scores)
-                ev["scores"] = merged_scores
-                ev["task_score"] = task_score
-                ev["passed"] = passed
-        with open(trace_path, "w") as _f:
-            for ev in _existing:
-                _f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-            _f.write(json.dumps(grading_result, ensure_ascii=False) + "\n")
-    except Exception as _e:
-        # Fallback: append-only (legacy behavior) so we don't lose grading_result on IO error
-        print(f"[grader] WARN: trace_end update failed ({_e}); falling back to append.", file=sys.stderr)
-        with open(trace_path, "a") as _f:
-            _f.write(json.dumps(grading_result, ensure_ascii=False) + "\n")
+    with open(trace_path, encoding="utf-8") as _f:
+        _existing = [json.loads(line) for line in _f if line.strip()]
+    # Drop any prior grading_result (idempotent re-grading)
+    _existing = [e for e in _existing if e.get("type") != "grading_result"]
+    for ev in _existing:
+        if ev.get("type") == "trace_end":
+            # Preserve the existing score merge policy during atomic publication.
+            merged_scores = dict(ev.get("scores") or {})
+            merged_scores.update(real_scores)
+            ev["scores"] = merged_scores
+            ev["task_score"] = task_score
+            ev["passed"] = passed
+    _publish_graded_trace(trace_path, [*_existing, grading_result])
 
     print(f"[grader] Grading result appended to trace; trace_end synced", file=sys.stderr)
 

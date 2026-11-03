@@ -20,7 +20,8 @@
 //! `plugins install --help`, `plugins enable --help`, `plugins inspect --help`).
 //! From it the driver gates on the adapter's declared framework version, chooses
 //! version-conditioned config, requires install `--force`, and accepts declared
-//! capabilities when each subcommand advertises `--accept-capabilities`. It adds
+//! capabilities when each subcommand advertises `--accept-capabilities`, unless
+//! the caller withholds consent. It adds
 //! `--dangerously-force-unsafe-install` only when both authorized and
 //! advertised as effective by the host, and records the inspect capabilities.
 //! The install/verify capabilities flow to `apply_enable` as typed
@@ -46,7 +47,9 @@ use super::driver::{
     DriverPlan, EnableProgress, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
     find_binary_in_path,
 };
-use super::managed_files::{MaterializedMapping, copy_materialized_resource};
+use super::managed_files::{
+    MaterializedMapping, copy_materialized_resource, remove_materialized_resource,
+};
 use crate::manifest::AdapterConfigSetSpec;
 
 /// Default timeout for an OpenClaw CLI invocation.
@@ -172,7 +175,7 @@ impl FrameworkDriver for OpenClawDriver {
                 &plugin_id,
                 &home,
                 ctx.user_home.as_deref(),
-                preflight.supports_enable_accept_capabilities,
+                preflight.supports_enable_accept_capabilities && !ctx.no_accept_capabilities,
             )));
             selected_config = preflight.selected_config;
             register_command = Some(display_command(&preflight.install_cmd));
@@ -273,6 +276,7 @@ impl FrameworkDriver for OpenClawDriver {
         } else {
             let preflight = self.plugin_preflight(&bundle.resource_root, ctx)?;
             PreparedEnable::OpenClaw {
+                no_accept_capabilities: ctx.no_accept_capabilities,
                 supports_accept_capabilities: preflight.supports_accept_capabilities,
                 supports_enable_accept_capabilities: preflight.supports_enable_accept_capabilities,
                 supports_unsafe_install: preflight.supports_unsafe_install,
@@ -341,6 +345,8 @@ impl FrameworkDriver for OpenClawDriver {
                 // Pending/applied config resources are journaled during apply;
                 // this list references confirmed entries only.
                 config_resources: Vec::new(),
+                install_rejected_before_mutation: false,
+                plugin_cleanup_required: false,
             }),
         };
         Ok((claim, prepared))
@@ -351,7 +357,30 @@ impl FrameworkDriver for OpenClawDriver {
         prior: &AdapterClaim,
         next: &mut AdapterClaim,
     ) -> Result<(), AdapterError> {
-        preserve_openclaw_config_facts(prior, next)
+        let same_state_dir = claim_state_dir(prior)? == claim_state_dir(next)?;
+        if same_state_dir {
+            preserve_openclaw_config_facts(prior, next)?;
+        }
+        let DriverPayload::OpenClaw(prior_payload) = &prior.driver_payload else {
+            return Err(invalid_config_claim(
+                prior,
+                "receipt payload is not OpenClaw",
+            ));
+        };
+        let DriverPayload::OpenClaw(next_payload) = &mut next.driver_payload else {
+            return Err(invalid_config_claim(
+                next,
+                "receipt payload is not OpenClaw",
+            ));
+        };
+        // The manager cleans the prior instance before replacing its receipt,
+        // and keeps the prior receipt if cleanup fails. Facts from a different
+        // state directory do not describe the new, still-uninstalled instance.
+        next_payload.plugin_cleanup_required =
+            same_state_dir && prior_payload.plugin_cleanup_required;
+        next_payload.install_rejected_before_mutation =
+            same_state_dir && prior_payload.install_rejected_before_mutation;
+        Ok(())
     }
 
     fn materialized_mappings(
@@ -462,6 +491,7 @@ impl FrameworkDriver for OpenClawDriver {
         } else {
             match prepared {
                 PreparedEnable::OpenClaw {
+                    no_accept_capabilities,
                     supports_accept_capabilities,
                     supports_enable_accept_capabilities,
                     supports_unsafe_install,
@@ -469,6 +499,11 @@ impl FrameworkDriver for OpenClawDriver {
                     supports_inspect_runtime,
                     selected_config_indices,
                 } => {
+                    if *no_accept_capabilities != ctx.no_accept_capabilities {
+                        return Err(prepared_state_mismatch(
+                            "prepared capability consent does not match the caller's decision",
+                        ));
+                    }
                     if !supports_inspect_json {
                         return Err(AdapterError::FrameworkCli {
                             program: openclaw_bin(),
@@ -487,8 +522,8 @@ impl FrameworkDriver for OpenClawDriver {
                     }
                     validate_prepared_config_indices(selected_config_indices, ctx)?;
                     (
-                        *supports_accept_capabilities,
-                        *supports_enable_accept_capabilities,
+                        *supports_accept_capabilities && !*no_accept_capabilities,
+                        *supports_enable_accept_capabilities && !*no_accept_capabilities,
                         *supports_unsafe_install,
                         *supports_inspect_runtime,
                         selected_config_indices.clone(),
@@ -499,9 +534,9 @@ impl FrameworkDriver for OpenClawDriver {
                         "openclaw plugin enable requires prepared host capabilities",
                     ));
                 }
-                PreparedEnable::QoderNative { .. } => {
+                PreparedEnable::QoderNative { .. } | PreparedEnable::QwenWork { .. } => {
                     return Err(prepared_state_mismatch(
-                        "openclaw plugin enable received Qoder capabilities",
+                        "openclaw plugin enable received another framework's prepared state",
                     ));
                 }
             }
@@ -527,18 +562,44 @@ impl FrameworkDriver for OpenClawDriver {
                 user_home,
             );
             let program = cmd.program.clone();
+            let prior_cleanup_required = match &mut claim.driver_payload {
+                DriverPayload::OpenClaw(payload) => {
+                    let prior = payload.plugin_cleanup_required;
+                    // A failed command can be interrupted after creating an
+                    // installation, so persist conservative ownership on error.
+                    payload.plugin_cleanup_required = true;
+                    payload.install_rejected_before_mutation = false;
+                    prior
+                }
+                _ => {
+                    return Err(prepared_state_mismatch(
+                        "openclaw plugin install received a non-OpenClaw claim",
+                    ));
+                }
+            };
+            // The manager may have replaced a rejected-install receipt with
+            // this claim. Persist cleanup ownership before install can mutate
+            // the registry, so a process interruption cannot restore the old
+            // `cleanup_required = false` snapshot.
+            progress.persist_claim(claim)?;
             let output = ctx.ops.run_framework_cli(cmd)?;
             if !output.success() {
+                if install_rejected_before_mutation(&output) {
+                    let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload else {
+                        return Err(prepared_state_mismatch(
+                            "openclaw plugin install received a non-OpenClaw claim",
+                        ));
+                    };
+                    payload.install_rejected_before_mutation = true;
+                    payload.plugin_cleanup_required = prior_cleanup_required;
+                }
                 let mut reason = full_failure_reason("plugins install", &output);
                 // Point the operator at the explicit, auditable retry only when
                 // it could actually help: the host exposes the unsafe flag, the
                 // user did not already authorize it, and the failure looks like
                 // a plugin-safety rejection. Never retry automatically.
-                if install_output_requires_capability_consent(&output) {
-                    reason.push_str(
-                        "; OpenClaw capability consent was not accepted; inspect the reported \
-                         capability requirements and the host's --accept-capabilities support",
-                    );
+                if output_requires_capability_consent(&output) {
+                    reason.push_str(capability_consent_failure_note(ctx.no_accept_capabilities));
                 } else if host_supports_unsafe
                     && !ctx.allow_unsafe_plugin_install
                     && install_output_looks_like_safety_rejection(&output)
@@ -550,6 +611,10 @@ impl FrameworkDriver for OpenClawDriver {
                     );
                 }
                 return Err(AdapterError::FrameworkCli { program, reason });
+            }
+            if let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload {
+                payload.install_rejected_before_mutation = false;
+                payload.plugin_cleanup_required = true;
             }
             Some(plugin_id)
         };
@@ -593,10 +658,11 @@ impl FrameworkDriver for OpenClawDriver {
             let program = cmd.program.clone();
             let output = ctx.ops.run_framework_cli(cmd)?;
             if !output.success() {
-                return Err(AdapterError::FrameworkCli {
-                    program,
-                    reason: full_failure_reason("plugins enable", &output),
-                });
+                let mut reason = full_failure_reason("plugins enable", &output);
+                if ctx.no_accept_capabilities && output_requires_capability_consent(&output) {
+                    reason.push_str(capability_consent_failure_note(true));
+                }
+                return Err(AdapterError::FrameworkCli { program, reason });
             }
 
             // Post-enable runtime verification: the plugin must report
@@ -701,7 +767,20 @@ impl FrameworkDriver for OpenClawDriver {
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
 
-        if let Some(plugin_id) = claim_plugin_id(claim) {
+        let install_rejected_before_mutation = matches!(
+            &claim.driver_payload,
+            DriverPayload::OpenClaw(payload)
+                if payload.install_rejected_before_mutation
+                    && !payload.plugin_cleanup_required
+                    && payload.config_resources.is_empty()
+                    && claim_config_counts(claim) == (0, 0)
+        );
+        if install_rejected_before_mutation {
+            messages.push(
+                "OpenClaw rejected plugin install during config preflight before mutation"
+                    .to_string(),
+            );
+        } else if let Some(plugin_id) = claim_plugin_id(claim) {
             validate_plugin_id(&plugin_id)?;
             if find_binary_in_path(&openclaw_bin()).is_none() {
                 return Ok(DisableReport {
@@ -721,61 +800,93 @@ impl FrameworkDriver for OpenClawDriver {
                 messages.push(format!(
                     "openclaw plugin '{plugin_id}' was already unregistered"
                 ));
-            } else if uninstall_reports_untracked_plugin(&output, &plugin_id) {
-                // Missing package ownership does not prove that the plugin is
-                // gone. Verify against the same instance as the uninstall.
+            } else {
+                // A failed install can leave a receipt even though the
+                // framework never registered the plugin. A failed uninstall
+                // alone cannot prove either outcome; only explicit
+                // pre-mutation evidence from install may bypass registry checks.
+                let uninstall_reason = if uninstall_reports_untracked_plugin(&output, &plugin_id) {
+                    format!(
+                        "plugin '{plugin_id}' has no tracked package install; `plugins uninstall` failed"
+                    )
+                } else {
+                    format!(
+                        "openclaw plugin uninstall failed: {}",
+                        cli_failure_reason("plugins uninstall", &output)
+                    )
+                };
                 let mut cmd = build_list_cmd(&home, ctx.user_home.as_deref());
                 cmd.args.push("--json".to_string());
                 let verification = ctx.ops.run_framework_cli_json(cmd);
-                if !verification
-                    .as_ref()
-                    .is_ok_and(|output| json_list_confirms_plugin_absent(output, &plugin_id))
-                {
-                    let reason = match verification {
-                        Ok(output) => inspect_diagnostics(&output),
-                        Err(err) => err.to_string(),
-                    };
-                    return Ok(DisableReport {
-                        cleanup_complete: false,
-                        messages: vec![format!(
-                            "openclaw plugin '{plugin_id}' has no tracked package install; \
-                             `plugins list --json` could not confirm absence: {reason}; \
-                             repair the OpenClaw plugin registry and retry disable"
-                        )],
-                    });
+                match verification {
+                    Ok(list) if json_list_confirms_plugin_absent(&list, &plugin_id) => {
+                        messages.push(format!(
+                            "{uninstall_reason}; `plugins list --json` confirmed the plugin is absent"
+                        ));
+                    }
+                    Ok(list) if !list.success() => {
+                        let diagnostics = inspect_diagnostics(&list);
+                        let detail = if diagnostics.is_empty() {
+                            "the list did not complete successfully".to_string()
+                        } else {
+                            diagnostics
+                        };
+                        return Ok(DisableReport {
+                            cleanup_complete: false,
+                            messages: vec![format!(
+                                "{uninstall_reason}; `plugins list --json` could not confirm absence: {detail}; repair the OpenClaw plugin registry and retry disable"
+                            )],
+                        });
+                    }
+                    Ok(list) => {
+                        let diagnostics = inspect_diagnostics(&list);
+                        let detail = if diagnostics.is_empty() {
+                            "the list still contains the plugin or lacks clean diagnostics"
+                                .to_string()
+                        } else {
+                            diagnostics
+                        };
+                        return Ok(DisableReport {
+                            cleanup_complete: false,
+                            messages: vec![format!(
+                                "{uninstall_reason}; `plugins list --json` could not confirm absence: {detail}; repair the OpenClaw plugin registry and retry disable"
+                            )],
+                        });
+                    }
+                    Err(err) => {
+                        return Ok(DisableReport {
+                            cleanup_complete: false,
+                            messages: vec![format!(
+                                "{uninstall_reason}; `plugins list --json` could not confirm absence: {err}; repair the OpenClaw plugin registry and retry disable"
+                            )],
+                        });
+                    }
                 }
-                messages.push(format!(
-                    "openclaw plugin '{plugin_id}' is absent from `plugins list --json`"
-                ));
-            } else {
-                return Ok(DisableReport {
-                    cleanup_complete: false,
-                    messages: vec![format!(
-                        "openclaw plugin uninstall failed: {}",
-                        cli_failure_reason("plugins uninstall", &output)
-                    )],
-                });
             }
         } else {
             messages.push("receipt records no plugin to unregister".to_string());
         }
 
-        let skill_resources = claim_skill_resources(claim);
+        let skill_resources = if install_rejected_before_mutation {
+            // These paths are declarations in a pre-apply receipt. The
+            // install preflight runs before OpenClaw skill materialization.
+            Vec::new()
+        } else {
+            claim_skill_resources(claim)
+        };
         for skill_name in &skill_resources {
             let skill_dir = home.join("skills").join(skill_name);
-            match ctx.ops.remove_tree(&skill_dir) {
-                Ok(true) => messages.push(format!(
-                    "removed openclaw skill dir {}",
-                    skill_dir.display()
-                )),
-                Ok(false) => {} // already gone, idempotent
-                Err(err) => {
-                    messages.push(format!(
-                        "failed to remove skill dir {}: {err}",
-                        skill_dir.display()
-                    ));
-                    cleanup_complete = false;
-                }
+            let resource_id = format!("openclaw_skill_{skill_name}");
+            if let Err(message) = remove_skill_dir(
+                claim,
+                &resource_id,
+                &home,
+                &skill_dir,
+                ctx.ops,
+                &mut messages,
+            ) {
+                messages.push(message);
+                cleanup_complete = false;
             }
         }
 
@@ -1178,6 +1289,7 @@ impl OpenClawDriver {
             ctx.user_home.as_deref(),
             &profile,
             ctx.allow_unsafe_plugin_install,
+            ctx.no_accept_capabilities,
         )?;
         let selected_config = self.select_config(ctx, &profile)?;
         Ok(PluginPreflight {
@@ -1760,7 +1872,7 @@ fn install_output_looks_like_safety_rejection(output: &CliOutput) -> bool {
         .any(|marker| haystack.contains(marker))
 }
 
-fn install_output_requires_capability_consent(output: &CliOutput) -> bool {
+fn output_requires_capability_consent(output: &CliOutput) -> bool {
     format!(
         "{}\n{}",
         strip_ansi(&output.stdout),
@@ -1768,6 +1880,16 @@ fn install_output_requires_capability_consent(output: &CliOutput) -> bool {
     )
     .to_ascii_lowercase()
     .contains("capability consent")
+}
+
+fn capability_consent_failure_note(no_accept_capabilities: bool) -> &'static str {
+    if no_accept_capabilities {
+        "; OpenClaw capability consent was withheld by --no-accept-capabilities; \
+         review the reported capability requirements and authorize them separately if appropriate"
+    } else {
+        "; OpenClaw capability consent was not accepted; inspect the reported \
+         capability requirements and the host's --accept-capabilities support"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2287,8 +2409,8 @@ fn base_cmd(args: Vec<String>, home: &Path, user_home: Option<&Path>) -> Framewo
 /// (`allow_unsafe`) and the host's help describes it as effective. An
 /// authorized request fails when the option is absent or advertised as a
 /// deprecated no-op, and a normal install never carries it.
-/// Enabling a plugin accepts its declared capabilities, so the consent flag
-/// is included whenever the installer advertises it.
+/// The consent flag is included only when the installer advertises it and
+/// the caller has not withheld the automatic grant.
 ///
 /// # Errors
 ///
@@ -2301,6 +2423,7 @@ fn build_install_cmd(
     user_home: Option<&Path>,
     profile: &OpenClawHostProfile,
     allow_unsafe: bool,
+    no_accept_capabilities: bool,
 ) -> Result<FrameworkCommand, AdapterError> {
     if !profile.supports_install_force {
         return Err(AdapterError::FrameworkCli {
@@ -2336,7 +2459,7 @@ fn build_install_cmd(
         install_argv(
             resource_root,
             allow_unsafe,
-            profile.supports_accept_capabilities,
+            profile.supports_accept_capabilities && !no_accept_capabilities,
         ),
         home,
         user_home,
@@ -2996,6 +3119,106 @@ fn json_list_confirms_plugin_absent(output: &CliOutput, plugin_id: &str) -> bool
     })
 }
 
+/// Recognize OpenClaw's config-schema rejection, which happens before install
+/// mutates the plugin index or payload. Other failures remain ambiguous.
+fn install_rejected_before_mutation(output: &CliOutput) -> bool {
+    if output.success() || output.timed_out || !output.stdout.trim().is_empty() {
+        return false;
+    }
+    let stderr = strip_ansi(&output.stderr);
+    let mut lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    matches!(lines.next(), Some("OpenClaw config is invalid"))
+        && lines.clone().any(|line| line.starts_with("File:"))
+        && lines.any(|line| line.starts_with("Problem:"))
+}
+
+/// Remove one copied skill on disable. Receipts that record their
+/// materialized files delete exactly those entries and keep anything else in
+/// the directory; receipts written before files were recorded keep the
+/// previous whole-directory removal.
+pub(crate) fn remove_skill_dir(
+    claim: &AdapterClaim,
+    resource_id: &str,
+    framework_home: &Path,
+    skill_dir: &Path,
+    ops: &dyn super::driver::AdapterOps,
+    messages: &mut Vec<String>,
+) -> Result<(), String> {
+    // The framework home is the Manager-validated boundary. Inspect every
+    // component below it before looking at the root or deleting anything:
+    // symlink_metadata(skill_dir) alone still follows a redirected `skills`.
+    // Checking before the missing-root fast path also preserves receipts for
+    // dangling ancestor links, so restoring the original directory can retry.
+    let relative = skill_dir.strip_prefix(framework_home).map_err(|_| {
+        format!(
+            "skill directory {} is outside framework home {}",
+            skill_dir.display(),
+            framework_home.display()
+        )
+    })?;
+    let mut parent = framework_home.to_path_buf();
+    for component in relative.components() {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Ok(_) => {
+                return Err(format!(
+                    "failed to remove skill dir: refusing cleanup through {}: expected a real directory; restore the original directory and retry disable",
+                    parent.display()
+                ));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "cannot inspect skill directory {}: {err}",
+                    parent.display()
+                ));
+            }
+        }
+    }
+    if !claim
+        .materialized_files
+        .iter()
+        .any(|file| file.resource_id == resource_id)
+    {
+        return match ops.remove_tree(skill_dir) {
+            Ok(true) => {
+                messages.push(format!("removed skill dir {}", skill_dir.display()));
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(err) => Err(format!(
+                "failed to remove skill dir {}: {err}",
+                skill_dir.display()
+            )),
+        };
+    }
+    match remove_materialized_resource(claim, resource_id, ops) {
+        Ok(outcome) => {
+            match &outcome.kept_root {
+                Some(root) => messages.push(format!(
+                    "removed {} ANOLISA-managed file(s) from skill dir {}; kept the directory \
+                     because it holds files ANOLISA did not write or that were modified",
+                    outcome.removed,
+                    root.display()
+                )),
+                None if outcome.removed > 0 => {
+                    messages.push(format!("removed skill dir {}", skill_dir.display()));
+                }
+                None => {}
+            }
+            Ok(())
+        }
+        Err(err) => Err(format!(
+            "failed to remove skill dir {}: {err}",
+            skill_dir.display()
+        )),
+    }
+}
+
 /// Extract skill names from a claim's `skill_resources` by parsing the
 /// resource ids. Each id has the form `openclaw_skill_<name>`, and we
 /// extract `<name>` as the directory name under `<home>/skills/`.
@@ -3041,8 +3264,10 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::driver::AdapterOps;
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard};
+    use std::{cell::RefCell, collections::VecDeque};
 
     static OPENCLAW_BIN_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -3091,6 +3316,128 @@ mod tests {
                     std::env::remove_var("OPENCLAW_BIN");
                 }
             }
+        }
+    }
+
+    struct ScriptedOps {
+        outputs: RefCell<VecDeque<CliOutput>>,
+    }
+
+    impl AdapterOps for ScriptedOps {
+        fn run_framework_cli(&self, cmd: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+            self.outputs
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| AdapterError::FrameworkCli {
+                    program: cmd.program,
+                    reason: "no scripted OpenClaw output".to_string(),
+                })
+        }
+
+        fn copy_tree(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+            unimplemented!()
+        }
+
+        fn copy_file(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+            unimplemented!()
+        }
+
+        fn remove_tree(&self, _: &Path) -> Result<bool, AdapterError> {
+            Ok(false)
+        }
+
+        fn write_file(&self, _: &Path, _: &[u8]) -> Result<(), AdapterError> {
+            unimplemented!()
+        }
+
+        fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+            unimplemented!()
+        }
+
+        fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+            unimplemented!()
+        }
+    }
+
+    fn cleanup_failed_plugin_claim(state_dir: PathBuf) -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "openclaw".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-10-13T00:00:00Z".to_string(),
+            resource_root: PathBuf::from("/missing/adapter/source"),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::CleanupFailed,
+            notices: Vec::new(),
+            resources: vec![
+                ClaimResource {
+                    id: "state".to_string(),
+                    purpose: "openclaw_state_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath { path: state_dir },
+                },
+                ClaimResource {
+                    id: "plugin".to_string(),
+                    purpose: "openclaw_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "openclaw".to_string(),
+                        plugin_id: "tokenless".to_string(),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
+                state_dir_resource: "state".to_string(),
+                plugin_resource: "plugin".to_string(),
+                skill_resources: Vec::new(),
+                config_resources: Vec::new(),
+                plugin_cleanup_required: true,
+                install_rejected_before_mutation: false,
+            }),
+        }
+    }
+
+    fn run_disable_with_outputs(outputs: Vec<CliOutput>) -> DisableReport {
+        let _env = OpenClawBinEnvGuard::set("/bin/sh");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let layout = anolisa_platform::fs_layout::FsLayout::user(home.clone());
+        let claim = cleanup_failed_plugin_claim(home.join(".openclaw"));
+        let ops = ScriptedOps {
+            outputs: RefCell::new(outputs.into()),
+        };
+        let ctx = DriverCtx {
+            component: "tokenless".to_string(),
+            framework: "openclaw".to_string(),
+            layout: &layout,
+            resource_root: claim.resource_root.clone(),
+            user_home: Some(home),
+            declared_plugin_id: None,
+            requested_profiles: Vec::new(),
+            adapter_type: claim.adapter_type.clone(),
+            declared_skills: Vec::new(),
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
+            dry_run: false,
+            ops: &ops,
+        };
+        OpenClawDriver::new()
+            .disable(&claim, &ctx)
+            .expect("disable should return a cleanup report")
+    }
+
+    fn cli_output(status: i32, stdout: &str, stderr: &str) -> CliOutput {
+        CliOutput {
+            status: Some(status),
+            timed_out: false,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
         }
     }
 
@@ -3232,6 +3579,52 @@ mod tests {
     }
 
     #[test]
+    fn failed_uninstall_clears_receipt_only_after_json_confirms_plugin_absence() {
+        let report = run_disable_with_outputs(vec![
+            cli_output(1, "", "OpenClaw config is invalid"),
+            cli_output(0, r#"{"plugins":[],"diagnostics":[]}"#, ""),
+        ]);
+
+        assert!(report.cleanup_complete);
+        assert!(report.messages.iter().any(|message| {
+            message.contains("plugins list --json` confirmed the plugin is absent")
+        }));
+    }
+
+    #[test]
+    fn failed_uninstall_keeps_receipt_when_json_still_lists_plugin() {
+        let report = run_disable_with_outputs(vec![
+            cli_output(1, "", "OpenClaw config is invalid"),
+            cli_output(
+                0,
+                r#"{"plugins":[{"id":"tokenless"}],"diagnostics":[]}"#,
+                "",
+            ),
+        ]);
+
+        assert!(!report.cleanup_complete);
+        assert!(
+            report.messages.iter().any(|message| {
+                message.contains("plugins list --json` could not confirm absence")
+            })
+        );
+    }
+
+    #[test]
+    fn failed_uninstall_keeps_receipt_when_json_inventory_is_unavailable() {
+        let report = run_disable_with_outputs(vec![
+            cli_output(1, "", "OpenClaw config is invalid"),
+            cli_output(1, "", "OpenClaw config is invalid"),
+        ]);
+
+        assert!(!report.cleanup_complete);
+        assert!(report.messages.iter().any(|message| {
+            message.contains("plugins list --json` could not confirm absence")
+                && message.contains("OpenClaw config is invalid")
+        }));
+    }
+
+    #[test]
     fn json_absence_requires_success_and_usable_diagnostics() {
         let output = CliOutput {
             status: Some(0),
@@ -3368,6 +3761,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(true, true),
             false,
+            false,
         )
         .expect("force-capable host builds an install command");
         assert_eq!(cmd.program, "openclaw");
@@ -3401,6 +3795,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(false, true),
             false,
+            false,
         )
         .expect_err("no --force must fail before mutation");
         assert!(matches!(err, AdapterError::FrameworkCli { .. }));
@@ -3415,6 +3810,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(true, true),
             true,
+            false,
         )
         .expect("authorized + supported unsafe install builds a command");
         assert_eq!(
@@ -3439,6 +3835,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &profile(true, false),
             true,
+            false,
         )
         .expect_err("authorized but unsupported unsafe must fail before mutation");
         assert!(matches!(err, AdapterError::FrameworkCli { .. }));
@@ -3455,6 +3852,7 @@ mod tests {
             Some(Path::new("/home/u")),
             &host,
             true,
+            false,
         )
         .expect_err("a deprecated no-op must not be treated as an unsafe bypass");
         match err {
@@ -3723,6 +4121,36 @@ mod tests {
     }
 
     #[test]
+    fn install_rejection_requires_unambiguous_config_preflight_diagnostic() {
+        let output = |stderr: &str, stdout: &str, timed_out: bool| CliOutput {
+            status: Some(1),
+            timed_out,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        };
+        assert!(install_rejected_before_mutation(&output(
+            "OpenClaw config is invalid\nFile: /home/test/openclaw.json\nProblem:\n- commands.ownerDisplay: Unrecognized key",
+            "",
+            false,
+        )));
+        assert!(!install_rejected_before_mutation(&output(
+            "Config is invalid: Unrecognized key at commands.ownerDisplay",
+            "",
+            false,
+        )));
+        assert!(!install_rejected_before_mutation(&output(
+            "OpenClaw config is invalid\nFile: /home/test/openclaw.json",
+            "partial output",
+            false,
+        )));
+        assert!(!install_rejected_before_mutation(&output(
+            "OpenClaw config is invalid\nFile: /home/test/openclaw.json\nProblem: invalid",
+            "",
+            true,
+        )));
+    }
+
+    #[test]
     fn uninstall_cmd_uses_force() {
         let _env = OpenClawBinEnvGuard::unset();
         let cmd = build_uninstall_cmd(
@@ -3881,6 +4309,8 @@ mod tests {
                     "openclaw_skill_cred-scan".to_string(),
                 ],
                 config_resources: vec!["openclaw_config_0".to_string()],
+                plugin_cleanup_required: true,
+                install_rejected_before_mutation: false,
             }),
         };
         let skills = claim_skill_resources(&claim);
@@ -3938,6 +4368,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: false,
+            no_accept_capabilities: false,
             dry_run: true,
             ops: &ops,
         };
@@ -4030,6 +4461,7 @@ mod tests {
             declared_bundle_entry: None,
             framework_version_req: None,
             allow_unsafe_plugin_install: allow_unsafe,
+            no_accept_capabilities: false,
             dry_run: false,
             ops: &ops,
         };
@@ -4060,6 +4492,8 @@ mod tests {
                 plugin_resource: RES_PLUGIN.to_string(),
                 skill_resources: Vec::new(),
                 config_resources: Vec::new(),
+                plugin_cleanup_required: true,
+                install_rejected_before_mutation: false,
             }),
         };
         let mut skill_claim = plugin_claim.clone();
@@ -4068,6 +4502,30 @@ mod tests {
 
         let driver = OpenClawDriver::new();
         let _env = OpenClawBinEnvGuard::unset();
+
+        // A public prepared value cannot override the operation's consent
+        // decision in either direction, even when both host commands support it.
+        for (ctx_withholds, prepared_withholds) in [(true, false), (false, true)] {
+            let mut ctx = mk_ctx(None, false);
+            ctx.no_accept_capabilities = ctx_withholds;
+            let err = driver
+                .apply_enable(
+                    &mut plugin_claim,
+                    &PreparedEnable::OpenClaw {
+                        no_accept_capabilities: prepared_withholds,
+                        supports_accept_capabilities: true,
+                        supports_enable_accept_capabilities: true,
+                        supports_unsafe_install: false,
+                        supports_inspect_json: true,
+                        supports_inspect_runtime: false,
+                        selected_config_indices: Vec::new(),
+                    },
+                    &ctx,
+                    &mut (),
+                )
+                .expect_err("mismatched consent must fail before any mutation");
+            assert!(err.to_string().contains("caller's decision"), "{err}");
+        }
 
         // Plugin adapter but no prepared capabilities → reject.
         assert!(matches!(
@@ -4085,6 +4543,7 @@ mod tests {
             driver.apply_enable(
                 &mut skill_claim,
                 &PreparedEnable::OpenClaw {
+                    no_accept_capabilities: false,
                     supports_accept_capabilities: false,
                     supports_enable_accept_capabilities: false,
                     supports_unsafe_install: true,
@@ -4103,6 +4562,7 @@ mod tests {
             driver.apply_enable(
                 &mut plugin_claim,
                 &PreparedEnable::OpenClaw {
+                    no_accept_capabilities: false,
                     supports_accept_capabilities: false,
                     supports_enable_accept_capabilities: false,
                     supports_unsafe_install: true,
@@ -4122,6 +4582,7 @@ mod tests {
             driver.apply_enable(
                 &mut plugin_claim,
                 &PreparedEnable::OpenClaw {
+                    no_accept_capabilities: false,
                     supports_accept_capabilities: false,
                     supports_enable_accept_capabilities: false,
                     supports_unsafe_install: false,

@@ -13,7 +13,114 @@ use agentsight::event::Event;
 use agentsight::genai::GenAIBuilder;
 use agentsight::genai::semantic::{GenAISemanticEvent, MessagePart};
 use agentsight::parser::Parser;
+use agentsight::pipeline_core::PipelineCore;
 use agentsight::response_map::ResponseSessionMapper;
+
+#[ctor::ctor]
+fn isolate_procfs() {
+    // Synthetic event PIDs must not inherit metadata from unrelated host processes.
+    let root = std::env::temp_dir().join(format!(
+        "agentsight-pipeline-procfs-{}",
+        uuid::Uuid::new_v4()
+    ));
+    assert!(agentsight::utils::procfs::set_proc_root(root));
+}
+
+#[test]
+fn configured_connection_capacity_preserves_concurrent_sse() {
+    for concurrency in [32, 64] {
+        let mut config = agentsight::config::AgentsightConfig::new();
+        config
+            .load_from_json(&format!(
+                r#"{{"runtime_limits":{{"connection_capacity":{concurrency}}}}}"#
+            ))
+            .unwrap();
+        let mut core = PipelineCore::new(&config, Analyzer::new());
+        let builder = GenAIBuilder::new();
+        let mapper = ResponseSessionMapper::new();
+        let cache = HashMap::new();
+        let mut events = Vec::new();
+        let mut feed = |index: usize, rw: i32, bytes: Vec<u8>| {
+            let ssl = common::make_ssl_event(
+                30_000 + index as u32,
+                0x90_0000 + index as u64,
+                rw,
+                bytes,
+                "python3",
+            );
+            for result in core.process_event(Event::Ssl(ssl)) {
+                let analyzed = core.analyze_for_owned_delivery(result, false);
+                events.extend(
+                    builder
+                        .build_with_pending(&analyzed, &mapper, &cache)
+                        .0
+                        .events,
+                );
+            }
+        };
+        for index in 0..concurrency {
+            feed(
+                index,
+                1,
+                common::make_openai_request_bytes("capacity-fixture", "benchmark", true),
+            );
+            feed(index, 0, common::make_openai_sse_response_headers());
+        }
+        let chunks: Vec<_> = (0..concurrency)
+            .map(|index| {
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({
+                        "id": format!("bench-capacity-{index}"),
+                        "model": "capacity-fixture",
+                        "choices": [{"index": 0, "delta": {"content": " x"}, "finish_reason": null}]
+                    })
+                )
+                .into_bytes()
+            })
+            .collect();
+        // Keep every response in flight until all 1,000 interleaved tokens arrive.
+        for _ in 0..1_000 {
+            for (index, chunk) in chunks.iter().enumerate() {
+                feed(index, 0, chunk.clone());
+            }
+        }
+        for index in 0..concurrency {
+            feed(
+                index,
+                0,
+                common::make_openai_sse_chunk(
+                    &format!("bench-capacity-{index}"),
+                    "capacity-fixture",
+                    "",
+                    12,
+                    1_000,
+                ),
+            );
+            feed(index, 0, common::make_sse_done());
+        }
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GenAISemanticEvent::LLMCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), concurrency);
+        let pids: std::collections::HashSet<_> = calls.iter().map(|call| call.pid).collect();
+        assert_eq!(pids.len(), concurrency);
+        for call in calls {
+            assert!(call.response.streamed);
+            assert_eq!(assistant_text(call), " x".repeat(1_000));
+            let usage = call
+                .token_usage
+                .as_ref()
+                .expect("every response includes usage");
+            assert_eq!(usage.input_tokens, 12);
+            assert_eq!(usage.output_tokens, 1_000);
+        }
+    }
+}
 
 #[test]
 fn native_event_clock_reaches_semantic_output() {
@@ -29,9 +136,7 @@ fn native_event_clock_reaches_semantic_output() {
     };
     // Allow the bounded clock-sampling bracket; a container-epoch shift is far larger.
     let start = wall_ns();
-    let parser = Parser::new();
-    let mut aggregator = Aggregator::new();
-    let analyzer = Analyzer::new();
+    let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
     let builder = GenAIBuilder::new();
     let mapper = ResponseSessionMapper::new();
     let cache = HashMap::new();
@@ -79,8 +184,8 @@ fn native_event_clock_reaches_semantic_output() {
         bytes[header_len..].copy_from_slice(&payload);
         let ssl = SslEvent::from_bytes(&bytes).expect("native clock must decode");
         assert!(ssl.timestamp_ns >= start.saturating_sub(5_000_000));
-        for aggregated in aggregator.process_result(parser.parse_event(Event::Ssl(ssl))) {
-            let analyzed = analyzer.analyze_aggregated(&aggregated);
+        for aggregated in core.process_event(Event::Ssl(ssl)) {
+            let analyzed = core.analyze_for_owned_delivery(aggregated, true);
             result.extend(
                 builder
                     .build_with_pending(&analyzed, &mapper, &cache)
@@ -105,9 +210,7 @@ fn native_event_clock_reaches_semantic_output() {
 
 /// Run a sequence of SslEvents through the full pipeline, return any GenAI events produced.
 fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISemanticEvent> {
-    let parser = Parser::new();
-    let mut aggregator = Aggregator::new();
-    let analyzer = Analyzer::new();
+    let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
     let builder = GenAIBuilder::new();
     let mapper = ResponseSessionMapper::new();
     let pid_cache: HashMap<u32, String> = HashMap::new();
@@ -118,11 +221,8 @@ fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISem
         let ssl_event = common::make_ssl_event(pid, ssl_ptr, rw, buf, comm);
         let event = Event::Ssl(ssl_event);
 
-        let parse_result = parser.parse_event(event);
-        let aggregated_results = aggregator.process_result(parse_result);
-
-        for agg_result in &aggregated_results {
-            let analysis_results = analyzer.analyze_aggregated(agg_result);
+        for agg_result in core.process_event(event) {
+            let analysis_results = core.analyze_for_owned_delivery(agg_result, true);
             let (output, _pending_info) =
                 builder.build_with_pending(&analysis_results, &mapper, &pid_cache);
 
@@ -136,16 +236,13 @@ fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISem
 /// Same as [`run_pipeline`] but stops at the analyzer, so tests can assert on
 /// the `TokenRecord` that lands in the token database.
 fn run_analysis(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<AnalysisResult> {
-    let parser = Parser::new();
-    let mut aggregator = Aggregator::new();
-    let analyzer = Analyzer::new();
+    let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
 
     let mut all = Vec::new();
     for (pid, ssl_ptr, rw, buf, comm) in ssl_events {
         let ssl_event = common::make_ssl_event(pid, ssl_ptr, rw, buf, comm);
-        let parse_result = parser.parse_event(Event::Ssl(ssl_event));
-        for agg_result in &aggregator.process_result(parse_result) {
-            all.extend(analyzer.analyze_aggregated(agg_result));
+        for agg_result in &core.process_event(Event::Ssl(ssl_event)) {
+            all.extend(core.analyze_aggregated(agg_result));
         }
     }
     all
@@ -218,6 +315,44 @@ fn test_openai_sse_pipeline() {
     assert_eq!(call.model, "gpt-4o");
     assert_eq!(call.pid, pid as i32);
     assert_eq!(call.process_name, comm);
+}
+
+#[test]
+fn openai_usage_split_across_tls_records_is_reassembled() {
+    let analysis = run_analysis(vec![
+        (
+            5002,
+            0xC000,
+            1,
+            common::make_openai_request_bytes("gpt-4o", "Say hello", true),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            common::make_openai_sse_response_headers(),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            br#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_to"#.to_vec(),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            b"kens\":3,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n".to_vec(),
+            "python3",
+        ),
+    ]);
+
+    let record = expect_token_record(&analysis);
+    assert_eq!(record.input_tokens, 3);
+    assert_eq!(record.output_tokens, 2);
 }
 
 #[test]
@@ -619,4 +754,188 @@ fn test_dashscope_native_multimodal_image_tokens_pipeline() {
         Some("qwen-vl-plus"),
         "native responses carry no model, so it must be backfilled from the request"
     );
+}
+
+fn collect_bom_stream(chunks: Vec<Vec<u8>>, inline: bool) -> agentsight::aggregator::HttpPair {
+    let parser = Parser::new();
+    let mut aggregator = Aggregator::new();
+    let mut reads = vec![common::make_anthropic_request_bytes("bom-fixture", "hello")];
+    let mut headers = common::make_openai_sse_response_headers();
+    let mut chunks = chunks.into_iter();
+    if inline {
+        headers.extend(chunks.next().expect("first body"));
+    }
+    reads.push(headers);
+    reads.extend(chunks);
+    let mut completed = Vec::new();
+    for (index, buf) in reads.into_iter().enumerate() {
+        let ssl = common::make_ssl_event(5301, 0xE201, i32::from(index == 0), buf, "claude");
+        completed.extend(aggregator.process_result(parser.parse_event(Event::Ssl(ssl))));
+    }
+    assert_eq!(completed.len(), 1, "stream must complete exactly once");
+    match completed.remove(0) {
+        agentsight::aggregator::AggregatedResult::SseComplete(pair) => pair,
+        other => panic!("expected completed SSE, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_sse_initial_bom_keeps_usage_across_reads() {
+    let start = r#"{"type":"message_start","message":{"id":"msg_bom_fixture","model":"bom-fixture","usage":{"input_tokens":120,"output_tokens":0,"cache_creation_input_tokens":30,"cache_read_input_tokens":40}}}"#;
+    let first = format!("data: {start}\n\n").into_bytes();
+    let delta =
+        b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":240}}\n\n".to_vec();
+    let stop = b"data: {\"type\":\"message_stop\"}\n\n".to_vec();
+    let bom = vec![0xef, 0xbb, 0xbf];
+    let mut marked = bom.clone();
+    marked.extend(&first);
+    let mut named = bom.clone();
+    named.extend(format!("event: message_start\ndata: {start}\n\n").as_bytes());
+    let cases = vec![
+        ("plain", vec![first.clone()], false),
+        ("named", vec![named], false),
+        ("first-data", vec![marked.clone()], false),
+        ("inline", vec![marked], true),
+        (
+            "split-bom",
+            vec![vec![0xef], vec![0xbb], [vec![0xbf], first.clone()].concat()],
+            false,
+        ),
+        (
+            "split-field",
+            vec![[bom.clone(), b"da".to_vec()].concat(), first[2..].to_vec()],
+            true,
+        ),
+    ];
+    for (name, mut chunks, inline) in cases {
+        chunks.extend([delta.clone(), stop.clone()]);
+        let pair = collect_bom_stream(chunks, inline);
+        assert_eq!(pair.response.sse_events[0].body_str(), start, "{name}");
+        let analysis = Analyzer::new()
+            .analyze_aggregated(&agentsight::aggregator::AggregatedResult::SseComplete(pair));
+        let record = expect_token_record(&analysis);
+        assert_eq!(record.input_tokens, 120, "{name}");
+        assert_eq!(record.output_tokens, 240, "{name}");
+        assert_eq!(record.cache_creation_tokens, Some(30), "{name}");
+        assert_eq!(record.cache_read_tokens, Some(40), "{name}");
+        assert_eq!(record.total_tokens(), 430, "{name}");
+        let (semantic, _) = GenAIBuilder::new().build_with_pending(
+            &analysis,
+            &ResponseSessionMapper::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            expect_llm_call(&semantic.events)
+                .token_usage
+                .as_ref()
+                .unwrap()
+                .total_tokens,
+            430,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn test_sse_bom_prefix_keeps_identical_later_events() {
+    let first =
+        b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n"
+            .to_vec();
+    let pair = collect_bom_stream(
+        vec![
+            [vec![0xef, 0xbb, 0xbf], first.clone(), first].concat(),
+            common::make_sse_done(),
+        ],
+        false,
+    );
+    assert_eq!(pair.response.sse_events.len(), 3);
+    assert_eq!(
+        pair.response.sse_events[0].data(),
+        pair.response.sse_events[1].data()
+    );
+    assert!(pair.response.sse_events[2].is_done());
+}
+
+#[test]
+fn test_sse_fragmented_bom_done_completes_from_raw_data() {
+    let pair = collect_bom_stream(
+        vec![vec![0xef], vec![0xbb], b"\xbfdata: [DONE]\n\n".to_vec()],
+        false,
+    );
+    assert_eq!(pair.response.sse_events.len(), 1);
+    assert!(pair.response.sse_events[0].is_done());
+}
+
+#[test]
+fn test_compressed_sse_initial_bom() {
+    use std::io::Write;
+    let payload = b"\xef\xbb\xbfdata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\ndata: {\"type\":\"message_stop\"}\n\n";
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(payload).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    response.extend(format!("{:x}\r\n", compressed.len()).as_bytes());
+    response.extend(compressed);
+    response.extend(b"\r\n0\r\n\r\n");
+    let analysis = run_analysis(vec![
+        (
+            5302,
+            0xE202,
+            1,
+            common::make_anthropic_request_bytes("bom-fixture", "hello"),
+            "claude",
+        ),
+        (5302, 0xE202, 0, response, "claude"),
+    ]);
+    assert_eq!(expect_token_record(&analysis).input_tokens, 7);
+}
+#[test]
+fn test_sse_line_endings_keep_anthropic_billed_usage() {
+    for ending in ["\n", "\r\n", "\r"] {
+        let request = common::make_anthropic_request_bytes("claude-test", "hello");
+        let start = r#"{"type":"message_start","message":{"id":"msg_line_endings","model":"claude-test","usage":{"input_tokens":120,"output_tokens":0,"cache_creation_input_tokens":30,"cache_read_input_tokens":40}}}"#;
+        let delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":240}}"#;
+        let chunks = vec![
+            (5300, 0xE200, 1, request, "claude"),
+            (
+                5300,
+                0xE200,
+                0,
+                common::make_openai_sse_response_headers(),
+                "claude",
+            ),
+            (
+                5300,
+                0xE200,
+                0,
+                format!("event: message_start{ending}data: {start}{ending}{ending}").into_bytes(),
+                "claude",
+            ),
+            (
+                5300,
+                0xE200,
+                0,
+                format!("event: message_delta{ending}data: {delta}{ending}{ending}").into_bytes(),
+                "claude",
+            ),
+            (
+                5300,
+                0xE200,
+                0,
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec(),
+                "claude",
+            ),
+        ];
+        let analysis = run_analysis(chunks.clone());
+        let record = expect_token_record(&analysis);
+        assert_eq!(record.input_tokens, 120, "{ending:?}");
+        assert_eq!(record.output_tokens, 240, "{ending:?}");
+        assert_eq!(record.cache_creation_tokens, Some(30), "{ending:?}");
+        assert_eq!(record.cache_read_tokens, Some(40), "{ending:?}");
+        assert_eq!(record.total_tokens(), 430, "{ending:?}");
+        let semantic = run_pipeline(chunks);
+        let call = expect_llm_call(&semantic);
+        let usage = call.token_usage.as_ref().expect("billed usage");
+        assert_eq!(usage.total_tokens, 430, "{ending:?}");
+    }
 }

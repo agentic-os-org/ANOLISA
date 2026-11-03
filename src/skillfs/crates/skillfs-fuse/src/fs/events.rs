@@ -36,10 +36,18 @@ impl SkillFs {
             if matcher.is_staging_root(skill_name) {
                 return;
             }
-            // H3: Hermes nested ID — check the leaf component.
-            if let Some(leaf) = skill_name.split('/').next_back() {
-                if leaf != skill_name && matcher.is_staging_root(leaf) {
-                    return;
+            // H3: Hermes nested ID — both components name a top-level
+            // directory of the workspace, so both are checked against the
+            // staging patterns. A PrefixStar pattern matches the whole ID
+            // through its category prefix, but an Exact pattern
+            // (".pip-staging" is a documented example) matches only the
+            // category; checking nothing but the leaf let a nested skill
+            // staged inside it flow into the refresh/notify machinery.
+            if skill_name.contains('/') {
+                for component in skill_name.split('/') {
+                    if matcher.is_staging_root(component) {
+                        return;
+                    }
                 }
             }
         }
@@ -153,6 +161,11 @@ impl SkillFs {
             PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
                 (Some(skill_name.clone()), None)
             }
+            // A Hermes category slot is attributed to the category
+            // itself — without this arm a rejected category-slot
+            // operation would log an anonymous event with no object
+            // to locate it by.
+            PathType::CategoryDir { category } => (Some(category.clone()), None),
             PathType::NestedSkillDir {
                 category,
                 skill_name,

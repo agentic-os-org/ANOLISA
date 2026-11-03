@@ -17,6 +17,8 @@ pub struct AggregatedResponse {
     pub completion_timestamp_ns: Option<u64>,
     /// SSE events collected during streaming (if is_sse is true)
     pub sse_events: Vec<ParsedSseEvent>,
+    /// Original event count before delta reduction.
+    pub captured_sse_event_count: Option<usize>,
     /// Raw bytes that arrived as RawData while in SseActive state. These are
     /// continuation chunks of an oversized SSE event (e.g. OpenAI Responses
     /// API's `response.completed` echoing the full system prompt + tools)
@@ -32,6 +34,7 @@ impl AggregatedResponse {
             parsed,
             completion_timestamp_ns: None,
             sse_events: Vec::new(),
+            captured_sse_event_count: None,
             sse_continuation_bytes: None,
         }
     }
@@ -77,10 +80,12 @@ impl AggregatedResponse {
     /// Get end timestamp (last packet) in nanoseconds
     /// Uses the final body fragment for non-SSE responses.
     pub fn end_timestamp_ns(&self) -> u64 {
-        self.sse_events
-            .last()
-            .map(|e| e.source_event().timestamp_ns)
-            .or(self.completion_timestamp_ns)
+        self.completion_timestamp_ns
+            .or_else(|| {
+                self.sse_events
+                    .last()
+                    .map(|e| e.source_event().timestamp_ns)
+            })
             .unwrap_or_else(|| self.start_timestamp_ns())
     }
 
@@ -93,7 +98,7 @@ impl AggregatedResponse {
     pub fn first_output_timestamp_ns(&self) -> Option<u64> {
         self.sse_events
             .iter()
-            .find(|event| event_has_meaningful_output(event.json_body().as_ref()))
+            .find(|event| event.with_json(event_has_meaningful_output))
             .map(|event| event.source_event().timestamp_ns)
     }
 
@@ -130,7 +135,8 @@ impl AggregatedResponse {
 
     /// Get SSE event count
     pub fn sse_event_count(&self) -> usize {
-        self.sse_events.len()
+        self.captured_sse_event_count
+            .unwrap_or(self.sse_events.len())
     }
 
     /// Add SSE event
@@ -153,6 +159,31 @@ impl AggregatedResponse {
     }
 }
 
+/// Output-item types the Responses protocol uses for a tool call.
+///
+/// `function_call` and `custom_tool_call` carry their name in `name`; a Codex
+/// `local_shell_call` keeps its argv in an `action` object and names the tool
+/// implicitly, the shape the message parser folds into a `shell` call. The
+/// first-output scan used to know only the first two spellings, so a turn whose
+/// first output was a shell call kept its TTFT empty.
+fn response_item_carries_a_call(item: &serde_json::Value) -> bool {
+    matches!(
+        item.get("type").and_then(serde_json::Value::as_str),
+        Some("function_call" | "custom_tool_call" | "local_shell_call")
+    )
+}
+
+/// Content-block types the Anthropic wire format uses for a tool call.
+///
+/// `tool_use` is the classic spelling; `server_tool_use` and `mcp_tool_use` are
+/// the same call made by a tool the provider runs on its side (web search, code
+/// execution, the MCP connector). They carry the identical `id` / `name` /
+/// `input` payload — the message parser reads all three as one block type (see
+/// `AnthropicContentBlock`) — so the first-output scan must recognise them too.
+fn is_anthropic_call_block(block_type: &str) -> bool {
+    matches!(block_type, "tool_use" | "server_tool_use" | "mcp_tool_use")
+}
+
 fn non_empty_string(value: Option<&serde_json::Value>) -> bool {
     value
         .and_then(serde_json::Value::as_str)
@@ -169,7 +200,9 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
             "response.output_text.delta"
             | "response.reasoning_text.delta"
             | "response.reasoning_summary_text.delta"
-            | "response.function_call_arguments.delta" => {
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
+            | "response.refusal.delta" => {
                 return non_empty_string(value.get("delta"));
             }
             "content_block_delta" => {
@@ -182,18 +215,98 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                 let block = value.get("content_block");
                 return non_empty_string(block.and_then(|item| item.get("text")))
                     || non_empty_string(block.and_then(|item| item.get("thinking")))
-                    || (block.and_then(|item| item.get("type"))
-                        == Some(&serde_json::Value::String("tool_use".to_string()))
+                    || (block
+                        .and_then(|item| item.get("type"))
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_anthropic_call_block)
                         && non_empty_string(block.and_then(|item| item.get("name"))));
             }
             "response.output_item.added" => {
                 let item = value.get("item");
-                return item.and_then(|item| item.get("type"))
-                    == Some(&serde_json::Value::String("function_call".to_string()))
-                    && non_empty_string(item.and_then(|item| item.get("name")));
+                let Some(item) = item else { return false };
+                return response_item_carries_a_call(item)
+                    && (non_empty_string(item.get("name"))
+                        // A Codex `local_shell_call` names its tool implicitly;
+                        // the argv in `action` is what says it is a call.
+                        || item.get("action").is_some_and(|action| !action.is_null()));
             }
             _ => {}
         }
+    }
+
+    // DashScope/Bailian native envelope: the payload is nested under `output`
+    // (`output.text`, or `output.choices[].message` carrying content, reasoning
+    // or whole tool calls), so the top-level `choices` walk below never sees
+    // it. Native streams are parsed and stored like any other protocol, so
+    // without this branch their first-output timestamp stayed empty.
+    if let Some(output) = value.get("output").filter(|o| o.is_object()) {
+        if non_empty_string(output.get("text")) {
+            return true;
+        }
+        if let Some(choices) = output.get("choices").and_then(serde_json::Value::as_array) {
+            return choices.iter().any(|choice| {
+                let Some(message) = choice.get("message") else {
+                    return false;
+                };
+                let has_content = message.get("content").is_some_and(|content| {
+                    non_empty_string(Some(content))
+                        || content.as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|b| non_empty_string(b.get("text")))
+                        })
+                });
+                has_content
+                    || non_empty_string(message.get("reasoning_content"))
+                    || message
+                        .get("tool_calls")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                let function = call.get("function");
+                                non_empty_string(function.and_then(|f| f.get("name")))
+                                    || non_empty_string(function.and_then(|f| f.get("arguments")))
+                            })
+                        })
+            });
+        }
+    }
+
+    // Gemini streamGenerateContent: the payload rides under
+    // `candidates[].content.parts[]` — text as `{"text": ...}` parts, tool
+    // calls as `{"functionCall": {"name": ...}}` parts — and usage under
+    // `usageMetadata`. None of the shapes above match it, so a Gemini
+    // stream's first answer token never dated the stream and its TTFT
+    // stayed empty.
+    if let Some(candidates) = value
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+    {
+        return candidates.iter().any(|candidate| {
+            let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                return false;
+            };
+            parts.iter().any(|part| {
+                non_empty_string(part.get("text"))
+                    || part
+                        .get("functionCall")
+                        .is_some_and(|call| non_empty_string(call.get("name")))
+                    // Gemini image generation streams the answer as inline
+                    // image parts (`inlineData.data`) and code execution
+                    // streams the model-authored code as `executableCode.code`
+                    // — both are the first content-bearing output of the
+                    // answer. `codeExecutionResult` is sandbox tool output,
+                    // not model output, and stays non-dating.
+                    || part
+                        .get("inlineData")
+                        .is_some_and(|data| non_empty_string(data.get("data")))
+                    || part
+                        .get("executableCode")
+                        .is_some_and(|code| non_empty_string(code.get("code")))
+            })
+        });
     }
 
     value
@@ -202,11 +315,30 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
         .is_some_and(|choices| {
             choices.iter().any(|choice| {
                 let delta = choice.get("delta");
+                // SysOM/Bailian Copilot streams accumulated `choices[].message`
+                // chunks instead of `choices[].delta`, so its first answer
+                // token never dated the stream and the call had no TTFT.
+                let message = choice.get("message");
                 non_empty_string(choice.get("text"))
+                    || non_empty_string(message.and_then(|item| item.get("content")))
+                    || non_empty_string(message.and_then(|item| item.get("reasoning_content")))
                     || non_empty_string(delta.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
+                    || non_empty_string(delta.and_then(|item| item.get("refusal")))
                     || delta
                         .and_then(|item| item.get("tool_calls"))
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                let function = call.get("function");
+                                non_empty_string(function.and_then(|item| item.get("name")))
+                                    || non_empty_string(
+                                        function.and_then(|item| item.get("arguments")),
+                                    )
+                            })
+                        })
+                    || message
+                        .and_then(|item| item.get("tool_use"))
                         .and_then(serde_json::Value::as_array)
                         .is_some_and(|calls| {
                             calls.iter().any(|call| {
@@ -282,9 +414,12 @@ impl ToChromeTraceEvent for AggregatedResponse {
         let ts_us = ns_to_us(self.start_timestamp_ns());
         let dur_us = ns_to_us(self.duration_ns());
 
-        // Minimum duration: 10ms = 10,000 microseconds
-        const MIN_DUR_US: u64 = 10_000;
-        let dur_us = dur_us.max(MIN_DUR_US);
+        // Duration floor so short responses stay visible in trace viewers.
+        // This is the configured `min_duration_us` knob (published process-wide
+        // by `AgentSight::new`); the previous hard-coded 10 000 was a frozen
+        // copy of the knob's default. Real durations longer than the floor are
+        // emitted unchanged — the floor lifts, it never truncates.
+        let dur_us = dur_us.max(crate::config::min_duration_us());
 
         let event = ChromeTraceEvent::complete(
             format!("{} {}", self.parsed.status_code, self.parsed.reason),
@@ -350,6 +485,7 @@ mod latency_tests {
                 source_event: ssl_event("", 10),
             },
             sse_events,
+            captured_sse_event_count: None,
             sse_continuation_bytes: None,
         }
     }
@@ -362,9 +498,52 @@ mod latency_tests {
             "type": "response.output_text.delta",
             "delta": "hello"
         });
+        let refusal = serde_json::json!({
+            "type": "response.refusal.delta",
+            "delta": "I can't help with that."
+        });
         assert!(!event_has_meaningful_output(Some(&created)));
         assert!(!event_has_meaningful_output(Some(&empty)));
         assert!(event_has_meaningful_output(Some(&output)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
+    }
+
+    /// A custom tool call announces itself as `custom_tool_call` and streams
+    /// its payload on `response.custom_tool_call_input.delta`. Both were
+    /// missing from the meaningful-output check, which only knew the
+    /// `function_call` spellings, so a turn whose first output was a custom
+    /// tool call kept the first-output timestamp empty even though the same
+    /// turn with a function call recorded one.
+    #[test]
+    fn recognizes_a_custom_tool_call_as_output() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "custom_tool_call", "name": "apply_patch", "input": ""}
+        });
+        let delta = serde_json::json!({
+            "type": "response.custom_tool_call_input.delta",
+            "delta": "*** Begin Patch"
+        });
+        let empty_delta = serde_json::json!({
+            "type": "response.custom_tool_call_input.delta",
+            "delta": ""
+        });
+        assert!(
+            event_has_meaningful_output(Some(&added)),
+            "an announced custom tool call is output like an announced function call"
+        );
+        assert!(
+            event_has_meaningful_output(Some(&delta)),
+            "a custom tool input delta is output like a function argument delta"
+        );
+        assert!(!event_has_meaningful_output(Some(&empty_delta)));
+
+        // The function-call spellings keep working.
+        let function_added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "name": "read_file"}
+        });
+        assert!(event_has_meaningful_output(Some(&function_added)));
     }
 
     #[test]
@@ -376,8 +555,205 @@ mod latency_tests {
         let chat = serde_json::json!({
             "choices": [{"delta": {"content": "hello"}}]
         });
+        // A refusal-only stream still carries the model's answer, so its first
+        // delta is a first-output timestamp like any other.
+        let refusal = serde_json::json!({
+            "choices": [{"delta": {"refusal": "I can't help with that."}}]
+        });
         assert!(event_has_meaningful_output(Some(&anthropic)));
         assert!(event_has_meaningful_output(Some(&chat)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
+    }
+
+    /// Anthropic runs some tools on its own side: the model calls
+    /// `server_tool_use` (web search, code execution, the MCP connector) and
+    /// the provider answers with `web_search_tool_result` and friends. The
+    /// blocks carry the identical `id` / `name` / `input` payload as a
+    /// `tool_use` block, and the message parser reads all three as one block
+    /// type, but the first-output scan compared the type against the literal
+    /// `"tool_use"` only. A stream whose first output is a server-side call
+    /// therefore kept its first-output timestamp empty, so its TTFT was
+    /// missing from the latency stats while the same turn with a classic tool
+    /// call recorded one.
+    #[test]
+    fn recognizes_a_server_tool_call_as_output() {
+        let server_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "server_tool_use", "id": "srvtoolu_1",
+                              "name": "web_search", "input": {}}
+        });
+        let mcp_tool = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "mcp_tool_use", "id": "mcptoolu_1",
+                              "name": "list_issues", "input": {}}
+        });
+        let classic = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_1",
+                              "name": "read_file", "input": {}}
+        });
+        // A block that opens without a name carries no call yet.
+        let unnamed = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "server_tool_use", "id": "srvtoolu_2",
+                              "name": "", "input": {}}
+        });
+
+        assert!(event_has_meaningful_output(Some(&classic)));
+        assert!(
+            event_has_meaningful_output(Some(&server_tool)),
+            "a server_tool_use call is output like a tool_use call"
+        );
+        assert!(
+            event_has_meaningful_output(Some(&mcp_tool)),
+            "an mcp_tool_use call is output like a tool_use call"
+        );
+        assert!(!event_has_meaningful_output(Some(&unnamed)));
+    }
+
+    /// A Codex `local_shell_call` announces itself as an output item that
+    /// names its tool implicitly: the type says "shell", the argv rides in an
+    /// `action` object, and there is no `name` field to read. The message
+    /// parser already folds that item into a `shell` tool call, but the
+    /// first-output scan matched the type against `function_call` /
+    /// `custom_tool_call` and required a non-empty `name`, so a turn whose
+    /// first output was a shell call kept TTFT empty.
+    #[test]
+    fn recognizes_a_codex_shell_call_as_output() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "local_shell_call", "id": "lsc_1", "call_id": "call_ls",
+                     "action": {"type": "exec", "command": ["ls", "-l"]}}
+        });
+        // The same item with no argv yet carries no call.
+        let empty = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "local_shell_call", "id": "lsc_2", "call_id": "call_ls2"}
+        });
+        // The classic spellings keep their behavior.
+        let function_added = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "name": "read_file"}
+        });
+        let unnamed_function = serde_json::json!({
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "call_id": "call_x"}
+        });
+
+        assert!(event_has_meaningful_output(Some(&function_added)));
+        assert!(!event_has_meaningful_output(Some(&unnamed_function)));
+        assert!(
+            event_has_meaningful_output(Some(&added)),
+            "a Codex shell call is output like a function call"
+        );
+        assert!(!event_has_meaningful_output(Some(&empty)));
+    }
+
+    /// The DashScope/Bailian native envelope nests its payload under `output`
+    /// (`output.text` or `output.choices[].message`), so the top-level
+    /// `choices` walk never saw it: a native stream produced no first-output
+    /// timestamp, and its TTFT was missing from the latency stats.
+    #[test]
+    fn recognizes_dashscope_native_output() {
+        let content = serde_json::json!({
+            "output": {"choices": [{"finish_reason": "null",
+                                    "message": {"role": "assistant", "content": "你"}}]},
+            "usage": {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}
+        });
+        let text_format = serde_json::json!({
+            "output": {"finish_reason": "null", "text": "1, 2"}
+        });
+        let tool_call = serde_json::json!({
+            "output": {"choices": [{"finish_reason": "null",
+                                    "message": {"content": "",
+                                                "tool_calls": [{"index": 0, "id": "call_1",
+                                                                "type": "function",
+                                                                "function": {"name": "get_weather",
+                                                                             "arguments": ""}}]}}]}
+        });
+        let usage_only = serde_json::json!({"output": {"finish_reason": "null", "text": ""}});
+
+        assert!(event_has_meaningful_output(Some(&content)));
+        assert!(event_has_meaningful_output(Some(&text_format)));
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+        assert!(!event_has_meaningful_output(Some(&usage_only)));
+    }
+
+    #[test]
+    fn recognizes_sysom_cumulative_message_output() {
+        // The SysOM/Copilot endpoint streams `choices[].message` chunks whose
+        // content grows as the answer is produced; it never sends `delta`.
+        let chunk = serde_json::json!({
+            "choices": [{"message": {"content": "Hel", "tool_use": null}}]
+        });
+        assert!(event_has_meaningful_output(Some(&chunk)));
+
+        // A chunk that only opens the turn carries no output yet.
+        let opening = serde_json::json!({
+            "choices": [{"message": {"content": "", "tool_use": null}}]
+        });
+        assert!(!event_has_meaningful_output(Some(&opening)));
+
+        // A tool-only turn counts once the call arrives.
+        let tool_call = serde_json::json!({
+            "choices": [{"message": {"content": "", "tool_use": [
+                {"index": 0, "id": "c1", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a\"}"}}]}}]
+        });
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+    }
+
+    #[test]
+    fn sysom_stream_dates_its_first_message_chunk() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","tool_use":null}}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello","tool_use":null}}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello there!","tool_use":null}}]}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    /// A stream that thinks before it answers puts reasoning on the same
+    /// accumulated `choices[].message` shape it uses for content (the shape the
+    /// comment above the `choices` walk names for SysOM/Bailian Copilot), so a
+    /// reasoning-only frame is that stream's first output. The `delta` arm
+    /// dates `delta.reasoning_content` and the DashScope-native arm dates
+    /// `output.choices[].message.reasoning_content`, but the accumulated
+    /// message arm checked only `content`/`tool_use`: a thinking-first answer
+    /// kept the TTFT empty until its first content chunk, dating the stream
+    /// later than the model's first token.
+    #[test]
+    fn sysom_stream_dates_a_reasoning_only_message_chunk() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","reasoning_content":"","tool_use":null}}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","reasoning_content":"Let me check","tool_use":null}}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello there!","reasoning_content":"Let me check","tool_use":null}}]}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
     }
 
     #[test]
@@ -418,5 +794,231 @@ mod latency_tests {
         ]);
 
         assert_eq!(response.first_output_timestamp_ns(), None);
+    }
+
+    /// `AgentsightConfig::min_duration_us` must govern the duration floor of
+    /// the HTTP/1 Chrome trace events. All three exporters (`ParsedRequest`,
+    /// `ParsedResponse`, `AggregatedResponse`) used to freeze the knob's
+    /// default (10 000 µs) in private constants, so a configured value never
+    /// reached them. All floor mutations happen inside this single test so the
+    /// process-wide global cannot race a parallel test.
+    #[test]
+    fn min_duration_floor_is_configurable_for_http_trace_events() {
+        use crate::chrome_trace::ToChromeTraceEvent;
+        use crate::parser::http::ParsedRequest;
+
+        let saved = crate::config::min_duration_us();
+
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 1,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: ssl_event("", 1_000),
+            reassembled_body: None,
+        };
+        let parsed_response = ParsedResponse {
+            version: 1,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: ssl_event("", 1_000),
+        };
+        // `response_with_sse_events` starts at timestamp 10 ns; a completion
+        // timestamp of 10 + 5 ms gives a 5 ms real duration, below every floor
+        // used here, and 10 + 100 ms gives one above them.
+        let mut short = response_with_sse_events(vec![]);
+        short.completion_timestamp_ns = Some(10 + 5_000_000);
+        let mut long = response_with_sse_events(vec![]);
+        long.completion_timestamp_ns = Some(10 + 100_000_000);
+
+        // A configured floor (42 ms) reaches all three exporters.
+        crate::config::set_min_duration_us(42_000);
+        assert_eq!(request.to_chrome_trace_events()[0].dur, Some(42_000));
+        assert_eq!(
+            parsed_response.to_chrome_trace_events()[0].dur,
+            Some(42_000)
+        );
+        assert_eq!(
+            short.to_chrome_trace_events()[0].dur,
+            Some(42_000),
+            "a 5 ms real duration must be lifted to the configured floor"
+        );
+        // The floor lifts but never truncates: a real 100 ms duration is
+        // emitted unchanged.
+        assert_eq!(long.to_chrome_trace_events()[0].dur, Some(100_000));
+
+        // A zero config is clamped to 1 µs instead of an invisible
+        // zero-duration complete event.
+        crate::config::set_min_duration_us(0);
+        assert_eq!(request.to_chrome_trace_events()[0].dur, Some(1));
+
+        crate::config::set_min_duration_us(saved);
+    }
+
+    /// Gemini streamGenerateContent streams its answer as
+    /// `candidates[].content.parts[]` — text as `{"text": ...}` parts, tool
+    /// calls as `{"functionCall": ...}` parts — so none of the shapes above
+    /// matched it: the stream never dated its first output and its TTFT
+    /// stayed empty.
+    #[test]
+    fn recognizes_gemini_candidates_output() {
+        let text = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": "Hel"}], "role": "model"},
+                            "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let tool_call = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "X"}}}],
+                "role": "model"}}]
+        });
+        let usage_only = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": ""}], "role": "model"},
+                            "finishReason": "STOP", "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}
+        });
+        let image_part = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                "role": "model"}, "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let code_part = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                "role": "model"}, "index": 0}]
+        });
+        let empty_inline_data = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": ""}}],
+                "role": "model"}, "index": 0}]
+        });
+        let empty_executable_code = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": ""}}],
+                "role": "model"}, "index": 0}]
+        });
+        let code_execution_result = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                "role": "model"}, "index": 0}]
+        });
+
+        assert!(event_has_meaningful_output(Some(&text)));
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+        assert!(!event_has_meaningful_output(Some(&usage_only)));
+        // Image and model-authored code parts are incremental answer output.
+        assert!(event_has_meaningful_output(Some(&image_part)));
+        assert!(event_has_meaningful_output(Some(&code_part)));
+        // Empty payloads and sandbox tool results stay non-meaningful.
+        assert!(!event_has_meaningful_output(Some(&empty_inline_data)));
+        assert!(!event_has_meaningful_output(Some(&empty_executable_code)));
+        assert!(!event_has_meaningful_output(Some(&code_execution_result)));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_text_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}],"role":"model"},"index":0}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},"index":0}],
+                    "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    /// Gemini image generation streams its answer as `inlineData` parts and
+    /// code execution as `executableCode` parts — neither carries `text`, so
+    /// the candidates arm above never dated them and those calls had no TTFT.
+    #[test]
+    fn recognizes_gemini_multimodal_output_parts() {
+        let image = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                "role": "model"}, "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10}
+        });
+        let code = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                "role": "model"}, "index": 0}]
+        });
+        let empty_image = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": ""}}],
+                "role": "model"}, "finishReason": "STOP", "index": 0}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}
+        });
+        // The sandbox's execution result is not model output: it follows the
+        // model-authored executableCode part, so it must not date the stream
+        // on its own.
+        let execution_result = serde_json::json!({
+            "candidates": [{"content": {"parts": [
+                {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                "role": "model"}, "index": 0}]
+        });
+
+        assert!(event_has_meaningful_output(Some(&image)));
+        assert!(event_has_meaningful_output(Some(&code)));
+        assert!(!event_has_meaningful_output(Some(&empty_image)));
+        assert!(!event_has_meaningful_output(Some(&execution_result)));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_image_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}],
+                    "role": "model"},"index":0}]}"#,
+                200,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    #[test]
+    fn gemini_stream_dates_its_first_code_part() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0}],
+                    "usageMetadata": {"promptTokenCount": 10}}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"executableCode": {"language": "PYTHON", "code": "print(1)"}}],
+                    "role": "model"},"index":0}]}"#,
+                250,
+            ),
+            sse_event(
+                r#"{"candidates":[{"content":{"parts":[
+                    {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}],
+                    "role": "model"},"index":0}]}"#,
+                400,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(250));
     }
 }

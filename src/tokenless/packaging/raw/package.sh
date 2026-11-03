@@ -41,8 +41,7 @@ normalize_arch() {
 
 validate_target() {
     case "$TARGET_OS-$TARGET_ARCH" in
-        linux-x86_64 | linux-aarch64 | macos-aarch64) ;;
-        macos-x86_64) die "Tokenless raw packages do not support macOS x86_64" ;;
+        linux-x86_64 | linux-aarch64 | macos-aarch64 | macos-x86_64) ;;
         *) die "unsupported Tokenless raw target: $TARGET_OS-$TARGET_ARCH" ;;
     esac
 }
@@ -95,6 +94,17 @@ stage_payload() {
         dsh/dist/index.js \
         hermes/plugin.yaml \
         qoder/.qoder-plugin/plugin.json \
+        qwenwork/.qoder-plugin/plugin.json \
+        qwenwork/hooks/hooks.json \
+        qwenwork/hooks/run-hook.sh \
+        qwenwork/hooks/shared/hook_utils.py \
+        qwenwork/hooks/shared/rewrite_hook.py \
+        qwenwork/hooks/shared/compress_response_hook.py \
+        qwenwork/hooks/shared/tool_categories.json \
+        qwenwork/scripts/detect.sh \
+        qwenwork/scripts/install.sh \
+        qwenwork/scripts/uninstall.sh \
+        qwenwork/scripts/lifecycle.py \
         claude-code/.claude-plugin/marketplace.json \
         claude-code/.claude-plugin/plugin.json \
         claude-code/hooks/run-hook.sh \
@@ -125,34 +135,29 @@ stage_payload() {
     install -p -m 0755 "$BIN_DIR/tokenless" "$stage/bin/tokenless"
     install -p -m 0755 "$BIN_DIR/rtk" \
         "$stage/libexec/anolisa/tokenless/"
-    cp -a "$adapters"/. "$stage/adapters"/
-
-    # A checkout upgraded from the former adapter layout can retain formerly
-    # ignored AgentScope build artifacts. They are not part of this payload.
-    rm -rf "$stage/adapters/agentscope"
+    tokenless_copy_adapters "$adapters" "$stage/adapters" raw
 
     # ANOLISA intentionally ignores archive symlinks. The source tree shares
     # these dispatchers by symlink, so raw packages must carry regular files.
     materialize_hook "$stage" "claude-code/hooks/run-hook.sh"
     materialize_hook "$stage" "qwencode/hooks/run-hook.sh"
 
-    install -p -m 0644 \
-        "$adapters/common/cosh-extension.json" \
-        "$adapters/common/tool-ready-spec.json" \
-        "$stage/extensions/tokenless/"
-    install -p -m 0755 "$adapters/common/tokenless-env-fix.sh" \
-        "$stage/extensions/tokenless/"
-    cp -a "$adapters/common/hooks"/. "$stage/extensions/tokenless/hooks"/
-    cp -a "$adapters/common/commands"/. "$stage/extensions/tokenless/commands"/
+    # A native desktop sideload must remain self-contained outside the FHS tree.
+    rm -rf "$stage/adapters/qwenwork/hooks/shared"
+    python3 - "$stage/adapters" <<'PY'
+import shutil
+import sys
+from pathlib import Path
 
-    # Match the installed adapter payload and exclude build-only inputs.
-    rm -rf "$stage/adapters/openclaw/node_modules"
-    rm -f \
-        "$stage/adapters/openclaw/package-lock.json" \
-        "$stage/adapters/openclaw/index.ts" \
-        "$stage/adapters/openclaw/tsconfig.json"
-    find "$stage/adapters" "$stage/extensions/tokenless" \
-        \( -name '*.in' -o -name '.gitignore' \) -delete
+adapters = Path(sys.argv[1])
+shutil.copytree(
+    adapters / "common/hooks",
+    adapters / "qwenwork/hooks/shared",
+    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+)
+PY
+
+    tokenless_copy_extension "$adapters" "$stage/extensions/tokenless" raw
     normalize_modes "$stage"
 
     if [ -n "$(find "$stage" -type l -print -quit)" ]; then
@@ -175,9 +180,13 @@ COMMAND="${1:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/../payload.sh"
 SOURCE_ROOT="${TOKENLESS_SOURCE_DIR:-$DEFAULT_ROOT}"
+# Existing raw manifests describe the ANOLISA profile, not arbitrary layouts.
+AWPRJ="${AWPRJ-anolisa}"
+[ "$AWPRJ" = anolisa ] || die 'raw packages require AWPRJ=anolisa; use make install for independent file installation'
 BIN_DIR="${BIN_DIR:-}"
-CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/.anolisa/component.toml}"
+CONTRACT="${RAW_CONTRACT:-$SOURCE_ROOT/target/packaging/anolisa/component.toml}"
 TARGET_OS="$(normalize_os "${TARGET_OS:-$(detect_os)}")"
 TARGET_ARCH="$(normalize_arch "${TARGET_ARCH:-$(detect_arch)}")"
 

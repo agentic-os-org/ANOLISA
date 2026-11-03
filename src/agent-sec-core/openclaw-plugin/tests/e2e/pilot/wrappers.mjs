@@ -273,13 +273,13 @@ function writeCallLog(entry) {
 
 const invocation = parseInvocation(args);
 
-// prompt-scan pipes the prompt via stdin (callAgentSecCli opts.stdin), not via
-// a --text argv. Read stdin once so override matching sees the prompt and the
-// forwarding branch can relay it to the real CLI. Backward compat: subcommands
-// that still use --text/--code argv (scan-code) or the --stdin flag (scan-pii)
-// are unaffected.
+// Capture synthetic prompt/PII input once for the evidence log and forward the
+// identical bytes to the real CLI. Only scan-prompt has marker-based overrides.
 let stdinBuffer;
-if (invocation.subcommand === "scan-prompt" && invocation.input === undefined) {
+if (invocation.input === undefined && (
+  invocation.subcommand === "scan-prompt" ||
+  (invocation.subcommand === "scan-pii" && args.includes("--stdin"))
+)) {
   try {
     stdinBuffer = readFileSync(0, "utf8");
     invocation.input = stdinBuffer.length > 0 ? stdinBuffer : undefined;

@@ -30,6 +30,7 @@
 
 use std::ffi::CString;
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 mod common;
@@ -1338,4 +1339,91 @@ fn test_skill_meta_protection_holds_for_symlink_creation() {
         libc::ENOENT,
         ".skill-meta symlink creation must surface ENOENT, got {err}"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Raw-byte physical paths (non-UTF-8 source root)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `setattr` chown/utimens and `statfs` must address the physical path by its
+/// raw OS bytes. Converting the path with `to_string_lossy` first makes the
+/// syscall target a different (usually nonexistent) path whenever the source
+/// root contains a byte that is not valid UTF-8, so `touch`, `chown`, and
+/// `statvfs` fail with ENOENT while reads, writes, and chmod keep working.
+#[test]
+fn test_raw_byte_source_root_metadata_and_statfs() {
+    skip_if_no_fuse!();
+
+    // Parent directory whose own name is not valid UTF-8; the fixture's
+    // source tempdir is created *inside* it, so the mounted source path
+    // carries the raw byte. `tempfile::tempdir()` names are valid UTF-8, so
+    // the non-UTF-8 component has to come from this explicit raw directory.
+    let outer = tempfile::tempdir().expect("outer tempdir");
+    let raw_parent = outer
+        .path()
+        .join(std::ffi::OsString::from_vec(b"caf\xe9".to_vec()));
+    std::fs::create_dir(&raw_parent).expect("raw parent dir");
+
+    let fx = MountFixture::normal_in(&raw_parent, |src| {
+        create_skill_dir(src, "alpha");
+        std::fs::write(src.join("alpha/notes.txt"), b"payload").unwrap();
+    });
+
+    let file = fx.passthrough_path("alpha", "notes.txt");
+    let physical = fx.source().join("alpha/notes.txt");
+    // The fixture's fixed startup sleep is not a readiness guarantee; wait
+    // until the mounted view actually serves the seeded file.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::symlink_metadata(&file).is_err() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let c_file = CString::new(file.as_os_str().as_encoded_bytes()).expect("mount path CString");
+
+    // Control: chmod already uses the raw path and must keep working.
+    let ret = unsafe { libc::chmod(c_file.as_ptr(), 0o600) };
+    assert_eq!(ret, 0, "chmod through the mount must succeed");
+
+    // touch / utimensat through the mount.
+    let pinned = libc::timespec {
+        tv_sec: 1_700_000_000,
+        tv_nsec: 0,
+    };
+    let times = [pinned, pinned];
+    let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_file.as_ptr(), times.as_ptr(), 0) };
+    assert_eq!(
+        ret,
+        0,
+        "utimensat through the mount must succeed, got {}",
+        std::io::Error::last_os_error()
+    );
+    assert_eq!(
+        std::fs::metadata(&physical)
+            .expect("physical metadata")
+            .mtime(),
+        1_700_000_000,
+        "utimensat must land on the physical file"
+    );
+
+    // chown (to the caller's own uid/gid) through the mount.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let ret = unsafe { libc::chown(c_file.as_ptr(), uid, gid) };
+    assert_eq!(
+        ret,
+        0,
+        "chown through the mount must succeed, got {}",
+        std::io::Error::last_os_error()
+    );
+
+    // statfs through the mount.
+    let c_dir = CString::new(file.parent().unwrap().as_os_str().as_encoded_bytes())
+        .expect("mount dir CString");
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_dir.as_ptr(), &mut st) };
+    assert_eq!(
+        ret,
+        0,
+        "statvfs through the mount must succeed, got {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(st.f_bsize > 0, "statfs must report real filesystem stats");
 }

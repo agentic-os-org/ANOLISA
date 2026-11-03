@@ -30,8 +30,12 @@ export default definePluginEntry({
       }
       cap.register(api);
       count++;
-      api.logger.info(`[agent-sec] registered: ${cap.id} -> [${cap.hooks.join(", ")}]`);
+      api.logger.info(
+        `[agent-sec] enabled: ${cap.id}; supported hooks: [${cap.hooks.join(", ")}]`,
+      );
     }
-    api.logger.info(`[agent-sec] ${count}/${capabilities.length} capabilities active`);
+    api.logger.info(
+      `[agent-sec] ${count}/${capabilities.length} capabilities active`,
+    );
   },
 });

@@ -11,10 +11,10 @@ use crate::runtime::prelude::*;
 use crate::slash::panel::render_notice_panel;
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct RuntimeIdentity {
-    provider_id: Option<String>,
-    provider_type: Option<String>,
-    model: Option<String>,
+pub(super) struct RuntimeIdentity {
+    pub(super) provider_id: Option<String>,
+    pub(super) provider_type: Option<String>,
+    pub(super) model: Option<String>,
     provider_details_available: bool,
 }
 
@@ -289,7 +289,7 @@ fn record_tool_outcome(
     }
 }
 
-fn runtime_identity(adapter: &AdapterInstance, state: &InlineState) -> RuntimeIdentity {
+pub(super) fn runtime_identity(adapter: &AdapterInstance, state: &InlineState) -> RuntimeIdentity {
     let observed_model = state.personalization.foreground_model.clone();
     match adapter {
         AdapterInstance::Fake(_) => RuntimeIdentity {
@@ -362,7 +362,7 @@ fn core_identity_from_auth_state(
     }
 }
 
-fn provider_display(identity: &RuntimeIdentity) -> Option<String> {
+pub(super) fn provider_display(identity: &RuntimeIdentity) -> Option<String> {
     let provider_id = identity.provider_id.as_deref()?;
     let Some(provider_type) = identity.provider_type.as_deref() else {
         return Some(provider_id.to_string());

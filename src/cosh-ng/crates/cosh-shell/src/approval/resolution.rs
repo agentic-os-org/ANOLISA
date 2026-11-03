@@ -5,7 +5,7 @@ use crate::approval::broker::{
 };
 use crate::approval::handoff::{
     fallback_bash_execution_path, shell_handoff_command_from_request, trust_key_from_command,
-    ApprovedBashExecutionPath,
+    trusted_command_from_request, ApprovedBashExecutionPath,
 };
 use crate::approval::journal::{approval_audit_input, approval_journal_entry};
 use crate::approval::provider::provider_approval_status;
@@ -59,8 +59,12 @@ pub(crate) fn apply_approval_decision(
             if state.approvals.requests[request_index].risk == "high" {
                 (status, MessageId::ApprovalResolutionApprovedTitle)
             } else {
-                trust_key =
-                    trust_key_from_command(&state.approvals.requests[request_index].preview);
+                // Trust covers the command the handoff executes. Minting from the
+                // card's display preview instead would key it by text the shell
+                // never runs, which no later revocation can reach; a request with
+                // no derivable command mints nothing.
+                trust_key = trusted_command_from_request(&state.approvals.requests[request_index])
+                    .and_then(|command| trust_key_from_command(&command));
                 (status, MessageId::ApprovalResolutionTrustedTitle)
             }
         }
@@ -136,7 +140,7 @@ pub(crate) fn batch_consent_covers_request(request: &RuntimeApprovalRequest, run
         && request.run_id == run_id
 }
 
-fn finalize_approval_decision(
+pub(super) fn finalize_approval_decision(
     state: &mut InlineState,
     request_index: usize,
     status: ApprovalRequestStatus,

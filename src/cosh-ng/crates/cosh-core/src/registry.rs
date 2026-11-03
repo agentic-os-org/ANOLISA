@@ -29,6 +29,7 @@ pub(crate) struct LiveExtensionRuntime {
     enable_shell_evidence_tool: bool,
     load_skills: bool,
     tool_selection: Option<String>,
+    workspace_file_tools: bool,
     state_dir_override: Option<std::path::PathBuf>,
     settings_override: Option<std::sync::Arc<ExtensionSettings>>,
 }
@@ -54,6 +55,7 @@ impl LiveExtensionRuntime {
             enable_shell_evidence_tool,
             load_skills,
             tool_selection,
+            workspace_file_tools: true,
             state_dir_override: None,
             settings_override: None,
         }
@@ -71,9 +73,15 @@ impl LiveExtensionRuntime {
             enable_shell_evidence_tool,
             load_skills: true,
             tool_selection: None,
+            workspace_file_tools: true,
             state_dir_override: Some(state_dir),
             settings_override: Some(settings),
         }
+    }
+
+    pub(crate) fn with_workspace_file_tools(mut self, enabled: bool) -> Self {
+        self.workspace_file_tools = enabled;
+        self
     }
 
     fn next_generation(&self) -> u64 {
@@ -88,6 +96,7 @@ impl LiveExtensionRuntime {
             .with_shell_evidence(self.enable_shell_evidence_tool)
             .with_skill_loading(self.load_skills)
             .with_tool_selection(self.tool_selection.as_deref())
+            .with_workspace_file_tools(self.workspace_file_tools)
     }
 
     async fn publish(&self, snapshot: RuntimeSnapshot) -> Result<RuntimePublication, String> {
@@ -800,6 +809,66 @@ mod tests {
             .filter_map(|skill| skill.get("name").and_then(Value::as_str))
             .map(str::to_string)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn workspace_file_tools_stay_disabled_across_runtime_rebuilds() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut manager = ExtensionManager::new_isolated(
+            workspace.clone(),
+            Some(temporary.path().join("extensions")),
+            Some(temporary.path().join("system")),
+        );
+        let settings = Arc::new(ExtensionSettings::new_isolated(
+            temporary.path().join("user-settings"),
+            temporary.path().join("workspace-settings"),
+            true,
+            Arc::new(crate::extension::settings::KeyringSecretBackend),
+        ));
+        let runtime = LiveExtensionRuntime::new_isolated(
+            GenerationController::new(runtime_snapshot(1, &[], true)),
+            false,
+            temporary.path().join("states"),
+            settings.clone(),
+        )
+        .with_workspace_file_tools(false);
+        let config = CoreConfig::default();
+        for generation in [2, 3] {
+            let snapshot = runtime
+                .configure_builder(RuntimeSnapshotBuilder::new(
+                    &mut manager,
+                    &config,
+                    workspace.clone(),
+                    generation,
+                ))
+                .with_settings(&settings)
+                .build()
+                .await;
+            runtime.publish(snapshot).await.unwrap();
+            let snapshot = runtime.controller.current();
+            assert_eq!(snapshot.generation.id, generation);
+            assert!(snapshot.tools.contains("shell"));
+            for name in [
+                "read_file",
+                "read_many_files",
+                "list_directory",
+                "glob",
+                "grep",
+                "write_file",
+                "edit",
+            ] {
+                assert!(snapshot.tools.get(name).is_none(), "{name}");
+                assert!(!snapshot.tools.names().iter().any(|tool| tool == name));
+                assert!(!snapshot
+                    .tools
+                    .declarations()
+                    .iter()
+                    .any(|tool| tool.name == name));
+            }
+        }
+        runtime.controller.current().mcp.shutdown().await;
     }
 
     #[tokio::test]

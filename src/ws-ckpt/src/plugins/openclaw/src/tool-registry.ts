@@ -115,7 +115,7 @@ export function registerTools(api: OpenClawPluginApi): void {
 
   // --- ws-ckpt-rollback ---
   api.registerTool(
-    {
+    (context) => ({
       name: "ws-ckpt-rollback",
       description:
         "Preview or roll back the workspace to a previous snapshot or N ancestors back. " +
@@ -157,10 +157,11 @@ export function registerTools(api: OpenClawPluginApi): void {
           params.workspace as string | undefined,
           params.numAncestors as number | undefined,
           params.preview as boolean | undefined,
+          context,
         );
         return textToolResult(r.text, r.isError);
       },
-    },
+    }),
     { name: "ws-ckpt-rollback" },
   );
 

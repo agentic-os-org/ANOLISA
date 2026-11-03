@@ -380,18 +380,23 @@ mod parent_lifecycle {
 
     fn direct_children(pid: i32) -> Vec<i32> {
         let mut children = BTreeSet::new();
-        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        let Ok(processes) = std::fs::read_dir("/proc") else {
             return Vec::new();
         };
-        for task in tasks.flatten() {
-            let Ok(values) = std::fs::read_to_string(task.path().join("children")) else {
+        for process in processes.flatten() {
+            let Ok(child) = process.file_name().to_string_lossy().parse::<i32>() else {
                 continue;
             };
-            children.extend(
-                values
-                    .split_whitespace()
-                    .filter_map(|value| value.parse::<i32>().ok()),
-            );
+            let Ok(stat) = std::fs::read_to_string(process.path().join("stat")) else {
+                continue;
+            };
+            let parent = stat
+                .rsplit_once(") ")
+                .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<i32>().ok());
+            if parent == Some(pid) {
+                children.insert(child);
+            }
         }
         children.into_iter().collect()
     }
@@ -672,6 +677,7 @@ mod parent_lifecycle {
 
 #[test]
 fn scripted_shell_exit_timeout_kills_foreground_group() {
+    let _guard = shell_host_run_guard();
     let root = std::env::temp_dir().join(format!(
         "cosh-scripted-exit-timeout-{}-{}",
         std::process::id(),
@@ -682,13 +688,14 @@ fn scripted_shell_exit_timeout_kills_foreground_group() {
     std::fs::create_dir_all(&root).expect("timeout test root");
     let mut config = ShellHostConfig::new("scripted-exit-timeout", &work_dir);
     config.native_mode = false;
+    let config = shell_host_test_config(&config);
     let started = Instant::now();
     let override_exit = format!(
         "exit() {{ sh -c 'trap \"\" HUP TERM; printf \"%s\\n\" \"$$\" > {}; while :; do sleep 60; done'; }}",
         shell_arg(&descendant_pid_file)
     );
 
-    let error = run_scripted_bash(&config, &[ScriptedInput::command(override_exit)])
+    let error = shell_run_scripted_bash(&config, &[ScriptedInput::command(override_exit)])
         .expect_err("scripted shell that ignores exit must time out");
 
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);

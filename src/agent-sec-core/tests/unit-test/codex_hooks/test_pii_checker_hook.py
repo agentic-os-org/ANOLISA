@@ -233,6 +233,18 @@ class TestFailOpen:
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
 
+    @pytest.mark.parametrize(
+        "non_object", ["null", '[{"verdict": "deny"}]', '"deny"', "7"]
+    )
+    def test_cli_non_object_json_allows(self, mock_cli, non_object):
+        # A scan result that parses as JSON but is not an object carries no
+        # verdict or findings; the hook must degrade to fail-open (empty
+        # stdout = allow) instead of crashing, matching the qwen/qoder/cosh
+        # siblings and the hermes in-process capability.
+        env = mock_cli(output=non_object, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
+        assert output == {}
+
 
 class TestTextExtraction:
     """Verify text extraction for different hook events."""
@@ -1015,6 +1027,22 @@ class TestHelpers:
     )
     def test_risk_summary(self, verdict, findings, expected):
         assert pii_checker_hook._risk_summary(verdict, findings) == expected
+
+    def test_truncated_details_use_total_counts_and_reject_malformed_counts(self):
+        summary = {
+            "findings_truncated": True,
+            "total": 20001,
+            "by_severity": {"deny": 1, "warn": 20000},
+        }
+        findings = [{"severity": "deny"}]
+        message = pii_checker_hook._risk_summary("deny", findings, summary)
+        assert "20001" in message and "20000" in message
+        assert "明细已省略" in message
+        summary["total"] = "20001"
+        assert (
+            pii_checker_hook._risk_summary("deny", findings, summary)
+            == "检测到 1 项高风险敏感信息"
+        )
 
 
 class TestFormatBlockReason:

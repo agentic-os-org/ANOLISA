@@ -45,6 +45,29 @@ pub enum SnapshotDeleteOutcome {
     Failed(String),
 }
 
+/// Deterministic diff failures that callers must distinguish from backend unavailability.
+#[derive(Debug, thiserror::Error)]
+pub enum DiffError {
+    /// A path cannot be represented without losing filename bytes.
+    #[error("{operation} {field} cannot be represented as UTF-8: {token:?}")]
+    UnsupportedWorkspacePath {
+        /// Dump operation containing the path.
+        operation: &'static str,
+        /// Path slot within the operation, such as source or destination.
+        field: &'static str,
+        /// Original escaped token, preserved for diagnosis without lossy decoding.
+        token: String,
+    },
+}
+
+/// A backend refused to create a subvolume before any side effect (#7234).
+///
+/// Guarded callers downcast to this to report a known-no-effect rejection
+/// instead of an uncertain backend failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CreateAdmissionRefused(pub String);
+
 /// GC result (generation cleanup)
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GcResult {
@@ -111,9 +134,20 @@ pub trait StorageBackend: Send + Sync {
     /// Recover the workspace back to a plain directory (undo init)
     /// - btrfs-base: rsync restore + remove symlink + delete subvolume (no umount loop)
     /// - btrfs-loop: rsync restore + remove symlink + delete subvolume + umount + losetup -d + remove img
-    async fn recover_workspace(&self, ws_id: &str, original_path: &str) -> anyhow::Result<()>;
+    ///
+    /// Returns the internal diff-temp paths that could not be deleted during
+    /// recovery (empty when fully cleaned) so callers can surface them as a
+    /// warning; the entries themselves are already logged and stay for the
+    /// next bootstrap or diff to retry.
+    async fn recover_workspace(
+        &self,
+        ws_id: &str,
+        original_path: &str,
+    ) -> anyhow::Result<Vec<String>>;
 
     /// Compute diff between two snapshots, or between a snapshot and the live workspace.
+    /// Returns [`DiffError::UnsupportedWorkspacePath`] when a diff path cannot be
+    /// represented as UTF-8; retrying without correcting the path cannot succeed.
     async fn diff(
         &self,
         ws_id: &str,

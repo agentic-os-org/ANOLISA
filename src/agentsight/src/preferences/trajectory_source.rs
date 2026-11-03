@@ -22,6 +22,11 @@ pub const PREFERENCE_TRAJECTORY_MAX_ROWS: usize = 50;
 /// unified rows. Trajectories whose ATIF JSON fails to parse are skipped
 /// with a debug log — a single corrupted row must not fail the request.
 ///
+/// Rows are returned newest-first: the store yields documents newest-first
+/// and [`rows_from_atif_json`] emits each document's turns newest-first, so
+/// the concatenation is globally ordered — the order the shared turn
+/// selection contract in [`crate::preferences::api`] requires.
+///
 /// # Errors
 /// Returns an error when the store query itself fails.
 pub fn load_window_rows(
@@ -44,10 +49,13 @@ pub fn load_window_rows(
 ///
 /// Each user step opens a turn; tool-call names from the agent steps that
 /// follow attach to that turn, mirroring the genai shape where one row
-/// carries both the user query and the tools the response invoked. Adjacent
-/// turns follow the steps order, so the rapid-followup rule works exactly
-/// as on genai rows when steps carry parseable timestamps — and is skipped
-/// for turns that do not. Returns an empty vec on malformed JSON.
+/// carries both the user query and the tools the response invoked. Rows are
+/// emitted newest-first — the shared selection contract in
+/// [`crate::preferences::api`] — while tool attachment itself walks the
+/// steps in their stored order. Turns stay adjacent in time after the
+/// reversal, so the rapid-followup rule works exactly as on genai rows when
+/// steps carry parseable timestamps — and is skipped for turns that do not.
+/// Returns an empty vec on malformed JSON.
 pub fn rows_from_atif_json(
     session_id: &str,
     atif_json: &str,
@@ -96,6 +104,12 @@ pub fn rows_from_atif_json(
             StepSource::System => {}
         }
     }
+    // ATIF steps arrive oldest-first; the consumers are documented to require
+    // newest-first input, and an unreversed document made the window
+    // concatenation sorted only at document granularity — the turns endpoint
+    // returned the OLDEST turns and the LLM prompt ran in reverse order.
+    // Reversing after the loop keeps tool attachment untouched.
+    rows.reverse();
     rows
 }
 
@@ -140,24 +154,23 @@ mod tests {
         let rows = flatten(atif);
         assert_eq!(rows.len(), 2);
 
-        let first = &rows[0];
-        assert_eq!(first.id, 1);
-        assert_eq!(first.session_id.as_deref(), Some("traj-1"));
-        assert_eq!(first.conversation_id.as_deref(), Some("traj-1"));
-        assert_eq!(first.user_text.as_deref(), Some("先出方案再写代码"));
-        // Both agent steps of the turn contribute; empty names are dropped.
-        assert_eq!(first.tool_names, vec!["bash", "grep"]);
-        assert_eq!(first.timestamp_ns, Some(1_784_973_600_000_000_000));
-
-        let second = &rows[1];
-        assert_eq!(second.id, 2);
-        assert_eq!(second.user_text.as_deref(), Some("改完之后跑测试"));
-        assert!(second.tool_names.is_empty());
+        // Rows are emitted newest-first (the shared selection contract).
+        let newest = &rows[0];
+        assert_eq!(newest.id, 2);
+        assert_eq!(newest.user_text.as_deref(), Some("改完之后跑测试"));
+        assert!(newest.tool_names.is_empty());
         // 30 seconds after the first turn — inside the correction window.
-        assert_eq!(
-            second.timestamp_ns.map(|ts| ts - 1_784_973_600_000_000_000),
-            Some(30_000_000_000)
-        );
+        assert_eq!(newest.timestamp_ns, Some(1_784_973_630_000_000_000));
+
+        let oldest = &rows[1];
+        assert_eq!(oldest.id, 1);
+        assert_eq!(oldest.session_id.as_deref(), Some("traj-1"));
+        assert_eq!(oldest.conversation_id.as_deref(), Some("traj-1"));
+        assert_eq!(oldest.user_text.as_deref(), Some("先出方案再写代码"));
+        // Both agent steps of the turn contribute; empty names are dropped.
+        // Tool attachment runs in steps order, before the newest-first flip.
+        assert_eq!(oldest.tool_names, vec!["bash", "grep"]);
+        assert_eq!(oldest.timestamp_ns, Some(1_784_973_600_000_000_000));
     }
 
     #[test]
@@ -174,12 +187,13 @@ mod tests {
         }"#;
         let rows = flatten(atif);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].user_text.as_deref(), Some("跑测试"));
-        // No timestamp on the step → no fabricated value.
-        assert_eq!(rows[0].timestamp_ns, None);
+        // Newest-first: the tag-only turn (step 2) heads the window.
         // Only injected tags left → no usable user text.
-        assert!(rows[1].user_text.is_none());
+        assert!(rows[0].user_text.is_none());
         // Unparseable timestamp → None as well.
+        assert_eq!(rows[0].timestamp_ns, None);
+        assert_eq!(rows[1].user_text.as_deref(), Some("跑测试"));
+        // No timestamp on the step → no fabricated value.
         assert_eq!(rows[1].timestamp_ns, None);
     }
 
@@ -202,5 +216,73 @@ mod tests {
         let b = rows_from_atif_json("t-2", atif, &mut next_id);
         assert_eq!(a[0].id, 1);
         assert_eq!(b[0].id, 2);
+    }
+
+    #[test]
+    fn load_window_rows_emits_turns_newest_first() {
+        use agentsight_trajectory_collector::TrajectoryRecord;
+
+        // The shared selection contract (preferences::api) requires
+        // newest-first input. ATIF steps are oldest-first, so without a
+        // per-document reversal the concatenation over DESC documents is
+        // only sorted at document granularity: GET /turns?limit=1 answered
+        // the oldest turn of the newest document and the LLM prompt was
+        // fed in the wrong order.
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-traj-source-order-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let store = TrajectoryStore::new_with_path(&dir.join("trajectories.db"))
+            .expect("open trajectory store");
+
+        let atif = r#"{
+            "agent": {"name": "qoder"},
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "older turn",
+                 "timestamp": "2026-07-25T10:00:00Z"},
+                {"step_id": 2, "source": "user", "message": "newer turn",
+                 "timestamp": "2026-07-25T10:00:30Z"}
+            ]
+        }"#;
+        store
+            .upsert_trajectory(&TrajectoryRecord {
+                session_id: "traj-order".to_string(),
+                schema_version: "ATIF-v1.7".to_string(),
+                agent_name: "qoder".to_string(),
+                model_name: None,
+                num_steps: 2,
+                total_prompt_tokens: None,
+                total_completion_tokens: None,
+                start_time: None,
+                end_time: None,
+                first_user_message: None,
+                last_user_message: None,
+                atif_json: atif.to_string(),
+                project: String::new(),
+                source: "qoder".to_string(),
+                is_subagent: false,
+                file_path: String::new(),
+                file_size: 0,
+                file_mtime_ns: 0,
+            })
+            .expect("upsert trajectory");
+
+        let rows = load_window_rows(&store, 0).expect("load window");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].user_text.as_deref(),
+            Some("newer turn"),
+            "the newest turn must come first: {rows:?}"
+        );
+        assert_eq!(rows[1].user_text.as_deref(), Some("older turn"));
+
+        // Both consumers documented to require newest-first input now answer
+        // the newest turn for a limit of one.
+        let turns = crate::preferences::api::select_unique_turns(rows.iter(), Some(1));
+        assert_eq!(turns, vec!["newer turn"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

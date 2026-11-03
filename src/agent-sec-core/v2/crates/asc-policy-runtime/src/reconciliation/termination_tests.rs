@@ -23,8 +23,7 @@ fn terminal_write_releases_capacity_and_preserves_complete_deployment_record() {
                     presence: Presence::Unknown,
                     last_confirmed: None,
                 });
-            let repo =
-                ProcessLocalPapRepository::with_binding_states(vec![original.clone()]).unwrap();
+            let repo = SqlitePolicyRepository::with_binding_states(vec![original.clone()]).unwrap();
             let queue = WorkQueue::new(1, 0);
             queue.enqueue(&id(1)).unwrap();
             assert_eq!(queue.take(), Some(id(1)));
@@ -33,8 +32,17 @@ fn terminal_write_releases_capacity_and_preserves_complete_deployment_record() {
                 queue.state.lock().unwrap().entries.get(&id(1)),
                 Some(Entry::Running { .. })
             ));
-            finish_failed(&repo, &queue, id(1), Some(&original), code);
+            finish_failed(
+                &repo,
+                &queue,
+                id(1),
+                Some(&original),
+                Some(original.status_version),
+                1000,
+                code,
+            );
             let mut expected = original;
+            expected.status_version += 1;
             expected.binding.status.phase = if matches!(
                 phase,
                 BindingStatus::PendingDelete | BindingStatus::Deleting
@@ -53,7 +61,7 @@ fn terminal_write_releases_capacity_and_preserves_complete_deployment_record() {
 }
 
 struct FaultedTerminalWrite {
-    inner: ProcessLocalPapRepository,
+    inner: SqlitePolicyRepository,
     mode: u8,
 }
 impl BindingStateRepository for FaultedTerminalWrite {
@@ -75,7 +83,7 @@ impl BindingStateRepository for FaultedTerminalWrite {
                 let mut next = expected.binding.clone();
                 next.status = BindingStatus::PendingDelete.into();
                 self.inner
-                    .update_binding(Some(&expected.binding), &next)
+                    .admit_binding_for_test(Some(&expected.into()), &next)
                     .unwrap();
                 self.inner.compare_exchange_binding_state(expected, write)
             }
@@ -88,7 +96,7 @@ fn unconfirmed_write_retains_slot_and_conflict_preserves_new_delete() {
     for mode in 0..=2 {
         let original = record(1);
         let repo = FaultedTerminalWrite {
-            inner: ProcessLocalPapRepository::with_binding_states(vec![original.clone()]).unwrap(),
+            inner: SqlitePolicyRepository::with_binding_states(vec![original.clone()]).unwrap(),
             mode,
         };
         let queue = WorkQueue::new(1, 0);
@@ -99,6 +107,8 @@ fn unconfirmed_write_retains_slot_and_conflict_preserves_new_delete() {
             &queue,
             id(1),
             Some(&original),
+            Some(original.status_version),
+            1000,
             "RECONCILE_RETRY_EXHAUSTED",
         );
         let saved = repo.get_binding_state(&id(1)).unwrap().unwrap();
@@ -110,7 +120,10 @@ fn unconfirmed_write_retains_slot_and_conflict_preserves_new_delete() {
             assert_eq!(saved, original);
             assert_eq!(
                 queue.state.lock().unwrap().entries.get(&id(1)),
-                Some(&Entry::Exhausted)
+                Some(&Entry::WaitingRetry {
+                    retry_at: 1000,
+                    retries: 0
+                })
             );
             queue.discover_many([(id(1), None)], 100);
             assert!(queue.state.lock().unwrap().ready.is_empty());
@@ -130,7 +143,7 @@ fn newer_intent_or_notification_is_not_failed_by_old_attempt() {
         if mode == 1 {
             current.binding.status.phase = BindingStatus::PendingDelete;
         }
-        let repo = ProcessLocalPapRepository::with_binding_states(vec![current.clone()]).unwrap();
+        let repo = SqlitePolicyRepository::with_binding_states(vec![current.clone()]).unwrap();
         let queue = WorkQueue::new(1, 0);
         queue.enqueue(&id(1)).unwrap();
         assert_eq!(queue.take(), Some(id(1)));
@@ -142,6 +155,8 @@ fn newer_intent_or_notification_is_not_failed_by_old_attempt() {
             &queue,
             id(1),
             Some(&original),
+            Some(original.status_version),
+            1000,
             "RECONCILE_WORKER_PANICKED",
         );
         assert_eq!(repo.get_binding_state(&id(1)).unwrap(), Some(current));
@@ -150,7 +165,7 @@ fn newer_intent_or_notification_is_not_failed_by_old_attempt() {
 }
 
 struct PanickingSkippedRead {
-    inner: Arc<ProcessLocalPapRepository>,
+    inner: Arc<SqlitePolicyRepository>,
     reads: AtomicUsize,
 }
 impl BindingStateRepository for PanickingSkippedRead {
@@ -184,9 +199,8 @@ impl BindingReconcileCatalog for PanickingSkippedRead {
 
 #[test]
 fn skipped_read_panic_is_terminalized_without_stopping_other_bindings() {
-    let inner = Arc::new(
-        ProcessLocalPapRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
-    );
+    let inner =
+        Arc::new(SqlitePolicyRepository::with_binding_states(vec![record(1), record(2)]).unwrap());
     let repo = Arc::new(PanickingSkippedRead {
         inner: inner.clone(),
         reads: AtomicUsize::new(0),
@@ -234,7 +248,7 @@ fn skipped_read_panic_is_terminalized_without_stopping_other_bindings() {
 }
 
 struct GatedTerminalWrite {
-    inner: Arc<ProcessLocalPapRepository>,
+    inner: Arc<SqlitePolicyRepository>,
     gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 impl BindingStateRepository for GatedTerminalWrite {
@@ -260,7 +274,7 @@ impl BindingStateRepository for GatedTerminalWrite {
 fn failed_write_keeps_running_ownership_while_new_delete_wins_cas() {
     let original = record(1);
     let inner =
-        Arc::new(ProcessLocalPapRepository::with_binding_states(vec![original.clone()]).unwrap());
+        Arc::new(SqlitePolicyRepository::with_binding_states(vec![original.clone()]).unwrap());
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let repo = Arc::new(GatedTerminalWrite {
@@ -279,18 +293,20 @@ fn failed_write_keeps_running_ownership_while_new_delete_wins_cas() {
                 &queue,
                 id(1),
                 Some(&original),
+                Some(original.status_version),
+                1000,
                 "RECONCILE_RETRY_EXHAUSTED",
             );
         })
     };
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(queue.enqueue(&id(2)), Err(asc_pap::EnqueueError::Full));
-    let pap = PapService::new(
-        inner.clone(),
-        Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-    )
-    .with_reconcile_enqueuer(queue.clone());
-    let accepted = pap.delete_binding(&id(1)).unwrap();
+    let pap = PapService::new(inner.clone())
+        .with_reconcile_enqueuer(queue.clone())
+        .with_scope_discovery(Arc::new(Discovery));
+    pap.delete_scope(&record(1).binding.spec.scope.scope_id)
+        .unwrap();
+    let accepted = pap.get_binding(&id(1)).unwrap();
     assert!(queue.state.lock().unwrap().ready.is_empty());
     assert!(matches!(
         queue.state.lock().unwrap().entries.get(&id(1)),

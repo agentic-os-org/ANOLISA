@@ -16,6 +16,7 @@ pub mod error;
 pub mod hook;
 pub mod metrics;
 mod record;
+mod schema;
 mod schema_version;
 mod summary;
 
@@ -27,6 +28,7 @@ pub use error::ObservabilityError;
 pub use hook::{MetadataShape, OBSERVABILITY_HOOKS, ObservabilityHook};
 pub use metrics::{allowed_metrics_for_hook, hook_metric_allowlist};
 pub use record::{HookMetrics, ObservabilityMetadata, ObservabilityRecord, format_observed_at};
+pub use schema::observability_record_json_schema;
 pub use schema_version::OBSERVABILITY_SQLITE_SCHEMA_VERSION;
 pub use summary::{RunSummary, SessionSummary, USER_INPUT_PREVIEW_LIMIT};
 

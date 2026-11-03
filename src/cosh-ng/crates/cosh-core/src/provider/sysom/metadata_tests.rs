@@ -480,6 +480,44 @@ async fn ecs_metadata_generate_initializes_body_and_refreshes_sts_once() {
 }
 
 #[tokio::test]
+async fn ecs_metadata_manual_sts_error_never_switches_to_instance_role() {
+    // A ready instance role is available; manual STS must still stay authoritative.
+    let fixture = Fixture::start(vec![
+        Reply::new(API_PATH, 403, "SecurityTokenExpired"),
+        Reply::token(),
+        Reply::new(ROLE_PATH, 200, &credentials().to_string()),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache_path = dir.path().join("instance_id");
+    std::fs::write(&cache_path, "i-cached").unwrap();
+    let provider = SysomProvider::new(
+        "manual-ak",
+        "manual-sk",
+        Some("manual-sts"),
+        &fixture.base_url,
+    );
+    let result = TEST_CACHE_PATH
+        .scope(
+            cache_path,
+            ecs_metadata::TEST_ENDPOINT.scope(
+                fixture.base_url.clone(),
+                provider.generate(&[], &[], &GenerateConfig::default()),
+            ),
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("an expired manual STS token must fail the request");
+    };
+    assert!(error.contains("SecurityTokenExpired"), "{error}");
+    let creds = provider.credentials.read().unwrap().clone();
+    assert_eq!(creds.access_key_id, "manual-ak");
+    assert_eq!(creds.security_token.as_deref(), Some("manual-sts"));
+    let requests = fixture.finish(1).await;
+    assert!(requests[0].contains("Credential=manual-ak,"));
+}
+
+#[tokio::test]
 async fn ecs_metadata_disk_cache_preserves_positive_negative_and_expiry() {
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("instance_id");

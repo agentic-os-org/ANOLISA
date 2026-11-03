@@ -8,7 +8,7 @@
 
 import { execFile } from "child_process";
 import { writeFileSync, unlinkSync, mkdtempSync, rmdirSync } from "fs";
-import { join } from "path";
+import { isAbsolute, join } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
 import type { CommandOutput } from "./types.js";
@@ -18,6 +18,15 @@ const execFileAsync = promisify(execFile);
 
 /** Allows the daemon's 180 s bounded reclamation plus RPC overhead. */
 const DEFAULT_TIMEOUT_MS = 240_000;
+
+/**
+ * Largest CLI output captured per stream. execFile's default is only
+ * 1 MiB, well below legitimate output: a single daemon response frame
+ * may be 16 MiB (`MAX_FRAME_SIZE`), and `ws-ckpt list` aggregates every
+ * page into one stdout stream when `--limit`/`--cursor` are omitted.
+ * Matches the 64 MiB response cap cosh-ng's own CkptClient applies.
+ */
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 /** The ws-ckpt CLI binary name. */
 const WS_CKPT_BIN = "ws-ckpt";
@@ -185,12 +194,33 @@ export class CommandExecutor {
    *
    * @param workspace - Optional workspace path for workspace-specific status.
    */
-  public async status(workspace?: string): Promise<CommandOutput> {
+  public async status(workspace?: string, format?: "json"): Promise<CommandOutput> {
     const args = ["status"];
     if (workspace) {
       args.push("--workspace", workspace);
     }
+    if (format) args.push("--format", format);
     return this.run(args);
+  }
+
+  /** Resolve a bare workspace selector using the daemon's registered path. */
+  public async resolveWorkspacePath(workspace: string): Promise<string> {
+    // Mirror the CLI's ID-or-path distinction; a local directory with the
+    // same name must not override the daemon's ID lookup. Dot entries are paths.
+    if (workspace === "." || workspace === ".." || /[/\\]/.test(workspace)) return workspace;
+    try {
+      const output = await this.status(workspace, "json");
+      if (output.exitCode !== 0) throw new Error(output.stderr || output.stdout);
+      const report = JSON.parse(output.stdout);
+      const entries = report?.workspaces;
+      if (!Array.isArray(entries) || entries.length !== 1
+          || typeof entries[0]?.path !== "string" || !isAbsolute(entries[0].path)) {
+        throw new Error("expected one registered workspace with an absolute path");
+      }
+      return entries[0].path;
+    } catch (error) {
+      throw new Error(`Cannot resolve workspace ${JSON.stringify(workspace)}: ${error instanceof Error ? error.message : String(error)}. Check daemon status or use the registered absolute path.`);
+    }
   }
 
   /**
@@ -269,6 +299,7 @@ export class CommandExecutor {
       const { stdout, stderr } = await execFileAsync(WS_CKPT_BIN, args, {
         timeout: this.timeoutMs,
         encoding: "utf-8",
+        maxBuffer: MAX_OUTPUT_BYTES,
         env: { ...process.env, WS_CKPT_AGENT_NAME: "openclaw" },
       });
 

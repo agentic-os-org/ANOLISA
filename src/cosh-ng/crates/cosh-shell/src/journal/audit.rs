@@ -12,6 +12,7 @@ use crate::types::{ShellEvent, ShellEventKind, COMMAND_OUTPUT_REF_MAX_BYTES};
 
 mod writer;
 
+use truncation::TruncationReport;
 use writer::AuditSegmentWriter;
 
 /// Session recorder that projects only Shell-owned facts.
@@ -19,8 +20,10 @@ pub(crate) struct ShellAuditRecorder {
     writer: Option<AuditSegmentWriter>,
     writer_root: Option<PathBuf>,
     mode: AuditMode,
+    max_disk_bytes: u64,
     shell_session_id: String,
     seen_events: usize,
+    truncation: TruncationReport,
     hash_salt: String,
     degraded: bool,
     warning_emitted: bool,
@@ -64,7 +67,7 @@ impl ShellAuditRecorder {
             error
         });
         let writer = writer_root.as_ref().ok().and_then(|root| {
-            AuditSegmentWriter::create(root)
+            AuditSegmentWriter::create_with_capacity(root, settings.max_disk_bytes)
                 .map_err(|error| {
                     tracing::warn!(target: "cosh_audit", "audit writer unavailable: {error}");
                     error
@@ -76,8 +79,10 @@ impl ShellAuditRecorder {
             writer,
             writer_root: writer_root.ok(),
             mode: settings.mode,
+            max_disk_bytes: settings.max_disk_bytes,
             shell_session_id,
             seen_events: 0,
+            truncation: TruncationReport::Idle,
             hash_salt: uuid::Uuid::new_v4().to_string(),
             warning_emitted: false,
             owned_approvals: std::collections::HashSet::new(),
@@ -97,8 +102,10 @@ impl ShellAuditRecorder {
             writer: None,
             writer_root: None,
             mode: AuditMode::Required,
+            max_disk_bytes: AuditSettings::default().max_disk_bytes,
             shell_session_id: shell_session_id.into(),
             seen_events: 0,
+            truncation: TruncationReport::Idle,
             hash_salt: "test-salt".to_string(),
             degraded: true,
             warning_emitted: false,
@@ -115,8 +122,10 @@ impl ShellAuditRecorder {
             writer: AuditSegmentWriter::create(root).ok(),
             writer_root: Some(root.to_path_buf()),
             mode: AuditMode::BestEffort,
+            max_disk_bytes: AuditSettings::default().max_disk_bytes,
             shell_session_id: "audit-test-session".to_string(),
             seen_events: 0,
+            truncation: TruncationReport::Idle,
             hash_salt: "salt".to_string(),
             degraded: false,
             warning_emitted: false,
@@ -127,10 +136,26 @@ impl ShellAuditRecorder {
     }
 
     /// Projects newly observed native command events exactly once.
+    ///
+    /// `events` is a cumulative per-session snapshot that callers only ever
+    /// grow. A shorter snapshot means the upstream buffer was truncated or
+    /// rebuilt; replaying it would duplicate persisted records, so the batch
+    /// is skipped while the high-water mark stays put, and the gap is
+    /// persisted as one `audit.truncated` record per shrink episode
+    /// (re-armed after the marker is durable and projection advances) so
+    /// reconciliation can tell an omission from a complete stream.
     pub(crate) fn observe_shell_events(&mut self, events: &[ShellEvent]) {
         if self.seen_events > events.len() {
-            self.seen_events = 0;
+            tracing::warn!(
+                target: "cosh_audit",
+                seen = self.seen_events,
+                len = events.len(),
+                "shell event snapshot shrank; skipping the batch to keep audit records exactly-once"
+            );
+            self.report_truncation(events.len());
+            return;
         }
+        self.retry_truncation();
         for event in &events[self.seen_events..] {
             if matches!(
                 event.kind,
@@ -142,6 +167,7 @@ impl ShellAuditRecorder {
             }
         }
         self.seen_events = events.len();
+        self.finish_truncation_after_projection(events.len());
     }
 
     /// Projects an already de-duplicated absolute-cursor event batch.
@@ -308,6 +334,13 @@ impl ShellAuditRecorder {
             AuditRedaction::clean(),
         )?;
         let event_id = event.event_id.clone();
+        if !self.retry_truncation() {
+            return if self.mode == AuditMode::Required {
+                Err("AUDIT_REQUIRED_UNAVAILABLE: approval was blocked before execution".to_string())
+            } else {
+                Ok(None)
+            };
+        }
         self.ensure_writer();
         let result = self
             .writer
@@ -505,6 +538,9 @@ impl ShellAuditRecorder {
     }
 
     fn append(&mut self, mut event: AuditEventV1, durable: bool) -> bool {
+        if !self.retry_truncation() {
+            return false;
+        }
         self.ensure_writer();
         let event_type = event.event_type.clone();
         let result = self
@@ -588,7 +624,7 @@ impl ShellAuditRecorder {
         let Some(root) = self.writer_root.as_deref() else {
             return;
         };
-        if let Ok(writer) = AuditSegmentWriter::create(root) {
+        if let Ok(writer) = AuditSegmentWriter::create_with_capacity(root, self.max_disk_bytes) {
             self.writer = Some(writer);
         }
     }
@@ -632,6 +668,9 @@ fn approval_identity(request: &ShellApprovalAuditInput<'_>) -> AuditIdentity {
 
 #[path = "audit/host_execution.rs"]
 mod host_execution;
+
+#[path = "audit/truncation.rs"]
+mod truncation;
 
 #[cfg(test)]
 #[path = "audit_tests.rs"]

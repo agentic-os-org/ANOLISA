@@ -15,12 +15,19 @@
  * Platform packages follow the naming convention:
  *   @anolisa/cli-{os}-{arch}
  *
- * Each platform package ships a single native binary at:
- *   bin/anolisa
+ * Each platform package ships bin/anolisa and its sibling
+ * share/anolisa/components/ integration registry. The native executable resolves
+ * its packaged data from its real location, through the launcher symlink.
  */
 
-import { existsSync, mkdirSync, symlinkSync, unlinkSync, chmodSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  symlinkSync,
+  unlinkSync,
+  chmodSync,
+} from 'node:fs';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { platform, arch } from 'node:os';
@@ -61,9 +68,7 @@ function resolvePackageBinary() {
 
   const nativeBinary = join(pkgDir, 'bin', 'anolisa');
   if (!existsSync(nativeBinary)) {
-    throw new Error(
-      `Binary not found in ${pkgName} at ${nativeBinary}`,
-    );
+    throw new Error(`Binary not found in ${pkgName} at ${nativeBinary}`);
   }
 
   return nativeBinary;
@@ -79,13 +84,17 @@ function main() {
 
   const linkPath = join(binDir, 'anolisa');
 
-  // Remove existing symlink or file
-  if (existsSync(linkPath)) {
+  // Do not follow the launcher symlink: its previous target may be absent.
+  try {
     unlinkSync(linkPath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
   }
 
-  // Create symlink to the platform-specific binary
-  symlinkSync(nativeBinary, linkPath);
+  // Keep the launcher valid when the complete installation tree is relocated.
+  symlinkSync(relative(binDir, nativeBinary), linkPath);
   chmodSync(linkPath, 0o755);
 
   console.log(`@anolisa/cli: Linked native binary for ${platform()}-${arch()}`);

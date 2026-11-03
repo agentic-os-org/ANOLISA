@@ -225,6 +225,15 @@ pub struct AuditEvidenceData {
     pub range_category: Option<String>,
 }
 
+/// Projection gap left by a shrunken cumulative event snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditTruncationData {
+    pub operation: String,
+    pub seen: u64,
+    pub len: u64,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuditLifecycleData {
@@ -379,6 +388,9 @@ impl AuditEventV1 {
             }
             "audit.degraded" | "audit.recovered" => {
                 serde_json::from_value::<AuditControlData>(self.data.clone()).is_ok()
+            }
+            "audit.truncated" => {
+                serde_json::from_value::<AuditTruncationData>(self.data.clone()).is_ok()
             }
             _ => true,
         };

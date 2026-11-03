@@ -3,9 +3,11 @@
 #![forbid(unsafe_code)]
 
 mod daemon_socket;
+mod data_home;
 mod identifier;
 mod revision;
 
 pub use daemon_socket::{DAEMON_SOCKET_ENV, DaemonSocketPathError, daemon_socket_path_from_env};
+pub use data_home::is_valid_anolisa_data_home;
 pub use identifier::{IdentifierError, ResourceId};
 pub use revision::{Revision, RevisionError};

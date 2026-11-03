@@ -623,3 +623,657 @@ fn schema_probe_does_not_create_a_missing_database() {
     assert!(probe_atif_column(&path, "missing-session").is_err());
     assert!(!path.exists());
 }
+
+#[test]
+fn probe_requires_a_session_match_in_an_unscoped_table() {
+    // The sibling table has no session_id column, so the probe scans it
+    // unscoped. A row whose document has no top-level session_id must not be
+    // attributed to whatever session id the caller asked for — that would run
+    // the paid LLM analysis against an unrelated trajectory.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should follow Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "agentsight-causal-unscoped-{}-{nonce}.db",
+        std::process::id()
+    ));
+    {
+        let conn = rusqlite::Connection::open(&path).expect("create sibling database");
+        conn.execute_batch("CREATE TABLE t(payload TEXT)")
+            .expect("create table");
+        let insert = "INSERT INTO t(payload) VALUES (?1)";
+        conn.execute(insert, [r#"{"steps": []}"#])
+            .expect("insert session-less ATIF doc");
+        conn.execute(insert, [r#"{"session_id": "sess-atif", "steps": []}"#])
+            .expect("insert scoped ATIF doc");
+    }
+
+    assert_eq!(
+        probe_atif_column(&path, "different-session").unwrap(),
+        None,
+        "an unscoped row without session_id must not match another session"
+    );
+    // Positive guard: a document that does carry the requested session_id is
+    // still found through the same unscoped scan.
+    assert!(
+        probe_atif_column(&path, "sess-atif").unwrap().is_some(),
+        "a document naming the requested session must still be returned"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// id_kind gate
+// ---------------------------------------------------------------------------
+
+fn test_app_state() -> actix_web::web::Data<AppState> {
+    use crate::config::ServerAuthConfig;
+    use crate::grader::EvaluationStore;
+    use crate::health::HealthStore;
+    use crate::security::SecurityStore;
+    use std::sync::{Arc, RwLock};
+
+    let auth_config = ServerAuthConfig { enabled: false };
+    let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+        &auth_config,
+        std::path::Path::new("/tmp"),
+    ));
+    actix_web::web::Data::new(AppState {
+        config_path: None,
+        storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+            None,
+            &crate::config::StorageConfig::default(),
+        )),
+        reuse_store: None,
+        reuse_llm_judge_enabled: false,
+        causal_store: None,
+        storage_path: std::path::PathBuf::from(":memory:"),
+        genai_store: None,
+        start_time: std::time::Instant::now(),
+        health_store: Arc::new(RwLock::new(HealthStore::new())),
+        interruption_store: None,
+        evaluation_store: Arc::new(
+            EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+        ),
+        enforcement: None,
+        containment: None,
+        audit_service: Arc::new(agentsight_audit::AuditService::new(
+            SecurityStore::open_in_memory().unwrap().audit_store(),
+        )),
+        security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+        auth,
+        optimize: None,
+        trajectory_store: Arc::new(RwLock::new(None)),
+    })
+}
+
+#[actix_web::test]
+async fn causal_attribution_rejects_unknown_id_kind() {
+    use actix_web::App;
+    use actix_web::http::StatusCode;
+    use actix_web::test as awtest;
+
+    let app = awtest::init_service(
+        App::new()
+            .app_data(test_app_state())
+            .service(run_causal_attribution),
+    )
+    .await;
+
+    let post = |id_kind: Option<&str>| {
+        let mut body = serde_json::json!({
+            "session_id": "0123456789abcdef0123456789abcdef",
+            "complaint": "为什么这一轮没有完成",
+        });
+        if let Some(kind) = id_kind {
+            body["id_kind"] = serde_json::Value::String(kind.to_string());
+        }
+        awtest::TestRequest::post()
+            .uri("/causal-attribution")
+            .set_json(body)
+            .to_request()
+    };
+
+    // A token outside the closed set must not silently attribute the whole
+    // session while the caller believes it asked for one conversation.
+    let resp = awtest::call_service(&app, post(Some("conversatoin"))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = awtest::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_id_kind");
+    assert_eq!(
+        body["valid_id_kinds"],
+        serde_json::json!(["session", "conversation"])
+    );
+
+    // Both real scopes and the omitted form pass this gate. They stop at the
+    // optimization subsystem this fixture leaves unconfigured; the point is
+    // that the gate does not turn them away.
+    for request in [
+        post(Some("session")),
+        post(Some("conversation")),
+        post(None),
+    ] {
+        let resp = awtest::call_service(&app, request).await;
+        assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contra-panel quote anchoring (mock LLM, end to end)
+// ---------------------------------------------------------------------------
+
+/// Drain one HTTP request off `stream` — headers plus the full body — so the
+/// client is not reset mid-send. The pipeline's prompts run to many kilobytes,
+/// well past a single read.
+fn drain_request(stream: &mut std::net::TcpStream) {
+    let mut seen: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 16384];
+    let mut header_end: Option<usize> = None;
+    let mut content_length = 0usize;
+    loop {
+        let n = match std::io::Read::read(stream, &mut buf) {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        seen.extend_from_slice(&buf[..n]);
+        if header_end.is_none() {
+            if let Some(pos) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                header_end = Some(pos + 4);
+                let head = String::from_utf8_lossy(&seen[..pos]).to_ascii_lowercase();
+                content_length = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+            }
+        }
+        if let Some(end) = header_end {
+            if seen.len() >= end + content_length {
+                return;
+            }
+        }
+    }
+}
+
+/// A mock OpenAI-compatible endpoint that answers each request with the next
+/// canned completion body (repeating the last one), so the pipeline's handling
+/// of a *parsed* verdict can be exercised end to end without a real LLM.
+fn responding_llm_sequence(bodies: Vec<String>) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm");
+    let addr = listener.local_addr().expect("mock llm addr");
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(bodies));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            drain_request(&mut stream);
+            let body = {
+                let mut queue = queue.lock().expect("mock llm queue");
+                if queue.len() > 1 {
+                    queue.remove(0)
+                } else {
+                    queue.last().cloned().unwrap_or_default()
+                }
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+/// One canned completion whose content is `content`.
+fn completion_with(content: &str) -> String {
+    serde_json::json!({
+        "id": "chatcmpl-mock",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    })
+    .to_string()
+}
+
+/// The canned oracle + verdicts response the combined prompt expects.
+fn combined_response() -> String {
+    completion_with(
+        r#"{"goal":"把三个文件移到归档目录","preconditions":[],"evidence":[],"pass_criteria":["三个文件都在归档目录"],"verdicts":[]}"#,
+    )
+}
+
+/// The canned attribution response, with the given `actual_conclusion`.
+fn attribution_response(actual_conclusion: &str) -> String {
+    completion_with(
+        &serde_json::json!({
+            "outcome": "fail",
+            "outcome_note": "宣告了未完成的移动",
+            "verdict": "交付与任务不符",
+            "root_one": "未核对文件是否存在",
+            "root_step_id": null,
+            "attrib": "model",
+            "fix": "移动前先列目录核对",
+            "actual_conclusion": actual_conclusion,
+            "turn_issue": false,
+            "title": "未核对就宣告完成",
+            "alternative_attribs": []
+        })
+        .to_string(),
+    )
+}
+
+/// A round whose final agent message is the genuine delivery: two of the three
+/// requested files were moved, the third does not exist. The texts are chosen
+/// to contain no claim the grounding layer would extract (no slash, no
+/// three-digit number, no version), so the pipeline makes exactly two model
+/// calls: the combined oracle + verdicts, then the attribution.
+fn partial_move_trajectory() -> AtifTrajectory {
+    use agentsight_atif::{ATIF_SCHEMA_VERSION, Agent};
+
+    let step = |step_id: usize, source: StepSource, message: &str| Step {
+        step_id,
+        source,
+        message: message.to_string(),
+        timestamp: None,
+        model_name: None,
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: None,
+        observation: None,
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    };
+
+    AtifTrajectory {
+        schema_version: ATIF_SCHEMA_VERSION.into(),
+        agent: Agent {
+            name: "test".into(),
+            version: "0".into(),
+            model_name: None,
+            tool_definitions: None,
+            extra: None,
+        },
+        steps: vec![
+            step(1, StepSource::User, "把甲、乙、丙三个文件移到归档目录"),
+            step(
+                2,
+                StepSource::Agent,
+                "已把甲和乙移到归档目录；丙在源目录里不存在，无法移动，请确认文件名。",
+            ),
+        ],
+        session_id: None,
+        trajectory_id: None,
+        notes: None,
+        final_metrics: None,
+        continued_trajectory_ref: None,
+        subagent_trajectories: None,
+        extra: None,
+    }
+}
+
+/// Runs the pipeline over [`partial_move_trajectory`] against a mock LLM that
+/// answers with the given attribution `actual_conclusion`.
+fn contra_panel_for(actual_conclusion: &str) -> CausalContra {
+    contra_panel_for_trajectory(partial_move_trajectory(), actual_conclusion)
+}
+
+/// Runs the pipeline over the given trajectory against a mock LLM that
+/// answers with the given attribution `actual_conclusion`.
+fn contra_panel_for_trajectory(doc: AtifTrajectory, actual_conclusion: &str) -> CausalContra {
+    let base = responding_llm_sequence(vec![
+        combined_response(),
+        attribution_response(actual_conclusion),
+    ]);
+    let client = LlmClient::with_config(base, "test-key", "test-model");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "文件没有全部移过去".into(),
+        force: false,
+        id_kind: None,
+    };
+
+    let case_ = actix_web::rt::System::new()
+        .block_on(run_pipeline(&client, &doc, 0..doc.steps.len(), &req))
+        .expect("pipeline should succeed");
+    case_
+        .contra
+        .expect("a defective round should contrast intent and delivery")
+}
+
+/// `actual_conclusion` is a quote the evaluator was told to copy verbatim from
+/// the final step. Unverified, a hallucinated conclusion reaches the contra
+/// panel as "agent 最终交付" — the delivery half of the panel the user reads
+/// first — and puts words the agent never wrote under the panel's authority.
+/// The quote must be anchored to the transcript the way judge citations are:
+/// a conclusion the final agent step does not carry is replaced by that step's
+/// genuine response.
+#[test]
+fn a_fabricated_final_conclusion_never_reaches_the_contra_panel() {
+    let contra = contra_panel_for("三个文件已全部移动完成");
+
+    assert!(
+        !contra.said.contains("三个文件已全部移动完成"),
+        "a conclusion the agent never wrote must not be shown as its final delivery: {}",
+        contra.said
+    );
+    assert!(
+        contra.said.contains("已把甲和乙移到归档目录"),
+        "the panel must fall back to the genuine final response: {}",
+        contra.said
+    );
+}
+
+/// The anchor accepts the quote it was promised: an excerpt genuinely taken
+/// from the final agent message — wrapped in quotation marks, whitespace
+/// collapsed — stays the panel's delivery side instead of being replaced.
+#[test]
+fn a_genuinely_quoted_final_conclusion_is_kept() {
+    let contra = contra_panel_for("「已把甲和乙移到归档目录；丙在源目录里不存在」");
+
+    assert!(
+        contra.said.contains("已把甲和乙移到归档目录"),
+        "a quote the transcript carries should stay the delivery side: {}",
+        contra.said
+    );
+    assert!(
+        !contra.said.contains("agent 交付评估"),
+        "a genuine quote must not be demoted to the evaluation fallback: {}",
+        contra.said
+    );
+}
+
+/// A round whose final agent step both speaks and observes: the message is
+/// the delivery, the observation result is separate transcript text. Used to
+/// pin that the delivery anchor never accepts a quote stitched across the
+/// seam of two fields — text no single transcript entry carries.
+fn message_and_result_trajectory() -> AtifTrajectory {
+    use agentsight_atif::{ATIF_SCHEMA_VERSION, Agent, Observation, ObservationResult};
+
+    let step = |step_id: usize, source: StepSource, message: &str| Step {
+        step_id,
+        source,
+        message: message.to_string(),
+        timestamp: None,
+        model_name: None,
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: None,
+        observation: None,
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    };
+
+    let mut speaking = step(
+        2,
+        StepSource::Agent,
+        "已把甲和乙移到归档目录；丙在源目录里不存在，无法移动，请确认文件名。",
+    );
+    speaking.observation = Some(Observation {
+        results: vec![ObservationResult {
+            source_call_id: None,
+            content: Some(serde_json::Value::String(
+                "归档目录现在共收纳了两个文件".into(),
+            )),
+            subagent_trajectory_ref: None,
+            extra: None,
+        }],
+    });
+
+    AtifTrajectory {
+        schema_version: ATIF_SCHEMA_VERSION.into(),
+        agent: Agent {
+            name: "test".into(),
+            version: "0".into(),
+            model_name: None,
+            tool_definitions: None,
+            extra: None,
+        },
+        steps: vec![
+            step(1, StepSource::User, "把甲、乙、丙三个文件移到归档目录"),
+            speaking,
+        ],
+        session_id: None,
+        trajectory_id: None,
+        notes: None,
+        final_metrics: None,
+        continued_trajectory_ref: None,
+        subagent_trajectories: None,
+        extra: None,
+    }
+}
+
+/// A quote that starts at the end of the agent's message and finishes in the
+/// next observation result matches only the concatenation of the two fields,
+/// never an individual transcript entry. Such a splice is exactly the
+/// fabricated exhibit the anchor exists to reject: no step actually wrote it.
+#[test]
+fn a_quote_stitched_across_fields_is_not_the_delivery() {
+    let contra = contra_panel_for_trajectory(
+        message_and_result_trajectory(),
+        "「请确认文件名。 归档目录现在共收纳了两个文件」",
+    );
+
+    assert!(
+        !contra.said.contains("归档目录现在共收纳了两个文件"),
+        "a quote no single field carries must not be shown as the delivery: {}",
+        contra.said
+    );
+    assert!(
+        contra.said.contains("已把甲和乙移到归档目录"),
+        "the panel must show the step's genuine message instead: {}",
+        contra.said
+    );
+}
+
+/// A round that ends in bookkeeping: the substantive agent response is
+/// followed by a heartbeat step whose message is empty — the same no-op case
+/// `build_contra`'s observation axis already skips.
+fn heartbeat_terminated_trajectory() -> AtifTrajectory {
+    use agentsight_atif::{ATIF_SCHEMA_VERSION, Agent, Observation, ObservationResult};
+
+    let step = |step_id: usize, source: StepSource, message: &str| Step {
+        step_id,
+        source,
+        message: message.to_string(),
+        timestamp: None,
+        model_name: None,
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: None,
+        observation: None,
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    };
+
+    let mut heartbeat = step(3, StepSource::Agent, "");
+    heartbeat.observation = Some(Observation {
+        results: vec![ObservationResult {
+            source_call_id: None,
+            content: Some(serde_json::Value::String("HEARTBEAT_OK".into())),
+            subagent_trajectory_ref: None,
+            extra: None,
+        }],
+    });
+
+    AtifTrajectory {
+        schema_version: ATIF_SCHEMA_VERSION.into(),
+        agent: Agent {
+            name: "test".into(),
+            version: "0".into(),
+            model_name: None,
+            tool_definitions: None,
+            extra: None,
+        },
+        steps: vec![
+            step(1, StepSource::User, "把甲、乙、丙三个文件移到归档目录"),
+            step(
+                2,
+                StepSource::Agent,
+                "已把甲和乙移到归档目录；丙在源目录里不存在，无法移动，请确认文件名。",
+            ),
+            heartbeat,
+        ],
+        session_id: None,
+        trajectory_id: None,
+        notes: None,
+        final_metrics: None,
+        continued_trajectory_ref: None,
+        subagent_trajectories: None,
+        extra: None,
+    }
+}
+
+/// The evaluator quotes the final *substantive* response, but the round then
+/// ends in an empty-message heartbeat. Selecting the heartbeat as the
+/// delivery step would reject the genuine quote (the heartbeat carries none
+/// of it) and demote the panel to the evaluator's verdict — the delivery
+/// selection must skip trailing no-op steps, exactly as the panel's own
+/// comment calls out.
+#[test]
+fn a_genuine_quote_survives_a_trailing_heartbeat_step() {
+    let contra = contra_panel_for_trajectory(
+        heartbeat_terminated_trajectory(),
+        "「已把甲和乙移到归档目录；丙在源目录里不存在」",
+    );
+
+    assert!(
+        contra.said.contains("已把甲和乙移到归档目录"),
+        "the quote is genuinely from the final substantive response: {}",
+        contra.said
+    );
+    assert!(
+        !contra.said.contains("agent 交付评估"),
+        "must not be demoted to the evaluator's verdict fallback: {}",
+        contra.said
+    );
+}
+
+/// A clean round ending in a bookkeeping heartbeat must anchor its outcome on
+/// the last substantive agent response. Selecting the trailing empty-message
+/// step labelled the heartbeat "最终结论" and hid the real answer from the
+/// chain, while `build_contra` already skipped no-op steps.
+#[test]
+fn clean_round_anchors_on_the_last_substantive_agent_step() {
+    let doc = heartbeat_terminated_trajectory();
+    let index = grounding::evidence::build_index(&doc, 0..doc.steps.len());
+    let verdicts: Verdicts =
+        serde_json::from_value(serde_json::json!({"verdicts": []})).expect("verdicts fixture");
+    let attr: Attribution = serde_json::from_value(serde_json::json!({
+        "outcome": "success",
+        "verdict": "已完成",
+        "root_one": "",
+        "attrib": "none"
+    }))
+    .expect("attribution fixture");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "这一轮完成了吗".into(),
+        force: true,
+        id_kind: None,
+    };
+
+    let case_ = build_case(&doc, &doc.steps, &req, &verdicts, &attr, &index)
+        .expect("case builds from a well-formed trajectory");
+
+    let anchor = case_
+        .nodes
+        .iter()
+        .find(|n| n.step == Some(2))
+        .expect("the substantive answer is the outcome anchor");
+    assert_eq!(anchor.kind, "good");
+    assert_eq!(anchor.tag, "最终结论");
+    assert!(
+        case_.nodes.iter().all(|n| n.step != Some(3)),
+        "the empty heartbeat must not become the conclusion"
+    );
+}
+
+/// A trailing System step after the real answer must not become the outcome
+/// anchor. It is not an agent delivery; the previous substantive agent step is.
+#[test]
+fn clean_round_ignores_a_trailing_system_step() {
+    let mut doc = heartbeat_terminated_trajectory();
+    doc.steps[2].source = StepSource::System;
+    let index = grounding::evidence::build_index(&doc, 0..doc.steps.len());
+    let verdicts: Verdicts =
+        serde_json::from_value(serde_json::json!({"verdicts": []})).expect("verdicts fixture");
+    let attr: Attribution = serde_json::from_value(serde_json::json!({
+        "outcome": "success",
+        "verdict": "已完成",
+        "root_one": "",
+        "attrib": "none"
+    }))
+    .expect("attribution fixture");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "这一轮完成了吗".into(),
+        force: true,
+        id_kind: None,
+    };
+
+    let case_ = build_case(&doc, &doc.steps, &req, &verdicts, &attr, &index)
+        .expect("case builds from a well-formed trajectory");
+
+    let anchor = case_
+        .nodes
+        .iter()
+        .find(|n| n.step == Some(2))
+        .expect("the substantive answer is the outcome anchor");
+    assert_eq!(anchor.kind, "good");
+    assert!(
+        case_.nodes.iter().all(|n| n.step != Some(3)),
+        "the trailing System step must not become the conclusion"
+    );
+}
+
+/// A round whose only agent step carries no message still needs an endpoint;
+/// the delivery rule falls back to the last non-user step.
+#[test]
+fn empty_agent_only_round_still_anchors() {
+    let mut doc = heartbeat_terminated_trajectory();
+    doc.steps = vec![doc.steps[0].clone(), doc.steps[2].clone()];
+    let index = grounding::evidence::build_index(&doc, 0..doc.steps.len());
+    let verdicts: Verdicts =
+        serde_json::from_value(serde_json::json!({"verdicts": []})).expect("verdicts fixture");
+    let attr: Attribution = serde_json::from_value(serde_json::json!({
+        "outcome": "success",
+        "verdict": "已完成",
+        "root_one": "",
+        "attrib": "none"
+    }))
+    .expect("attribution fixture");
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "这一轮完成了吗".into(),
+        force: true,
+        id_kind: None,
+    };
+
+    let case_ = build_case(&doc, &doc.steps, &req, &verdicts, &attr, &index)
+        .expect("case builds from a well-formed trajectory");
+
+    assert!(
+        case_.nodes.iter().any(|n| n.step == Some(3)),
+        "the fallback must still anchor a round with no agent message"
+    );
+}

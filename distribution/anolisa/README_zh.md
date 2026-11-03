@@ -42,6 +42,9 @@ anolisa update all
 `status` 和 `doctor` 允许修改 raw 安装中 `type = "config"` 文件的内容，
 同时继续检查文件是否存在、权限和路径安全。
 
+`logs --since <RFC3339>` 按包含边界的时间戳筛选，正确比较时区偏移和小数秒。
+只有设置 `--since` 时，无法解析时间戳的记录才会被排除。
+
 ### 二级命令 — 管理
 
 | 命令 | 说明 |
@@ -55,14 +58,23 @@ anolisa update all
 | `env` | 显示环境检测结果 |
 | `bug` | 生成 bug 报告（`--component cosh-ng` 时附加 cosh-shell 诊断包摘要；`COSH_SHELL_BIN` 可覆盖二进制路径） |
 
-执行 `anolisa adapter enable <component> openclaw` 即同意插件声明的能力，
-CLI 会在宿主支持 capability consent 时传递对应参数。此操作不授予
+默认情况下，`anolisa adapter enable <component> openclaw` 会在宿主的各条命令
+支持 capability consent 时同意插件声明的能力。添加 `--no-accept-capabilities`
+可在安装和激活两个阶段拒绝自动授予同意。此选项不撤销宿主已有的授权，也不授予
 unsafe-install 覆盖权限。
 
 通过 `anolisa adapter enable tokenless opencode` 启用 Tokenless 本地插件。
 ANOLISA 管理插件链接；启用或禁用后需重启 OpenCode。
 自定义配置目录及已有安装的接管规则见
-[adapter 参考](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md#adapter)。
+[adapter 参考](../../docs/user-guide/zh/getting-started/anolisa-cli.md#adapter)。
+
+千问办公 QwenWorkCN 的原生 Bash 和 macOS 工作区 Shell 会话使用
+`anolisa adapter enable tokenless qwenwork` 接入 Tokenless。完成后重启应用并在应用内
+检查激活状态；CLI 验证文件，但激活状态为 `unknown`。已有脚本安装需先卸载再通过 CLI 启用。
+
+Cosh adapter 通过 cosh 原生 registry 选择并启用交付的用户来源。需使用支持按身份清理
+adapter 来源选择的 cosh-ng；enable 或 disable 后重启已有 cosh 会话。status 验证
+catalog 配置，已有会话的加载情况报告为 `unknown`。
 
 ## 安装模式
 
@@ -89,10 +101,15 @@ scope。因此，即使 system scope 已安装同名组件，
 | `--no-color` | 禁用彩色输出 |
 
 完整的命令形式、scope 行为与恢复流程见
-[CLI 用户指南](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md)。
+[CLI 用户指南](../../docs/user-guide/zh/getting-started/anolisa-cli.md)。
 
 RPM 安装支持 Yum 3 和 DNF 4。使用 `sudo` 执行 RPM `--dry-run`，
 可在安装前检查依赖和冲突。
+
+raw 安装可使用 `anolisa install <component> --backend raw --no-deps`
+跳过运行依赖检查和安装，也支持与 `--all` 组合。使用组件前需自行确保
+所需依赖可用。安装成功后会向 stderr 输出提醒，`--quiet` 可隐藏提醒。
+RPM 后端不支持此选项，会明确报错。
 
 ## 架构
 
@@ -110,6 +127,16 @@ RPM 安装支持 Yum 3 和 DNF 4。使用 `sudo` 执行 RPM `--dry-run`，
 planner 区分 ANOLISA 自有文件与 native package authority，并在副作用前
 记录崩溃恢复意图。组件元数据通过 `component.toml` 声明。
 
+ANOLISA 在 `share/anolisa/components/` 中交付 RPM 集成合同。组件 RPM 独立
+交付运行时、plugins 和 skills，无须安装 ANOLISA 元数据。RPM install/adopt
+将发行合同保存为状态快照，供适配器管理使用；raw 产物保留各自发布版本的合同。
+`bash scripts/package-manifests.sh /absolute/manifests.tar.gz` 可生成
+`scripts/install-anolisa.sh` 使用的数据包。
+预构建归档和 native npm 包在 `bin/anolisa` 旁交付同一套 registry；请一起
+保留 `bin/` 和 `share/` 目录。手工只复制一个二进制文件时，需要另用安装器
+部署数据包，才能管理 RPM 适配器。若 registry 合同仍由旧组件 RPM 所有，
+安装器会拒绝覆盖；请先升级这些组件包。
+
 raw backend 每次解析都会重新拉取 distribution index，仓库不可达时命令直接
 失败。`repo.toml` 中旧的 `cache_ttl_secs` 和 `offline_fallback` 字段仍可正常
 解析以保持向后兼容，但当前 raw backend 不会使用这些值。
@@ -119,7 +146,7 @@ raw backend 每次解析都会重新拉取 distribution index，仓库不可达�
 - Linux（x86_64 / aarch64）或 macOS 11+（arm64 / x86_64，功能受限）
 
 Intel macOS 的预构建包和 npm 支持需要使用包含 `darwin-x64` 平台包的新版本。
-该版本发布且安装入口单独开放之前，官网安装脚本仍仅支持 ARM Mac。
+官网安装脚本已同时支持 ARM Mac 与 macOS 11 及更高版本的 Intel Mac。
 - 从源码构建需要 Rust ≥ 1.93
 
 ## 许可证

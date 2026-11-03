@@ -1,0 +1,33 @@
+name: Test OS Skills raw package
+
+on:
+  pull_request:
+    paths:
+      - 'src/os-skills/**'
+      - '.github/actions/build-os-skills-prebuilt/**'
+      - '.github/actions/prebuilt-rust-common/**'
+      - '.github/workflows/os-skills-prebuilt-ci.yaml'
+      - '.github/workflows/release.yaml'
+      - '.github/workflows/release-preview.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Verify OS Skills raw package
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify raw package and action
+        run: |
+          python3 -m unittest discover -s src/os-skills/tests -p test_raw_packaging.py
+          python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
+          bash .github/actions/build-os-skills-prebuilt/test.sh

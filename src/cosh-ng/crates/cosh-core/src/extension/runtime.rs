@@ -24,6 +24,7 @@ pub struct RuntimeSnapshotBuilder<'a> {
     enable_shell_evidence_tool: bool,
     load_skills: bool,
     tool_selection: Option<&'a str>,
+    workspace_file_tools: bool,
     settings: Option<&'a ExtensionSettings>,
 }
 
@@ -43,6 +44,7 @@ impl<'a> RuntimeSnapshotBuilder<'a> {
             enable_shell_evidence_tool: false,
             load_skills: true,
             tool_selection: None,
+            workspace_file_tools: true,
             settings: None,
         }
     }
@@ -62,6 +64,11 @@ impl<'a> RuntimeSnapshotBuilder<'a> {
     /// Restricts every generated runtime snapshot to the CLI-selected tool set.
     pub fn with_tool_selection(mut self, selection: Option<&'a str>) -> Self {
         self.tool_selection = selection;
+        self
+    }
+
+    pub(crate) fn with_workspace_file_tools(mut self, enabled: bool) -> Self {
+        self.workspace_file_tools = enabled;
         self
     }
 
@@ -138,6 +145,11 @@ impl<'a> RuntimeSnapshotBuilder<'a> {
                 tool_registration_healthy = false;
                 diagnostics.push(ExtensionDiagnostic::new("tool_selection_invalid", error));
             }
+        }
+        // Apply after CLI selection so explicitly selected unavailable tools
+        // remain disabled, including after extension reloads.
+        if !self.workspace_file_tools {
+            tools.disable_workspace_file_tools();
         }
         let tools = Arc::new(tools);
 

@@ -45,6 +45,21 @@ pub struct ImportReport {
 }
 
 /// Reconstruct markdown from frontmatter map + body.
+///
+/// The frontmatter format is line-based (one `key: value` or `  - item`
+/// line each), and its five hand-rolled readers (`parse_frontmatter`,
+/// `parse_frontmatter_flat` and its copies) do not parse YAML escapes —
+/// so this writer must not apply any. The crate's established convention
+/// for exactly this situation (see `sanitize_hint` in `memory_observe.rs`
+/// and `memory_task::yaml_quote`) is to flatten: every ASCII control
+/// character becomes a space, everything else is written verbatim.
+/// `sanitize_scalar` applies that to keys, values and list items alike —
+/// `ExportedMemory.frontmatter` deserialises straight from an untrusted
+/// archive with no validation, so a key can carry exactly the line break
+/// this function refuses on the value side (including a `\n---\n` that
+/// would otherwise terminate the frontmatter block early and land
+/// attacker-controlled text at the head of the body). The cost of the
+/// convention is that the line break is lost rather than preserved.
 fn reconstruct_markdown(fm: &HashMap<String, String>, body: &str) -> String {
     if fm.is_empty() {
         return body.to_string();
@@ -57,17 +72,34 @@ fn reconstruct_markdown(fm: &HashMap<String, String>, body: &str) -> String {
         // If value is a JSON array, emit as YAML list items
         if value.starts_with('[') {
             if let Ok(items) = serde_json::from_str::<Vec<String>>(value) {
-                out.push_str(&format!("{key}:\n"));
-                for item in &items {
-                    out.push_str(&format!("  - {item}\n"));
+                // The item form is only safe when every item survives the
+                // line-based format verbatim; otherwise re-serialise the
+                // flattened items as one JSON array line — still one line,
+                // still list-shaped for `parse_frontmatter_list`, and
+                // byte-stable from the second cycle on.
+                if items.iter().all(|item| is_frontmatter_safe(item)) {
+                    out.push_str(&format!("{}:\n", sanitize_scalar(key)));
+                    for item in &items {
+                        out.push_str(&format!("  - {item}\n"));
+                    }
+                } else {
+                    let flat: Vec<String> =
+                        items.iter().map(|item| sanitize_scalar(item)).collect();
+                    // `to_string` on a `Vec<String>` cannot fail (no maps,
+                    // no non-string keys); the fallback only keeps the
+                    // function total.
+                    let encoded = serde_json::to_string(&flat).unwrap_or_else(|_| "[]".to_string());
+                    out.push_str(&format!("{}: {}\n", sanitize_scalar(key), encoded));
                 }
                 continue;
             }
         }
-        if value.is_empty() {
-            out.push_str(&format!("{key}:\n"));
+        let flat_value = sanitize_scalar(value);
+        let flat_key = sanitize_scalar(key);
+        if flat_value.is_empty() {
+            out.push_str(&format!("{flat_key}:\n"));
         } else {
-            out.push_str(&format!("{key}: {value}\n"));
+            out.push_str(&format!("{flat_key}: {flat_value}\n"));
         }
     }
     out.push_str("---\n\n");
@@ -76,6 +108,28 @@ fn reconstruct_markdown(fm: &HashMap<String, String>, body: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A scalar that can be written verbatim as one frontmatter line: no
+/// ASCII control character at all. NUL and ESC are as unwelcome in a
+/// line that later gets FTS-indexed and echoed to a terminal as a line
+/// break is, which is why the predicate is control-character-wide and
+/// not just newline-shaped.
+fn is_frontmatter_safe(value: &str) -> bool {
+    !value.chars().any(|c| c.is_ascii_control())
+}
+
+/// Flatten a scalar for the line-based frontmatter format: every ASCII
+/// control character becomes a space, everything else is kept verbatim
+/// (including `#`, `:`, `"` and `\\` — the readers do not parse
+/// escapes, so escaping would corrupt values asymmetrically). This is
+/// the same convention `sanitize_hint` and `memory_task::yaml_quote`
+/// already apply.
+fn sanitize_scalar(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_ascii_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Import memories from an AMA JSON string.
@@ -113,8 +167,28 @@ pub fn memory_import(
         errors: Vec::new(),
     };
 
+    // Pre-pass (own throwaway seen-set): the destructive overwrite wipe may
+    // only run for a fully well-formed archive — one whose every entry
+    // passes the path-shape and duplicate checks. A malformed archive
+    // (even partly) skips the wipe; per-entry reporting below still
+    // applies, so valid entries import and invalid ones are listed.
+    let archive_is_malformed = {
+        let mut prepass_seen = std::collections::HashSet::new();
+        archive
+            .memories
+            .iter()
+            .chain(archive.tasks.iter())
+            .any(|mem| check_and_record_entry_path(mem, &mut prepass_seen).is_err())
+    };
+    if archive_is_malformed {
+        tracing::warn!(
+            "overwrite strategy skipped the destructive wipe: \
+             the archive contains invalid entries (see the error list)"
+        );
+    }
+
     // Handle overwrite strategy: export backup, then remove all existing .md files
-    if strategy == ImportStrategy::Overwrite && !dry_run {
+    if strategy == ImportStrategy::Overwrite && !dry_run && !archive_is_malformed {
         // Best-effort backup: export current state before destructive overwrite.
         match crate::tools::memory_export::memory_export(
             svc,
@@ -134,30 +208,45 @@ pub fn memory_import(
         tracing::info!("overwrite strategy: removed {removed} existing memories");
     }
 
+    // One shared seen-set for memories and tasks: both write into the same
+    // mount namespace, so a task and a memory with the same path collide on
+    // disk and must be reported rather than double-written.
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Import memories
     for mem in &archive.memories {
-        match import_single(svc, mem, strategy, dry_run) {
+        match import_single(svc, mem, strategy, dry_run, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
                 ImportAction::Skipped => report.skipped += 1,
             },
             Err(e) => {
-                report.errors.push(format!("{}: {e}", mem.path));
+                let label = if mem.path.is_empty() {
+                    "<empty>"
+                } else {
+                    &mem.path
+                };
+                report.errors.push(format!("{label}: {e}"));
             }
         }
     }
 
     // Import tasks
     for task in &archive.tasks {
-        match import_single(svc, task, strategy, dry_run) {
+        match import_single(svc, task, strategy, dry_run, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
                 ImportAction::Skipped => report.skipped += 1,
             },
             Err(e) => {
-                report.errors.push(format!("{}: {e}", task.path));
+                let label = if task.path.is_empty() {
+                    "<empty>"
+                } else {
+                    &task.path
+                };
+                report.errors.push(format!("{label}: {e}"));
             }
         }
     }
@@ -204,15 +293,62 @@ enum ImportAction {
     Skipped,
 }
 
+/// Validate one archive entry before it is written.
+///
+/// The AMA format only ever contains markdown memory paths: `mem_export`
+/// filters its walk to `.md` files and `ExportedMemory::path` is documented
+/// as e.g. "facts/lesson/01J5.md". Anything else — a non-`.md` path like
+/// "facts/facts.jsonl", an empty path, or a path repeated in the same
+/// archive — is malformed input, and writing it would clobber non-memory
+/// files (the append-only fact log, the generated index) with reconstructed
+/// markdown.
+fn check_and_record_entry_path(
+    mem: &ExportedMemory,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<String> {
+    if mem.path.is_empty() {
+        return Err(MemoryError::InvalidArgument(
+            "archive entry has an empty path".into(),
+        ));
+    }
+    if Path::new(&mem.path).extension().and_then(|e| e.to_str()) != Some("md") {
+        return Err(MemoryError::InvalidArgument(format!(
+            "archive entry '{}' is not a markdown (.md) memory path; \
+             AMA archives only contain .md files (as produced by mem_export)",
+            mem.path
+        )));
+    }
+    // Normalize once and key everything on the canonical form:
+    // `Path::components()` drops trailing slashes and empty segments, so
+    // "notes/a.md/", "notes//a.md" and "notes/a.md//" all collapse to
+    // "notes/a.md". The raw-string keyed set treated those spellings as
+    // distinct (the duplicate guard was bypassable), and the trailing
+    // slash additionally defeated the skip-existing `exists()` check
+    // with ENOTDIR once the file was there.
+    let normalized: std::path::PathBuf = Path::new(&mem.path).components().collect();
+    let normalized = normalized.to_string_lossy().into_owned();
+    if !seen.insert(normalized.clone()) {
+        return Err(MemoryError::InvalidArgument(format!(
+            "duplicate entry path '{}' in archive; each memory may appear once",
+            mem.path
+        )));
+    }
+    Ok(normalized)
+}
+
 fn import_single(
     svc: &MemoryService,
     mem: &ExportedMemory,
     strategy: ImportStrategy,
     dry_run: bool,
+    seen: &mut std::collections::HashSet<String>,
 ) -> Result<ImportAction> {
+    let path = check_and_record_entry_path(mem, seen)?;
+
     // Security: use ns::paths::resolve_for_create to prevent path traversal
-    // and enforce reserved-segment checks (.anolisa, .git*, etc.)
-    let target_path = crate::ns::paths::resolve_for_create(&svc.mount, &mem.path)?;
+    // and enforce reserved-segment checks (.anolisa, .git*, etc.) — on the
+    // normalized path, so trailing-slash spellings resolve to the file.
+    let target_path = crate::ns::paths::resolve_for_create(&svc.mount, &path)?;
 
     let exists = target_path.exists();
 
@@ -338,6 +474,185 @@ mod tests {
         let body = "Just content.";
         let md = reconstruct_markdown(&fm, body);
         assert_eq!(md, body);
+    }
+
+    #[test]
+    fn multiline_value_cannot_inject_frontmatter_keys() {
+        // A hand-edited or third-party AMA archive may carry a frontmatter
+        // value with an embedded line break. Written verbatim, the second
+        // line would become its own frontmatter key (`id: injected`).
+        let mut fm = HashMap::new();
+        fm.insert("note".to_string(), "line one\nid: injected".to_string());
+
+        let md = reconstruct_markdown(&fm, "body");
+
+        for line in md.lines() {
+            assert!(
+                !line.starts_with("id:"),
+                "value line break injected a frontmatter key: {md:?}"
+            );
+        }
+        // The value survives, flattened onto one line per the crate's
+        // no-escape convention (`sanitize_hint` and friends).
+        assert!(
+            md.contains("note: line one id: injected"),
+            "multi-line value should be flattened onto one line: {md:?}"
+        );
+        // Windows paths and other non-control characters stay verbatim —
+        // the readers do not parse escapes, so escaping them would corrupt
+        // the value on read-back.
+        let mut fm = HashMap::new();
+        fm.insert("path".to_string(), "C:\\Users\\tester\\notes".to_string());
+        let md = reconstruct_markdown(&fm, "body");
+        assert!(
+            md.contains("path: C:\\Users\\tester\\notes"),
+            "non-control characters must stay verbatim: {md:?}"
+        );
+    }
+
+    #[test]
+    fn multiline_key_cannot_inject_frontmatter_keys() {
+        // `ExportedMemory.frontmatter` deserialises straight from the
+        // archive with no validation, so a KEY can carry the same line
+        // break — and worse, a `\n---\n` that would terminate the
+        // frontmatter block early and drop every key sorted after it.
+        let mut fm = HashMap::new();
+        fm.insert("aaa\nid: injected".to_string(), "v".to_string());
+        fm.insert("tags".to_string(), "keepme".to_string());
+
+        let md = reconstruct_markdown(&fm, "body");
+
+        for line in md.lines() {
+            assert!(
+                !line.starts_with("id:"),
+                "key line break injected a frontmatter key: {md:?}"
+            );
+        }
+        let (parsed, body) = crate::tools::memory_export::parse_frontmatter(&md);
+        assert!(
+            parsed.get("tags").is_some_and(|v| v == "keepme"),
+            "keys sorted after the malicious one must survive: {parsed:?}"
+        );
+        assert_eq!(
+            body.trim(),
+            "body",
+            "body must not absorb frontmatter: {body:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_cannot_terminate_the_frontmatter_block_early() {
+        let mut fm = HashMap::new();
+        fm.insert("aaa".to_string(), "1".to_string());
+        fm.insert("zzz\n---\n\npwned body line".to_string(), "2".to_string());
+        fm.insert("tags".to_string(), "keepme".to_string());
+
+        let md = reconstruct_markdown(&fm, "real body");
+
+        let (parsed, body) = crate::tools::memory_export::parse_frontmatter(&md);
+        assert!(
+            parsed.get("tags").is_some_and(|v| v == "keepme"),
+            "keys sorted after the malicious one must survive: {parsed:?}"
+        );
+        assert!(
+            parsed.contains_key("zzz ---  pwned body line"),
+            "the malicious key is flattened, not lost: {parsed:?}"
+        );
+        assert!(
+            !body.contains("pwned"),
+            "attacker-controlled text must not land at the head of the body: {body:?}"
+        );
+        assert_eq!(body.trim(), "real body");
+    }
+
+    #[test]
+    fn reconstruct_round_trips_through_the_real_reader() {
+        // The in-repo pattern (memory_observe's hint_round_trips): assert
+        // on the parsed map, not the rendered text, so the reader and the
+        // writer cannot drift apart.
+        let mut fm = HashMap::new();
+        fm.insert("id".to_string(), "abc123".to_string());
+        fm.insert("note".to_string(), "line one\nid: injected".to_string());
+        fm.insert(
+            "next_steps".to_string(),
+            "[\"Step 1\",\"a\nb\"]".to_string(),
+        );
+
+        let md1 = reconstruct_markdown(&fm, "body");
+        let (parsed, body1) = crate::tools::memory_export::parse_frontmatter(&md1);
+        assert_eq!(body1.trim(), "body");
+        assert_eq!(parsed.get("id").map(String::as_str), Some("abc123"));
+        assert_eq!(
+            parsed.get("note").map(String::as_str),
+            Some("line one id: injected")
+        );
+
+        // The cycle reaches a fixed point by the second rendering: the
+        // first cycle may still normalise (the JSON-array fallback for a
+        // list with a broken item re-renders as the item form once the
+        // item is flattened), but from there on every further
+        // reconstruct -> parse round trip is byte-stable.
+        let md2 = reconstruct_markdown(&parsed, body1);
+        let (parsed2, body2) = crate::tools::memory_export::parse_frontmatter(&md2);
+        assert_eq!(
+            parsed, parsed2,
+            "parsed values must be stable across cycles"
+        );
+        assert_eq!(
+            body1.trim(),
+            body2.trim(),
+            "body content must survive every cycle unchanged"
+        );
+        // (The body gains one leading blank line per cycle - pre-existing:
+        // reconstruct_markdown writes a blank line after the closing
+        // marker while parse_frontmatter slices right after it; out of
+        // scope for this PR and worth its own issue.)
+        let md3 = reconstruct_markdown(&parsed2, body2);
+        let (parsed3, _) = crate::tools::memory_export::parse_frontmatter(&md3);
+        assert_eq!(
+            parsed2, parsed3,
+            "the frontmatter must stay at its fixed point from the second cycle on"
+        );
+    }
+
+    #[test]
+    fn json_list_with_multiline_items_falls_back_to_one_line() {
+        // `["a\nb"]` cannot be a YAML list here: the embedded line break
+        // would split the item across lines and corrupt the frontmatter.
+        let mut fm = HashMap::new();
+        fm.insert("next_steps".to_string(), "[\"a\nb\"]".to_string());
+
+        let md = reconstruct_markdown(&fm, "body");
+
+        // The fallback re-serialises the flattened items as one JSON
+        // array line: still list-shaped for every downstream consumer.
+        assert_eq!(
+            md.lines()
+                .find(|l| l.starts_with("next_steps:"))
+                .map(|l| l.to_string()),
+            Some("next_steps: [\"a b\"]".to_string()),
+            "list fallback must re-serialise the flattened items: {md:?}"
+        );
+        assert!(
+            !md.contains("\n  - "),
+            "no list item line may split: {md:?}"
+        );
+    }
+
+    #[test]
+    fn single_line_lists_keep_the_yaml_item_form() {
+        let mut fm = HashMap::new();
+        fm.insert(
+            "next_steps".to_string(),
+            "[\"Step 1\",\"Step 2\"]".to_string(),
+        );
+
+        let md = reconstruct_markdown(&fm, "body");
+
+        assert!(
+            md.contains("next_steps:\n  - Step 1\n  - Step 2\n"),
+            "well-formed lists must keep the item form: {md:?}"
+        );
     }
 
     #[test]

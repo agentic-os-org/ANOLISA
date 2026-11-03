@@ -1,16 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::{PolicyTemplate, TemplateEnvelope};
-use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
+use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::binding::{BindingStatus, BindingView};
 use asc_policy_types::error::ValidationError;
-use asc_policy_types::identifiers::PolicyId;
 use asc_policy_types::policy::{PreparedPolicy, validate_policy_name};
-use asc_policy_types::scope::{PreparedScope, ScopeSelector};
+use asc_policy_types::scope::{PolicyReference, PreparedScope, ScopeDeletion, ScopeSelector};
 use uuid::Uuid;
 
-use crate::compiler::PolicyCompiler;
 use crate::error::PapError;
 use crate::model::Page;
 use crate::repository::PapRepository;
@@ -24,37 +22,40 @@ enum WriteTarget<'a> {
     Update(&'a ResourceId),
 }
 
-/// Policy Administration Point for transport-independent desired-state CRUD.
-pub struct PapService<R, C> {
+/// Policy Administration Point for templates, assignments and owned Binding intent.
+pub struct PapService<R> {
+    scope_mutations: Arc<Mutex<()>>,
     repository: Arc<R>,
-    compiler: Arc<C>,
+    discovery: Option<Arc<dyn crate::ScopeDiscovery>>,
     enqueuer: Option<Arc<dyn crate::BindingReconcileEnqueuer>>,
 }
 
-impl<R, C> Clone for PapService<R, C> {
+impl<R> Clone for PapService<R> {
     fn clone(&self) -> Self {
         Self {
+            scope_mutations: self.scope_mutations.clone(),
             repository: Arc::clone(&self.repository),
-            compiler: Arc::clone(&self.compiler),
             enqueuer: self.enqueuer.clone(),
+            discovery: self.discovery.clone(),
         }
     }
 }
 
-impl<R, C> PapService<R, C>
+impl<R> PapService<R>
 where
     R: PapRepository,
-    C: PolicyCompiler,
 {
-    /// Creates PAP from explicit persistence and synchronous compiler ports.
-    pub fn new(repository: Arc<R>, compiler: Arc<C>) -> Self {
+    /// Creates PAP with a repository; templates are validated before admission.
+    pub fn new(repository: Arc<R>) -> Self {
         Self {
+            scope_mutations: Arc::new(Mutex::new(())),
             repository,
-            compiler,
             enqueuer: None,
+            discovery: None,
         }
     }
 
+    /// Connects committed Binding intent to the existing reconciliation runtime.
     #[must_use]
     pub fn with_reconcile_enqueuer(
         mut self,
@@ -63,10 +64,20 @@ where
         self.enqueuer = Some(enqueuer);
         self
     }
+    /// Connects assignment admission and deletion to owned discovery workers.
+    #[must_use]
+    pub fn with_scope_discovery(mut self, discovery: Arc<dyn crate::ScopeDiscovery>) -> Self {
+        self.discovery = Some(discovery);
+        self
+    }
     fn check_ready(&self) -> Result<(), PapError> {
         self.enqueuer.as_ref().map_or(Ok(()), |e| e.check_ready())
     }
-    fn notify(&self, mut binding: BindingView) -> Result<BindingView, PapError> {
+    fn notify(
+        &self,
+        receipt: &asc_policy_repository::BindingIntentReceipt,
+    ) -> Result<BindingView, PapError> {
+        let mut binding = receipt.binding.clone();
         let Some(enqueuer) = &self.enqueuer else {
             return Ok(binding);
         };
@@ -80,7 +91,7 @@ where
         let Err(reason) = enqueuer.enqueue(&binding.spec.binding_id) else {
             return Ok(binding);
         };
-        match self.repository.fail_pending_binding(&binding, reason) {
+        match self.repository.fail_pending_binding(receipt, reason) {
             Ok(true) => {
                 // Return the snapshot confirmed by the conditional write, without
                 // a second read that could observe a newer request or fail.
@@ -118,7 +129,7 @@ where
     /// PAP generates the identity and starts at revision 1.
     ///
     /// # Errors
-    /// Returns validation, lowering, conflict, revision, or persistence errors.
+    /// Returns validation, conflict, revision, or persistence errors.
     #[tracing::instrument(skip_all, name = "pap.create_policy")]
     pub fn create_policy(
         &self,
@@ -131,10 +142,10 @@ where
     /// Updates one existing Policy identity to an authored template.
     ///
     /// Identical latest content is idempotent. Changed content receives the
-    /// next never-reused revision and is lowered synchronously before storage.
+    /// next never-reused revision and is validated before storage.
     ///
     /// # Errors
-    /// Returns validation, lowering, conflict, revision, or persistence errors.
+    /// Returns validation, conflict, revision, or persistence errors.
     #[tracing::instrument(skip_all, name = "pap.update_policy")]
     pub fn update_policy(
         &self,
@@ -176,7 +187,13 @@ where
 
             let revision =
                 next_revision(state.as_ref().map(|value| value.last_allocated_revision))?;
-            let candidate = self.prepare_policy(&selected_id, policy_name, revision, template)?;
+            let candidate = PreparedPolicy {
+                policy_id: selected_id.clone(),
+                policy_name: policy_name.to_owned(),
+                revision,
+                template: template.clone(),
+            };
+            candidate.validate().map_err(PapError::InvalidPolicy)?;
             match self.repository.put_policy(&candidate) {
                 Err(PapError::Conflict) => {
                     if !update_existing {
@@ -225,301 +242,182 @@ where
         self.repository.delete_policy_revision(id, revision)
     }
 
-    /// Creates one Scope identity from an authored selector.
-    ///
-    /// PAP generates the identity and starts at revision 1.
-    ///
+    /// Creates an immutable assignment from exact current policy revisions.
     /// # Errors
-    /// Returns validation, conflict, revision, or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.create_scope")]
-    pub fn create_scope(&self, selector: &ScopeSelector) -> Result<PreparedScope, PapError> {
-        self.write_scope(WriteTarget::Create, selector)
-    }
-
-    /// Updates one existing Scope identity to an authored selector.
-    ///
-    /// Identical latest content is idempotent. Changed content receives the
-    /// next never-reused revision, with the repository atomically rejecting a
-    /// stale allocation head so this service can retry from the winning update.
-    ///
-    /// # Errors
-    /// Returns validation, conflict, revision, or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.update_scope")]
-    pub fn update_scope(
+    /// Rejects stale references, invalid selectors, and unavailable discovery.
+    #[tracing::instrument(skip_all, name = "pap.create_scope", fields(scope_id = tracing::field::Empty))]
+    pub fn create_scope_assignment(
         &self,
-        scope_id: &ResourceId,
         selector: &ScopeSelector,
+        policies: &[PolicyReference],
     ) -> Result<PreparedScope, PapError> {
-        self.write_scope(WriteTarget::Update(scope_id), selector)
-    }
-
-    fn write_scope(
-        &self,
-        target: WriteTarget<'_>,
-        selector: &ScopeSelector,
-    ) -> Result<PreparedScope, PapError> {
+        let _guard = self
+            .scope_mutations
+            .lock()
+            .map_err(|_| PapError::Persistence)?;
         selector.validate().map_err(PapError::InvalidScope)?;
-        let (update_existing, mut selected_id) = match target {
-            WriteTarget::Create => (false, generated_resource_id()?),
-            WriteTarget::Update(id) => (true, id.clone()),
-        };
-
-        for _ in 0..MAX_WRITE_ATTEMPTS {
-            let state = self.repository.get_scope_revision_state(&selected_id)?;
-            if update_existing && state.is_none() {
-                return Err(PapError::NotFound);
-            }
-            if !update_existing && state.is_some() {
-                selected_id = generated_resource_id()?;
-                continue;
-            }
-            if let Some(current) = state.as_ref().and_then(|value| value.current.as_ref())
-                && &current.selector == selector
-            {
-                return Ok(current.clone());
-            }
-
-            let revision =
-                next_revision(state.as_ref().map(|value| value.last_allocated_revision))?;
-            let candidate = PreparedScope {
-                scope_id: selected_id.clone(),
-                revision,
-                selector: selector.clone(),
-            };
-            // The selector was validated before any repository access; the
-            // remaining fields are already validated identifier/revision types.
-            match self.repository.put_scope(&candidate) {
-                Err(PapError::Conflict) => {
-                    if !update_existing {
-                        selected_id = generated_resource_id()?;
-                    }
-                }
-                result => return result,
-            }
+        // The current AgentSight adapter has no cgroup instance contract.
+        if matches!(selector, ScopeSelector::CgroupId { .. }) {
+            return Err(PapError::InvalidScope(ValidationError::new(
+                "selector",
+                "cgroup assignments are not supported",
+            )));
         }
-        Err(PapError::Conflict)
+        let discovery = self.discovery.as_ref().ok_or(PapError::Unavailable)?;
+        self.check_ready()?;
+        let snapshots = policies
+            .iter()
+            .map(|p| {
+                self.repository
+                    .get_policy(&p.policy_id, p.policy_revision)
+                    .map_err(|e| {
+                        if matches!(e, PapError::NotFound) {
+                            PapError::ReferencedPolicyRevisionNotFound
+                        } else {
+                            e
+                        }
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let candidate = PreparedScope {
+            scope_id: generated_resource_id()?,
+            selector: selector.clone(),
+            policy_snapshots: snapshots,
+            status: asc_policy_types::scope::ScopeStatus::Active,
+        };
+        candidate.validate().map_err(PapError::InvalidScope)?;
+        let scope = match self.repository.put_scope(&candidate) {
+            // A commit can succeed before its acknowledgement is lost. Only the
+            // exact server-generated assignment proves admission in that case.
+            Err(PapError::Persistence) => match self.repository.get_scope(&candidate.scope_id) {
+                Ok(saved) if saved == candidate => saved,
+                _ => return Err(PapError::Persistence),
+            },
+            result => result?,
+        };
+        tracing::Span::current().record("scope_id", tracing::field::display(&scope.scope_id));
+        let started = self
+            .repository
+            .scope_discovery_seed(&scope.scope_id)
+            .and_then(|seed| discovery.start(&seed));
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_pap",
+            scope_id = %scope.scope_id, discovery_result = ?started,
+            "scope admitted; discovery start attempted"
+        );
+        if let Err(error) = started {
+            let cleanup = self
+                .repository
+                .begin_scope_delete(&scope.scope_id)
+                .and_then(|_| self.repository.finish_scope_discovery(&scope.scope_id))
+                .and_then(|bindings| self.notify_all(bindings));
+            if let Err(cleanup_error) = cleanup {
+                tracing::error!(
+                    target: "asc_process_diagnostic",
+                    scope_id = %scope.scope_id,
+                    start_error = %error,
+                    %cleanup_error,
+                    "scope discovery startup compensation failed; inspect and retry Scope deletion"
+                );
+            }
+            return Err(error);
+        }
+        Ok(scope)
     }
 
-    /// Gets the current Scope when its revision matches exactly.
-    ///
+    /// Reads an assignment by identity.
     /// # Errors
-    /// Returns not-found or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.get_scope")]
-    pub fn get_scope(
-        &self,
-        id: &ResourceId,
-        revision: Revision,
-    ) -> Result<PreparedScope, PapError> {
-        self.repository.get_scope(id, revision)
+    /// Returns not-found or storage failures.
+    pub fn get_scope(&self, id: &ResourceId) -> Result<PreparedScope, PapError> {
+        self.repository.get_scope(id)
     }
 
-    /// Lists current Scope records.
-    ///
+    /// Lists assignments including those awaiting cleanup.
     /// # Errors
-    /// Returns invalid-pagination or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.list_scopes")]
+    /// Returns pagination or storage failures.
     pub fn list_scopes(&self, limit: u32, offset: u32) -> Result<Page<PreparedScope>, PapError> {
         validate_limit(limit)?;
         self.repository.list_scopes(limit, offset)
     }
 
-    /// Deletes the current Scope content without allowing revision reuse.
-    ///
+    /// Accepts irreversible deletion, stops discovery and schedules owned cleanup.
+    /// A successful response acknowledges intent, not remote completion.
     /// # Errors
-    /// Returns not-found, conflict, or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.delete_scope_revision")]
-    pub fn delete_scope_revision(
-        &self,
-        id: &ResourceId,
-        revision: Revision,
-    ) -> Result<PreparedScope, PapError> {
-        self.repository.delete_scope_revision(id, revision)
-    }
-
-    /// Creates one immutable Binding spec from Policy and Scope references.
-    ///
-    /// PAP generates the identity, starts at revision 1, and assigns
-    /// `PENDING_APPLY`.
-    ///
-    /// # Errors
-    /// Returns not-found, validation, conflict, revision, or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.create_binding")]
-    pub fn create_binding(
-        &self,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<BindingView, PapError> {
-        self.write_binding(
-            WriteTarget::Create,
-            policy_id,
-            policy_revision,
-            scope_id,
-            scope_revision,
-        )
-    }
-
-    /// Updates the single current Binding record to Apply intent.
-    ///
-    /// Policy and Scope references are resolved to complete immutable snapshots.
-    /// An identical spec is idempotent while Apply is pending, running, or
-    /// complete. Same-spec retry after `ApplyFailed` keeps the revision and target
-    /// responsibility; only changed specs receive the next revision. Changed specs are
-    /// rejected while Applying, and every UPDATE is rejected after Delete intent.
-    /// Admission returns `PENDING_APPLY` and notifies the configured runtime;
-    /// translation and target I/O execute outside the request.
-    ///
-    /// # Errors
-    /// Returns not-found, validation, operation-in-progress, conflict, revision,
-    /// or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.update_binding")]
-    pub fn update_binding(
-        &self,
-        binding_id: &ResourceId,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<BindingView, PapError> {
-        self.write_binding(
-            WriteTarget::Update(binding_id),
-            policy_id,
-            policy_revision,
-            scope_id,
-            scope_revision,
-        )
-    }
-
-    fn write_binding(
-        &self,
-        target: WriteTarget<'_>,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<BindingView, PapError> {
-        self.check_ready()?;
-        let (update_existing, mut selected_id) = match target {
-            WriteTarget::Create => (false, generated_resource_id()?),
-            WriteTarget::Update(id) => (true, id.clone()),
+    /// Returns not-found, discovery or storage failures, retaining admitted intent.
+    #[tracing::instrument(skip_all, name = "pap.delete_scope", fields(scope_id = %id))]
+    pub fn delete_scope(&self, id: &ResourceId) -> Result<ScopeDeletion, PapError> {
+        let _guard = self
+            .scope_mutations
+            .lock()
+            .map_err(|_| PapError::Persistence)?;
+        if self.repository.begin_scope_delete(id)?.is_none() {
+            return Ok(ScopeDeletion {
+                scope_id: id.clone(),
+                completed: true,
+            });
+        }
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_pap",
+            scope_id = %id, "scope deletion intent committed"
+        );
+        // Close child admission before joining discovery. A stop failure retains
+        // deletion intent; retry delete/retry_scope after discovery is available.
+        self.discovery
+            .as_ref()
+            .ok_or(PapError::Unavailable)?
+            .stop(id)?;
+        self.notify_all(self.repository.finish_scope_discovery(id)?)?;
+        tracing::debug!(
+            target: "asc_observability::diagnostic", component = "policy_pap",
+            scope_id = %id, "scope discovery stopped; binding cleanup notified"
+        );
+        let completed = match self.repository.get_scope(id) {
+            Ok(_) => false,
+            Err(PapError::NotFound) => true,
+            Err(error) => return Err(error),
         };
-
-        for _ in 0..MAX_WRITE_ATTEMPTS {
-            let current = match self.repository.get_binding(&selected_id) {
-                Ok(current) if update_existing => Some(current),
-                Ok(_) => {
-                    selected_id = generated_resource_id()?;
-                    continue;
-                }
-                Err(PapError::NotFound) if update_existing => return Err(PapError::NotFound),
-                Err(PapError::NotFound) => None,
-                Err(error) => return Err(error),
-            };
-            if let Some(current) = current.as_ref() {
-                if matches!(
-                    current.status.phase,
-                    BindingStatus::PendingDelete
-                        | BindingStatus::Deleting
-                        | BindingStatus::DeleteFailed
-                        | BindingStatus::Deleted
-                ) {
-                    return Err(PapError::OperationInProgress);
-                }
-                if current.status == BindingStatus::Applying {
-                    let identical_reference = current.spec.policy.policy_id == *policy_id
-                        && current.spec.policy.revision == policy_revision
-                        && current.spec.scope.scope_id == *scope_id
-                        && current.spec.scope.revision == scope_revision;
-                    return if identical_reference {
-                        self.notify(current.clone())
-                    } else {
-                        Err(PapError::OperationInProgress)
-                    };
-                }
-            }
-            let policy =
-                self.resolve_binding_policy(current.as_ref(), policy_id, policy_revision)?;
-            let scope = self.resolve_binding_scope(current.as_ref(), scope_id, scope_revision)?;
-
-            if let Some(current) = current.as_ref() {
-                let identical = current.spec.policy == policy && current.spec.scope == scope;
-                if identical {
-                    let next_status = current
-                        .status
-                        .request_apply()
-                        .map_err(|_| PapError::OperationInProgress)?;
-                    if next_status == current.status {
-                        return self.notify(current.clone());
-                    }
-                }
-            }
-
-            let revision = match current.as_ref() {
-                Some(current) if current.spec.policy == policy && current.spec.scope == scope => {
-                    current.spec.binding_revision
-                }
-                _ => next_revision(current.as_ref().map(|value| value.spec.binding_revision))?,
-            };
-            let spec = PreparedBinding {
-                binding_id: selected_id.clone(),
-                binding_revision: revision,
-                policy: policy.clone(),
-                scope: scope.clone(),
-            };
-            let initial_status = BindingStatus::PendingApply;
-            let binding = binding_view(spec, initial_status)?;
-
-            // The conditional write saves pending intent and clears its previous error.
-            // Notify only after this write succeeds; rejection is terminalized conditionally by PAP.
-            match self.repository.update_binding(current.as_ref(), &binding) {
-                Err(PapError::Conflict) => {
-                    if !update_existing {
-                        selected_id = generated_resource_id()?;
-                    }
-                }
-                result => return result.and_then(|binding| self.notify(binding)),
-            }
-        }
-        Err(PapError::Conflict)
+        Ok(ScopeDeletion {
+            scope_id: id.clone(),
+            completed,
+        })
     }
 
-    fn resolve_binding_policy(
-        &self,
-        current: Option<&BindingView>,
-        policy_id: &ResourceId,
-        policy_revision: Revision,
-    ) -> Result<PreparedPolicy, PapError> {
-        match self.repository.get_policy(policy_id, policy_revision) {
-            Ok(policy) => Ok(policy),
-            Err(PapError::NotFound) => current
-                .filter(|binding| {
-                    binding.spec.policy.policy_id == *policy_id
-                        && binding.spec.policy.revision == policy_revision
-                })
-                .map(|binding| binding.spec.policy.clone())
-                .ok_or(PapError::ReferencedPolicyRevisionNotFound),
-            Err(error) => Err(error),
+    /// Explicitly retries failed work owned by an assignment.
+    /// # Errors
+    /// Returns not-found, discovery, scheduling or storage failures.
+    pub fn retry_scope(&self, id: &ResourceId) -> Result<PreparedScope, PapError> {
+        let _guard = self
+            .scope_mutations
+            .lock()
+            .map_err(|_| PapError::Persistence)?;
+        let scope = self.repository.get_scope(id)?;
+        if scope.status == asc_policy_types::scope::ScopeStatus::Deleting {
+            self.discovery
+                .as_ref()
+                .ok_or(PapError::Unavailable)?
+                .stop(id)?;
+            self.notify_all(self.repository.finish_scope_discovery(id)?)?;
         }
+        match self.repository.retry_scope(id) {
+            Ok(bindings) => self.notify_all(bindings)?,
+            Err(PapError::NotFound)
+                if scope.status == asc_policy_types::scope::ScopeStatus::Deleting => {}
+            Err(error) => return Err(error),
+        }
+        Ok(scope)
     }
 
-    fn resolve_binding_scope(
+    fn notify_all(
         &self,
-        current: Option<&BindingView>,
-        scope_id: &ResourceId,
-        scope_revision: Revision,
-    ) -> Result<PreparedScope, PapError> {
-        match self.repository.get_scope(scope_id, scope_revision) {
-            Ok(scope) => Ok(scope),
-            Err(PapError::NotFound) => current
-                .filter(|binding| {
-                    binding.spec.scope.scope_id == *scope_id
-                        && binding.spec.scope.revision == scope_revision
-                })
-                .map(|binding| binding.spec.scope.clone())
-                .ok_or(PapError::ReferencedScopeRevisionNotFound),
-            Err(error) => Err(error),
+        bindings: Vec<asc_policy_repository::BindingIntentReceipt>,
+    ) -> Result<(), PapError> {
+        let mut failure = None;
+        for binding in bindings {
+            if let Err(error) = self.notify(&binding) {
+                failure = Some(error);
+            }
         }
+        failure.map_or(Ok(()), Err)
     }
 
     /// Gets the current Binding snapshot and mutable status.
@@ -540,88 +438,16 @@ where
         validate_limit(limit)?;
         self.repository.list_bindings(limit, offset)
     }
-
-    /// Accepts irreversible Delete intent at the current spec/revision.
-    /// Pending/running deletion is idempotent. `DeleteFailed` retries with a fresh
-    /// retry budget. Spec and target records remain until the reconciler confirms
-    /// every target absent and physically removes the aggregate. This returns the
-    /// accepted `PENDING_DELETE` view without waiting for remote cleanup.
-    ///
-    /// # Errors
-    /// Returns not-found, conflict or persistence errors.
-    #[tracing::instrument(skip_all, name = "pap.delete_binding")]
-    pub fn delete_binding(&self, id: &ResourceId) -> Result<BindingView, PapError> {
-        self.check_ready()?;
-        for _ in 0..MAX_WRITE_ATTEMPTS {
-            let current = self.repository.get_binding(id)?;
-            let next_status = current.status.request_delete();
-            if next_status == current.status {
-                return self.notify(current);
-            }
-            let binding = binding_view(current.spec.clone(), next_status)?;
-
-            // Preserve cleanup responsibility while atomically admitting Delete.
-            // The daemon will notify its worker only after this write commits.
-            match self.repository.update_binding(Some(&current), &binding) {
-                Ok(binding) => return self.notify(binding),
-                Err(PapError::Conflict) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Err(PapError::Conflict)
-    }
-
-    fn prepare_policy(
-        &self,
-        policy_id: &ResourceId,
-        policy_name: &str,
-        revision: Revision,
-        template: &PolicyTemplate,
-    ) -> Result<PreparedPolicy, PapError> {
-        let domain_id = PolicyId::new(policy_id.as_str()).map_err(PapError::InvalidIdentifier)?;
-        let input = TemplateEnvelope {
-            policy_id: domain_id.clone(),
-            revision,
-            template: template.clone(),
-        };
-        let canonical_policy = self
-            .compiler
-            .lower(&input)
-            .map_err(PapError::InvalidPolicy)?;
-        if canonical_policy.policy_id != domain_id {
-            return Err(PapError::InvalidPolicy(ValidationError::new(
-                "canonicalPolicy.policyId",
-                "compiler output must match the authored Policy identity",
-            )));
-        }
-        if canonical_policy.revision != revision {
-            return Err(PapError::InvalidPolicy(ValidationError::new(
-                "canonicalPolicy.revision",
-                "compiler output must match the authored Policy revision",
-            )));
-        }
-        canonical_policy
-            .validate()
-            .map_err(PapError::InvalidPolicy)?;
-        // Name was checked at admission; the checks above validate every
-        // remaining PreparedPolicy invariant with PAP's compiler error paths.
-        Ok(PreparedPolicy {
-            policy_id: policy_id.clone(),
-            policy_name: policy_name.to_owned(),
-            revision,
-            template: template.clone(),
-            canonical_policy,
-        })
-    }
 }
 
-fn binding_view(spec: PreparedBinding, status: BindingStatus) -> Result<BindingView, PapError> {
-    let view = BindingView {
-        spec,
-        status: status.into(),
-    };
-    view.validate().map_err(PapError::InvalidBinding)?;
-    Ok(view)
+impl<R: PapRepository> crate::ScopeBindingSink for PapService<R> {
+    fn sync_instances(
+        &self,
+        id: &ResourceId,
+        instances: &[asc_policy_types::process_discovery::ProcessIdentity],
+    ) -> Result<(), PapError> {
+        self.notify_all(self.repository.sync_scope_instances(id, instances)?)
+    }
 }
 
 fn validate_limit(limit: u32) -> Result<(), PapError> {

@@ -39,7 +39,9 @@ PREFIX="${TOKENLESS_INSTALL_PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 CODEX_BIN="${CODEX_BIN:-}"
 MARKETPLACE_NAME="anolisa-tokenless"
+PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
 MARKETPLACE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/codex-marketplace"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 
 DEREGISTER_ONLY=0
 if [[ "${TOKENLESS_DEREGISTER_ONLY:-0}" == "1" ]]; then
@@ -55,6 +57,39 @@ echo "[tokenless] Codex plugin uninstall"
 
 # 1. Remove codex plugin registration
 CODEX_BIN="$(resolve_codex)"
+
+if [ "$DRY_RUN" = "1" ]; then
+    # Preview before the first removal: a dry run must leave the codex
+    # registrations, the marketplace tree and the component binary alone. The
+    # two branches of the real path differ (the CLI one asks codex, the no-CLI
+    # one reads config.toml and refuses to guess), so the preview names the one
+    # the resolved state takes instead of claiming both.
+    if [ -n "$CODEX_BIN" ]; then
+        echo "DRY-RUN: ${CODEX_BIN} plugin remove tokenless@${MARKETPLACE_NAME} (only when it is registered)"
+        echo "DRY-RUN: ${CODEX_BIN} plugin marketplace remove ${MARKETPLACE_NAME} (only when it is registered)"
+        echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there and the registration is confirmed gone)"
+    else
+        # No CLI to ask, so the real path decides on config.toml alone; the same
+        # read-only check decides here, or the preview would report a kept
+        # directory while the run deletes it.
+        codex_config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+        if [[ -f "$codex_config" ]] && grep -Eq "tokenless|${MARKETPLACE_NAME}" "$codex_config" 2>/dev/null; then
+            echo "DRY-RUN: no codex CLI resolved and ${codex_config} still names tokenless, so the real run keeps"
+            echo "DRY-RUN: ${MARKETPLACE_DIR} and exits 1"
+        else
+            echo "DRY-RUN: no codex CLI resolved and ${codex_config} records no tokenless registration:"
+            echo "DRY-RUN: rm -rf ${MARKETPLACE_DIR} (only when it is there), and the real run exits 0"
+        fi
+    fi
+    # The component binary is a separate decision: the real path removes it
+    # whenever TOKENLESS_DEREGISTER_ONLY is unset, whether or not the
+    # registration could be confirmed, so it is previewed in every branch.
+    if [ "$DEREGISTER_ONLY" = "0" ]; then
+        echo "DRY-RUN: rm -f ${BINDIR}/tokenless (only when it is there; interactive mode asks first; without a terminal it is kept)"
+    fi
+    exit 0
+fi
+
 DEREGISTER_FAILED=0
 # A query that fails is not an empty answer. Piping `plugin list` straight into
 # grep turns a broken or refusing CLI into "nothing is registered", which reads as
@@ -83,21 +118,29 @@ codex_list() {  # codex_list <args...> -> prints the listing, status = CLI statu
 # registered" turned every successful uninstall into exit 1 and, through
 # TOKENLESS_DEREGISTER_ONLY, stopped the component uninstaller from dropping the
 # adapter resources and the receipt. Only a row for this plugin whose status is
-# not `not installed` counts as a surviving registration.
+# not `not installed` counts as a surviving registration. Other marketplaces
+# may offer a plugin with the same name; a bare row only identifies our plugin
+# inside our marketplace section. Qualified ids do not need section context.
 codex_plugin_registered() {  # <listing> -> 0 while an active plugin row survives
     local rows
     rows="$(printf '%s\n' "$1" \
-        | grep -E "^[[:space:]]*tokenless(@[^[:space:]]*)?[[:space:]]" \
-        | grep -Eiv "^[[:space:]]*[^[:space:]]+[[:space:]]+not[[:space:]]+installed([[:space:]]|$)" \
-        || true)"
+        | awk -v id="$PLUGIN_ID" -v market="$MARKETPLACE_NAME" '
+            $1 == "Marketplace" {
+                section = $2
+                gsub(/`/, "", section)
+                next
+            }
+            ($1 == id || ($1 == "tokenless" && section == market)) &&
+            !(tolower($2) == "not" && tolower($3) ~ /^installed,?$/) { print }
+        ')"
     [[ -n "$rows" ]]
 }
 
 if [[ -n "$CODEX_BIN" ]]; then
     if plugin_listing="$(codex_list plugin list)"; then
         if codex_plugin_registered "$plugin_listing"; then
-            echo "[tokenless] Removing codex plugin 'tokenless@${MARKETPLACE_NAME}'..."
-            "$CODEX_BIN" plugin remove "tokenless@${MARKETPLACE_NAME}" 2>&1 || true
+            echo "[tokenless] Removing codex plugin '${PLUGIN_ID}'..."
+            "$CODEX_BIN" plugin remove "${PLUGIN_ID}" 2>&1 || true
             # The removal status is swallowed on purpose — "was not registered" and
             # "refused" both come back non-zero — so re-ask instead of trusting it.
             if after_listing="$(codex_list plugin list)"; then
@@ -197,7 +240,7 @@ fi
 if [[ $DEREGISTER_FAILED -eq 1 ]]; then
     echo "[tokenless] Uninstall incomplete: the Codex registration is still in place." >&2
     echo "[tokenless] Remove it, then run this script again:" >&2
-    echo "[tokenless]   codex plugin remove tokenless@${MARKETPLACE_NAME}" >&2
+    echo "[tokenless]   codex plugin remove ${PLUGIN_ID}" >&2
     echo "[tokenless]   codex plugin marketplace remove ${MARKETPLACE_NAME}" >&2
     exit 1
 fi

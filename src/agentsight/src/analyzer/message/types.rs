@@ -1,11 +1,13 @@
 //! Message types for LLM API request/response parsing
 //!
-//! This module defines structured types for parsing OpenAI Chat Completions
-//! and Anthropic Messages API formats.
+//! This module defines structured types for parsing OpenAI Chat Completions,
+//! Anthropic Messages, Aliyun SysOM and Google Gemini API formats.
 //!
 //! # Supported APIs
 //! - OpenAI Chat Completions (`/v1/chat/completions`)
 //! - Anthropic Messages (`/v1/messages`)
+//! - Aliyun SysOM Copilot (`/api/v1/copilot/generate_copilot`)
+//! - Google Gemini (`/v1beta/models/{model}:generateContent`)
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +33,12 @@ pub enum MessageRole {
     Assistant,
     /// Tool/Function message
     Tool,
+    /// A role this build does not model, such as the `function` role of the
+    /// legacy OpenAI function-calling protocol. One unrecognised role must
+    /// not fail the whole request deserialization — the same degradation
+    /// [`AnthropicContentBlock`] takes for unmodeled blocks.
+    #[serde(other)]
+    Unknown,
 }
 
 // ============================================================================
@@ -116,18 +124,30 @@ pub struct OpenAIRequest {
 /// OpenAI Chat Completions API response body
 ///
 /// Reference: https://platform.openai.com/docs/api-reference/chat/object
+///
+/// The identity fields are optional because compatible gateways slim the
+/// body down to what they have: GLM's `/api/paas/v4/chat/completions`
+/// returns `{id, choices, created, model, request_id}` with no `object`. A
+/// required identity field failed the whole deserialization, so the
+/// recorded response was dropped whole — no output message, no finish
+/// reason, no usage. `choices` stays required: an OpenAI response without
+/// choices is not slim, it is broken.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIResponse {
     /// Unique completion ID
+    #[serde(default)]
     pub id: String,
 
     /// Object type (always "chat.completion")
+    #[serde(default)]
     pub object: String,
 
     /// Unix timestamp of creation
+    #[serde(default)]
     pub created: u64,
 
     /// Model used for the completion
+    #[serde(default)]
     pub model: String,
 
     /// List of completion choices
@@ -196,18 +216,23 @@ pub enum OpenAIContent {
 }
 
 impl OpenAIContent {
-    /// Extract text content as a single string
+    /// Extract text content as a single string.
+    ///
+    /// Multi-block content is joined with `\n` (empty text blocks skipped) to
+    /// match the raw path's `joined_text_parts`: `IdResolver` derives its keys
+    /// from this text on both the typed and the raw path, so the two paths
+    /// must agree on the same request.
     pub fn as_text(&self) -> String {
         match self {
             OpenAIContent::Text(s) => s.clone(),
             OpenAIContent::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    OpenAIContentPart::Text { text } => Some(text.as_str()),
+                    OpenAIContentPart::Text { text } if !text.is_empty() => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
-                .join(""),
+                .join("\n"),
         }
     }
 }
@@ -228,6 +253,12 @@ pub enum OpenAIContentPart {
         /// Image URL object
         image_url: OpenAIImageUrl,
     },
+    /// A content part this build does not model, such as `input_audio` or
+    /// `file`. Kept as a variant so one unrecognised part cannot fail the
+    /// whole request; text extraction skips it, exactly as it skips image
+    /// parts.
+    #[serde(other)]
+    Unknown,
 }
 
 /// OpenAI image URL structure
@@ -405,6 +436,7 @@ pub struct AnthropicResponse {
     pub stop_sequence: Option<String>,
 
     /// Token usage statistics
+    #[serde(default)]
     pub usage: AnthropicUsage,
 }
 
@@ -475,7 +507,12 @@ pub enum AnthropicContentBlock {
         source: AnthropicImageSource,
     },
     /// Tool use content block
-    #[serde(rename = "tool_use")]
+    ///
+    /// `server_tool_use` is the same call made by a tool the provider runs on
+    /// its side (web search, code execution, the MCP connector); it carries
+    /// the identical `id` / `name` / `input` payload, so it is read as the
+    /// call it is instead of being dropped by the catch-all variant.
+    #[serde(rename = "tool_use", alias = "server_tool_use", alias = "mcp_tool_use")]
     ToolUse {
         /// Tool use ID
         id: String,
@@ -485,7 +522,23 @@ pub enum AnthropicContentBlock {
         input: serde_json::Value,
     },
     /// Tool result content block
-    #[serde(rename = "tool_result")]
+    ///
+    /// The server-tool results (`web_search_tool_result`,
+    /// `web_fetch_tool_result`, the code-execution results, the MCP
+    /// connector's `mcp_tool_result`, and `tool_search_tool_result`) all carry
+    /// `tool_use_id` plus a caller-defined `content`, exactly like
+    /// `tool_result`; they were dropped as unmodelled blocks, which lost the
+    /// result the answer was built from.
+    #[serde(
+        rename = "tool_result",
+        alias = "web_search_tool_result",
+        alias = "web_fetch_tool_result",
+        alias = "code_execution_tool_result",
+        alias = "bash_code_execution_tool_result",
+        alias = "text_editor_code_execution_tool_result",
+        alias = "tool_search_tool_result",
+        alias = "mcp_tool_result"
+    )]
     ToolResult {
         /// Tool use ID this result is for
         tool_use_id: String,
@@ -496,6 +549,14 @@ pub enum AnthropicContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    /// A block type this build does not model, such as `redacted_thinking`
+    /// (extended thinking with redacted content) or `container_upload`.
+    ///
+    /// Kept as a variant so one unrecognised block cannot fail the whole
+    /// response — the streaming path degrades the same way for unknown
+    /// `content_block_start` types.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Anthropic image source
@@ -519,12 +580,14 @@ pub struct AnthropicImageSource {
 }
 
 /// Anthropic token usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnthropicUsage {
     /// Number of input tokens
+    #[serde(default)]
     pub input_tokens: u64,
 
     /// Number of output tokens
+    #[serde(default)]
     pub output_tokens: u64,
 
     /// Input tokens used to create cache entries
@@ -551,15 +614,26 @@ impl AnthropicUsage {
 ///
 /// Each SSE event in an OpenAI streaming response contains a chunk
 /// with delta updates instead of complete messages.
+///
+/// The identity fields are optional because compatible gateways slim the
+/// event down to what they have, the same way they slim the plain body
+/// (see [`OpenAIResponse`]): a required field failed the whole event's
+/// deserialization, so the aggregation silently skipped every chunk and
+/// the stream looked empty. `choices` stays required — a chunk without
+/// choices carries nothing to aggregate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiSseChunk {
     /// Unique completion ID
+    #[serde(default)]
     pub id: String,
     /// Object type (usually "chat.completion.chunk")
+    #[serde(default)]
     pub object: String,
     /// Unix timestamp of creation
+    #[serde(default)]
     pub created: u64,
     /// Model used for the completion
+    #[serde(default)]
     pub model: String,
     /// List of chunk choices with deltas
     pub choices: Vec<OpenAiSseChoice>,
@@ -572,9 +646,25 @@ pub struct OpenAiSseChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiSseChoice {
     /// Index of the choice
+    ///
+    /// Slimmed compatible streams omit it — their stream carries a single
+    /// choice, so the index defaults to that one slot.
+    #[serde(default)]
     pub index: u32,
     /// Delta content (incremental update)
+    ///
+    /// A cumulative frame carries a whole `message` instead, so the delta
+    /// defaults rather than rejecting that frame.
+    #[serde(default)]
     pub delta: OpenAiSseDelta,
+    /// Cumulative whole-message frame: repeats the answer so far instead of
+    /// an increment. Kept untyped because its shape is the terminal message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<serde_json::Value>,
+    /// Legacy `/v1/completions` fragment. That protocol puts the generated
+    /// text directly on the choice, with no `delta` or `message` object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     /// Reason for finishing (stop, length, tool_calls, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
@@ -584,7 +674,7 @@ pub struct OpenAiSseChoice {
 }
 
 /// OpenAI SSE delta content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenAiSseDelta {
     /// Role (usually only in first chunk)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -643,18 +733,28 @@ pub enum AnthropicSseEvent {
 }
 
 /// Anthropic SSE message start data
+///
+/// The identity fields are optional because compatible gateways slim the
+/// event down to what they have: DashScope-compatible streams send only
+/// `model` plus `usage`, with no `id`, `type` or `role`. A required field
+/// failed the whole event's deserialization, so the aggregation skipped it
+/// and lost the model and the preliminary usage snapshot it carried.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicSseMessageStart {
     /// Message ID
+    #[serde(default)]
     pub id: String,
     /// Message type (always "message")
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type")]
     pub type_: String,
     /// Role (always "assistant")
+    #[serde(default = "assistant_role")]
     pub role: MessageRole,
     /// Model used
+    #[serde(default)]
     pub model: String,
     /// Initial usage statistics
+    #[serde(default)]
     pub usage: AnthropicUsage,
     /// Content blocks (empty at start)
     #[serde(default)]
@@ -665,6 +765,12 @@ pub struct AnthropicSseMessageStart {
     /// Stop sequence
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
+}
+
+/// Default role for a `message_start` that omits it: the event only ever
+/// describes the assistant's reply.
+fn assistant_role() -> MessageRole {
+    MessageRole::Assistant
 }
 
 /// Anthropic SSE content delta
@@ -705,7 +811,11 @@ pub struct AnthropicSseMessageDelta {
 /// delta with `message_start` rather than trusting either alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicSseUsageDelta {
-    /// Output tokens
+    /// Output tokens. Optional like every other counter: a proxy that splits the
+    /// terminal usage between `message_start` and this delta may omit it, and a
+    /// required field would fail the whole event, losing the `stop_reason` and
+    /// the counters the delta did carry.
+    #[serde(default)]
     pub output_tokens: u64,
     /// Input tokens, when the provider reports them in the delta
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -749,6 +859,13 @@ pub enum ParsedApiMessage {
         /// Parsed response body
         response: Option<super::sysom::SysomResponse>,
     },
+    /// Google Gemini `generateContent` API message
+    GeminiMessage {
+        /// Parsed request body (model and stream come from the request path)
+        request: Option<super::gemini::GeminiRequest>,
+        /// Parsed response body
+        response: Option<super::gemini::GeminiResponse>,
+    },
 }
 
 impl ParsedApiMessage {
@@ -766,6 +883,9 @@ impl ParsedApiMessage {
             ParsedApiMessage::SysomMessage { request, .. } => {
                 request.as_ref().map(|r| r.params.model.as_str())
             }
+            ParsedApiMessage::GeminiMessage { request, .. } => {
+                request.as_ref().map(|r| r.model.as_str())
+            }
         }
     }
 
@@ -775,6 +895,7 @@ impl ParsedApiMessage {
             ParsedApiMessage::OpenAICompletion { .. } => "openai",
             ParsedApiMessage::AnthropicMessage { .. } => "anthropic",
             ParsedApiMessage::SysomMessage { .. } => "sysom",
+            ParsedApiMessage::GeminiMessage { .. } => "gemini",
         }
     }
 
@@ -789,6 +910,9 @@ impl ParsedApiMessage {
             }
             ParsedApiMessage::SysomMessage { response, .. } => {
                 response.as_ref().and_then(|r| r.id.as_deref())
+            }
+            ParsedApiMessage::GeminiMessage { response, .. } => {
+                response.as_ref().and_then(|r| r.response_id.as_deref())
             }
         }
     }
@@ -820,6 +944,7 @@ impl ParsedApiMessage {
             ParsedApiMessage::SysomMessage { request, .. } => {
                 request.as_ref().map(|r| r.params.stream)
             }
+            ParsedApiMessage::GeminiMessage { request, .. } => request.as_ref().map(|r| r.stream),
         }
     }
 }
@@ -889,7 +1014,20 @@ mod tests {
                 text: "World".to_string(),
             },
         ]);
-        assert_eq!(parts_content.as_text(), "Hello World");
+        assert_eq!(parts_content.as_text(), "Hello \nWorld");
+
+        let with_empty = OpenAIContent::Parts(vec![
+            OpenAIContentPart::Text {
+                text: String::new(),
+            },
+            OpenAIContentPart::Text {
+                text: "A".to_string(),
+            },
+            OpenAIContentPart::Text {
+                text: "B".to_string(),
+            },
+        ]);
+        assert_eq!(with_empty.as_text(), "A\nB");
     }
 
     #[test]
@@ -1035,6 +1173,52 @@ mod tests {
         ]"#;
         let blocks: Vec<AnthropicContentBlock> = serde_json::from_str(json_str).unwrap();
         assert_eq!(blocks.len(), 2);
+    }
+
+    /// Anthropic's server-tool blocks carry the same payload as the modelled
+    /// call and result blocks: `server_tool_use` is a `tool_use` the provider
+    /// ran on its side, and `web_search_tool_result` is a `tool_result` for
+    /// it. Both used to fall into the catch-all `Unknown` variant, so the one
+    /// record of what the model asked for and what came back was dropped from
+    /// the parsed response.
+    #[test]
+    fn test_anthropic_server_tool_blocks_map_onto_the_modelled_blocks() {
+        let json_str = r#"[
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+             "input": {"query": "rust 2026"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+             "content": [{"type": "web_search_result", "url": "https://example.com",
+                          "title": "Example"}]},
+            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_2",
+             "content": {"type": "web_fetch_result", "url": "https://example.com"}}
+        ]"#;
+        let blocks: Vec<AnthropicContentBlock> = serde_json::from_str(json_str)
+            .expect("the server-tool spellings must not fall into Unknown");
+
+        match &blocks[0] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "srvtoolu_1");
+                assert_eq!(name, "web_search");
+                assert_eq!(input, &serde_json::json!({"query": "rust 2026"}));
+            }
+            other => panic!("server_tool_use must read as a tool call, got {other:?}"),
+        }
+        match &blocks[1] {
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "srvtoolu_1");
+                assert!(content.is_some(), "the search results must be kept");
+                assert!(is_error.is_none());
+            }
+            other => panic!("web_search_tool_result must read as a tool result, got {other:?}"),
+        }
+        assert!(matches!(
+            &blocks[2],
+            AnthropicContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "srvtoolu_2"
+        ));
     }
 
     #[test]
@@ -1300,5 +1484,47 @@ mod tests {
             response: None,
         };
         assert_eq!(msg.request_metadata_session_id(), None);
+    }
+    #[test]
+    fn test_openai_request_tolerates_unmodeled_variants() {
+        // The legacy function-calling protocol addresses tool results with
+        // role:"function"; multimodal requests carry content parts this
+        // build does not model (input_audio, file). One unmodeled variant
+        // used to fail the whole OpenAIRequest deserialization, so the
+        // call lost every input message.
+        let json = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "What is the weather?"},
+                {"role": "function", "name": "get_weather", "content": "{\"temp\": 20}"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "transcribe this"},
+                    {"type": "input_audio", "input_audio": {"data": "b64", "format": "wav"}}
+                ]}
+            ]
+        });
+        let req: OpenAIRequest = serde_json::from_value(json)
+            .expect("one unmodeled variant must not fail the whole request");
+        assert_eq!(req.messages.len(), 3);
+        assert_eq!(
+            req.messages[1].role,
+            MessageRole::Unknown,
+            "the legacy function role must degrade to Unknown, not fail the request"
+        );
+        let parts = req.messages[2].content.as_ref().unwrap();
+        assert!(
+            parts.as_text().contains("transcribe this"),
+            "the text part must survive the unmodeled audio part"
+        );
+        assert!(
+            !parts.as_text().contains("b64"),
+            "the unmodeled audio part must not leak into text extraction"
+        );
+    }
+
+    #[test]
+    fn test_message_role_unknown_for_unmodeled_role() {
+        let parsed: MessageRole = serde_json::from_str("\"function\"").unwrap();
+        assert_eq!(parsed, MessageRole::Unknown);
     }
 }

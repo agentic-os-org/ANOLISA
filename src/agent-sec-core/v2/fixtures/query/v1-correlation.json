@@ -1,0 +1,815 @@
+{
+  "record_defaults": {
+    "id": 1,
+    "uid": 1000,
+    "hook": "before_tool_call",
+    "timestamp": "1970-01-01T00:01:40Z",
+    "timestamp_epoch": 100.0,
+    "session_id": "s",
+    "run_id": "r",
+    "call_id": null,
+    "tool_call_id": "t",
+    "metadata": {},
+    "metrics": {
+      "parameters": {
+        "command": "echo x"
+      }
+    }
+  },
+  "event_defaults": {
+    "event_id": "",
+    "category": "code_scan",
+    "event_type": "scan",
+    "result": "succeeded",
+    "timestamp": "1970-01-01T00:01:40Z",
+    "uid": 1000,
+    "pid": 1,
+    "trace_id": "",
+    "session_id": "s",
+    "run_id": "r",
+    "call_id": null,
+    "tool_call_id": "t",
+    "details": {
+      "request": {}
+    }
+  },
+  "cases": [
+    {
+      "name": "exact ignores content and time",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 1100.0,
+          "event": {
+            "event_id": "exact",
+            "details": {
+              "request": {
+                "code": "different"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "exact",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": 1000.0
+        }
+      ]
+    },
+    {
+      "name": "ties use epoch then event id",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 101.0,
+          "event": {
+            "event_id": "z"
+          }
+        },
+        {
+          "timestamp_epoch": 99.0,
+          "event": {
+            "event_id": "b"
+          }
+        },
+        {
+          "timestamp_epoch": 99.0,
+          "event": {
+            "event_id": "a"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "a",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": -1.0
+        }
+      ]
+    },
+    {
+      "name": "PII source before tool",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "wrong",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "source": "tool_output"
+              }
+            }
+          }
+        },
+        {
+          "timestamp_epoch": 101.0,
+          "event": {
+            "event_id": "right",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "source": "tool_input"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "right",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": 1.0
+        }
+      ]
+    },
+    {
+      "name": "PII source after tool",
+      "record": {
+        "hook": "after_tool_call"
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "wrong",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "source": "tool_input"
+              }
+            }
+          }
+        },
+        {
+          "timestamp_epoch": 101.0,
+          "event": {
+            "event_id": "right",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "source": "tool_output"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "right",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": 1.0
+        }
+      ]
+    },
+    {
+      "name": "PII missing source needs hash",
+      "record": {
+        "metrics": {
+          "pii_scan_input_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "hash",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "text_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "hash",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "PII source mismatch cannot fall back",
+      "record": {
+        "metrics": {
+          "pii_scan_input_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "wrong",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "source": "tool_output",
+                "text_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+              }
+            }
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "run match",
+      "record": {
+        "hook": "before_agent_run",
+        "tool_call_id": null
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 1100.0,
+          "event": {
+            "event_id": "prompt",
+            "category": "prompt_scan"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "prompt",
+          "reason": "run_id",
+          "rank": 0,
+          "time_delta_seconds": 1000.0
+        }
+      ]
+    },
+    {
+      "name": "field rank beats time distance",
+      "record": {
+        "tool_call_id": null
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "prefix",
+            "details": {
+              "request": {
+                "code": "echo"
+              }
+            }
+          }
+        },
+        {
+          "timestamp_epoch": 110.0,
+          "event": {
+            "event_id": "exact",
+            "details": {
+              "request": {
+                "code": " echo  x "
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "exact",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": 10.0
+        }
+      ]
+    },
+    {
+      "name": "field inclusive boundary",
+      "record": {
+        "tool_call_id": null
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 90.0,
+          "event": {
+            "event_id": "boundary",
+            "details": {
+              "request": {
+                "code": "echo x"
+              }
+            }
+          }
+        },
+        {
+          "timestamp_epoch": 110.001,
+          "event": {
+            "event_id": "outside",
+            "details": {
+              "request": {
+                "code": "echo x"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "boundary",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": -10.0
+        }
+      ]
+    },
+    {
+      "name": "suffix before prefix",
+      "record": {
+        "tool_call_id": null
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "prefix",
+            "details": {
+              "request": {
+                "code": "echo"
+              }
+            }
+          }
+        },
+        {
+          "timestamp_epoch": 101.0,
+          "event": {
+            "event_id": "suffix",
+            "details": {
+              "request": {
+                "code": "x"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "suffix",
+          "reason": "field+time",
+          "rank": 1,
+          "time_delta_seconds": 1.0
+        }
+      ]
+    },
+    {
+      "name": "zero run uses content hash",
+      "record": {
+        "hook": "before_agent_run",
+        "run_id": "00000000-0000-0000-0000-000000000000",
+        "tool_call_id": null,
+        "metrics": {
+          "user_input": "hello"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "hash",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "text_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "hash",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "skill never uses fallback",
+      "record": {
+        "tool_call_id": null
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "skill",
+            "category": "skill_ledger",
+            "details": {
+              "request": {
+                "command": "echo x"
+              }
+            }
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "unsupported hook",
+      "record": {
+        "hook": "after_llm_call"
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "code"
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "missing session",
+      "record": {
+        "session_id": " "
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "code"
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "exact never falls back to matching content",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "wrong-tool",
+            "tool_call_id": "other",
+            "details": {
+              "request": {
+                "code": "echo x"
+              }
+            }
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "exact rejects missing run",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "missing-run",
+            "run_id": null
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "exact rejects missing tool",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "missing-tool",
+            "tool_call_id": null
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "category mapping excludes prompt from tool",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "prompt",
+            "category": "prompt_scan"
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "category deduplication and tie by id",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "z"
+          }
+        },
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "a"
+          }
+        },
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "skill",
+            "category": "skill_ledger"
+          }
+        },
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "pii",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "source": "tool_input"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "a",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        },
+        {
+          "event_id": "skill",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        },
+        {
+          "event_id": "pii",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "equal distance selects earlier timestamp",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 101.0,
+          "event": {
+            "event_id": "later"
+          }
+        },
+        {
+          "timestamp_epoch": 99.0,
+          "event": {
+            "event_id": "earlier"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "earlier",
+          "reason": "tool_call_id",
+          "rank": 0,
+          "time_delta_seconds": -1.0
+        }
+      ]
+    },
+    {
+      "name": "fallback rejects time only",
+      "record": {
+        "tool_call_id": null
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "near"
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "PII cannot use raw prefix",
+      "record": {
+        "hook": "before_agent_run",
+        "run_id": "",
+        "tool_call_id": null,
+        "metrics": {
+          "user_input": "hello world"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "raw",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "text": "hello"
+              }
+            }
+          }
+        }
+      ],
+      "expected": []
+    },
+    {
+      "name": "blank run uses session fallback",
+      "record": {
+        "run_id": " ",
+        "tool_call_id": null
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "code",
+            "details": {
+              "request": {
+                "code": "echo x"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "code",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "after tool fallback uses input hash",
+      "record": {
+        "hook": "after_tool_call",
+        "tool_call_id": null,
+        "metrics": {
+          "pii_scan_input_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "hash",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "text_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "hash",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "before tool fallback uses input hash",
+      "record": {
+        "tool_call_id": null,
+        "metrics": {
+          "pii_scan_input_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "hash",
+            "category": "pii_scan",
+            "details": {
+              "request": {
+                "text_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "hash",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "tool string parameters fallback",
+      "record": {
+        "tool_call_id": null,
+        "metrics": {
+          "parameters": "echo x"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "code",
+            "details": {
+              "request": {
+                "code": "echo x"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "code",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": 0.0
+        }
+      ]
+    },
+    {
+      "name": "prompt fallback matching",
+      "record": {
+        "hook": "before_agent_run",
+        "run_id": "",
+        "tool_call_id": null,
+        "metrics": {
+          "user_input": "hello world"
+        }
+      },
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "prefix",
+            "category": "prompt_scan",
+            "details": {
+              "request": {
+                "text": "hello"
+              }
+            }
+          }
+        },
+        {
+          "timestamp_epoch": 102.0,
+          "event": {
+            "event_id": "exact",
+            "category": "prompt_scan",
+            "details": {
+              "request": {
+                "text": "hello world"
+              }
+            }
+          }
+        }
+      ],
+      "expected": [
+        {
+          "event_id": "exact",
+          "reason": "field+time",
+          "rank": 0,
+          "time_delta_seconds": 2.0
+        }
+      ]
+    },
+    {
+      "name": "PII missing request cannot match",
+      "record": {},
+      "candidates": [
+        {
+          "timestamp_epoch": 100.0,
+          "event": {
+            "event_id": "empty",
+            "category": "pii_scan",
+            "details": {}
+          }
+        }
+      ],
+      "expected": []
+    }
+  ]
+}

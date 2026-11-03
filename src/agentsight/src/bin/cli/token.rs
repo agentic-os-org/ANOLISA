@@ -13,8 +13,8 @@ pub struct TokenCommand {
     #[structopt(long, possible_values = &["today", "yesterday", "week", "last_week", "month", "last_month"])]
     pub period: Option<String>,
 
-    /// Query last N hours
-    #[structopt(long)]
+    /// Query last N hours (cannot be combined with --period)
+    #[structopt(long, conflicts_with = "period")]
     pub hours: Option<u64>,
 
     /// Compare with previous period
@@ -28,24 +28,38 @@ pub struct TokenCommand {
     /// Custom data file path
     #[structopt(long)]
     pub data_file: Option<String>,
+
+    /// Override the database path
+    ///
+    /// The name every other query command uses for the same thing; it means
+    /// exactly what `--data-file` does here. `--data-file` stays because it is
+    /// already documented, and the two are declared mutually exclusive so a
+    /// caller cannot pass both and wonder which won.
+    #[structopt(long, conflicts_with = "data-file")]
+    pub db: Option<String>,
 }
 
 impl TokenCommand {
-    pub fn execute(&self) {
-        // Determine data file path
-        // Use the unified database path (agentsight.db) as default,
-        // which is where Storage writes all tables.
-        let data_path = self
-            .data_file
-            .as_ref()
+    /// Resolve the database path: `--db` and `--data-file` are the same
+    /// override under two names (see [`TokenCommand::db`]); without either the
+    /// unified `agentsight.db` is used, which is where Storage writes all
+    /// tables.
+    fn db_path(&self) -> std::path::PathBuf {
+        self.db
+            .as_deref()
+            .or(self.data_file.as_deref())
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| SqliteConfig::default().db_path());
+            .unwrap_or_else(|| SqliteConfig::default().db_path())
+    }
+
+    pub fn execute(&self) {
+        let data_path = self.db_path();
 
         self.execute_summary(&data_path);
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {
-        if self.data_file.is_some()
+        if (self.data_file.is_some() || self.db.is_some())
             && let Err(error) = agentsight::check_data_file(data_path)
         {
             eprintln!("{error}");
@@ -131,6 +145,85 @@ fn print_human_readable(result: &TokenQueryResult, show_compare: bool) {
             result.request_count,
             format_tokens_with_commas(result.input_tokens),
             format_tokens_with_commas(result.output_tokens)
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--hours` used to win unconditionally and `--period` was then never
+    /// read: `token --period week --hours 24` answered the 24-hour window while
+    /// the caller believed it asked for the calendar week — with exit 0 and a
+    /// header naming the window actually used, so the mismatch was invisible.
+    /// The sibling `interruption list --unresolved/--resolved` flags are
+    /// declared mutually exclusive for the same reason.
+    #[test]
+    fn hours_and_period_are_rejected_together() {
+        let both = TokenCommand::from_iter_safe(["token", "--period", "week", "--hours", "24"]);
+        let err = both.expect_err("two window selectors must not be silently reduced to one");
+        let message = err.to_string();
+        assert!(
+            message.contains("--hours") && message.contains("--period"),
+            "the error must name both flags: {message}"
+        );
+
+        // Either selector alone keeps working, in both flag orders.
+        let hours =
+            TokenCommand::from_iter_safe(["token", "--hours", "24"]).expect("--hours alone");
+        assert_eq!(hours.hours, Some(24));
+        let period =
+            TokenCommand::from_iter_safe(["token", "--period", "week"]).expect("--period alone");
+        assert_eq!(period.period.as_deref(), Some("week"));
+        let compared = TokenCommand::from_iter_safe(["token", "--hours", "24", "--compare"])
+            .expect("--hours with --compare");
+        assert!(compared.compare);
+        let reversed = TokenCommand::from_iter_safe(["token", "--hours", "24", "--period", "week"]);
+        assert!(reversed.is_err(), "the order of the flags must not matter");
+    }
+
+    /// Every other query command spells the database override `--db`
+    /// (`metrics`, `audit`, `summary`, `interruption`, `skill-metrics`,
+    /// `dashboard`, `serve`), and the CLI reference's Conventions table says
+    /// so. `token` alone called it `--data-file`, so `token --db <copy>` — the
+    /// spelling a reader carries over from the sibling commands — was rejected
+    /// with an unknown-argument error.
+    #[test]
+    fn db_is_accepted_as_the_database_override() {
+        let plain = TokenCommand::from_iter_safe(["token"]).expect("a plain invocation parses");
+        assert_eq!(plain.db_path(), SqliteConfig::default().db_path());
+
+        let with_db = TokenCommand::from_iter_safe(["token", "--db", "/tmp/token_copy.db"])
+            .expect("--db must be accepted, like the sibling query commands");
+        assert_eq!(
+            with_db.db_path(),
+            std::path::PathBuf::from("/tmp/token_copy.db")
+        );
+
+        // The published name keeps working and means the same thing.
+        let with_data_file =
+            TokenCommand::from_iter_safe(["token", "--data-file", "/tmp/token_copy.db"])
+                .expect("--data-file stays supported");
+        assert_eq!(
+            with_data_file.db_path(),
+            std::path::PathBuf::from("/tmp/token_copy.db")
+        );
+
+        // Two spellings of one override: passing both is a usage error rather
+        // than a silent pick, the same way `--hours`/`--period` are declared.
+        let both = TokenCommand::from_iter_safe([
+            "token",
+            "--db",
+            "/tmp/a.db",
+            "--data-file",
+            "/tmp/b.db",
+        ]);
+        let err = both.expect_err("the two spellings must not be silently reduced to one");
+        let message = err.to_string();
+        assert!(
+            message.contains("--db") && message.contains("--data-file"),
+            "the error must name both flags: {message}"
         );
     }
 }

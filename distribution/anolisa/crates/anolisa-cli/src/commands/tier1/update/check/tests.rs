@@ -673,6 +673,36 @@ fn update_check_default_present_via_index_package_without_provide() {
 }
 
 #[test]
+fn update_check_default_selects_installed_aggregate_or_core() {
+    let index = crate::resolution::ComponentIndex::from_toml_str(
+        "schema_version = 2\n\n[[components]]\nname = \"agent-memory\"\ntargets = [{ os = \"linux\", arch = \"x86_64\" }]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"agent-memory\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"agent-memory-core\"\n",
+        "test-components.toml",
+    )
+    .expect("index parses");
+    let mut host = FakeHost::with_cli_noop();
+    host.installed.insert(
+        "agent-memory-core".to_string(),
+        info("agent-memory-core", "0.2.13", Some("1")),
+    );
+    assert!(matches!(
+        probe_default_package(&host, Some(&index), "agent-memory"),
+        DefaultProbe::Installed(package) if package == "agent-memory-core"
+    ));
+    host.provides.insert(
+        "anolisa-component(agent-memory)".to_string(),
+        vec!["agent-memory".to_string()],
+    );
+    host.installed.insert(
+        "agent-memory".to_string(),
+        info("agent-memory", "0.2.13", Some("1")),
+    );
+    assert!(matches!(
+        probe_default_package(&host, Some(&index), "agent-memory"),
+        DefaultProbe::Installed(package) if package == "agent-memory"
+    ));
+}
+
+#[test]
 fn update_check_default_present_via_package_map_without_provide() {
     let mut host = FakeHost::with_cli_noop();
     host.installed.insert(
@@ -1790,6 +1820,38 @@ fn update_check_target_profile_parses_default_components() {
     let profile =
         load_target_profile_by_name(&layout, "image-v1.0", &probe).expect("profile loads");
     assert_eq!(profile.default_components, vec!["cosh", "sec-core"]);
+}
+
+#[test]
+fn registry_only_native_tree_preserves_layout_profiles_and_errors() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let layout = FsLayout::system(Some(tmp.path().join("layout")));
+    let packaged_root = tmp.path().join("native/share/anolisa");
+    std::fs::create_dir_all(packaged_root.join("components")).expect("mkdir registry");
+    let local = layout.datadir.join(PROFILES_SUBDIR).join("site.toml");
+    std::fs::create_dir_all(local.parent().expect("profile parent")).expect("mkdir profiles");
+    std::fs::write(
+        &local,
+        "schema_version = 1\nname = \"site\"\ndefault_components = [\"tokenless\"]\n",
+    )
+    .expect("write layout profile");
+    let probe = crate::packaged::PackagedDataProbe::from_inputs(Some(packaged_root.clone()), None);
+    let profile = load_target_profile_by_name(&layout, "site", &probe)
+        .expect("layout profile remains discoverable");
+    assert_eq!(profile.default_components, vec!["tokenless"]);
+
+    let preferred = packaged_root.join(PROFILES_SUBDIR).join("site.toml");
+    std::fs::create_dir_all(preferred.parent().expect("packaged parent")).expect("mkdir packaged");
+    std::fs::write(&preferred, "this is not TOML [").expect("write invalid profile");
+    let error = load_target_profile_by_name(&layout, "site", &probe)
+        .expect_err("invalid packaged profile cannot fall back");
+    assert!(error.to_string().contains("invalid"));
+
+    std::fs::remove_file(&preferred).expect("remove invalid file");
+    std::fs::create_dir(&preferred).expect("directory blocks profile");
+    let error = load_target_profile_by_name(&layout, "site", &probe)
+        .expect_err("unreadable packaged profile cannot fall back");
+    assert!(error.to_string().contains("cannot read target profile"));
 }
 
 #[test]

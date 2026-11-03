@@ -37,8 +37,7 @@ fn html_is_switchable_and_requires_recovery_and_text_replacement() {
             10 => {}
             _ => unreachable!(),
         }
-        let run = PostToolPipeline::run(&req, &config, if mode == 10 { None } else { Some(&store) })
-            .unwrap();
+        let run = PostToolPipeline::run(&req, &config, if mode == 10 { None } else { Some(&store) });
         assert_eq!(run.response.output, input, "mode {mode}");
         assert!(run.operations.is_empty(), "mode {mode}");
         assert!(run.response.stash_keys.is_empty());
@@ -56,7 +55,7 @@ fn html_renders_from_commands_and_apis_with_one_stash_write() {
         config.html_extraction_enabled = true;
         let mut req = request(&input);
         req.content_origin = origin;
-        let run = PostToolPipeline::run(&req, &config, Some(&store)).unwrap();
+        let run = PostToolPipeline::run(&req, &config, Some(&store));
 
         assert_eq!(run.response.disposition, Disposition::Applied);
         assert_eq!(run.response.content_type, Some(ContentType::Html));
@@ -126,7 +125,7 @@ fn html_failures_pass_through_and_rejections_roll_back() {
             }
             _ => unreachable!(),
         };
-        let run = PostToolPipeline::run(&request(&input), &config, Some(&store)).unwrap();
+        let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
         assert_eq!(run.response.disposition, disposition, "mode {mode}");
         assert_eq!(run.response.output, input);
         assert!(run.response.applied_operations.is_empty());
@@ -150,7 +149,7 @@ fn html_trailers_stay_after_the_view_and_in_the_stash() {
         let store: Arc<dyn StashStore> = concrete.clone();
         let mut config = build_log_config();
         config.html_extraction_enabled = true;
-        let run = PostToolPipeline::run(&request(&input), &config, Some(&store)).unwrap();
+        let run = PostToolPipeline::run(&request(&input), &config, Some(&store));
         // The trailer neither changes the content type nor the savings: it
         // costs the same tokens on both sides of the gate.
         assert_eq!(run.response.content_type, Some(ContentType::Html));
@@ -163,4 +162,78 @@ fn html_trailers_stay_after_the_view_and_in_the_stash() {
             Some(input.clone())
         );
     }
+}
+
+#[test]
+fn html_renders_a_page_that_opens_with_a_byte_order_mark() {
+    let page = html_input(10);
+    let input = format!("\u{feff}{page}");
+    let mut config = build_log_config();
+    config.html_extraction_enabled = true;
+
+    let marked = Arc::new(CountingStore::default());
+    let marked_store: Arc<dyn StashStore> = marked.clone();
+    let run = PostToolPipeline::run(&request(&input), &config, Some(&marked_store));
+
+    // The mark is a format character, not whitespace: unless detection skips it
+    // the page is never routed to the HTML domain, so a fetched document stays
+    // whole in the model's context even though the renderer reads it exactly as
+    // the unmarked page.
+    assert_eq!(run.response.content_type, Some(ContentType::Html));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.applied_operations,
+        [AppliedOperation::HtmlExtraction]
+    );
+    assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+    let output = &run.response.output;
+    assert!(output.contains("\nTitle: Doc\nURL: https://example.com/doc\n# Title\n"));
+    assert!(output.ends_with("\n[End page]"));
+    assert!(!output.contains('\u{feff}'));
+    assert_eq!(run.response.stash_keys.len(), 1);
+    // Recovery stays byte-exact, mark included.
+    assert_eq!(
+        marked.retrieve(&run.response.stash_keys[0]).unwrap(),
+        Some(input.clone())
+    );
+
+    // The view is the one the same page renders without the mark, apart from
+    // the retrieve line, which names each run's own stash entry.
+    let plain = Arc::new(CountingStore::default());
+    let plain_store: Arc<dyn StashStore> = plain.clone();
+    let plain_run = PostToolPipeline::run(&request(&page), &config, Some(&plain_store));
+    assert_eq!(plain_run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        output.split_once('\n').map(|(_, rest)| rest),
+        plain_run.response.output.split_once('\n').map(|(_, rest)| rest)
+    );
+}
+
+#[test]
+fn html_stash_failure_degrades_to_unchanged_and_counts_one_error() {
+    // A failed stash write is a backend failure, not an extractor failure:
+    // the page must pass through unchanged with the failure counted in the
+    // run's stash-error total (the lifecycle turns it into
+    // RuntimeError::StashWrite) instead of failing the whole PostTool call
+    // as RuntimeError::Pipeline.
+    let input = html_input(10);
+    let mut config = build_log_config();
+    config.html_extraction_enabled = true;
+    let mut req = request(&input);
+    req.content_origin = ContentOrigin::CommandOutput;
+    // CountingStore with the counter pre-advanced past the threshold so the
+    // very first `stash` call fails (same trick as the pipeline test).
+    let store: Arc<dyn StashStore> = Arc::new(CountingStore {
+        stash_calls: std::sync::atomic::AtomicUsize::new(1),
+        fail_stashes_after: 1,
+        ..CountingStore::default()
+    });
+    let run = PostToolPipeline::run(&req, &config, Some(&store));
+
+    assert_eq!(run.response.output, input);
+    assert_eq!(run.response.disposition, Disposition::NoSavings);
+    assert!(run.response.applied_operations.is_empty());
+    assert!(run.response.stash_keys.is_empty());
+    assert_eq!(run.stash_errors, Some(1));
+    assert_eq!(run.stash_writes, Some(0));
 }

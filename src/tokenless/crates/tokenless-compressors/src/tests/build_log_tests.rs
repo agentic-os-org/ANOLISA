@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite, extract_hash};
 
@@ -23,6 +24,38 @@ impl StashStore for AlwaysFail {
 
     fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
         Ok(false)
+    }
+}
+
+/// Stash store whose first write succeeds and every later write fails,
+/// simulating a backend that breaks mid-run (disk full, lock lost).
+struct FailAfterFirst {
+    inner: InMemoryStore,
+    calls: AtomicUsize,
+}
+
+impl StashStore for FailAfterFirst {
+    fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) > 0 {
+            return Err(StashError::Backend("simulated mid-run failure".to_owned()));
+        }
+        self.inner.stash(payload)
+    }
+
+    fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
+        self.inner.retrieve(hash)
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn evict_expired(&self) -> Result<usize, StashError> {
+        self.inner.evict_expired()
+    }
+
+    fn delete(&self, hash: &str, generation: u64) -> Result<bool, StashError> {
+        self.inner.delete(hash, generation)
     }
 }
 
@@ -87,6 +120,128 @@ fn pytest_quiet_log(files: usize) -> String {
     }
     output.push_str(&format!("{} passed in 2.34s\n", files * 8));
     output
+}
+
+fn unittest_log(passing: usize) -> String {
+    let mut output = (0..passing)
+        .map(|index| format!("test_case_{index:03} (__main__.ExampleTests) ... ok\n"))
+        .collect::<String>();
+    output.push_str(&format!(
+        "\n----------------------------------------------------------------------\nRan {passing} tests in 0.295s\n\nOK\n"
+    ));
+    output
+}
+
+#[test]
+fn unittest_success_reduces_and_restores_exactly() {
+    for input in [
+        unittest_log(83),
+        unittest_log(83).replace("ExampleTests)", "ExampleTests.test_case)"),
+        unittest_log(83).replace('\n', "\r\n"),
+    ] {
+        assert!(BuildLogCompressor::detect(&input));
+        let store = InMemoryStore::new();
+        let outcome = BuildLogCompressor.compress(&input, Some(&store));
+        assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+        assert_eq!(outcome.metrics.omitted_lines, 79);
+        assert!(outcome.output.contains("test_case_000"));
+        assert!(outcome.output.contains("test_case_082"));
+        assert!(outcome.output.contains("Ran 83 tests in 0.295s"));
+        assert!(outcome.output.ends_with("OK\n") || outcome.output.ends_with("OK\r\n"));
+        let write = &outcome.stash_writes[0];
+        assert_eq!(
+            replace_marker_line(
+                &outcome.output,
+                &write.key,
+                &store.retrieve(&write.key).unwrap().unwrap(),
+            ),
+            input
+        );
+    }
+    let input = unittest_log(83);
+    assert_eq!(BuildLogCompressor.compress(&input, None).output, input);
+    assert_eq!(
+        BuildLogCompressor.compress(&input, Some(&AlwaysFail)).output,
+        input
+    );
+}
+
+#[test]
+fn unittest_django_keeps_nonpassing_records_and_tracebacks() {
+    let setup = "Creating test database for alias 'default'...\n\
+                 Operations to perform:\n\
+                   Apply all migrations: auth, contenttypes\n\
+                 Running migrations:\n\
+                   Applying auth.0001_initial... OK\n\
+                 System check identified no issues (0 silenced).\n";
+    let diagnostics = "test_skip (auth_tests.FormsTest) ... skipped 'database unavailable'\n\
+                       test_expected (auth_tests.FormsTest) ... expected failure\n\
+                       test_unexpected (auth_tests.FormsTest) ... unexpected success\n\
+                       test_fail (auth_tests.FormsTest) ... FAIL\n\
+                       test_error (auth_tests.FormsTest) ... ERROR\n\
+                       test_documented (auth_tests.FormsTest)\n\
+                       A description of the test ... ok\n\
+                       ======================================================================\n\
+                       ERROR: test_error (auth_tests.FormsTest)\n\
+                       ----------------------------------------------------------------------\n\
+                       Traceback (most recent call last):\n\
+                       \x20 File \"test_forms.py\", line 42, in test_error\n\
+                       \x20   raise ValueError('invalid form')\n\
+                       ValueError: invalid form\n\n";
+    let summary = "Ran 86 tests in 0.295s\n\n\
+                   FAILED (failures=1, errors=1, skipped=1, expected failures=1, unexpected successes=1)\n\
+                   Destroying test database for alias 'default'...\n";
+    let mut input = format!("{setup}{}", unittest_log(80));
+    input.insert_str(input.find("test_case_040").unwrap(), diagnostics);
+    input = input.replace("Ran 80 tests in 0.295s\n\nOK\n", summary);
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.metrics.omitted_blocks, 2);
+    assert!(outcome.output.starts_with(setup));
+    assert!(outcome.output.contains(diagnostics));
+    assert!(outcome.output.ends_with(summary));
+    let mut restored = outcome.output.clone();
+    for write in &outcome.stash_writes {
+        restored = replace_marker_line(
+            &restored,
+            &write.key,
+            &store.retrieve(&write.key).unwrap().unwrap(),
+        );
+    }
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn unittest_detection_accepts_partial_runs_and_rejects_prose() {
+    let partial = "test_a (tests.Example) ... ok\n\
+                   test_b (tests.Example) ... expected failure\n\
+                   test_c (tests.Example) ... skipped 'not supported'\n";
+    assert!(BuildLogCompressor::detect(partial));
+    let prefaced = format!("{}{partial}", "Preparing database...\n".repeat(140));
+    assert!(BuildLogCompressor::detect(&prefaced));
+    for summary in ["Ran 1 test in 0.001s", "Ran 83 tests in 0.295 s"] {
+        let input = format!("{summary}\n\nOK\n");
+        assert!(BuildLogCompressor::detect(&input));
+        assert_eq!(
+            BuildLogCompressor.compress(&input, Some(&InMemoryStore::new())).output,
+            input
+        );
+    }
+    for prose in [
+        "The unittest runner reports tests as ok, skipped, FAIL or ERROR.\n",
+        "OK\n",
+        "Ran tests in development.\n",
+        "Ran 83 tests in a temporary database.\n",
+        "Example: test_case (tests.Example) ... ok\n".repeat(20).as_str(),
+        "test prose (not a test identifier) ... ok\n".repeat(20).as_str(),
+    ] {
+        assert!(!BuildLogCompressor::detect(prose), "detected: {prose}");
+        assert_eq!(
+            BuildLogCompressor.compress(prose, Some(&InMemoryStore::new())).output,
+            prose
+        );
+    }
 }
 
 #[test]
@@ -294,6 +449,67 @@ fn stash_failure_is_reported_without_emitting_a_marker() {
     assert!(outcome.operations.is_empty());
     assert_eq!(outcome.metrics.stash_errors, 1);
     assert!(outcome.stash_writes.is_empty());
+}
+
+#[test]
+fn partial_stash_failure_returns_tentative_writes_with_lossless_output() {
+    // First omission block stashes, the second fails mid-run: the candidate
+    // must fall back to the lossless log without a marker, while the one
+    // tentative write is still returned so the runtime ledger can delete the
+    // orphaned row.
+    let mut input = cargo_log(30);
+    let position = input.find("Compiling package-015").unwrap();
+    input.insert_str(
+        position,
+        "error[E0308]: mismatched types\n  --> src/main.rs:3:4\n",
+    );
+    let store = FailAfterFirst {
+        inner: InMemoryStore::new(),
+        calls: AtomicUsize::new(0),
+    };
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+
+    assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+    assert_eq!(outcome.output, input);
+    assert!(!outcome.output.contains("lines omitted"));
+    assert_eq!(outcome.metrics.stash_errors, 1);
+    assert_eq!(outcome.stash_writes.len(), 1);
+    assert!(outcome.stash_writes[0].created);
+    assert_eq!(store.len(), 1);
+}
+
+#[test]
+fn duplicate_omission_payloads_share_one_key_across_markers() {
+    // Two omission blocks with identical payloads: the first stash creates
+    // the row, the second refreshes it, and both markers carry the same key —
+    // one retrievable row backs two markers.
+    let mut input = "$ cargo build\n".to_owned();
+    for group in 0..2 {
+        for _ in 0..12 {
+            input.push_str(
+                "Compiling shared-package v0.1.0 with a deliberately long progress suffix\n",
+            );
+        }
+        input.push_str(&format!("phase boundary {group}\n"));
+    }
+    input.push_str("Finished `dev` profile [unoptimized] target(s) in 2.1s\n");
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+
+    assert_eq!(outcome.recoverability, crate::Recoverability::Retrievable);
+    assert_eq!(outcome.metrics.omitted_blocks, 2);
+    assert_eq!(outcome.stash_writes.len(), 2);
+    let (first, second) = (&outcome.stash_writes[0], &outcome.stash_writes[1]);
+    assert!(first.created);
+    assert!(!second.created);
+    assert_eq!(first.key, second.key);
+    assert_eq!(second.previous_generation, Some(first.generation));
+    assert_eq!(store.len(), 1, "one row backs both markers");
+    let markers = outcome
+        .output
+        .matches(&recovery_instruction(&first.key, &RecoveryMethod::Shell))
+        .count();
+    assert_eq!(markers, 2);
 }
 
 #[test]

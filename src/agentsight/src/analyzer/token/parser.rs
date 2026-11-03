@@ -68,10 +68,21 @@ impl TokenParser {
         // at a concatenation of SSE chunks that together don't form a
         // single valid JSON object. Recover input/output token counts via
         // a regex-free string scan when the buffer references usage fields.
+        // Gemini's counters are camelCase under `usageMetadata`
+        // (`promptTokenCount`/`candidatesTokenCount`, 2e018e7d9), so the
+        // gate must recognize them too or a Gemini chunk split across TLS
+        // records recovers nothing while every other provider still does.
+        // Its snake_case spellings are the gateway fallback the direct parse
+        // keeps, and they have to be gated on for the same reason: a buffer
+        // that names them is turned away before the scan ever sees it.
         if data.contains("\"input_tokens\"")
             || data.contains("\"output_tokens\"")
             || data.contains("\"prompt_tokens\"")
             || data.contains("\"completion_tokens\"")
+            || data.contains("\"promptTokenCount\"")
+            || data.contains("\"candidatesTokenCount\"")
+            || data.contains("\"prompt_token_count\"")
+            || data.contains("\"candidates_token_count\"")
         {
             let usage = Self::scan_partial_usage(data);
             if usage.is_some() {
@@ -85,41 +96,92 @@ impl TokenParser {
 
     /// Recover token usage fields from a possibly-truncated JSON string by
     /// scanning for the integer values that follow `"input_tokens"`,
-    /// `"output_tokens"`, etc. The first occurrence wins, which matches
-    /// dashscope's behaviour of placing the canonical `usage` block before
-    /// any `x_details` echo.
+    /// `"output_tokens"`, etc. The first *numeric* occurrence wins, which
+    /// matches dashscope's behaviour of placing the canonical `usage` block
+    /// before any `x_details` echo.
+    ///
+    /// A non-numeric occurrence is skipped: a committed Responses payload
+    /// echoes the request's `tools` before `usage`, so a tool parameter
+    /// named `input_tokens` appears there as an object schema. Stopping at
+    /// it lost the real count that followed.
     fn scan_partial_usage(data: &str) -> Option<TokenUsage> {
         fn find_u64(s: &str, key: &str) -> Option<u64> {
             let pat = format!("\"{key}\"");
-            let mut idx = s.find(&pat)?;
-            idx += pat.len();
-            let rest = s.get(idx..)?;
-            let rest = rest.trim_start();
-            let rest = rest.strip_prefix(':')?.trim_start();
-            let end = rest
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len());
-            if end == 0 {
-                return None;
+            let mut search_from = 0usize;
+            while let Some(relative) = s.get(search_from..)?.find(&pat) {
+                let idx = search_from + relative + pat.len();
+                search_from = idx;
+                let rest = s.get(idx..)?.trim_start();
+                let Some(rest) = rest.strip_prefix(':').map(str::trim_start) else {
+                    continue;
+                };
+                let end = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
+                if end == 0 {
+                    continue;
+                }
+                if let Ok(value) = rest[..end].parse::<u64>() {
+                    return Some(value);
+                }
             }
-            rest[..end].parse::<u64>().ok()
+            None
         }
 
-        let input = find_u64(data, "input_tokens").or_else(|| find_u64(data, "prompt_tokens"));
-        let output =
-            find_u64(data, "output_tokens").or_else(|| find_u64(data, "completion_tokens"));
+        // Gemini's wire counters are camelCase (`promptTokenCount` /
+        // `candidatesTokenCount` under `usageMetadata`); the snake_case
+        // spellings are the gateway fallback `extract_usage_object`'s Gemini
+        // arm keeps, so the scan reads them the same way and in the same
+        // order. A gateway that spells them snake_case is the reason
+        // `detect_provider_from_usage` reads `prompt_token_count` as the
+        // Gemini signal.
+        let gemini_input =
+            find_u64(data, "promptTokenCount").or_else(|| find_u64(data, "prompt_token_count"));
+        let gemini_output = find_u64(data, "candidatesTokenCount")
+            .or_else(|| find_u64(data, "candidates_token_count"));
+        let is_gemini = gemini_input.is_some() || gemini_output.is_some();
+        let input = find_u64(data, "input_tokens")
+            .or_else(|| find_u64(data, "prompt_tokens"))
+            .or(gemini_input);
+        let output = find_u64(data, "output_tokens")
+            .or_else(|| find_u64(data, "completion_tokens"))
+            .or(gemini_output);
         if input.is_none() && output.is_none() {
             return None;
         }
 
+        let cache_creation_input_tokens = find_u64(data, "cache_creation_input_tokens");
+        let anthropic_cache_read = find_u64(data, "cache_read_input_tokens");
+        let cache_read_input_tokens = anthropic_cache_read
+            .or_else(|| find_u64(data, "cached_tokens"))
+            .or_else(|| find_u64(data, "cachedContentTokenCount"));
+        // Provider decides whether the cache counters are billed on top of the
+        // input count (Anthropic) or sit inside it (OpenAI-compatible). The
+        // cache field names alone are not enough: DashScope's compatible mode
+        // nests `cache_creation_input_tokens` under `prompt_tokens_details`,
+        // where `prompt_tokens` already includes it, so inferring Anthropic
+        // from the name alone roughly doubles the billed input. Anthropic
+        // spells the input count `input_tokens`; `prompt_tokens` is the
+        // OpenAI-compatible spelling. Gemini's camelCase counters bill like
+        // OpenAI (the cached prefix sits inside `promptTokenCount`), so they
+        // carry the Gemini label and never fall into the Anthropic inference.
+        let provider = if is_gemini {
+            LLMProvider::Gemini
+        } else if find_u64(data, "prompt_tokens").is_none()
+            && (cache_creation_input_tokens.is_some() || anthropic_cache_read.is_some())
+        {
+            LLMProvider::Anthropic
+        } else {
+            LLMProvider::OpenAI
+        };
+
         Some(TokenUsage {
             input_tokens: input.unwrap_or(0),
             output_tokens: output.unwrap_or(0),
-            cache_creation_input_tokens: find_u64(data, "cache_creation_input_tokens"),
-            cache_read_input_tokens: find_u64(data, "cache_read_input_tokens")
-                .or_else(|| find_u64(data, "cached_tokens")),
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             model: None,
-            provider: LLMProvider::OpenAI,
+            provider,
         })
     }
 
@@ -155,18 +217,37 @@ impl TokenParser {
             }
         }
 
-        // 4. Check for usage object directly (OpenAI and compatible APIs)
+        // 4. Gemini: usage rides under `usageMetadata` with camelCase counters
+        // (`promptTokenCount`/`candidatesTokenCount`), never under `usage`, and
+        // the model under `modelVersion`. The endpoint detector already knows
+        // generativelanguage.googleapis.com, but without this branch the
+        // parser never read the metadata, so every Gemini stream produced no
+        // token record at all.
+        if let Some(usage) = json.get("usageMetadata").filter(|u| u.is_object()) {
+            return extract_usage_object(usage, LLMProvider::Gemini, json);
+        }
+
+        // 5. Check for usage object directly (OpenAI and compatible APIs)
         if let Some(usage) = json.get("usage") {
             let provider = detect_provider_from_usage(usage);
             return extract_usage_object(usage, provider, json);
         }
 
-        // 5. Responses API: usage nested in response.completed event
-        if json.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
+        // 6. Responses API: usage nested in the terminal response event —
+        // `response.completed`, or `response.incomplete` when the output cap
+        // cut the stream. The terminal event carries the final usage either
+        // way (the live message parser reads both, e534bec1b). The event
+        // type is the endpoint knowledge detect_provider_from_usage lacks:
+        // the Responses usage object reuses Anthropic's field names, and one
+        // without `*_details` would otherwise be mislabeled Anthropic and
+        // double-count its cache hits in billed_input_tokens.
+        if matches!(
+            json.get("type").and_then(|v| v.as_str()),
+            Some("response.completed" | "response.incomplete")
+        ) {
             if let Some(resp) = json.get("response") {
                 if let Some(usage) = resp.get("usage") {
-                    let provider = detect_provider_from_usage(usage);
-                    return extract_usage_object(usage, provider, json);
+                    return extract_usage_object(usage, LLMProvider::OpenAI, json);
                 }
             }
         }
@@ -278,6 +359,131 @@ mod tests {
         assert_eq!(usage.total_tokens(), 1643, "reconciles with total_tokens");
     }
 
+    /// Gemini `streamGenerateContent` chunks carry usage under
+    /// `usageMetadata` with camelCase counters — never under `usage` — and the
+    /// model under `modelVersion`. Shape from generativelanguage.googleapis.com
+    /// traffic; the endpoint detector already recognizes that host, but the
+    /// parser never read the metadata, so every Gemini stream produced no
+    /// token record at all.
+    #[test]
+    fn test_parse_gemini_usage_metadata() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "candidates": [
+                {"content": {"parts": [{"text": "Hello"}], "role": "model"},
+                 "finishReason": "STOP", "index": 0}
+            ],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5,
+                              "totalTokenCount": 15, "cachedContentTokenCount": 3},
+            "modelVersion": "gemini-2.0-flash-001"
+        }"#;
+        let usage = parser
+            .parse_data(data)
+            .expect("gemini usage must be parsed");
+        assert_eq!(usage.provider, LLMProvider::Gemini);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_input_tokens, Some(3));
+        assert_eq!(usage.model.as_deref(), Some("gemini-2.0-flash-001"));
+    }
+
+    /// Streaming chunks that only carry a text delta have no
+    /// `usageMetadata`; they must not yield a usage record (the caller merges
+    /// every parseable chunk and takes the max of each cumulative counter).
+    #[test]
+    fn test_parse_gemini_chunk_without_usage_metadata_yields_no_usage() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "candidates": [
+                {"content": {"parts": [{"text": "Hel"}], "role": "model"}, "index": 0}
+            ]
+        }"#;
+        assert!(parser.parse_data(data).is_none());
+    }
+
+    /// The strict JSON path reads `usageMetadata` (tests above), but the
+    /// continuation-buffer fallback scanned snake_case keys only: a Gemini
+    /// chunk split across TLS records — the exact scenario
+    /// `scan_partial_usage` exists for — recovered no tokens at all while
+    /// every other provider still did.
+    #[test]
+    fn test_scan_partial_usage_gemini_camel_case_counters() {
+        let data = r#"data:{"candidates":[{"content":{"parts":[{"text":"Hel"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":57,"candidatesTokenCount":3,"totalTokenCount":60,"cachedContentTokenCount":2"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("truncated gemini usage should still parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.cache_read_input_tokens, Some(2));
+        // Gemini bills the cached prefix inside `promptTokenCount` (the
+        // OpenAI formula), so the provider label must be Gemini — never
+        // Anthropic, whose formula would add the cache on top a second time.
+        assert_eq!(usage.provider, LLMProvider::Gemini);
+    }
+
+    /// Thinking models report their reasoning budget in `thoughtsTokenCount`,
+    /// outside `candidatesTokenCount`, while `totalTokenCount` covers both (the
+    /// reasoning budget is billed as output). Reading only the candidate
+    /// counter under-reported such a call by orders of magnitude — 1 output
+    /// token instead of 816 for the shape below — and broke the
+    /// `input + output == total` reconciliation every other provider arm keeps
+    /// (asserted for DashScope above).
+    #[test]
+    fn test_parse_gemini_thinking_usage_reconciles_with_total() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "candidates": [
+                {"content": {"parts": [{"text": "4"}], "role": "model"},
+                 "finishReason": "STOP", "index": 0}
+            ],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1,
+                              "thoughtsTokenCount": 815, "totalTokenCount": 826},
+            "modelVersion": "gemini-2.5-flash"
+        }"#;
+        let usage = parser
+            .parse_data(data)
+            .expect("gemini usage must be parsed");
+        assert_eq!(
+            usage.output_tokens, 816,
+            "thinking tokens are billed as output tokens"
+        );
+        assert_eq!(usage.total_tokens(), 826, "reconciles with totalTokenCount");
+    }
+
+    /// Gemini's counters have two spellings: the wire format is camelCase
+    /// (`promptTokenCount`/`candidatesTokenCount` under `usageMetadata`), and
+    /// the snake_case spellings are the gateway fallback `extract_usage_object`
+    /// keeps (the provider detector reads `prompt_token_count` as the Gemini
+    /// signal too). The continuation recovery was taught the camelCase pair
+    /// only, and its gate runs before the scan: a truncated chunk from such a
+    /// gateway is turned away before anything reads it, so the same payload
+    /// that parses cleanly one line above records no usage at all.
+    #[test]
+    fn test_scan_partial_usage_gemini_gateway_spellings() {
+        let parser = TokenParser::new();
+        // The same payload the gateway spells snake_case, complete.
+        let complete = r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}],"role":"model"},"index":0}],"usageMetadata":{"prompt_token_count":57,"candidates_token_count":3,"total_token_count":60},"modelVersion":"gemini-2.5-flash"}"#;
+        let parsed = parser.parse_data(complete).expect("complete usage parses");
+        assert_eq!(parsed.input_tokens, 57);
+        assert_eq!(parsed.output_tokens, 3);
+        assert_eq!(parsed.provider, LLMProvider::Gemini);
+
+        // The last TLS record was cut, so the strict parse fails; the
+        // continuation recovery must reach the same counters.
+        let truncated = r#"data:{"candidates":[{"content":{"parts":[{"text":"Hel"}],"role":"model"},"index":0}],"usageMetadata":{"prompt_token_count":57,"candidates_token_count":3,"total_token_count":60"#;
+        let usage = parser
+            .parse_data(truncated)
+            .expect("truncated gateway-spelled gemini usage must still parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(
+            usage.provider,
+            LLMProvider::Gemini,
+            "the gateway spelling still bills like Gemini (cache sits inside the prompt count)"
+        );
+    }
+
     /// Regression guard from **real captured traffic**: Anthropic-protocol
     /// gateway responses carry `total_tokens` in `usage` but have no `output`
     /// envelope, so they must stay Anthropic.
@@ -370,6 +576,10 @@ mod tests {
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 0);
         assert_eq!(usage.provider, LLMProvider::Anthropic);
+        // The model rides inside `message.model`; no streamed Anthropic event
+        // carries a top-level `model`, so reading only that key stored every
+        // Claude stream with an empty model in the token record.
+        assert_eq!(usage.model.as_deref(), Some("claude-3-opus"));
     }
 
     #[test]
@@ -526,6 +736,41 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, Some(0));
     }
 
+    /// A truncated DashScope-compatible body (the continuation buffer left by
+    /// a process that died mid-stream) must keep the OpenAI-compatible billing
+    /// rule: `prompt_tokens` already contains the cache counters nested under
+    /// `prompt_tokens_details`, so adding them again doubles the input.
+    #[test]
+    fn test_partial_dashscope_usage_keeps_openai_billing() {
+        let parser = TokenParser::new();
+        // Deliberately not valid JSON: the last TLS record was cut.
+        let data = r#"{"id":"chatcmpl-ds-003","model":"qwen3.6-plus","usage":{"prompt_tokens":29719,"completion_tokens":435,"total_tokens":30154,"prompt_tokens_details":{"cache_creation_input_tokens":29713,"cached_tokens":0}"#;
+
+        let usage = parser
+            .parse_data(data)
+            .expect("partial usage must be recovered");
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+        assert_eq!(usage.input_tokens, 29719);
+        assert_eq!(usage.cache_creation_input_tokens, Some(29713));
+
+        let record = crate::analyzer::token::record::TokenRecord::new(
+            1,
+            "qwen".to_string(),
+            usage.provider.to_string(),
+            usage.input_tokens,
+            0,
+        )
+        .with_cache_tokens(
+            usage.cache_creation_input_tokens.unwrap_or(0),
+            usage.cache_read_input_tokens.unwrap_or(0),
+        );
+        assert_eq!(
+            record.billed_input_tokens(),
+            29719,
+            "nested cache counters are already part of prompt_tokens"
+        );
+    }
+
     #[test]
     fn test_parse_dashscope_usage_without_prompt_tokens_details() {
         // DashScope response lacking prompt_tokens_details — cache fields
@@ -592,6 +837,53 @@ mod tests {
         let usage = parser.parse_data(data).expect("usage should parse");
         assert_eq!(usage.input_tokens, 57);
         assert_eq!(usage.output_tokens, 3);
+        // The nested counter must survive the strict JSON path too: the same
+        // payload truncated recovers it through the scan fallback, so dropping
+        // it here would make the complete buffer the less accurate of the two.
+        assert_eq!(usage.cache_read_input_tokens, Some(0));
+    }
+
+    #[test]
+    fn test_parse_responses_usage_with_nested_cached_tokens() {
+        // The Responses API nests the cache-hit counter under
+        // `input_tokens_details.cached_tokens`. Nothing read that key, so a
+        // complete payload reported no cache reads at all even though the
+        // counter was present.
+        let data = r#"{"sequence_number":10,"type":"response.completed","response":{"usage":{"total_tokens":60,"input_tokens_details":{"cached_tokens":2},"output_tokens":3,"input_tokens":57},"model":"qwen3-coder-plus"}}"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("usage should parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(
+            usage.cache_read_input_tokens,
+            Some(2),
+            "input_tokens_details.cached_tokens is the Responses-API cache counter"
+        );
+        // Guard the ordering the fallback already pinned for the truncated
+        // variant: an OpenAI-style nested counter must not relabel the provider.
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+    }
+
+    #[test]
+    fn test_parse_responses_incomplete_usage() {
+        // A capped Responses stream terminates with `response.incomplete`,
+        // not `response.completed` — and the terminal event carries the
+        // final usage either way. The strict path recognized `completed`
+        // only, so everywhere TokenParser feeds usage (the drain
+        // enrichment, the analyzer's SSE usage aggregation) a capped call
+        // recorded no tokens at all, while the live message parser
+        // recovered them (e534bec1b).
+        let data = r#"{"sequence_number":7,"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"total_tokens":15,"input_tokens":10,"output_tokens":5},"model":"qwen3-coder-plus"}}"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("usage should parse");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+        // OpenAI-style usage keys must keep the OpenAI provider label so
+        // billed_input_tokens does not switch to the Anthropic formula.
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+        // The model rides inside `response.model`; the event has no top-level
+        // `model`, so the token record kept an empty model for Responses calls.
+        assert_eq!(usage.model.as_deref(), Some("qwen3-coder-plus"));
     }
 
     #[test]
@@ -609,6 +901,40 @@ data:{"sequence_number":10,"type":"response.completed","response":{"usage":{"tot
         assert_eq!(usage.input_tokens, 57);
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cache_read_input_tokens, Some(2));
+        // OpenAI-style cache (cached_tokens) stays inside input: provider
+        // must not be mislabeled as Anthropic.
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_anthropic_cache_fields_report_anthropic() {
+        // Truncated Anthropic message_delta: Anthropic bills cache tokens on
+        // top of input_tokens, so the scan must label the provider Anthropic —
+        // otherwise billed_input_tokens silently drops the cache counters.
+        let data = r#"{"type":"message_delta","usage":{"input_tokens":100,"cache_creation_input_tokens":10,"cache_read_input_tokens":20"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("partial usage should still parse");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cache_creation_input_tokens, Some(10));
+        assert_eq!(usage.cache_read_input_tokens, Some(20));
+        assert_eq!(usage.provider, LLMProvider::Anthropic);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_skips_a_tool_schema_key() {
+        // The Responses `response.completed` payload echoes the request's
+        // tool definitions before `usage`. A tool parameter named like a
+        // usage counter is an object schema, not a count; the scan used to
+        // stop there and record input=0 for a truncated buffer.
+        let data = r#"{"type":"response.completed","response":{"tools":[{"type":"function","function":{"name":"meter","parameters":{"type":"object","properties":{"input_tokens":{"type":"integer"},"output_tokens":{"type":"integer"}}}}}],"usage":{"input_tokens":57,"output_tokens":3"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("the real usage counters must still parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
     }
 
     #[test]

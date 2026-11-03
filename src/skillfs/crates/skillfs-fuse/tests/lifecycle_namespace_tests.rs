@@ -705,3 +705,139 @@ fn test_non_reserved_names_unaffected_by_view_mode_in_pure_api() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes layout — the hub view keeps the same boundary.
+//
+// The Hermes root readdir lists the physical workspace and a top-level entry
+// parses as a category, which the lifecycle gate does not cover. Without the
+// layout-aware classification a reserved name therefore appears as ordinary
+// hub content: listed by readdir (both modes), resolvable by lookup, and
+// mutable through the mount.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Seed the four reserved names in both physical shapes (half directories,
+/// half plain files) next to one ordinary category with a nested skill.
+fn seed_hermes_with_reserved_names(src: &std::path::Path) {
+    create_skill_dir(&src.join("apple"), "apple-notes");
+    std::fs::write(src.join("apple/note.txt"), "note\n").expect("seed note");
+    // Neighbour name: a directory, so it stays an ordinary hub entry.
+    std::fs::create_dir(src.join(".staging2")).expect("seed neighbour name");
+    for (index, name) in RESERVED_NAMES.iter().enumerate() {
+        let path = src.join(name);
+        if index % 2 == 0 {
+            std::fs::create_dir(&path).unwrap_or_else(|e| panic!("seed {name}: {e}"));
+            std::fs::write(path.join("payload.bin"), "payload\n")
+                .unwrap_or_else(|e| panic!("seed {name}/payload.bin: {e}"));
+        } else {
+            std::fs::write(&path, "payload\n").unwrap_or_else(|e| panic!("seed {name}: {e}"));
+        }
+    }
+}
+
+#[test]
+fn test_reserved_roots_hidden_in_hermes_in_place_mode() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::in_place_hermes(seed_hermes_with_reserved_names);
+
+    let entries = list_dir_names(&fx.skills_root());
+    for name in RESERVED_NAMES {
+        assert!(
+            !entries.contains(&name.to_string()),
+            "{name} must not be listed: {entries:?}"
+        );
+        let path = fx.skills_root().join(name);
+        let err = std::fs::metadata(&path)
+            .err()
+            .unwrap_or_else(|| panic!("{name}: lookup must fail"));
+        assert_eq!(
+            err.raw_os_error().unwrap_or(0),
+            libc::ENOENT,
+            "{name}: lookup must be ENOENT"
+        );
+        // Creating the reserved name is denied by the lifecycle gate before
+        // any I/O; the other mutations are refused by the hidden lookup
+        // (ENOENT) that the kernel needs first. Both are refusals, matching
+        // the boundary the suite asserts for the flat layout.
+        let err = std::fs::create_dir(&path)
+            .err()
+            .unwrap_or_else(|| panic!("mkdir {name} must fail"));
+        assert_eacces(name, err.raw_os_error().unwrap_or(0));
+        let refused = [libc::EACCES, libc::ENOENT];
+        let err = std::fs::remove_file(&path)
+            .err()
+            .unwrap_or_else(|| panic!("unlink {name} must fail"));
+        assert!(
+            refused.contains(&err.raw_os_error().unwrap_or(0)),
+            "{name}: unlink must be refused, got {err}"
+        );
+    }
+
+    // A neighbour name is not reserved, and the nested skill stays readable.
+    assert!(
+        entries.contains(&".staging2".to_string()),
+        "neighbour name must stay ordinary: {entries:?}"
+    );
+    let note = fx.skills_root().join("apple/note.txt");
+    assert!(note.exists(), "an ordinary nested file stays reachable");
+    let err = std::fs::rename(&note, fx.skills_root().join(".certified"))
+        .err()
+        .unwrap_or_else(|| panic!("rename onto a reserved name must fail"));
+    assert!(
+        [libc::EACCES, libc::ENOENT].contains(&err.raw_os_error().unwrap_or(0)),
+        "rename onto a reserved name must be refused, got {err}"
+    );
+    assert!(
+        note.exists(),
+        "a refused rename must leave the source file in place"
+    );
+    let nested = std::fs::read_to_string(fx.skills_root().join("apple/apple-notes/SKILL.md"))
+        .expect("nested skill stays readable");
+    assert!(nested.contains("apple-notes"));
+}
+
+#[test]
+fn test_reserved_roots_hidden_in_hermes_normal_mode() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal_hermes(seed_hermes_with_reserved_names);
+
+    let entries = list_dir_names(&fx.skills_root());
+    for name in RESERVED_NAMES {
+        assert!(
+            !entries.contains(&name.to_string()),
+            "{name} must not be listed: {entries:?}"
+        );
+        let path = fx.skills_root().join(name);
+        let err = std::fs::metadata(&path)
+            .err()
+            .unwrap_or_else(|| panic!("{name}: lookup must fail"));
+        assert_eq!(
+            err.raw_os_error().unwrap_or(0),
+            libc::ENOENT,
+            "{name}: lookup must be ENOENT"
+        );
+        let err = std::fs::create_dir(&path)
+            .err()
+            .unwrap_or_else(|| panic!("mkdir {name} must fail"));
+        assert_eacces(name, err.raw_os_error().unwrap_or(0));
+    }
+
+    // Normal mounts keep the source outside the mount, so the reserved roots
+    // and their payloads must still be there untouched.
+    for name in RESERVED_NAMES {
+        assert!(
+            fx.source().join(name).exists(),
+            "{name} must still exist on disk"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(fx.source().join(".staging/payload.bin")).unwrap(),
+        "payload\n"
+    );
+
+    let nested = std::fs::read_to_string(fx.skills_root().join("apple/apple-notes/SKILL.md"))
+        .expect("nested skill stays readable");
+    assert!(nested.contains("apple-notes"));
+}

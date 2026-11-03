@@ -257,7 +257,11 @@ fn record_to_log(
             "audit",
         )
     })?;
-    let mut writer = AuditSegmentWriter::create(&root.path, component)?;
+    let mut writer = AuditSegmentWriter::create_with_settings(
+        &root.path,
+        component,
+        config::load_audit_settings(None)?.settings,
+    )?;
     writer.append(&mut event, AuditDurability::SecurityBoundary)?;
     writer.close()
 }

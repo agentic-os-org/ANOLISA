@@ -1,0 +1,3 @@
+# SDK 0.2.88's unbounded MCP requirement currently resolves incompatible MCP 2.x.
+claude-agent-sdk==0.2.88
+mcp==1.26.0

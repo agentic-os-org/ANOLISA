@@ -38,6 +38,32 @@ export function inboundPiiScanText(event: unknown): string {
   );
 }
 
+/** Text exposed at the model-entry gate; omit media payloads and message metadata. */
+export function modelInputPiiScanText(event: unknown): string {
+  const record = asRecord(event);
+  const parts = [safeString(record?.systemPrompt), safeString(record?.prompt)];
+  for (const message of Array.isArray(record?.messages)
+    ? record.messages
+    : []) {
+    const content = asRecord(message)?.content;
+    if (typeof content === "string") {
+      parts.push(content);
+      continue;
+    }
+    for (const item of Array.isArray(content) ? content : []) {
+      const block = asRecord(item);
+      if (block?.type === "text") {
+        parts.push(safeString(block.text));
+      } else if (block?.type === "thinking") {
+        parts.push(safeString(block.thinking));
+      } else if (block?.type === "toolCall") {
+        parts.push(valueToText(block.arguments));
+      }
+    }
+  }
+  return parts.filter((text) => text.trim()).join("\n\n");
+}
+
 export function valueToText(value: unknown): string {
   if (value === undefined || value === null) {
     return "";

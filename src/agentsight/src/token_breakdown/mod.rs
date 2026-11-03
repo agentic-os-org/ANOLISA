@@ -19,14 +19,14 @@
 //! - `request`: system_prompt + individual messages in order (user_message, assistant_response, etc.)
 //! - `response`: content + reasoning_content + tool_calls (3 sub-categories)
 
-pub mod types;
-pub mod lexer;
-pub mod classifier;
 pub mod breakdown;
+pub mod classifier;
 pub mod cli;
+pub mod lexer;
+pub mod types;
 
-pub use types::*;
-pub use lexer::parse_chatml;
-pub use classifier::classify_conversation;
 pub use breakdown::compute_breakdown;
+pub use classifier::classify_conversation;
 pub use cli::AnalyzeChatmlCommand;
+pub use lexer::parse_chatml;
+pub use types::*;

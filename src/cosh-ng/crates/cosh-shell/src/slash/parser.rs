@@ -15,6 +15,7 @@ pub(super) fn slash_input(event: &ShellEvent) -> Option<&str> {
 pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
+    Bug(&'a str),
     Agent,
     Auth,
     Audit(&'a str),
@@ -54,7 +55,7 @@ impl<'a> SlashCommand<'a> {
         // Most parser-owned commands split arguments on whitespace, so quotes
         // would silently produce wrong tokens. `/extensions` is the exception:
         // it forwards its raw argument string to a quote-aware tokenizer.
-        let supports_quoted_arguments = matches!(token, "/extensions" | "/task");
+        let supports_quoted_arguments = matches!(token, "/bug" | "/extensions" | "/task");
         if parser_owned_command(token) && !supports_quoted_arguments && input.contains(['\'', '"'])
         {
             return Err(SlashParseError::QuotedArgumentsUnsupported);
@@ -90,6 +91,9 @@ impl<'a> SlashCommand<'a> {
             }
             "/debug" => Some(Self::Debug(parts.next())),
             "/health" => Some(Self::Health),
+            "/bug" => Some(Self::Bug(
+                input.strip_prefix("/bug").unwrap_or_default().trim(),
+            )),
             "/status" | "/about" => Some(Self::Status),
             "/stats" => Some(Self::Stats(
                 input.strip_prefix("/stats").unwrap_or_default().trim(),
@@ -165,6 +169,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/config"
             | "/debug"
             | "/health"
+            | "/bug"
             | "/status"
             | "/about"
             | "/stats"
@@ -306,6 +311,16 @@ mod tests {
                 ),
                 "{command}"
             );
+        }
+    }
+
+    #[test]
+    fn bug_description_preserves_quoted_natural_language() {
+        match SlashCommand::parse(r#"/bug fails with \"permission denied\""#) {
+            Ok(Some(SlashCommand::Bug(description))) => {
+                assert_eq!(description, r#"fails with \"permission denied\""#)
+            }
+            _ => panic!("quoted bug description did not parse"),
         }
     }
 

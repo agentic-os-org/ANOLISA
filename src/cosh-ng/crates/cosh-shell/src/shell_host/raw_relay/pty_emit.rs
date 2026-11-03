@@ -1,13 +1,15 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use nix::libc;
 
 use crate::raw_input::{
-    signal_foreground_process_group, write_all_pty, RawInputMode, RawObserverAction,
+    signal_foreground_process_group, update_input_mode, write_all_pty, RawInputMode,
+    RawObserverAction,
 };
 use crate::types::{ImplicitPagerPolicy, ShellHandoffRequest};
 
@@ -119,6 +121,27 @@ fn clear_handoff_files(handoff_request_file: &Path) {
     let _ = std::fs::remove_file(handoff_token_file(handoff_request_file));
 }
 
+pub(super) fn update_input_mode_and_wake(
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    action: &RawObserverAction,
+    parser: &OscParser,
+    wake: &mut UnixStream,
+) -> io::Result<()> {
+    update_input_mode(
+        input_mode,
+        action,
+        super::input_events::latest_capture_submission_generation(&parser.events),
+    );
+    if matches!(action, RawObserverAction::InvalidateApprovalCapture(_)) {
+        match wake.write(&[1]) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_pty_emit<W: Write>(
     master: &mut File,
@@ -198,6 +221,30 @@ pub(super) fn resolve_pty_emit<W: Write>(
             ghost_text,
             ghost_route,
         } => {
+            if ghost_text.is_none() {
+                let mut mode = input_mode
+                    .lock()
+                    .map_err(|_| io::Error::other("raw input mode lock poisoned"))?;
+                if matches!(
+                    &*mode,
+                    RawInputMode::Draining {
+                        invalidated: true,
+                        ..
+                    }
+                ) {
+                    return Ok(RawObserverAction::RestorePrompt {
+                        ghost_text,
+                        ghost_route,
+                    });
+                }
+                if matches!(&*mode, RawInputMode::Terminal { .. }) {
+                    crate::raw_input::update_locked_input_mode(
+                        &mut mode,
+                        &RawObserverAction::Continue,
+                        None,
+                    );
+                }
+            }
             output.flush()?;
             let raw_prompt = parser.last_prompt_display();
             let prompt = prompt_replay_bytes(raw_prompt);

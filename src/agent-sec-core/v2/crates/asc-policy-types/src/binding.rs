@@ -5,7 +5,47 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Validate, ValidationError};
 use crate::identifiers::{ResourceId, Revision};
 use crate::policy::PreparedPolicy;
-use crate::scope::PreparedScope;
+use crate::process_discovery::ProcessIdentity;
+use crate::scope::ScopeSelector;
+
+/// Assignment provenance and the concrete instance selected for this Binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BindingScope {
+    /// Owning assignment identity.
+    pub scope_id: ResourceId,
+    /// Original selection criteria, retained for diagnostics.
+    pub selector: ScopeSelector,
+    /// Process instance pinned at discovery, including its namespace.
+    pub process: ProcessIdentity,
+}
+
+impl Validate for BindingScope {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.selector.validate().map_err(|error| {
+            ValidationError::new(format!("selector.{}", error.path), error.message)
+        })?;
+        if self.process.pid == 0
+            || self.process.start_time == 0
+            || self.process.boot_id.is_empty()
+            || self.process.pid_namespace.is_empty()
+        {
+            return Err(ValidationError::new(
+                "process",
+                "requires a complete process identity",
+            ));
+        }
+        if let ScopeSelector::Pid { pid } = self.selector
+            && pid != self.process.pid
+        {
+            return Err(ValidationError::new(
+                "process.pid",
+                "must match the selected PID",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Complete Adapter-independent immutable Binding specification.
 ///
@@ -20,10 +60,10 @@ pub struct PreparedBinding {
     pub binding_id: ResourceId,
     /// Immutable spec revision.
     pub binding_revision: Revision,
-    /// Exactly one authored and lowered Policy revision.
+    /// Exactly one authored Policy revision, compiled by the target Adapter.
     pub policy: PreparedPolicy,
-    /// Exactly one authored Scope revision.
-    pub scope: PreparedScope,
+    /// Scope provenance and the selected execution instance.
+    pub scope: BindingScope,
 }
 
 impl Validate for PreparedBinding {
@@ -51,8 +91,9 @@ impl Validate for PreparedBinding {
 /// Delete requests keep the revision. Pending/running Apply and Ready accept an
 /// identical UPDATE as a no-op. `ApplyFailed` allows a same-spec retry.
 /// Delete intent is irreversible: `PendingDelete`, `Deleting` and `DeleteFailed` reject
-/// every UPDATE. DELETE may supersede Applying; its observations must still be
-/// recorded before cleanup. Repeated pending/running DELETE is a no-op, while
+/// every UPDATE. DELETE may supersede Applying; previously registered targets
+/// remain responsible for cleanup, and stale results are discarded atomically.
+/// Repeated pending/running DELETE is a no-op, while
 /// `DeleteFailed` can retry with a fresh retry budget.
 ///
 /// Workers claim pending work, complete Apply as Ready, or return failures to
@@ -99,7 +140,7 @@ impl BindingStatus {
     }
 
     /// Returns the status produced by DELETE, without changing spec or revision.
-    /// A running Apply may be superseded; its remote observations still matter.
+    /// Supersedes a running Apply while retaining its registered cleanup targets.
     #[must_use]
     pub const fn request_delete(self) -> Self {
         match self {

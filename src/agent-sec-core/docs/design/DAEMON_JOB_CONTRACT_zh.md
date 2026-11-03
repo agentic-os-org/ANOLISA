@@ -213,6 +213,9 @@ transport failure 会终止当前 worker，并对当前变更最多重新启动�
 最多为 2。worker 返回的领域执行错误是 business failure，不得触发 worker 重启或自动
 重试。
 
+worker 响应完成与 shutdown cancellation 重叠时，取消仍须使 activation task 退出，
+随后完成 worker 清理；不得在收到停止请求后重新进入等待通知的循环。
+
 stop 时先关闭 worker stdin 并等待 2 秒；仍未退出则 terminate，再等待 5 秒；仍未退出则
 kill。该进程协议和三阶段终止流程是 **[CURRENT]** Python 实现细节。Rust core 完成后可以
 进程内执行，但必须保持业务错误不自动重试、transport/执行失败可区分、取消不被解释为
@@ -405,14 +408,18 @@ daemon trace ID。OTel 未采样、未配置 exporter 或 Collector 故障不得
 | --- | --- |
 | DJOB-001 | 默认 registry 恰好包含 `skill-ledger-activation`，status 顺序确定 |
 | DJOB-002 | Job 在 socket bind 前启动；启动/bind 失败执行资源和 Job rollback |
-| DJOB-003 | shutdown 在 request drain 后停止 Job，并等待 worker/task 清理 |
+| DJOB-003 | shutdown 在 request drain 后停止 Job，并等待 worker/task 清理；worker 响应完成与取消重叠时仍能退出 |
 | DJOB-004 | `skill-ledger-activation` health 保留基础字段和当前 state 投影 |
 | DJOB-007 | Skill Ledger startup reconcile 只处理显式 managed 目录 |
 | DJOB-008 | 500 ms debounce、按 canonical directory 合并及 reported Skill ID 覆盖 |
 | DJOB-009 | drain cancellation 将未处理变更重新放回 pending |
 | DJOB-010 | worker transport/protocol/timeout 总尝试数最多 2，domain failure 不重试 |
-| DJOB-011 | 当前 worker 停止后不遗留子进程；具体 stdin/terminate/kill 序列仅属于 Python 实现 |
+| DJOB-011 | 当前 worker 停止后不遗留子进程，包括响应完成与取消重叠的情况；具体 stdin/terminate/kill 序列仅属于 Python 实现 |
 | DJOB-012 | notify accepted 只表示内存接受；显式 managed 目录在重启后通过 startup reconcile 重新求值 |
+
+`DJOB-003/011` 的完成与取消重叠回归对应
+`tests/unit-test/daemon/test_skill_ledger_worker_client.py::test_activation_stop_when_worker_response_completes`。
+该测试复用 fake worker 固定交错顺序；真实子进程退出由既有 daemon 集成测试验证。
 
 ### 11.2 **[CURRENT][HISTORICAL]** Python 通用框架表征
 
@@ -446,38 +453,43 @@ DJOB-005/006 不进入 Rust 首版 no-regression 或 release gate；只有未来
 ### 11.4 **[TARGET V2]** Policy reconciliation 专用后台服务
 
 此服务由 `asc-policy-runtime` 实现，daemon 仅装配；它不依赖通用 periodic scheduler 或
-完整 JobSupervisor。PAP Binding 提交后通知、retry 到期和有界补扫是触发源。Runtime 与
-通知入口可用是 Binding 写准入条件，不是 daemon 启动条件，也不等待每个目标 READY。
-Policy/Scope CRUD 不依赖 reconciliation；实际存储错误由各自 Repository 操作返回。
+完整 JobSupervisor。Scope discovery 提交 Binding 后通知、retry 到期和有界补扫是触发源。
+生产 daemon 在 SQLite 打开、恢复装配及 Runtime 启动成功后开放 UDS，不等待每个目标 READY。
+Scope 创建检查 Runtime/discovery 准入；Policy CRUD 与查询不以 Binding Ready 为前提，
+实际存储错误由各自 Repository 操作返回。
 每次尝试才通过 factory 创建 Client，读取凭据；凭据或连接失败按 Binding 重试处理。
 每次执行重新读取和准备；退避释放 worker，
 同 Binding 互斥到实际调用退出。dirty 仅负责下一轮检查。
 
 自动重试必须等待：Superseded 和仓储错误默认等待 1 秒，RetryAt 按期限等待；
 若期限在收尾期间已过去，仍至少等待 1 毫秒。队列默认首次调用后最多自动重试 4 次，
-三类结果共用次数；耗尽后保留内存 Exhausted 条目，timer/补扫不能复活。
-新 Delete/Update 通知仍立即将等待或耗尽条目改为 Queued，Running 的 dirty 在退出后优先处理，
-并重置队列计数；核心已提交的业务预算不被队列重置。Exhausted 仍计入容量，
-不伪造业务失败落库或丢弃目标责任；计数不跨 Runtime 重建。
+纯存储等待不消耗自动预算，保留原 write_id/结果；预算耗尽先条件写 Failed 再释放 slot，
+只有终止无法确认时保留 Exhausted，timer/补扫不能复活。
+Scope 删除/显式 retry 的新通知仍立即将等待或耗尽条目改为 Queued，Running 的 dirty
+在退出后优先处理；旧失败不得覆盖新意图。Exhausted 仍计入容量，目标责任不丢失；
+队列计数、业务尝试次数及 deadline 均不跨 Runtime 重建，FAILED 仍需显式 retry。
 Runtime 直接从 reconciler 获取同一时钟实例，不另行注入 timer 时钟。每页补扫只加锁一次，
 不改变已有条目；tick 暂保留全 entries 扫描，不承诺满容量下的扫描延迟。
 
 业务 FAILED 与服务 health 分离。单 Binding 存储/数据错误及 CAS 竞争耗尽保留 WaitingRetry 或 Exhausted，
 不维护全局 storage_errors 集合，也不阻断其它请求。存储/数据错误输出 ID 与安全错误诊断，
 CAS 耗尽返回独立的 Contended；后续调用重读并恢复已有状态，不伪造失败落库或远端结果。
-补扫失败影响 health，但不关闭写准入。Runtime 初始化失败保留 Policy/Scope CRUD、查询及其它服务，
-注入不可用通知入口仅拒绝 Binding mutation。
+补扫失败影响 health，但不单独关闭写准入。测试中的不可用通知入口验证 Scope 创建拒绝及
+独立 Policy CRUD；生产 Runtime 初始化失败使 daemon 启动失败，不开放 UDS。
 单次 reconcile 的可展开 panic 由核心先尝试结果/失败记账，再由 worker 在调用边界捕获；
-最新记录已终结或删除时移除队列条目，否则保留 Exhausted 停止自动执行，避免补扫重放。
-查询结果也失败或 panic 时同样按未确认处理；新通知/dirty 仍优先，worker 继续处理其它 Binding。
+最新记录已终结或删除时移除队列条目；原结果或写回执尚待确认时定时继续存储步骤，
+不重复已完成的 Client 调用。只有终止无法确认且无原结果可继续时保留 Exhausted；
+新通知/dirty 仍优先，worker 继续处理其它 Binding。
 不覆盖已提交成功结果，不因 panic 清空 deployments，也不把旧尝试失败写到新 Delete/Update。
 timer/scanner 或 worker 调度代码自身 panic 才停止领取并标记 reconciliation 服务失败，关闭 Binding 写准入；
-daemon 仅记录健康变化，不因此请求全进程 shutdown，Policy/Scope CRUD 和读查询仍可用。
+daemon 仅记录健康变化，不因此请求全进程 shutdown；Scope 创建关闭，Policy CRUD 和查询
+仍按各自存储可用性处理。
 这遵循“单个 Job error 不自动等于顶层 daemon 不可用”的原则。首版不自动重建
 失败 Runtime，需进程重启。取消不会中断同步
 Client；shutdown 先关闭请求准入并 drain 请求，再停止领取/扫描并 join 实际调用。30s drain
-到期后只由进程退出结束剩余工作，不提前释放执行所有权。首版内存记录在重启后丢失；
-持久化后重启恢复须独立验收。服务不创建自定义 trace ID，OTel 集成沿用迁移架构的统一契约。
+到期后只由进程退出结束剩余工作，不提前释放执行所有权。SQLite 保存意图与部署责任，
+重启重建 discovery 和调度；恢复按 SQLite 契约独立验收。服务不创建自定义 trace ID，
+OTel 集成沿用迁移架构的统一契约。
 
 以下均映射到 `v2/crates/asc-policy-runtime/src/reconciliation/tests.rs` 的可执行测试：
 
@@ -490,13 +502,84 @@ Client；shutdown 先关闭请求准入并 drain 请求，再停止领取/扫描
 | DJOB-028 | 停机等待实际调用、旧 Apply 观察不覆盖 Delete | `shutdown_retains_actual_call_until_join_and_closes_write_admission`、`delete_admitted_during_apply_waits_for_exit_and_preserves_cleanup` |
 | DJOB-029 | 单 Binding 错误重试不阻断其它 Binding/PAP CRUD；扫描降级不关闭准入 | `binding_errors_retry_without_blocking_other_bindings_or_pap_writes`、`scan_failure_degrades_health_without_closing_binding_admission` |
 | DJOB-030 | 自动重试等待且有上限，补扫不复活；新通知立即触发并重置队列预算 | `automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings`、`new_notifications_reset_queue_budget_and_preempt_waiting_or_exhaustion`、`zero_retry_budget_stops_first_failure_and_submillisecond_delay_is_rejected` |
-| DJOB-031 | 单次 reconcile panic 隔离，保留完成事实/目标责任，worker 继续处理其它 Binding | `panic_tests.rs`：`attempt_panic_records_failure_and_same_worker_completes_next_binding`、`committed_success_survives_attempt_panic_without_replay`、`unconfirmed_panic_stops_only_that_binding_until_new_notification` |
+| DJOB-031 | 单次 reconcile panic 隔离，保留完成事实/目标责任，worker 继续处理其它 Binding | `panic_tests.rs`：`attempt_panic_records_failure_and_same_worker_completes_next_binding`、`committed_success_survives_attempt_panic_without_replay`、`unconfirmed_panic_retains_result_while_other_bindings_progress` |
 | DJOB-032 | panic 收尾与新通知竞争不丢工作、不重入，新 Delete 可继续清理 | `panic_tests.rs`：`delete_during_attempt_panic_keeps_dirty_and_cleans_registered_target`、`panic_completion_and_new_notification_race_never_loses_work` |
 | DJOB-033 | Runtime 沿用核心时钟；批量补扫保留既有任务、容量及到期语义 | `one_worker_serves_other_bindings_during_retry_and_reprepares_on_deadline`（非零起点）、`batch_discovery_preserves_existing_work_and_applies_capacity_and_deadlines` |
 
 运行入口：`cargo test -p asc-policy-runtime --locked --offline`。组件中的 scripted 错误不等于
-系统性 fault-injection 交付。完整 CLI/daemon E2E 单独 PR，SQLite/崩溃恢复和系统性注入等待
-persistent Repository；这些边界见 [Runtime 设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)。
+系统性 fault-injection 交付。真实 CLI/daemon、SQLite 故障及崩溃恢复入口见
+[SQLite 验收](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md#9-实施分期与验收)，分层结果不能互相替代。
+
+### 11.5 **[TARGET V2]** security-event SQLite retention 周期服务
+
+此服务由 `v2/apps/asc-daemon/src/retention.rs` 实现，daemon 组合根装配；它不依赖通用
+periodic scheduler 或完整 JobSupervisor。目的：让长驻 daemon 自持 Security Events `SQLite`
+retention（#6602/#6679）——v1 依赖短命 CLI 进程 `atexit` 补做维护，长驻 daemon 永不裁剪，
+SIGKILL/OOM/掉电后重启也不补做，数据库在长期运行的主机上无界增长。
+
+同一服务也承载 Observability `SQLite` 的周期 retention：两库各有独立
+gate marker/lock，同一 pass 内组合执行；任一库 `Failed`/`Contended` 即按 `failure_retry`
+重试（另一库的 gate 重查为无害 no-op），observability 库的 warm 失败仅为告警（best-effort
+流），不阻塞 admission。
+
+- **trigger**：启动 catch-up 一次（`retention::run_startup_catchup`，在 UDS admission 之前
+  完成），此后每 `check_interval`（默认 1h）重查共享跨进程 daily gate；gate 本身仍决定是否
+  真正执行。pass 内部失败按 `failure_retry`（默认 60s）退避重试。catch-up 与 shutdown 信号
+  `select!` 竞争（信号任务先于 catch-up 启动）：信号先到则放弃 admission，in-flight pass
+  仍由任务持有至终局 join（DJOB-RET-014）。
+- **Ready 关系**：服务不是 readiness-critical，无自己的 Ready gate。admission 只按顺序等待
+  启动 catch-up 这一次 pass 完成；catch-up 失败或 contended 不阻塞 admission，转由周期任务
+  按 `failure_retry` 重试。daemon 完成启动只代表 retention 已排队，不代表已成功。
+- **并发边界**：maintenance 与请求审计写入（finalizer 的 INSERT）共享同一 `SqliteStore`
+  mutex（单连接设计，见 store.rs）。首次（可能很大的历史 backlog）pass 严格前置于 admission；
+  此后每次 pass 至多裁剪一个 gate 窗口（24h）的过期行，请求写入最坏等待一个已收敛 pass。
+  跨进程仍由 `.maintenance.lock` flock 互斥（与 v1 CLI 进程共存；并发 v1 atexit pass 与请求
+  写入的互相等待与 v1-v1 之间一致，不变更）。
+- **失败/重试**：gate 返回结构化结果 `MaintenanceOutcome`（`NotDue`/`Contended`/`Ran`/
+  `Failed`）。`Failed`（prune、lock 文件打开/加锁、marker 写/改名失败）与 `Contended`
+  （他进程持锁）都按 `failure_retry` 退避重试且不推进 marker；`NotDue` 回常规 cadence。pass
+  panic 报告一次后回常规 cadence（panic 是 bug，不按 60s 重试刷屏）。checkpoint 保持 v1
+  best-effort（repository.rs 默认实现吞错），不计入 `Failed`。
+- **health**：服务无请求可见状态，不进 DJOB registry；降级只通过进程 diagnostics 投影
+  （每个 `Failed`/`Contended`/panic/catch-up 与 pass 完成各一条稳定前缀消息）。长驻 health
+  （任务存活、cadence 保持）与最近一次 outcome 分离：任务在 pass 失败或 panic 后继续存活，
+  仅 shutdown 取消它。
+- **日志/tracing**：全部经 daemon diagnostics 通道；不创建自定义 trace ID（对齐 DJOB-023）。
+- **cancellation 与 shutdown**：`RetentionTask` 从不 `abort()`——`spawn_blocking` 闭包不可
+  取消（runtime.rs 记录的语义），abort 后残留 pass 会与 `event_sinks.close()` 的 final pass
+  竞争同一 store mutex。改为：watch channel 协作取消调度；`shutdown` 先取消、再 join 任务
+  本身（任务总是 await 其 in-flight `spawn_blocking` pass，join 完成 ⇒ pass 已终止），此后
+  组合根才执行 final pass——严格后置，不再与残留 maintenance 竞争。
+  取消优先级：调度 `select!` 以 cancellation 臂为 `biased` 首位，且 tick 唤醒后、启动任何新 `spawn_blocking` pass 前再次确认取消标志；取消状态转换与新 pass 提交经共享 lifecycle 锁（gate）串行化——`cancel` 与调度循环的「检查+提交」段互斥，信号不会落在检查返回 `false` 与 `spawn_blocking` 提交之间，取消信号一旦发出，即使 tick 同时就绪也不得再调度新 pass（否则新 pass 会侵占 65s join 预算）；失败退避的重试等待同样遵循该优先级。
+  停机预算：retention terminal join 与 SkillFS worker / reconciliation 的 runtime drain 共享同一 65s stop deadline 并行等待（`shutdown_by`），加 UDS drain 2s、Tokio shutdown 1s 与 telemetry shutdown 2s 后仍在 unit 的 `TimeoutStopSec=75` 之内（预算明细见 DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md）。join 超时同时降级两库 final pass——跳过它们并以 FAILURE 退出码报告（与 SIGKILL 同级：进程退出兜底；在途 pass 可能持有任一 store 的 mutex）；worker drain 与 retention 无关，照常执行。final pass 自身受剩余预算约束：必须在 stop deadline + 1s + 5s（`FINAL_PASS_BUDGET`）内完成，剩余不足 2s（`FINAL_PASS_MIN_BUDGET`，`SqliteSink::close_with_deadline`）时跳过 pass、只关连接，marker 不前进，下次启动 catch-up 补跑（DJOB-RET-015/016）。
+- **restart**：无内存状态；重启后由启动 catch-up + 共享 marker 文件恢复（硬杀补做）。
+
+可执行验收 fixture（`v2/apps/asc-daemon/tests/retention_lifecycle.rs`；DJOB-RET-006 为真
+二进制 + 真 UDS + 生产 schema 种子库，其余为生产任务循环 + scripted pass；DJOB-RET-010..013
+为 `retention.rs`/`sinks.rs` 的 in-module 单测）：
+
+| ID | 行为 | fixture / test |
+|---|---|---|
+| DJOB-RET-001 | 启动 catch-up 立即首跑一次，随后按 cadence 检查 | `startup_catch_up_runs_once_then_follows_the_cadence` |
+| DJOB-RET-002 | catch-up 失败不阻塞 admission，按退避重试 | `a_failed_catch_up_schedules_the_backoff_retry` |
+| DJOB-RET-003 | Failed pass 按退避重试、逐次诊断 | `a_failed_pass_retries_after_the_backoff` |
+| DJOB-RET-004 | Contended pass 报告并按退避重试 | `a_contended_pass_retries_after_the_backoff` |
+| DJOB-RET-005 | panic pass 报告一次、任务存活、回常规 cadence | `a_panicking_pass_is_reported_and_the_task_survives` |
+| DJOB-RET-006 | admission 前置：首次 connect 即见 backlog 已裁剪且 marker 已写 | `startup_catch_up_prunes_the_backlog_before_admission` |
+| DJOB-RET-007 | shutdown join 等待 in-flight pass 终止后才返回 | `shutdown_joins_an_in_flight_pass_before_returning` |
+| DJOB-RET-008 | join 超时返回 false（调用方须跳过 final pass） | `a_stuck_pass_times_out_the_terminal_join` |
+| DJOB-RET-009 | tick 与 cancellation 同时就绪时不得调度新 pass（取消优先） | `a_tick_and_cancellation_ready_together_schedule_no_new_pass` |
+| DJOB-RET-010 | 检查-提交窗口内到达的取消信号仍阻止该 pass（gate 串行化） | `retention.rs` 单测 `a_signal_inside_the_submission_window_still_prevents_the_pass` |
+| DJOB-RET-014 | catch-up 期间到达的 shutdown 放弃 admission，且终局 join 仍覆盖 in-flight pass | `retention.rs` 单测 `a_shutdown_during_the_startup_catchup_abandons_admission_and_joins_the_pass` |
+| DJOB-RET-015 | 剩余停机预算不足 2s 时 final pass 被跳过（marker 不前进、连接仍关闭） | `asc-sqlite-kernel` 单测 `a_final_pass_that_cannot_fit_the_stop_budget_is_skipped` |
+| DJOB-RET-016 | 剩余预算充足时 final pass 照常执行 | `asc-sqlite-kernel` 单测 `a_final_pass_with_budget_left_still_runs` |
+| DJOB-RET-011 | `cancel` 与「检查+提交」段互斥（gate 被持有时不得完成） | `retention.rs` 单测 `cancel_serializes_with_the_submission_section` |
+| DJOB-RET-012 | `shutdown_by` 遵守共享 deadline（已过期的 deadline 立即报 false） | `retention.rs` 单测 `a_stuck_pass_misses_a_shared_deadline_promptly` |
+| DJOB-RET-013 | retention join 超时跳过两库 final pass（在途 pass 可能持有任一 store 的 mutex） | `sinks.rs` 单测 `a_retention_join_timeout_skips_both_final_passes` |
+
+运行入口：`cargo test -p asc-daemon --test retention_lifecycle --locked --offline`；
+in-module 单测：`cargo test -p asc-daemon --lib --locked --offline` 与
+`cargo test -p asc-daemon --bin agent-sec-daemon --locked --offline`。
 
 ## 12. 当前实现证据
 
@@ -522,3 +605,77 @@ persistent Repository；这些边界见 [Runtime 设计](BINDING_RECONCILER_RUNT
 - [OpenTelemetry Trace API](https://opentelemetry.io/docs/specs/otel/trace/api/)：
   background run span、root/parent 关系和 context propagation 的标准语义。attempt child span
   与 contributor Span Links 不属于 Rust 首版要求。
+
+## 14. [TARGET V2] SkillSec 启动恢复边界
+
+第五批在 UDS 准入前执行一次 SkillSec 恢复：首先恢复私有换钥 intent，再按已登记的精确根目录
+调用 reconcile。任务共享 SkillSecService 和公共 Action Runtime，使用 120 秒总预算，不启动
+周期调度器。单 Skill 恢复失败记录公开错误类别和进程诊断，继续处理其他 Skill；后续写操作在同一
+锁内再次检查其恢复 intent。换钥未完成时普通 Ledger 操作拒绝，但 status 与管理员重试可用。
+启动恢复与最近一次业务结果分开；进程启动不代表每个 Skill 均已激活。
+
+DJOB-SG-001 的可执行核心证据是 `asc-capability-skill-sec/src/service/administration.rs` 和
+`src/service/rollback.rs` 的中断恢复测试；进程装配位于 `v2/apps/asc-daemon/src/skill_sec.rs`。
+SkillFS notify 驱动的后台合并队列、重试、shutdown、健康与实际 FUSE 生效在第六批接入，不由本节
+提前声称完成。
+
+## SkillSec 第一阶段落地边界
+
+上述 Python Job 和早期 Rust 建议由第一阶段的具体实现收口：当前使用一个进程内 worker，
+通过同一个 `ActionService` 复用 `SkillSecService`、Action Runtime 和公共 Finalizer。没有另建 Python 子进程协议或
+通用 Job 调度器。每项变更分别执行 scan 和 activation，前者失败也会尝试后者；业务错误不
+自动重放，仅执行前的 `Busy` 在同一有界期限内重试。
+启动扫描使用内部、不可由 RPC 构造的 StartupScan，经同一 Action Runtime 按 scan 审计。
+仅既有只读系统 Skill 跳过结果不继续 activation，也不生成 pass verdict。启动任务与已到期
+notify 交替执行；未到期通知不阻挡启动任务。不增加 watcher 或周期扫描。
+DJOB-SG-002 由 `skill_worker.rs` 的交替执行、跳过不激活及原有失败后激活测试覆盖。
+
+实时通知按 canonical 身份合并，500 ms debounce，持续输入时最多延迟两秒；相同 Skill
+的具体文件列表不影响扫描范围，因此 worker 始终扫描完整 Skill。实时 pending 限制为 256
+个不同 Skill，满队列返回签名拒绝。这是取代上文无界 map 的明确资源边界。启动任务来自
+默认目录、显式普通目录配置与仍受授权的 registry；默认发现单独受 10,000 个目录项和
+1,024 个新增 Skill 限制，已有登记与显式配置不截断；单目录发现错误记录诊断并继续成功部分。同一个 daemon worker 也负责未配置 SkillFS 时的启动
+补扫，包含未登记的普通 Skill 和已登记的挂载 Skill，不遍历 FUSE，不受实时 pending 上限截断。
+
+关闭停止接收并等待当前有界操作。内存 pending 不持久化，daemon 重启后通过全量注册目录
+补扫恢复，而非重新发送原通知或承诺 exactly-once。`status` 的 `skillfs` 对象返回 queued、
+running、processed、failed、lastError；各次 Action 使用公共审计记录，未增加独立 Job
+trace-ID 或第二套审计输出。worker 意外退出时关闭队列准入，`healthy=false`、`running=false`，
+要求重启 daemon；不会继续确认无法处理的通知。可执行异常退出证据为
+`apps/asc-daemon/src/skill_worker.rs::unwinding_worker_closes_admission_and_reports_failed_health`。
+具体模块与验收边界见
+[SkillSec 第一阶段迁移](SKILL_SEC_PHASE_ONE_zh.md#第六批-skillfs-边界)。
+
+## 15. [TARGET V2][IMPLEMENTED] Scope 驱动进程发现
+
+遵循 [生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)（SCOPE-CR-002）。Scope 无 revision，
+保存不可变 selector 和完整策略快照。`ScopeDiscovery::start(scope)` 创建一个专属 worker，
+从 Scope 读取快照；Policy 更新/删除不影响后续匹配实例。
+
+- 创建立即扫描，此后每 2 秒扫描。每个 Scope 共用匹配缓存；boot、PID namespace、PID、
+  start time 区分实例，exe 路径/device/inode 与 comm 改变会重新匹配。
+- worker 每轮把完整已知实例集合交给 PAP，即使缓存命中也提交，使失败的准入可以重试。
+  Repository 原子检查 ACTIVE、去重并创建真实 Binding 意图，随后只通知 Binding ID。
+- 完整扫描确认退出或观察到失配时，系统请求旧 Binding 删除。局部读取失败保留已有实例；
+  清理责任保存在统一 Repository，不靠 discovery 缓存维护。PID selector 不跟随 PID reuse。
+- 删除 Scope 先关闭新子项准入，再取消/join worker，随后通知全部 Binding 清理。
+  即使 Apply 已执行也保留其副作用记账；全部子项清理完成才回收 Scope。重复删除不重置
+  预算；终态失败由 `scope retry` 显式重试，不由周期扫描刷新。
+- PAP clone 共享创建/删除互斥锁，避免删除后启动孤儿 worker；registry 容量仍为 32。
+  start 失败保证没有遗留 worker，再补偿 Scope 删除；返回原始启动错误，补偿失败记录
+  Scope ID 和两种错误供排查及显式删除，不构成跨进程事务保证。
+- shutdown 关闭准入、unpark 并 join，纳入 daemon drain。扫描降级/恢复记录日志；每轮有
+  `scope_discovery.scan` span。`process discovery selected new instances` 只描述进程选择，
+  实际下发状态以 PAP Binding 查询为准。
+
+Discovery 按 PID 缓存选中的完整 `ProcessIdentity`，保留 selector、PID pin 和匹配输入缓存。
+每轮向 PAP 提交全部选中实例，Repository 按持久化 Scope 中的 Policy 快照展开 Binding。
+日志中的 `instances_selected` 统计新增进程实例，与该 Scope 的 Policy 数量无关。
+PAP `BindingView` 是可查询/可下发/可清理的存储对象。
+Reconciler 继续拥有调度、CAS、串行目标调用、UNKNOWN 记账及有界重试，不新增另一套执行
+状态机。Scope、Binding、PID pin 和恢复实例由 SQLite 保存；匹配缓存和重试预算留在内存。
+恢复流程见 [Policy SQLite 持久化设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
+
+验收包括 name/path/exec/PID reuse/局部读失败单元测试、registry 容量/停止测试，以及
+`sqlite_procfs_discovery_cleans_exited_instances_and_scope` 的真实 procfs、
+PAP/runtime/Adapter/scripted Client 组合。mock 结果不证明真实 kernel enforcement。

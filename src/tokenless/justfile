@@ -10,7 +10,7 @@ default:
 
 # Fetch the pinned RTK commit and apply Tokenless patches
 setup-rtk:
-    bash scripts/setup-rtk.sh {{rtk_dir}}
+    bash packaging/build/setup-rtk.sh {{rtk_dir}}
 
 # Remove cloned rtk directory (use when switching versions or re-patching)
 clean-rtk:

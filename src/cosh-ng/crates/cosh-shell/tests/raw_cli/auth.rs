@@ -699,3 +699,8 @@ fn raw_cli_auth_non_ecs_aliyun_falls_back_to_manual_keys() {
     // The successful startup result is reused after selecting the template.
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
 }
+
+#[test]
+fn raw_cli_marker_input_readiness_keeps_concurrent_drivers_separate() {
+    crate::support::raw_cli::assert_marker_input_readiness_paths_are_exclusive();
+}

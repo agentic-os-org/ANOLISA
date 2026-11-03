@@ -10,10 +10,81 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use crate::attr::{file_attr_from_metadata, file_attr_from_stat};
 use crate::handles::open_options_from_flags;
-use crate::path::{PathType, is_skill_discover_path};
+use crate::path::{PathType, hermes_nested_sync_eligible, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
-use crate::sys::{errno, fstatat_leaf, openat_leaf};
+use crate::sys::{errno, fchownat_leaf, fstatat_leaf, openat_leaf, utimensat_leaf};
+
+/// Convert a FUSE `TimeOrNow` into the `timespec` the kernel expects;
+/// `None` becomes `UTIME_OMIT`. Pre-epoch instants are normalized so
+/// `tv_nsec` stays non-negative.
+fn timespec_from_time_or_now(value: Option<fuser::TimeOrNow>) -> libc::timespec {
+    match value {
+        Some(fuser::TimeOrNow::Now) => libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        },
+        Some(fuser::TimeOrNow::SpecificTime(t)) => match t.duration_since(UNIX_EPOCH) {
+            Ok(d) => libc::timespec {
+                tv_sec: d.as_secs() as i64,
+                tv_nsec: d.subsec_nanos() as i64,
+            },
+            Err(e) => {
+                // Pre-epoch time: negative seconds
+                let d = e.duration();
+                let mut sec = -(d.as_secs() as i64);
+                let mut nsec = -(d.subsec_nanos() as i64);
+                // Normalize: nsec should be non-negative for timespec
+                if nsec < 0 {
+                    sec -= 1;
+                    nsec += 1_000_000_000;
+                }
+                libc::timespec {
+                    tv_sec: sec,
+                    tv_nsec: nsec,
+                }
+            }
+        },
+        None => libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+    }
+}
+
+/// Clone the fd backing an unlinked inode's setattr out of the handle
+/// table: the request's `fh` when the kernel attaches one, otherwise any
+/// live handle for the inode (the kernel does not attach the handle to
+/// every fd-based setattr — `fchmod(2)` sends mode without `FATTR_FH` —
+/// and POSIX keeps the inode alive until the last close). A failed clone
+/// keeps its own errno (EMFILE/ENFILE, ...) instead of collapsing into
+/// the ENOENT "no handle" reply; `Ok(None)` means no handle at all.
+fn clone_unlinked_handle_file(
+    handles: &crate::handles::HandleManager,
+    fh: Option<u64>,
+    ino: u64,
+) -> std::io::Result<Option<std::fs::File>> {
+    clone_unlinked_handle_file_with(handles, fh, ino, std::fs::File::try_clone)
+}
+
+/// `clone_unlinked_handle_file` with the fd copy itself injected, so a test
+/// can exercise the error mapping without having to exhaust the process's
+/// real descriptor table.
+fn clone_unlinked_handle_file_with(
+    handles: &crate::handles::HandleManager,
+    fh: Option<u64>,
+    ino: u64,
+    clone: impl Fn(&std::fs::File) -> std::io::Result<std::fs::File>,
+) -> std::io::Result<Option<std::fs::File>> {
+    let cloned = fh
+        .and_then(|fh| handles.with_handle(fh, |entry| entry.file.as_ref().map(&clone)))
+        .flatten()
+        .or_else(|| handles.with_handle_for_ino(ino, |f| clone(f)));
+    match cloned {
+        Some(result) => result.map(Some),
+        None => Ok(None),
+    }
+}
 
 impl SkillFs {
     pub(in crate::fs) fn write_impl(
@@ -100,6 +171,64 @@ impl SkillFs {
             return;
         }
 
+        // I4/H3: hidden-skill write gate. An fd opened while the skill
+        // resolved `current` keeps its inode -> path mapping after the
+        // ledger flips the skill to `hidden`, so the write dispatches
+        // with a live mapping and must be refused here exactly like
+        // every other mutating callback — and like the #5183 xattr
+        // gate, which rejects `fsetxattr` on the very same stale fd
+        // with ENOENT. Without this arm the fd kept a mutation channel
+        // into the hidden skill's live source. The open-after-unlink
+        // branch above deliberately skips this gate: POSIX keeps a raw
+        // fd writable until last close, and the unlink already passed
+        // the protection gates when it dropped the mapping.
+        {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
+                _ => false,
+            };
+            if reject {
+                // Audit the rejection with the `hidden_skill` class the
+                // xattr gate established (#5183): a stale-fd write probe
+                // against a hidden skill must leave the same
+                // `Rejected` trace as `fsetxattr` on the same fd.
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Write,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
+                reply.error(libc::ENOENT);
+                return;
+            }
+        }
+
         debug!(ino, offset, len = data.len(), "write");
 
         // Must go through fh lookup
@@ -139,6 +268,7 @@ impl SkillFs {
                     self.send_sync(SyncEvent::Reparse {
                         skill_name: skill_name.clone(),
                         source_path: self.skill_physical_dir(skill_name).join("SKILL.md"),
+                        max_skill_size: self.max_skill_size,
                     });
                 }
                 if let PathType::InboxPassthrough {
@@ -150,6 +280,32 @@ impl SkillFs {
                         self.send_sync(SyncEvent::Reparse {
                             skill_name: skill_name.clone(),
                             source_path: self.inbox_skill_dir(skill_name).join("SKILL.md"),
+                            max_skill_size: self.max_skill_size,
+                        });
+                    }
+                }
+                // Hermes nested manifests live in the same store (keyed by
+                // their leaf name, like the categorized loader inserts
+                // them), so a nested SKILL.md write needs the same
+                // re-parse a flat one enqueues.
+                if let PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } = &path_type
+                {
+                    let marker = self
+                        .hermes_skill_physical_dir(category, skill_name)
+                        .join("SKILL.md");
+                    if hermes_nested_sync_eligible(
+                        self.staging_matcher.as_deref(),
+                        category,
+                        skill_name,
+                        &marker,
+                    ) {
+                        self.send_sync(SyncEvent::Reparse {
+                            skill_name: skill_name.clone(),
+                            source_path: marker,
+                            max_skill_size: self.max_skill_size,
                         });
                     }
                 }
@@ -325,12 +481,55 @@ impl SkillFs {
         }
 
         // S3: refuse to create entries beneath a reserved lifecycle
-        // namespace before any physical I/O.
+        // namespace before any physical I/O — and before the virtual
+        // slot rejection below, so `create /skills/.staging` keeps the
+        // historical `EACCES` + `PolicyDenied` audit (and the
+        // policy_denied metric) instead of the generic virtual-slot
+        // `EROFS`/`Create` record.
         if let Some(errno) =
             self.enforce_lifecycle_reservation(&path_type, SkillEventKind::Create, req, None)
         {
             reply.error(errno);
             return;
+        }
+
+        // Virtual-path type confusion: only file-capable leaves may
+        // host a freshly created file — passthrough leaves, the
+        // `SKILL.md` manifest slots, and the Hermes passthrough labels.
+        // Virtual directory slots (Root, SkillsDir, SkillDir,
+        // CategoryDir, Invalid) resolve onto `source/<name>` and would
+        // materialize a plain regular file that `create` reports as a
+        // RegularFile while later lookup/getattr answer ENOENT/Directory
+        // — the same confusion `mknod` and `symlink` reject with EROFS.
+        // `NestedSkillDir` stays allowed: a depth-2 name that does not
+        // exist yet is lexically a nested-skill dir, but creating a
+        // plain file there (`apple/README.md`) is the ordinary new
+        // category-file flow, and once created the child re-parses as
+        // `CategoryPassthrough` so lookups agree with the created type.
+        match &path_type {
+            PathType::SkillMd { .. }
+            | PathType::Passthrough { .. }
+            | PathType::NestedSkillDir { .. }
+            | PathType::NestedSkillMd { .. }
+            | PathType::NestedPassthrough { .. }
+            | PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
+            | PathType::InboxPassthrough { .. } => {}
+            _ => {
+                self.ro_warn("create", &path_str);
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::EROFS),
+                    None,
+                    Some(format!("class=virtual_dir_slot path={path_str}")),
+                );
+                reply.error(libc::EROFS);
+                return;
+            }
         }
 
         // S1: `.skill-meta/**` is mutation-protected. Reject before touching
@@ -349,6 +548,9 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
                 PathType::NestedPassthrough {
                     category,
                     skill_name,
@@ -369,6 +571,15 @@ impl SkillFs {
                 _ => false,
             };
             if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -385,9 +596,21 @@ impl SkillFs {
 
         debug!(parent, name = %name.to_string_lossy(), ?physical, "create");
 
-        // skill-discover namespace is read-only
+        // skill-discover namespace is read-only. Emit the
+        // `Rejected`/`EROFS` record the `symlink`/`link` gates
+        // (link.rs) already leave for the same namespace so `create`
+        // probes against the read-only tree are audited too.
         if let PathType::Passthrough { ref skill_name, .. } = path_type {
             if is_skill_discover_path(skill_name) {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::EROFS),
+                    None,
+                    Some("class=skill_discover".to_string()),
+                );
                 reply.error(libc::EROFS);
                 return;
             }
@@ -474,6 +697,7 @@ impl SkillFs {
                     self.send_sync(SyncEvent::Reparse {
                         skill_name: skill_name.clone(),
                         source_path: physical.clone(),
+                        max_skill_size: self.max_skill_size,
                     });
                 }
                 if let PathType::InboxPassthrough {
@@ -485,6 +709,30 @@ impl SkillFs {
                         self.send_sync(SyncEvent::Reparse {
                             skill_name: skill_name.clone(),
                             source_path: physical.clone(),
+                            max_skill_size: self.max_skill_size,
+                        });
+                    }
+                }
+                // Hermes nested manifest creation must teach the store the
+                // new leaf entry, mirroring the flat create above — but
+                // hidden working copies stay out of the store exactly
+                // like discovery.
+                if let PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                    ..
+                } = &path_type
+                {
+                    if hermes_nested_sync_eligible(
+                        self.staging_matcher.as_deref(),
+                        category,
+                        skill_name,
+                        &physical,
+                    ) {
+                        self.send_sync(SyncEvent::Reparse {
+                            skill_name: skill_name.clone(),
+                            source_path: physical.clone(),
+                            max_skill_size: self.max_skill_size,
                         });
                     }
                 }
@@ -620,14 +868,24 @@ impl SkillFs {
             return;
         }
 
-        // Only Passthrough leaves under an ordinary skill can host a
-        // freshly created FIFO. Virtual paths (Root, SkillsDir, SkillDir,
-        // SkillMd, Invalid) are rejected before any physical I/O.
+        // Passthrough leaves under an ordinary skill — flat or Hermes
+        // nested — can host a freshly created FIFO. Virtual paths (Root,
+        // SkillsDir, SkillDir, SkillMd, Invalid) are rejected before any
+        // physical I/O. The nested case is identified by its hermes id so
+        // the skill-discover and observe paths below stay unchanged.
         let (skill_name, _relative_path) = match &path_type {
             PathType::Passthrough {
                 skill_name,
                 relative_path,
             } => (skill_name.clone(), relative_path.clone()),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Self::hermes_skill_id(category, skill_name),
+                relative_path.clone(),
+            ),
             _ => {
                 self.ro_warn("mknod", &path_str);
                 self.emit_op_event(
@@ -666,6 +924,44 @@ impl SkillFs {
         {
             reply.error(errno);
             return;
+        }
+
+        // I4/H3: reject FIFO creation inside a hidden skill unless the
+        // path matches the post-publish grace whitelist — the same gate
+        // `create`/`symlink`/`link` apply. The kernel keeps the skill
+        // directory's dentries warm across a ledger flip, so without
+        // this arm a stale dentry let `mkfifo` inject a new entry into a
+        // hidden skill whose content is otherwise unreachable.
+        {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
+                _ => false,
+            };
+            if reject {
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Create,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
+                reply.error(libc::ENOENT);
+                return;
+            }
         }
 
         let physical = match self.resolve_physical_path(&path_str) {
@@ -753,6 +1049,83 @@ impl SkillFs {
         );
         reply.entry(&Duration::from_secs(1), &attr, 0);
     }
+    /// Apply a setattr request through an open file handle whose inode no
+    /// longer has a path mapping (the file was unlinked). The kernel's fd
+    /// keeps the inode alive, so ftruncate/fchmod/fchown/futimens must work.
+    #[allow(clippy::too_many_arguments)]
+    fn setattr_unlinked_handle(
+        &self,
+        ino: u64,
+        fh: Option<u64>,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        reply: ReplyAttr,
+    ) {
+        use std::os::unix::io::AsRawFd;
+
+        let file = match clone_unlinked_handle_file(&self.handles, fh, ino) {
+            Ok(Some(file)) => file,
+            // Captured virtual content has no fd to fall back to; the inode
+            // is gone, exactly as before.
+            Ok(None) => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            // A failed fd copy (EMFILE/ENFILE, ...) means the handle is
+            // still alive but the fd could not be borrowed; report its own
+            // errno instead of the misleading ENOENT.
+            Err(e) => {
+                reply.error(errno(&e));
+                return;
+            }
+        };
+        let fd = file.as_raw_fd();
+
+        if let Some(new_size) = size {
+            if unsafe { libc::ftruncate(fd, new_size as libc::off_t) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+        if let Some(new_mode) = mode {
+            if unsafe { libc::fchmod(fd, new_mode & 0o7777) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+        if uid.is_some() || gid.is_some() {
+            let new_uid = uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
+            let new_gid = gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
+            if unsafe { libc::fchown(fd, new_uid, new_gid) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+        if atime.is_some() || mtime.is_some() {
+            let times = [
+                timespec_from_time_or_now(atime),
+                timespec_from_time_or_now(mtime),
+            ];
+            if unsafe { libc::futimens(fd, times.as_ptr()) } != 0 {
+                reply.error(errno(&std::io::Error::last_os_error()));
+                return;
+            }
+        }
+
+        match file.metadata() {
+            Ok(meta) => {
+                let mut attr = file_attr_from_metadata(&meta);
+                attr.ino = ino;
+                reply.attr(&Duration::from_secs(1), &attr);
+            }
+            Err(e) => reply.error(errno(&e)),
+        }
+    }
+
     pub(in crate::fs) fn setattr_impl(
         &mut self,
         req: &Request,
@@ -764,7 +1137,7 @@ impl SkillFs {
         atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<std::time::SystemTime>,
-        _fh: Option<u64>,
+        fh: Option<u64>,
         _crtime: Option<std::time::SystemTime>,
         _chgtime: Option<std::time::SystemTime>,
         _bkuptime: Option<std::time::SystemTime>,
@@ -783,8 +1156,12 @@ impl SkillFs {
         let path = match self.inodes.get_path(ino) {
             Some(p) => p,
             None => {
-                reply.error(libc::ENOENT);
-                return;
+                // The inode was unlinked while an fd is still open. POSIX
+                // keeps the inode alive until the last close, so mutations
+                // through that fd must still work — use the handle's file
+                // instead of failing with ENOENT.
+                return self
+                    .setattr_unlinked_handle(ino, fh, mode, uid, gid, size, atime, mtime, reply);
             }
         };
 
@@ -829,6 +1206,19 @@ impl SkillFs {
                     return;
                 }
                 if self.should_reject_hidden_write(skill_name, None) {
+                    // Audit the rejection with the `hidden_skill` class the
+                    // xattr gate established (#5183) so a hidden skill's
+                    // metadata probes leave a trace — the same convention
+                    // the other mutating callbacks follow.
+                    self.emit_op_event_with_detail(
+                        req,
+                        &path_type,
+                        SkillEventKind::Metadata,
+                        SkillEventAction::Rejected,
+                        Some(libc::ENOENT),
+                        None,
+                        Some("class=hidden_skill".to_string()),
+                    );
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -973,6 +1363,19 @@ impl SkillFs {
                 _ => false,
             };
             if reject {
+                // Audit the rejection with the `hidden_skill` class the
+                // xattr gate established (#5183) so a hidden skill's
+                // chmod/chown/truncate/utimens probes leave a trace — the
+                // same convention the other mutating callbacks follow.
+                self.emit_op_event_with_detail(
+                    req,
+                    &path_type,
+                    SkillEventKind::Metadata,
+                    SkillEventAction::Rejected,
+                    Some(libc::ENOENT),
+                    None,
+                    Some("class=hidden_skill".to_string()),
+                );
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -988,6 +1391,46 @@ impl SkillFs {
         };
 
         debug!(ino, ?size, ?mode, ?uid, ?gid, ?physical, "setattr");
+
+        // A setattr delivered on a symlink inode comes from a no-follow
+        // syscall (lchown / lutimes / fchmodat2 with AT_SYMLINK_NOFOLLOW).
+        // chown(2) and utimensat(..., 0) would follow the link and mutate
+        // whatever it points at — possibly outside the skill tree — instead
+        // of the link itself. Detect the link once and use the no-follow
+        // syscall/flag for every branch below. A physical path beyond
+        // PATH_MAX defeats path-based typing; fall back to the parent-fd
+        // leaf stat so such a file is still typed no-follow and routed
+        // through the *at syscalls below, while any other stat error
+        // keeps its errno.
+        let long_path;
+        let is_symlink = match std::fs::symlink_metadata(&physical) {
+            Ok(m) => {
+                long_path = false;
+                m.file_type().is_symlink()
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, false) {
+                        Ok(st) => {
+                            long_path = true;
+                            st.st_mode & libc::S_IFMT == libc::S_IFLNK
+                        }
+                        Err(e2) => {
+                            reply.error(errno(&e2));
+                            return;
+                        }
+                    },
+                    Err(_) => {
+                        reply.error(errno(&e));
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                reply.error(errno(&e));
+                return;
+            }
+        };
 
         // 1. Handle size (truncate) — preserve existing logic
         if let Some(new_size) = size {
@@ -1012,7 +1455,30 @@ impl SkillFs {
                         self.send_sync(SyncEvent::Reparse {
                             skill_name: skill_name.clone(),
                             source_path: physical.clone(),
+                            max_skill_size: self.max_skill_size,
                         });
+                    }
+                    // Hermes nested SKILL.md truncate re-parses too (the
+                    // store keys the leaf entry), hidden working copies
+                    // excepted like discovery.
+                    if let PathType::NestedSkillMd {
+                        ref category,
+                        ref skill_name,
+                        ..
+                    } = path_type
+                    {
+                        if hermes_nested_sync_eligible(
+                            self.staging_matcher.as_deref(),
+                            category,
+                            skill_name,
+                            &physical,
+                        ) {
+                            self.send_sync(SyncEvent::Reparse {
+                                skill_name: skill_name.clone(),
+                                source_path: physical.clone(),
+                                max_skill_size: self.max_skill_size,
+                            });
+                        }
                     }
                     // D1.3-demo: truncate is the only setattr
                     // mutation that materially changes file content,
@@ -1079,6 +1545,14 @@ impl SkillFs {
 
         // 2. Handle mode (chmod)
         if let Some(new_mode) = mode {
+            // Linux does not support changing a symlink's own mode; only
+            // fchmodat2(AT_SYMLINK_NOFOLLOW) delivers mode here for a link,
+            // and the kernel answers EOPNOTSUPP for it. set_permissions
+            // would silently chmod the target instead.
+            if is_symlink {
+                reply.error(libc::EOPNOTSUPP);
+                return;
+            }
             let perms = std::fs::Permissions::from_mode(new_mode);
             if let Err(e) = std::fs::set_permissions(&physical, perms) {
                 reply.error(errno(&e));
@@ -1088,7 +1562,9 @@ impl SkillFs {
 
         // 3. Handle uid/gid (chown)
         if uid.is_some() || gid.is_some() {
-            let c_path = match std::ffi::CString::new(physical.to_string_lossy().into_owned()) {
+            // Raw OS bytes, not a lossy UTF-8 view: `chown` must address the
+            // exact physical path even when it contains non-UTF-8 bytes.
+            let c_path = match crate::sys::cstring_from_os_str(physical.as_os_str()) {
                 Ok(p) => p,
                 Err(_) => {
                     reply.error(libc::EINVAL);
@@ -1098,9 +1574,29 @@ impl SkillFs {
             // -1 means "don't change" — on Linux (uid_t)-1 == u32::MAX
             let new_uid = uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
             let new_gid = gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
-            let ret = unsafe { libc::chown(c_path.as_ptr(), new_uid, new_gid) };
-            if ret != 0 {
-                let e = std::io::Error::last_os_error();
+            let chown_result = if long_path {
+                // chown(2)/lchown(2) cannot name a path beyond PATH_MAX;
+                // reach the leaf through the open parent directory,
+                // preserving the no-follow choice above.
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => {
+                        fchownat_leaf(&parent_fd, &leaf, new_uid, new_gid, !is_symlink).map(|_| 0)
+                    }
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e)),
+                }
+            } else {
+                let ret = if is_symlink {
+                    unsafe { libc::lchown(c_path.as_ptr(), new_uid, new_gid) }
+                } else {
+                    unsafe { libc::chown(c_path.as_ptr(), new_uid, new_gid) }
+                };
+                if ret != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(0)
+                }
+            };
+            if let Err(e) = chown_result {
                 reply.error(errno(&e));
                 return;
             }
@@ -1108,7 +1604,8 @@ impl SkillFs {
 
         // 4. Handle atime/mtime (utimensat)
         if atime.is_some() || mtime.is_some() {
-            let c_path = match std::ffi::CString::new(physical.to_string_lossy().into_owned()) {
+            // Same raw-byte path requirement as the chown branch above.
+            let c_path = match crate::sys::cstring_from_os_str(physical.as_os_str()) {
                 Ok(p) => p,
                 Err(_) => {
                     reply.error(libc::EINVAL);
@@ -1116,79 +1613,36 @@ impl SkillFs {
                 }
             };
 
-            let atime_spec = match atime {
-                Some(fuser::TimeOrNow::Now) => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_NOW,
-                },
-                Some(fuser::TimeOrNow::SpecificTime(t)) => {
-                    match t.duration_since(UNIX_EPOCH) {
-                        Ok(d) => libc::timespec {
-                            tv_sec: d.as_secs() as i64,
-                            tv_nsec: d.subsec_nanos() as i64,
-                        },
-                        Err(e) => {
-                            // Pre-epoch time: negative seconds
-                            let d = e.duration();
-                            let mut sec = -(d.as_secs() as i64);
-                            let mut nsec = -(d.subsec_nanos() as i64);
-                            // Normalize: nsec should be non-negative for timespec
-                            if nsec < 0 {
-                                sec -= 1;
-                                nsec += 1_000_000_000;
-                            }
-                            libc::timespec {
-                                tv_sec: sec,
-                                tv_nsec: nsec,
-                            }
-                        }
-                    }
-                }
-                None => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_OMIT,
-                },
-            };
-
-            let mtime_spec = match mtime {
-                Some(fuser::TimeOrNow::Now) => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_NOW,
-                },
-                Some(fuser::TimeOrNow::SpecificTime(t)) => {
-                    match t.duration_since(UNIX_EPOCH) {
-                        Ok(d) => libc::timespec {
-                            tv_sec: d.as_secs() as i64,
-                            tv_nsec: d.subsec_nanos() as i64,
-                        },
-                        Err(e) => {
-                            // Pre-epoch time: negative seconds
-                            let d = e.duration();
-                            let mut sec = -(d.as_secs() as i64);
-                            let mut nsec = -(d.subsec_nanos() as i64);
-                            // Normalize: nsec should be non-negative for timespec
-                            if nsec < 0 {
-                                sec -= 1;
-                                nsec += 1_000_000_000;
-                            }
-                            libc::timespec {
-                                tv_sec: sec,
-                                tv_nsec: nsec,
-                            }
-                        }
-                    }
-                }
-                None => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_OMIT,
-                },
-            };
+            let atime_spec = timespec_from_time_or_now(atime);
+            let mtime_spec = timespec_from_time_or_now(mtime);
 
             let times = [atime_spec, mtime_spec];
-            let ret =
-                unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-            if ret != 0 {
-                let e = std::io::Error::last_os_error();
+            let utimensat_result = if long_path {
+                // utimensat cannot name a path beyond PATH_MAX; reach the
+                // leaf through the open parent directory, preserving the
+                // no-follow choice.
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => utimensat_leaf(&parent_fd, &leaf, &times, is_symlink),
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e)),
+                }
+            } else {
+                // Same as chown above: times set through a no-follow syscall
+                // belong to the link, not to its target.
+                let flags = if is_symlink {
+                    libc::AT_SYMLINK_NOFOLLOW
+                } else {
+                    0
+                };
+                let ret = unsafe {
+                    libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), flags)
+                };
+                if ret != 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            };
+            if let Err(e) = utimensat_result {
                 reply.error(errno(&e));
                 return;
             }
@@ -1202,11 +1656,15 @@ impl SkillFs {
         // `ENAMETOOLONG` here, and the kernel would surface that errno to
         // the caller while keeping the stale attr cache (`stat` after the
         // failed reply would still report the pre-truncate size).
-        let final_attr: std::io::Result<FileAttr> = match std::fs::metadata(&physical) {
+        let final_attr: std::io::Result<FileAttr> = match if is_symlink {
+            std::fs::symlink_metadata(&physical)
+        } else {
+            std::fs::metadata(&physical)
+        } {
             Ok(meta) => Ok(file_attr_from_metadata(&meta)),
             Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
                 match self.open_parent_dir_for(&path) {
-                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, true) {
+                    Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, !is_symlink) {
                         Ok(st) => Ok(file_attr_from_stat(&st)),
                         Err(e2) => Err(e2),
                     },
@@ -1251,5 +1709,43 @@ impl SkillFs {
                 reply.error(err);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fd that cannot be duplicated must surface its own errno from the
+    /// setattr fd lookup, not be swallowed into the ENOENT "no handle"
+    /// reply: the kernel handle is alive and the setattr syscalls would
+    /// work given the fd.
+    #[test]
+    fn unlinked_setattr_clone_failure_keeps_its_errno() {
+        let handles = crate::handles::HandleManager::new();
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let fh = handles.allocate(7, libc::O_RDWR, Some(file), None);
+
+        // The injected copy fails the way an exhausted descriptor table
+        // fails (EMFILE) while the handle itself stays usable; the error
+        // must propagate verbatim. Injecting it keeps the test off the
+        // process's real descriptor budget.
+        let err = clone_unlinked_handle_file_with(&handles, Some(fh), 7, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+        })
+        .expect_err("a failed clone must surface its errno");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EMFILE),
+            "the clone error must propagate verbatim, got {err:?}"
+        );
+
+        // No handle for the inode stays `Ok(None)`, which the caller maps
+        // to ENOENT.
+        assert!(
+            clone_unlinked_handle_file(&handles, None, 999)
+                .unwrap()
+                .is_none()
+        );
     }
 }

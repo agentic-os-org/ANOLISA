@@ -473,14 +473,14 @@ fn raw_cli_session_new_detaches_active_without_deleting_or_forcing_resume() {
 fn raw_cli_new_alias_starts_fresh_without_reaching_bash_or_changing_cwd() {
     let fixture = SessionFixture::new("session-new-alias", FixtureMode::Ready);
     let workspace = fixture.workspace.to_string_lossy().into_owned();
-    let output = fixture.run(
+    let output = fixture.run_marker(
         &[],
-        vec![
-            (b"pwd\n".to_vec(), Duration::from_millis(300)),
-            (b"/new\n".to_vec(), Duration::from_millis(400)),
+        &[
+            ("cosh-osc$ ", "pwd\n".to_string()),
+            ("cosh-osc$ ", "/new\n".to_string()),
             (
-                b"pwd\necho after-new-alias\nexit\n".to_vec(),
-                Duration::from_millis(300),
+                "The next Agent request starts a fresh conversation",
+                "pwd\necho after-new-alias\nexit\n".to_string(),
             ),
         ],
     );

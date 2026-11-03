@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "actplane")]
-use agentsight_enforcer::ActPlaneBackend;
 use agentsight_enforcer::EnforcerService;
 #[cfg(all(feature = "mock-backend", not(feature = "actplane")))]
 use agentsight_enforcer::MockBackend;
+#[cfg(feature = "actplane")]
+use agentsight_enforcer::{ActPlaneBackend, EnforcementBackend};
 
 fn main() -> anyhow::Result<()> {
     init_logging();
@@ -75,11 +75,35 @@ fn termination_flag() -> anyhow::Result<Arc<AtomicBool>> {
 #[cfg(feature = "actplane")]
 fn run(socket_path: String) -> anyhow::Result<()> {
     let stop = termination_flag()?;
-    let service = EnforcerService::bind(&socket_path, Arc::new(ActPlaneBackend::open()?), None)?;
+    let backend = Arc::new(ActPlaneBackend::open()?);
+    let health = backend.health()?;
+    let profile = std::env::var("ACTPLANE_PINNED_PROFILE").ok();
+    if let Some(message) =
+        file_guard_startup_warning(profile.as_deref(), health.capabilities.file_delete_guard)
+    {
+        log::warn!("{message}");
+    }
+    let service = EnforcerService::bind(&socket_path, backend, None)?;
     log::info!("agentsight-enforcer listening on {socket_path}");
     service.serve_until(stop.as_ref())?;
     log::info!("agentsight-enforcer stopped");
     Ok(())
+}
+
+#[cfg(any(feature = "actplane", test))]
+fn file_guard_startup_warning(profile: Option<&str>, available: bool) -> Option<String> {
+    if available {
+        return None;
+    }
+    // ready 只表示引擎可接收请求，不能据此承诺防误删能力；不改变 health 门控。
+    Some(format!(
+        "file_delete_guard=false (requested ACTPLANE_PINNED_PROFILE={}): \
+         file deletion protection requires the agent-file-guard profile, active BPF-LSM, \
+         and the initial PID namespace. Changing from credential-exfiltration disables \
+         credential-to-network blocking; schedule pinned-engine reprovisioning before switching. \
+         See the AgentSight deployment guide for prerequisites and activation steps",
+        profile.unwrap_or("full")
+    ))
 }
 
 #[cfg(all(feature = "mock-backend", not(feature = "actplane")))]
@@ -100,6 +124,29 @@ compile_error!("agentsight-enforcer requires the mock-backend or actplane featur
 mod tests {
     use super::*;
     use log::Log as _;
+
+    #[test]
+    fn unavailable_file_guard_reports_profile_and_activation_requirements() {
+        let message = file_guard_startup_warning(Some("credential-exfiltration"), false)
+            .expect("missing capability must be visible");
+        assert!(message.contains("file_delete_guard=false"));
+        assert!(message.contains("ACTPLANE_PINNED_PROFILE=credential-exfiltration"));
+        assert!(message.contains("agent-file-guard"));
+        assert!(message.contains("active BPF-LSM"));
+        assert!(message.contains("disables credential-to-network blocking"));
+        assert!(message.contains("pinned-engine reprovisioning"));
+    }
+
+    #[test]
+    fn available_file_guard_does_not_emit_activation_warning() {
+        assert!(file_guard_startup_warning(Some("agent-file-guard"), true).is_none());
+    }
+
+    #[test]
+    fn missing_profile_variable_reports_the_full_default() {
+        let message = file_guard_startup_warning(None, false).expect("missing capability");
+        assert!(message.contains("ACTPLANE_PINNED_PROFILE=full"));
+    }
 
     #[test]
     fn stderr_logger_delegates_enabled_to_filter() {

@@ -49,7 +49,7 @@ def get_workspace_from_session(session_file: Path) -> str | None:
             if first_line.strip():
                 data = json.loads(first_line)
                 cwd = data.get("cwd", "")
-                if cwd:
+                if isinstance(cwd, str) and cwd:
                     return cwd
     except Exception:
         pass
@@ -58,16 +58,68 @@ def get_workspace_from_session(session_file: Path) -> str | None:
 
 def get_skill_paths(workspace: str) -> dict:
     """Return {skill_name: absolute_path} discovered under <workspace>/skills."""
-    skill_paths = {}
-    ws_path = Path(workspace)
-    skills_dir = ws_path / "skills"
+    try:
+        skill_paths = {}
+        ws_path = Path(workspace)
+        skills_dir = ws_path / "skills"
 
-    if skills_dir.exists():
-        for skill_dir in skills_dir.iterdir():
-            if skill_dir.is_dir():
-                skill_paths[skill_dir.name] = str(skill_dir)
+        if skills_dir.exists():
+            for skill_dir in skills_dir.iterdir():
+                if skill_dir.is_dir():
+                    skill_paths[skill_dir.name] = str(skill_dir)
 
-    return skill_paths
+        return skill_paths
+    except OSError:
+        # Session headers can point at expired or inaccessible workspaces.
+        # Keep the direct /skills/<name>/ parser useful for the rest of the log.
+        return {}
+
+
+#: Characters that end a shell word in the commands this script parses.
+#: The set mirrors the name class of the ``skills/([^/\s&|;]+)/`` fallback
+#: below (a skill directory name may contain anything except ``/`` and
+#: these) plus the quoting characters a shell wraps a path in, which are
+#: syntax, never part of a directory name here. The grouping and
+#: redirection operators ``( ) < >`` and the backquote are syntax as well:
+#: a path can sit directly against them (``(cd /ws/skills/web)``,
+#: ``ls /ws/skills/web>listing.txt``), so they are word boundaries on
+#: either side exactly like whitespace.
+_SHELL_WORD_DELIMITERS = " \t\n\r&|;()<>'\"`"
+
+
+def _references_path(command: str, skill_path: str) -> bool:
+    """Whether ``command`` references ``skill_path`` as a whole path.
+
+    A bare substring test misattributes a call to whichever skill the dict
+    iterates first whenever one skill's path is a prefix of another's
+    (``/ws/skills/web`` inside ``/ws/skills/web-search/run.py``), so the
+    reference must start and end at a shell-word boundary: ``web`` no
+    longer matches ``web-search/...``, while ``ls /ws/skills/web`` (the
+    command ends right after the directory) and
+    ``python /ws/skills/web/run.py`` still count. A reference also counts
+    when it sits directly against a grouping or redirection operator —
+    ``(cd /ws/skills/web)`` or ``ls /ws/skills/web>listing.txt`` — since
+    those characters are shell syntax, never name content.
+    """
+    start = 0
+    while True:
+        idx = command.find(skill_path, start)
+        if idx < 0:
+            return False
+        end = idx + len(skill_path)
+        starts_at_boundary = (
+            idx == 0
+            or command[idx - 1] == "/"
+            or command[idx - 1] in _SHELL_WORD_DELIMITERS
+        )
+        ends_at_boundary = (
+            end == len(command)
+            or command[end] == "/"
+            or command[end] in _SHELL_WORD_DELIMITERS
+        )
+        if starts_at_boundary and ends_at_boundary:
+            return True
+        start = idx + 1
 
 
 def find_skill_in_command(command: str, skill_paths: dict) -> str | None:
@@ -75,8 +127,15 @@ def find_skill_in_command(command: str, skill_paths: dict) -> str | None:
     if not command:
         return None
 
-    for skill_name, skill_path in skill_paths.items():
-        if skill_path in command:
+    # Longest (most specific) path first. With the boundary check above a
+    # command that references exactly one skill matches it no matter the
+    # dict order; when a command genuinely references several skills, the
+    # most specific path wins so the attribution stays deterministic
+    # across readdir orders.
+    for skill_name, skill_path in sorted(
+        skill_paths.items(), key=lambda item: (-len(item[1]), item[0])
+    ):
+        if _references_path(command, skill_path):
             return skill_name
 
     match = re.search(r'skills/([^/\s&|;]+)/', command)
@@ -121,7 +180,11 @@ def analyze_session_file(session_file: Path) -> tuple[str, dict, dict]:
 
     workspace = get_workspace_from_session(session_file)
     if workspace:
-        skill_paths = get_skill_paths(workspace)
+        try:
+            skill_paths = get_skill_paths(workspace)
+        except (OSError, RuntimeError, ValueError):
+            # A stale or malformed workspace must not discard the rest of a session.
+            skill_paths = {}
     else:
         skill_paths = {}
 
@@ -135,18 +198,36 @@ def analyze_session_file(session_file: Path) -> tuple[str, dict, dict]:
                 except json.JSONDecodeError:
                     continue
 
+                # A non-object line (array/scalar) has no event fields; skip it
+                # instead of aborting the whole session at the first such line.
+                if not isinstance(data, dict):
+                    continue
+
                 ts = data.get("timestamp", "")
                 if ts:
                     session_date = parse_timestamp(ts)
 
                 message = data.get("message", {})
+                if not isinstance(message, dict):
+                    continue
                 content = message.get("content", [])
 
                 if isinstance(content, list):
                     for item in content:
+                        if not isinstance(item, dict):
+                            continue
                         if item.get("type") == "toolCall":
                             args = item.get("arguments", {})
+                            if not isinstance(args, dict):
+                                continue
                             command = args.get("command", "")
+
+                            # Only strings can be matched against skill paths;
+                            # a list/number/object command must not reach
+                            # re.search, which would abort the whole file and
+                            # drop every later valid skill call.
+                            if not isinstance(command, str):
+                                continue
 
                             skill_name = find_skill_in_command(command, skill_paths)
                             if not skill_name:
@@ -224,8 +305,6 @@ def print_report(results: dict, mode: str = "summary"):
     print("Skill Usage Report (session logs)")
     print("=" * 60)
 
-    total_calls = 0
-
     print("\nWorkspace mapping:")
     print("-" * 40)
     for agent_id, workspace in sorted(results["workspaces"].items()):
@@ -242,7 +321,6 @@ def print_report(results: dict, mode: str = "summary"):
             for skill_name in sorted(agent_stats.keys(), key=lambda x: agent_stats[x], reverse=True):
                 count = agent_stats[skill_name]
                 print(f"    {skill_name}: {count}")
-                total_calls += count
 
     if mode in ("date", "all"):
         print("\nBy date:")
@@ -265,6 +343,10 @@ def print_report(results: dict, mode: str = "summary"):
             print(f"    Calls: {session['calls']}")
             for skill_name, count in sorted(session["skills"].items(), key=lambda x: x[1], reverse=True):
                 print(f"      {skill_name}: {count}")
+
+    total_calls = sum(
+        sum(agent_stats.values()) for agent_stats in results["by_agent"].values()
+    )
 
     print("\n" + "=" * 60)
     print(f"Total skill calls: {total_calls}")

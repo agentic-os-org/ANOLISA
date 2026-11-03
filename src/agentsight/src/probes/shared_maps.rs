@@ -4,11 +4,11 @@
 // Shared BPF maps bundle.
 //
 // Several probes coordinate by reusing the same BPF maps that proctrace owns:
-// the shared ring buffer (`rb`), the process filter (`traced_processes`), and
-// (optionally) the cgroup filter (`cgroup_filter`). Historically each of these
-// was threaded through every probe constructor as a separate `&MapHandle`
-// argument, so adding one more shared map meant editing the signature of every
-// probe.
+// the shared ring buffer (`rb`), internal counters (`internal_metrics`), the
+// process filter (`traced_processes`), and (optionally) the cgroup filter.
+// Historically each map was threaded through every probe constructor as a
+// separate `&MapHandle` argument, so adding one more shared map meant editing
+// the signature of every probe.
 //
 // `SharedMaps` replaces that growing argument list with a single bundle. A probe
 // now takes one `&SharedMaps` and declares which maps it consumes as a
@@ -28,6 +28,8 @@ use std::os::fd::AsFd;
 pub enum MapKind {
     /// Shared ring buffer every probe writes events into.
     Rb,
+    /// Per-CPU counters shared by every ring-buffer producer.
+    InternalMetrics,
     /// Process filter map (`pid -> traced`).
     TracedProcesses,
     /// Cgroup filter map; only consulted when cgroup filtering is enabled.
@@ -39,6 +41,7 @@ impl MapKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             MapKind::Rb => "rb",
+            MapKind::InternalMetrics => "internal_metrics",
             MapKind::TracedProcesses => "traced_processes",
             MapKind::CgroupFilter => "cgroup_filter",
         }
@@ -47,12 +50,13 @@ impl MapKind {
 
 /// A bundle of BPF maps shared between probes.
 ///
-/// `rb` is always present; `traced_processes` and `cgroup_filter` are optional
-/// because not every deployment shares them (e.g. cgroup filtering is off by
-/// default). Build one with [`SharedMaps::new`] plus the `with_*` methods, then
-/// hand `&SharedMaps` to each probe.
+/// `rb` is always present; the other maps are optional because standalone
+/// probes may own private maps and cgroup filtering is off by default. Build
+/// one with [`SharedMaps::new`] plus the `with_*` methods, then hand
+/// `&SharedMaps` to each probe.
 pub struct SharedMaps {
     rb: MapHandle,
+    internal_metrics: Option<MapHandle>,
     traced_processes: Option<MapHandle>,
     cgroup_filter: Option<MapHandle>,
     cgroup_filter_enabled: bool,
@@ -63,10 +67,17 @@ impl SharedMaps {
     pub fn new(rb: MapHandle) -> Self {
         Self {
             rb,
+            internal_metrics: None,
             traced_processes: None,
             cgroup_filter: None,
             cgroup_filter_enabled: false,
         }
+    }
+
+    /// Also share the per-CPU internal metrics map.
+    pub fn with_internal_metrics(mut self, internal_metrics: MapHandle) -> Self {
+        self.internal_metrics = Some(internal_metrics);
+        self
     }
 
     /// Also share the `traced_processes` process-filter map.
@@ -97,6 +108,7 @@ impl SharedMaps {
     fn handle(&self, kind: MapKind) -> Option<&MapHandle> {
         match kind {
             MapKind::Rb => Some(&self.rb),
+            MapKind::InternalMetrics => self.internal_metrics.as_ref(),
             MapKind::TracedProcesses => self.traced_processes.as_ref(),
             MapKind::CgroupFilter => self.cgroup_filter.as_ref(),
         }
@@ -105,6 +117,7 @@ impl SharedMaps {
     /// The kinds this bundle currently holds (`rb` is always present).
     pub fn available_kinds(&self) -> Vec<MapKind> {
         available_from_presence(
+            self.internal_metrics.is_some(),
             self.traced_processes.is_some(),
             self.cgroup_filter.is_some(),
         )
@@ -142,8 +155,15 @@ impl SharedMaps {
 ///
 /// Split out as a pure function so the selection logic is unit-testable without
 /// constructing real BPF map handles.
-fn available_from_presence(has_traced_processes: bool, has_cgroup_filter: bool) -> Vec<MapKind> {
+fn available_from_presence(
+    has_internal_metrics: bool,
+    has_traced_processes: bool,
+    has_cgroup_filter: bool,
+) -> Vec<MapKind> {
     let mut kinds = vec![MapKind::Rb];
+    if has_internal_metrics {
+        kinds.push(MapKind::InternalMetrics);
+    }
     if has_traced_processes {
         kinds.push(MapKind::TracedProcesses);
     }
@@ -176,20 +196,28 @@ mod tests {
     fn map_kind_names_match_bpf_map_names() {
         // These strings are load-bearing: reuse_into looks maps up by name.
         assert_eq!(Rb.as_str(), "rb");
+        assert_eq!(InternalMetrics.as_str(), "internal_metrics");
         assert_eq!(TracedProcesses.as_str(), "traced_processes");
         assert_eq!(CgroupFilter.as_str(), "cgroup_filter");
     }
 
     #[test]
     fn available_includes_rb_and_present_optionals() {
-        assert_eq!(available_from_presence(false, false), vec![Rb]);
+        assert_eq!(available_from_presence(false, false, false), vec![Rb]);
         assert_eq!(
-            available_from_presence(true, false),
+            available_from_presence(false, true, false),
             vec![Rb, TracedProcesses]
         );
-        assert_eq!(available_from_presence(false, true), vec![Rb, CgroupFilter]);
         assert_eq!(
-            available_from_presence(true, true),
+            available_from_presence(false, false, true),
+            vec![Rb, CgroupFilter]
+        );
+        assert_eq!(
+            available_from_presence(true, true, true),
+            vec![Rb, InternalMetrics, TracedProcesses, CgroupFilter]
+        );
+        assert_eq!(
+            available_from_presence(false, true, true),
             vec![Rb, TracedProcesses, CgroupFilter]
         );
     }
@@ -211,7 +239,7 @@ mod tests {
 
     #[test]
     fn plan_rb_only_probe() {
-        // A probe (procmon / tcpsniff) that wants only the ring buffer.
+        // A standalone consumer may still request only the ring buffer.
         assert_eq!(
             plan_reuse(&[Rb], &[Rb, TracedProcesses, CgroupFilter]),
             vec![Rb]

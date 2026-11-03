@@ -53,6 +53,10 @@ pub enum KernelError {
         source: io::Error,
     },
 
+    /// The database path is a symlink or does not name a regular file.
+    #[error("unsafe sqlite database path: {}", .0.display())]
+    UnsafePath(PathBuf),
+
     /// A column name in a [`crate::schema::TableSpec`] failed validation.
     ///
     /// Wording matches v1, which raises
@@ -113,6 +117,7 @@ impl KernelError {
         match self {
             Self::Sqlite(_) => "DatabaseError",
             Self::Io { .. } => "OSError",
+            Self::UnsafePath(_) => "UnsafePath",
             Self::InvalidColumnName(_) | Self::Malformed(_) => "ValueError",
             Self::EmptySchema => "EmptySchemaError",
             Self::Disabled => "StoreDisabled",
@@ -207,6 +212,15 @@ mod tests {
         assert!(!is_busy(&err));
         assert!(!is_schema(&err));
         assert_eq!(err.error_type(), "OSError");
+    }
+
+    #[test]
+    fn unsafe_path_has_a_stable_error_type_and_classifies_as_none_of_the_soft_kinds() {
+        let err = KernelError::UnsafePath(PathBuf::from("/tmp/database.db"));
+        assert_eq!(err.error_type(), "UnsafePath");
+        assert!(!is_corruption(&err));
+        assert!(!is_busy(&err));
+        assert!(!is_schema(&err));
     }
 
     #[test]

@@ -8,14 +8,18 @@ on:
       - '.github/workflows/pages.yml'
       - 'AGENTS.md'
       - 'CHANGELOG*.md'
+      - 'CONTRIBUTING*.md'
+      - 'contribute/**'
       - 'docs/**'
       - 'website/**'
       - 'src/**/CHANGELOG*.md'
+      - 'src/**/CONTRIBUTING*.md'
       - 'src/**/Cargo.toml'
       - 'src/**/README.md'
       - 'src/**/package.json'
       - 'src/**/pyproject.toml'
       - 'distribution/anolisa/**/CHANGELOG*.md'
+      - 'distribution/anolisa/**/CONTRIBUTING*.md'
       - 'distribution/anolisa/**/Cargo.toml'
       - 'distribution/anolisa/**/README.md'
       - 'distribution/anolisa/**/package.json'
@@ -40,14 +44,18 @@ on:
       - '.github/workflows/pages.yml'
       - 'AGENTS.md'
       - 'CHANGELOG*.md'
+      - 'CONTRIBUTING*.md'
+      - 'contribute/**'
       - 'docs/**'
       - 'website/**'
       - 'src/**/CHANGELOG*.md'
+      - 'src/**/CONTRIBUTING*.md'
       - 'src/**/Cargo.toml'
       - 'src/**/README.md'
       - 'src/**/package.json'
       - 'src/**/pyproject.toml'
       - 'distribution/anolisa/**/CHANGELOG*.md'
+      - 'distribution/anolisa/**/CONTRIBUTING*.md'
       - 'distribution/anolisa/**/Cargo.toml'
       - 'distribution/anolisa/**/README.md'
       - 'distribution/anolisa/**/package.json'
@@ -78,7 +86,7 @@ jobs:
   build:
     name: Build website
     runs-on: >-
-      ${{ github.repository == 'alibaba/anolisa' &&
+      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
       'anolisa-k8s-general-ci-x64' || 'ubuntu-latest' }}
     env:
       SITE_URL: ${{ github.repository == 'agentic-os-org/ANOLISA' && 'https://agentic-os.sh' || format('https://{0}.github.io', github.repository_owner) }}

@@ -78,8 +78,15 @@ pub struct SysomMessage {
     /// Role: "system" | "user" | "assistant" | "tool"
     pub role: String,
 
-    /// Text content
-    #[serde(default)]
+    /// Text content.
+    ///
+    /// Two wire shapes reach this field. An assistant turn that only issued a
+    /// tool call carries `"content": null` (the shape every OpenAI-compatible
+    /// SDK tool loop sends), and a multimodal turn carries a content-block
+    /// array. Both used to fail the whole `llmParamString` decode, taking the
+    /// rest of the request with them, so [`content_as_text`] reads the string
+    /// verbatim, joins the blocks, and treats absent/`null` as "no text".
+    #[serde(default, deserialize_with = "content_as_text")]
     pub content: String,
 
     /// Tool call ID (for role=tool messages)
@@ -96,18 +103,31 @@ pub struct SysomMessage {
 }
 
 /// An assistant-issued tool call (inside request messages)
+///
+/// A request may carry a call without the deprecated `type` field (nothing
+/// here reads it) and with a `null` id before the provider assigns one — the
+/// same tolerance [`SysomToolUseItem`] already has on the response side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomToolCall {
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: String,
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "null_as_default")]
     pub call_type: String,
     pub function: SysomFunction,
 }
 
 /// Function name + arguments
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Both may be absent from a frame: the frame that first shows a call may
+/// carry no arguments snapshot yet, and a later frame of an open call may
+/// repeat only the snapshot. The SysOM client's own reader treats an absent,
+/// `null` and empty arguments field alike as "no snapshot in this frame", so a
+/// missing field must not fail the frame that carries the call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SysomFunction {
+    #[serde(default, deserialize_with = "null_as_default")]
     pub name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub arguments: String,
 }
 
@@ -121,10 +141,23 @@ pub struct SysomRequest {
 /// A single tool-use item in the SysOM response (array format, differs from OpenAI)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomToolUseItem {
-    pub index: u32,
+    /// Provider-assigned slot. `None` when the provider omits it entirely, in
+    /// which case the array position is the slot — the SysOM client's own
+    /// reader treats the index as authoritative and the position only as that
+    /// fallback, and a later frame may repeat only the calls that changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: String,
-    #[serde(rename = "type")]
+    /// Item kind. Providers may leave it out and nothing here reads it; the
+    /// call is identified by its function, so an absent kind must not fail the
+    /// frame.
+    #[serde(default, rename = "type", deserialize_with = "null_as_default")]
     pub item_type: String,
+    /// Function the call names. A frame may omit the whole object while the
+    /// call is being streamed — the frame that opens the call is the one that
+    /// names it — so an absent function must not fail the frame either.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub function: SysomFunction,
 }
 
@@ -134,11 +167,66 @@ pub struct SysomResponseChoice {
     pub message: SysomResponseMessage,
 }
 
+/// Read a field the provider may send as an explicit `null`.
+///
+/// Both directions of the SysOM envelope need this. In a cumulative response
+/// frame, absent, `null` and empty all mean "no snapshot in this frame": the
+/// provider stops repeating the text once the answer switches to tool calls,
+/// and a later frame of an open call need not repeat its identity. In a
+/// request message the same spellings appear on a tool-calling assistant turn
+/// (`content: null`) and on a call whose id the provider has not assigned yet.
+///
+/// A `null` must not fail the payload that carries it, the way it does not
+/// fail the SysOM client's own reader (`identity_field` reads a `null` id or
+/// name as "not reported"). Applying it to a field means "this field is
+/// optional and its absence is not an error".
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Deserialize a `content` field as its text, accepting both wire shapes.
+///
+/// The native DashScope protocol puts a plain string on the field for
+/// `result_format: text`, and a content-block array for a multimodal turn
+/// (`[{"type":"text","text":…},…]`) — on a request message and on a response
+/// choice alike. Every other reader of the envelope concatenates the block
+/// texts with no separator: the shared native reader in the token extractor,
+/// the chatml reader and `parser::llm`'s request view all do. This typed field
+/// is a `String`, so an array failed the whole body's deserialization instead
+/// of just that one field — the response lost its id and tool calls, the
+/// request lost the entire `llmParamString` decode. Reading the array as its
+/// text keeps the siblings' fields and matches what they count for the same
+/// capture.
+fn content_as_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let content = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match content {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(text)) => text,
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| {
+                // A block carries its text on `text`; the `type` tag is the
+                // block kind, not a constraint on which blocks are read, since
+                // a compatible gateway omits it on a plain text block.
+                block.get("text").and_then(|text| text.as_str())
+            })
+            .collect::<String>(),
+        Some(other) => other.to_string(),
+    })
+}
+
 /// The message part of a SysOM response choice
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomResponseMessage {
     /// Text content of the response
-    #[serde(default)]
+    #[serde(default, deserialize_with = "content_as_text")]
     pub content: String,
 
     /// Tool calls in the response (`tool_use` array, NOT `tool_calls`)
@@ -153,7 +241,15 @@ pub struct SysomResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
-    /// Response choices
+    /// Response choices.
+    ///
+    /// A cumulative frame may report no choices at all — `null` or the field
+    /// omitted — while still carrying the response id, the same way it may
+    /// send a `null` content or identity mid-call. The SysOM client's own
+    /// reader treats absent or null choices as "this frame carries no
+    /// content"; failing the frame here instead dropped it whole, losing the
+    /// id update it carried.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub choices: Vec<SysomResponseChoice>,
 }
 
@@ -194,9 +290,14 @@ impl SysomParser {
 
     /// Parse a SysOM response body.
     ///
-    /// Accepts two formats:
-    /// 1. **Non-streaming**: `{ "choices": [...] }` (inner JSON already decoded by caller)
-    /// 2. **SSE / streaming**: JSON array of chunks — each chunk has the same
+    /// Accepts three formats:
+    /// 1. **Non-streaming envelope**: `{ "data": "<json-string>" }` — the
+    ///    SysOM POP API wraps the actual LLM response in `body.data` (see the
+    ///    module header). The inner JSON string is decoded first and parsed
+    ///    like a direct body.
+    /// 2. **Direct choices object**: `{ "choices": [...] }` (inner JSON
+    ///    already decoded by caller)
+    /// 3. **SSE / streaming**: JSON array of chunks — each chunk has the same
     ///    `choices` structure; the last non-empty chunk's content is used.
     pub fn parse_response(body: &serde_json::Value) -> Option<SysomResponse> {
         // Non-streaming: direct `choices` object
@@ -204,6 +305,18 @@ impl SysomParser {
             return serde_json::from_value::<SysomResponse>(body.clone())
                 .map_err(|e| log::trace!("[SysomParser] Failed to parse response: {e}"))
                 .ok();
+        }
+
+        // Non-streaming envelope: the POP API wraps the real LLM response in
+        // `body.data` as a JSON-encoded string. Nothing unwrapped it, so a
+        // non-streaming call's assistant content and tool_use parsed as
+        // `None` and the captured call recorded no output at all.
+        if let Some(inner) = body.get("data").and_then(|v| v.as_str()) {
+            return serde_json::from_str::<serde_json::Value>(inner)
+                .map_err(|e| log::trace!("[SysomParser] Failed to decode body.data: {e}"))
+                .ok()
+                .as_ref()
+                .and_then(Self::parse_response);
         }
 
         // Streaming: JSON array of SSE chunks — aggregate content and last tool_use
@@ -217,11 +330,21 @@ impl SysomParser {
     /// Aggregate SSE chunk array into a single [`SysomResponse`]
     ///
     /// SysOM SSE chunks carry **cumulative** content (each chunk contains the
-    /// full text so far, not a delta).  We therefore take the **last** chunk
-    /// that contains non-empty content/tool_use data.
+    /// full text so far, not a delta), so the **last** chunk with non-empty
+    /// content carries the answer.
+    ///
+    /// Calls are folded frame by frame rather than taken from the last frame
+    /// verbatim: the provider names a call only in the frame that opens it, so
+    /// a later frame may repeat just its arguments ([`fold_tool_call`]), and
+    /// keeping only the last frame's array could lose either the identity or
+    /// the newest snapshot. The slot is the provider's `index`; the array
+    /// position is used only when the frame omits it, because a later frame
+    /// may repeat just the calls that changed — the SysOM client's reader
+    /// treats the index as authoritative for the same reason.
     fn aggregate_sse_chunks(chunks: &[serde_json::Value]) -> Option<SysomResponse> {
         let mut last_content = String::new();
-        let mut last_tool_use: Option<Vec<SysomToolUseItem>> = None;
+        let mut calls: std::collections::BTreeMap<u32, SysomToolUseItem> =
+            std::collections::BTreeMap::new();
         let mut last_id: Option<String> = None;
 
         for chunk in chunks {
@@ -233,13 +356,28 @@ impl SysomParser {
                     if !choice.message.content.is_empty() {
                         last_content = choice.message.content;
                     }
-                    if choice.message.tool_use.is_some() {
-                        last_tool_use = choice.message.tool_use;
+                    for (position, item) in choice
+                        .message
+                        .tool_use
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let index = item
+                            .index
+                            .unwrap_or(u32::try_from(position).unwrap_or(u32::MAX));
+                        match calls.get_mut(&index) {
+                            Some(call) => fold_tool_call(call, item),
+                            None => {
+                                calls.insert(index, item);
+                            }
+                        }
                     }
                 }
             }
         }
 
+        let last_tool_use = (!calls.is_empty()).then(|| calls.into_values().collect());
         if last_content.is_empty() && last_tool_use.is_none() {
             return None;
         }
@@ -253,6 +391,29 @@ impl SysomParser {
                 },
             }],
         })
+    }
+}
+
+/// Fold a later frame's version of a call into the call seen so far.
+///
+/// A call is identified by its provider index across the cumulative frames
+/// (the array position only when the provider omits the index), and its fields
+/// are repeated only while the provider has something new to say: the frame
+/// that opens the call carries its identity, later frames may repeat only its
+/// growing arguments — the SysOM client's own reader keeps the slot's identity
+/// for exactly that reason. An absent or empty field is therefore "not
+/// repeated in this frame", never "cleared": it must not erase the non-empty
+/// value an earlier frame established, and among the values that were repeated
+/// the newest one wins.
+fn fold_tool_call(call: &mut SysomToolUseItem, item: SysomToolUseItem) {
+    if !item.id.is_empty() {
+        call.id = item.id;
+    }
+    if !item.function.name.is_empty() {
+        call.function.name = item.function.name;
+    }
+    if !item.function.arguments.is_empty() {
+        call.function.arguments = item.function.arguments;
     }
 }
 
@@ -291,6 +452,123 @@ mod tests {
         assert_eq!(req.params.model, "qwen3-coder-plus");
         assert_eq!(req.params.messages.len(), 2);
         assert!(req.params.stream);
+    }
+
+    /// A tool-calling assistant turn is spelled
+    /// `{"role": "assistant", "content": null, "tool_calls": [...]}`, the
+    /// shape every OpenAI-compatible SDK tool loop sends, and a provider may
+    /// leave the deprecated call `type` out while naming only the function.
+    /// The request-side structs required both, so one such turn failed the
+    /// whole `llmParamString` decode and `parse_request` returned none — the
+    /// entire request view, not just that turn, vanished from the call.
+    #[test]
+    fn test_parse_request_keeps_a_null_content_tool_turn() {
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "list_dir", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "a.txt"}
+            ],
+            "stream": true
+        });
+        let body = serde_json::json!({ "llmParamString": params.to_string() });
+
+        let req = SysomParser::parse_request(&body)
+            .expect("a null content or an omitted call type must not drop the request");
+        assert_eq!(req.params.messages.len(), 3);
+        assert_eq!(req.params.messages[1].content, "");
+        let calls = req.params.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the tool call must survive");
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].function.name, "list_dir");
+    }
+
+    /// The same turn with the call `type` spelled out and a `null` id: a
+    /// provider that has no id yet repeats a null rather than omitting it.
+    #[test]
+    fn test_parse_request_keeps_a_null_call_id() {
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [
+                {"role": "assistant", "content": "", "tool_calls": [{
+                    "id": null,
+                    "type": "function",
+                    "function": {"name": "list_dir", "arguments": "{}"}
+                }]}
+            ]
+        });
+        let body = serde_json::json!({ "llmParamString": params.to_string() });
+
+        let req = SysomParser::parse_request(&body).expect("a null id must not drop the request");
+        let calls = req.params.messages[0]
+            .tool_calls
+            .as_ref()
+            .expect("the tool call must survive");
+        assert_eq!(calls[0].id, "");
+    }
+
+    /// End to end through `parse_by_path`, the entry the analyzer uses: a
+    /// request-only capture (the in-flight call) whose body holds one
+    /// tool-calling turn used to parse as no message at all, so the call had
+    /// no request view to attribute.
+    #[test]
+    fn test_parse_by_path_keeps_a_null_content_request() {
+        use crate::analyzer::message::{MessageParser, ParsedApiMessage};
+
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1",
+                    "function": {"name": "list_dir", "arguments": "{}"}
+                }]}
+            ]
+        });
+        let body = serde_json::json!({ "llmParamString": params.to_string() });
+
+        match MessageParser::new().parse_by_path(
+            "/api/v1/copilot/generate_copilot_stream_response",
+            Some(&body),
+            None,
+        ) {
+            Some(ParsedApiMessage::SysomMessage { request, .. }) => {
+                let request = request.expect("the request view must survive");
+                assert_eq!(request.params.messages.len(), 2);
+            }
+            other => panic!("expected the SysomMessage request, got {other:?}"),
+        }
+    }
+
+    /// The request side of the same envelope: a multimodal user turn's
+    /// `llmParamString` message carries `content` as a parts array, and the
+    /// typed `SysomMessage` read it as a `String`. The array failed the whole
+    /// `llmParamString` decode, so the request recorded no prompt at all while
+    /// the other request readers join the block texts.
+    #[test]
+    fn test_parse_request_block_array_content() {
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+                ]
+            }],
+            "stream": false,
+            "use_dashscope": true
+        });
+        let body = serde_json::json!({"llmParamString": params.to_string()});
+
+        let req = SysomParser::parse_request(&body).expect("a parts-array message must parse");
+        assert_eq!(req.params.messages[0].content, "what is in this image?");
     }
 
     #[test]
@@ -344,5 +622,386 @@ mod tests {
 
         let resp = SysomParser::parse_response(&chunks).unwrap();
         assert_eq!(resp.choices[0].message.content, "Hello there!");
+    }
+
+    /// The documented non-streaming envelope wraps the real LLM response in
+    /// `body.data` as a JSON-encoded string (see the module header). The
+    /// parser only looked at a direct `choices` object and at the SSE chunk
+    /// array, so a non-streaming call's assistant content and tool_use
+    /// parsed as `None` and the captured call recorded no output at all.
+    #[test]
+    fn test_parse_response_non_streaming_data_envelope() {
+        let inner = serde_json::json!({
+            "id": "chatcmpl-ns-1",
+            "choices": [{
+                "message": {
+                    "content": "Hello there!",
+                    "tool_use": [{
+                        "index": 0,
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"/tmp/test.txt\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let body = serde_json::json!({ "data": inner.to_string() });
+
+        let resp = SysomParser::parse_response(&body)
+            .expect("the data envelope must be unwrapped and parsed");
+        assert_eq!(resp.choices[0].message.content, "Hello there!");
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-ns-1"));
+        let tool_use = resp.choices[0].message.tool_use.as_ref().unwrap();
+        assert_eq!(tool_use[0].function.name, "read_file");
+        assert_eq!(tool_use[0].id, "call_abc123");
+    }
+
+    /// End-to-end through `MessageParser::parse_by_path`, the path the
+    /// analyzer takes: a non-streaming SysOM call must parse both its
+    /// request (from `llmParamString`) and its response (from the `data`
+    /// envelope). Before the unwrap the response half stayed `None`.
+    #[test]
+    fn test_parse_by_path_non_streaming_data_envelope() {
+        use crate::analyzer::message::{MessageParser, ParsedApiMessage};
+
+        let parser = MessageParser::new();
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let request = serde_json::json!({ "llmParamString": params.to_string() });
+        let inner = serde_json::json!({
+            "choices": [{"message": {"content": "hi there", "tool_use": null}}]
+        });
+        let response = serde_json::json!({ "data": inner.to_string() });
+
+        match parser.parse_by_path(
+            "/api/v1/copilot/generate_copilot_response",
+            Some(&request),
+            Some(&response),
+        ) {
+            Some(ParsedApiMessage::SysomMessage { request, response }) => {
+                assert!(request.is_some(), "the request must still parse");
+                let resp = response.expect("the wrapped response must parse");
+                assert_eq!(resp.choices[0].message.content, "hi there");
+            }
+            other => panic!("expected SysomMessage, got {other:?}"),
+        }
+    }
+
+    /// An inner payload that is not JSON keeps the old outcome (`None`)
+    /// instead of panicking or half-parsing.
+    #[test]
+    fn test_parse_response_data_envelope_with_invalid_inner_json_is_none() {
+        let body = serde_json::json!({ "data": "not json" });
+        assert!(SysomParser::parse_response(&body).is_none());
+    }
+
+    /// A provider may stop repeating the text snapshot once a frame carries
+    /// streaming tool calls, so the frame that first shows a call can send
+    /// `content: null`. Failing that frame used to drop the call it carried
+    /// while keeping the older text snapshot.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_call_from_a_null_content_frame() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "Let me check.", "tool_use": null}}]},
+            {"choices": [{"message": {"content": null, "tool_use": [{
+                "index": 0,
+                "id": "call_abc123",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        assert_eq!(resp.choices[0].message.content, "Let me check.");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("the frame's tool call must be kept");
+        assert_eq!(tool_use[0].id, "call_abc123");
+        assert_eq!(tool_use[0].function.name, "read_file");
+    }
+
+    /// The same frame shape reaches the non-streaming paths (a direct
+    /// `choices` object or the `data` envelope), where a null content used to
+    /// lose the whole response.
+    #[test]
+    fn test_parse_response_keeps_a_call_from_a_null_content_message() {
+        let inner = serde_json::json!({
+            "id": "chatcmpl-ns-2",
+            "choices": [{"message": {"content": null, "tool_use": [{
+                "index": 0,
+                "id": "call_abc123",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]
+        });
+
+        for body in [
+            inner.clone(),
+            serde_json::json!({ "data": inner.to_string() }),
+        ] {
+            let resp = SysomParser::parse_response(&body)
+                .unwrap_or_else(|| panic!("{body}: the response must parse"));
+            let tool_use = resp.choices[0]
+                .message
+                .tool_use
+                .as_ref()
+                .unwrap_or_else(|| panic!("{body}: the tool call must be kept"));
+            assert_eq!(tool_use[0].id, "call_abc123");
+        }
+    }
+
+    /// The native protocol puts a multimodal answer's content on
+    /// `choices[].message.content` as a parts array. Every other reader of the
+    /// envelope concatenates the block texts, but `SysomResponseMessage.content`
+    /// is a `String`: the array failed the *whole* response's deserialization,
+    /// so the call recorded no output, and the frame's response id and tool
+    /// calls were dropped with it.
+    #[test]
+    fn test_parse_response_block_array_content() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": [{"type": "text", "text": "这张照片"}, {"type": "text", "text": "里有一只猫"}],
+                    "tool_use": null
+                }
+            }]
+        });
+        let resp = SysomParser::parse_response(&body).expect("a parts-array content must parse");
+        assert_eq!(resp.choices[0].message.content, "这张照片里有一只猫");
+    }
+
+    /// A provider may omit `index` from its tool_use entries entirely, in
+    /// which case the array position is the index. The frame used to fail to
+    /// parse, so a provider that never sends the key recorded no call at all.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_tool_call_without_an_index() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "", "tool_use": [{
+                "id": "call_no_index",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("a call without an index must still be kept");
+        assert_eq!(tool_use[0].id, "call_no_index");
+        assert_eq!(tool_use[0].function.name, "read_file");
+    }
+
+    /// A tool_use entry may leave out the item `type`: the SysOM client reads
+    /// only index, id and function from an entry. Requiring it dropped the
+    /// call the frame carried.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_tool_call_without_a_type() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "", "tool_use": [{
+                "index": 0,
+                "id": "call_no_type",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("a call without an item type must still be kept");
+        assert_eq!(tool_use[0].id, "call_no_type");
+    }
+
+    /// A frame may show a call before its arguments snapshot exists: the SysOM
+    /// client's own reader treats an absent, `null` and empty arguments field
+    /// alike as "no snapshot in this frame". Requiring a string failed the
+    /// frame, the aggregation skipped it whole, and when it was the only frame
+    /// carrying the call the parsed response held no call at all.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_call_without_an_arguments_snapshot() {
+        for entry in [
+            serde_json::json!({
+                "index": 0,
+                "id": "call_no_args",
+                "type": "function",
+                "function": {"name": "read_file"}
+            }),
+            serde_json::json!({
+                "index": 0,
+                "id": "call_no_args",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": null}
+            }),
+        ] {
+            let chunks = serde_json::json!([
+                {"choices": [{"message": {"content": "Let me check.", "tool_use": [entry]}}]}
+            ]);
+
+            let resp = SysomParser::parse_response(&chunks)
+                .unwrap_or_else(|| panic!("{entry}: the response must parse"));
+            assert_eq!(resp.choices[0].message.content, "Let me check.");
+            let tool_use = resp.choices[0]
+                .message
+                .tool_use
+                .as_ref()
+                .unwrap_or_else(|| panic!("{entry}: the call must be kept"));
+            assert_eq!(tool_use[0].id, "call_no_args");
+            assert_eq!(tool_use[0].function.name, "read_file");
+            assert!(tool_use[0].function.arguments.is_empty());
+        }
+    }
+
+    /// The provider names a call only in the frame that opens it: the SysOM
+    /// client's own test allows a later frame to omit the identity, and the
+    /// cumulative frames keep growing the arguments. Keeping the last frame's
+    /// array verbatim therefore recorded either the older arguments snapshot
+    /// (the identity-free frame failed to parse) or no name at all.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_the_identity_of_the_opening_frame() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "Let me check.", "tool_use": [{
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":"}
+            }]}}]},
+            {"choices": [{"message": {"content": "", "tool_use": [{
+                "index": 0,
+                "function": {"arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("the call must be kept");
+        assert_eq!(tool_use[0].id, "call_1", "the opening frame names the call");
+        assert_eq!(tool_use[0].function.name, "read_file");
+        assert_eq!(
+            tool_use[0].function.arguments, "{\"path\":\"/tmp/a.txt\"}",
+            "the newest snapshot wins"
+        );
+        assert_eq!(resp.choices[0].message.content, "Let me check.");
+    }
+
+    /// A later frame may repeat only the calls that changed, so the provider's
+    /// `index` — not the array position — identifies the slot. Folding by
+    /// position routed a frame that carried only the second of two parallel
+    /// calls into the first call, rewriting its arguments with the other
+    /// call's snapshot and leaving the second one stale.
+    #[test]
+    fn test_aggregate_sse_chunks_routes_a_partial_frame_by_provider_index() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"tool_use": [
+                {"index": 0, "id": "call_a", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{\"path\":\"a\""}},
+                {"index": 1, "id": "call_b", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{\"path\":\"b\""}}
+            ]}}]},
+            {"choices": [{"message": {"tool_use": [
+                {"index": 1, "function": {"arguments": "{\"path\":\"b\",\"line\":2}"}}
+            ]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("both calls must be kept");
+        assert_eq!(tool_use.len(), 2);
+        assert_eq!(tool_use[0].id, "call_a");
+        assert_eq!(
+            tool_use[0].function.arguments, "{\"path\":\"a\"",
+            "the frame that carried only call_b must not touch call_a"
+        );
+        assert_eq!(tool_use[1].id, "call_b");
+        assert_eq!(
+            tool_use[1].function.arguments, "{\"path\":\"b\",\"line\":2}",
+            "the newest snapshot of call_b wins"
+        );
+    }
+
+    /// A later frame of an open call may send its identity as an explicit
+    /// `null`, which the SysOM client's reader treats like an absent field.
+    /// Only `arguments` accepted a `null`, so such a frame failed to parse
+    /// whole and its newer snapshot and content were lost with it.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_frame_with_a_null_identity() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "Let me check.", "tool_use": [{
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":"}
+            }]}}]},
+            {"choices": [{"message": {"content": "Let me check the file.", "tool_use": [{
+                "index": 0,
+                "id": null,
+                "type": null,
+                "function": {"name": null, "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]},
+            {"choices": [{"message": {"tool_use": [{"index": 0, "function": null}]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("the call must be kept");
+        assert_eq!(tool_use[0].id, "call_1");
+        assert_eq!(tool_use[0].function.name, "read_file");
+        assert_eq!(tool_use[0].function.arguments, "{\"path\":\"/tmp/a.txt\"}");
+        assert_eq!(resp.choices[0].message.content, "Let me check the file.");
+    }
+
+    /// A closing frame with `"choices": null` still carries the response id;
+    /// failing the frame dropped it whole and the aggregator kept an earlier
+    /// id (or none). The client's own reader treats null choices as "no
+    /// content in this frame", not as a parse error.
+    #[test]
+    fn test_parse_response_sse_null_choices_keeps_id() {
+        let chunks = serde_json::json!([
+            {"id": "chatcmpl-keep", "choices": [{"message": {"content": "Hello"}}]},
+            {"id": "chatcmpl-last", "choices": null}
+        ]);
+        let resp = SysomParser::parse_response(&chunks).unwrap();
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-last"));
+        assert_eq!(resp.choices[0].message.content, "Hello");
+    }
+
+    /// A frame that omits `choices` entirely is the same "no content" case.
+    #[test]
+    fn test_parse_response_sse_missing_choices_keeps_id() {
+        let chunks = serde_json::json!([
+            {"id": "chatcmpl-keep", "choices": [{"message": {"content": "Hello"}}]},
+            {"id": "chatcmpl-last"}
+        ]);
+        let resp = SysomParser::parse_response(&chunks).unwrap();
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-last"));
+        assert_eq!(resp.choices[0].message.content, "Hello");
+    }
+
+    /// The same rule on the non-streaming direct body: a `null` choices
+    /// container parses as "no content" instead of failing the whole call.
+    #[test]
+    fn test_parse_response_non_streaming_null_choices() {
+        let body = serde_json::json!({"id": "chatcmpl-nc", "choices": null});
+        let resp = SysomParser::parse_response(&body).unwrap();
+        assert!(resp.choices.is_empty());
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-nc"));
     }
 }

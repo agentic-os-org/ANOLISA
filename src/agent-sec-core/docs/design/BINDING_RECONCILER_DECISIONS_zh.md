@@ -2,6 +2,19 @@
 
 文档类型：`[TARGET V2]` 设计决定与取舍记录；实施进度和运行结果由 PR、CI 与验收报告记录。
 
+当前生产和契约测试均使用 SQLite；
+当前存储与恢复边界以 [SQLite 设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)为准。
+
+SCOPE-CR-002 已接入 SQLite 实现：不可变 Scope 快照、系统 Binding 准入、停止发现后
+异步清理和 Scope 显式重试。当前协议及测试入口见上述生命周期契约；旧 changed-spec
+测试继续覆盖底层 revision/CAS 兼容能力，不表示开放用户 Binding mutation。
+
+最新对象语义见 [Policy/Scope/Binding 生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md)：
+Policy 有 revision、只保存 current；Scope 是无自身 revision 的不可变 Assignment，
+保存精确 Policy revision 的完整快照；Binding 的创建和删除由 Scope/实例生命周期驱动。
+本文手动 Binding CRUD、Scope revision 和可变 Binding 的讨论保留为历史设计依据，
+不再作为新产品入口；执行串行、条件写、目标记账和异步清理责任继续适用。
+
 [调度、存储与恢复详细设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)
 记录 CR-010～CR-015 的目标约束。Runtime 集成使用 ready + entries、
 Queued/Running/WaitingRetry/Exhausted 和 dirty；deployment 独立局部更新，无全局 resourceVersion；
@@ -11,14 +24,14 @@ Queued/Running/WaitingRetry/Exhausted 和 dirty；deployment 独立局部更新�
 已有实现及历史验收说明不因此变为新设计证据。
 
 PR 边界：Runtime/daemon 接线与单元、组件及调度竞争测试一起交付；完整端到端
-测试单独开 PR；系统性 error injection 和进程崩溃/恢复测试待 persistent Repository
-就绪后实施。完整 E2E 和系统性故障注入不作为 Runtime 集成 PR 门禁，既有相关回归继续维护。
+测试独立验收；系统性 error injection 和进程崩溃/恢复测试按 SQLite 设计验收。
+完整 E2E 和系统性故障注入不作为 Runtime 集成 PR 门禁，既有相关回归继续维护。
 
 共享边界补充：Adapter/Client trait 已抽取到 `asc-policy-target-contracts`，
 参数和结果数据位于 `asc-policy-types::target`。Reconciler 与具体 Client 均依赖
 该共享层；Client 不再依赖 `asc-pcp`，核心只重导出契约以保留本地消费者兼容。
 共享运行记录和数据库读/CAS 接口位于 `asc-policy-repository`；认领、登记、结果合并、
-重试决策留在核心，同 Binding 执行串行由 Runtime/WorkQueue 保证。memory repository 不依赖 `asc-pcp`；真实组件组合测试归核心，
+重试决策留在核心，同 Binding 执行串行由 Runtime/WorkQueue 保证。SQLite repository 的运行时实现不依赖 `asc-pcp`；真实组件组合测试归核心，
 Client 单独可测试。
 本次仅调整依赖归属，不改变序列化、PEP 请求或状态机语义。
 
@@ -33,10 +46,10 @@ Client 单独可测试。
 
 首版 Reconciler 自身的必过范围、完整 fixture/trace 要求、22 项核心场景和完成条件
 已单独记录在 [Reconciler 验收标准](../../v2/fixtures/reconciliation/ACCEPTANCE.md)。
-核心、Client 组合、daemon 和持久化各层的具体执行结果见
-[验收报告](../../v2/fixtures/reconciliation/RESULTS.md)，不得跨层替代验证。
+核心、Client 组合、daemon 和持久化各层的执行结果需分别记录被测源码版本、命令与结果，
+不得跨层替代验证。
 
-## 已确认方向
+## 原实现已确认方向（对象入口由新生命周期契约替代）
 
 - PAP 同步保存 Binding；翻译和 PEP 下发由事件驱动的 Reconciler 异步执行。
 - `bindingRevision` 只标识 spec：创建为 1，spec 改变时递增；Delete、同 spec
@@ -59,22 +72,18 @@ Client 单独可测试。
 - 使用 exponential backoff 重试；达到配置的次数上限后停止自动重试，并将
   当前意图对应的 Binding 更新为 `APPLY_FAILED` 或 `DELETE_FAILED`，保存错误。
   已被新意图覆盖的旧任务不能写入当前 Binding 的失败状态。
-- Policy、Scope、Binding 继续只保留最新 revision 的完整副本；不能因恢复设计
-  默认引入历史对象全量存储。
+- Policy 只保留当前 revision；新 Scope 保存完整策略快照且无自身 revision。
+  既有 Scope 在来源 Policy 更新/删除后仍可生成 Binding，不引入历史模板全量存储。
 
 [请求状态表](../../v2/README.md)、PAP、Repository、协议与 fixtures 必须保持一致。
 PAP 区分创建和条件更新，防止旧写入复活已删除记录；最终删除按事务条件完成，
 再回收已确认无待写结果的执行槽位。请求准入、后台执行和 SQL 耐久性分别提供证据。
 
-## 已确认：首阶段使用内存 repository
+## Repository 边界
 
-首阶段使用内存实现，不把 SQL 或跨重启恢复作为功能
-实现阻碍。Binding、部署记录、稳定请求及重试预算仍统一交由 Reconciler/PAP 通过
-repository 原子保存；Client 不访问 repository。
-
-内存记录只在进程存活期间有效，重启后丢失，PEP 对象可能遗留。本记录所述持久化
-顺序先作为逻辑保存顺序实现；磁盘耐久性、重启接续、迁移及 close/reopen 验收
-保留到后续 SQL 阶段。不能把首阶段内存流程的通过结果描述为跨重启恢复已验证。
+生产与契约测试使用 `asc-policy-repository-sqlite`，Binding 与部署记录经 Repository
+原子保存；Client 不访问 Repository。重试次数和期限由 WorkQueue 持有，重建队列时重置。
+存储、迁移与恢复边界见 [SQLite 设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)。
 
 ## 已知限制：跨服务的操作时序
 
@@ -214,7 +223,7 @@ revision 与 expected status 的检查及状态写入必须在 repository 中原
 - 通用顺序是 Adapter 翻译 → Client 准备 → Reconciler 登记 UNKNOWN 目标 → Client
   创建或更新 → Reconciler 结果记账及状态 CAS。Client 始终不访问或回调 repository。
 
-这些是已确认的职责边界，不代表接口已经实现；首阶段仍使用内存 repository。
+以上组件职责不构成 SQLite 故障或进程崩溃恢复的验收证据。
 
 ### 部分成功与重放
 
@@ -235,7 +244,7 @@ update 重试应区分旧目标集合与本次新目标，不能因为新目标�
 
 仅在幂等重放不足以支持恢复时再评估额外执行进度；当前不要求复杂 checkpoint
 协议。Client 接收多个待清理目标、返回部分确认、固定请求重放的可执行契约已实现；
-repository 跨重启恢复仍依赖后续 SQL，不由请求可序列化直接证明。
+Repository 跨重启恢复按 SQLite 设计独立验收，不由请求可序列化直接证明。
 
 ## 已确认：有界重试与失败后保留记录
 
@@ -243,7 +252,7 @@ repository 跨重启恢复仍依赖后续 SQL，不由请求可序列化直接�
 - Apply/Update 最终失败写 `APPLY_FAILED`；Delete 最终失败写 `DELETE_FAILED`。
 - 失败状态和错误写入仍受当前意图 revision/status 约束。
 - 重试次数需要持久化，避免重启后重新计数而变成无限重试。次数口径、退避参数、
-  下次执行时间与中断尝试计数见 Runtime 设计；跨重启的耐久性由后续 SQL 工作包验证。
+  下次执行时间与中断尝试计数见 Runtime 设计；跨重启的耐久性按 SQLite 设计独立验收。
 - `DELETE_FAILED` 仍保留所有未确认不存在的部署记录，供后续用户重新发起删除。
   `APPLY_FAILED` 同样不能清空仍可能存在的目标。
 - 只有所有待清理目标均已明确确认不存在且结果已持久化，才允许条件删除整个 Binding 聚合。
@@ -307,21 +316,20 @@ PEP 速率限制、跨进程恢复与持久化队列不在本次范围。
 | 跨服务 Apply 晚于 Delete 完成 | 明确延期，不属于该设计范围 | 保留限制，不将本地锁或 CAS 当作远端执行顺序保证 |
 | 提交成功但通知丢失、重启后 ING 卡住 | 进程内事件交接和补扫归 Runtime；跨重启恢复延后 SQL 阶段 | Runtime 验证补扫和 running 恢复交接；持久化工作包验证重启恢复 |
 | 大量任务、队列去重和 throttle | Runtime 包含有界队列、并发池、去重和退避；PEP 速率限制延后 | 队列竞争和容量验收在本阶段；需要时另增 PEP 速率限制 |
-| 如何证明实现符合设计 | 核心 fixtures、真实 Adapter/Client 的 mock HTTP 组合及分阶段集成验收 | 运行结果见 RESULTS.md；完整 E2E 独立 PR，恢复与系统性注入随持久化阶段完成 |
+| 如何证明实现符合设计 | 核心 fixtures、真实 Adapter/Client 的 mock HTTP 组合及分阶段集成验收 | 按被测源码版本记录运行结果；完整 E2E、恢复与系统性注入独立验收 |
 
-实施需持续覆盖四组契约（核心内存及 Client 部分已落地，PAP/调度/SQL 分阶段推进）：
+实施需持续覆盖四组契约：
 
 1. **数据与事务**：部署记录与当前意图的独立更新，目标记账与最终状态的一致性，
-   Binding 与意图的原子保存，首阶段由内存 repository 同一临界区实现；后续 SQL
-   再实现耐久性。不能仅依赖 worker 串行执行弥补 repository 更新丢失。
+   Binding 与意图通过 SQLite 短事务原子保存。不能仅依赖 worker 串行执行弥补 repository 更新丢失。
 2. **Client 接口与幂等**：请求前可获得目标身份，结果表达部分确认及不确定。本次 prepared
    原样交给 Client；下一次重新读取、翻译和准备。AgentSight 只校验本次准备的进程身份，
    不保留跨次进程连续性依据。删除后重新 CREATE 使用新 Binding ID、revision 1。
 3. **调度、状态与重试恢复**：WorkQueue 的 Running 边界、dirty、容量、并发、补扫、退避和
    shutdown 在 Runtime 集成验收。完成或耗尽预算的 Binding 不因补扫自动重试。
-   跨重启恢复依赖后续 SQL；PEP 请求速率限制另行实施。
+   跨重启恢复按 SQLite 设计独立验收；PEP 请求速率限制另行实施。
 4. **接口投影与验收**：公开错误字段，以及对竞争、部分成功、崩溃恢复的可执行
-   验收。fixture 应比较完整输入输出和有序调用；首阶段内存结果不能代替后续 SQL
+   验收。fixture 应比较完整输入输出和有序调用；组件结果不能代替 SQLite
    耐久性或真实 PEP 生效证据；跨服务时序限制需保持显式标注。
 
 上述是详细设计和实现验证工作，目前无需重新确认已选定的产品方向。

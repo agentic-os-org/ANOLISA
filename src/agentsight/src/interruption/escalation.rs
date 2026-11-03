@@ -28,12 +28,15 @@ pub(crate) enum KillAction {
 /// Pure: mirrors the original inline logic exactly —
 /// `new_count = existing_count + 1`; `new_count > threshold` → SIGKILL;
 /// `new_count == threshold` → SIGTERM; otherwise wait. When disabled, never acts.
+/// A zero threshold is the documented alert-only mode (the config accepts it
+/// and `docs/agent-diagnostics-guide.md` defines it as "report, do not kill"),
+/// so it never escalates regardless of the detection count.
 pub(crate) fn decide_kill(
     enabled: bool,
     existing_count: usize,
     kill_after_count: usize,
 ) -> KillAction {
-    if !enabled {
+    if !enabled || kill_after_count == 0 {
         return KillAction::Disabled;
     }
     let new_count = existing_count + 1;
@@ -124,9 +127,11 @@ mod tests {
     }
 
     #[test]
-    fn decide_zero_threshold_kills_immediately() {
-        // threshold 0: existing 0 -> new 1 > 0 -> Kill
-        assert_eq!(decide_kill(true, 0, 0), KillAction::Kill);
+    fn decide_zero_threshold_never_signals() {
+        // Threshold 0 is the documented "alert only" mode: detections are
+        // still recorded, but no signal may be sent at any count.
+        assert_eq!(decide_kill(true, 0, 0), KillAction::Disabled);
+        assert_eq!(decide_kill(true, 4, 0), KillAction::Disabled);
     }
 
     // ── execute_kill_action via RecordingKiller ────────────────────

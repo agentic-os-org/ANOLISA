@@ -81,6 +81,7 @@ impl ContainmentEnforcer for FakeEnforcer {
                         policy_revision: request.policy.revision.to_string(),
                         policy_dsl: policy("block", &source),
                         policy_mode: Some(request.policy.mode),
+                        file_protection_policy: None,
                     },
                     state: BindingState::Enforced,
                     message: None,
@@ -282,6 +283,11 @@ impl ApiFixture {
         containment: Option<Arc<ContainmentCoordinator>>,
     ) -> web::Data<AppState> {
         web::Data::new(AppState {
+            config_path: None,
+            storage_budget: std::sync::Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
@@ -775,6 +781,7 @@ fn source_binding(binding_id: Uuid) -> Binding {
             policy_revision: "3".into(),
             policy_dsl: policy("notify", "/root/secret.txt"),
             policy_mode: Some(PolicyMode::Audit),
+            file_protection_policy: None,
         },
         state: BindingState::Enforced,
         message: None,

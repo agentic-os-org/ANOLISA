@@ -67,14 +67,21 @@ openclaw plugins install /path/to/selective-claw
 
 ## 配置项
 
-所有配置均为可选。通过 OpenClaw 的插件配置进行设置：
+所有配置均为可选。在 OpenClaw 配置的 `plugins.entries.selective-claw.config` 中设置；
+宿主通过 `api.pluginConfig` 将这些选项传给插件：
 
 ```json
 {
-  "selective-claw": {
-    "enabled": true,
-    "freshTailTurns": 3,
-    "dbPath": "~/.openclaw/selective-claw.db"
+  "plugins": {
+    "entries": {
+      "selective-claw": {
+        "config": {
+          "enabled": true,
+          "freshTailTurns": 3,
+          "dbPath": "~/.openclaw/selective-claw.db"
+        }
+      }
+    }
   }
 }
 ```
@@ -84,6 +91,9 @@ openclaw plugins install /path/to/selective-claw
 | `enabled` | `true` | 启用或禁用插件 |
 | `freshTailTurns` | `3` | 始终保留原文的最近轮次数 |
 | `dbPath` | `~/.openclaw/selective-claw.db` | SQLite 数据库文件路径 |
+
+`dbPath` 中的 `~/` 会展开为当前用户的主目录。未设置路径时使用 `OPENCLAW_STATE_DIR`，
+该环境变量也未设置时使用 `~/.openclaw`。设置 `enabled: false` 时不打开数据库，也不注册引擎或工具。
 
 ## 项目架构
 

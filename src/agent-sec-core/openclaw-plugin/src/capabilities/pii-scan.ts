@@ -11,11 +11,12 @@ import {
   envHookPolicy,
   isHookPolicyValue,
   normalizeHookPolicy,
+  supportsModelInputGate,
   type HookPolicy,
 } from "../utils.js";
 
 const CLI_TIMEOUT_MS = 10_000;
-const BEFORE_DISPATCH_PRIORITY = 200;
+const INPUT_SCAN_PRIORITY = 200;
 
 type PiiScanConfig = {
   scanUserInput: boolean;
@@ -24,8 +25,7 @@ type PiiScanConfig = {
 };
 
 function readConfig(pluginConfig: Record<string, any>, api: any): PiiScanConfig {
-  const capabilityConfig =
-    pluginConfig.capabilities?.["pii-scan-user-input"] ?? {};
+  const capabilityConfig = pluginConfig.capabilities?.["pii-scan-user-input"] ?? {};
   let policy: HookPolicy = "observe";
   if (process.env.PII_CHECKER_MODE !== undefined) {
     policy = envHookPolicy("PII_CHECKER_MODE", "observe");
@@ -56,10 +56,7 @@ function safeString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function findingRisk(
-  finding: Record<string, unknown>,
-  verdict: string,
-): "high" | "general" {
+function findingRisk(finding: Record<string, unknown>, verdict: string): "high" | "general" {
   const severity = safeString(finding.severity);
   if (severity === "deny") {
     return "high";
@@ -70,10 +67,36 @@ function findingRisk(
   return verdict === "deny" ? "high" : "general";
 }
 
-function riskSummary(verdict: string, findings: Record<string, unknown>[]): string {
-  const highCount = findings.filter(
-    (finding) => findingRisk(finding, verdict) === "high",
-  ).length;
+function riskSummary(
+  verdict: string,
+  findings: Record<string, unknown>[],
+  summary?: unknown,
+): string {
+  if (typeof summary === "object" && summary !== null) {
+    const data = summary as Record<string, unknown>;
+    if (
+      data.findings_truncated === true &&
+      typeof data.by_severity === "object" &&
+      data.by_severity !== null
+    ) {
+      const counts = data.by_severity as Record<string, unknown>;
+      const high = counts.deny ?? 0;
+      const general = counts.warn ?? 0;
+      const total = data.total;
+      if (
+        typeof high === "number" &&
+        typeof general === "number" &&
+        Number.isSafeInteger(high) &&
+        Number.isSafeInteger(general) &&
+        high >= 0 &&
+        general >= 0 &&
+        total === high + general
+      ) {
+        return `检测到 ${total} 项敏感信息（高风险 ${high}、一般风险 ${general}；明细已省略）`;
+      }
+    }
+  }
+  const highCount = findings.filter((finding) => findingRisk(finding, verdict) === "high").length;
   const generalCount = findings.length - highCount;
 
   if (highCount > 0 && generalCount > 0) {
@@ -89,21 +112,27 @@ function formatPiiWarning(
   verdict: string,
   findings: unknown[],
   finalMessage = "本次仅提醒，未触发确认或阻断。",
+  summary?: unknown,
 ): string {
   const typedFindings = findings.filter(
     (finding): finding is Record<string, unknown> =>
-      typeof finding === "object" && finding !== null && !Array.isArray(finding),
+      typeof finding === "object" &&
+      finding !== null &&
+      !Array.isArray(finding),
   );
-  return `[pii-checker] ${riskSummary(verdict, typedFindings)}；${finalMessage}`;
+  return `[pii-checker] ${riskSummary(verdict, typedFindings, summary)}；${finalMessage}`;
 }
 
-function buildScanArgs(source: string, includeLowConfidence: boolean): string[] {
+function buildScanArgs(
+  source: string,
+  includeLowConfidence: boolean,
+): string[] {
   const args = [
     "scan-pii",
     "--stdin",
     "--format",
     "json",
-    "--redact-output",
+    ...(source === "model_input" ? [] : ["--redact-output"]),
     "--source",
     source,
   ];
@@ -113,16 +142,14 @@ function buildScanArgs(source: string, includeLowConfidence: boolean): string[] 
   return args;
 }
 
-function getInboundText(event: any): string {
-  return inboundPiiScanText(event);
-}
-
 function getModelOutputText(event: any): string {
   const response = safeString(event?.response);
   if (response.trim()) {
     return response;
   }
-  const lastAssistant = safeString(event?.lastAssistant ?? event?.last_assistant);
+  const lastAssistant = safeString(
+    event?.lastAssistant ?? event?.last_assistant,
+  );
   if (lastAssistant.trim()) {
     return lastAssistant;
   }
@@ -131,7 +158,9 @@ function getModelOutputText(event: any): string {
     : Array.isArray(event?.assistant_texts)
       ? event.assistant_texts
       : [];
-  return assistantTexts.filter((item: unknown) => typeof item === "string").join("\n");
+  return assistantTexts
+    .filter((item: unknown) => typeof item === "string")
+    .join("\n");
 }
 
 function getToolOutputText(event: any): string {
@@ -145,22 +174,25 @@ async function scanPiiText(
   ctx: any,
   text: string,
   source: string,
-): Promise<{ verdict: string; findings: unknown[] } | undefined> {
+): Promise<{ verdict: string; findings: unknown[]; summary?: unknown } | undefined> {
   const result = await callAgentSecCli(buildScanArgs(source, cfg.includeLowConfidence), {
     timeout: CLI_TIMEOUT_MS,
     stdin: text,
     traceContext: buildTraceContext(event, ctx),
   });
   if (result.exitCode !== 0) {
-    api.logger.warn(`[pii-checker] CLI failed: ${result.stderr || result.exitCode}`);
+    api.logger.warn(
+      `[pii-checker] CLI failed: ${result.stderr || result.exitCode}`,
+    );
     return undefined;
   }
 
-  let scanResult: { verdict?: unknown; findings?: unknown };
+  let scanResult: { verdict?: unknown; findings?: unknown; summary?: unknown };
   try {
     scanResult = JSON.parse(result.stdout) as {
       verdict?: unknown;
       findings?: unknown;
+      summary?: unknown;
     };
   } catch (error) {
     api.logger.warn(
@@ -173,6 +205,7 @@ async function scanPiiText(
   return {
     verdict: safeString(scanResult.verdict) || "pass",
     findings: Array.isArray(scanResult.findings) ? scanResult.findings : [],
+    summary: scanResult.summary,
   };
 }
 
@@ -181,16 +214,17 @@ function logPiiWarning(
   verdict: string,
   findings: unknown[],
   cfg: PiiScanConfig,
+  summary?: unknown,
   finalMessage?: string,
 ): string {
-  const warning = formatPiiWarning(verdict, findings, finalMessage);
+  const warning = formatPiiWarning(verdict, findings, finalMessage, summary);
   api.logger.debug?.(`[pii-checker] verdict=${verdict} policy=${cfg.policy}`);
   api.logger.warn(warning);
   return warning;
 }
 
 /**
- * 用户输入 PII / 凭据检测。
+ * PII and credential checks at host-provided boundaries.
  *
  * Scans PII at the boundaries exposed by OpenClaw and applies the configured
  * policy. Unsupported confirmation or post-action boundaries fail open with a warning.
@@ -198,77 +232,134 @@ function logPiiWarning(
 export const piiScan: SecurityCapability = {
   id: "pii-scan-user-input",
   name: "PII Checker",
-  hooks: ["before_dispatch", "before_tool_call", "after_tool_call", "llm_output"],
+  hooks: [
+    "before_agent_run",
+    "before_dispatch",
+    "before_tool_call",
+    "after_tool_call",
+    "llm_output",
+  ],
   register(api) {
     if (!envFlagEnabled("PII_CHECKER_HOOK_ENABLED", true)) {
       return;
     }
-    const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {}, api);
+    const cfg = readConfig(
+      (api.pluginConfig as Record<string, any>) ?? {},
+      api,
+    );
     if (!cfg.scanUserInput) {
-      api.logger.info("[pii-checker] piiScanUserInput=false, capability disabled");
+      api.logger.info(
+        "[pii-checker] piiScanUserInput=false, capability disabled",
+      );
       return;
     }
 
-    api.on(
-      "before_dispatch",
-      async (event: any, ctx: any) => {
-        try {
-          const text = getInboundText(event);
-          if (!text.trim()) {
-            return undefined;
-          }
-
-          const scanResult = await scanPiiText(api, cfg, event, ctx, text, "user_input");
-          if (scanResult === undefined) return undefined;
-          const { verdict, findings } = scanResult;
-
-          if (verdict === "pass" || findings.length === 0) {
-            api.logger.info("[pii-checker] pass");
-            return undefined;
-          }
-
-          if (verdict !== "warn" && verdict !== "deny") {
-            return undefined;
-          }
-
-          if (cfg.policy === "observe") return undefined;
-          const warning = logPiiWarning(
-            api,
-            verdict,
-            findings,
-            cfg,
-            verdict === "deny" && cfg.policy === "block"
-              ? "当前策略已阻断本次请求。"
-              : verdict === "deny" && cfg.policy === "ask"
-                ? "当前环节不支持确认/阻断，本次仅提醒，不会阻断。"
-                : undefined,
-          );
-          if (verdict === "deny" && cfg.policy === "block") {
-            return {
-              handled: true,
-              text: warning,
-            };
-          }
-          return undefined;
-        } catch (error) {
-          api.logger.warn(
-            `[pii-checker] failed open: ${error instanceof Error ? error.message : String(error)}`,
-          );
+    const modelInput = supportsModelInputGate(api.runtime?.version);
+    const inputHook = modelInput ? "before_agent_run" : "before_dispatch";
+    api.logger.info(`[pii-checker] input hook: ${inputHook}`);
+    if (!modelInput) {
+      api.logger.warn(
+        "[pii-checker] using legacy inbound scanning; model-input scanning requires a stable OpenClaw >=2026.5.12",
+      );
+    }
+    const scanInput = async (
+      event: any,
+      ctx: any,
+    ): Promise<string | undefined> => {
+      try {
+        const text = modelInput
+          ? safeString(event?.prompt)
+          : inboundPiiScanText(event);
+        if (!text.trim()) {
           return undefined;
         }
-      },
-      { priority: BEFORE_DISPATCH_PRIORITY },
-    );
+
+        const scanResult = await scanPiiText(
+          api,
+          cfg,
+          event,
+          ctx,
+          text,
+          modelInput ? "model_input" : "user_input",
+        );
+        if (scanResult === undefined) return undefined;
+        const { verdict, findings, summary } = scanResult;
+
+        if (verdict === "pass" || findings.length === 0) {
+          api.logger.info("[pii-checker] pass");
+          return undefined;
+        }
+
+        if (verdict !== "warn" && verdict !== "deny") {
+          return undefined;
+        }
+
+        if (cfg.policy === "observe") return undefined;
+        const warning = logPiiWarning(
+          api,
+          verdict,
+          findings,
+          cfg,
+          summary,
+          verdict === "deny" && cfg.policy === "block"
+            ? "当前策略已阻断本次请求。"
+            : verdict === "deny" && cfg.policy === "ask"
+              ? modelInput
+                ? "当前环节不支持确认，本次仅提醒，不会阻断。"
+                : "当前环节不支持确认/阻断，本次仅提醒，不会阻断。"
+              : undefined,
+        );
+        if (verdict === "deny" && cfg.policy === "block") {
+          return warning;
+        }
+        return undefined;
+      } catch (error) {
+        api.logger.warn(
+          `[pii-checker] failed open: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return undefined;
+      }
+    };
+    if (modelInput) {
+      api.on(
+        "before_agent_run",
+        async (event, ctx) => {
+          const message = await scanInput(event, ctx);
+          return message
+            ? { outcome: "block", reason: "pii_detected", message }
+            : undefined;
+        },
+        { priority: INPUT_SCAN_PRIORITY },
+      );
+    } else {
+      api.on(
+        "before_dispatch",
+        async (event, ctx) => {
+          const text = await scanInput(event, ctx);
+          return text ? { handled: true, text } : undefined;
+        },
+        { priority: INPUT_SCAN_PRIORITY },
+      );
+    }
 
     api.on(
       "before_tool_call",
       async (event: any, ctx: any) => {
         try {
-          const text = valueToText(event?.params ?? event?.parameters ?? event?.args);
+          const text = valueToText(
+            event?.params ?? event?.parameters ?? event?.args,
+          );
           if (!text.trim()) return undefined;
-          const scanResult = await scanPiiText(api, cfg, event, ctx, text, "tool_input");
+          const scanResult = await scanPiiText(
+            api,
+            cfg,
+            event,
+            ctx,
+            text,
+            "tool_input",
+          );
           if (scanResult === undefined) return undefined;
-          const { verdict, findings } = scanResult;
+          const { verdict, findings, summary } = scanResult;
           if (verdict === "pass" || findings.length === 0) return undefined;
           if (verdict !== "warn" && verdict !== "deny") return undefined;
           if (cfg.policy === "observe") return undefined;
@@ -277,6 +368,7 @@ export const piiScan: SecurityCapability = {
             verdict,
             findings,
             cfg,
+            summary,
             verdict === "deny" && cfg.policy === "block"
               ? "当前策略已阻断本次工具调用。"
               : verdict === "deny" && cfg.policy === "ask"
@@ -303,26 +395,35 @@ export const piiScan: SecurityCapability = {
           return undefined;
         }
       },
-      { priority: BEFORE_DISPATCH_PRIORITY },
+      { priority: INPUT_SCAN_PRIORITY },
     );
 
     api.on("after_tool_call", async (event: any, ctx: any) => {
       try {
         const text = getToolOutputText(event);
         if (!text.trim()) return undefined;
-        const scanResult = await scanPiiText(api, cfg, event, ctx, text, "tool_output");
+        const scanResult = await scanPiiText(
+          api,
+          cfg,
+          event,
+          ctx,
+          text,
+          "tool_output",
+        );
         if (scanResult === undefined) return undefined;
-        const { verdict, findings } = scanResult;
+        const { verdict, findings, summary } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
         if (cfg.policy !== "observe") {
           const cannotEnforce =
-            verdict === "deny" && (cfg.policy === "ask" || cfg.policy === "block");
+            verdict === "deny" &&
+            (cfg.policy === "ask" || cfg.policy === "block");
           logPiiWarning(
             api,
             verdict,
             findings,
             cfg,
+            summary,
             cannotEnforce
               ? "工具已经执行；当前环节不支持确认/阻断，本次仅提醒，工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
               : "工具已经执行；本次仅提醒，未触发确认或阻断，工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。",
@@ -341,9 +442,16 @@ export const piiScan: SecurityCapability = {
       try {
         const text = getModelOutputText(event);
         if (!text.trim()) return undefined;
-        const scanResult = await scanPiiText(api, cfg, event, ctx, text, "model_output");
+        const scanResult = await scanPiiText(
+          api,
+          cfg,
+          event,
+          ctx,
+          text,
+          "model_output",
+        );
         if (scanResult === undefined) return undefined;
-        const { verdict, findings } = scanResult;
+        const { verdict, findings, summary } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
         if (cfg.policy !== "observe") {
@@ -352,6 +460,7 @@ export const piiScan: SecurityCapability = {
             verdict,
             findings,
             cfg,
+            summary,
             "当前环节仅提醒，原始模型输出仍会交付，不会被脱敏或阻断。",
           );
         }

@@ -80,6 +80,28 @@ jobs:
           echo "| Component | \`$COMPONENT\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`$VERSION\` |" >> $GITHUB_STEP_SUMMARY
 
+      - name: Verify agent-sec-core V2 version matches tag
+        if: steps.parse.outputs.component == 'agent-sec-core'
+        env:
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          workspace_version=$(awk '
+            $0 == "[workspace.package]" { in_section = 1; next }
+            in_section && /^\[/ { exit }
+            in_section && /^version = / {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"$/, "", value)
+              print value
+              exit
+            }
+          ' src/agent-sec-core/v2/Cargo.toml)
+          test -n "$workspace_version"
+          test "$workspace_version" = "$TAG_VERSION" || {
+            echo "sec-core tag version $TAG_VERSION differs from V2 workspace version $workspace_version" >&2
+            exit 1
+          }
+
       - name: Plan precompiled packages
         id: plan-prebuilt
         env:
@@ -125,6 +147,50 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Build OS Skills raw package
+        id: os-skills-prebuilt
+        if: matrix.component == 'os-skills'
+        uses: ./.github/actions/build-os-skills-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build agent-memory precompiled package
+        id: agent-memory-prebuilt
+        if: matrix.component == 'agent-memory'
+        uses: ./.github/actions/build-agent-memory-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build sec-core precompiled package
+        id: sec-core-prebuilt
+        if: matrix.component == 'agent-sec-core'
+        uses: ./.github/actions/build-sec-core-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build agentsight precompiled package
+        id: agentsight-prebuilt
+        if: matrix.component == 'agentsight'
+        uses: ./.github/actions/build-agentsight-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
       - name: Build cosh-ng precompiled package
         id: cosh-ng-prebuilt
         if: matrix.component == 'cosh-ng'
@@ -140,6 +206,28 @@ jobs:
         id: tokenless-prebuilt
         if: matrix.component == 'tokenless'
         uses: ./.github/actions/build-tokenless-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build ws-ckpt precompiled package
+        id: ws-ckpt-prebuilt
+        if: matrix.component == 'ws-ckpt'
+        uses: ./.github/actions/build-ws-ckpt-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build skillfs precompiled package
+        id: skillfs-prebuilt
+        if: matrix.component == 'skillfs'
+        uses: ./.github/actions/build-skillfs-prebuilt
         with:
           version: ${{ needs.package.outputs.version }}
           target-os: ${{ matrix.target-os }}
@@ -164,13 +252,25 @@ jobs:
         env:
           COMPONENT: ${{ matrix.component }}
           ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
+          AGENT_MEMORY_DIRECTORY: ${{ steps.agent-memory-prebuilt.outputs.artifact-directory }}
+          SEC_CORE_DIRECTORY: ${{ steps.sec-core-prebuilt.outputs.artifact-directory }}
+          OS_SKILLS_DIRECTORY: ${{ steps.os-skills-prebuilt.outputs.artifact-directory }}
+          AGENTSIGHT_DIRECTORY: ${{ steps.agentsight-prebuilt.outputs.artifact-directory }}
           COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
           TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+          WS_CKPT_DIRECTORY: ${{ steps.ws-ckpt-prebuilt.outputs.artifact-directory }}
+          SKILLFS_DIRECTORY: ${{ steps.skillfs-prebuilt.outputs.artifact-directory }}
         run: |
           case "$COMPONENT" in
             anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
+            agent-memory) ARTIFACT_DIRECTORY="$AGENT_MEMORY_DIRECTORY" ;;
+            agent-sec-core) ARTIFACT_DIRECTORY="$SEC_CORE_DIRECTORY" ;;
+            os-skills) ARTIFACT_DIRECTORY="$OS_SKILLS_DIRECTORY" ;;
+            agentsight) ARTIFACT_DIRECTORY="$AGENTSIGHT_DIRECTORY" ;;
             cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
             tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            ws-ckpt) ARTIFACT_DIRECTORY="$WS_CKPT_DIRECTORY" ;;
+            skillfs) ARTIFACT_DIRECTORY="$SKILLFS_DIRECTORY" ;;
             *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
           esac
           if [ -z "$ARTIFACT_DIRECTORY" ]; then
@@ -288,6 +388,19 @@ jobs:
             --layout aggregate \
             --write-checksums /tmp/python-wheels/SHA256SUMS-python-wheels.txt
 
+      - name: Package ANOLISA distribution manifests
+        if: needs.package.outputs.component == 'anolisa'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          distribution/anolisa/scripts/package-manifests.sh "/tmp/archives/manifests-${VERSION}.tar.gz"
+          cp "/tmp/archives/manifests-${VERSION}.tar.gz" /tmp/archives/manifests-latest.tar.gz
+          (
+            cd /tmp/archives
+            sha256sum "manifests-${VERSION}.tar.gz" manifests-latest.tar.gz > SHA256SUMS-manifests.txt
+          )
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -312,14 +425,12 @@ jobs:
             anolisa)        PREFIX="anolisa/v" ;;
           esac
 
-          PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)
-          if [ -z "$PREV_TAG" ]; then
-            COMPARE_URL="https://github.com/${{ github.repository }}/commits/${TAG}"
-          else
-            COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
-          fi
-
-          NOTES="## ${COMPONENT} v${VERSION}\n\n<!-- Add release notes here -->\n\n## What's Changed\n\n<!-- List the key changes in this release -->\n\n**Full Changelog**: ${COMPARE_URL}"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          COMPARE_URL=$(python3 .github/scripts/generate_release_notes.py \
+            --tag "$TAG" \
+            --prefix "$PREFIX" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$NOTES_FILE")
 
           # Collect all assets to upload
           ASSETS=("$ARCHIVE")
@@ -334,6 +445,10 @@ jobs:
               find /tmp/prebuilt -mindepth 2 -maxdepth 2 -type f -print |
                 LC_ALL=C sort
             )
+          fi
+          if [ "$COMPONENT" = anolisa ]; then
+            ASSETS+=("/tmp/archives/manifests-${VERSION}.tar.gz")
+            ASSETS+=(/tmp/archives/manifests-latest.tar.gz /tmp/archives/SHA256SUMS-manifests.txt)
           fi
           if [ "$COMPONENT" = tokenless ]; then
             while IFS= read -r asset; do
@@ -353,7 +468,7 @@ jobs:
 
           gh release create "$TAG" \
             --title "${COMPONENT} v${VERSION}" \
-            --notes "$(printf '%b' "${NOTES}")" \
+            --notes-file "$NOTES_FILE" \
             --target "$(git rev-list -n 1 $TAG)" \
             "${ASSETS[@]}"
 

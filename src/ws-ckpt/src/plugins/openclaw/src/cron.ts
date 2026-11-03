@@ -4,6 +4,7 @@ import { join } from "path";
 import { runCrontab } from "./commands.js";
 
 const CRON_RE = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
+const LINE_BREAK_RE = /[\n\r]/;
 const LOCK_DIR = join(tmpdir(), "ws-ckpt-cron.lock");
 
 export function validateCronExpr(expr: string): boolean {
@@ -28,16 +29,23 @@ function buildCronLine(workspace: string, schedule: string): string {
   );
 }
 
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
+async function withLock(fn: () => Promise<boolean>): Promise<boolean> {
   const maxWait = 5000;
   const interval = 50;
   let waited = 0;
-  while (true) {
+  let acquired = false;
+  while (!acquired) {
     try {
       mkdirSync(LOCK_DIR);
-      break;
-    } catch {
-      if (waited >= maxWait) break; // proceed unlocked rather than fail
+      acquired = true;
+    } catch (error) {
+      // A read-modify-write without ownership can overwrite another caller.
+      if (
+        (error as NodeJS.ErrnoException).code !== "EEXIST" ||
+        waited >= maxWait
+      ) {
+        return false;
+      }
       await new Promise((r) => setTimeout(r, interval));
       waited += interval;
     }
@@ -45,7 +53,14 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
-    try { rmdirSync(LOCK_DIR); } catch { /* already removed */ }
+    // Acquisition failures return before entering the operation or its cleanup.
+    if (acquired) {
+      try {
+        rmdirSync(LOCK_DIR);
+      } catch {
+        /* already removed */
+      }
+    }
   }
 }
 
@@ -123,6 +138,11 @@ export function parseSchedulesUpdate(value: string, current: string[]): ParseRes
 export class CrontabManager {
   static async sync(workspace: string, schedules: string[]): Promise<boolean> {
     return withLock(async () => {
+      // Fail closed: never touch the crontab when an interpolated value
+      // could split a line (see buildCronLine).
+      if (LINE_BREAK_RE.test(workspace) || schedules.some((s) => LINE_BREAK_RE.test(s))) {
+        return false;
+      }
       const lines = await readCrontab();
       if (lines === null) return false;
       const kept = lines.filter((l) => !matchesWorkspace(l, workspace));

@@ -72,10 +72,9 @@ class SkillLedgerWorkerClient:
             for attempt in range(2):
                 try:
                     try:
-                        result = await asyncio.wait_for(
-                            self._process_once(change),
-                            timeout=self._request_timeout_seconds,
-                        )
+                        # Preserve external cancellation when the response completes.
+                        async with asyncio.timeout(self._request_timeout_seconds):
+                            result = await self._process_once(change)
                     except asyncio.TimeoutError as exc:
                         raise SkillLedgerWorkerTransportError(
                             "worker request timed out after "
@@ -104,16 +103,26 @@ class SkillLedgerWorkerClient:
                 self._stopping = False
 
     async def _process_once(self, change: SkillFsChange) -> dict[str, Any]:
+        # Serialize BEFORE spawning: an oversized request is a permanent
+        # payload error, not a transport failure, and must neither spawn a
+        # doomed worker nor be retried.
+        request = new_worker_request(change)
+        frame = serialize_worker_request(request)
+
         process = await self._ensure_worker()
         if process.stdin is None or process.stdout is None:
             raise SkillLedgerWorkerTransportError("worker stdio is unavailable")
 
-        request = new_worker_request(change)
         try:
-            process.stdin.write(serialize_worker_request(request))
+            process.stdin.write(frame)
             await process.stdin.drain()
             line = await process.stdout.readline()
         except (BrokenPipeError, ConnectionError, OSError, ValueError) as exc:
+            # ValueError stays for the READ side: a decoding or shutdown-time
+            # ValueError from readline() is a faulty-worker condition that the
+            # transport classification must route into the kill-and-restart
+            # recovery. The write side can no longer raise it — request
+            # serialization happens before the spawn, above.
             raise SkillLedgerWorkerTransportError(
                 self._transport_message(f"worker communication failed: {exc}")
             ) from exc

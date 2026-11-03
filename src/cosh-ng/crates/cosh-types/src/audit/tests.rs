@@ -282,3 +282,48 @@ fn unknown_event_payload_is_bounded() {
     event.data = serde_json::json!({"future": "x".repeat(MAX_UNKNOWN_DATA_BYTES + 1)});
     assert!(event.validate().is_err());
 }
+
+/// Drift guard for the approved per-user execution-audit budget of 30 days and
+/// 100 MiB. These defaults are what Core passes to `schedule_retention`, so a
+/// change here silently alters how much audit history every user keeps.
+///
+/// This case pins the *values* only; it does not prove the cap is enforced. The
+/// enforcement side lives in `cosh-platform`'s retention tests, which drive
+/// `schedule_retention` with a one-byte `max_disk_bytes`. The approval decision
+/// record is not committed to this repository, so the numbers are stated here
+/// rather than cited.
+#[test]
+fn audit_settings_default_matches_the_approved_per_user_budget() {
+    let settings = AuditSettings::default();
+    assert_eq!(settings.retention_days, 30);
+    assert_eq!(settings.max_disk_bytes, 100 * 1024 * 1024);
+}
+
+#[test]
+fn shell_truncation_marker_is_a_strictly_validated_known_event() {
+    let event: AuditEventV1 = serde_json::from_str(include_str!(
+        "../../tests/fixtures/audit-v1-shell-truncated.json"
+    ))
+    .expect("Shell-produced truncation fixture");
+    assert_eq!(
+        event.event_type,
+        AuditEventType::from(KnownAuditEventType::AuditTruncated),
+        "readers reconciling known variants must see the gap marker"
+    );
+    event
+        .validate()
+        .expect("the fixture is a valid truncation marker");
+    for data in [
+        serde_json::json!({"operation": "event_snapshot_shrunk", "seen": 2}),
+        serde_json::json!({"operation": "event_snapshot_shrunk", "seen": 2, "len": 1, "x": 1}),
+        serde_json::json!({"operation": "event_snapshot_shrunk", "seen": "2", "len": 1}),
+    ] {
+        let mut drifted = event.clone();
+        drifted.data = data;
+        assert!(
+            drifted.validate().is_err(),
+            "a drifted truncation payload must fail strict validation: {}",
+            drifted.data
+        );
+    }
+}

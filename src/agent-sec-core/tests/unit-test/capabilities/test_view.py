@@ -781,3 +781,20 @@ def test_cosh_ledger_xdg_view_preserves_paths_and_fallback(data_home):
     expected = data_home if data_home == "/Data With Spaces" else "~/.local/share"
     assert record.env["XDG_DATA_HOME"]["effective"] == expected
     assert record.mode == "ask"
+
+
+def test_openclaw_pii_lists_version_dependent_input_hooks() -> None:
+    record = _single_record("openclaw", "pii-check")
+    assert record.hooks == [
+        "before_agent_run",
+        "before_dispatch",
+        "before_tool_call",
+        "after_tool_call",
+        "llm_output",
+    ]
+
+
+def test_cosh_skill_ledger_view_reports_query_timeout() -> None:
+    record = _single_record("cosh", "skill-ledger")
+    # The environment view does not include the host manifest's init + show deadline.
+    assert record.timeout == "5"

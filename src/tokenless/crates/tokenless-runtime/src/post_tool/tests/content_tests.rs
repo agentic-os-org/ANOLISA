@@ -104,6 +104,54 @@ fn detects_html_documents_but_not_fragments() {
 }
 
 #[test]
+fn a_leading_mark_does_not_hide_the_other_domains() {
+    // The mark is format, not content, for every domain's reader — the
+    // HTML tokenizer just already had it fixed. Each of these is the
+    // twin of the same document without the mark.
+    assert_eq!(detect("\u{feff}diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-x\n+y\n"), ContentType::Diff);
+    assert_eq!(detect("\u{feff}Traceback (most recent call last):\n  File \"t.py\", line 1\nValueError: boom\n"), ContentType::StackTrace);
+    assert_eq!(
+        detect("\u{feff}{\"items\": [{\"name\": \"a\", \"description\": \"ddd\"}]}\n"),
+        ContentType::Json
+    );
+    assert_eq!(
+        detect("\u{feff}| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n"),
+        ContentType::Tabular
+    );
+    // A second mark is content: still nothing detectable.
+    assert_eq!(detect("\u{feff}\u{feff}plain words"), ContentType::PlainText);
+}
+
+#[test]
+fn detects_a_page_opened_by_a_byte_order_mark() {
+    // The tokenizer ignores one leading BOM, so the page behind it is the same
+    // document the renderer reads. U+FEFF is not whitespace, so trimming alone
+    // leaves the mark in front of the doctype and the page is never routed to
+    // the HTML domain.
+    for page in [
+        "\u{feff}<!DOCTYPE html>\n<html><body>hi</body></html>",
+        "\u{feff}<!doctype HTML>\n<html><body>hi</body></html>",
+        "\u{feff}<html><body>hi</body></html>",
+        "\u{feff}\n<!DOCTYPE html>\n<html><body>hi</body></html>",
+    ] {
+        assert_eq!(detect(page), ContentType::Html, "{page:?}");
+    }
+    // Only the first mark is a BOM: behind a second one, or behind any other
+    // content, the doctype no longer opens the document.
+    assert_ne!(
+        detect("\u{feff}\u{feff}<!DOCTYPE html>\n<html><body>hi</body></html>"),
+        ContentType::Html
+    );
+    assert_ne!(
+        detect("\n\u{feff}<!DOCTYPE html>\n<html><body>hi</body></html>"),
+        ContentType::Html
+    );
+    // The mark does not turn a fragment or prose into a page.
+    assert_ne!(detect("\u{feff}<div>partial</div>"), ContentType::Html);
+    assert_ne!(detect("\u{feff}plain words"), ContentType::Html);
+}
+
+#[test]
 fn html_fragments_inside_other_domains_do_not_make_them_html() {
     let page = "<!DOCTYPE html>\n<html lang=\"en\">\n<body><main><p>Widget reference</p></main></body>\n</html>";
     let prefixed_grep = page
@@ -260,6 +308,37 @@ fn detection_is_deterministic_and_bounded() {
     let first = detect(&large);
     assert_eq!(first, detect(&large));
     assert_eq!(first, ContentType::PlainText);
+}
+
+#[test]
+fn detects_plain_path_lists_without_misclassifying_numbers_or_mixed_output() {
+    for prefix in ["/workspace/project with spaces/", "./project/", "../project/", "src/"] {
+        let paths: String = (0..10).map(|i| format!("{prefix}file {i}.rs\n")).collect();
+        assert_eq!(detect(&paths), ContentType::SearchResults);
+        assert_ne!(detect(&format!("{paths}---\n755 uploads/\n")), ContentType::SearchResults);
+    }
+    assert_ne!(detect("60\n"), ContentType::SearchResults);
+    assert_ne!(detect("https://example.com/a\nhttps://example.com/b\nhttps://example.com/c\n"), ContentType::SearchResults);
+    assert_ne!(detect("// comment /a\n// comment /b\n// comment /c\n"), ContentType::SearchResults);
+    assert_eq!(detect("src/a.rs,1\nsrc/b.rs,2\nsrc/c.rs,3\n"), ContentType::Tabular);
+}
+
+#[test]
+fn path_list_detection_only_probes_complete_records_at_the_byte_limit() {
+    for (ending, boundary, remaining) in [
+        ("\n", " ", "file.json\n"),
+        ("\r\n", "\r", "\n"),
+        ("\n", "", "中文/file.json\n"),
+    ] {
+        let head = format!("/workspace/project with spaces/中文/file.json{ending}").repeat(60);
+        let prefix = "/workspace/";
+        // Put a space, the CR of CRLF, or the first byte of a Unicode scalar
+        // exactly at the byte limit without changing any full path record.
+        let padding = MAX_SCAN_BYTES - head.len() - prefix.len() - 1;
+        let input = format!("{head}{prefix}{}{boundary}{remaining}{head}", "a".repeat(padding));
+        assert!(input.len() > MAX_SCAN_BYTES);
+        assert_eq!(detect(&input), ContentType::SearchResults, "{ending:?} {boundary:?}");
+    }
 }
 
 #[test]

@@ -104,10 +104,26 @@ passthrough writes.
 
 ## Quick Start
 
+### Precompiled packages
+
+Release CI builds Linux x86_64 and aarch64 packages with a glibc 2.28 baseline.
+Each target produces `skillfs-{version}-linux-{arch}.tar.gz`, its `.sha256`,
+a CycloneDX `.tar.gz.cdx.json` SBOM, and the SBOM's `.sha256`.
+The archive includes `bin/skillfs`, the system installation contract, the
+bundled Skill, and the license. The target system needs FUSE 3 (including its
+shared library); mounting also requires access to `/dev/fuse`.
+
+Before releasing, run **Release / Preview** in GitHub Actions, select the branch,
+choose `skillfs`, and enter the version from `Cargo.toml` without a `v` prefix.
+Download the two `skillfs-prebuilt-{version}-linux-{arch}` artifacts after
+verification succeeds. Preview artifacts are retained for 14 days and do not
+create a GitHub Release. Formal releases use `skillfs/v{version}` tags and the
+existing release environment approval.
+
 ### Build
 
 ```bash
-cargo build --release
+make build
 ```
 
 ### Common Commands
@@ -136,8 +152,21 @@ cargo run -p skillfs -- stop /path/to/mountpoint
 
 Use `skillfs mount --config /path/to/skillfs-mount.toml` with `mountpoint` and
 an ordered `sources` array to aggregate directories. Earlier sources win whole
-skill-name conflicts; multiple sources are read-only. Paths must be absolute.
-See the [configuration reference](../../docs/user-guide/en/runtime/skillfs.md#mount-configuration)
+skill-name conflicts; multiple distinct sources are read-only. A single source
+is writable unless `--read-only` is supplied. Paths must be absolute.
+Add `--managed` for supervised recovery:
+
+```bash
+skillfs mount --config /path/to/skillfs-mount.toml --managed
+```
+
+This mode freezes the resolved source paths and order, mountpoint, effective
+read-only setting, and `--allow-other` setting at startup. Editing or deleting
+the original mount configuration does not change the worker's recovery target.
+Recovery still reads current source contents and the first source's views.
+To apply configuration changes, run `skillfs stop <MOUNTPOINT>` successfully,
+then start again with `--config ... --managed`.
+See the [configuration reference](../../docs/user-guide/en/skillfs/index.md#mount-configuration)
 for the TOML example, supported flags, and OpenClaw integration limits.
 
 ### Managed Mount Mode
@@ -152,14 +181,18 @@ restarts:
 
 - The client writes managed state, starts a detached supervisor in its own
   session with `setsid`, waits for readiness, and then returns.
-- The supervisor starts a foreground FUSE worker with the same source,
-  mountpoint, config, security, audit, activation, trusted-writer, control
-  socket, and logging options.
+- For positional mounts, the supervisor starts a foreground FUSE worker with
+  the same source, mountpoint, config, security, audit, activation,
+  trusted-writer, control socket, and logging options. Mount-configuration mode
+  uses the frozen inputs described above.
 - If the worker exits unexpectedly while desired state remains `mounted`, the
   supervisor remounts after bounded backoff.
 - Only `skillfs stop <MOUNTPOINT>` clears desired mounted state, terminates the
   supervisor/worker, and unmounts. `stop` is idempotent and can be run safely on
-  an already-unmounted path.
+  an already-unmounted path. Successful cleanup removes runtime state and the
+  frozen mount configuration. For configuration-based mounts, a busy mount or
+  an unconfirmed unmount returns an error and retains the `stopped` state and
+  frozen configuration; resolve the cause and run `stop` again to retry cleanup.
 - If the supervisor is killed with `kill -9`, an orphan worker may continue to
   serve the mount without monitoring. Run `skillfs stop <MOUNTPOINT>` to clean
   residual state, processes, and mounts before starting `mount --managed` again.
@@ -200,7 +233,9 @@ skills = ["apple-notes", "blogwatcher"]
 
 After mounting:
 
-- `/skills` shows skills from the default view.
+- `/skills` shows skills from the default view plus skills not assigned to any view.
+- Mounting leaves `skillfs-views.toml` unchanged; edit it explicitly to persist
+  assignments and remount to apply changed view configuration.
 - `skill-discover/SKILL.md` lists skills from secondary views and their
   readable `source_path` values.
 
@@ -238,10 +273,21 @@ When FUSE reads `SKILL.md`, SkillFS runs `compiler::compile` and supports:
 - `<!-- @else -->`
 - `<!-- @endif -->`
 
+On Linux, command availability is checked directly against executable files on
+`PATH`; the optional `which` utility is not required. The fixed command allowlist
+and mount-startup environment snapshot are unchanged. Remount after changing
+`PATH` or installing a command to refresh that snapshot.
+
 When there are no conditional blocks, SkillFS also applies a small set of
 heuristic command normalizations, for example:
 
-- `pip install` -> `uv pip install`
+- Bare `pip install` / `pip3 install` -> `uv pip install`; interpreter-specific
+  `python -m pip` calls and installs with `--user` stay unchanged because uv
+  does not support user-site installs. Bare invocations use a conservative
+  command-position heuristic rather than a complete shell parser; unfinished
+  arguments, including line continuations and command substitutions, stay unchanged.
+  Descriptor redirections do not end the argument scan. Inline code spans in lists
+  or prose are independent; trailing parenthetical notes do not prevent rewriting.
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 
@@ -459,8 +505,8 @@ sed "s|skillfs-sidecar:dev|$IMAGE|g" deploy/kubernetes/20-pod.yaml |
 ```
 
 See the
-[Kubernetes sidecar user guide](../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md)
-([中文](../../docs/user-guide/zh/runtime/skillfs-kubernetes-sidecar.md)) for
+[Kubernetes sidecar user guide](../../docs/user-guide/en/skillfs/kubernetes-sidecar.md)
+([中文](../../docs/user-guide/zh/skillfs/kubernetes-sidecar.md)) for
 deployment, `skill-discover` verification, troubleshooting, and cleanup.
 
 ## Test Coverage
@@ -593,7 +639,7 @@ Related security surfaces:
 
 ## Documentation
 
-- [Kubernetes sidecar deployment guide](../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md) -
+- [Kubernetes sidecar deployment guide](../../docs/user-guide/en/skillfs/kubernetes-sidecar.md) -
   Build, deploy, verify, and clean up SkillFS in Kubernetes.
 - [docs/specs/skillfs-spec.md](docs/specs/skillfs-spec.md) - Architecture,
   runtime consistency boundaries, and deployment scenarios.

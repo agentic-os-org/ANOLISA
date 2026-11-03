@@ -19,7 +19,7 @@ pub const SKIPPED_MESSAGE: &str = "observability SQLite write was skipped";
 pub struct ObservabilityFaultPolicy;
 
 impl FaultPolicy for ObservabilityFaultPolicy {
-    type Record = ObservabilityRecord;
+    type Record = (ObservabilityRecord, u32);
 
     /// Surfaces every fault, disposing only for genuine I/O or driver faults.
     ///
@@ -31,7 +31,7 @@ impl FaultPolicy for ObservabilityFaultPolicy {
     ///   stream), but a **malformed** corruption retry keeps it too, whereas the
     ///   security-event stream disposes. This is the one genuinely asymmetric
     ///   rung in v1.
-    fn on_fault(&self, fault: &Fault<'_>, _record: &ObservabilityRecord) -> Outcome {
+    fn on_fault(&self, fault: &Fault<'_>, _record: &Self::Record) -> Outcome {
         match fault.kind {
             // Both the pre-insert check and the post-rebuild check use the same
             // v1 message, so the phase does not change the text.
@@ -111,8 +111,8 @@ mod tests {
             WriteFault::Io,
             WriteFault::Malformed,
         ] {
-            let outcome =
-                ObservabilityFaultPolicy.on_fault(&fault(kind, Phase::Insert, false), &record());
+            let outcome = ObservabilityFaultPolicy
+                .on_fault(&fault(kind, Phase::Insert, false), &(record(), 1000));
             assert!(
                 outcome.failure.is_some(),
                 "{kind:?} must never be swallowed here"
@@ -126,16 +126,22 @@ mod tests {
         assert_eq!(
             message(&policy.on_fault(
                 &fault(WriteFault::Disabled, Phase::Insert, false),
-                &record()
+                &(record(), 1000)
             )),
             Some(DISABLED_MESSAGE)
         );
         assert_eq!(
-            message(&policy.on_fault(&fault(WriteFault::Busy, Phase::Insert, true), &record())),
+            message(&policy.on_fault(
+                &fault(WriteFault::Busy, Phase::Insert, true),
+                &(record(), 1000)
+            )),
             Some(BUSY_MESSAGE)
         );
         assert_eq!(
-            message(&policy.on_fault(&fault(WriteFault::Skipped, Phase::Insert, false), &record())),
+            message(&policy.on_fault(
+                &fault(WriteFault::Skipped, Phase::Insert, false),
+                &(record(), 1000)
+            )),
             Some(SKIPPED_MESSAGE)
         );
     }
@@ -144,7 +150,7 @@ mod tests {
     fn the_post_rebuild_disabled_check_reuses_the_disabled_message() {
         let outcome = ObservabilityFaultPolicy.on_fault(
             &fault(WriteFault::Corruption, Phase::CorruptionDisabled, false),
-            &record(),
+            &(record(), 1000),
         );
         assert_eq!(message(&outcome), Some(DISABLED_MESSAGE));
         assert!(!outcome.dispose);
@@ -153,8 +159,10 @@ mod tests {
     #[test]
     fn a_malformed_record_propagates_without_disposing() {
         for phase in [Phase::Insert, Phase::CorruptionRetry] {
-            let outcome = ObservabilityFaultPolicy
-                .on_fault(&fault(WriteFault::Malformed, phase, false), &record());
+            let outcome = ObservabilityFaultPolicy.on_fault(
+                &fault(WriteFault::Malformed, phase, false),
+                &(record(), 1000),
+            );
             assert_eq!(outcome.failure, Some(Failure::Original));
             assert!(
                 !outcome.dispose,
@@ -167,7 +175,7 @@ mod tests {
     fn a_busy_corruption_retry_keeps_the_connection() {
         let outcome = ObservabilityFaultPolicy.on_fault(
             &fault(WriteFault::Busy, Phase::CorruptionRetry, true),
-            &record(),
+            &(record(), 1000),
         );
         assert_eq!(message(&outcome), Some(BUSY_MESSAGE));
         assert!(!outcome.dispose);
@@ -177,13 +185,13 @@ mod tests {
     fn a_failed_corruption_retry_disposes_only_for_a_database_fault() {
         let outcome = ObservabilityFaultPolicy.on_fault(
             &fault(WriteFault::Database, Phase::CorruptionRetry, false),
-            &record(),
+            &(record(), 1000),
         );
         assert!(outcome.dispose);
 
         let first_attempt = ObservabilityFaultPolicy.on_fault(
             &fault(WriteFault::Database, Phase::Insert, false),
-            &record(),
+            &(record(), 1000),
         );
         assert!(
             !first_attempt.dispose,
@@ -205,7 +213,7 @@ mod tests {
                 busy: false,
                 error: Some(&err),
             },
-            &record(),
+            &(record(), 1000),
         );
         assert!(outcome.dispose);
         assert_eq!(outcome.failure, Some(Failure::Original));
@@ -213,8 +221,10 @@ mod tests {
 
     #[test]
     fn schema_drift_propagates_without_disposing() {
-        let outcome = ObservabilityFaultPolicy
-            .on_fault(&fault(WriteFault::Schema, Phase::Insert, false), &record());
+        let outcome = ObservabilityFaultPolicy.on_fault(
+            &fault(WriteFault::Schema, Phase::Insert, false),
+            &(record(), 1000),
+        );
         assert_eq!(outcome.failure, Some(Failure::Original));
         assert!(!outcome.dispose);
     }

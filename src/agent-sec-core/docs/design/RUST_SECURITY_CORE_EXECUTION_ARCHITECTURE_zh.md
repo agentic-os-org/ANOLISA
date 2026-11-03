@@ -131,8 +131,8 @@ Rust 应先构造 immutable `FinalizedInvocation`，再做三个有边界的 pro
 
 ### 4.1 ActionId 与 typed request
 
-**实现范围：** 当前 V2 `ActionId` 只有 `CodeScan`。下面八个 action 的 enum 是迁移完成后的
-目标示意，不是当前支持清单；`PromptScan`、`PiiScan` 等须随各自能力实现再加入代码。
+**实现范围：** 当前 V2 `ActionId` 包含 `CodeScan` 和 `PiiScan`。下面八个 action 的 enum
+是迁移完成后的目标示意，不是当前支持清单；其余 action 须随各自能力实现再加入代码。
 
 八个 action 使用封闭的 `ActionId`，每个 action 定义自己的 request/output 类型。adapter
 完成 transport/binding envelope 校验后，把固定 `ActionId`、context 和有大小限制的 raw
@@ -347,7 +347,9 @@ V1 client 不得自动重放执行状态不明的有副作用 action。
 
 `asc-action-runtime` 的 lifecycle 与 Finalizer 是所有扫描 capability 共用的基础设施，
 由 runtime 隐式完成终态处理，具体 capability 和 handler 不拥有 sink。
-当前 code-scan 是已接入的消费者；其 identity、telemetry 投影与 fixture 不限定公共机制的适用范围。
+当前 code-scan 与 PII scan 均已接入。PII 的共享请求类型、应用入口、安全参数拒绝及
+标量遥测复用本节机制，具体迁移与验收见 [PII 两阶段设计](PII_V2_MIGRATION_zh.md)。
+下述共享基础设施的原始验收记录保留其当时的 code-scan 范围，不代替 PII 的直接消费者验收。
 其它扫描能力在各自提交中添加 identity、Executor、投影与注册，复用本节的装配与执行路径。
 
 以下为 **[TARGET V2][PARTIAL_MIGRATION]** 的实际实现，不表示 §5.1 的完整目标状态机、
@@ -363,7 +365,8 @@ Supervisor 或 OTel 已完成。
   [Telemetry 字段与门控](telemetry-security-event-sync.md)。
 - 本切片不声明完整 SMC-012/OTel、Prompt/PII 算法、observability 查询、RPM/systemd、
   uploader 交付或断电恢复已验收。`ActionOutcome` 仍是现有五字段模型；CLI stdout 由 wire
-  result 渲染，不新增 V1 `stdout` 字段。PAP 仍使用 process-local Repository。
+  result 渲染，不新增 V1 `stdout` 字段。该基线的 PAP 使用进程内 Repository；当前已使用
+  SQLite，存储恢复证据见 [SQLite 设计](POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md)第 9 节。
 
 #### 装配与调用
 
@@ -724,7 +727,7 @@ daemon handler：
 SecurityEvent `event_id` 保留自身身份，不因采用 OTel 而取消。字段替代须记录实际消费者及关联验收。
 
 query handler 必须把客户端 filter 与服务端 `QueryScope` 求交；CLI/TUI 不得绕过该 adapter
-直读 SQLite、Compiler 或 PCP。
+直读 SQLite 或 PCP。
 
 ## 11. 推荐 module 边界
 
@@ -746,8 +749,7 @@ crates/asc-observability/           # trajectory/read model/effect evidence
 crates/asc-persistence-sqlite/
 ```
 
-ActionRuntime 依赖 executor port，不依赖具体 capability；capability 不依赖 daemon-core 或
-Policy Compiler；asc-daemon 负责注入具体 capability、Repository 和 Client。不得建立一个
+ActionRuntime 依赖 executor port，不依赖具体 capability；capability 不依赖 daemon-core；asc-daemon 负责注入具体 capability、Repository 和 Client。不得建立一个
 通用 SecurityBackend、common/services/utils 层来模糊 bounded context。
 
 ## 12. 迁移策略
@@ -777,7 +779,7 @@ Policy Compiler；asc-daemon 负责注入具体 capability、Repository 和 Clie
 
 每个 capability 工作包交付 typed request/output、CapabilityExecutor、compatibility
 projector、audit projector 和 telemetry fixture。capability 不自行实现 lifecycle、event
-writer，也不依赖 daemon-core 或 Policy Compiler。
+writer，也不依赖 daemon-core 或 PAP。
 
 ### 工作包 D：daemon protocol 与 Action Slice
 

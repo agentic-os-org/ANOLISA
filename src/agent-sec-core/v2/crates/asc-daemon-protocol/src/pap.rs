@@ -1,7 +1,7 @@
-use asc_foundation_types::{ResourceId, Revision};
+use asc_foundation_types::ResourceId;
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::PolicyTemplate;
-use asc_policy_types::scope::ScopeSelector;
+use asc_policy_types::scope::{PolicyReference, ScopeSelector};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Create one Policy with a server-generated identity.
@@ -30,56 +30,15 @@ pub struct UpdatePolicyParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateScopeParams {
-    /// Authored selector with a positive PID or cgroup ID.
+    /// Authored process selection; unsupported selectors are rejected at admission.
     #[serde(
         deserialize_with = "deserialize_authored_selector",
         serialize_with = "serialize_authored_selector"
     )]
     pub selector: ScopeSelector,
-}
-
-/// Update one existing Scope identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UpdateScopeParams {
-    /// Existing Scope identity.
-    pub scope_id: ResourceId,
-    /// Authored selector with a positive PID or cgroup ID.
-    #[serde(
-        deserialize_with = "deserialize_authored_selector",
-        serialize_with = "serialize_authored_selector"
-    )]
-    pub selector: ScopeSelector,
-}
-
-/// Create one Binding Apply intent with a server-generated identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateBindingParams {
-    /// Exact Policy identity.
-    pub policy_id: ResourceId,
-    /// Exact current Policy revision.
-    pub policy_revision: Revision,
-    /// Exact Scope identity.
-    pub scope_id: ResourceId,
-    /// Exact current Scope revision.
-    pub scope_revision: Revision,
-}
-
-/// Update one existing Binding and request Apply.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UpdateBindingParams {
-    /// Existing Binding identity.
-    pub binding_id: ResourceId,
-    /// Exact Policy identity.
-    pub policy_id: ResourceId,
-    /// Exact current Policy revision.
-    pub policy_revision: Revision,
-    /// Exact Scope identity.
-    pub scope_id: ResourceId,
-    /// Exact current Scope revision.
-    pub scope_revision: Revision,
+    /// Exact policies assigned to every Scope; admission requires 1–32 distinct IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_templates: Vec<PolicyReference>,
 }
 
 fn deserialize_authored_selector<'de, D>(deserializer: D) -> Result<ScopeSelector, D::Error>

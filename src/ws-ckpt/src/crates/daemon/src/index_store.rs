@@ -1,3 +1,4 @@
+use crate::backends::btrfs_identity::{subvolume_lineage, SubvolumeLineage};
 use anyhow::Context;
 use std::path::Path;
 use ws_ckpt_common::{SnapshotIndex, INDEX_FILE};
@@ -91,6 +92,77 @@ pub(crate) async fn reconcile_from_fs(
     Ok(changed)
 }
 
+/// Restore a stale rollback head from live lineage without undoing later checkpoints.
+pub(crate) fn reconcile_live_head(
+    live: &Path,
+    snapshots: &Path,
+    index: &mut SnapshotIndex,
+) -> anyhow::Result<bool> {
+    reconcile_live_head_with(live, snapshots, index, subvolume_lineage)
+}
+
+fn reconcile_live_head_with(
+    live: &Path,
+    snapshots: &Path,
+    index: &mut SnapshotIndex,
+    read: impl Fn(&Path) -> anyhow::Result<SubvolumeLineage>,
+) -> anyhow::Result<bool> {
+    let Some(head) = index.head.as_ref() else {
+        return Ok(false);
+    };
+    if index.snapshots.get(head).is_none_or(|meta| meta.missing) {
+        return Ok(false);
+    }
+    let live = match read(live) {
+        Ok(lineage) => lineage,
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            tracing::debug!("Live workspace {live:?} is missing; skipping index head check");
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
+    let Some(source) = live.parent_uuid else {
+        return Ok(false);
+    };
+    let mut target = None;
+    for (id, meta) in &index.snapshots {
+        if meta.missing {
+            continue;
+        }
+        crate::backends::btrfs_common::ensure_snapshot_id_is_single_component(id)?;
+        let snapshot = read(&snapshots.join(id))?;
+        if (id == head && snapshot.uuid == source) || snapshot.parent_uuid == Some(live.uuid) {
+            return Ok(false);
+        }
+        if snapshot.uuid == source {
+            anyhow::ensure!(
+                target.is_none(),
+                "multiple snapshots match the live source UUID"
+            );
+            target = Some(id.clone());
+        }
+    }
+    let Some(target) = target else {
+        tracing::debug!(
+            "Cannot locate the live source snapshot; leaving index head {head} unchanged"
+        );
+        return Ok(false);
+    };
+    tracing::warn!("Restoring stale index head {head} -> {target}, the live workspace source");
+    for (id, meta) in &mut index.snapshots {
+        meta.child_ids
+            .retain(|child| child != ws_ckpt_common::LIVE_CHILD);
+        if id == &target {
+            meta.child_ids.push(ws_ckpt_common::LIVE_CHILD.into());
+        }
+    }
+    index.head = Some(target);
+    Ok(true)
+}
+
 /// Rebuild a SnapshotIndex from the filesystem directory structure.
 /// Directory names are snapshot IDs, including hidden names and `index.json`.
 pub async fn rebuild_from_fs(
@@ -157,6 +229,83 @@ mod tests {
         assert!(index.snapshots.is_empty());
         assert!(index.head.is_none());
         assert!(!reconcile_from_fs(&snapshots, &mut index).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn live_head_recovery_matrix() {
+        // Head, live source, missing source, later checkpoint, expected head.
+        for (head, source, missing, checkpoint, expected) in [
+            ("s2", Some(11), false, false, "s1"), // Rollback index not saved
+            ("s1", Some(11), false, false, "s1"), // Rollback index saved
+            ("s3", Some(11), false, true, "s3"),  // Later checkpoint
+            ("s2", Some(11), false, true, "s2"),  // Cleanup moved head to an ancestor
+            ("s2", None, false, false, "s2"),     // Live has no source
+            ("s2", Some(99), false, false, "s2"), // No matching source
+            ("s2", Some(11), true, false, "s2"),  // Source snapshot deleted
+        ] {
+            let dir = tempdir().unwrap();
+            for id in ["s1", "s2", "s3"]
+                .into_iter()
+                .filter(|id| *id != "s3" || checkpoint)
+            {
+                std::fs::create_dir(dir.path().join(id)).unwrap();
+            }
+            let mut index = rebuild_from_fs(dir.path(), PathBuf::from("/ws"))
+                .await
+                .unwrap();
+            index.head = Some(head.into());
+            index
+                .snapshots
+                .get_mut(head)
+                .unwrap()
+                .child_ids
+                .push(ws_ckpt_common::LIVE_CHILD.into());
+            index.snapshots.get_mut("s1").unwrap().missing = missing;
+            let original = serde_json::to_value(&index).unwrap();
+            let read = |path: &Path| {
+                let (uuid, parent) = match path.file_name().unwrap().to_str().unwrap() {
+                    "live" => (3, source),
+                    "s1" => (11, Some(1)),
+                    "s2" => (12, Some(1)),
+                    "s3" => (13, Some(3)),
+                    _ => anyhow::bail!("unexpected path"),
+                };
+                Ok(SubvolumeLineage {
+                    uuid: [uuid; 16],
+                    parent_uuid: parent.map(|p| [p; 16]),
+                })
+            };
+            let moved =
+                reconcile_live_head_with(Path::new("/live"), dir.path(), &mut index, read).unwrap();
+            assert_eq!(moved, head != expected);
+            assert_eq!(index.head.as_deref(), Some(expected));
+            if moved {
+                assert_eq!(
+                    index.snapshots[expected].child_ids,
+                    [ws_ckpt_common::LIVE_CHILD]
+                );
+                assert!(index.snapshots[head].child_ids.is_empty());
+            } else {
+                assert_eq!(serde_json::to_value(&index).unwrap(), original);
+            }
+            let original = serde_json::to_value(&index).unwrap();
+            for kind in [
+                std::io::ErrorKind::NotFound,
+                std::io::ErrorKind::PermissionDenied,
+                std::io::ErrorKind::Other,
+            ] {
+                let result =
+                    reconcile_live_head_with(Path::new("/live"), dir.path(), &mut index, |_| {
+                        Err(std::io::Error::new(kind, "read failure")).context("read live lineage")
+                    });
+                if kind == std::io::ErrorKind::NotFound {
+                    assert!(!result.unwrap());
+                } else {
+                    assert!(result.is_err());
+                }
+                assert_eq!(serde_json::to_value(&index).unwrap(), original);
+            }
+        }
     }
 
     #[tokio::test]

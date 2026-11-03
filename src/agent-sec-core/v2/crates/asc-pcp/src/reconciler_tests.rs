@@ -1,5 +1,5 @@
 use super::*;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::binding::BindingView;
 
 #[test]
@@ -11,7 +11,7 @@ fn invalid_outcome_transitions_return_invalid_without_producing_a_write() {
         }
     }
     let core = BindingReconciler::new(
-        Arc::new(ProcessLocalPapRepository::default()),
+        Arc::new(SqlitePolicyRepository::temporary().unwrap()),
         Arc::new(|_: &asc_policy_types::binding::PreparedBinding| {
             panic!("outcome validation must not call the adapter")
         }),
@@ -39,6 +39,7 @@ fn invalid_outcome_transitions_return_invalid_without_producing_a_write() {
         BindingStatus::Deleted,
     ] {
         let record = ReconcileRecord {
+            status_version: 1,
             binding: BindingView {
                 spec: serde_json::from_str(include_str!(
                     "../../asc-policy-types/tests/fixtures/prepared-binding.json"

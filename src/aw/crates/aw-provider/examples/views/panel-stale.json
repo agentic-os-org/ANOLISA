@@ -1,0 +1,74 @@
+{
+  "api_version": "aw-panel/v1alpha1",
+  "generated_at_ms": 1000,
+  "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "service": {
+    "state": "unavailable",
+    "generation": null,
+    "audit_healthy": null,
+    "adoption": "unverified",
+    "code": "identity_mismatch"
+  },
+  "providers": [
+    {
+      "id": "tokenless-main",
+      "implementation": "tokenless",
+      "version": null,
+      "configured": true,
+      "enabled": true,
+      "admission": "unknown",
+      "native_readiness": "unknown",
+      "capabilities": [
+        "health.summary",
+        "metrics.summary"
+      ],
+      "views": {
+        "health.summary": {
+          "status": "ok",
+          "observed_at_ms": 1000,
+          "code": null,
+          "data": {
+            "configured": true,
+            "enabled": true,
+            "admission": "unknown",
+            "native_readiness": "unknown",
+            "backend_liveness": "unknown"
+          }
+        },
+        "metrics.summary": {
+          "status": "ok",
+          "observed_at_ms": 1000,
+          "code": null,
+          "data": {
+            "records": 12,
+            "before_tokens_estimated": 10000,
+            "after_tokens_estimated": 6500,
+            "saved_tokens_estimated": 3500,
+            "saved_percent": 35.0,
+            "scope": "component_store_recent_records",
+            "requested_limit": 200,
+            "range_start": null,
+            "range_end": null,
+            "recording_state": "unknown",
+            "adoption": "unverified",
+            "by_operation": {
+              "compress-response": {
+                "records": 12,
+                "before_tokens_estimated": 10000,
+                "after_tokens_estimated": 6500,
+                "saved_tokens_estimated": 3500,
+                "saved_percent": 35.0
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "recent_execution": {
+    "status": "stale",
+    "observed_at_ms": 1000,
+    "code": "identity_mismatch",
+    "data": null
+  }
+}

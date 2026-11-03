@@ -1,0 +1,690 @@
+use aw_config::{Error, Validator, MAX_DEPTH, MAX_DOCUMENT_BYTES, SCHEMA};
+use serde_json::{json, Value};
+use std::sync::LazyLock;
+
+static VALIDATOR: LazyLock<Validator> = LazyLock::new(|| Validator::new().unwrap());
+const EXAMPLE: &str = include_str!("../examples/aw.yaml");
+
+fn example() -> Value {
+    VALIDATOR
+        .parse(EXAMPLE.as_bytes())
+        .unwrap()
+        .as_value()
+        .clone()
+}
+
+fn parse(value: &Value) -> Result<aw_config::Configuration, Error> {
+    VALIDATOR.parse(&serde_json::to_vec(value).unwrap())
+}
+
+#[test]
+fn agent_shutdown_grace_accepts_bounded_integer_values_without_inserting_defaults() {
+    let mut value = example();
+    let path = "/spec/agents/qoder/shutdown_grace_ms";
+    assert!(parse(&value).unwrap().as_value().pointer(path).is_none());
+    for literal in ["1", "2000", "120000", "3000.0", "3e3"] {
+        let grace: Value = serde_json::from_str(literal).unwrap();
+        value["spec"]["agents"]["qoder"]["shutdown_grace_ms"] = grace.clone();
+        let configuration = parse(&value).unwrap();
+        assert_eq!(configuration.as_value().pointer(path), Some(&grace));
+    }
+}
+
+#[test]
+fn agent_shutdown_grace_rejects_invalid_bounds_and_types() {
+    for grace in [
+        json!(0),
+        json!(-1),
+        json!(0.5),
+        json!(2000.5),
+        json!(120001),
+        json!("2000"),
+        json!(true),
+        json!(null),
+    ] {
+        let mut value = example();
+        value["spec"]["agents"]["qoder"]["shutdown_grace_ms"] = grace;
+        assert!(matches!(
+            parse(&value),
+            Err(Error::Shape { path, .. })
+                if path == "/spec/agents/qoder/shutdown_grace_ms"
+        ));
+    }
+}
+
+#[test]
+fn starter_example_needs_no_policy_program_and_requests_only_tool_events() {
+    let configuration = VALIDATOR
+        .parse(include_bytes!("../examples/aw.minimal.yaml"))
+        .unwrap();
+    let spec = &configuration.as_value()["spec"];
+    assert_eq!(spec["providers"], json!({}));
+    let events = spec["events"].as_object().unwrap();
+    assert_eq!(events.len(), 2);
+    for name in ["tool.before", "tool.after"] {
+        assert_eq!(events[name]["enabled"], true);
+        assert_eq!(events[name]["required"], true);
+        assert_eq!(events[name]["steps"], json!([]));
+        assert!(events[name].get("guard").is_none());
+    }
+}
+
+#[test]
+fn one_configuration_covers_declared_adapters_and_sixteen_event_names() {
+    let mut value = example();
+    for adapter in [
+        "qwenpaw",
+        "qoder",
+        "qoder-sdk",
+        "openclaw",
+        "hermes",
+        "pi",
+        "claude-sdk",
+        "agentscope",
+    ] {
+        value["spec"]["agents"][adapter] = json!({
+            "adapter": adapter,
+            "argv": ["/nonexistent/agent", "--argument", ""]
+        });
+    }
+    let configuration = parse(&value).unwrap();
+    assert_eq!(configuration.as_value(), &value);
+    assert_eq!(value["spec"]["events"].as_object().unwrap().len(), 16);
+    // Configuration acceptance cannot depend on programs existing or running.
+    let events = value["spec"]["events"].as_object().unwrap();
+    let schema: Value = serde_json::from_str(SCHEMA).unwrap();
+    let allowed = schema["properties"]["spec"]["properties"]["events"]["properties"]
+        .as_object()
+        .unwrap();
+    assert_eq!(
+        events.keys().collect::<Vec<_>>(),
+        allowed.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn optional_view_registration_is_separate_from_event_configuration_and_effects() {
+    let mut value = example();
+    let before = value["spec"]["events"].clone();
+    value["spec"]["providers"]["security"]["view"] = json!({
+        "protocol":"aw-provider-view/v1alpha1","implementation":"security",
+        "transport":{"type":"stdio","location":"agent","argv":["/view-only", "--literal"]}});
+    assert_eq!(parse(&value).unwrap().as_value()["spec"]["events"], before);
+    for (pointer, replacement) in [
+        ("/protocol", json!("aw-provider/v1alpha1")),
+        ("/transport/argv/0", json!("relative-view")),
+        ("/transport/location", json!("daemon")),
+        ("/implementation", json!("not/a/name")),
+    ] {
+        let mut bad = value.clone();
+        *bad["spec"]["providers"]["security"]["view"]
+            .pointer_mut(pointer)
+            .unwrap() = replacement;
+        assert!(parse(&bad).is_err(), "{pointer}");
+    }
+    value["spec"]["providers"]["security"]["view"]["command"] = json!("not allowed");
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn opaque_provider_config_preserves_json_values_without_wire_canonical_restrictions() {
+    let mut value = example();
+    value["spec"]["providers"]["business"]["config"] = json!({
+        "threshold": 0.75, "标签": "平台", "options": [true, null, {"unicode": "🦀"}]
+    });
+    assert_eq!(parse(&value).unwrap().as_value(), &value);
+    let yaml = serde_yaml_ng::to_string(&value).unwrap();
+    assert_eq!(VALIDATOR.parse(yaml.as_bytes()).unwrap().as_value(), &value);
+}
+
+#[test]
+fn unknown_public_fields_versions_targets_and_types_fail() {
+    for pointer in [
+        "",
+        "/metadata",
+        "/spec",
+        "/spec/daemon",
+        "/spec/execution",
+        "/spec/audit",
+        "/spec/agents/qoder",
+        "/spec/providers/security",
+        "/spec/providers/security/transport",
+        "/spec/events/tool.before",
+        "/spec/events/tool.before/match",
+        "/spec/events/tool.before/steps/0",
+    ] {
+        let mut value = example();
+        value.pointer_mut(pointer).unwrap()["unknown"] = json!(true);
+        assert!(
+            matches!(parse(&value), Err(Error::Shape { .. })),
+            "{pointer}"
+        );
+    }
+    for (pointer, replacement) in [
+        ("/apiVersion", json!("aw/v99")),
+        ("/kind", json!("Policy")),
+        ("/spec/agents/qoder/adapter", json!("qwen-code")),
+        ("/spec/agents/qoder/argv", json!([])),
+        ("/spec/agents/qoder/argv", json!([""])),
+        ("/spec/agents/qoder/argv", json!(["qoder\u{0000}cli"])),
+        (
+            "/spec/providers/security/transport",
+            json!({"type": "http", "url": "https://example.invalid"}),
+        ),
+        ("/spec/providers/security/protocol", json!("unknown/v1")),
+        ("/spec/providers/security/timeout_ms", json!(0)),
+        ("/spec/providers/security/max_output_bytes", json!(-1)),
+        ("/spec/providers/security/config", json!([])),
+        ("/spec/execution/default_event_budget_ms", json!("5000")),
+        ("/spec/execution/guarantee", json!("protected")),
+        ("/spec/audit/enabled", json!(false)),
+        ("/spec/audit/payload", json!("raw")),
+        ("/spec/events/tool.before/enabled", json!("true")),
+        ("/spec/events/tool.before/steps/0/effects", json!(["allow"])),
+    ] {
+        let mut value = example();
+        *value.pointer_mut(pointer).unwrap() = replacement;
+        assert!(
+            matches!(parse(&value), Err(Error::Shape { .. })),
+            "{pointer}"
+        );
+    }
+    let mut value = example();
+    value["status"] = json!({"Ready": true});
+    assert!(parse(&value).is_err());
+    value = example();
+    value["spec"]["events"]["tool.befor"] = json!({"enabled": true, "steps": []});
+    assert!(parse(&value).is_err());
+    value = example();
+    let version = value.as_object_mut().unwrap().remove("apiVersion").unwrap();
+    value["api_version"] = version;
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn references_and_duplicate_step_ids_are_checked_even_in_disabled_steps() {
+    let mut value = example();
+    value["spec"]["events"]["tool.after"]["steps"][1]["provider"] = json!("missing");
+    let error = parse(&value).err().unwrap().to_string();
+    assert!(error.contains("/spec/events/tool.after/steps/1/provider"));
+    assert!(error.contains("unknown Provider"));
+    value = example();
+    let step = value["spec"]["events"]["tool.before"]["steps"][0].clone();
+    value["spec"]["events"]["tool.before"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(step);
+    assert!(parse(&value)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("duplicate step ID"));
+}
+
+#[test]
+fn final_guard_must_be_linked_enabled_and_read_only() {
+    let mut value = example();
+    value["spec"]["events"]["security.violation"]["enabled"] = json!(false);
+    value["spec"]["events"]["security.violation"]["required"] = json!(false);
+    assert!(parse(&value).is_err());
+    value = example();
+    value["spec"]["events"]
+        .as_object_mut()
+        .unwrap()
+        .remove("security.violation");
+    assert!(parse(&value).is_err());
+    value = example();
+    value["spec"]["events"]["tool.before"]
+        .as_object_mut()
+        .unwrap()
+        .remove("guard");
+    assert!(parse(&value).is_err());
+    value = example();
+    value["spec"]["events"]["security.violation"]["steps"][0]["effects"] = json!(["replace_input"]);
+    assert!(parse(&value).is_err());
+    value = example();
+    value["spec"]["events"]["tool.after"]["guard"] = json!("security.violation");
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn actions_respect_event_timing_and_active_ask_is_rejected() {
+    for (event, field, replacement) in [
+        ("tool.before", "effects", json!(["replace_result"])),
+        ("tool.after", "effects", json!(["block"])),
+        ("tool.before", "on_error", json!("withhold_result")),
+        ("tool.after", "on_error", json!("block")),
+        ("tool.before", "effects", json!(["ask"])),
+    ] {
+        let mut value = example();
+        value["spec"]["events"][event]["steps"][0][field] = replacement;
+        assert!(parse(&value).is_err(), "{event}/{field}");
+    }
+    let mut value = example();
+    value["spec"]["events"]["tool.before"]["steps"][0]["effects"] = json!(["ask"]);
+    value["spec"]["events"]["tool.before"]["steps"][0]["enabled"] = json!(false);
+    assert!(parse(&value).is_ok());
+    value = example();
+    value["spec"]["events"]["session.start"]["steps"] = json!([{
+        "id":"control", "provider":"business", "operation":"start",
+        "effects":["block"], "on_error":"report"
+    }]);
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn exact_native_selectors_cover_custom_tools_without_regex_semantics() {
+    for tools in [
+        json!(["*"]),
+        json!(["bash", "file_read", "file_write"]),
+        json!([
+            "native:qwenpaw:custom",
+            "native:agentscope:custom",
+            "native:qoder:mcp__read",
+            "native:hermes:tool",
+            "native:openclaw:exec"
+        ]),
+    ] {
+        let mut value = example();
+        for adapter in ["qwenpaw", "agentscope", "hermes", "openclaw"] {
+            value["spec"]["agents"][adapter] = json!({"adapter":adapter,"argv":["/bin/true"]});
+        }
+        value["spec"]["events"]["tool.before"]["match"]["tools"] = tools;
+        assert!(parse(&value).is_ok());
+    }
+    for tools in [
+        json!([]),
+        json!(["*", "bash"]),
+        json!(["bash", "bash"]),
+        json!(["Bash"]),
+        json!(["native:qoder:"]),
+        json!(["native:unknown:exec"]),
+        json!(["native:qoder:foo*"]),
+        json!(["native:qoder:bad\nname"]),
+    ] {
+        let mut value = example();
+        value["spec"]["events"]["tool.before"]["match"]["tools"] = tools;
+        assert!(parse(&value).is_err());
+    }
+}
+
+#[test]
+fn disabled_or_omitted_events_do_not_claim_support_and_defaults_stay_omitted() {
+    let mut value = example();
+    value["spec"]["events"] = json!({"tool.before": {"enabled": true, "steps": []}});
+    value["spec"]["providers"] = json!({});
+    assert_eq!(parse(&value).unwrap().as_value(), &value);
+    value["spec"]["events"]["tool.before"]["enabled"] = json!(false);
+    value["spec"]["events"]["tool.before"]["required"] = json!(true);
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn yaml_rejects_duplicate_keys_tags_merge_keys_non_string_keys_and_multiple_documents() {
+    for input in [
+        "key: 1\nkey: 2",
+        "config: {a: 1, a: 2}",
+        r#"{"config":{"a":1,"a":2}}"#,
+        "key: !custom 1",
+        "key: {<<: {a: 1}}",
+        "key: {1: value}",
+        "key: {true: value}",
+        "key: {[a]: value}",
+        "key: .nan",
+        "key: .inf",
+        "key: 1\n---\nkey: 2",
+        "key: 1\n---",
+        "key: [unterminated",
+    ] {
+        assert!(
+            matches!(
+                VALIDATOR.parse(input.as_bytes()),
+                Err(Error::Document { .. })
+            ),
+            "{input}"
+        );
+    }
+    let input = EXAMPLE.replace(
+        "project: platform",
+        "project: platform\n        project: duplicate",
+    );
+    assert!(VALIDATOR
+        .parse(input.as_bytes())
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("duplicate mapping key"));
+}
+
+#[test]
+fn errors_locate_invalid_fields_without_echoing_secret_values() {
+    let mut value = example();
+    value["spec"]["providers"]["security"]["timeout_ms"] = json!("sensitive-value-123");
+    let error = parse(&value).err().unwrap();
+    assert!(error
+        .to_string()
+        .contains("/spec/providers/security/timeout_ms"));
+    assert!(!format!("{error:?} {error}").contains("sensitive-value-123"));
+    let error = VALIDATOR
+        .parse(b"key: !custom sensitive-value-123")
+        .err()
+        .unwrap();
+    assert!(!format!("{error:?} {error}").contains("sensitive-value-123"));
+}
+
+#[test]
+fn document_depth_size_and_alias_expansion_are_bounded() {
+    assert!(matches!(
+        VALIDATOR.parse(&[0xff, 0xfe, b'a', 0]),
+        Err(Error::Document { .. })
+    ));
+    let deep = format!(
+        "{}0{}",
+        "[".repeat(MAX_DEPTH + 2),
+        "]".repeat(MAX_DEPTH + 2)
+    );
+    assert!(matches!(
+        VALIDATOR.parse(deep.as_bytes()),
+        Err(Error::Document { .. })
+    ));
+    assert!(matches!(
+        VALIDATOR.parse(&vec![b' '; MAX_DOCUMENT_BYTES + 1]),
+        Err(Error::Document { .. })
+    ));
+    let expanded = format!(
+        "a: &a {}\nb: [{}]\n",
+        "x".repeat(4096),
+        vec!["*a"; 1100].join(",")
+    );
+    assert!(matches!(
+        VALIDATOR.parse(expanded.as_bytes()),
+        Err(Error::Document { .. })
+    ));
+    assert!(matches!(
+        VALIDATOR.parse(b"a: &a [*a]"),
+        Err(Error::Document { .. })
+    ));
+}
+
+#[test]
+fn native_hook_steps_are_explicit_and_cannot_claim_provider_effects() {
+    let mut value = example();
+    value["spec"]["providers"]["raw"] = json!({
+        "protocol": "native-hook/v1alpha1", "config": {}, "timeout_ms": 1000,
+        "max_output_bytes": 4096,
+        "transport": {"type": "stdio", "location": "agent", "argv": ["/bin/cat"]}
+    });
+    value["spec"]["events"]["tool.before"]["steps"] = json!([
+        {"id": "raw", "provider": "raw", "native": {}, "on_error": "block"}
+    ]);
+    parse(&value).unwrap();
+    for (pointer, replacement) in [
+        ("/spec/providers/raw/config", json!({"ignored": true})),
+        (
+            "/spec/providers/raw/protocol",
+            json!("aw-provider/v1alpha1"),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/native",
+            json!({"ignored": true}),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/on_error",
+            json!("withhold_result"),
+        ),
+    ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(parse(&invalid).is_err(), "{pointer}");
+    }
+    for (field, replacement) in [("operation", json!("fake")), ("effects", json!(["block"]))] {
+        let mut invalid = value.clone();
+        invalid["spec"]["events"]["tool.before"]["steps"][0][field] = replacement;
+        assert!(parse(&invalid).is_err(), "{field}");
+    }
+    value["spec"]["events"]["tool.after"]["steps"] =
+        value["spec"]["events"]["tool.before"]["steps"].clone();
+    assert!(parse(&value).is_err());
+    value["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("report");
+    parse(&value).unwrap();
+}
+
+#[test]
+fn boolean_hooks_default_to_invoke_without_inserting_defaults() {
+    let mut value = example();
+    value["spec"]["providers"]["boolean"] = json!({
+        "transport":{"type":"stdio","location":"agent","argv":["/not-executed"]},
+        "timeout_ms":1000,"max_output_bytes":32
+    });
+    value["spec"]["events"]["tool.before"]["steps"] = json!([
+        {"id":"match","provider":"boolean","effects":["block"],"on_error":"block"}
+    ]);
+    assert_eq!(parse(&value).unwrap().as_value(), &value);
+    let yaml = serde_yaml_ng::to_string(&value).unwrap();
+    assert_eq!(VALIDATOR.parse(yaml.as_bytes()).unwrap().as_value(), &value);
+    value["spec"]["providers"]["boolean"]["protocol"] = json!(aw_config::HOOK_PROTOCOL);
+    value["spec"]["providers"]["boolean"]["config"] = json!({});
+    value["spec"]["events"]["tool.before"]["steps"][0]["operation"] = json!("invoke");
+    value["spec"]["events"]["tool.before"]["steps"][0]["reason_code"] =
+        json!("parameter_contains_12345");
+    parse(&value).unwrap();
+    for (pointer, replacement) in [
+        (
+            "/spec/providers/boolean/protocol",
+            json!("aw-provider/v1alpha1"),
+        ),
+        ("/spec/providers/boolean/config", json!({"unused":true})),
+        (
+            "/spec/events/tool.before/steps/0/operation",
+            json!("check_12345"),
+        ),
+        (
+            "/spec/events/tool.before/steps/0/reason_code",
+            json!("invalid reason"),
+        ),
+    ] {
+        let mut invalid = value.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(parse(&invalid).is_err(), "{pointer}");
+    }
+    let provider = value["spec"]["providers"]["boolean"]
+        .as_object_mut()
+        .unwrap();
+    provider.remove("protocol");
+    provider.remove("config");
+    value["spec"]["events"]["tool.before"]["steps"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("operation");
+    parse(&value).unwrap();
+    value["spec"]["providers"]["boolean"]["protocol"] = json!("aw-provider/v1alpha1");
+    value["spec"]["providers"]["boolean"]["config"] = json!({});
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn native_qoder_scheduling_is_an_explicit_adapter_setting() {
+    let mut value = example();
+    value["spec"]["agents"]["qoder"]["qoder"] = json!({"sequential": true});
+    parse(&value).unwrap();
+    value["spec"]["agents"]["qoder"]["qoder"]["sequential"] = json!(false);
+    parse(&value).unwrap();
+    value["spec"]["agents"]["qoder"]["adapter"] = json!("openclaw");
+    assert!(parse(&value).is_err());
+    value["spec"]["agents"]["qoder"]["adapter"] = json!("qoder");
+    value["spec"]["agents"]["qoder"]["qoder"]["unknown"] = json!(true);
+    assert!(parse(&value).is_err());
+}
+
+#[test]
+fn json_documents_parse_equivalently_across_layouts_and_number_spellings() {
+    let yaml = VALIDATOR
+        .parse(include_bytes!("../examples/aw.minimal.yaml"))
+        .unwrap();
+    let fixture = include_str!("../examples/aw.minimal.json");
+    assert_eq!(
+        VALIDATOR.parse(fixture.as_bytes()).unwrap().as_value(),
+        yaml.as_value()
+    );
+    // Compact, pretty and tab-indented spellings are the same document; the
+    // fixture keeps no double spaces inside string values.
+    for layout in [
+        serde_json::to_string(yaml.as_value()).unwrap(),
+        serde_json::to_string_pretty(yaml.as_value()).unwrap(),
+        fixture.replace("  ", "\t"),
+    ] {
+        assert_eq!(
+            VALIDATOR.parse(layout.as_bytes()).unwrap().as_value(),
+            yaml.as_value(),
+            "{layout}"
+        );
+    }
+    // A JSON exponent resolves through YAML scalar rules: the budget arrives
+    // as float-typed 1000.0, which the schema's integer type accepts.
+    let exponent = fixture.replace(
+        "\"default_event_budget_ms\": 5000",
+        "\"default_event_budget_ms\": 1e3",
+    );
+    let parsed = VALIDATOR.parse(exponent.as_bytes()).unwrap();
+    let budget = &parsed.as_value()["spec"]["execution"]["default_event_budget_ms"];
+    assert_eq!(budget.as_f64(), Some(1000.0));
+    assert!(budget.as_i64().is_none());
+}
+
+#[test]
+fn unrepresentable_integer_scalars_cannot_become_rounded_floats() {
+    for literal in [
+        "340282366920938463463374607431768211456",
+        "10000000000000000000000000000000000000000",
+        "-170141183460469231731687303715884105729",
+        "+340282366920938463463374607431768211456",
+    ] {
+        for scalar in [
+            literal.to_owned(),
+            format!("&wide {literal}"),
+            format!("[&wide {literal}, *wide]"),
+            format!("{{source: &wide {literal}, copy: *wide}}"),
+            format!("!!float {literal}"),
+        ] {
+            let input = EXAMPLE.replace("project: platform", &format!("project: {scalar}"));
+            let error = VALIDATOR
+                .parse(input.as_bytes())
+                .err()
+                .expect("wide integer accepted");
+            assert!(
+                matches!(
+                    error,
+                    Error::Document {
+                        reason: "integer is outside the supported range",
+                        line: Some(_),
+                        column: Some(_),
+                    }
+                ),
+                "{scalar}: {error}"
+            );
+            if scalar == literal {
+                let (line, source) = input
+                    .lines()
+                    .enumerate()
+                    .find(|(_, line)| line.contains(literal))
+                    .unwrap();
+                assert!(
+                    matches!(error, Error::Document { line: Some(actual_line), column: Some(column), .. }
+                    if actual_line == line + 1 && column == source.find(literal).unwrap() + 1)
+                );
+            }
+        }
+        let input = EXAMPLE.replace(
+            "project: platform",
+            &format!("note: can't\n        project: {literal}"),
+        );
+        assert!(matches!(
+            VALIDATOR.parse(input.as_bytes()),
+            Err(Error::Document { .. })
+        ));
+        let mut value = example();
+        value["spec"]["providers"]["business"]["config"]["project"] = json!("WIDE_INTEGER");
+        let input = serde_json::to_string(&value)
+            .unwrap()
+            .replace("\"WIDE_INTEGER\"", literal);
+        assert!(matches!(
+            VALIDATOR.parse(input.as_bytes()),
+            Err(Error::Document { .. })
+        ));
+    }
+}
+
+#[test]
+fn yaml_scalar_context_preserves_strings_and_explicit_float_spellings() {
+    const WIDE: &str = "10000000000000000000000000000000000000000";
+    for scalar in [
+        format!("'{WIDE}'"),
+        format!("\"{WIDE}\""),
+        format!("id{WIDE}"),
+        format!("|\n          {WIDE}"),
+        format!(">-\n          {WIDE}"),
+        format!("[&text '{WIDE}', *text]"),
+        format!("{{nested: '{WIDE}', value: 1e40}}"),
+        "18446744073709551615".into(),
+        "-9223372036854775808".into(),
+        "1e300".into(),
+        "1.7976931348623157e308".into(),
+        "1.5e30".into(),
+        "10000000000000000000000000000000000000000.0".into(),
+        "[&value 1e40, *value]".into(),
+        "!!float 5".into(),
+        "!!float 340282366920938463463374607431768211455".into(),
+        "!!float -170141183460469231731687303715884105728".into(),
+    ] {
+        let input = EXAMPLE.replace(
+            "project: platform",
+            &format!("# note: {WIDE}\n        project: {scalar}\n        float: 1e40"),
+        );
+        VALIDATOR
+            .parse(input.as_bytes())
+            .unwrap_or_else(|e| panic!("{scalar}: {e}"));
+    }
+    // Alias resolution must keep the original string type, even alongside floats.
+    let input = EXAMPLE.replace(
+        "project: platform",
+        &format!("project: &text '{WIDE}'\n        copy: *text\n        float: 1e40"),
+    );
+    let value = VALIDATOR.parse(input.as_bytes()).unwrap();
+    assert_eq!(
+        value.as_value()["spec"]["providers"]["business"]["config"]["copy"],
+        WIDE
+    );
+}
+
+#[test]
+fn daemon_limits_accept_concurrent_budgets_and_reject_invalid_values() {
+    let mut value = example();
+    for field in [
+        "bindings",
+        "events",
+        "calls",
+        "connections",
+        "invocations_per_binding",
+    ] {
+        for limit in [1, 64, 4096] {
+            value["spec"]["daemon"]["limits"] = json!({field:limit});
+            parse(&value).unwrap();
+        }
+        for limit in [
+            json!(0),
+            json!(-1),
+            json!(4097),
+            json!(1.5),
+            json!("64"),
+            Value::Null,
+        ] {
+            value["spec"]["daemon"]["limits"] = json!({field:limit});
+            assert!(parse(&value).is_err());
+        }
+    }
+    value["spec"]["daemon"]["limits"] = json!({"history_calls":1024});
+    assert!(parse(&value).is_err());
+}
+
+#[path = "configuration/submission.rs"]
+mod submission;

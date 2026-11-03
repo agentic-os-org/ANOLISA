@@ -13,11 +13,18 @@ on:
       - ".github/scripts/validate-repository-metadata.py"
       - ".github/scripts/test_validate_repository_metadata.py"
       - ".github/scripts/test_package_source_paths.py"
+      - ".github/scripts/test_release_notes.py"
+      - ".github/scripts/generate_release_notes.py"
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
       - ".github/scripts/issue-triage.js"
       - ".github/scripts/issue-triage.test.js"
+      - ".github/scripts/sec-core-issue-*"
+      - ".github/scripts/issue-analysis*"
+      - ".github/issue-analysis/**"
+      - ".github/workflows/sec-core-issue-analysis.yml"
+      - ".github/workflows/issue-analysis*.yml"
       - ".github/scripts/dingtalk_notification.py"
       - ".github/scripts/test_dingtalk_notification.py"
       - ".github/workflows/ci.yaml"
@@ -38,11 +45,18 @@ on:
       - ".github/scripts/validate-repository-metadata.py"
       - ".github/scripts/test_validate_repository_metadata.py"
       - ".github/scripts/test_package_source_paths.py"
+      - ".github/scripts/test_release_notes.py"
+      - ".github/scripts/generate_release_notes.py"
       - ".github/actions/package-source/action.yaml"
       - ".github/scripts/issue-claim.js"
       - ".github/scripts/issue-claim.test.js"
       - ".github/scripts/issue-triage.js"
       - ".github/scripts/issue-triage.test.js"
+      - ".github/scripts/sec-core-issue-*"
+      - ".github/scripts/issue-analysis*"
+      - ".github/issue-analysis/**"
+      - ".github/workflows/sec-core-issue-analysis.yml"
+      - ".github/workflows/issue-analysis*.yml"
       - ".github/scripts/dingtalk_notification.py"
       - ".github/scripts/test_dingtalk_notification.py"
       - ".github/workflows/ci.yaml"
@@ -77,6 +91,9 @@ jobs:
       - name: Test source archive paths and identity
         run: python3 .github/scripts/test_package_source_paths.py
 
+      - name: Test automatic release notes
+        run: python3 -B .github/scripts/test_release_notes.py
+
   community-automation:
     name: Test community automation
     runs-on: anolisa-k8s-general-ci-x64
@@ -91,10 +108,15 @@ jobs:
         run: |
           node --check .github/scripts/issue-triage.js
           node --check .github/scripts/issue-claim.js
+          node --check .github/scripts/sec-core-issue-analysis.js
+          node --check .github/scripts/issue-analysis.js
+          node --check .github/scripts/sec-core-issue-runtime.js
 
       - name: Run state-machine regression tests
         run: |
           node --test \
             .github/scripts/issue-triage.test.js \
-            .github/scripts/issue-claim.test.js
+            .github/scripts/issue-claim.test.js \
+            .github/scripts/sec-core-issue-analysis.test.js \
+            .github/scripts/issue-analysis.test.js
           python3 .github/scripts/test_dingtalk_notification.py

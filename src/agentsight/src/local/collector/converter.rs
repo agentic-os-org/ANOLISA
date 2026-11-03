@@ -3,30 +3,86 @@
 //! Parses QoderWork/Qoder/Claude Code JSONL session files and converts them
 //! to ATIF v1.7 documents for trajectory display. These agents share a common
 //! JSONL format with event types: `runtime-config`, `user`, `assistant`.
+//! Codex rollouts use a different envelope schema and are delegated to the
+//! collector crate's Codex converter.
 //!
 //! Content blocks within messages:
 //! - `assistant` content: `thinking`, `text`, `tool_use`
 //! - `user` content: `text` (human input), `tool_result` (tool output)
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Observation, ObservationResult, Step,
-    StepSource, ToolCall,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    // Lossy decode: a session file torn mid-write by a killed agent can end
+    // in the middle of a multi-byte character, and a strict `read_to_string`
+    // would fail the whole conversion, dropping every complete record before
+    // the tail. The torn tail becomes a malformed line the parser skips.
+    let content = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
     convert_jsonl_content_to_atif(&content)
 }
 
 pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajectory> {
+    // Codex rollouts use a different envelope schema
+    // (`{"timestamp","type","payload"}` records). The collector crate already
+    // ships a converter for them, so delegate instead of emitting an empty
+    // trajectory. The substrings mirror `is_codex_rollout`'s envelope types:
+    // `response_item`/`turn_context` only occur in Codex files, while
+    // `session_meta` also catches a rollout truncated before its first turn
+    // (session_meta + user_message, listed by discovery but with no
+    // turn_context/response_item records yet). Qoder transcripts carry a
+    // bare `session_meta` line too, so `is_codex_rollout`'s payload-object
+    // check keeps them on the Claude/Qoder path.
+    if content.contains("response_item")
+        || content.contains("turn_context")
+        || content.contains("session_meta")
+    {
+        let events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
+        if agentsight_trajectory_collector::codex::is_codex_rollout(&events) {
+            return agentsight_trajectory_collector::codex::convert_codex_events(&events, "codex");
+        }
+    }
+
+    // Gemini CLI chats are an append-only record stream: a leading
+    // `{sessionId, projectHash}` metadata record, `id`-keyed message records
+    // and `$`-prefixed corrections. The substrings mirror `is_gemini_chat`'s
+    // record markers, so foreign content stays on the Claude/Qoder path.
+    if content.contains("projectHash")
+        || content.contains("$rewindTo")
+        || content.contains("$patch")
+        || content.contains("$set")
+    {
+        // A legacy document may contain individually parseable lines (for
+        // example a scalar in an array). Recognize the whole document first.
+        let events = agentsight_trajectory_collector::gemini::legacy_document(content)
+            .map(|document| vec![document])
+            .unwrap_or_else(|| agentsight_trajectory_collector::qoder::load_jsonl_events(content));
+        if agentsight_trajectory_collector::gemini::is_gemini_chat(&events) {
+            return agentsight_trajectory_collector::gemini::convert_gemini_events(
+                &events,
+                "gemini-cli",
+            );
+        }
+    }
+
+    // Codex's shared loader already consumes its BOM; normalize only this path.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
     let mut session_id = String::new();
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
     let mut agent_name = String::new();
+    let mut message_session_id = None;
+    let mut message_version = None;
+    let mut message_model = None;
     let mut steps: Vec<Step> = Vec::new();
     let mut step_id: usize = 0;
 
@@ -41,6 +97,30 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if matches!(event_type, "user" | "assistant") {
+            if message_session_id.is_none() {
+                message_session_id = event
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if message_version.is_none() {
+                message_version = event
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if event_type == "assistant" && message_model.is_none() {
+                message_model = event
+                    .pointer("/message/model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+        }
 
         match event_type {
             "runtime-config" => {
@@ -81,43 +161,46 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                 let content_arr = event.pointer("/message/content").and_then(|c| c.as_array());
 
                 if let Some(blocks) = content_arr {
-                    let is_tool_result = blocks
+                    // One user message can carry tool results and text at the
+                    // same time (typing while a tool call is pending). Both
+                    // belong to the trajectory: the results as observations on
+                    // the agent step, the text as its own user step.
+                    if blocks
                         .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
-
-                    if is_tool_result {
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    {
                         append_tool_results(&mut steps, blocks);
-                    } else {
-                        let mut message_text = String::new();
-                        for block in blocks {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                if !text.is_empty() {
-                                    if !message_text.is_empty() {
-                                        message_text.push('\n');
-                                    }
-                                    message_text.push_str(text);
+                    }
+
+                    let mut message_text = String::new();
+                    for block in blocks {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            if !text.is_empty() {
+                                if !message_text.is_empty() {
+                                    message_text.push('\n');
                                 }
+                                message_text.push_str(text);
                             }
                         }
-                        if !message_text.is_empty() {
-                            step_id += 1;
-                            steps.push(Step {
-                                step_id,
-                                timestamp,
-                                source: StepSource::User,
-                                message: message_text,
-                                model_name: None,
-                                reasoning_effort: None,
-                                reasoning_content: None,
-                                tool_calls: None,
-                                observation: None,
-                                metrics: None,
-                                extra: None,
-                                llm_call_count: None,
-                                is_copied_context: None,
-                            });
-                        }
+                    }
+                    if !message_text.is_empty() {
+                        step_id += 1;
+                        steps.push(Step {
+                            step_id,
+                            timestamp,
+                            source: StepSource::User,
+                            message: message_text,
+                            model_name: None,
+                            reasoning_effort: None,
+                            reasoning_content: None,
+                            tool_calls: None,
+                            observation: None,
+                            metrics: None,
+                            extra: None,
+                            llm_call_count: None,
+                            is_copied_context: None,
+                        });
                     }
                 } else if let Some(content_str) =
                     event.pointer("/message/content").and_then(|c| c.as_str())
@@ -151,7 +234,8 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                     .map(String::from)
                     .or_else(|| model_name.clone());
 
-                let content_arr = event.pointer("/message/content").and_then(|c| c.as_array());
+                let content = event.pointer("/message/content");
+                let content_arr = content.and_then(Value::as_array);
 
                 let mut message_text = String::new();
                 let mut reasoning = String::new();
@@ -202,6 +286,8 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                             _ => {}
                         }
                     }
+                } else if let Some(text) = content.and_then(Value::as_str) {
+                    message_text.push_str(text);
                 }
 
                 step_id += 1;
@@ -233,6 +319,17 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Claude Code records identity on messages without a runtime-config.
+    // Explicit runtime metadata retains precedence even when it arrives later.
+    if session_id.is_empty() {
+        session_id = message_session_id.unwrap_or_default();
+    }
+    if agent_version.is_empty() {
+        agent_version = message_version.unwrap_or_default();
+    }
+    if model_name.is_none() {
+        model_name = message_model;
+    }
     let total_steps = steps.len();
 
     let agent = Agent {
@@ -278,20 +375,33 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     })
 }
 
+/// Flatten a `tool_result.content` payload into result text.
+///
+/// Claude Code/Qoder emit `content` as an array of `{"type":"text","text":…}`
+/// blocks; mirror `agentsight-trajectory-collector`'s ATIF converter so the
+/// local viewer keeps the same tool output the canonical collector records.
+fn flatten_tool_result_content(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => {
+            let text_parts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| {
+                    let obj = block.as_object()?;
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        obj.get("text").and_then(|v| v.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            text_parts.join("\n")
+        }
+        other => other.to_string(),
+    }
+}
+
 fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
-    let last_agent_step = steps
-        .iter_mut()
-        .rev()
-        .find(|s| s.source == StepSource::Agent);
-    let step = match last_agent_step {
-        Some(s) => s,
-        None => return,
-    };
-
-    let observation = step.observation.get_or_insert(Observation {
-        results: Vec::new(),
-    });
-
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type != "tool_result" {
@@ -301,15 +411,63 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let content = block
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let Some(id) = source_call_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        // Prefer the original ID across the whole history before considering
+        // a unique provider echo; intervening assistant steps do not own it.
+        let exact = steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == id))
+        });
+        let owner = exact.or_else(|| {
+            let mut matched_id: Option<&str> = None;
+            let mut owner = None;
+            for (index, step) in steps.iter().enumerate() {
+                for call in step.tool_calls.iter().flatten() {
+                    if agentsight_atif::same_call_id(&call.tool_call_id, id) {
+                        if matched_id.is_some_and(|previous| previous != call.tool_call_id) {
+                            return None;
+                        }
+                        matched_id = Some(&call.tool_call_id);
+                        owner = Some(index);
+                    }
+                }
+            }
+            owner
+        });
+        let Some(step) = owner.map(|index| &mut steps[index]) else {
+            continue;
+        };
+        let observation = step.observation.get_or_insert_with(|| Observation {
+            results: Vec::new(),
+        });
+        let content = Some(Value::String(
+            block
+                .get("content")
+                .map(flatten_tool_result_content)
+                .unwrap_or_default(),
+        ));
+        let extra = if block
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Some(HashMap::from([(
+                EXTRA_IS_ERROR.to_string(),
+                Value::Bool(true),
+            )]))
+        } else {
+            None
+        };
         observation.results.push(ObservationResult {
             source_call_id,
-            content: content.map(serde_json::Value::String),
+            content,
             subagent_trajectory_ref: None,
-            extra: None,
+            extra,
         });
     }
 }
@@ -342,6 +500,129 @@ mod tests {
         assert_eq!(traj.agent.name, "my-agent");
         assert_eq!(traj.agent.version, "1.2.3");
         assert_eq!(traj.agent.model_name.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn local_bom_keeps_the_first_user_record() {
+        let content = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"marked-session\",\"message\":{\"content\":\"inspect the project\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n",
+        );
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.steps.len(), 2);
+            assert_eq!(traj.steps[0].source, StepSource::User);
+            assert_eq!(traj.steps[0].message, "inspect the project");
+            assert_eq!(traj.steps[1].source, StepSource::Agent);
+        }
+    }
+
+    #[test]
+    fn local_bom_keeps_runtime_config_metadata() {
+        let content = format!(
+            "{}\n{}\n",
+            rt_cfg("marked-config", "gpt-4o", "1.2.3", "my-agent"),
+            r#"{"type":"user","message":{"content":"hello"}}"#,
+        );
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.session_id.as_deref(), Some("marked-config"));
+            assert_eq!(traj.agent.name, "my-agent");
+            assert_eq!(traj.agent.version, "1.2.3");
+            assert_eq!(traj.agent.model_name.as_deref(), Some("gpt-4o"));
+            assert_eq!(traj.steps.len(), 1);
+        }
+    }
+
+    #[test]
+    fn local_bom_preserves_marks_outside_the_file_prefix() {
+        let content = "{\"type\":\"user\",\"message\":{\"content\":\"left\u{feff}right\"}}\n";
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.steps.len(), 1);
+            assert_eq!(traj.steps[0].message, "left\u{feff}right");
+        }
+        for content in [
+            format!("\u{feff}\u{feff}{content}"),
+            format!("\n\u{feff}{content}"),
+        ] {
+            let traj = convert_jsonl_content_to_atif(&content).unwrap();
+            assert!(
+                traj.steps.is_empty(),
+                "a mark outside the prefix remains data"
+            );
+        }
+    }
+
+    #[test]
+    fn local_bom_codex_delegation_does_not_strip_twice() {
+        let content = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"marked-codex\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"inspect the project\"}]}}\n",
+        );
+        for prefix in ["", "\u{feff}"] {
+            let traj = convert_jsonl_content_to_atif(&format!("{prefix}{content}")).unwrap();
+            assert_eq!(traj.session_id.as_deref(), Some("marked-codex"));
+            assert_eq!(traj.agent.name, "codex");
+            assert_eq!(traj.agent.version, "0.146.0");
+            assert_eq!(traj.steps[0].message, "inspect the project");
+        }
+        // Codex's shared loader owns its BOM handling; stripping before
+        // delegation would incorrectly accept a second leading mark.
+        let traj = convert_jsonl_content_to_atif(&format!("\u{feff}\u{feff}{content}")).unwrap();
+        assert_eq!(traj.session_id, None);
+    }
+
+    #[test]
+    fn gemini_chat_delegates_to_gemini_converter() {
+        // A Gemini chat record stream: id-keyed message records plus the
+        // leading partial-metadata record. The Claude-style path would see no
+        // `message`-wrapped events and emit zero steps.
+        let content = concat!(
+            "{\"sessionId\":\"g-1\",\"projectHash\":\"h\",\"startTime\":\"2026-08-03T09:00:00.000Z\"}\n",
+            "{\"id\":\"m1\",\"timestamp\":\"2026-08-03T09:00:01.000Z\",\"type\":\"user\",\"content\":\"hi\"}\n",
+            "{\"id\":\"m2\",\"timestamp\":\"2026-08-03T09:00:02.000Z\",\"type\":\"gemini\",\"content\":\"hello\"}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "gemini-cli");
+        assert_eq!(traj.session_id.as_deref(), Some("g-1"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "hi");
+        assert_eq!(traj.steps[1].source, StepSource::Agent);
+        assert_eq!(traj.steps[1].message, "hello");
+    }
+
+    #[test]
+    fn legacy_gemini_document_delegates_to_gemini_converter() {
+        // <= 0.38 wrote `JSON.stringify(conversation, null, 2)`: no line
+        // parses as JSONL, so the viewer needs the whole-file fallback.
+        let content = concat!(
+            "{\n",
+            "  \"sessionId\": \"g-legacy\",\n",
+            "  \"projectHash\": \"h\",\n",
+            "  \"messages\": [\n",
+            "    {\n",
+            "      \"id\": \"m1\",\n",
+            "      \"timestamp\": \"2026-08-03T09:00:01.000Z\",\n",
+            "      \"type\": \"user\",\n",
+            "      \"content\": \"hi\"\n",
+            "    },\n",
+            "    {\n",
+            "      \"id\": \"m2\",\n",
+            "      \"timestamp\": \"2026-08-03T09:00:02.000Z\",\n",
+            "      \"type\": \"gemini\",\n",
+            "      \"content\": \"hello\"\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "gemini-cli");
+        assert_eq!(traj.session_id.as_deref(), Some("g-legacy"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].message, "hi");
+        assert_eq!(traj.steps[1].message, "hello");
     }
 
     #[test]
@@ -389,10 +670,57 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_result_array_content_and_error_flag() {
+        // Claude Code/Qoder write `tool_result.content` as an array of text
+        // blocks and mark failures with `is_error`. Both used to be dropped,
+        // so tool output disappeared from collected trajectories and
+        // downstream failure detection saw no error.
+        let content = r#"{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"tc1","name":"bash","input":{"cmd":"false"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","is_error":true,"content":[{"type":"text","text":"command failed"},{"type":"text","text":"exit 1"}]}]}}"#;
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(
+            obs.results[0].content,
+            Some(Value::String("command failed\nexit 1".to_string())),
+            "text blocks must be flattened into the result content"
+        );
+        assert_eq!(
+            obs.results[0]
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get(agentsight_atif::EXTRA_IS_ERROR)),
+            Some(&Value::Bool(true)),
+            "is_error must be carried in the result extra"
+        );
+    }
+
+    #[test]
     fn test_tool_result_without_prior_agent_step() {
         let content = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"result"}]}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
         assert_eq!(traj.steps.len(), 0);
+    }
+
+    #[test]
+    fn test_user_text_beside_tool_result_is_kept() {
+        // A user can type while a tool call is pending; Claude Code then
+        // records one message holding both the tool results and the text.
+        let content = r#"{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"tc1","name":"ls","input":null}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","content":"file.txt"},{"type":"text","text":"keep going with plan B"}]}}"#;
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+
+        let user_steps: Vec<_> = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .collect();
+        assert_eq!(user_steps.len(), 1);
+        assert_eq!(user_steps[0].message, "keep going with plan B");
+
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("tc1"));
     }
 
     #[test]
@@ -431,12 +759,12 @@ mod tests {
     }
 
     #[test]
-    fn test_assistant_no_content_blocks() {
+    fn test_assistant_string_content() {
         let content =
             r#"{"type":"assistant","message":{"model":"m","content":"plain text reply"}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
         assert_eq!(traj.steps.len(), 1);
-        assert_eq!(traj.steps[0].message, "");
+        assert_eq!(traj.steps[0].message, "plain text reply");
         assert!(traj.steps[0].tool_calls.is_none());
         assert!(traj.steps[0].reasoning_content.is_none());
     }
@@ -459,6 +787,23 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_jsonl_file_with_torn_utf8_tail() {
+        let dir = std::env::temp_dir().join("agentsight_converter_torn_test.jsonl");
+        let mut bytes = br#"{"type":"user","message":{"content":"hello"}}"#.to_vec();
+        bytes.push(b'\n');
+        // A killed agent's last write cut a multi-byte character in half.
+        bytes.extend_from_slice(b"{\"type\":\"assistant\",\"message\":{\"content\":\"\xe4\xb8");
+        std::fs::write(&dir, bytes).unwrap();
+        let traj = convert_jsonl_to_atif(&dir).unwrap();
+        assert_eq!(
+            traj.steps.len(),
+            1,
+            "the complete record before the tail survives"
+        );
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
     fn test_runtime_config_defaults() {
         let content = r#"{"type":"runtime-config"}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
@@ -476,5 +821,69 @@ mod tests {
         );
         let traj = convert_jsonl_content_to_atif(&content).unwrap();
         assert_eq!(traj.steps[0].model_name.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_codex_rollout_delegates_to_the_codex_converter() {
+        // A Codex rollout is an envelope stream; the Claude-style loop would
+        // return an empty trajectory with agent "unknown" for it.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d\",\"cwd\":\"/Users/u/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.360Z\",\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"t-1\",\"model\":\"gpt-5.6-sol\",\"effort\":\"medium\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"list the files\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:58.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:59.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"file-a\\n\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:57:00.153Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.session_id.as_deref(), Some("019fc70d"));
+        assert_eq!(traj.agent.name, "codex");
+        assert_eq!(traj.agent.version, "0.146.0");
+        assert_eq!(traj.agent.model_name.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(traj.steps.len(), 2);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "list the files");
+        let agent_step = &traj.steps[1];
+        assert_eq!(agent_step.source, StepSource::Agent);
+        assert_eq!(agent_step.message, "done");
+        let calls = agent_step.tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].function_name, "exec");
+        let obs = agent_step.observation.as_ref().unwrap();
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_truncated_codex_rollout_still_delegates() {
+        // A rollout killed before its first turn: `session_meta` plus the
+        // user's message, no `turn_context`/`response_item` records yet. The
+        // listing still shows the session (discovery keys on
+        // event_msg/user_message), so the converter must delegate too, not
+        // fall to the Claude loop and emit an empty trajectory.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d\",\"cwd\":\"/Users/u/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"list the files\"}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "codex");
+        assert_eq!(traj.agent.version, "0.146.0");
+        assert_eq!(traj.session_id.as_deref(), Some("019fc70d"));
+        assert_eq!(traj.steps.len(), 1);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "list the files");
+    }
+
+    #[test]
+    fn test_qoder_session_meta_does_not_trigger_codex_delegation() {
+        // Qoder transcripts also carry a `session_meta` event; the Claude
+        // path must keep handling them (no payload envelope → not Codex).
+        let content = concat!(
+            "{\"type\":\"session_meta\",\"foo\":\"bar\"}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.steps.len(), 1);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "hello");
+        assert_eq!(traj.agent.name, "unknown");
     }
 }

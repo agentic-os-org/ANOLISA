@@ -71,6 +71,56 @@ legacy index writer 也至少执行 temp-file fsync、rename 和 best-effort par
 legacy checkpoint、rollback、cleanup、delete 或正常关机不会把已确认的 evidence 重写成
 未同步文件。
 
+## Guarded rollback 路径表示
+
+Guarded rollback preview 和回滚前重新计算的 diff 要求路径能够无损表示为 UTF-8。
+Btrfs dump 路径先还原转义，再校验 UTF-8。非法路径字节返回
+`UnsupportedWorkspacePath`，daemon 诊断包含 dump 操作、路径字段（例如
+`rename destination`）及原始转义 token。btrfs-progs 6.1 在被忽略的 metadata 字段中
+输出的原始非 UTF-8 字节不会导致路径解析失败。
+
+该拒绝发生在 backend rollback 之前。如果操作已预留，daemon 会先持久化清除预留记录，
+再返回拒绝；如果清除失败，仍沿用现有的不确定结果处理。Cosh 将该拒绝映射为
+`CheckpointRestoreFailed`、`recoverable = false`，并设置
+`details.guarded_rollback_rejection = "unsupported_workspace_path"`。Cosh 继续隐藏
+daemon 诊断原文，可通过 ws-ckpt diff 的诊断定位受影响路径。路径不变时，重试无法解决
+问题。不带 preview 的普通 rollback 不依赖该 diff，但也不提供 guarded diff digest 校验。
+
+`UnsupportedWorkspacePath` 在 ws-ckpt 和 cosh 的 bincode 枚举末尾追加，编号为 16，
+现有拒绝码 0–15 保持不变。应同时部署两个组件以使用此错误分类。旧版 cosh 无法解码
+新拒绝码，会以不可重试的 protocol error 安全拒绝。
+
+Legacy `Diff` 和 `RollbackPreview` 请求通过 dispatcher 保留同一类路径错误，返回
+`ErrorCode::UnsupportedWorkspacePath`。该错误码在 ws-ckpt 与 cosh 的镜像
+`WsCkptErrorCode` 中均追加为编号 13。其他未分类的 handler 错误仍使用 `InternalError`。
+CLI 输出专用错误码、操作、字段和转义路径 token；legacy cosh 调用将其映射为
+`CheckpointRestoreFailed`，并设置 `recoverable = false`。
+
+OpenClaw 和 Hermes 优先识别 `cannot be represented as UTF-8`，再匹配通用错误子串，
+保留诊断并明确提示：修复文件名之前不可重试。这也兼容将该错误标记为 `InternalError`
+的旧 daemon 诊断。Hermes 的 diff/rollback 工具 handler 在向模型返回错误之前应用
+此映射。应同时部署 daemon、CLI 和 cosh 以支持追加的 wire 错误码，旧 CLI 无法解码
+新错误码；两个插件也需要更新，才能提供明确的重试指引。
+
+## Backend 空间准入
+
+Btrfs backend 在 data 或 metadata 用量达到 95% 删除守护阈值，或无法读取用量时，拒绝
+创建新 subvolume。范围包括 checkpoint snapshot、rollback snapshot，以及 rollback
+preview 和回滚前复核使用的 diff 临时 snapshot。拒绝发生在创建任何 snapshot 或移动
+workspace 之前，因此 guarded checkpoint 与 rollback 返回 `InsufficientSpace`，而不是
+不确定结果；已预留的 rollback 会先持久化清除预留记录。清理释放空间后可重试同一请求。
+Legacy 请求遇到同一拒绝时返回已有的 `ErrorCode::DiskSpaceInsufficient`，而不是 `InternalError`。
+
+Cosh 将 `InsufficientSpace` 映射为 `CheckpointCreateFailed` 或
+`CheckpointRestoreFailed`，设置 `recoverable = true`，以及
+`details.guarded_rejection` / `details.guarded_rollback_rejection =
+"insufficient_space"`，并使用 cosh 自己的固定提示。daemon 诊断原文仍不透传，daemon
+日志中同样记录该原因。
+
+`InsufficientSpace` 在 ws-ckpt 和 cosh 的 bincode 枚举末尾追加，checkpoint 拒绝码
+编号为 12，rollback 拒绝码编号为 17。旧版 cosh 无法解码新拒绝码，会以不可重试的
+protocol error 安全拒绝。
+
 ## 兼容性与验证
 
 新 Request/Response variant 只追加在 bincode enum 末尾，所有 legacy discriminant 和

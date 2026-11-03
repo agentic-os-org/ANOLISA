@@ -8,11 +8,11 @@
 //! that the daemon scans and writes activation state through.
 //!
 //! SkillFS creates the backing root (optionally as a bind mount) before the
-//! FUSE over-mount becomes active.  When a bind mount is created, it is
-//! immediately marked `MS_PRIVATE | MS_REC` so that host mount-propagation
-//! events — most critically the in-place FUSE over-mount — are **not**
-//! propagated into the backing root.  Without this isolation the daemon
-//! would see the FUSE hidden view instead of the real source tree.
+//! FUSE over-mount becomes active. The bind is detached and made private
+//! before publication, so copies propagated to an already running daemon
+//! cannot inherit the source mount's propagation group. Making only the
+//! published local copy private would leave those remote copies vulnerable
+//! to the in-place FUSE over-mount hiding the real source tree.
 //!
 //! Daemon live-source operations — activation bootstrap, reload, watching,
 //! and N3 protocol event `skillDir` — use the backing root path. Socket notify
@@ -212,6 +212,8 @@ impl std::error::Error for BackingRootError {
 pub struct LedgerBackingRoot {
     /// The daemon-facing root path.
     path: PathBuf,
+    /// Agent-visible mount that must be released before removing its live alias.
+    mountpoint: PathBuf,
     /// Whether SkillFS created a bind mount that needs unmount on cleanup.
     created_bind_mount: bool,
     /// If SkillFS created the backing root directory, the path to remove
@@ -304,6 +306,7 @@ impl LedgerBackingRoot {
             );
             return Ok(Self {
                 path: source_canon.to_path_buf(),
+                mountpoint: mount_canon.to_path_buf(),
                 created_bind_mount: false,
                 created_temp_dir: None,
             });
@@ -372,6 +375,7 @@ impl LedgerBackingRoot {
             }
             return Ok(Self {
                 path: source_canon.to_path_buf(),
+                mountpoint: mount_canon.to_path_buf(),
                 created_bind_mount: false,
                 created_temp_dir: None,
             });
@@ -410,9 +414,18 @@ impl LedgerBackingRoot {
                         error = %e,
                         "make-private failed — unmounting and failing closed"
                     );
-                    let _ = Self::do_umount(&backing_canon);
+                    // Same hazard as cleanup: only remove the dir once the
+                    // live mount is confirmed released.
+                    let umount_ok = Self::do_umount(&backing_canon).is_ok();
                     if let Some(ref dir) = created_temp_dir {
-                        let _ = std::fs::remove_dir_all(dir);
+                        if umount_ok {
+                            let _ = std::fs::remove_dir(dir);
+                        } else {
+                            warn!(
+                                path = %dir.display(),
+                                "leaving backing root directory in place: unmount failed after make-private error"
+                            );
+                        }
                     }
                     return Err(BackingRootError::MakePrivateFailed {
                         target: backing_canon,
@@ -425,14 +438,31 @@ impl LedgerBackingRoot {
                     backing_root = %backing_canon.display(),
                     "backing root bind mount created (private, propagation isolated)"
                 );
-                // Verify identity after bind mount.
-                Self::verify_identity(source_canon, &backing_canon).inspect_err(|_| {
-                    if let Some(ref dir) = created_temp_dir {
-                        let _ = std::fs::remove_dir_all(dir);
+                // Verify identity after bind mount. The mount is live here:
+                // never remove the backing dir under it (that would recurse
+                // through the bind into the source tree). Release the mount
+                // first; if that fails, fail closed and leave both in place
+                // for operator cleanup.
+                if let Err(e) = Self::verify_identity(source_canon, &backing_canon) {
+                    match Self::do_umount(&backing_canon) {
+                        Ok(()) => {
+                            if let Some(ref dir) = created_temp_dir {
+                                let _ = std::fs::remove_dir(dir);
+                            }
+                        }
+                        Err(umount_err) => {
+                            warn!(
+                                backing_root = %backing_canon.display(),
+                                error = %umount_err,
+                                "identity check failed and unmount failed — leaving backing root mounted for operator cleanup"
+                            );
+                        }
                     }
-                })?;
+                    return Err(e);
+                }
                 Ok(Self {
                     path: backing_canon,
+                    mountpoint: mount_canon.to_path_buf(),
                     created_bind_mount: true,
                     created_temp_dir,
                 })
@@ -465,6 +495,7 @@ impl LedgerBackingRoot {
                         );
                         Ok(Self {
                             path: backing_canon,
+                            mountpoint: mount_canon.to_path_buf(),
                             created_bind_mount: false,
                             created_temp_dir,
                         })
@@ -502,15 +533,61 @@ impl LedgerBackingRoot {
 
     /// Clean up resources created by [`Self::setup`].
     ///
-    /// Unmounts the bind mount if SkillFS created it, then removes the
-    /// temporary directory if SkillFS created it. Errors are logged but
-    /// do not propagate — this runs on the shutdown path and should not
-    /// block process exit.
+    /// Preserves the live alias while the agent-visible FUSE mount remains
+    /// active or its state cannot be read. Otherwise unmounts the bind mount
+    /// and removes the empty temporary directory created by SkillFS. Errors
+    /// are logged but do not propagate — cleanup must not block process exit.
     pub fn cleanup(&self) {
-        if self.created_bind_mount {
+        self.cleanup_with_mounts(std::fs::read("/proc/mounts"));
+    }
+
+    fn cleanup_with_mounts(&self, mounts: std::io::Result<Vec<u8>>) {
+        if !self.created_bind_mount && self.created_temp_dir.is_none() {
+            return;
+        }
+        let mounts = match mounts {
+            Ok(mounts) => mounts,
+            Err(e) => {
+                warn!(
+                    backing_root = %self.path.display(),
+                    error = %e,
+                    "leaving backing root in place: cannot read FUSE mount state"
+                );
+                return;
+            }
+        };
+        // A worker can exit before managed stop discovers that FUSE is busy.
+        // Keep the live alias, not merely its empty directory, for recovery.
+        let fuse_active = mounts.split(|&b| b == b'\n').any(|line| {
+            let fs_type = line
+                .split(|b| b.is_ascii_whitespace())
+                .filter(|field| !field.is_empty())
+                .nth(2)
+                .unwrap_or_default();
+            (fs_type == b"fuse" || fs_type.starts_with(b"fuse."))
+                && crate::proc_mounts::mounts_contain_target(
+                    line,
+                    self.mountpoint.as_os_str().as_bytes(),
+                )
+        });
+        if fuse_active {
+            warn!(
+                backing_root = %self.path.display(),
+                mountpoint = %self.mountpoint.display(),
+                "leaving backing root in place: FUSE mount still active"
+            );
+            return;
+        }
+        // The temp dir IS the bind mount point. Removing it while the mount
+        // is still live would make remove_dir_all recurse through the bind
+        // and unlink the source tree it aliases (the mount point itself
+        // survives with EBUSY, masking the damage). Remove only after the
+        // mount is confirmed released, and only the empty dir we created.
+        let mount_released = if self.created_bind_mount {
             match Self::do_umount(&self.path) {
                 Ok(()) => {
                     info!(backing_root = %self.path.display(), "backing root bind mount unmounted");
+                    true
                 }
                 Err(e) => {
                     warn!(
@@ -518,11 +595,21 @@ impl LedgerBackingRoot {
                         error = %e,
                         "failed to unmount backing root bind mount during cleanup"
                     );
+                    false
                 }
             }
-        }
+        } else {
+            true
+        };
         if let Some(ref dir) = self.created_temp_dir {
-            if let Err(e) = std::fs::remove_dir_all(dir) {
+            if !mount_released {
+                warn!(
+                    path = %dir.display(),
+                    "leaving backing root directory in place: bind mount still active"
+                );
+                return;
+            }
+            if let Err(e) = std::fs::remove_dir(dir) {
                 warn!(
                     path = %dir.display(),
                     error = %e,
@@ -600,22 +687,42 @@ impl LedgerBackingRoot {
         }
     }
 
-    /// Perform a `mount --bind` from `source` to `target` via the libc
-    /// `mount(2)` syscall.
+    // Isolate the detached bind before any copy reaches another mount namespace.
     #[cfg(target_os = "linux")]
     fn do_bind_mount(source: &Path, target: &Path) -> std::io::Result<()> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
         let src_c = CString::new(source.as_os_str().as_bytes())
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
         let tgt_c = CString::new(target.as_os_str().as_bytes())
             .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
 
-        let ret = unsafe {
-            libc::mount(
+        // SAFETY: src_c remains a valid C string; the flags request a new mount fd.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_open_tree,
+                libc::AT_FDCWD,
                 src_c.as_ptr(),
+                libc::OPEN_TREE_CLONE | libc::OPEN_TREE_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: successful open_tree returns an owned int fd, even through syscall.
+        let mount = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+        Self::do_make_private(Path::new(&format!("/proc/self/fd/{}", mount.as_raw_fd())))?;
+
+        // SAFETY: the owned mount fd and target C string remain valid for this call.
+        // Dropping the fd also destroys an unpublished mount on any failure above/below.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_move_mount,
+                mount.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_FDCWD,
                 tgt_c.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND,
-                std::ptr::null(),
+                libc::MOVE_MOUNT_F_EMPTY_PATH,
             )
         };
         if ret == 0 {
@@ -723,6 +830,76 @@ mod tests {
     #[test]
     fn path_is_inside_sibling_not_inside() {
         assert!(!path_is_inside(Path::new("/a/bb"), Path::new("/a/b")));
+    }
+
+    // -----------------------------------------------------------------------
+    // cleanup removal gating
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cleanup_keeps_temp_dir_when_bind_mount_cannot_be_released() {
+        // umount on a path that is not a mount point fails under any
+        // privilege level (EPERM without CAP_SYS_ADMIN, EINVAL with it), so
+        // cleanup must fail closed and leave the directory alone — removing
+        // under a live mount would recurse through the bind into the source
+        // tree it aliases.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().to_path_buf();
+        let root = LedgerBackingRoot {
+            path: path.clone(),
+            mountpoint: temp.path().join("mount"),
+            created_bind_mount: true,
+            created_temp_dir: Some(path.clone()),
+        };
+        root.cleanup();
+        assert!(
+            path.is_dir(),
+            "directory must survive an unreleased bind mount"
+        );
+    }
+
+    #[test]
+    fn cleanup_removes_empty_temp_dir_without_bind_mount() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let inner = temp.path().join("backing");
+        std::fs::create_dir(&inner).expect("create dir");
+        let root = LedgerBackingRoot {
+            path: inner.clone(),
+            mountpoint: temp.path().join("mount"),
+            created_bind_mount: false,
+            created_temp_dir: Some(inner.clone()),
+        };
+        root.cleanup();
+        assert!(!inner.exists(), "empty created dir must be removed");
+    }
+
+    #[test]
+    fn cleanup_preserves_backing_until_fuse_is_released() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("backing");
+        std::fs::create_dir(&path).unwrap();
+        let root = LedgerBackingRoot {
+            path: path.clone(),
+            mountpoint: PathBuf::from("/mnt/my skills"),
+            created_bind_mount: false,
+            created_temp_dir: Some(path.clone()),
+        };
+        for mounts in [
+            b"skillfs /mnt/my\\040skills fuse rw 0 0\n".as_slice(),
+            b"skillfs /mnt/my\\040skills fuse.skillfs rw 0 0\n".as_slice(),
+        ] {
+            root.cleanup_with_mounts(Ok(mounts.to_vec()));
+            assert!(path.is_dir(), "backing must survive an active FUSE mount");
+        }
+        root.cleanup_with_mounts(Err(std::io::Error::from_raw_os_error(libc::EACCES)));
+        assert!(path.is_dir(), "unknown mount state must preserve backing");
+
+        // An underlying source mount is not the FUSE over-mount. It must not
+        // prevent cleanup after an in-place FUSE mount has been released.
+        root.cleanup_with_mounts(Ok(b"/dev/root /mnt/my\\040skills ext4 rw 0 0\n\
+                                     skillfs /mnt/other fuse rw 0 0\n"
+            .to_vec()));
+        assert!(!path.exists(), "released FUSE must allow normal cleanup");
     }
 
     // -----------------------------------------------------------------------
@@ -1029,8 +1206,20 @@ mod tests {
 
         let result = LedgerBackingRoot::setup(&source_canon, &backing_path, &mount_canon, false);
 
-        // Without root, bind mount fails, and the separate directory
-        // has different dev/ino -> IdentityMismatch.
+        // With mount privileges, `setup` bind-mounts the source onto the
+        // backing path itself, so the directory is no longer separate and the
+        // premise does not hold. Decide on the actual outcome, not the uid:
+        // root without CAP_SYS_ADMIN (as in many containers) still takes the
+        // identity-check fallback asserted below. Dropping `result` unmounts.
+        if let Ok(root) = &result {
+            if root.created_bind_mount() {
+                eprintln!("SKIP p1_1_identity_mismatch_rejected: setup created a bind mount");
+                return;
+            }
+        }
+
+        // Without mount privileges, bind mount fails, and the separate
+        // directory has different dev/ino -> IdentityMismatch.
         assert!(
             matches!(result, Err(BackingRootError::IdentityMismatch { .. })),
             "separate non-bind-mount directory should be rejected (identity mismatch): {result:?}"

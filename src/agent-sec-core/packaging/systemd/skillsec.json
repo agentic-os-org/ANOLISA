@@ -1,0 +1,5 @@
+{
+  "stateDir": "/var/lib/agent-sec/skillsec",
+  "enableDefaultSkillDirs": true,
+  "managedSkillDirs": []
+}

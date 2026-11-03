@@ -273,6 +273,10 @@ pub(super) fn upsert_credential_intent_from_binding_on(
 }
 
 /// Checks that an enforced acknowledgement exactly represents a structured request.
+///
+/// Enforcers built before `ApplyPolicy::policy_mode` existed never echo the
+/// field, so a `None` mode means "not echoed" rather than a conflicting mode
+/// and is accepted; an echoed mode must still match the structured intent.
 pub(crate) fn credential_binding_matches_request(
     request: &ApplyCredentialPolicy,
     binding: &Binding,
@@ -286,7 +290,10 @@ pub(crate) fn credential_binding_matches_request(
         && binding.request.process_start_time == request.process_start_time
         && binding.request.policy_id == request.policy.policy_id
         && binding.request.policy_revision == request.policy.revision.to_string()
-        && binding.request.policy_mode == Some(request.policy.mode)
+        && binding
+            .request
+            .policy_mode
+            .is_none_or(|mode| mode == request.policy.mode)
 }
 
 fn validate_request(request: &ApplyCredentialPolicy) -> Result<(), EnforcementStoreError> {
@@ -310,7 +317,10 @@ fn validate_binding(
         && binding.request.process_start_time == request.process_start_time
         && binding.request.policy_id == request.policy.policy_id
         && binding.request.policy_revision == request.policy.revision.to_string()
-        && binding.request.policy_mode == Some(request.policy.mode);
+        && binding
+            .request
+            .policy_mode
+            .is_none_or(|mode| mode == request.policy.mode);
     let persisted_non_active = matches!(
         binding.state,
         BindingState::Pending

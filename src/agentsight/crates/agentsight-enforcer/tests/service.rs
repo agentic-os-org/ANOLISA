@@ -29,6 +29,7 @@ fn fixture_apply_policy() -> ApplyPolicy {
         policy_revision: "revision-1".into(),
         policy_dsl: "label AGENT".into(),
         policy_mode: None,
+        file_protection_policy: None,
     }
 }
 

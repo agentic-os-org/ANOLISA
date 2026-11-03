@@ -21,10 +21,12 @@ edition = "2024"
 # reference these via `{ workspace = true }`; the root crate is being
 # migrated to workspace deps incrementally.
 [workspace.dependencies]
+url = "2"
 anyhow = "1.0.86"
 actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 async-trait = "0.1.89"
 chrono = { version = "0.4.41", features = ["serde"] }
+criterion = { version = "0.7.0", default-features = false, features = ["cargo_bench_support"] }
 ctrlc = "3.4"
 dirs = "6"
 ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
@@ -33,10 +35,15 @@ fs2 = "0.4"
 futures = "0.3.32"
 libc = "0.2.155"
 log = "0.4.22"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+memchr = "2"
 rig-core = "0.40.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
+sha2 = "0.10.8"
+tempfile = "3"
 thiserror = "1.0.63"
 tokio = "1"
 tracing = "0.1"
@@ -44,11 +51,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [package]
 name = "agentsight"
-version = "0.13.0"
+version = "0.15.3"
 edition = "2024"
 
 [features]
-default = ["server"]
+default = ["server", "bpf-build"]
+# Disable for macOS cross builds so Linux host tools are not compiled.
+bpf-build = ["dep:libbpf-cargo", "dep:bindgen", "dep:cc", "dep:cbindgen"]
 server = [
     "dep:actix-web",
     "dep:actix-cors",
@@ -63,6 +72,8 @@ crate-type = ["cdylib", "rlib"]
 
 # Cross-platform dependencies (compile on all OSes)
 [dependencies]
+memchr = { workspace = true }
+url = { workspace = true }
 agentsight-audit = { path = "crates/agentsight-audit" }
 agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
@@ -78,7 +89,7 @@ log = { workspace = true }
 regex = "1.10.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10.8"
+sha2 = { workspace = true }
 rusqlite = { workspace = true }
 structopt = "0.3.26"
 llm-tokenizer = "1.3"
@@ -103,8 +114,11 @@ dirs = { workspace = true }
 sysinfo = "0.33"
 
 [dev-dependencies]
+dirs = { workspace = true }
 actix-web = { version = "4", features = ["macros"] }
 agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
+criterion = { workspace = true }
+tempfile = { workspace = true }
 
 # Linux-only dependencies (eBPF, process inspection, HTTP parsing, etc.)
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -145,16 +159,22 @@ async-trait = { workspace = true }
 cached = "0.52.0"
 futures = { workspace = true }
 log4rs = "1.3.0"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+[[bench]]
+name = "pipeline"
+harness = false
 
 [profile.dev]
 debug-assertions = false
 
 # Linux-only build dependencies (eBPF skeleton + C header generation)
 [target.'cfg(target_os = "linux")'.build-dependencies]
-libbpf-cargo = "0.23.3"
-bindgen = "0.69.4"
-cc = "1.1.31"
-cbindgen = "0.27"
+libbpf-cargo = { version = "0.23.3", optional = true }
+bindgen = { version = "0.69.4", optional = true }
+cc = { version = "1.1.31", optional = true }
+cbindgen = { version = "0.27", optional = true }
 
 # Redirect the pinned ActPlane git dependencies to the reviewed vendored copies.
 # The git+rev pins above are what scripts/build-enforcer.sh attests against; this

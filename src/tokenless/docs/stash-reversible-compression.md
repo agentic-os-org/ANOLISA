@@ -121,17 +121,17 @@ Both backends enforce:
   An hour comfortably covers a typical agent session's compress→retrieve
   round trip. Expiry is enforced **on read** — `retrieve()` filters out
   expired rows (SQLite `WHERE expires_at >= now`) and `len()` counts only
-  live entries, so expired data is never returned. The rows themselves
-  remain on disk until either capacity-based FIFO eviction (triggered by
-  `stash()`) or an explicit `evict_expired()` call (available for bulk
-  cleanup but not called automatically), so the SQLite file can grow
-  beyond the capacity before a `stash()` triggers a trim.
+  live entries, so expired data is never returned. SQLite deletes expired
+  rows during a later successful `stash()` or `retrieve()`, including
+  compression-only workloads. `evict_expired()` remains available for
+  explicit bulk cleanup. Lazy deletion neither immediately shrinks the
+  SQLite file nor guarantees secure erasure of disk data.
 - **Capacity** (FIFO): once the live entry count exceeds the limit (InMemory
   1000; SQLite 10 000), the oldest entries are evicted. This prevents
   unbounded growth from runaway compression.
 
-SQLite allocates ownership tokens and performs the live-row check, `created`
-decision, upsert, and capacity enforcement in one `BEGIN IMMEDIATE`
+SQLite deletes expired rows, allocates ownership tokens, and performs the
+live-row check, `created` decision, upsert, and capacity enforcement in one `BEGIN IMMEDIATE`
 transaction. A singleton `stash_metadata` row persists the generation
 high-water mark across row deletion, expiry, lazy purge, and eviction; opening
 older databases migrates the generation column and repairs that high-water
@@ -204,9 +204,10 @@ to prevent recovered output from being compressed again.
 
 `JsonCompressor` stashes complete record arrays, complete long strings, dropped
 non-record array windows, and depth-truncated subtrees when a trusted recovery
-path is available. Structural
-cleanup—blacklisted diagnostic fields, `null`, and empty values—is classified
-as lossless and does not emit recovery markers.
+path is available. JSON compaction and verified TOON encoding preserve all
+fields, including diagnostic names, `null`, and empty values. These complete
+representations are lossless and do not need recovery markers. Explicit
+truncation or record reduction still follows the recovery policy above.
 
 The former stateless MCP Retrieve server was removed. It accepted hashes
 without verified model-visibility context, so it cannot serve as an authorized

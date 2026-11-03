@@ -97,8 +97,12 @@ sudo ktuner rollback
 | 退出码 | 含义 |
 |--------|------|
 | 0      | 成功（check 时表示系统已最优） |
-| 1      | check 发现有建议（不是错误，表示可以优化） |
+| 1      | check 发现有建议；或 rollback 未完成（存在失败或缺失的目标） |
 | 2      | 错误（详见 stderr 的 JSON） |
+
+rollback 完全恢复或有效的空记录返回 `0`。未完成时返回 `1`，检查 stdout JSON 的
+`restored`、`failed`、`skipped` 计数；恢复记录会保留，可排查后重试。命令错误返回 `2`，
+详情见 stderr JSON。
 
 ## 约束
 

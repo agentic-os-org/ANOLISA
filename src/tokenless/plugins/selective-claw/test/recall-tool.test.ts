@@ -42,6 +42,16 @@ describe("executeExpandTurn", () => {
     expect(result.turns[1].turnSeq).toBe(2);
   });
 
+  it("returns duplicate selections once in first-requested order", () => {
+    const turnIds = [2, 1, 2, 999, 1];
+    const result = executeExpandTurn(store, "s1", turnIds);
+    expect(result.found).toBe(2);
+    expect(result.turns.map((turn) => turn.turnSeq)).toEqual([2, 1]);
+    expect(result.turns[0].messages.map((message) => message.seq)).toEqual([3, 4]);
+    expect(result.turns[1].messages.map((message) => message.seq)).toEqual([1, 2]);
+    expect(turnIds).toEqual([2, 1, 2, 999, 1]);
+  });
+
   it("returns full content without truncation", () => {
     store.createMessage({
       sessionId: "s1",

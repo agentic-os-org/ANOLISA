@@ -68,7 +68,52 @@ impl SkillFs {
                     reply.error(libc::EINVAL);
                     return;
                 }
-                let physical = self.skill_physical_dir(&skill_name).join(&relative_path);
+                // Trusted `.skill-meta` access keeps the live-source
+                // management view, exactly like lookup/getattr/open/access:
+                // a trusted caller must be able to read the metadata
+                // namespace even when the regular skill view is a fallback
+                // snapshot or hidden. Untrusted callers stay hidden.
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                let physical = match self.is_trusted_skill_meta_access(&pt, req) {
+                    Some(false) => {
+                        self.emit_event(
+                            SkillEvent::new(SkillEventKind::Readlink)
+                                .with_skill_name(&skill_name)
+                                .with_relative_path(&relative_path)
+                                .with_action(SkillEventAction::Failed)
+                                .with_errno(libc::ENOENT)
+                                .with_caller(req.uid(), req.gid()),
+                        );
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => self.skill_physical_dir(&skill_name).join(&relative_path),
+                    // Serve ordinary skill content from the same directory
+                    // the rest of the read path resolves to: staging/pending/
+                    // grace paths read the live source, a ledger fallback
+                    // reads the trusted snapshot, and a hidden skill is not
+                    // readable at all. Reading the live source unconditionally
+                    // mixed a live target with the snapshot's symlink type for
+                    // fallback skills.
+                    None => match self.flat_access_read_path(&skill_name, Some(&relative_path)) {
+                        Some(p) => p,
+                        None => {
+                            self.emit_event(
+                                SkillEvent::new(SkillEventKind::Readlink)
+                                    .with_skill_name(&skill_name)
+                                    .with_relative_path(&relative_path)
+                                    .with_action(SkillEventAction::Failed)
+                                    .with_errno(libc::ENOENT)
+                                    .with_caller(req.uid(), req.gid()),
+                            );
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                    },
+                };
                 match std::fs::read_link(&physical) {
                     Ok(target) => {
                         use std::os::unix::ffi::OsStrExt;
@@ -145,24 +190,49 @@ impl SkillFs {
             | PathType::NestedSkillDir { .. } => {
                 reply.error(libc::EINVAL);
             }
-            PathType::HermesMetaChild {
-                name,
-                relative_path,
-            }
-            | PathType::CategoryPassthrough {
-                name,
-                relative_path,
-            }
-            | PathType::NestedPassthrough {
-                category: name,
-                skill_name: _,
-                relative_path,
-            } => {
+            PathType::HermesMetaChild { .. } | PathType::CategoryPassthrough { .. } => {
+                // Not a skill leaf: plain passthrough, no activation mapping.
                 let physical = match self.resolve_physical_path(&path) {
                     Some(p) => p,
                     None => return reply.error(libc::ENOENT),
                 };
-                let _ = (&name, &relative_path);
+                match std::fs::read_link(&physical) {
+                    Ok(target) => {
+                        use std::os::unix::ffi::OsStrExt;
+                        reply.data(target.as_os_str().as_bytes());
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                // Mirror the flat branch: trusted `.skill-meta` access reads
+                // the live nested source (matching lookup/getattr/open/
+                // access), while ordinary skill content follows the nested
+                // read directory (live source, staging/pending candidate, or
+                // trusted snapshot).
+                let npt = PathType::NestedPassthrough {
+                    category: category.clone(),
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                let physical = match self.is_trusted_skill_meta_access(&npt, req) {
+                    Some(false) => return reply.error(libc::ENOENT),
+                    Some(true) => self
+                        .hermes_skill_physical_dir(&category, &skill_name)
+                        .join(&relative_path),
+                    None => match self.nested_access_read_path(
+                        &category,
+                        &skill_name,
+                        Some(&relative_path),
+                    ) {
+                        Some(p) => p,
+                        None => return reply.error(libc::ENOENT),
+                    },
+                };
                 match std::fs::read_link(&physical) {
                     Ok(target) => {
                         use std::os::unix::ffi::OsStrExt;
@@ -206,7 +276,9 @@ impl SkillFs {
         // Only Passthrough leaves under an ordinary skill may host a new
         // symlink. Virtual paths keep their existing virtual semantics,
         // which means SymlinkDir / SymlinkMd / Root / SkillsDir / Invalid
-        // remain EROFS as in S0.
+        // remain EROFS as in S0. (Hermes nested leaves are not accepted yet:
+        // `classify_symlink_target` compares the first path component, a
+        // flat-skill model that would misclassify a nested sibling.)
         let (skill_name, relative_path) = match &path_type {
             PathType::Passthrough {
                 skill_name,
@@ -260,6 +332,24 @@ impl SkillFs {
             Some(format!("target={}", target_str)),
         ) {
             reply.error(errno);
+            return;
+        }
+
+        // I4/H3: reject symlink creation on hidden skills unless the
+        // path matches the post-publish grace whitelist — the same gate
+        // `create`/`unlink`/`rename` apply, so a hidden skill cannot be
+        // given new directory entries through `symlink`.
+        if self.should_reject_hidden_write(&skill_name, Some(&relative_path)) {
+            self.emit_op_event_with_detail(
+                req,
+                &path_type,
+                SkillEventKind::SymlinkAttempt,
+                SkillEventAction::Rejected,
+                Some(libc::ENOENT),
+                None,
+                Some("class=hidden_skill".to_string()),
+            );
+            reply.error(libc::ENOENT);
             return;
         }
 
@@ -496,12 +586,20 @@ impl SkillFs {
         };
         let source_path_type = self.parse_fuse_path(Path::new(&source_path_str));
 
-        // Destination must be a passthrough leaf.
+        // Destination must be a passthrough leaf (flat or Hermes nested).
         let (dst_skill, dst_rel) = match &new_path_type {
             PathType::Passthrough {
                 skill_name,
                 relative_path,
             } => (skill_name.clone(), relative_path.clone()),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Self::hermes_skill_id(category, skill_name),
+                relative_path.clone(),
+            ),
             _ => {
                 self.ro_warn("link", &new_path_str);
                 self.emit_event(
@@ -528,6 +626,14 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => (skill_name.clone(), relative_path.clone()),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Self::hermes_skill_id(category, skill_name),
+                relative_path.clone(),
+            ),
             _ => {
                 self.emit_event(
                     SkillEvent::new(SkillEventKind::HardlinkAttempt)
@@ -560,6 +666,53 @@ impl SkillFs {
                     )),
             );
             reply.error(libc::EROFS);
+            return;
+        }
+
+        // I4/H3: reject hardlinks whose source or destination belongs
+        // to a hidden skill unless grace-allowed — the same gate the
+        // other mutating callbacks apply, so a hidden skill cannot be
+        // given new directory entries (or have its files linked out)
+        // through `link`. A held directory inode routes linkat past
+        // lookup, so both endpoints are re-checked here against the
+        // CURRENT ledger state, flat or Hermes nested. This runs before
+        // the cross-skill check: a hidden endpoint must answer ENOENT
+        // like every other hidden-skill operation instead of leaking
+        // its existence through the cross-skill EACCES.
+        let hidden_endpoint = |path_type: &PathType| match path_type {
+            PathType::Passthrough {
+                skill_name,
+                relative_path,
+            } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => self.should_reject_hermes_nested_hidden_write(
+                category,
+                skill_name,
+                Some(relative_path),
+            ),
+            _ => false,
+        };
+        let hidden_src = hidden_endpoint(&source_path_type);
+        let hidden_dst = hidden_endpoint(&new_path_type);
+        if hidden_src || hidden_dst {
+            let rejecting_side = if hidden_dst {
+                &new_path_type
+            } else {
+                &source_path_type
+            };
+            self.emit_op_event_with_detail(
+                req,
+                rejecting_side,
+                SkillEventKind::HardlinkAttempt,
+                SkillEventAction::Rejected,
+                Some(libc::ENOENT),
+                None,
+                Some("class=hidden_skill".to_string()),
+            );
+            reply.error(libc::ENOENT);
             return;
         }
 

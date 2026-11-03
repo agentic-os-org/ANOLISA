@@ -61,7 +61,69 @@ pub(crate) fn signal_process_group_id(process_group: i32, signal: i32) -> io::Re
     Ok(())
 }
 
+thread_local! {
+    static NONBLOCKING_REPLAY_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DEFERRED_REPLAY_BYTES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    static COMMITTED_REPLAY_BYTES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(super) struct NonblockingReplayWrite {
+    previous_active: bool,
+    previous_bytes: Vec<u8>,
+    previous_committed: Vec<u8>,
+}
+
+impl NonblockingReplayWrite {
+    #[cfg(test)]
+    pub(super) fn is_active() -> bool {
+        NONBLOCKING_REPLAY_WRITE.with(|active| active.get())
+    }
+
+    pub(super) fn enter(master: &File) -> io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if flags & libc::O_NONBLOCK == 0 {
+            return Err(io::Error::other(
+                "protected replay requires a nonblocking PTY",
+            ));
+        }
+        Ok(Self {
+            previous_active: NONBLOCKING_REPLAY_WRITE.with(|active| active.replace(true)),
+            previous_bytes: DEFERRED_REPLAY_BYTES
+                .with(|bytes| std::mem::take(&mut *bytes.borrow_mut())),
+            previous_committed: COMMITTED_REPLAY_BYTES
+                .with(|bytes| std::mem::take(&mut *bytes.borrow_mut())),
+        })
+    }
+
+    pub(super) fn take_deferred(&self) -> Vec<u8> {
+        DEFERRED_REPLAY_BYTES.with(|bytes| std::mem::take(&mut *bytes.borrow_mut()))
+    }
+
+    pub(super) fn take_committed(&self) -> Vec<u8> {
+        COMMITTED_REPLAY_BYTES.with(|bytes| std::mem::take(&mut *bytes.borrow_mut()))
+    }
+}
+
+impl Drop for NonblockingReplayWrite {
+    fn drop(&mut self) {
+        NONBLOCKING_REPLAY_WRITE.with(|active| active.set(self.previous_active));
+        DEFERRED_REPLAY_BYTES
+            .with(|bytes| *bytes.borrow_mut() = std::mem::take(&mut self.previous_bytes));
+        COMMITTED_REPLAY_BYTES
+            .with(|bytes| *bytes.borrow_mut() = std::mem::take(&mut self.previous_committed));
+    }
+}
+
 pub(crate) fn write_all_pty(master: &mut File, mut bytes: &[u8]) -> io::Result<()> {
+    let protected = NONBLOCKING_REPLAY_WRITE.with(|active| active.get());
+    if protected && DEFERRED_REPLAY_BYTES.with(|pending| !pending.borrow().is_empty()) {
+        DEFERRED_REPLAY_BYTES.with(|pending| pending.borrow_mut().extend_from_slice(bytes));
+        return Ok(());
+    }
     while !bytes.is_empty() {
         match master.write(bytes) {
             Ok(0) => {
@@ -70,7 +132,17 @@ pub(crate) fn write_all_pty(master: &mut File, mut bytes: &[u8]) -> io::Result<(
                     "failed to write to PTY",
                 ));
             }
-            Ok(n) => bytes = &bytes[n..],
+            Ok(n) => {
+                if protected {
+                    COMMITTED_REPLAY_BYTES
+                        .with(|committed| committed.borrow_mut().extend_from_slice(&bytes[..n]));
+                }
+                bytes = &bytes[n..];
+            }
+            Err(err) if protected && err.kind() == io::ErrorKind::WouldBlock => {
+                DEFERRED_REPLAY_BYTES.with(|pending| pending.borrow_mut().extend_from_slice(bytes));
+                return Ok(());
+            }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(1));
@@ -79,4 +151,37 @@ pub(crate) fn write_all_pty(master: &mut File, mut bytes: &[u8]) -> io::Result<(
         }
     }
     master.flush()
+}
+
+#[cfg(test)]
+mod replay_write_tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn r10_protected_write_guard_restores_nested_and_error_state() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut master = unsafe { File::from_raw_fd(stream.into_raw_fd()) };
+        let payload = [b'x'; 8192];
+        loop {
+            match master.write(&payload) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill writer: {error}"),
+            }
+        }
+        assert!(!NONBLOCKING_REPLAY_WRITE.with(|active| active.get()));
+        {
+            let _outer = NonblockingReplayWrite::enter(&master).unwrap();
+            {
+                let inner = NonblockingReplayWrite::enter(&master).unwrap();
+                write_all_pty(&mut master, b"blocked").unwrap();
+                assert_eq!(inner.take_deferred(), b"blocked");
+            }
+            assert!(NONBLOCKING_REPLAY_WRITE.with(|active| active.get()));
+        }
+        assert!(!NONBLOCKING_REPLAY_WRITE.with(|active| active.get()));
+    }
 }

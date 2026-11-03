@@ -18,6 +18,7 @@ use anolisa_core::{
 use anolisa_platform::fs_layout::FsLayout;
 use sha2::{Digest, Sha256};
 
+use crate::commands::common;
 use crate::context::CliContext;
 use crate::repo_config::{
     HostVars, RepoConfig, raw_artifact_url, raw_index_url, raw_index_v2_url, raw_relative_root,
@@ -62,7 +63,11 @@ pub(super) fn index_fetch_error(
         }
         err => CliError::Runtime {
             command: COMMAND.to_string(),
-            reason: format!("failed to fetch distribution index {index_url}: {err}"),
+            reason: format!(
+                "failed to fetch distribution index {}: {}",
+                common::repository_url_label(index_url),
+                common::redact_known_urls(&err.to_string(), &[index_url.to_string()]),
+            ),
         },
     }
 }
@@ -126,6 +131,9 @@ pub(crate) fn resolve_raw(
     let cache = DownloadCache::new(layout.cache_dir.clone());
     let (index_url, cached_index_path) =
         fetch_raw_index(&cache, &base_url, repository_origin.as_ref())?;
+    // Every message below names the repository the user configured; name it by
+    // origin so a credential or secret path segment in `base_url` is not echoed.
+    let index_label = common::repository_url_label(&index_url);
     // Entry-tolerant parse: a row shaped for a future CLI fails closed for
     // its own component (skipped, surfaced as a warning) instead of taking
     // the whole shared index — and every unrelated component — down with it.
@@ -135,7 +143,7 @@ pub(crate) fn resolve_raw(
     let (full_index, skipped_entries) = DistributionIndex::load_lenient(&cached_index_path)
         .map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
-            reason: format!("failed to parse distribution index {index_url}: {err}"),
+            reason: format!("failed to parse distribution index {index_label}: {err}"),
         })?;
     let index = installable_raw_index(full_index.clone());
 
@@ -161,7 +169,7 @@ pub(crate) fn resolve_raw(
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!(
-                "distribution index {index_url} contains an entry for '{package}' this CLI cannot parse ({}); refusing to resolve '{package}' against the remaining entries to avoid a silent downgrade — run 'anolisa self-update' and retry",
+                "distribution index {index_label} contains an entry for '{package}' this CLI cannot parse ({}); refusing to resolve '{package}' against the remaining entries to avoid a silent downgrade — run 'anolisa update self' and retry",
                 blocking.reason
             ),
         });
@@ -169,7 +177,7 @@ pub(crate) fn resolve_raw(
     warnings.extend(
         skipped_entries
             .into_iter()
-            .map(|s| format!("distribution index {index_url}: {}", s.reason)),
+            .map(|s| format!("distribution index {index_label}: {}", s.reason)),
     );
     let entry = index.resolve(&query).map_err(|err| {
         // A pinned version the installable index cannot satisfy gets a
@@ -197,7 +205,7 @@ pub(crate) fn resolve_raw(
                 return CliError::InvalidArgument {
                     command: COMMAND.to_string(),
                     reason: format!(
-                        "version '{pinned}' of component '{component}' (package '{package}') is published in the raw repository {index_url} but only with artifact types the raw backend cannot install (supported: {}); nothing was changed{installable_note}",
+                        "version '{pinned}' of component '{component}' (package '{package}') is published in the raw repository {index_label} but only with artifact types the raw backend cannot install (supported: {}); nothing was changed{installable_note}",
                         SUPPORTED_ARTIFACT_TYPES.join(", "),
                     ),
                 };
@@ -206,7 +214,7 @@ pub(crate) fn resolve_raw(
                 return CliError::InvalidArgument {
                     command: COMMAND.to_string(),
                     reason: format!(
-                        "version '{pinned}' of component '{component}' (package '{package}') is not published in the raw repository {index_url} for {}/{} ({} mode); nothing was changed{installable_note}",
+                        "version '{pinned}' of component '{component}' (package '{package}') is not published in the raw repository {index_label} for {}/{} ({} mode); nothing was changed{installable_note}",
                         env.os,
                         env.arch,
                         ctx.install_mode.as_str(),
@@ -239,7 +247,7 @@ pub(crate) fn resolve_raw(
                 return CliError::InvalidArgument {
                     command: COMMAND.to_string(),
                     reason: format!(
-                        "component '{component}' (package '{package}') is not available for {}/{} from {index_url}; nothing was changed\n\navailable platforms:\n{available}",
+                        "component '{component}' (package '{package}') is not available for {}/{} from {index_label}; nothing was changed\n\navailable platforms:\n{available}",
                         query.os,
                         query.arch,
                     ),
@@ -249,7 +257,7 @@ pub(crate) fn resolve_raw(
         CliError::InvalidArgument {
             command: COMMAND.to_string(),
             reason: format!(
-                "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_url}: {err}",
+                "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_label}: {err}",
                 version.unwrap_or("latest"),
                 env.os,
                 env.arch,
@@ -417,7 +425,11 @@ pub(crate) fn load_dry_run_install_contract(
             Err(err) => {
                 return Err(CliError::Runtime {
                     command: COMMAND.to_string(),
-                    reason: format!("failed to fetch sidecar metadata {meta_url}: {err}"),
+                    reason: format!(
+                        "failed to fetch sidecar metadata {}: {}",
+                        common::repository_url_label(&meta_url),
+                        common::redact_known_urls(&err.to_string(), &[meta_url.to_string()]),
+                    ),
                 });
             }
         };
@@ -432,7 +444,10 @@ pub(crate) fn load_dry_run_install_contract(
         let manifest =
             ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
                 command: COMMAND.to_string(),
-                reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
+                reason: format!(
+                    "failed to parse sidecar metadata {}: {err}",
+                    common::repository_url_label(&meta_url),
+                ),
             })?;
         validate_manifest_contract_header(
             &manifest,
@@ -529,8 +544,12 @@ pub(crate) fn prepare_raw_execution(
         .map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!(
-                "failed to download artifact {}: {err}",
-                resolution.artifact_url
+                "failed to download artifact {}: {}",
+                common::repository_url_label(&resolution.artifact_url),
+                common::redact_known_urls(
+                    &err.to_string(),
+                    std::slice::from_ref(&resolution.artifact_url)
+                ),
             ),
         })?;
 
@@ -564,7 +583,7 @@ fn load_execution_install_contract(
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to read embedded component manifest from {}: {err}",
-                        resolution.artifact_url
+                        common::repository_url_label(&resolution.artifact_url)
                     ),
                 })?
                 .ok_or_else(|| CliError::Runtime {
@@ -579,7 +598,7 @@ fn load_execution_install_contract(
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to parse embedded component manifest from {}: {err}",
-                        resolution.artifact_url
+                        common::repository_url_label(&resolution.artifact_url)
                     ),
                 })?;
             validate_manifest_digest(&toml, resolution)?;
@@ -621,10 +640,17 @@ fn resolve_manifest_contract(
     if files.is_empty() {
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
-            reason: format!(
-                "component '{}' declares no [install.files] — nothing to install",
-                resolution.component
-            ),
+            reason: if manifest.install.files.is_empty() {
+                format!(
+                    "component '{}' declares no [install.files] — nothing to install",
+                    resolution.component
+                )
+            } else {
+                format!(
+                    "component '{}' only declares the ANOLISA-owned discovery contract; no component files remain to install",
+                    resolution.component
+                )
+            },
         });
     }
     // Adapter resources are laid alongside the component's own files, from
@@ -735,7 +761,7 @@ fn validate_min_anolisa_version_against(
         return Err(CliError::InvalidArgument {
             command: COMMAND.to_string(),
             reason: format!(
-                "component '{component}' requires anolisa >= {required}, but this CLI is {current}; run 'anolisa self-update' and retry",
+                "component '{component}' requires anolisa >= {required}, but this CLI is {current}; run 'anolisa update self' and retry",
             ),
         });
     }
@@ -880,6 +906,10 @@ fn resolve_manifest_files(
             render,
         });
     }
+    // Published archives predate the transfer of discovery ownership to ANOLISA.
+    files.retain(|file| {
+        !anolisa_core::manifest::is_distribution_discovery_contract(layout, component, &file.dest)
+    });
     Ok(files)
 }
 
@@ -921,9 +951,10 @@ fn resolve_render_spec(
     let mode = RenderMode::parse(render).ok_or_else(|| CliError::InvalidArgument {
         command: COMMAND.to_string(),
         reason: format!(
-            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}'); run 'anolisa self-update' and retry",
+            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}', '{}'); run 'anolisa update self' and retry",
             spec.display(),
             anolisa_core::manifest::RENDER_ANOLISA_PATHS_V1,
+            anolisa_core::manifest::RENDER_ANOLISA_JSON_COMMAND_V1,
         ),
     })?;
     if spec.kind == FileKind::Symlink || spec.source.as_deref().is_some_and(|s| s.ends_with('/')) {
@@ -1086,16 +1117,98 @@ pub(crate) struct InstallHooks {
     pub(crate) post_enable: Vec<HookSpec>,
 }
 
+/// Hook phases an anolisa command actually executes.
+///
+/// `install` runs `pre_install`, `post_install` and `post_enable`;
+/// `uninstall` runs `pre_uninstall` and `post_uninstall` from the contract
+/// persisted at install time. The remaining `HookPhase` variants are valid
+/// manifest vocabulary but no command resolves them, so a component that
+/// declares one ships a script this CLI never runs. That capability
+/// limitation must be *surfaced*, but on its own it is not a reason to
+/// reject the whole component: the default is a warning naming the phase
+/// (see [`unrunnable_hook_phase_warnings`]), and only a `strict = true`
+/// declaration — the author stating the hook must run — refuses the
+/// install or update before file placement
+/// ([`strict_unrunnable_hook_phase_reason`]). The check reads the embedded
+/// manifest after the artifact has been downloaded into the cache.
+const RUNNABLE_HOOK_PHASES: [HookPhase; 5] = [
+    HookPhase::PreInstall,
+    HookPhase::PostInstall,
+    HookPhase::PostEnable,
+    HookPhase::PreUninstall,
+    HookPhase::PostUninstall,
+];
+
+/// The blocking contract error for a `strict = true` `[[component.hooks]]`
+/// phase no anolisa command executes, or `None` when no strict declaration
+/// is dead.
+///
+/// `strict` is the author's explicit "this hook must run" contract (see
+/// `ManifestHookSpec::strict`), and a phase this CLI cannot execute
+/// violates it outright, so the verb refuses instead of installing a
+/// component whose author-required behaviour silently cannot happen.
+/// Shared by the fresh-install resolver below and the raw-update preflight
+/// (`RawReplayOps::download_verify`), so the update path cannot accept a
+/// strict dead phase that a fresh install refuses.
+pub(crate) fn strict_unrunnable_hook_phase_reason(
+    manifest: &ComponentManifest,
+    component: &str,
+) -> Option<String> {
+    manifest
+        .install
+        .hooks
+        .iter()
+        .find(|hook| hook.strict && !RUNNABLE_HOOK_PHASES.contains(&hook.phase))
+        .map(|hook| {
+            format!(
+                "component '{component}' declares a strict [[component.hooks]] phase '{}' that no anolisa command runs (supported phases: pre_install, post_install, post_enable, pre_uninstall, post_uninstall); strict requires the hook to execute, so the install/update is refused",
+                hook.phase.as_str(),
+            )
+        })
+}
+
+/// Warnings for non-strict `[[component.hooks]]` phases no anolisa command
+/// executes — the default behaviour: the install or update proceeds, and
+/// the user is told exactly which declared hook this CLI will not run.
+pub(crate) fn unrunnable_hook_phase_warnings(
+    manifest: &ComponentManifest,
+    component: &str,
+) -> Vec<String> {
+    manifest
+        .install
+        .hooks
+        .iter()
+        .filter(|hook| !hook.strict && !RUNNABLE_HOOK_PHASES.contains(&hook.phase))
+        .map(|hook| {
+            format!(
+                "component '{component}' declares a [[component.hooks]] phase '{}' that the current CLI will not execute (no anolisa command runs it)",
+                hook.phase.as_str(),
+            )
+        })
+        .collect()
+}
+
 /// Resolve a component's `[[component.hooks]]` for the three install phases.
 ///
 /// Unlike the uninstall side (which degrades a missing/invalid snapshot to
 /// "no hooks"), install resolves strictly: an unresolvable script path is a
-/// contract authoring bug and aborts before any IO so it surfaces early.
+/// contract authoring bug and aborts before install file placement. The
+/// artifact has already been downloaded and its embedded manifest parsed.
+/// A hook phase no command runs follows the `strict` contract: a strict
+/// declaration refuses with [`CliError::InvalidArgument`] (an authored-input
+/// defect, not a machine failure), a non-strict one proceeds — the caller
+/// surfaces [`unrunnable_hook_phase_warnings`] alongside the result.
 pub(crate) fn resolve_install_hooks(
     manifest: &ComponentManifest,
     layout: &FsLayout,
     component: &str,
 ) -> Result<InstallHooks, CliError> {
+    if let Some(reason) = strict_unrunnable_hook_phase_reason(manifest, component) {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason,
+        });
+    }
     let resolve = |phase: HookPhase| -> Result<Vec<HookSpec>, CliError> {
         resolve_manifest_hooks(&manifest.install.hooks, layout, component, phase).map_err(|err| {
             CliError::Runtime {
@@ -1120,6 +1233,53 @@ mod tests {
     use anolisa_core::ComponentManifest;
     use anolisa_platform::fs_layout::FsLayout;
     use tempfile::tempdir;
+
+    #[test]
+    fn ws_ckpt_contract_installs_adapter_bundles_without_duplicate_destinations() {
+        use anolisa_core::install_runner::InstallRunner;
+        use std::collections::BTreeSet;
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for contract in [
+            "../../../../src/ws-ckpt/packaging/anolisa/raw/component.toml",
+            "../../manifests/components/ws-ckpt/component.toml",
+        ] {
+            let manifest = ComponentManifest::from_file(&manifest_dir.join(contract))
+                .expect("ws-ckpt Raw contract must parse");
+            let sandbox = tempdir().unwrap();
+            let layout = FsLayout::system(Some(sandbox.path().join("system")));
+            let mut files = resolve_manifest_files(&manifest, &layout, "ws-ckpt").unwrap();
+            files.extend(resolve_adapter_files(&manifest, &layout, "ws-ckpt").unwrap());
+            let sources = files
+                .iter()
+                .map(|file| {
+                    let source = file.source.as_ref().unwrap();
+                    if source.ends_with('/') {
+                        format!("{source}fixture.txt")
+                    } else {
+                        source.clone()
+                    }
+                })
+                .collect::<BTreeSet<_>>();
+            let entries = sources
+                .iter()
+                .map(|source| (source.as_str(), b"fixture".as_slice()))
+                .collect::<Vec<_>>();
+            let artifact = sandbox.path().join("ws-ckpt.tar.gz");
+            std::fs::write(&artifact, build_tar_gz(&entries)).unwrap();
+            let runner = InstallRunner::new(&layout);
+            let prepared = runner
+                .prepare_files("tar_gz", &artifact, &files)
+                .expect("layout and adapter mappings must install without duplicate destinations");
+            runner.install_prepared(prepared).unwrap();
+            for framework in ["openclaw", "hermes"] {
+                let plugin = layout
+                    .datadir
+                    .join(format!("plugins/ws-ckpt/{framework}/fixture.txt"));
+                assert_eq!(std::fs::read(plugin).unwrap(), b"fixture");
+            }
+        }
+    }
 
     /// Split-index bootstrap: a repository that publishes the complete
     /// generation-2 index must be served from it, so gated entries are
@@ -1224,6 +1384,50 @@ mod tests {
             url: "https://example.invalid/index-v2.toml".to_string(),
             reason: "timed out".to_string(),
         }));
+    }
+
+    /// A repository URL may carry credentials or a secret path segment
+    /// (`validate_base_url` accepts `user:pass@host`, and `[vars]` can inject a
+    /// token). Failure text is what users paste into reports, so it must name
+    /// the repository without echoing those parts.
+    #[test]
+    fn index_fetch_error_does_not_echo_repository_credentials() {
+        let url = "https://user:secret@repo.example.internal/private/v1/index.toml";
+        let err = DownloadError::HttpStatus {
+            url: url.to_string(),
+            status: 404,
+        };
+        let CliError::Runtime { reason, .. } = index_fetch_error(url, err, None) else {
+            panic!("expected runtime error");
+        };
+        assert!(!reason.contains("secret"), "got: {reason}");
+        assert!(!reason.contains("user:"), "got: {reason}");
+        assert!(!reason.contains("/private/"), "got: {reason}");
+        assert_eq!(
+            reason,
+            "failed to fetch distribution index https://repo.example.internal: \
+             http status 404 while fetching <redacted>"
+        );
+    }
+
+    /// A repository URL without credentials still identifies its host — only
+    /// the path (and any userinfo) is dropped, so the message stays actionable
+    /// for the ordinary case.
+    #[test]
+    fn index_fetch_error_keeps_the_origin_of_a_plain_url() {
+        let url = "https://repo.example/anolisa/v1/index.toml";
+        let err = DownloadError::HttpStatus {
+            url: url.to_string(),
+            status: 500,
+        };
+        let CliError::Runtime { reason, .. } = index_fetch_error(url, err, None) else {
+            panic!("expected runtime error");
+        };
+        assert_eq!(
+            reason,
+            "failed to fetch distribution index https://repo.example: \
+             http status 500 while fetching <redacted>"
+        );
     }
 
     /// Target-specific metadata is the point of the sibling-first order: the
@@ -1501,6 +1705,128 @@ mod tests {
         assert!(matches!(err, CliError::Runtime { .. }));
     }
 
+    #[test]
+    fn resolve_install_hooks_rejects_strict_phase_no_command_runs() {
+        // `pre_enable`, `pre_disable`, `post_disable`, `pre_restart` and
+        // `post_restart` parse — `HookPhase` is the manifest vocabulary —
+        // but no anolisa command resolves any of them. A strict
+        // declaration is the author's "this hook must run" contract, and
+        // this CLI cannot honour it, so the install must fail fast with
+        // the phase named — mirroring the unresolvable-script-path rule.
+        for phase in [
+            "pre_enable",
+            "pre_disable",
+            "post_disable",
+            "pre_restart",
+            "post_restart",
+        ] {
+            let tmp = tempdir().expect("tmpdir");
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let toml = hooks_manifest(&[(phase, "{datadir}/hooks/demo/hook.sh", true)]);
+            let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+            let err = resolve_install_hooks(&manifest, &layout, "demo").expect_err(&format!(
+                "strict phase {phase} must be rejected at install time"
+            ));
+            let CliError::InvalidArgument { reason, .. } = &err else {
+                panic!("expected INVALID_ARGUMENT for {phase}, got {err:?}");
+            };
+            assert!(
+                reason.contains(phase),
+                "error must name the dead phase {phase}, got: {reason}"
+            );
+            assert!(
+                reason.contains("strict"),
+                "error must state the strict contract, got: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_install_hooks_warns_but_accepts_non_strict_phase_no_command_runs() {
+        // The default for a phase no command runs is warn-and-continue:
+        // a hook the current CLI will not execute is a capability
+        // limitation to surface, not a reason to declare the whole
+        // component uninstalleable.
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let toml = hooks_manifest(&[
+            ("pre_install", "{datadir}/hooks/demo/pre-install.sh", false),
+            ("pre_restart", "{datadir}/hooks/demo/hook.sh", false),
+        ]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+
+        let hooks = resolve_install_hooks(&manifest, &layout, "demo")
+            .expect("a non-strict dead phase must not block the install");
+        assert_eq!(
+            hooks.pre_install.len(),
+            1,
+            "runnable hooks resolve as usual"
+        );
+
+        let warnings = unrunnable_hook_phase_warnings(&manifest, "demo");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the dead phase warns: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("pre_restart"),
+            "warning must name the phase: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("current CLI will not execute"),
+            "warning must state what happens: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("demo"),
+            "warning must name the component: {}",
+            warnings[0]
+        );
+
+        // The strict twin on the same manifest shape refuses instead.
+        let toml = hooks_manifest(&[("pre_restart", "{datadir}/hooks/demo/hook.sh", true)]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        assert!(
+            resolve_install_hooks(&manifest, &layout, "demo").is_err(),
+            "the strict twin must refuse"
+        );
+    }
+
+    #[test]
+    fn resolve_install_hooks_accepts_every_phase_a_command_runs() {
+        // pre/post-uninstall belong to the uninstall verb (resolved from
+        // the contract persisted at install time), so install must keep
+        // accepting them alongside its own three phases.
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let toml = hooks_manifest(&[
+            ("pre_install", "{datadir}/hooks/demo/pre-install.sh", false),
+            (
+                "post_install",
+                "{datadir}/hooks/demo/post-install.sh",
+                false,
+            ),
+            ("post_enable", "{datadir}/hooks/demo/post-enable.sh", false),
+            (
+                "pre_uninstall",
+                "{datadir}/hooks/demo/pre-uninstall.sh",
+                false,
+            ),
+            (
+                "post_uninstall",
+                "{datadir}/hooks/demo/post-uninstall.sh",
+                false,
+            ),
+        ]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let hooks = resolve_install_hooks(&manifest, &layout, "demo").expect("resolve");
+        assert_eq!(hooks.pre_install.len(), 1);
+        assert_eq!(hooks.post_install.len(), 1);
+        assert_eq!(hooks.post_enable.len(), 1);
+    }
+
     // -- render mapping ------------------------------------------------------
 
     fn render_manifest(entry: &str) -> ComponentManifest {
@@ -1558,7 +1884,7 @@ mod tests {
         match err {
             CliError::InvalidArgument { reason, .. } => {
                 assert!(reason.contains("anolisa-paths-v2"), "got: {reason}");
-                assert!(reason.contains("self-update"), "got: {reason}");
+                assert!(reason.contains("update self"), "got: {reason}");
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
@@ -1692,7 +2018,7 @@ mod tests {
                     reason.contains(env!("CARGO_PKG_VERSION")),
                     "must name the current version: {reason}"
                 );
-                assert!(reason.contains("self-update"), "got: {reason}");
+                assert!(reason.contains("update self"), "got: {reason}");
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }

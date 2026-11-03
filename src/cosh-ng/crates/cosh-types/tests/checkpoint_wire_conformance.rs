@@ -115,6 +115,7 @@ fn error_case_name(value: &local::WsCkptErrorCode) -> &'static str {
         local::WsCkptErrorCode::DiskSpaceInsufficient => "error/disk_space_insufficient",
         local::WsCkptErrorCode::CwdOccupied => "error/cwd_occupied",
         local::WsCkptErrorCode::CwdScanFailed => "error/cwd_scan_failed",
+        local::WsCkptErrorCode::UnsupportedWorkspacePath => "error/unsupported_workspace_path",
     }
 }
 
@@ -291,6 +292,7 @@ fn error_cases() -> Vec<(&'static str, local::WsCkptErrorCode)> {
         local::WsCkptErrorCode::DiskSpaceInsufficient,
         local::WsCkptErrorCode::CwdOccupied,
         local::WsCkptErrorCode::CwdScanFailed,
+        local::WsCkptErrorCode::UnsupportedWorkspacePath,
     ];
     samples
         .into_iter()
@@ -536,6 +538,7 @@ fn rejection_cases() -> Vec<(&'static str, local::GuardedCheckpointRejectionCode
             "rejection/evidence_capacity_reached",
             Code::EvidenceCapacityReached,
         ),
+        ("rejection/insufficient_space", Code::InsufficientSpace),
     ]
 }
 
@@ -591,6 +594,14 @@ fn rollback_rejection_cases() -> Vec<(&'static str, local::GuardedRollbackReject
         ),
         ("rollback_rejection/cwd_occupied", Code::CwdOccupied),
         ("rollback_rejection/cwd_scan_failed", Code::CwdScanFailed),
+        (
+            "rollback_rejection/unsupported_workspace_path",
+            Code::UnsupportedWorkspacePath,
+        ),
+        (
+            "rollback_rejection/insufficient_space",
+            Code::InsufficientSpace,
+        ),
     ]
 }
 

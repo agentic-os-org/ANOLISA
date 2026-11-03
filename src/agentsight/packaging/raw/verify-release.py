@@ -16,7 +16,6 @@ SEMVER = re.compile(
 )
 TARGET_SOURCES = {
     ("linux", "x86_64"): {
-        ".anolisa/component.toml",
         "bin/agentsight",
         "bin/agentsight-enforcer",
         "bin/agentsight-start",
@@ -24,10 +23,11 @@ TARGET_SOURCES = {
         "share/anolisa/agentsight/agentsight-enforcer.service",
     },
     ("macos", "aarch64"): {
-        ".anolisa/component.toml",
         "bin/agentsight",
     },
 }
+
+TARGET_SOURCES[("linux", "aarch64")] = TARGET_SOURCES[("linux", "x86_64")]
 
 
 def read_toml(path: Path) -> dict[str, object]:

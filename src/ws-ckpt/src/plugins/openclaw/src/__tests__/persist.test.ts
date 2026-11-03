@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("node:fs");
 vi.mock("node:os", () => ({ default: { homedir: () => "/home/test" } }));
@@ -11,10 +11,25 @@ const mockReadFileSync = fs.readFileSync as ReturnType<typeof vi.fn>;
 const mockWriteFileSync = fs.writeFileSync as ReturnType<typeof vi.fn>;
 const mockMkdirSync = fs.mkdirSync as ReturnType<typeof vi.fn>;
 const mockRenameSync = fs.renameSync as ReturnType<typeof vi.fn>;
+const mockUnlinkSync = fs.unlinkSync as ReturnType<typeof vi.fn>;
+const mockRmSync = fs.rmSync as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // resetAllMocks (not clearAllMocks): implementations installed by an
+  // earlier test must not leak into the next one.
+  vi.resetAllMocks();
   delete process.env.OPENCLAW_STATE_DIR;
+  // Deletion guards: cleanup may only ever remove the temp file the write
+  // just created. A delete of anything else — e.g. the final config in a
+  // future "clean up the corrupt config" edit — must fail the test instead
+  // of passing silently.
+  mockUnlinkSync.mockImplementation((p: unknown) => {
+    throw new Error(`unexpected unlinkSync: ${p}`);
+  });
+  mockRmSync.mockImplementation((p: unknown) => {
+    if (typeof p === "string" && p.includes("ws-ckpt.json.tmp.")) return undefined;
+    throw new Error(`unexpected rmSync: ${p}`);
+  });
 });
 
 describe("loadPersistedConfig", () => {
@@ -164,5 +179,53 @@ describe("persistConfig", () => {
       expect.stringContaining("/custom/"),
       expect.stringContaining("/custom/ws-ckpt.json")
     );
+  });
+
+  it("removes only the temp file when the rename fails", () => {
+    mockExistsSync.mockReturnValue(false);
+    mockMkdirSync.mockReturnValue(undefined);
+    mockWriteFileSync.mockReturnValue(undefined);
+    mockRenameSync.mockImplementation(() => { throw new Error("EISDIR"); });
+
+    const err = persistConfig({ autoCheckpoint: true });
+    expect(err).toContain("EISDIR");
+
+    expect(mockRmSync).toHaveBeenCalledTimes(1);
+    const rmPath = mockRmSync.mock.calls[0][0] as string;
+    expect(rmPath).toBe(mockWriteFileSync.mock.calls[0][0] as string);
+    expect(rmPath).toContain("ws-ckpt.json.tmp.");
+    expect(mockRmSync.mock.calls[0][1]).toEqual({ force: true });
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
+  });
+
+  it("removes a partial temp file when the write fails", () => {
+    mockExistsSync.mockReturnValue(false);
+    mockMkdirSync.mockReturnValue(undefined);
+    mockWriteFileSync.mockImplementation(() => { throw new Error("ENOSPC"); });
+
+    const err = persistConfig({ autoCheckpoint: true });
+    expect(err).toContain("ENOSPC");
+
+    expect(mockRmSync).toHaveBeenCalledTimes(1);
+    const rmPath = mockRmSync.mock.calls[0][0] as string;
+    expect(rmPath).toContain("ws-ckpt.json.tmp.");
+    expect(rmPath).toContain(`.tmp.${process.pid}`);
+    expect(mockRmSync.mock.calls[0][1]).toEqual({ force: true });
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
+  });
+
+  it("cleanup after a successful rename is a force no-op on the temp path", () => {
+    mockExistsSync.mockReturnValue(false);
+    mockMkdirSync.mockReturnValue(undefined);
+    mockWriteFileSync.mockReturnValue(undefined);
+    mockRenameSync.mockReturnValue(undefined);
+
+    expect(persistConfig({ autoCheckpoint: true })).toBe("");
+
+    expect(mockRmSync).toHaveBeenCalledTimes(1);
+    const rmPath = mockRmSync.mock.calls[0][0] as string;
+    expect(rmPath).toBe(mockWriteFileSync.mock.calls[0][0] as string);
+    expect(mockRmSync.mock.calls[0][1]).toEqual({ force: true });
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
   });
 });

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::CoshConfig;
+use crate::config::{project_hook_trust, CoshConfig, ProjectHookTrust};
 
 use super::builder::HealthReportBuilder;
 use super::model::{
@@ -353,6 +353,7 @@ const SIMPLE_CONFIG_KEYS: &[&str] = &[
     "ui.startup_hooks",
     "ui.debug",
     "ui.log_level",
+    "logging.level",
     "health.enabled",
     "health.role",
     "health.memory_sensitive",
@@ -495,7 +496,14 @@ fn collect_hooks(
     let project_root = project_hook_root(cwd);
     let project_present = project_root.is_some();
     let project_trusted = match &project_root {
-        Some(root) => is_trusted_root(root, &config.trusted_project_roots),
+        Some(root) => {
+            project_hook_trust(
+                root,
+                &config.trusted_project_roots,
+                &config.consented_project_hooks,
+                crate::hooks::HookEngine::project_hooks_pinned_digest_for_root(root).as_deref(),
+            ) == ProjectHookTrust::Trusted
+        }
         None => true,
     };
     builder
@@ -560,13 +568,6 @@ fn project_hook_root(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors()
         .find(|candidate| candidate.join(".cosh/hooks").is_dir())
         .map(canonical_root)
-}
-
-fn is_trusted_root(root: &Path, trusted_roots: &[PathBuf]) -> bool {
-    let root = canonical_root(root);
-    trusted_roots
-        .iter()
-        .any(|trusted| canonical_root(trusted) == root)
 }
 
 fn canonical_root(root: &Path) -> PathBuf {

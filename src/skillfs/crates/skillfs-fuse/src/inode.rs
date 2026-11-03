@@ -123,7 +123,12 @@ impl InodeManager {
         if new_count == 0 {
             st.lookup_counts.remove(&ino);
             if let Some(entry) = st.inodes.remove(&ino) {
-                st.paths.remove(&entry.path);
+                // Only drop the mapping when it still points at this inode;
+                // a reassigned mapping (rename over an existing target)
+                // belongs to a live inode.
+                if st.paths.get(&entry.path).copied() == Some(ino) {
+                    st.paths.remove(&entry.path);
+                }
             }
         } else {
             st.lookup_counts.insert(ino, new_count);
@@ -146,7 +151,11 @@ impl InodeManager {
     pub(crate) fn remove(&self, ino: u64) {
         let mut st = self.state.write();
         if let Some(entry) = st.inodes.remove(&ino) {
-            st.paths.remove(&entry.path);
+            // Same ownership guard as forget_inner: never delete a path
+            // mapping that now belongs to another inode.
+            if st.paths.get(&entry.path).copied() == Some(ino) {
+                st.paths.remove(&entry.path);
+            }
         }
         st.lookup_counts.remove(&ino);
     }
@@ -171,14 +180,43 @@ impl InodeManager {
     }
 
     /// Rename an inode's path and all children paths that start with old_path.
+    ///
+    /// POSIX `rename(2)` over an existing target unlinks the target, so its
+    /// inode entries are evicted BEFORE the rename loop runs — otherwise the
+    /// replaced inode keeps a stale alias to the destination path and the
+    /// kernel's later FORGET for it deletes the LIVE renamed inode's path
+    /// mapping (`paths` and `inodes` must stay inverse). Entries that are
+    /// themselves being renamed are skipped so a rename onto a subtree of
+    /// itself cannot self-destruct. Evicting drops `lookup_counts` early,
+    /// which makes the kernel's eventual FORGET a no-op (count 0, no entry —
+    /// `forget_inner` tolerates that).
     pub(crate) fn rename_path(&self, old_path: &str, new_path: &str) {
         let mut st = self.state.write();
+        if old_path == new_path {
+            return; // rename(2) no-op: nothing to move or evict.
+        }
         let to_rename: Vec<(u64, String)> = st
             .inodes
             .iter()
             .filter(|(_, e)| e.path == old_path || e.path.starts_with(&format!("{}/", old_path)))
             .map(|(&ino, e)| (ino, e.path.clone()))
             .collect();
+        let is_renamed = |p: &str| p == old_path || p.starts_with(&format!("{old_path}/"));
+        let replaced: Vec<u64> = st
+            .inodes
+            .iter()
+            .filter(|(_, e)| {
+                (e.path == new_path || e.path.starts_with(&format!("{new_path}/")))
+                    && !is_renamed(&e.path)
+            })
+            .map(|(&ino, _)| ino)
+            .collect();
+        for ino in replaced {
+            if let Some(entry) = st.inodes.remove(&ino) {
+                st.paths.remove(&entry.path);
+            }
+            st.lookup_counts.remove(&ino);
+        }
         for (ino, old) in to_rename {
             let new = old.replacen(old_path, new_path, 1);
             st.paths.remove(&old);
@@ -235,6 +273,30 @@ mod tests {
         assert_eq!(mgr.lookup_count(ino), 1);
         mgr.remember(ino);
         assert_eq!(mgr.lookup_count(ino), 2);
+    }
+
+    #[test]
+    fn forgotten_paths_reallocate_without_aliasing() {
+        // Kernel dentry reclaim sends FORGET, releasing the path mapping;
+        // call sites must reallocate rather than fall back to a constant —
+        // allocation rebinds the path and monotonic inos guarantee the
+        // fresh id aliases neither the forgotten one nor the root.
+        let mgr = InodeManager::new();
+        let ino = mgr.allocate("/skills", FileType::Directory, FUSE_ROOT_ID);
+        mgr.remember(ino);
+        mgr.forget(ino, 1);
+        assert_eq!(mgr.lookup_by_path("/skills"), None);
+
+        let fresh = mgr.allocate("/skills", FileType::Directory, FUSE_ROOT_ID);
+        assert_ne!(
+            fresh, ino,
+            "reallocated ino must not alias the forgotten one"
+        );
+        assert_ne!(
+            fresh, FUSE_ROOT_ID,
+            "reallocated ino must not be the root id"
+        );
+        assert_eq!(mgr.lookup_by_path("/skills"), Some(fresh));
     }
 
     #[test]
@@ -370,5 +432,133 @@ mod tests {
 
         // Verify root still intact.
         assert!(mgr.get(FUSE_ROOT_ID).is_some());
+    }
+    #[test]
+    fn rename_over_existing_target_releases_replaced_inode() {
+        let mgr = InodeManager::new();
+        let root = FUSE_ROOT_ID;
+        let a = mgr.allocate("/a", FileType::RegularFile, root);
+        let b = mgr.allocate("/b", FileType::RegularFile, root);
+        assert_ne!(a, b);
+        mgr.rename_path("/a", "/b");
+        assert_eq!(mgr.lookup_by_path("/b"), Some(a));
+        assert!(mgr.get(b).is_none(), "replaced target must be evicted");
+        assert_eq!(mgr.get_path(a).as_deref(), Some("/b"));
+        assert!(mgr.lookup_by_path("/a").is_none());
+    }
+
+    #[test]
+    fn forget_of_replaced_target_keeps_live_mapping() {
+        // The kernel always sends FORGET for the unlinked rename target.
+        // Before the fix, forget_inner deleted paths["/b"] — which after the
+        // rename belongs to the LIVE source inode — so the next LOOKUP
+        // minted a fresh inode number for an unchanged path.
+        let mgr = InodeManager::new();
+        let root = FUSE_ROOT_ID;
+        let a = mgr.allocate("/a", FileType::RegularFile, root);
+        let b = mgr.allocate("/b", FileType::RegularFile, root);
+        mgr.remember(a);
+        mgr.remember(b);
+        mgr.rename_path("/a", "/b");
+        mgr.forget(b, 1);
+        assert_eq!(
+            mgr.lookup_by_path("/b"),
+            Some(a),
+            "live mapping must survive"
+        );
+        assert!(mgr.get(a).is_some());
+    }
+
+    #[test]
+    fn rename_over_existing_evicts_target_children() {
+        let mgr = InodeManager::new();
+        let root = FUSE_ROOT_ID;
+        let a = mgr.allocate("/a", FileType::Directory, root);
+        let b = mgr.allocate("/b", FileType::Directory, root);
+        let ax = mgr.allocate("/a/x", FileType::RegularFile, a);
+        let by = mgr.allocate("/b/y", FileType::RegularFile, b);
+        mgr.remember(a);
+        mgr.remember(b);
+        mgr.remember(ax);
+        mgr.remember(by);
+        mgr.rename_path("/a", "/b");
+        assert_eq!(mgr.lookup_by_path("/b/x"), Some(ax));
+        assert!(
+            mgr.lookup_by_path("/b/y").is_none(),
+            "the replaced target's child must be evicted"
+        );
+        assert!(mgr.get(by).is_none());
+    }
+
+    #[test]
+    fn rename_to_same_path_is_noop() {
+        let mgr = InodeManager::new();
+        let root = FUSE_ROOT_ID;
+        let a = mgr.allocate("/a", FileType::Directory, root);
+        let ax = mgr.allocate("/a/x", FileType::RegularFile, a);
+        mgr.remember(a);
+        mgr.remember(ax);
+        mgr.rename_path("/a", "/a");
+        assert_eq!(mgr.lookup_by_path("/a"), Some(a));
+        assert_eq!(mgr.lookup_by_path("/a/x"), Some(ax));
+    }
+
+    #[test]
+    fn remove_drops_only_owned_path_entry() {
+        let mgr = InodeManager::new();
+        let root = FUSE_ROOT_ID;
+        let a = mgr.allocate("/a", FileType::RegularFile, root);
+        let b = mgr.allocate("/b", FileType::RegularFile, root);
+        mgr.remember(a);
+        mgr.remember(b);
+        mgr.rename_path("/a", "/b");
+        // The replaced inode was already evicted by the rename; removing a
+        // stale reference to it must not touch the live mapping.
+        mgr.remove(b);
+        assert_eq!(
+            mgr.lookup_by_path("/b"),
+            Some(a),
+            "live mapping survives remove"
+        );
+    }
+
+    #[test]
+    fn paths_and_inodes_stay_inverse_after_replace_storms() {
+        // A randomized-ish storm of allocate/remember/rename-over-existing/
+        // forget, then the inverse invariant: every inode's path maps back to
+        // that inode, and the map sizes agree.
+        let mgr = InodeManager::new();
+        let root = FUSE_ROOT_ID;
+        let mut inos: Vec<u64> = Vec::new();
+        for i in 0..12 {
+            let ino = mgr.allocate(&format!("/f{i}"), FileType::RegularFile, root);
+            mgr.remember(ino);
+            inos.push(ino);
+        }
+        // Rename each file onto its neighbor (replacing it).
+        for i in 0..11 {
+            let dst = i + 1;
+            mgr.rename_path(&format!("/f{i}"), &format!("/f{dst}"));
+        }
+        // Forget a few replaced inodes.
+        for ino in &inos[..6] {
+            mgr.forget(*ino, 1);
+        }
+        let st = mgr.state.read();
+        assert_eq!(
+            st.paths.len(),
+            st.inodes.len(),
+            "maps must stay the same size (root included)"
+        );
+        for (ino, entry) in st.inodes.iter() {
+            assert_eq!(
+                st.paths.get(&entry.path).copied(),
+                Some(*ino),
+                "paths[{}] must map back to ino {} (entry path {})",
+                entry.path,
+                ino,
+                entry.path
+            );
+        }
     }
 }

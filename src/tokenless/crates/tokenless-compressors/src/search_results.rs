@@ -1,14 +1,31 @@
-//! Complete search listings with repeated paths shared across consecutive rows.
+//! Complete search listings with repeated paths or directory prefixes shared.
+
+mod path_list;
 
 use tokenless_protocol::estimate_tokens;
 
 const HEADER: &str = "[Search results grouped by file; all received lines retained]\n";
 
-/// Stateless path sharing for no-context `path:line:text` search results.
+/// Stateless path sharing for numbered search results and plain path lists.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SearchResultsCompressor;
 
 impl SearchResultsCompressor {
+    /// Recognizes at least three unambiguous POSIX paths with uniform line endings.
+    #[must_use]
+    pub fn is_path_list(&self, input: &str) -> bool {
+        path_list::parse(input).is_some()
+    }
+
+    /// Shares a common directory prefix while retaining every received path byte.
+    ///
+    /// Returns no candidate for unsupported lists or when the complete encoded
+    /// view does not reduce both bytes and estimated tokens. No paths are opened.
+    #[must_use]
+    pub fn compress_paths(&self, input: &str) -> Option<String> {
+        path_list::compress(input)
+    }
+
     /// Returns a smaller, byte-reversible view, or no candidate.
     ///
     /// Requires at least three records, each with a path containing `/` or

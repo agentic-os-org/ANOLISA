@@ -77,3 +77,24 @@ fn routing_mode_command_rejects_runtime_switching_in_native_sessions() {
     assert!(rendered.contains("Native"));
     assert!(rendered.contains("startup"));
 }
+
+#[test]
+fn routing_query_and_invalid_mode_preserve_disabled_control() {
+    let (mut state, state_file) = routing_state("disabled-query");
+    state
+        .assistance_control
+        .as_ref()
+        .unwrap()
+        .set_enabled(false)
+        .unwrap();
+    for arg in [None, Some("invalid"), Some("shell-only")] {
+        let mut output = Vec::new();
+        assert!(
+            render_mode_command(Some("routing"), arg, None, &mut state, &mut output)
+                .expect("local routing control")
+        );
+        assert!(!state.assistance_control.as_ref().unwrap().is_enabled());
+        assert!(!state_file.exists());
+        assert!(!output.is_empty());
+    }
+}

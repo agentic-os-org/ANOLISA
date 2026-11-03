@@ -18,7 +18,7 @@ serde = { workspace = true }
 [dev-dependencies]
 asc-agentsight-client = { workspace = true }
 asc-pap = { workspace = true }
-asc-pap-repository-memory = { workspace = true }
+asc-policy-repository-sqlite = { workspace = true, features = ["test-support"] }
 asc-policy-adapter-agentsight = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

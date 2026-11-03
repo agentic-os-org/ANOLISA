@@ -1,0 +1,90 @@
+# Replace paths and RTK_SHA256_OF_EXECUTABLE; native profiles and credentials stay external.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: shared-tool-optimization
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: /absolute/path/to/aw-state
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [/absolute/path/to/qodercli]
+    openclaw:
+      adapter: openclaw
+      argv: [/absolute/path/to/node, /absolute/path/to/openclaw.mjs, gateway, run]
+    agentscope:
+      adapter: agentscope
+      argv: [/absolute/path/to/sdk-python, /absolute/path/to/application.py]
+    qwenpaw:
+      adapter: qwenpaw
+      argv: [/absolute/path/to/qwenpaw, app]
+    hermes:
+      adapter: hermes
+      argv: [/absolute/path/to/hermes, chat]
+    pi:
+      adapter: pi
+      argv: [/absolute/path/to/node, /absolute/path/to/pi-application.mjs]
+    claude:
+      adapter: claude-sdk
+      argv: [/absolute/path/to/python, /absolute/path/to/claude-worker.py]
+  providers:
+    tokenless:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv:
+          - /absolute/path/to/aw-provider-tokenless
+          - --cli
+          - /absolute/path/to/tokenless
+          - --data-dir
+          - /absolute/path/to/tokenless-state
+          - --rtk
+          - /absolute/path/to/tokenless-install/libexec/tokenless/rtk
+          - --rtk-sha256
+          - RTK_SHA256_OF_EXECUTABLE
+      timeout_ms: 2000
+      max_output_bytes: 1048576
+      config:
+        version: 1
+      view:
+        protocol: aw-provider-view/v1alpha1
+        implementation: tokenless
+        transport:
+          type: stdio
+          location: agent
+          argv:
+            - /absolute/path/to/aw-provider-tokenless
+            - --view
+            - --cli
+            - /absolute/path/to/tokenless
+            - --data-dir
+            - /absolute/path/to/tokenless-state
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: rewrite-command
+          provider: tokenless
+          operation: pre_tool
+          effects: [block]
+          on_error: report
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: compress-result
+          provider: tokenless
+          operation: post_tool
+          effects: [replace_result]
+          on_error: report

@@ -151,6 +151,41 @@ fn hermes_category_dir_readdir() {
 }
 
 // -----------------------------------------------------------------------
+// 4b. Hermes root listing hides store-hidden dot directories
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_root_listing_hides_a_hidden_skill_dir() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::normal_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        create_skill_dir(dir, "alpha");
+        // A dot-prefixed directory carrying SKILL.md: the store loader
+        // skips hidden directories, so it is never a managed Skill and the
+        // flat /skills listing cannot surface it. The physical Hermes root
+        // listing must not surface it either.
+        create_skill_dir(dir, ".hidden-skill");
+    });
+
+    let entries = list_dir_names(&fix.mountpoint().join("skills"));
+    assert!(
+        !entries.contains(&".hidden-skill".to_string()),
+        "a hidden skill directory must not be listed, got: {:?}",
+        entries
+    );
+    // Reverse: ordinary top-level skills and management entries stay.
+    assert!(
+        entries.contains(&"alpha".to_string()),
+        "ordinary top-level skill must stay listed, got: {entries:?}"
+    );
+    assert!(
+        entries.contains(&".hub".to_string()),
+        "management entries must stay listed, got: {entries:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
 // 5. Hermes mode nested skill leaf readable
 // -----------------------------------------------------------------------
 
@@ -167,6 +202,41 @@ fn hermes_nested_skill_md_readable() {
     assert!(
         content.contains("Apple Notes skill body"),
         "nested SKILL.md should be readable with correct content"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 5b. Hermes category listing hides store-hidden dot dirs
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_category_listing_hides_a_hidden_skill_dir() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::normal_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        let apple = dir.join("apple");
+        // A dot-prefixed directory carrying SKILL.md: the store loader skips
+        // hidden directories, so it is never a managed Skill and the flat
+        // /skills listing cannot surface it. The category listing must not
+        // surface it either.
+        create_skill_dir(&apple, ".hidden-skill");
+        // Plain dot content is not a Skill and stays listed.
+        std::fs::write(apple.join(".DS_Store"), "").unwrap();
+    });
+
+    let entries = list_dir_names(&fix.mountpoint().join("skills/apple"));
+    assert!(
+        !entries.contains(&".hidden-skill".to_string()),
+        "a hidden skill directory must not be listed, got: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"apple-notes".to_string()),
+        "ordinary nested skills must stay listed, got: {entries:?}"
+    );
+    assert!(
+        entries.contains(&".DS_Store".to_string()),
+        "plain dot content must stay listed, got: {entries:?}"
     );
 }
 
@@ -691,6 +761,578 @@ fn hermes_nested_file_rename_triggers_notify() {
     );
     assert_eq!(rename_events[0].schema_version, 2);
     assert_eq!(rename_events[0].paths, vec!["new.txt", "old.txt"]);
+}
+
+// -----------------------------------------------------------------------
+// H3-16. Hermes category rename refreshes every moved nested skill
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_category_rename_refreshes_each_moved_skill() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    // A category rename moves the source directory of every nested skill
+    // inside it, so each moved skill needs the same old/new refresh pair a
+    // direct skill rename emits. Without it a resolver keeps only the old
+    // ids and the moved skills read as hidden until an unrelated reconcile.
+    std::fs::rename(mp.join("apple"), mp.join("banana")).unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    let events = notify_client.events();
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.event_kind == "rename")
+        .map(|e| e.skill_id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "apple/apple-music".to_string(),
+            "apple/apple-notes".to_string(),
+            "banana/apple-music".to_string(),
+            "banana/apple-notes".to_string(),
+        ],
+        "a Hermes category rename must refresh the old and new id of every moved skill: {events:?}"
+    );
+
+    // Only the skill ids moved: the category itself is not a skill, and the
+    // moved skills survive at their new paths.
+    assert!(
+        events
+            .iter()
+            .all(|e| e.skill_id != "apple" && e.skill_id != "banana")
+    );
+    assert!(!source.path().join("apple").exists());
+    assert!(source.path().join("banana/apple-notes/SKILL.md").is_file());
+}
+
+#[test]
+fn hermes_plain_category_child_rename_stays_silent() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+    // A plain category child without SKILL.md is passthrough, not a skill.
+    std::fs::create_dir_all(source.path().join("apple/docs")).unwrap();
+    std::fs::write(source.path().join("apple/docs/readme.txt"), "notes").unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+    std::fs::rename(mp.join("apple/docs"), mp.join("apple/manuals")).unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    // The rename landed...
+    assert!(source.path().join("apple/manuals/readme.txt").is_file());
+    // ...and, unlike a category rename, it must not refresh the real skills
+    // beside it: only genuine categories enumerate their nested skills.
+    let events = notify_client.events();
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.skill_id.contains("apple-notes")
+                && !event.skill_id.contains("apple-music")),
+        "renaming a plain category child must not refresh any real skill: {events:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// H3-17. Category rename onto a management name mints no new ids
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_category_rename_onto_a_management_name_refreshes_only_old_ids() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path();
+    for skill in ["apple-notes", "apple-music"] {
+        let dir = source.join("apple").join(skill);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: d\n---\n"),
+        )
+        .unwrap();
+    }
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source, &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source,
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // `.hub` is a management path, not a skill container: the rename
+    // succeeds physically but must not mint `<management>/<skill>` ids for
+    // the daemon to scan.
+    std::fs::rename(
+        mountpoint.path().join("apple"),
+        mountpoint.path().join(".hub"),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    let events = notify_client.events();
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.event_kind == "rename")
+        .map(|e| e.skill_id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "apple/apple-music".to_string(),
+            "apple/apple-notes".to_string(),
+        ],
+        "a management-name target must refresh only the old ids: {events:?}"
+    );
+    assert!(source.join(".hub/apple-notes/SKILL.md").is_file());
+}
+
+#[test]
+fn hermes_category_rename_skips_hidden_nested_leaves() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path();
+    for skill in ["apple-notes", "apple-music"] {
+        let dir = source.join("apple").join(skill);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: d\n---\n"),
+        )
+        .unwrap();
+    }
+    // A dot-prefixed leaf is a managed/reserved location: the store loader
+    // skips it and the category listing hides it, so it is never a managed
+    // Skill and a category rename must not refresh an id for it.
+    let hidden = source.join("apple/.hidden-skill");
+    std::fs::create_dir_all(&hidden).unwrap();
+    std::fs::write(
+        hidden.join("SKILL.md"),
+        "---\nname: hidden-skill\ndescription: h\n---\n",
+    )
+    .unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source, &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source,
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    std::fs::rename(
+        mountpoint.path().join("apple"),
+        mountpoint.path().join("banana"),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    let events = notify_client.events();
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.event_kind == "rename")
+        .map(|e| e.skill_id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "apple/apple-music".to_string(),
+            "apple/apple-notes".to_string(),
+            "banana/apple-music".to_string(),
+            "banana/apple-notes".to_string(),
+        ],
+        "hidden leaves must not produce refresh ids: {events:?}"
+    );
+    assert!(source.join("banana/.hidden-skill/SKILL.md").is_file());
+}
+
+#[test]
+fn hermes_category_rename_to_a_hidden_name_refreshes_only_old_ids() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path();
+    for skill in ["apple-notes", "apple-music"] {
+        let dir = source.join("apple").join(skill);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: d\n---\n"),
+        )
+        .unwrap();
+    }
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source, &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source,
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // `.foo` is not management, but any dot-prefixed component is a
+    // managed/reserved location: the rename lands physically, while only
+    // the old ids are refreshed.
+    std::fs::rename(
+        mountpoint.path().join("apple"),
+        mountpoint.path().join(".foo"),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    let events = notify_client.events();
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.event_kind == "rename")
+        .map(|e| e.skill_id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "apple/apple-music".to_string(),
+            "apple/apple-notes".to_string(),
+        ],
+        "a hidden-name target must refresh only the old ids: {events:?}"
+    );
+    assert!(source.join(".foo/apple-notes/SKILL.md").is_file());
+}
+
+#[test]
+fn hermes_category_rename_from_a_hidden_name_refreshes_only_new_ids() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path();
+    // The source category is dot-prefixed: the store loader skips it, so
+    // its skills were never managed under the old namespace.
+    let dir = source.join(".hidden-parent").join("alpha");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: alpha\ndescription: d\n---\n",
+    )
+    .unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source, &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source,
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    // The background mount can take a moment to establish; wait (bounded)
+    // until the source category resolves through the mount so the rename
+    // below cannot race the mount.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::fs::symlink_metadata(mountpoint.path().join(".hidden-parent")).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mount did not expose .hidden-parent within 5s"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    std::fs::rename(
+        mountpoint.path().join(".hidden-parent"),
+        mountpoint.path().join("banana"),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    // `.hidden-parent` was never a managed Skill namespace, so only the
+    // new visible ids are minted; the rename must not ask the daemon to
+    // refresh `<dot-name>/alpha`.
+    let events = notify_client.events();
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.event_kind == "rename")
+        .map(|e| e.skill_id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["banana/alpha".to_string()],
+        "a hidden source must refresh only the new ids: {events:?}"
+    );
+    assert!(source.join("banana/alpha/SKILL.md").is_file());
+}
+
+#[test]
+fn hermes_category_rename_between_hidden_names_stays_silent() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path();
+    let dir = source.join(".hidden-parent").join("alpha");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: alpha\ndescription: d\n---\n",
+    )
+    .unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source, &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source,
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+    // The background mount can take a moment to establish; wait (bounded)
+    // until the source category resolves through the mount so the rename
+    // below cannot race the mount.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::fs::symlink_metadata(mountpoint.path().join(".hidden-parent")).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mount did not expose .hidden-parent within 5s"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    std::fs::rename(
+        mountpoint.path().join(".hidden-parent"),
+        mountpoint.path().join(".other-hidden"),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    // Neither namespace is managed, so there is nothing for the daemon to
+    // refresh: the rename must produce no id on either side.
+    let events = notify_client.events();
+    let rename_ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.event_kind == "rename")
+        .map(|e| e.skill_id.clone())
+        .collect();
+    assert!(
+        rename_ids.is_empty(),
+        "a rename between two hidden categories must not notify: {events:?}"
+    );
+    assert!(source.join(".other-hidden/alpha/SKILL.md").is_file());
 }
 
 // -----------------------------------------------------------------------
@@ -1281,6 +1923,100 @@ fn hermes_mixed_layout_top_level_and_nested() {
 }
 
 // -----------------------------------------------------------------------
+// 18b. Top-level files in an in-place Hermes mount.
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_top_level_file_is_listed_and_readable() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        // A plain file at the workspace root. The in-place root readdir
+        // lists the physical workspace, so this entry must be readable:
+        // leaving it classified as a category made it a phantom that
+        // `stat`, `cat` and `ls -l` all failed on with ENOENT.
+        std::fs::write(dir.join("README.md"), "top-level readme\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "*.tmp\n").unwrap();
+    });
+
+    let mp = fix.mountpoint();
+
+    let root_entries = list_dir_names(mp);
+    assert!(
+        root_entries.contains(&"README.md".to_string()),
+        "root must list the top-level file, got: {root_entries:?}"
+    );
+
+    let readme = std::fs::read_to_string(mp.join("README.md"))
+        .expect("top-level file must be readable through the mount");
+    assert_eq!(readme, "top-level readme\n");
+    assert!(
+        std::fs::metadata(mp.join("README.md")).unwrap().is_file(),
+        "top-level file must keep its file attrs"
+    );
+
+    let ignore = std::fs::read_to_string(mp.join(".gitignore"))
+        .expect("top-level dot-file must be readable through the mount");
+    assert_eq!(ignore, "*.tmp\n");
+
+    // The management file and the nested skill keep working alongside it.
+    assert_eq!(
+        std::fs::read_to_string(mp.join(".bundled_manifest")).unwrap(),
+        "manifest-content"
+    );
+    let nested_md = std::fs::read_to_string(mp.join("apple/apple-notes/SKILL.md"))
+        .expect("read nested SKILL.md");
+    assert!(nested_md.contains("Apple Notes skill body"));
+}
+
+// -----------------------------------------------------------------------
+// 18c. Reserved lifecycle names stay hidden in an in-place Hermes mount.
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_reserved_lifecycle_files_stay_hidden() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        // Plain-file shapes of the reserved lifecycle names. The S3 contract
+        // keeps these names out of the ordinary view and denies mutation, so
+        // the top-level file rewrite must not turn them into readable,
+        // writable files.
+        std::fs::write(dir.join(".certified"), "certified\n").unwrap();
+        std::fs::write(dir.join(".staging"), "staging\n").unwrap();
+        std::fs::write(dir.join(".quarantine"), "quarantine\n").unwrap();
+        std::fs::write(dir.join(".archive"), "archive\n").unwrap();
+    });
+
+    let mp = fix.mountpoint();
+
+    for name in [".certified", ".staging", ".quarantine", ".archive"] {
+        let path = mp.join(name);
+        assert!(
+            std::fs::symlink_metadata(&path).is_err(),
+            "{name} must stay hidden from the ordinary view"
+        );
+        assert!(
+            std::fs::read_to_string(&path).is_err(),
+            "{name} must not be readable"
+        );
+        assert!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .is_err(),
+            "{name} must not be openable for writing"
+        );
+        assert!(
+            std::fs::remove_file(&path).is_err(),
+            "{name} must not be removable"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
 // 19. Conservative layout auto-detection.
 // -----------------------------------------------------------------------
 
@@ -1381,4 +2117,281 @@ fn set_user_xattr(path: &Path, name: &str, value: &[u8]) {
             0,
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// Nested skill-dir rename keeps the store in sync (same rule as the
+// flat /skills rename path: drop the old leaf name, parse the new one).
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_nested_skill_dir_rename_syncs_store() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let config = MountConfig {
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    let mp = mountpoint.path();
+
+    std::fs::rename(
+        mp.join("apple/apple-notes"),
+        mp.join("apple/apple-notes-v2"),
+    )
+    .unwrap();
+
+    // The physical nested skill moved.
+    assert!(
+        source.path().join("apple/apple-notes-v2").is_dir(),
+        "physical rename must land at apple/apple-notes-v2"
+    );
+    assert!(
+        !source.path().join("apple/apple-notes").exists(),
+        "physical apple/apple-notes must be gone"
+    );
+
+    // The store dropped the dead leaf name and adopted the new one.
+    assert!(
+        shared.read().get("apple-notes").is_none(),
+        "stale store entry for the old leaf name must be removed"
+    );
+    let guard = shared.read();
+    let entry = guard
+        .get("apple-notes-v2")
+        .expect("renamed nested skill must appear in the store");
+    // In in-place mode the physical source is addressed through
+    // /proc/self/fd/<n>, so compare the meaningful suffix.
+    assert!(
+        entry.source_path.ends_with("apple/apple-notes-v2/SKILL.md"),
+        "renamed entry must point at the new source path, got {}",
+        entry.source_path.display()
+    );
+    drop(guard);
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mp.to_string_lossy()])
+        .output();
+}
+
+/// Regression (P1): a plain category child with no SKILL.md anywhere
+/// inside is lexically classified as NestedSkillDir, but it is not a
+/// skill and the store never held an entry for it — renaming it must
+/// not fabricate one (no placeholder for the new name) and must not
+/// disturb the unrelated real skills in the store.
+#[test]
+fn hermes_plain_nested_dir_rename_leaves_store_unchanged() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+    // A plain directory under a category: content, but no SKILL.md.
+    std::fs::create_dir_all(source.path().join("apple/docs")).unwrap();
+    std::fs::write(source.path().join("apple/docs/readme.txt"), "not a skill").unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let before: Vec<String> = {
+        let guard = shared.read();
+        let mut names = guard
+            .list()
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert!(
+        !before.contains(&"docs".to_string()),
+        "plain dir must not be in the store before the rename, got {before:?}"
+    );
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let config = MountConfig {
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    let mp = mountpoint.path();
+
+    std::fs::rename(mp.join("apple/docs"), mp.join("apple/guides")).unwrap();
+
+    // The physical plain directory moved.
+    assert!(
+        source.path().join("apple/guides/readme.txt").is_file(),
+        "physical rename must land at apple/guides"
+    );
+    assert!(
+        !source.path().join("apple/docs").exists(),
+        "physical apple/docs must be gone"
+    );
+
+    // The store is untouched: no placeholder for the new name, and the
+    // real skills keep their entries.
+    assert!(
+        shared.read().get("guides").is_none(),
+        "plain dir rename must not fabricate a store entry for the new name"
+    );
+    assert!(
+        shared.read().get("docs").is_none(),
+        "plain dir rename must not create an entry for the old name"
+    );
+    let after: Vec<String> = {
+        let guard = shared.read();
+        let mut names = guard
+            .list()
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        before, after,
+        "plain dir rename must leave the store unchanged"
+    );
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mp.to_string_lossy()])
+        .output();
+}
+
+/// Regression (P1): the store keys skills by bare leaf name, so a real
+/// nested skill `beta/docs` may already own the key "docs" when a plain
+/// `apple/docs` (no SKILL.md) is renamed. The rename must not delete
+/// that unrelated entry — identity migration requires the entry to
+/// originate from the renamed directory, category included.
+#[test]
+fn hermes_plain_nested_dir_rename_spares_same_leaf_real_skill() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+    // A real same-leaf skill under ANOTHER category.
+    let beta_docs = source.path().join("beta/docs");
+    std::fs::create_dir_all(&beta_docs).unwrap();
+    std::fs::write(
+        beta_docs.join("SKILL.md"),
+        "---\nname: docs\ndescription: real docs skill\n---\nbody\n",
+    )
+    .unwrap();
+    // A plain directory under `apple` sharing the leaf name.
+    std::fs::create_dir_all(source.path().join("apple/docs")).unwrap();
+    std::fs::write(source.path().join("apple/docs/readme.txt"), "not a skill").unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    {
+        let guard = shared.read();
+        let entry = guard
+            .get("docs")
+            .expect("the real beta/docs skill must be in the store");
+        assert!(
+            entry.source_path.ends_with("beta/docs/SKILL.md"),
+            "store key 'docs' must be owned by beta/docs, got {}",
+            entry.source_path.display()
+        );
+    }
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let config = MountConfig {
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    let mp = mountpoint.path();
+
+    std::fs::rename(mp.join("apple/docs"), mp.join("apple/guides")).unwrap();
+
+    // The physical plain directory moved.
+    assert!(
+        source.path().join("apple/guides/readme.txt").is_file(),
+        "physical rename must land at apple/guides"
+    );
+    assert!(
+        source.path().join("beta/docs/SKILL.md").is_file(),
+        "the real beta/docs skill must be physically untouched"
+    );
+
+    // The other category's real skill keeps its store entry, and no
+    // placeholder is fabricated for the plain directory's new name.
+    {
+        let guard = shared.read();
+        let entry = guard
+            .get("docs")
+            .expect("the real beta/docs skill must survive the plain-dir rename");
+        assert!(
+            entry.source_path.ends_with("beta/docs/SKILL.md"),
+            "the surviving 'docs' entry must still be beta/docs, got {}",
+            entry.source_path.display()
+        );
+        assert!(
+            guard.get("guides").is_none(),
+            "plain dir rename must not fabricate a store entry for the new name"
+        );
+    }
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mp.to_string_lossy()])
+        .output();
 }

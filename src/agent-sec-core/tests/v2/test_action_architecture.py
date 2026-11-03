@@ -21,7 +21,11 @@ def test_handlers_and_core_cannot_depend_on_concrete_scanners_or_output_writers(
             "asc-persistence-sqlite",
             "rusqlite",
         }
-    for source in (V2 / "crates/asc-daemon-handler/src").glob("*.rs"):
+    for source in (V2 / "crates/asc-daemon-handler/src").rglob("*.rs"):
+        # test_helpers.rs is a test-only fixture module declared as
+        # `#[cfg(test)] mod test_helpers;` in lib.rs; it is not production code.
+        if source.name == "test_helpers.rs":
+            continue
         production = source.read_text().split("#[cfg(test)]")[0]
         assert "Finalizer" not in production
         assert "ActionRuntime" not in production
@@ -35,6 +39,24 @@ def test_capabilities_cannot_write_events_or_telemetry_directly():
                 "asc-event-sink",
                 "asc-event-log",
                 "asc-telemetry",
+                "asc-observability",
                 "asc-persistence-sqlite",
                 "rusqlite",
             }
+
+
+def test_skillsec_entries_reuse_process_application_composition():
+    sources = [
+        V2 / "apps/asc-daemon/src/skill_sec.rs",
+        V2 / "apps/asc-daemon/src/skill_worker.rs",
+    ]
+    sources.extend((V2 / "apps/asc-daemon/src/skillfs").rglob("*.rs"))
+    for source in sources:
+        if source.name == "tests.rs":
+            continue
+        production = source.read_text().split("#[cfg(test)]")[0]
+        assert "ActionRuntime::new" not in production
+        assert "Finalizer::new" not in production
+    request = (V2 / "crates/asc-action-types/src/skill_sec.rs").read_text()
+    assert "SkillRoot" not in request
+    assert "SkillSecService" not in request

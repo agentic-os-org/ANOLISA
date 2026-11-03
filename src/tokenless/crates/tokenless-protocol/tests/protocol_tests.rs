@@ -42,6 +42,7 @@ fn requests() -> Vec<RequestEnvelope> {
                 content: "{}".into(),
                 status: ToolResultStatus::Success,
                 content_origin: ContentOrigin::CommandOutput,
+                command: None,
                 output_optimization: OutputOptimization::None,
                 capabilities: PostToolCapabilities {
                     replace_output: true,

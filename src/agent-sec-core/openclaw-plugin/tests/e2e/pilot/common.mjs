@@ -17,6 +17,8 @@ export const POLICY_CODE_DENY_MARKER = "agent-sec-policy-matrix code-deny";
 export const POLICY_CODE_DENY_COMMAND = "printf agent-sec-policy-matrix-code-deny";
 export const POLICY_CODE_DENY_OUTPUT = "agent-sec-policy-matrix-code-deny";
 export const POLICY_CODE_DONE_TEXT = "agent-sec-policy-matrix code turn complete";
+export const PII_GATEWAY_MARKER = "agent-sec-pii-gateway";
+export const PII_GATEWAY_REPLY = "PII gateway turn complete";
 
 export async function writeExecutable(file, contents) {
   await fs.writeFile(file, contents, { mode: 0o755 });

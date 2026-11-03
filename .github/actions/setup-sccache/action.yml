@@ -1,0 +1,44 @@
+name: Setup shared Rust compiler cache
+description: Configure the runner's preinstalled sccache for trusted cache writes
+inputs:
+  writer-password:
+    description: Redis writer password, provided only on trusted workflow events
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Enable shared compiler cache
+      shell: bash
+      env:
+        WRITER_PASSWORD: ${{ inputs.writer-password }}
+      run: |
+        # Without a writer secret, retain the runner's read-only configuration.
+        if [[ -z "$WRITER_PASSWORD" ]]; then
+          exit 0
+        fi
+        if ! command -v sccache >/dev/null 2>&1 \
+            || [[ -z "${SCCACHE_REDIS_ENDPOINT:-}" ]]; then
+          echo '::warning::Shared sccache is unavailable on this runner; compiling normally'
+          echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
+          exit 0
+        fi
+        echo "::add-mask::$SCCACHE_REDIS_ENDPOINT"
+        export SCCACHE_SKIP_CACHE_CHECK=1
+        export SCCACHE_REDIS_USERNAME=ci-writer
+        export SCCACHE_REDIS_PASSWORD="$WRITER_PASSWORD"
+        export SCCACHE_REDIS_RW_MODE=READ_WRITE
+        echo "::add-mask::$SCCACHE_REDIS_PASSWORD"
+        # The runner hook starts a read-only server. Credentials are server-scoped.
+        timeout 5s sccache --stop-server >/dev/null 2>&1 || true
+        if ! timeout 20s sccache --start-server; then
+          echo '::warning::Shared sccache failed to start; compiling normally'
+          echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
+          exit 0
+        fi
+        {
+          printf 'SCCACHE_REDIS_USERNAME=%s\n' "$SCCACHE_REDIS_USERNAME"
+          printf 'SCCACHE_REDIS_PASSWORD=%s\n' "$SCCACHE_REDIS_PASSWORD"
+          printf 'SCCACHE_REDIS_RW_MODE=%s\n' "$SCCACHE_REDIS_RW_MODE"
+          echo 'SCCACHE_SKIP_CACHE_CHECK=1'
+          echo 'RUSTC_WRAPPER=sccache'
+        } >> "$GITHUB_ENV"

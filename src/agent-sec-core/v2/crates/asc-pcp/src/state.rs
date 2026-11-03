@@ -5,6 +5,7 @@ use crate::{
     PreparedAttempt, Presence, ReconcileRecord, RetryPolicy, StoreError, TargetRef, WriteResult,
 };
 use asc_foundation_types::ResourceId;
+use asc_policy_repository::WriteReceipt;
 use asc_policy_types::binding::BindingStatus;
 use std::sync::Arc;
 
@@ -12,6 +13,27 @@ pub(crate) struct ReconcileState {
     pub repository: Arc<dyn BindingStateRepository>,
 }
 impl ReconcileState {
+    pub fn resolve(&self, pending: &mut Option<PendingWrite>) -> Result<WriteResult, StoreError> {
+        let write = pending.as_ref().ok_or(StoreError::Invalid)?;
+        let result = self
+            .repository
+            .compare_exchange_binding_state(&write.expected, &write.write)?;
+        *pending = None;
+        Ok(result)
+    }
+    fn save(
+        &self,
+        expected: &ReconcileRecord,
+        write: BindingStateWrite,
+        pending: &mut Option<PendingWrite>,
+    ) -> Result<WriteResult, StoreError> {
+        *pending = Some(PendingWrite {
+            expected: expected.clone(),
+            write,
+        });
+        self.resolve(pending)
+    }
+
     pub fn read(&self, id: &ResourceId) -> Result<Option<ReconcileRecord>, StoreError> {
         self.repository.get_binding_state(id)
     }
@@ -21,6 +43,7 @@ impl ReconcileState {
         now: u64,
         policy: RetryPolicy,
         schedule: &mut crate::AttemptSchedule,
+        pending: &mut Option<PendingWrite>,
     ) -> Result<bool, StoreError> {
         let mut next = record.clone();
         let exhausted = schedule.attempts_started >= policy.max_attempts;
@@ -39,10 +62,11 @@ impl ReconcileState {
         } else {
             Some(now.saturating_add(crate::retry::delay(policy, schedule.attempts_started)))
         };
-        let matched = self
-            .repository
-            .compare_exchange_binding_state(record, &BindingStateWrite::new(next))?
-            != WriteResult::Conflict;
+        let receipt = self.save(record, BindingStateWrite::new(next), pending)?;
+        let matched = receipt != WriteResult::Conflict;
+        if let WriteResult::Applied(receipt) | WriteResult::AlreadyApplied(receipt) = receipt {
+            schedule.status_version = receipt.status_version;
+        }
         if matched {
             schedule.next_attempt_at = next_attempt_at;
         }
@@ -54,17 +78,23 @@ impl ReconcileState {
         now: u64,
         policy: RetryPolicy,
         schedule: &mut crate::AttemptSchedule,
+        pending: &mut Option<PendingWrite>,
     ) -> Result<Option<ReconcileRecord>, StoreError> {
         let before = schedule.clone();
-        let Some(next) = claim(record.clone(), now, policy, schedule)? else {
+        let Some(mut next) = claim(record.clone(), now, policy, schedule)? else {
             return Ok(None);
         };
+        next.status_version = record
+            .status_version
+            .checked_add(1)
+            .ok_or(StoreError::Invalid)?;
         let write = BindingStateWrite::new(next.clone());
-        match self
-            .repository
-            .compare_exchange_binding_state(record, &write)?
-        {
-            WriteResult::Applied | WriteResult::AlreadyApplied => Ok(Some(next)),
+        match self.save(record, write, pending)? {
+            WriteResult::Applied(receipt) | WriteResult::AlreadyApplied(receipt) => {
+                next.status_version = receipt.status_version.ok_or(StoreError::Invalid)?;
+                schedule.status_version = receipt.status_version;
+                Ok(Some(next))
+            }
             WriteResult::Conflict => {
                 *schedule = before;
                 Ok(None)
@@ -76,6 +106,7 @@ impl ReconcileState {
         expected: &ExpectedBinding,
         prepared: Option<&PreparedAttempt>,
         targets: &[TargetRef],
+        pending: &mut Option<PendingWrite>,
     ) -> Result<bool, StoreError> {
         for _ in 0..16 {
             let Some(record) = self.read(&expected.id)? else {
@@ -88,11 +119,7 @@ impl ReconcileState {
                 deployments: Some(next.deployments),
                 ..Default::default()
             });
-            if self
-                .repository
-                .compare_exchange_binding_state(&record, &write)?
-                != WriteResult::Conflict
-            {
+            if self.save(&record, write, pending)? != WriteResult::Conflict {
                 return Ok(true);
             }
         }
@@ -103,28 +130,28 @@ impl ReconcileState {
         &self,
         outcome: &AttemptOutcome,
         completion: &mut Option<PendingWrite>,
-    ) -> Result<bool, StoreError> {
-        // A conflict is recomputed against the latest aggregate. Bound contention
-        // work per call; no outcome or write is retained after reconcile returns.
+    ) -> Result<Option<WriteReceipt>, StoreError> {
+        // Retain the exact write through storage failure. A newer lifecycle
+        // cancels the entire old result, including its target observations.
         for _ in 0..16 {
             if completion.is_none() {
                 let Some(record) = self.read(&outcome.expected.id)? else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 let (next, matched) = finish(record.clone(), outcome)?;
+                if !matched {
+                    return Ok(None);
+                }
                 *completion = Some(PendingWrite {
                     expected: record,
-                    write: if matched && outcome.next_status == BindingStatus::Deleted {
+                    write: if outcome.next_status == BindingStatus::Deleted {
                         BindingStateWrite::delete()
-                    } else if matched {
-                        BindingStateWrite::new(next)
                     } else {
                         BindingStateWrite::patch(asc_policy_repository::ReconciliationPatch {
+                            status: Some(next.binding.status),
                             deployments: Some(next.deployments),
-                            ..Default::default()
                         })
                     },
-                    matched,
                 });
             }
             let pending = completion.as_ref().ok_or(StoreError::Invalid)?;
@@ -132,17 +159,9 @@ impl ReconcileState {
                 .repository
                 .compare_exchange_binding_state(&pending.expected, &pending.write)?
             {
-                WriteResult::Applied => {
-                    let matched = pending.matched;
+                WriteResult::Applied(receipt) | WriteResult::AlreadyApplied(receipt) => {
                     *completion = None;
-                    return Ok(matched);
-                }
-                // Recheck the latest intent on the next call; never replay a
-                // removed Absent target or overwrite a newer PAP write.
-                WriteResult::AlreadyApplied => {
-                    let removed = pending.write.next.is_none();
-                    *completion = None;
-                    return Ok(removed);
+                    return Ok(receipt.status_applied.then_some(receipt));
                 }
                 WriteResult::Conflict => *completion = None,
             }
@@ -180,7 +199,7 @@ fn register(
     prepared: Option<&PreparedAttempt>,
     targets: &[TargetRef],
 ) -> Result<Option<ReconcileRecord>, StoreError> {
-    if !expected.matches(&record.binding) {
+    if !expected.matches(&record) {
         return Ok(None);
     }
     if !expected.status.is_reconciling() {
@@ -234,6 +253,9 @@ fn finish(
     mut record: ReconcileRecord,
     outcome: &AttemptOutcome,
 ) -> Result<(ReconcileRecord, bool), StoreError> {
+    if !outcome.expected.matches(&record) {
+        return Ok((record, false));
+    }
     if !outcome.expected.status.is_reconciling() {
         return Err(StoreError::Invalid);
     }
@@ -256,8 +278,7 @@ fn finish(
     {
         return Err(StoreError::Invalid);
     }
-    // Validate all evidence before touching the live state. Even a stale
-    // lifecycle may only report registered, not newer, target identities.
+    // Validate every observation before changing any part of the aggregate.
     for (index, observation) in outcome.observations.iter().enumerate() {
         if outcome.observations[..index]
             .iter()
@@ -286,27 +307,24 @@ fn finish(
             }
         }
     }
-    let matches = outcome.expected.matches(&record.binding);
-    if matches {
-        if outcome.next_status == BindingStatus::Deleted {
-            if !record.deployments.is_empty() {
-                return Err(StoreError::Invalid);
-            }
-            // The caller atomically removes the aggregate. There is no Deleted
-            // snapshot to persist, but all evidence must still be validated.
-            return Ok((record, true));
-        }
-        if outcome.next_status == BindingStatus::Ready
-            && !(record.deployments.len() == 1
-                && record.deployments[0].revision == outcome.expected.revision
-                && record.deployments[0].presence == Presence::Present)
-        {
+    if outcome.next_status == BindingStatus::Deleted {
+        if !record.deployments.is_empty() {
             return Err(StoreError::Invalid);
         }
-        record.binding.status.phase = outcome.next_status;
-        record.binding.status.error.clone_from(&outcome.error);
+        // The caller atomically removes the aggregate. There is no Deleted
+        // snapshot to persist, but all evidence must still be validated.
+        return Ok((record, true));
     }
-    Ok((record, matches))
+    if outcome.next_status == BindingStatus::Ready
+        && !(record.deployments.len() == 1
+            && record.deployments[0].revision == outcome.expected.revision
+            && record.deployments[0].presence == Presence::Present)
+    {
+        return Err(StoreError::Invalid);
+    }
+    record.binding.status.phase = outcome.next_status;
+    record.binding.status.error.clone_from(&outcome.error);
+    Ok((record, true))
 }
 
 #[cfg(test)]

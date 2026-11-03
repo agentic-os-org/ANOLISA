@@ -638,3 +638,22 @@ def test_drift_notice_contains_counts_not_file_names(mock_cli, tmp_path: Path) -
     reason = _permission(output)["permissionDecisionReason"]
     assert "added=1, removed=1, modified=2" in reason
     assert "secret-" not in reason
+
+
+@pytest.mark.parametrize(
+    "status,exit_code,notice",
+    [
+        ("deny", 1, "blocking findings"),
+        ("tampered", 1, "verification failed"),
+        ("pass", 1, "could not complete"),
+        ("deny", 2, "could not complete"),
+    ],
+)
+def test_check_exit_code_and_verdict_contract(
+    mock_cli, tmp_path, status, exit_code, notice
+):
+    project = tmp_path / "project"
+    _make_skill(project / ".qoder" / "skills", "example")
+    env, _capture, _home = mock_cli(json.dumps({"status": status}), rc=exit_code)
+    output = _stdout_json(_run_hook(_event(project, "example"), env))
+    assert notice in _permission(output)["permissionDecisionReason"]

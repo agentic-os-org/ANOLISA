@@ -9,8 +9,10 @@ pub(crate) use super::runtime_output::write_tool_output_ref;
 pub(crate) use super::runtime_render::{
     render_activity_details_by_id, render_activity_rows, render_provider_native_shell_transcript,
 };
+#[cfg(test)]
+pub(crate) use super::shell_handoff::close_untracked_shell_handoffs;
 pub(crate) use super::shell_handoff::{
-    close_untracked_shell_handoffs, record_approved_shell_handoff_blocks,
+    close_untracked_shell_handoffs_with_history_base, record_approved_shell_handoff_blocks,
 };
 use super::tool_invocation::{
     complete_tool_invocation, control_tool_invocation_id, first_error_line,

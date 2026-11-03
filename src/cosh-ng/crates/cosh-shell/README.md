@@ -14,9 +14,16 @@ It runs a managed PTY shell, intercepts Agent-oriented input, renders inline car
 
 See `../../docs/specs/shell-architecture-optimization/` for the current architecture optimization SDD.
 
+## Inline Failure Boundary
+
+Inline UI and the shell relay share one host process. A host failure can end the
+session and its jobs. Healthy shell-only routing does not guarantee recovery
+from cancellation or a failed terminal writer. Native Bash startup, PS1 bytes,
+prompt colors and cursor ownership remain with the existing shell/PTY path.
+
 ## Input-Wait Handling
 
-When an agent-approved foreground command sits in a kernel-evidenced input wait (password prompt, pager, plain stdin read on the session tty), the shell shows an inline hint card and — after `shell.input_wait_timeout_secs` (default 120, `0` disables) — interrupts the foreground group and reports the wait to the provider. Fullscreen TUIs and pipeline reads are exempt. See the [configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#cosh-shell-configuration).
+When an agent-approved foreground command sits in a kernel-evidenced input wait (password prompt, pager, plain stdin read on the session tty), the shell shows an inline hint card and — after `shell.input_wait_timeout_secs` (default 120, `0` disables) — interrupts the foreground group and reports the wait to the provider. Fullscreen TUIs and pipeline reads are exempt. See the [configuration guide](../../../../docs/user-guide/en/cosh-ng/configuration.md#cosh-shell-configuration).
 
 ## Build And Check
 
@@ -24,6 +31,15 @@ When an agent-approved foreground command sits in a kernel-evidenced input wait 
 cargo check --package cosh-shell --all-targets
 cargo test --package cosh-shell --lib -- --test-threads=1
 cargo clippy --package cosh-shell --all-targets -- -D warnings
+```
+
+On Linux, the real-Core integration tests require the `cosh-core` executable in the
+same Cargo target directory and profile. Building or testing `cosh-shell` alone
+does not build this sibling package. Build the real Core before targeted tests:
+
+```bash
+cargo build --locked --package cosh-core --bin cosh-core
+cargo test --locked --package cosh-shell --test raw_cli cosh_core:: -- --test-threads=1
 ```
 
 ## Raw Shell

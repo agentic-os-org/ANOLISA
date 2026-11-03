@@ -1141,3 +1141,189 @@ fn rename_into_invalid_inbox_name_is_refused() {
         .args(["-u", &mountpoint.path().to_string_lossy()])
         .output();
 }
+
+/// An inbox-internal skill-dir rename (`mv /.skillfs-inbox/foo
+/// /.skillfs-inbox/foo-v2`) physically renames `source/foo` to
+/// `source/foo-v2`, so the store must follow the same way mkdir/rmdir
+/// sync inbox entries: drop the old name and parse-or-placeholder the
+/// new one. Otherwise `/skills` keeps listing the dead `foo` and the
+/// renamed skill is invisible until an unrelated rescan.
+#[test]
+fn inbox_skill_dir_rename_syncs_store() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let source = tempfile::tempdir().expect("source");
+    create_skill_dir(source.path(), "foo");
+    let mountpoint = tempfile::tempdir().expect("mount");
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount");
+    std::thread::sleep(Duration::from_millis(300));
+
+    std::fs::rename(
+        mountpoint.path().join(".skillfs-inbox/foo"),
+        mountpoint.path().join(".skillfs-inbox/foo-v2"),
+    )
+    .expect("rename inbox skill dir");
+
+    // The physical candidate directory moved.
+    assert!(
+        source.path().join("foo-v2").is_dir(),
+        "physical rename must land at source/foo-v2"
+    );
+    assert!(
+        !source.path().join("foo").exists(),
+        "physical source/foo must be gone"
+    );
+
+    // The store dropped the dead name and adopted the new one.
+    assert!(
+        shared.read().get("foo").is_none(),
+        "stale store entry for the old name must be removed"
+    );
+    let guard = shared.read();
+    let entry = guard
+        .get("foo-v2")
+        .expect("renamed skill must appear in the store");
+    assert_eq!(
+        entry.source_path,
+        source.path().join("foo-v2/SKILL.md"),
+        "renamed entry must point at the new source path"
+    );
+    drop(guard);
+
+    // The /skills listing follows the store without an unrelated rescan.
+    let listing = sorted_dir(&mountpoint.path().join("skills"));
+    assert!(
+        !listing.contains(&"foo".to_string()),
+        "/skills must not list the dead name, got {listing:?}"
+    );
+    assert!(
+        listing.contains(&"foo-v2".to_string()),
+        "/skills must list the renamed skill, got {listing:?}"
+    );
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}
+
+/// Regression (P1): the store keys skills by bare leaf name, so a real
+/// nested `beta/docs` skill may already own the key "docs" when a plain
+/// `source/docs` inbox candidate (no SKILL.md) is renamed through
+/// `/.skillfs-inbox`. The rename gate must compare the entry's FULL
+/// relative identity below the source root — `beta/docs` does not strip
+/// to `docs` — so the real skill survives in the store and in `/skills`
+/// and no phantom `guides` entry is fabricated for the plain directory.
+#[test]
+fn inbox_plain_dir_rename_spares_same_leaf_real_skill() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let source = tempfile::tempdir().expect("source");
+    // A real same-leaf skill under a category.
+    let beta_docs = source.path().join("beta/docs");
+    std::fs::create_dir_all(&beta_docs).unwrap();
+    std::fs::write(
+        beta_docs.join("SKILL.md"),
+        "---\nname: docs\ndescription: real docs skill\n---\nbody\n",
+    )
+    .unwrap();
+    // A plain source-root candidate sharing the leaf name (no SKILL.md).
+    std::fs::create_dir_all(source.path().join("docs")).unwrap();
+    std::fs::write(source.path().join("docs/readme.txt"), "not a skill").unwrap();
+
+    let mountpoint = tempfile::tempdir().expect("mount");
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+    {
+        let guard = shared.read();
+        let entry = guard
+            .get("docs")
+            .expect("the real beta/docs skill must be in the store");
+        assert!(
+            entry.source_path.ends_with("beta/docs/SKILL.md"),
+            "store key 'docs' must be owned by beta/docs, got {}",
+            entry.source_path.display()
+        );
+    }
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount");
+    std::thread::sleep(Duration::from_millis(300));
+
+    std::fs::rename(
+        mountpoint.path().join(".skillfs-inbox/docs"),
+        mountpoint.path().join(".skillfs-inbox/guides"),
+    )
+    .expect("rename plain inbox candidate dir");
+
+    // The physical plain directory moved; the real skill is untouched.
+    assert!(
+        source.path().join("guides/readme.txt").is_file(),
+        "physical rename must land at source/guides"
+    );
+    assert!(
+        source.path().join("beta/docs/SKILL.md").is_file(),
+        "the real beta/docs skill must be physically untouched"
+    );
+
+    // The other directory's real skill keeps its store entry — no
+    // deletion under "docs", no placeholder under "guides".
+    {
+        let guard = shared.read();
+        let entry = guard
+            .get("docs")
+            .expect("the real beta/docs skill must survive the plain-dir rename");
+        assert!(
+            entry.source_path.ends_with("beta/docs/SKILL.md"),
+            "the surviving 'docs' entry must still be beta/docs, got {}",
+            entry.source_path.display()
+        );
+        assert!(
+            guard.get("guides").is_none(),
+            "plain dir rename must not fabricate a store entry for the new name"
+        );
+    }
+
+    // The view follows: /skills still lists the real skill and never
+    // lists the plain directory's new name.
+    let listing = sorted_dir(&mountpoint.path().join("skills"));
+    assert!(
+        listing.contains(&"docs".to_string()),
+        "/skills must keep listing the surviving beta/docs skill, got {listing:?}"
+    );
+    assert!(
+        !listing.contains(&"guides".to_string()),
+        "/skills must not list the plain directory's new name, got {listing:?}"
+    );
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+}

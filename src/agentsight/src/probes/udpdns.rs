@@ -169,13 +169,17 @@ pub struct UdpDns {
 
 /// Maps udpdns reuses from the shared bundle: ring buffer + process filter
 /// (used to skip already-traced processes). No cgroup filter.
-const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::TracedProcesses];
+const SHARED_MAPS: &[MapKind] = &[
+    MapKind::Rb,
+    MapKind::InternalMetrics,
+    MapKind::TracedProcesses,
+];
 
 impl UdpDns {
-    /// Create a new UdpDns that reuses the shared ring buffer and process filter.
+    /// Reuse the shared ring buffer, internal counters, and process filter.
     ///
     /// # Arguments
-    /// * `shared` - Bundle of shared BPF maps (ring buffer + traced_processes)
+    /// * `shared` - Bundle with ring buffer, counters, and process filter
     pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
         let mut builder = UdpdnsSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
@@ -186,7 +190,7 @@ impl UdpDns {
         // Tell BPF which namespace to report event pids in.
         open_skel.rodata_mut().observer_pidns_is_init = proc_root_is_init_pidns();
 
-        // Reuse shared ring buffer + process filter.
+        // Reuse shared ring buffer, counters, and process filter.
         shared
             .reuse_into(SHARED_MAPS, open_skel.open_object_mut())
             .context("failed to reuse shared maps for udpdns")?;

@@ -12,6 +12,9 @@ def create_sandbox(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     fake_bin.mkdir(parents=True)
     (sandbox / "agent-sec-cli").mkdir()
     shutil.copy2(COMPONENT_ROOT / "Makefile", sandbox / "Makefile")
+    (sandbox / "packaging").mkdir()
+    for source in (COMPONENT_ROOT / "packaging").glob("*.mk"):
+        shutil.copy2(source, sandbox / "packaging" / source.name)
 
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env['PATH']}"

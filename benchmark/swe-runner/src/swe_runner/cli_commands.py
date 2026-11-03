@@ -56,6 +56,19 @@ def command_output_dir(output_root: Path, command_name: str) -> Path:
     return output_root / command_name
 
 
+def _read_instance_list(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        raise CommandUsageError(f"Cannot read --instances-file {path}: {exc}") from exc
+    instance_ids = list(
+        dict.fromkeys(value for line in text.splitlines() if (value := line.strip()) and not value.startswith("#"))
+    )
+    if not instance_ids:
+        raise CommandUsageError(f"--instances-file {path} contains no instance IDs")
+    return instance_ids
+
+
 def run_instances_command(
     *,
     agent: str,
@@ -67,6 +80,7 @@ def run_instances_command(
     slice_range: str | None,
     filter_regex: str | None,
     instance_id: str | None,
+    instances_file: Path | None = None,
     workers: int,
     docker_pull_registry: str | None,
     use_skill: bool,
@@ -88,6 +102,7 @@ def run_instances_command(
         slice_range=slice_range,
         filter_regex=filter_regex,
         instance_id=instance_id,
+        instances_file=instances_file,
         workers=workers,
         docker_pull_registry=docker_pull_registry,
         use_skill=use_skill,
@@ -111,6 +126,7 @@ def build_run_settings(
     slice_range: str | None,
     filter_regex: str | None,
     instance_id: str | None,
+    instances_file: Path | None = None,
     workers: int,
     docker_pull_registry: str | None,
     use_skill: bool,
@@ -125,7 +141,12 @@ def build_run_settings(
     if tokenless and not agent_supports_run_option(agent, TOKENLESS_RUN_OPTION):
         raise CommandUsageError(f"--tokenless is not supported by agent '{agent}'")
 
-    instance_ids = [item.strip() for item in instance_id.split(",")] if instance_id else None
+    if instances_file is not None and instance_id is not None:
+        raise CommandUsageError("--instances-file and --instance-id are mutually exclusive")
+    if instances_file is None:
+        instance_ids = [item.strip() for item in instance_id.split(",")] if instance_id else None
+    else:
+        instance_ids = _read_instance_list(instances_file)
     return Settings(
         agent=AgentConfig(
             name=agent,
@@ -204,11 +225,13 @@ def analyze_traces_command(
     start: str | None,
     end: str,
     run_metadata: Path | None,
-) -> TraceAnalysisCommandResult:
+    dry_run: bool = False,
+) -> TraceAnalysisCommandResult | dict[str, object]:
     """Collect available traces and export analysis CSV files."""
     analyze_output = command_output_dir(output, ANALYZE_TRACES_OUTPUT_SUBDIR)
     effective_trace_root = trace_root or analyze_output / "traces"
-    setup_logging(analyze_output, suffix=ANALYZE_TRACES_OUTPUT_SUBDIR)
+    if not dry_run:
+        setup_logging(analyze_output, suffix=ANALYZE_TRACES_OUTPUT_SUBDIR)
 
     plan = TraceCollectionPlan.resolve(
         start=start,
@@ -216,6 +239,9 @@ def analyze_traces_command(
         run_metadata_path=run_metadata,
         openclaw_profiles_dir=openclaw_profiles_dir,
     )
+    if dry_run:
+        return build_trace_analysis_preview(trace_root=trace_root, output=output, plan=plan)
+
     trace_files = plan.collect(effective_trace_root)
     detail_dir, summary_csv = write_trace_analysis_csvs(
         trace_root=effective_trace_root,
@@ -228,3 +254,36 @@ def analyze_traces_command(
         summary_csv=summary_csv,
         trace_metrics_csv=analyze_output / "trace_metrics" / "trace_metrics.csv",
     )
+
+
+def build_trace_analysis_preview(
+    *,
+    trace_root: Path | None,
+    output: Path,
+    plan: TraceCollectionPlan,
+) -> dict[str, object]:
+    """Build the JSON-serializable dry-run preview of a trace analysis command.
+
+    Describes the resolved collection plan, effective trace root, and planned
+    report paths without collecting traces, setting up logging, or writing files.
+    """
+    analyze_output = command_output_dir(output, ANALYZE_TRACES_OUTPUT_SUBDIR)
+    effective_trace_root = trace_root or analyze_output / "traces"
+    return {
+        "trace_root": str(effective_trace_root),
+        "planned_report_paths": {
+            "detail_dir": str(analyze_output / "trace_details"),
+            "summary_csv": str(analyze_output / "trace_summary.csv"),
+            "trace_metrics_csv": str(analyze_output / "trace_metrics" / "trace_metrics.csv"),
+        },
+        "collection_plan": {
+            "should_collect": plan.should_collect,
+            "start_ns": plan.start_ns,
+            "end_ns": plan.end_ns,
+            "profiles_root": None if plan.profiles_root is None else str(plan.profiles_root),
+            "profile_dirs": None if plan.profile_dirs is None else sorted(str(item) for item in plan.profile_dirs),
+            "instance_ids": None if plan.instance_ids is None else sorted(plan.instance_ids),
+            "session_ids": None if plan.session_ids is None else sorted(plan.session_ids),
+            "source_name": plan.source_name,
+        },
+    }

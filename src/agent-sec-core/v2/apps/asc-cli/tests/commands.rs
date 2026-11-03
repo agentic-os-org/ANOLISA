@@ -10,7 +10,12 @@ use serde_json::{Value, json};
 mod common;
 
 #[test]
-fn all_fifteen_commands_match_frozen_wire_parameters() {
+fn removed_probe_command_is_rejected() {
+    assert!(Cli::parse_from(["agent-sec-cli", "agent-probe", "create"]).is_err());
+}
+
+#[test]
+fn all_assignment_commands_match_frozen_wire_parameters() {
     let directory = common::Directory::new();
     let methods: Value = serde_json::from_str(common::METHODS).unwrap();
     let mut covered = std::collections::BTreeSet::new();
@@ -47,7 +52,7 @@ fn equals_syntax_option_looking_values_and_awkward_paths_are_preserved() {
     let file = directory.0.join("policy=a b.json");
     std::fs::write(
         &file,
-        br#"{"kind":"prevent_file_deletion","files":["/work/a b"]}"#,
+        br#"{"specVersion": "0.1", "rules": [{"effect": "block", "category": "file", "action": "write", "target": {"type": "file", "path": "/work/a b"}, "where": {"operation": {"eq": "delete"}}}]}"#,
     )
     .unwrap();
     let args: Vec<OsString> = vec![
@@ -61,7 +66,10 @@ fn equals_syntax_option_looking_values_and_awkward_paths_are_preserved() {
     ];
     let request = Cli::parse_from(args).unwrap().request().unwrap();
     assert_eq!(request.params["policyName"], "--help");
-    assert_eq!(request.params["template"]["files"][0], "/work/a b");
+    assert_eq!(
+        request.params["template"]["rules"][0]["target"]["path"],
+        "/work/a b"
+    );
 }
 
 #[test]
@@ -113,6 +121,25 @@ fn scan_code_matches_the_v1_parameters_and_rejects_empty_input() {
         hyphen_source.request().unwrap().params["code"],
         "--executable=$(which python3)"
     );
+
+    let repeated = Cli::parse_from([
+        "agent-sec-cli",
+        "--socket",
+        "/run/asc.sock",
+        "scan-code",
+        "--code",
+        "echo a",
+        "--language",
+        "bash",
+        "--code",
+        "rm -rf /tmp/x",
+        "--language",
+        "python",
+    ])
+    .unwrap();
+    let params = repeated.request().unwrap().params;
+    assert_eq!(params["code"], "rm -rf /tmp/x");
+    assert_eq!(params["language"], "python");
 }
 
 #[test]
@@ -144,6 +171,12 @@ fn invalid_and_ambiguous_options_are_usage_errors() {
         let error = Cli::parse_from(args.clone()).unwrap_err();
         assert!(error.use_stderr(), "{args:?} unexpectedly produced help");
     }
+    assert_eq!(
+        Cli::parse_from(["agent-sec-cli", "policy", "list"])
+            .unwrap()
+            .socket(),
+        Some(std::path::Path::new("/run/agent-sec-core/daemon.sock"))
+    );
     assert!(
         Cli::parse_from([
             "agent-sec-cli",
@@ -228,10 +261,10 @@ fn file_errors_duplicate_keys_and_oversized_inputs_are_local_failures() {
     ));
     for bytes in [
         b"not-json".as_slice(),
-        br#"{"kind":"prevent_file_deletion","files":[],"files":["/etc"]}"#,
-        br#"{"kind":"prevent_file_deletion","kind":"high_sensitivity_read_deny","files":["/etc"]}"#,
-        br#"{"kind":"low_sensitivity_egress","files":["/etc"],"trustedDestinations":[{"type":"host","pattern":"one","pattern":"two","ports":[443]}]}"#,
-        br#"{"kind":"prevent_file_deletion","files":[],"extra":true}"#,
+        br#"{"specVersion":"0.1","rules":[],"rules":[]}"#,
+        br#"{"specVersion":"0.1","specVersion":"0.1","rules":[]}"#,
+        br#"{"specVersion":"0.1","rules":[{"effect":"block","category":"file","action":"write","target":{"type":"file","path":"/one","path":"/two"}}]}"#,
+        br#"{"specVersion":"0.1","rules":[],"extra":true}"#,
     ] {
         std::fs::write(&path, bytes).unwrap();
         assert!(matches!(
@@ -334,10 +367,15 @@ fn scan_code_rendering_preserves_error_results_on_stdout() {
 
 #[test]
 fn binary_help_version_and_failures_have_stable_exit_codes() {
-    let mut help_cases = vec![vec!["--help"], vec!["--version"]];
+    let mut help_cases = vec![vec!["--help"], vec!["--version"], vec!["-v"]];
     for resource in ["policy", "scope", "binding"] {
         help_cases.push(vec![resource, "--help"]);
-        for operation in ["create", "get", "list", "update", "delete"] {
+        let operations: &[&str] = match resource {
+            "policy" => &["create", "get", "list", "update", "delete"],
+            "scope" => &["create", "get", "list", "delete", "retry"],
+            _ => &["get", "list"],
+        };
+        for operation in operations {
             help_cases.push(vec![resource, operation, "--help"]);
         }
     }
@@ -349,7 +387,7 @@ fn binary_help_version_and_failures_have_stable_exit_codes() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if args == ["--version"] {
+        if args == ["--version"] || args == ["-v"] {
             assert_eq!(
                 stdout,
                 format!("agent-sec-cli {}\n", env!("CARGO_PKG_VERSION"))
@@ -404,4 +442,217 @@ fn binary_help_version_and_failures_have_stable_exit_codes() {
         }
     }
     assert!(!socket.exists());
+}
+
+#[test]
+fn skillsec_and_legacy_alias_share_requests_and_deadlines() {
+    let directory = common::Directory::new();
+    let findings = directory.0.join("findings.json");
+    std::fs::write(&findings, "[]").unwrap();
+    let export = directory.0.join("export");
+    let cases: &[&[&str]] = &[
+        &["init", "--no-baseline"],
+        &["check", "/skill with spaces"],
+        &["analyze", "/skill"],
+        &["scan", "--all", "--force"],
+        &[
+            "certify",
+            "/skill",
+            "--findings",
+            findings.to_str().unwrap(),
+        ],
+        &["status", "--verbose"],
+        &["audit", "/skill", "--verify-snapshots"],
+        &["list-scanners"],
+        &["decide", "/skill", "--action", "allow"],
+        &["show", "/skill"],
+        &["export", "/skill", "--output", export.to_str().unwrap()],
+        &["activate", "/skill"],
+    ];
+    for arguments in cases {
+        let parse = |name| {
+            Cli::parse_from(
+                ["agent-sec-cli", "--socket", "/run/asc.sock", name]
+                    .into_iter()
+                    .chain(arguments.iter().copied()),
+            )
+            .unwrap()
+        };
+        let current = parse("skillsec");
+        let legacy = parse("skill-ledger");
+        assert!(current.is_skill_sec());
+        assert!(legacy.is_skill_sec());
+        assert_eq!(current.timeout(), legacy.timeout());
+        let request = serde_json::to_value(current.request().unwrap()).unwrap();
+        assert_eq!(request["method"], "action.skill_sec");
+        assert_eq!(
+            request,
+            serde_json::to_value(legacy.request().unwrap()).unwrap(),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn skillsec_is_the_canonical_help_name_for_both_spellings() {
+    let output = common::run(&["--help".into()]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("skillsec"), "{help}");
+    assert!(!help.contains("skill-ledger"), "{help}");
+    for name in ["skillsec", "skill-ledger"] {
+        for subcommand in [None, Some("check")] {
+            let mut args = vec![OsString::from(name)];
+            args.extend(subcommand.map(OsString::from));
+            args.push("--help".into());
+            let output = common::run(&args);
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            let help = String::from_utf8(output.stdout).unwrap();
+            assert!(help.contains("Usage: agent-sec-cli skillsec"), "{help}");
+            assert!(!help.contains("skill-ledger"), "{help}");
+        }
+    }
+}
+
+#[test]
+fn skill_sec_deadline_override_does_not_change_other_commands() {
+    use std::time::Duration;
+
+    let cli = |args: &[&str]| {
+        Cli::parse_from(
+            ["agent-sec-cli", "--socket", "/run/asc.sock"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+        .unwrap()
+    };
+    let skill = cli(&["skillsec", "status"]);
+    assert_eq!(skill.timeout(), Duration::from_secs(60));
+    assert_eq!(skill.request().unwrap().params["timeoutMs"], 60_000);
+    let policy = cli(&["policy", "list"]);
+    assert_eq!(policy.timeout(), Duration::from_secs(5));
+    assert!(policy.request().unwrap().params.get("timeoutMs").is_none());
+    let scan = cli(&["scan-code", "--code", "echo safe"]);
+    assert_eq!(scan.timeout(), Duration::from_secs(5));
+    let explicit = cli(&["--timeout-ms", "8000", "skillsec", "status"]);
+    assert_eq!(explicit.timeout(), Duration::from_secs(8));
+    assert_eq!(explicit.request().unwrap().params["timeoutMs"], 8000);
+    let capped = cli(&["--timeout-ms", "180000", "skillsec", "status"]);
+    assert_eq!(capped.timeout(), Duration::from_secs(180));
+    assert_eq!(capped.request().unwrap().params["timeoutMs"], 120_000);
+}
+
+#[test]
+fn skill_sec_uses_global_trace_context_without_business_fields() {
+    let cli = Cli::parse_from([
+        "agent-sec-cli",
+        "--trace-context",
+        r#"{"traceId":"skill-call","sessionId":"skill-session","agentName":"skill-agent"}"#,
+        "--socket",
+        "/run/asc.sock",
+        "skillsec",
+        "status",
+    ])
+    .unwrap();
+    let request = cli.request().unwrap();
+    assert_eq!(
+        request.params,
+        json!({"command":"status","verbose":false,"timeoutMs":60000})
+    );
+    assert!(request.trace_context.is_none());
+    assert!(request.compatibility.is_none());
+    // The common client injects the active Context when transmitting; business DTOs stay separate.
+    let _attached = cli.context().attach();
+    let snapshot = asc_observability::snapshot();
+    assert_eq!(
+        snapshot.compatibility.trace_id.as_deref(),
+        Some("skill-call")
+    );
+    assert_eq!(
+        snapshot.agent.get("session_id").map(String::as_str),
+        Some("skill-session")
+    );
+    assert_eq!(
+        snapshot.agent.get("agent_name").map(String::as_str),
+        Some("skill-agent")
+    );
+}
+
+#[test]
+fn scope_create_excludes_unsupported_cgroup_selector() {
+    for flag in ["-h", "--help"] {
+        let output = common::run(&["scope".into(), "create".into(), flag.into()]);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let help = String::from_utf8(output.stdout).unwrap();
+        for selector in ["--pid", "--process-name", "--executable"] {
+            assert!(help.contains(selector), "{help}");
+        }
+        assert!(!help.contains("--cgroup-id"), "{help}");
+    }
+
+    for selector in [vec!["--cgroup-id", "1"], vec!["--cgroup-id=1"]] {
+        let mut args = vec![
+            "agent-sec-cli",
+            "scope",
+            "create",
+            "--policy-id",
+            "policy-one",
+            "--policy-revision",
+            "2",
+        ];
+        args.extend(selector);
+        let error = Cli::parse_from(args.clone()).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        let output = common::run(&args[1..].iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--cgroup-id"));
+    }
+}
+
+#[test]
+fn scope_create_encodes_name_and_path_assignments() {
+    for (flag, matcher) in [
+        ("--process-name", json!({"processName":"scope-agent"})),
+        ("--executable", json!({"executable":"/opt/agent"})),
+    ] {
+        let value = if flag == "--process-name" {
+            "scope-agent"
+        } else {
+            "/opt/agent"
+        };
+        let request = Cli::parse_from([
+            "agent-sec-cli",
+            "scope",
+            "create",
+            flag,
+            value,
+            "--policy-id",
+            "policy-one",
+            "--policy-revision",
+            "2",
+        ])
+        .unwrap()
+        .request()
+        .unwrap();
+        assert_eq!(request.method, "policy.scopes.create");
+        assert_eq!(
+            request.params,
+            json!({"selector":{"kind":"process","match":matcher}, "policyTemplates":[{"policyId":"policy-one","policyRevision":2}]})
+        );
+    }
+    assert!(
+        Cli::parse_from([
+            "agent-sec-cli",
+            "scope",
+            "create",
+            "--process-name",
+            "agent",
+            "--executable",
+            "/bin/agent"
+        ])
+        .is_err()
+    );
 }

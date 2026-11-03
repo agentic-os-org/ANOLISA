@@ -13,8 +13,11 @@ use std::time::Duration;
 use asc_daemon_protocol::DaemonRequest;
 use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
 use clap::Parser;
-pub use commands::CapabilitiesCommand;
 use commands::Command;
+pub use commands::{
+    CapabilitiesCommand, EventsCommand, EventsRunError, EventsTransport, PiiOutputFormat,
+    PromptScanPlan, ScanPromptInputError,
+};
 
 /// Parsed invocation for one CLI command.
 #[derive(Debug)]
@@ -31,6 +34,8 @@ pub struct Cli {
 pub enum Plan<'a> {
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
+    /// Generate the observability record schema without a daemon endpoint.
+    ObservabilitySchema,
     /// Sent to the daemon listening on `socket`.
     Daemon {
         /// Resolved absolute endpoint of the running daemon.
@@ -42,15 +47,20 @@ pub enum Plan<'a> {
 #[command(
     name = "agent-sec-cli",
     version,
+    disable_version_flag = true,
     about = "Manage Policy, Scope and Binding through asc-daemon"
 )]
 struct Arguments {
+    /// Show version and exit (`-v`, as in V1; there is no `-V`).
+    #[arg(short = 'v', long, action = clap::ArgAction::Version)]
+    version: (),
     /// Absolute endpoint; otherwise `AGENT_SEC_DAEMON_SOCKET` or the system default.
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     /// Total connect/write/read deadline in milliseconds; requests are never retried.
-    #[arg(long, global = true, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..))]
-    timeout_ms: u32,
+    /// When omitted, the default depends on the command (see [`Cli::timeout`]).
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
+    timeout_ms: Option<u32>,
     /// Version 1 W3C traceparent/tracestate/baggage JSON carrier.
     #[arg(long, global = true)]
     otel_context: Option<String>,
@@ -86,17 +96,20 @@ impl Cli {
         context::parse(None, trace_context_input.as_deref())?;
         let arguments = Arguments::try_parse_from(&argv)?;
         // Clap propagates global values across subcommands using last-wins.
-        // After successful parsing, a standalone --option token cannot be a
-        // value: these commands do not accept hyphen values or positional tails.
+        // Scan text/code accept hyphen values, so their next token is data even
+        // when it happens to spell a global option.
         for option in ["--socket", "--timeout-ms", "--otel-context"] {
-            let count = argv
-                .iter()
-                .skip(1)
-                .filter(|argument| {
-                    argument.as_bytes().split(|byte| *byte == b'=').next()
-                        == Some(option.as_bytes())
-                })
-                .count();
+            let mut tokens = argv.iter().skip(1);
+            let mut count = 0;
+            while let Some(argument) = tokens.next() {
+                if argument == "--text" || argument == "--code" {
+                    tokens.next();
+                } else if argument.as_bytes().split(|byte| *byte == b'=').next()
+                    == Some(option.as_bytes())
+                {
+                    count += 1;
+                }
+            }
             if count > 1 {
                 return Err(clap::Error::raw(
                     clap::error::ErrorKind::ArgumentConflict,
@@ -108,11 +121,23 @@ impl Cli {
             // A local command must stay usable on hosts that never deploy a
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
+            None if arguments.command.is_observability_schema() => None,
             None => Some(resolve_socket(arguments.socket, socket_env)?),
         };
         Ok(Self {
             socket,
-            timeout_ms: arguments.timeout_ms,
+            timeout_ms: arguments
+                .timeout_ms
+                .unwrap_or(if arguments.command.is_scan_prompt() {
+                    120_000
+                } else if arguments.command.is_llm_code_scan() {
+                    u32::try_from(asc_model_client::MAX_CODE_SCAN_BUDGET.as_millis())
+                        .unwrap_or(u32::MAX)
+                } else if arguments.command.is_skill_sec() {
+                    60_000
+                } else {
+                    5_000
+                }),
             context: context::parse(
                 arguments.otel_context.as_deref(),
                 trace_context_input.as_deref(),
@@ -128,6 +153,9 @@ impl Cli {
 
     /// Reports whether this invocation runs locally or against the daemon.
     pub fn plan(&self) -> Plan<'_> {
+        if self.command.is_observability_schema() {
+            return Plan::ObservabilitySchema;
+        }
         match (self.command.local(), self.socket.as_deref()) {
             (Some(command), _) => Plan::Local(command),
             (None, Some(socket)) => Plan::Daemon { socket },
@@ -143,21 +171,86 @@ impl Cli {
     }
 
     /// Returns the single call deadline duration.
+    ///
+    /// Defaults are resolved per command at parse time: prompt scans wait
+    /// for a model-backed layer whose inference can take tens of seconds
+    /// (the daemon budgets 35 s for a prompt-scan dispatch, and the V1 CLI
+    /// had no timeout at all), Skill Ledger calls may run signature tooling
+    /// that outlasts an interactive exchange, and every other command keeps
+    /// the 5 s interactive default.
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(u64::from(self.timeout_ms))
     }
 
+    /// Executes paged observability queries or an interactive review, when selected.
+    ///
+    /// # Errors
+    /// Returns input, daemon, terminal, or output failures without local-store fallback.
+    pub fn run_observability_query(&self, socket: &std::path::Path) -> Option<std::io::Result<u8>> {
+        self.command.run_observability_query(socket, self.timeout())
+    }
+
     /// Delegates to the selected command to construct a typed daemon request.
+    ///
+    /// Scan-prompt invocations may carry several requests (a batch file or
+    /// one per conversation payload); [`Cli::prompt_scan_run`] is the
+    /// scan-prompt entry point, and this method serves the single-request
+    /// commands.
     ///
     /// # Errors
     /// Returns a file read, template decode, or request encoding error.
     pub fn request(&self) -> Result<DaemonRequest, InputError> {
-        self.command.request()
+        let mut request = self.command.request()?;
+        if self.command.is_skill_sec() {
+            // The dispatcher clamps the method budget to 120 s either way.
+            request.params["timeoutMs"] = serde_json::json!(self.timeout_ms.min(120_000));
+        }
+        Ok(request)
+    }
+
+    /// Whether this invocation uses the Skill Ledger business output projection.
+    pub const fn is_skill_sec(&self) -> bool {
+        self.command.is_skill_sec()
+    }
+
+    /// Adds caller-owned cleanup results to an already validated successful business result.
+    /// Changed findings are retained; local failures do not undo the committed certification.
+    pub fn after_success(&self, request: &DaemonRequest, output: &mut serde_json::Value) {
+        self.command.after_success(request, output);
+    }
+
+    /// Resolves a scan-prompt invocation into its requests and warnings.
+    ///
+    /// # Errors
+    /// Returns input-collection failures (empty stdin, malformed JSON
+    /// payload, missing input file) before any daemon traffic.
+    pub fn prompt_scan_run(&self) -> Result<PromptScanPlan, InputError> {
+        self.command.prompt_scan_run()
+    }
+
+    /// Whether this invocation uses the V1-compatible observability-record projection.
+    pub const fn is_observability_record(&self) -> bool {
+        self.command.is_observability_record()
     }
 
     /// Whether this invocation uses the V1-compatible scan-code projection.
     pub const fn is_scan_code(&self) -> bool {
         self.command.is_scan_code()
+    }
+
+    /// Selected PII presentation, or `None` for another command.
+    pub const fn pii_format(&self) -> Option<PiiOutputFormat> {
+        self.command.pii_format()
+    }
+
+    /// Whether this invocation uses the prompt-scan projection.
+    pub const fn is_scan_prompt(&self) -> bool {
+        self.command.is_scan_prompt()
+    }
+
+    /// The events query command, or `None` for another command.
+    pub const fn events(&self) -> Option<&EventsCommand> {
+        self.command.events()
     }
 }
 
@@ -188,12 +281,42 @@ fn resolve_socket(
 }
 
 /// Local input failures, reported as execution failures rather than daemon errors.
+///
+/// Shared variants cover routing and the authoring commands; each command
+/// family that needs family-specific wording owns its own error type and is
+/// wrapped here, keeping this enum the single exit-path contract.
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
+    /// Local PII file or stdin access failed.
+    #[error("cannot read PII input: {0}")]
+    PiiRead(#[source] std::io::Error),
+    /// Malformed UTF-8 is never silently repaired.
+    #[error("PII input must be valid UTF-8")]
+    PiiUtf8,
+    /// Untruncated input cannot fit the daemon transport.
+    #[error("PII input exceeds the 4 MiB business frame limit")]
+    PiiTooLarge,
+    /// Invalid `SkillSec` business input.
+    #[error("SkillSec input: {0}")]
+    SkillSec(String),
+    /// Invalid `events` query input; the message is user-facing wording.
+    #[error("Error: {0}")]
+    Events(String),
+    /// Analyze retains its structured bad-input result.
+    #[error("{message}")]
+    AnalyzeInput {
+        /// Stable consumer error code.
+        code: &'static str,
+        /// Bounded public explanation.
+        message: &'static str,
+    },
+    /// V1-compatible observability input validation failure.
+    #[error("Error: {0}")]
+    Observability(String),
     /// The V1-compatible scan-code command received no non-whitespace source.
     #[error("Error: --code is required (use --code '<source>')")]
     EmptyCode,
-    /// Template file access failed.
+    /// Policy template file access failed.
     #[error("cannot read Policy template: {0}")]
     Read(#[from] std::io::Error),
     /// Bound input before parsing or constructing a request.
@@ -205,11 +328,108 @@ pub enum InputError {
     /// A locally rendered command was asked for a daemon request.
     #[error("this command is rendered locally and sends no daemon request")]
     LocalCommand,
+    /// The scan-prompt command builds its request batch (and reads stdin)
+    /// through [`Cli::prompt_scan_run`], not the single-request path.
+    #[error("scan-prompt requests are resolved through prompt_scan_run")]
+    PromptScanBatch,
+    /// The events command paginates its own requests through the events
+    /// transport loop, not the single-request path.
+    #[error("events requests are resolved through the events transport loop")]
+    EventsBatch,
+    /// A scan-prompt input failure; that command owns its variants and
+    /// wording, mirroring V1's scan-specific messages.
+    #[error(transparent)]
+    ScanPrompt(#[from] ScanPromptInputError),
+}
+
+impl InputError {
+    /// Whether the message already reads as a terminal usage error, so the
+    /// binary prints it verbatim instead of behind the `agent-sec-cli:`
+    /// prefix. The scan commands own their hints this way, mirroring V1.
+    #[must_use]
+    pub const fn is_usage_hint(&self) -> bool {
+        match self {
+            Self::EmptyCode | Self::Events(_) => true,
+            Self::ScanPrompt(error) => error.is_usage_hint(),
+            Self::PiiRead(_)
+            | Self::Observability(_)
+            | Self::PiiUtf8
+            | Self::PiiTooLarge
+            | Self::SkillSec(_)
+            | Self::AnalyzeInput { .. }
+            | Self::Read(_)
+            | Self::TooLarge
+            | Self::Json(_)
+            | Self::LocalCommand
+            | Self::PromptScanBatch
+            | Self::EventsBatch => false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scanner_hyphen_values_are_data_but_duplicate_global_options_fail() {
+        for (command, input) in [("scan-pii", "--text"), ("scan-code", "--code")] {
+            for literal in ["--socket", "--timeout-ms", "--socket=/literal"] {
+                let cli = Cli::parse_from_with_socket_env(
+                    [
+                        "agent-sec-cli",
+                        "--socket",
+                        "/run/asc.sock",
+                        command,
+                        input,
+                        literal,
+                    ],
+                    None,
+                )
+                .unwrap();
+                let key = if command == "scan-pii" {
+                    "text"
+                } else {
+                    "code"
+                };
+                assert_eq!(cli.request().unwrap().params[key], literal);
+            }
+        }
+        let error = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/run/one.sock",
+                "scan-pii",
+                "--text",
+                "",
+                "--socket",
+                "/run/two.sock",
+            ],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn llm_code_scan_uses_the_model_compatible_default_deadline() {
+        let cli = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/run/asc.sock",
+                "scan-code",
+                "--code",
+                "echo hello",
+                "--mode",
+                "llm",
+            ],
+            None,
+        )
+        .expect("LLM scan parses");
+        assert_eq!(cli.timeout(), asc_model_client::MAX_CODE_SCAN_BUDGET);
+    }
 
     #[test]
     fn environment_socket_is_used_when_the_option_is_omitted() {

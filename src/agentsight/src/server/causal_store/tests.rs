@@ -64,6 +64,50 @@ fn a_case_round_trips_byte_for_byte() {
     );
 }
 
+/// `usize::MAX as i64` wraps to `-1`, which is the sentinel for `round=None`.
+/// An out-of-range round therefore read back the cached "last round" case
+/// instead of being rejected.
+#[test]
+fn an_unrepresentable_round_does_not_alias_the_last_round() {
+    let dir = tmp_dir("sentinel");
+    let store = store_at(&dir);
+    store
+        .put(
+            CaseKey {
+                session_key: "sess:s1",
+                round: None,
+                complaint: "c",
+            },
+            r#"{"verdict":"last"}"#,
+        )
+        .unwrap();
+
+    let error = store
+        .get(CaseKey {
+            session_key: "sess:s1",
+            round: Some(usize::MAX),
+            complaint: "c",
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, super::CausalStoreError::RoundOutOfRange(usize::MAX)),
+        "unexpected error: {error}"
+    );
+    assert!(
+        store
+            .put(
+                CaseKey {
+                    session_key: "sess:s1",
+                    round: Some(usize::MAX),
+                    complaint: "c",
+                },
+                r#"{"verdict":"wrapped"}"#,
+            )
+            .is_err(),
+        "an unrepresentable round must not be stored"
+    );
+}
+
 #[test]
 fn a_case_survives_reopening_the_database() {
     // The whole point: restart loses the memory cache, not the answer.

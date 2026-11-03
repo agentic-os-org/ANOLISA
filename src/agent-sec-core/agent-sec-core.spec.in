@@ -249,7 +249,7 @@ Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
 %setup -q
 
 %build
-make build-all
+make build-all-v1
 make download-deps
 make stage-cli
 
@@ -258,6 +258,12 @@ rm -rf $RPM_BUILD_ROOT
 make install-all-for-rpmbuild DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
+* Thu Sep 24 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.13.2-1
+- Update version to 0.13.2
+
+* Wed Sep 23 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.13.1-1
+- Update version to 0.13.1
+
 * Sun Sep 20 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.13.0-1
 - Update version to 0.13.0
 

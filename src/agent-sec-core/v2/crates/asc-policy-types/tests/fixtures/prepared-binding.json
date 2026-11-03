@@ -6,89 +6,50 @@
     "policyName": "prevent deletion",
     "revision": 1,
     "template": {
-      "kind": "prevent_file_deletion",
-      "files": [
-        "/workspace/important/**",
-        "/etc/agent/config.yaml"
-      ]
-    },
-    "canonicalPolicy": {
-      "irSchemaVersion": 1,
-      "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
-      "policyId": "00000000-0000-4000-8000-000000000002",
-      "revision": 1,
-      "payload": {
-        "resources": [
-          {
-            "id": "protected-file-entries",
-            "kind": "file",
-            "matchers": [
-              {
-                "path": {
-                  "type": "glob",
-                  "pattern": "/workspace/important/**"
-                },
-                "resolution": {
-                  "type": "path_entry"
-                }
-              },
-              {
-                "path": {
-                  "type": "exact",
-                  "path": "/etc/agent/config.yaml"
-                },
-                "resolution": {
-                  "type": "path_entry"
-                }
-              }
-            ]
-          }
-        ],
-        "rules": [
-          {
-            "id": "deny-protected-file-deletion",
-            "when": {
-              "type": "atom",
-              "atom": {
-                "type": "resource_operation",
-                "operation": "delete",
-                "target": {
-                  "type": "in",
-                  "resourceSet": "protected-file-entries"
-                }
-              }
-            },
-            "outcome": {
-              "decision": "deny",
-              "obligations": [
-                "audit",
-                "emit_receipt"
-              ],
-              "remediation": "none"
-            },
-            "enforcement": {
-              "decisionTiming": "pre_effect",
-              "requiredEvidence": [
-                "binding_ready",
-                "operation_denied"
-              ]
+      "specVersion": "0.1",
+      "rules": [
+        {
+          "effect": "block",
+          "category": "file",
+          "action": "write",
+          "target": {
+            "type": "file",
+            "path": "/etc/agent/config.yaml"
+          },
+          "where": {
+            "operation": {
+              "eq": "delete"
             }
           }
-        ],
-        "activation": "post_attach_allowed",
-        "failurePolicy": {
-          "runtime": "fail_closed",
-          "update": "keep_last_known_good"
+        },
+        {
+          "effect": "block",
+          "category": "file",
+          "action": "write",
+          "target": {
+            "type": "file",
+            "path": "/workspace/important/**"
+          },
+          "where": {
+            "operation": {
+              "eq": "delete"
+            }
+          }
         }
-      }
+      ]
     }
   },
   "scope": {
     "scopeId": "20000000-0000-4000-8000-000000000001",
-    "revision": 3,
     "selector": {
       "kind": "pid",
       "pid": 4242
+    },
+    "process": {
+      "bootId": "11111111-2222-4333-8444-555555555555",
+      "pidNamespace": "pid:[42]",
+      "pid": 4242,
+      "startTime": 987654
     }
   }
 }

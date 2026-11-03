@@ -19,6 +19,7 @@ DEFAULT_MAX_BYTES = 1_048_576
 LOW_CONFIDENCE_THRESHOLD = 0.5
 ALLOWED_SOURCES = {
     "user_input",
+    "model_input",
     "tool_input",
     "tool_output",
     "model_output",

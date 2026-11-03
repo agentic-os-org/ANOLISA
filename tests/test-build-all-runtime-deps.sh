@@ -1182,6 +1182,18 @@ test_rustup_automatic_mirrors_still_select_by_channel() {
     assert_contains "$TEST_RUSTUP_PROBES" stable
 }
 
+test_product_install_uses_explicit_legacy_profiles() {
+    local component target
+    for component in agentsight tokenless ws-ckpt agent-memory; do
+        target="$(component_install_target "$component")"
+        [[ "$target" == install-legacy ]] || fail "$component lost its legacy product install profile"
+    done
+    for component in os-skills copilot-shell; do
+        target="$(component_install_target "$component")"
+        [[ "$target" == install ]] || fail "$component install target unexpectedly changed"
+    done
+}
+
 run_test() {
     local name="$1" status
     set +e
@@ -1241,3 +1253,5 @@ run_test test_install_node_system_warns_when_npm_is_not_in_system_path
 run_test test_memory_system_preflight_blocks_on_missing_npm
 run_test test_rustup_explicit_servers_are_preserved
 run_test test_rustup_automatic_mirrors_still_select_by_channel
+
+run_test test_product_install_uses_explicit_legacy_profiles

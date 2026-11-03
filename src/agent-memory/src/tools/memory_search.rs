@@ -1,9 +1,37 @@
-use crate::audit::AuditEntry;
+use crate::audit::{AuditEntry, fallback_query_mode, sanitized_query_path};
 use crate::error::{MemoryError, Result};
 use crate::index::SearchHit;
 use crate::service::MemoryService;
 
 const TOOL: &str = "memory_search";
+
+fn audit_index_error(
+    svc: &MemoryService,
+    mode: &str,
+    query: &str,
+    error: MemoryError,
+) -> MemoryError {
+    svc.audit_log(
+        AuditEntry::new(TOOL)
+            .path(sanitized_query_path(mode, query))
+            .error(error.to_string()),
+    );
+    if crate::index::store::is_row_decode_error(&error) && mode != "hybrid" {
+        let table = if mode == "vector" {
+            "files_vec"
+        } else {
+            "files/files_fts"
+        };
+        if let Some(index) = svc.index.as_ref() {
+            tracing::error!(
+                "memory search row decode failed (backend={mode}, table={table}, db={}): {error}; {}",
+                index.db_path().display(),
+                crate::index::store::ROW_DECODE_RECOVERY
+            );
+        }
+    }
+    error
+}
 
 /// Tier B: search the memory store.
 ///
@@ -13,7 +41,14 @@ const TOOL: &str = "memory_search";
 /// - `"hybrid"`: reciprocal rank fusion of BM25 + vector results.
 ///
 /// `category` filters results to a specific fact category (e.g. "lesson",
-/// "interest"). When empty, all categories are included.
+/// "interest"). When empty, all categories are included. On the bm25 paths the
+/// filter is applied in SQL before the `top_k` limit, so a category that ranks
+/// below the unfiltered window still fills it; the vector/hybrid paths have no
+/// SQL to push it into and still filter afterwards (see `filter_by_category`).
+///
+/// Every audit path this function writes is a [`sanitized_query_path`] marker
+/// whose mode must stay listed in `audit::SANITIZED_QUERY_MODES` — that list is
+/// how the readers tell a marker apart from a recorded query.
 ///
 /// Returns up to `top_k` ranked snippets. Errors with `NotImplemented` if the
 /// index worker isn't running, or if `mode=vector|hybrid` is requested without
@@ -73,15 +108,17 @@ pub fn memory_search(
 
     match mode {
         "bm25" => {
-            let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
-            let hits = filter_by_category(hits, category);
+            // Category is filtered in SQL before LIMIT.
+            let hits = index
+                .search_scoped(query, top_k.max(1), scope_ref, category)
+                .map_err(|e| audit_index_error(svc, "bm25", query, e))?;
             let tokens = hits
                 .iter()
                 .map(|h| h.snippet.len() as u64 / 4 + h.path.len() as u64 / 4)
                 .sum();
             svc.audit_log(
                 AuditEntry::new(TOOL)
-                    .path(format!("bm25:len={}", query.len()))
+                    .path(sanitized_query_path("bm25", query))
                     .bytes(hits.len() as u64)
                     .tokens(tokens),
             );
@@ -116,10 +153,14 @@ pub fn memory_search(
                     tracing::debug!(
                         "{mode} requested but no embedding provider — falling back to bm25"
                     );
-                    let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
+                    let hits = index
+                        .search_scoped(query, top_k.max(1), scope_ref, category)
+                        .map_err(|e| {
+                            audit_index_error(svc, &fallback_query_mode(mode), query, e)
+                        })?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
-                            .path(format!("bm25(fallback from {mode}):len={}", query.len()))
+                            .path(sanitized_query_path(&fallback_query_mode(mode), query))
                             .bytes(hits.len() as u64),
                     );
                     return Ok(hits);
@@ -147,17 +188,18 @@ pub fn memory_search(
             .map_err(|e| {
                 svc.audit_log(
                     AuditEntry::new(TOOL)
-                        .path(format!("embed:len={}", query.len()))
+                        .path(sanitized_query_path("embed", query))
                         .error(e.to_string()),
                 );
                 MemoryError::Other(format!("embedding failed: {e}"))
             })?;
 
-            let hits = if mode == "vector" {
-                index.search_vec(&embedding.vector, top_k.max(1))?
+            let hits = (if mode == "vector" {
+                index.search_vec(&embedding.vector, top_k.max(1))
             } else {
-                index.search_hybrid(query, &embedding.vector, top_k.max(1))?
-            };
+                index.search_hybrid(query, &embedding.vector, top_k.max(1))
+            })
+            .map_err(|e| audit_index_error(svc, mode, query, e))?;
             let hits = filter_by_category(hits, category);
             let tokens = hits
                 .iter()
@@ -166,7 +208,7 @@ pub fn memory_search(
 
             svc.audit_log(
                 AuditEntry::new(TOOL)
-                    .path(format!("{mode}:len={}", query.len()))
+                    .path(sanitized_query_path(mode, query))
                     .bytes(hits.len() as u64)
                     .tokens(tokens),
             );
@@ -180,6 +222,14 @@ pub fn memory_search(
 
 /// Filter search hits by category, based on the path prefix.
 /// Facts are stored under facts/<category>/<ulid>.md.
+///
+/// Only the vector/hybrid paths use this now: `search_vec` scores a full-table
+/// scan in Rust and `search_hybrid` fuses two such lists, so neither has a SQL
+/// `WHERE` to push the filter into yet. Both truncate to `top_k` before this
+/// runs, so a `category` filter can still come back short — or empty — when
+/// other categories own the window: the same truncation defect the bm25 paths
+/// now avoid by filtering in SQL. Closing it here means plumbing `category`
+/// into `search_vec` / `search_hybrid_inner`.
 fn filter_by_category(
     hits: Vec<crate::index::SearchHit>,
     category: Option<&str>,

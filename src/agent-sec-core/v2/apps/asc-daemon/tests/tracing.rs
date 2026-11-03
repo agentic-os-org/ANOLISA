@@ -1,9 +1,11 @@
-use asc_daemon::{BootstrapConfig, serve};
+use asc_action_runtime::testing::discarding_finalizer;
+use asc_capability_pii_scan::PiiRuleSet;
+use asc_daemon::{BootstrapConfig, scan_application, serve};
 use asc_daemon_core::{PeerCredentials, PrincipalPolicy, PrincipalRole};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_pap::PapService;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
+
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracerProvider};
 use std::os::unix::fs::DirBuilderExt as _;
@@ -42,14 +44,12 @@ async fn tracing_span_remains_open_after_dispatch_timeout_until_work_finishes() 
     )
     .unwrap();
     let (release_tx, release_rx) = mpsc::channel();
-    let pap = PapService::new(
-        Arc::new(ProcessLocalPapRepository::default()),
-        Arc::new(PolicyTemplateCompiler),
-    );
+    let pap = PapService::new(Arc::new(SqlitePolicyRepository::temporary().unwrap()));
+    let rules = Arc::new(PiiRuleSet::builtin().unwrap());
     let dispatcher = Arc::new(DaemonDispatcher::new(
         pap,
         Arc::new(PausedPolicy(Mutex::new(release_rx))),
-        asc_daemon::scan_application(asc_action_runtime::testing::discarding_finalizer()),
+        scan_application(discarding_finalizer(), rules),
     ));
     let directory =
         std::env::temp_dir().join(format!("asc-otel-lifetime-{}", uuid::Uuid::new_v4()));

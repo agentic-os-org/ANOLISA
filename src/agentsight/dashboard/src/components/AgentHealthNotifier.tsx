@@ -20,6 +20,12 @@ export const AgentHealthNotifier: React.FC = () => {
   const toastIdRef = useRef(0);
   // Track which PIDs we've already notified about (negative PID = hung notice)
   const notifiedRef = useRef<Set<number>>(new Set());
+  // Ownership token for in-flight polls: only the newest poll of the
+  // currently mounted effect may update alert state or deduplication
+  // markers. Health responses can resolve out of order, so an older
+  // offline/hung snapshot landing after a newer healthy one must not
+  // raise an obsolete toast or clear markers a newer notice relies on.
+  const pollTokenRef = useRef(0);
 
   const addToast = useCallback((message: string) => {
     const id = ++toastIdRef.current;
@@ -28,8 +34,13 @@ export const AgentHealthNotifier: React.FC = () => {
   }, []);
 
   const poll = useCallback(async () => {
+    const token = ++pollTokenRef.current;
     try {
       const data = await fetchAgentProcessHealth({ includeClients: true });
+      if (token !== pollTokenRef.current) {
+        // A newer poll (or the effect cleanup) invalidated this response.
+        return;
+      }
       const agents = Array.isArray(data?.agents) ? data.agents : [];
 
       // 检测新增异常退出（仅 has_crash=true 的才通知）和卡顿 agent
@@ -48,9 +59,10 @@ export const AgentHealthNotifier: React.FC = () => {
       notifiedRef.current.forEach(pid => {
         if (!currentPids.has(Math.abs(pid))) notifiedRef.current.delete(pid);
       });
-      // 如果 hung 进程恢复正常，清除其 hung 通知记录
+      // Recovery starts a new episode for either notice type, including PID reuse.
       agents.forEach(a => {
         if (a.status !== 'hung') notifiedRef.current.delete(-a.pid);
+        if (a.status !== 'offline' || !a.has_crash) notifiedRef.current.delete(a.pid);
       });
     } catch {
       // 通知是尽力而为的能力，接口失败时静默跳过本轮
@@ -60,7 +72,12 @@ export const AgentHealthNotifier: React.FC = () => {
   useEffect(() => {
     void poll();
     const timer = setInterval(poll, 10_000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      // Unmount (or a StrictMode remount): invalidate any response that is
+      // still in flight so it cannot raise toasts or mutate markers.
+      pollTokenRef.current += 1;
+    };
   }, [poll]);
 
   return (

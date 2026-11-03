@@ -340,7 +340,8 @@ fn retry_delay(base: Duration, failures: u32, interval: Duration) -> Duration {
     let exponent = failures.saturating_sub(1).min(8);
     base.saturating_mul(1_u32 << exponent)
         .min(MAX_BACKOFF)
-        .min(interval)
+        // A fast successful tick must not turn persistent failures into a busy loop.
+        .min(interval.max(Duration::from_secs(60)))
 }
 
 fn heartbeat(state: &Arc<Mutex<MaintenanceWorkerState>>) {
@@ -378,4 +379,26 @@ fn unix_ms() -> u64 {
 
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn short_ticks_do_not_cap_failure_backoff() {
+        for tick in [Duration::from_millis(20), Duration::from_secs(1)] {
+            assert_eq!(
+                retry_delay(LOCK_BUSY_BACKOFF, 1, tick),
+                Duration::from_secs(1)
+            );
+            assert_eq!(retry_delay(ERROR_BACKOFF, 1, tick), Duration::from_secs(5));
+            assert_eq!(retry_delay(ERROR_BACKOFF, 2, tick), Duration::from_secs(10));
+            assert_eq!(retry_delay(ERROR_BACKOFF, 9, tick), Duration::from_secs(60));
+        }
+        assert_eq!(
+            retry_delay(ERROR_BACKOFF, 100, Duration::from_secs(3600)),
+            MAX_BACKOFF
+        );
+    }
 }

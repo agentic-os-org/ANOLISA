@@ -147,15 +147,17 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
                 }
             }
             if line.len() > MAX_LINE_LEN {
-                // `String::truncate` panics unless the cut lands on a char
-                // boundary, and byte 4096 of a CJK line (3 bytes per char)
-                // almost never does — back off to the previous boundary the
-                // same way the index and context previews already do.
-                let mut end = MAX_LINE_LEN;
-                while end > 0 && !line.is_char_boundary(end) {
-                    end -= 1;
+                // String::truncate panics when the cut lands inside a
+                // multi-byte UTF-8 sequence, so walk back to the nearest
+                // char boundary: a single long CJK line would otherwise
+                // panic the worker on an ordinary grep call. `cut > 0` is
+                // belt-and-braces — index 0 is always a char boundary, so
+                // the walk terminates there on its own.
+                let mut cut = MAX_LINE_LEN;
+                while cut > 0 && !line.is_char_boundary(cut) {
+                    cut -= 1;
                 }
-                line.truncate(end);
+                line.truncate(cut);
             }
             if re.is_match(&line) {
                 hits.push(GrepHit {
@@ -177,4 +179,49 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
     );
 
     Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use tempfile::tempdir;
+
+    fn setup() -> (tempfile::TempDir, MemoryService) {
+        let tmp = tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.memory.paths.base_dir = tmp.path().to_string_lossy().to_string();
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.consolidation.enabled = false;
+        config.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().to_string();
+        let svc = MemoryService::new(config).unwrap();
+        (tmp, svc)
+    }
+
+    /// A single line that crosses MAX_LINE_LEN inside a multi-byte UTF-8
+    /// sequence must be clipped, not panic String::truncate's char-boundary
+    /// assertion: `grep` runs on ordinary user files, so `mem_grep` used to
+    /// panic the worker on any long CJK line.
+    #[test]
+    fn grep_clips_an_oversized_multibyte_line_instead_of_panicking() {
+        let (_tmp, svc) = setup();
+        let notes = svc.mount.root.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        // 3000 * 3 bytes = 9000 bytes, all multi-byte: the 4096-byte cap
+        // lands mid-character.
+        std::fs::write(notes.join("cjk.md"), "中".repeat(3000)).unwrap();
+
+        let hits = grep(
+            &svc,
+            "中",
+            GrepOptions {
+                dir: "notes".into(),
+                ..Default::default()
+            },
+        )
+        .expect("grep must not panic on a mid-character line cap");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text.chars().count(), MAX_LINE_LEN / 3);
+    }
 }

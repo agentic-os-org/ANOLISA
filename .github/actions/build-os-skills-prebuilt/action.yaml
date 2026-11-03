@@ -1,0 +1,54 @@
+name: Build OS Skills raw package
+description: Package tracked OS Skills for one Linux release target.
+
+inputs:
+  version:
+    description: Component version without the v prefix.
+    required: true
+  target-os:
+    description: Package target operating system.
+    required: true
+  target-arch:
+    description: Package target architecture.
+    required: true
+  profile:
+    description: Static asset release profile.
+    required: true
+  tag:
+    description: Release tag to bind to the checked-out commit. Empty for previews.
+    required: false
+    default: ''
+
+outputs:
+  artifact-directory:
+    description: Directory containing the archive, checksums, and CycloneDX SBOM.
+    value: ${{ steps.build.outputs.artifact-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Package OS Skills
+      id: build
+      shell: bash
+      env:
+        SKILLS_OUTPUT_DIR: ${{ runner.temp }}/os-skills-prebuilt-${{ inputs.target-os }}-${{ inputs.target-arch }}
+        SKILLS_VERSION: ${{ inputs.version }}
+        SKILLS_TARGET_OS: ${{ inputs.target-os }}
+        SKILLS_TARGET_ARCH: ${{ inputs.target-arch }}
+        SKILLS_PROFILE: ${{ inputs.profile }}
+        SKILLS_TAG: ${{ inputs.tag }}
+      run: |
+        "$GITHUB_ACTION_PATH/build.sh" \
+          --source-repo "$GITHUB_WORKSPACE" \
+          --output-dir "$SKILLS_OUTPUT_DIR" \
+          --version "$SKILLS_VERSION" \
+          --target-os "$SKILLS_TARGET_OS" \
+          --target-arch "$SKILLS_TARGET_ARCH" \
+          --profile "$SKILLS_PROFILE" \
+          --tag "$SKILLS_TAG"
+        echo "artifact-directory=$SKILLS_OUTPUT_DIR" >> "$GITHUB_OUTPUT"

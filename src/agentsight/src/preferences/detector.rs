@@ -7,7 +7,7 @@
 //! thresholds and keyword tables live in [`super::signals`] so rule tuning
 //! never touches this file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::signals::{
     CJK_RATIO_THRESHOLD, CORRECTION_PATTERNS, CORRECTION_WINDOW_NS, MIN_QUERY_CHARS_FOR_LANGUAGE,
@@ -23,8 +23,9 @@ pub struct PreferenceEventRow {
     /// only used as signal provenance.
     pub id: i64,
     pub session_id: Option<String>,
-    /// Grouping key for cross-turn rules: the genai `conversation_id` or
-    /// the trajectory session id.
+    /// Per-turn identity: the genai `conversation_id` (a user-query
+    /// fingerprint) or the trajectory session id. Cross-turn rules group by
+    /// `session_id`; this is the fallback for rows that have none.
     pub conversation_id: Option<String>,
     /// Per-turn timestamp in epoch nanoseconds. `None` when the source has
     /// no reliable value (e.g. an ATIF step without a parseable timestamp);
@@ -43,18 +44,39 @@ pub struct PreferenceEventRow {
 /// calls) are applied independently; the rapid follow-up correction rule
 /// needs cross-row context and runs over the whole batch. Malformed message
 /// JSON is tolerated: the row is skipped with a debug log, never an error.
+///
+/// The genai source emits one row per LLM call, so a single user turn with a
+/// five-step tool loop arrives as five rows carrying the same session,
+/// conversation and query. Those rows are one observation of the user's
+/// preference, not five: the turn-level rules run once per
+/// `(session, conversation, query)` tuple. Tool usage stays per row — call
+/// frequency is its evidence (see [`detect_tool_calls`]).
 pub fn detect_signals(rows: &[PreferenceEventRow]) -> Vec<PreferenceSignal> {
     let mut out = Vec::new();
+    let mut seen_turns: HashSet<(Option<&str>, Option<&str>, &str)> = HashSet::new();
     for row in rows {
-        detect_row_signals(row, &mut out);
+        let first_for_turn = match row.user_text.as_deref() {
+            Some(query) => seen_turns.insert((
+                row.session_id.as_deref(),
+                row.conversation_id.as_deref(),
+                query,
+            )),
+            // No query means the turn-level rules are skipped anyway.
+            None => true,
+        };
+        detect_row_signals(row, &mut out, first_for_turn);
     }
     detect_rapid_followups(rows, &mut out);
     out
 }
 
 /// Rules that only need a single row.
-fn detect_row_signals(row: &PreferenceEventRow, out: &mut Vec<PreferenceSignal>) {
-    if let Some(query) = row.user_text.as_deref() {
+fn detect_row_signals(
+    row: &PreferenceEventRow,
+    out: &mut Vec<PreferenceSignal>,
+    include_turn_rules: bool,
+) {
+    if include_turn_rules && let Some(query) = row.user_text.as_deref() {
         let excerpt = truncate_excerpt(query);
         if let Some(language) = detect_language(query) {
             out.push(make_signal(
@@ -148,12 +170,16 @@ fn detect_tool_calls(row: &PreferenceEventRow, out: &mut Vec<PreferenceSignal>) 
 /// Rows without a reliable timestamp cannot prove the time gap and are
 /// excluded rather than compared on fabricated values.
 fn detect_rapid_followups(rows: &[PreferenceEventRow], out: &mut Vec<PreferenceSignal>) {
-    // Group by conversation_id, keeping only rows with a usable query and
-    // a real timestamp.
-    let mut by_conversation: BTreeMap<&str, Vec<(&PreferenceEventRow, &str, i64)>> =
-        BTreeMap::new();
+    // Group by session, not by the genai `conversation_id`: that id is a
+    // per-query fingerprint (`genai::id_resolver` keys it on the last user
+    // message), so one bucket can only ever contain a single query and the
+    // rule could never fire on the primary Linux source. The session id spans
+    // the turns being compared; the trajectory source already uses it as its
+    // conversation key. Rows without a session fall back to the old key.
+    let mut by_session: BTreeMap<&str, Vec<(&PreferenceEventRow, &str, i64)>> = BTreeMap::new();
     for row in rows {
-        let Some(conversation_id) = row.conversation_id.as_deref() else {
+        let Some(conversation_id) = row.session_id.as_deref().or(row.conversation_id.as_deref())
+        else {
             continue;
         };
         let Some(query) = row.user_text.as_deref() else {
@@ -162,13 +188,13 @@ fn detect_rapid_followups(rows: &[PreferenceEventRow], out: &mut Vec<PreferenceS
         let Some(ts) = row.timestamp_ns else {
             continue;
         };
-        by_conversation
+        by_session
             .entry(conversation_id)
             .or_default()
             .push((row, query, ts));
     }
 
-    for events in by_conversation.values_mut() {
+    for events in by_session.values_mut() {
         events.sort_by_key(|(_, _, ts)| *ts);
         for pair in events.windows(2) {
             let (_, prev_query, prev_ts) = &pair[0];
@@ -291,6 +317,75 @@ mod tests {
     }
 
     #[test]
+    fn repeated_calls_in_one_turn_are_one_preference_observation() {
+        // genai writes one row per LLM call; a tool loop repeats the same
+        // session, conversation and query. The user made one request, so the
+        // turn-level rules must contribute one observation, not one per call.
+        let rows: Vec<_> = (1..=5)
+            .map(|id| row(id, "先出方案再写代码，然后跑测试"))
+            .collect();
+        let signals = detect_signals(&rows);
+
+        let plan_first = signals
+            .iter()
+            .filter(|s| s.kind == SignalKind::PlanFirst)
+            .count();
+        assert_eq!(plan_first, 1, "five calls of one turn are one observation");
+
+        let chinese = signals
+            .iter()
+            .filter(|s| {
+                s.kind
+                    == SignalKind::Language {
+                        language: "chinese",
+                    }
+            })
+            .count();
+        assert_eq!(chinese, 1);
+
+        let test_requirement = signals
+            .iter()
+            .filter(|s| s.kind == SignalKind::TestRequirement)
+            .count();
+        assert_eq!(test_requirement, 1);
+    }
+
+    #[test]
+    fn tool_usage_stays_per_call_after_turn_dedup() {
+        // Call frequency is the evidence for tool usage, so the dedup above
+        // must not collapse it.
+        let mut first = row(1, "list the files for me please");
+        first.tool_names = vec!["bash".to_string()];
+        let mut second = row(2, "list the files for me please");
+        second.tool_names = vec!["bash".to_string()];
+
+        let signals = detect_signals(&[first, second]);
+        let bash = signals
+            .iter()
+            .filter(
+                |s| matches!(&s.kind, SignalKind::ToolUsage { tool_name } if tool_name == "bash"),
+            )
+            .count();
+        assert_eq!(bash, 2, "each tool call remains its own evidence unit");
+    }
+
+    #[test]
+    fn distinct_turns_keep_their_own_observations() {
+        // Same text in two separate turns is two observations, not a repeat
+        // of one call loop.
+        let mut second_turn = row(2, "先出方案再写代码");
+        second_turn.conversation_id = Some("c2".to_string());
+        let signals = detect_signals(&[row(1, "先出方案再写代码"), second_turn]);
+        assert_eq!(
+            signals
+                .iter()
+                .filter(|s| s.kind == SignalKind::PlanFirst)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn rapid_followup_in_same_conversation_is_a_correction() {
         let mut a = row(1, "implement feature x for me please");
         let mut b = row(2, "stop, use the other module instead");
@@ -315,12 +410,37 @@ mod tests {
         let detected = detect_signals(&[a.clone(), b.clone()]);
         assert!(!detected.iter().any(|s| s.kind == SignalKind::Correction));
 
-        // Different conversations: no correction.
+        // Different sessions: no correction.
         let mut c = row(3, "now do something entirely different");
+        c.session_id = Some("s2".to_string());
         c.conversation_id = Some("c2".to_string());
         c.timestamp_ns = Some(3_000_000_000);
         let detected = detect_signals(&[a, c]);
         assert!(!detected.iter().any(|s| s.kind == SignalKind::Correction));
+    }
+
+    #[test]
+    fn rapid_followup_across_turns_of_one_genai_session_is_a_correction() {
+        // genai gives every user query its own conversation_id fingerprint,
+        // so a changed query necessarily lands in a different bucket when
+        // grouping by conversation_id. The session id is the stable grouping
+        // key that lets the rule see the two turns.
+        let mut a = row(1, "implement feature x for me please");
+        let mut b = row(2, "stop, use the other module instead");
+        a.conversation_id = Some("query-one".to_string());
+        b.conversation_id = Some("query-two".to_string());
+        a.timestamp_ns = Some(1_000_000_000);
+        b.timestamp_ns = Some(10_000_000_000);
+
+        let detected = detect_signals(&[a, b]);
+        assert_eq!(
+            detected
+                .iter()
+                .filter(|s| s.kind == SignalKind::Correction)
+                .count(),
+            1,
+            "a changed query nine seconds later is a correction"
+        );
     }
 
     #[test]

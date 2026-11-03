@@ -1,7 +1,7 @@
 //! Response framing regressions through Parser → Aggregator → Analyzer → GenAI → SQLite.
 mod common;
 
-use agentsight::aggregator::{AggregatedResult, Aggregator};
+use agentsight::aggregator::{AggregatedResult, Aggregator, RemoveReason};
 use agentsight::analyzer::Analyzer;
 use agentsight::config::RuntimeLimits;
 use agentsight::event::Event;
@@ -184,6 +184,107 @@ fn compressed_response_is_decoded_after_framing() {
 }
 
 #[test]
+fn stacked_response_codings_preserve_usage_messages_and_tool_index() {
+    use std::io::Write;
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&body()).unwrap();
+    let gzip = gzip.finish().unwrap();
+    let mut encoded = Vec::new();
+    {
+        let mut outer = brotli::CompressorWriter::new(&mut encoded, 4096, 3, 22);
+        outer.write_all(&gzip).unwrap();
+    }
+    let bytes = response(
+        &encoded,
+        &format!(
+            "Content-Encoding: gzip, br\r\nContent-Length: {}\r\n",
+            encoded.len()
+        ),
+    );
+    check(&bytes.chunks(17).collect::<Vec<_>>());
+}
+
+/// A chunked, **compressed** SSE body whose terminator shares the final read.
+///
+/// The parser turns a read that ends in `0\r\n\r\n` into SSE events for the
+/// bytes before the terminator. For a compressed body those bytes are the last
+/// compressed chunk, not SSE text, so they yielded no events and were dropped
+/// instead of reaching the aggregator's compressed buffer. `dechunk_body` then
+/// saw a truncated frame, `decompress_body` fell back to the still-compressed
+/// bytes, and the whole response decoded to zero events — no output text, no
+/// tool calls, no token usage.
+#[test]
+fn compressed_chunked_sse_keeps_the_final_chunk() {
+    let sse = b"data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n\
+                data: {\"choices\":[{\"delta\":{\"content\":\"two\"},\"finish_reason\":\"stop\"}]}\n\n";
+    let compressed = zstd::encode_all(&sse[..], 3).expect("fixture compresses");
+    let mid = compressed.len() / 2;
+    assert!(mid > 0, "precondition: a frame to split");
+
+    let mut framed = format!("{mid:x}\r\n").into_bytes();
+    framed.extend_from_slice(&compressed[..mid]);
+    framed.extend_from_slice(b"\r\n");
+    framed.extend_from_slice(format!("{:x}\r\n", compressed.len() - mid).as_bytes());
+    framed.extend_from_slice(&compressed[mid..]);
+    framed.extend_from_slice(b"\r\n0\r\n\r\n");
+
+    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: zstd\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let mut stream = headers.to_vec();
+    stream.extend_from_slice(&framed);
+    // The final read carries the last compressed chunk *and* the terminator,
+    // which is the shape the parser's own comment calls the common one.
+    let split = headers.len() + format!("{mid:x}\r\n").len() + mid + 2;
+
+    let mut aggregator = Aggregator::new();
+    assert!(
+        feed(
+            &mut aggregator,
+            1,
+            &common::make_openai_request_bytes("test-model", "hello", true),
+            1
+        )
+        .is_empty()
+    );
+    assert!(
+        feed(&mut aggregator, 0, &stream[..split], 100).is_empty(),
+        "the response cannot complete before its terminator"
+    );
+
+    let completed = feed(&mut aggregator, 0, &stream[split..], 200);
+
+    assert_eq!(
+        completed.len(),
+        1,
+        "the terminator must complete the stream"
+    );
+    let pair = match &completed[0] {
+        AggregatedResult::SseComplete(pair) | AggregatedResult::HttpComplete(pair) => pair,
+        other => panic!("expected a completed pair, got {other:?}"),
+    };
+    let bodies: Vec<&[u8]> = pair
+        .response
+        .sse_events
+        .iter()
+        .filter(|event| !event.is_done())
+        .map(|event| event.data())
+        .collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.windows(3).any(|w| w == b"one")),
+        "the first event must survive, got {:?}",
+        bodies.len()
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.windows(3).any(|w| w == b"two")),
+        "the event carried by the final chunk must survive, got {:?}",
+        bodies.len()
+    );
+}
+
+#[test]
 fn body_bytes_that_look_like_protocol_are_not_reparsed() {
     let mut aggregator = Aggregator::new();
     for body in [
@@ -299,8 +400,9 @@ fn incomplete_responses_are_bounded_and_never_complete_on_timeout() {
     ] {
         let mut aggregator = Aggregator::with_limits(4, &limits);
         request(&mut aggregator);
-        assert!(feed(&mut aggregator, 0, &response(&[], framing), 100).is_empty());
-        assert!(feed(&mut aggregator, 0, &[b'x'; 1025], 200).is_empty());
+        let mut removed = feed(&mut aggregator, 0, &response(&[], framing), 100);
+        removed.extend(feed(&mut aggregator, 0, &[b'x'; 1025], 200));
+        assert_incomplete(&removed, RemoveReason::OverBudget);
         assert!(!aggregator.has_pending());
         request(&mut aggregator);
         assert_eq!(feed(&mut aggregator, 0, &full_response(), 300).len(), 1);
@@ -316,9 +418,29 @@ fn malformed_framing_does_not_emit_complete() {
     ] {
         let mut aggregator = Aggregator::new();
         request(&mut aggregator);
-        assert!(feed(&mut aggregator, 0, &response(body.as_bytes(), framing), 100).is_empty());
+        let removed = feed(&mut aggregator, 0, &response(body.as_bytes(), framing), 100);
+        assert_incomplete(&removed, RemoveReason::ProtocolError);
         assert!(!aggregator.has_pending());
     }
+}
+
+fn assert_incomplete(results: &[AggregatedResult], expected: RemoveReason) {
+    assert!(matches!(results, [AggregatedResult::Abandoned { reason, .. }] if *reason == expected));
+    let analyzed = Analyzer::new().analyze_aggregated(&results[0]);
+    let (output, _) = GenAIBuilder::new().build_with_pending(
+        &analyzed,
+        &ResponseSessionMapper::new(),
+        &HashMap::new(),
+    );
+    assert!(output.pending_response_id.is_none());
+    let [GenAISemanticEvent::LLMCall(call)] = output.events.as_slice() else {
+        panic!("partial request must remain visible");
+    };
+    assert_eq!(call.metadata["abandon_reason"], expected.as_str());
+    assert_eq!(
+        call.response.messages[0].finish_reason.as_deref(),
+        Some("incomplete")
+    );
 }
 
 #[test]

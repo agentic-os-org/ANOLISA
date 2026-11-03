@@ -300,6 +300,8 @@ agent-sec-cli events --since '2026-08-05T00:00:00Z' --until '2026-08-06T00:00:00
 
 ### 参数约束
 
+- V2 查询范围由 daemon 的 UDS peer UID 决定：普通用户只读自身 UID，root 读取全部 UID。
+- `events --session-id` 使用原始 session ID；root 返回所有 UID 下匹配该 ID 的事件。同名会话在 root 返回结果中显示为 `UID_session_id`，仅用于区分归属；查询按原始 ID 匹配。
 - `--last-hours` 与 `--since` / `--until` 互斥。
 - `--count` 与 `--count-by` 互斥。
 - `--summary` 与 `--count`、`--count-by`、任何显式 `--output` 互斥。

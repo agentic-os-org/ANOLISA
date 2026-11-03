@@ -2,49 +2,114 @@
 
 [中文版](README_zh.md)
 
-AW provides versioned JSON Schemas and offline validators for capability calls and their records. The Rust library checks payload shapes and relationships between invocations, results and observations. It has no service process and does not execute providers or control agents.
+AW provides unified Hook orchestration, managed MCP integration and hot policy updates for Agents and SDK applications.
+One configuration composes security checks before tool execution, output compression afterward and custom rules.
+Supported resident entrypoints can update policy after tasks drain while keeping the host process running.
+Agents retain their models, interfaces and permissions. AW runs on Linux.
 
-The interfaces are experimental. Tests use synthetic records and do not certify runtime integration.
+## Shared capabilities
 
-## Run the checks
+| Capability | What you can do |
+| --- | --- |
+| Hook orchestration | Select rules by target and tool, compose sec-core, Tokenless and custom Hooks, and share step ordering, execution deadlines and audit. |
+| Managed MCP | Apply the same policies at supported actual tool-call boundaries, checking invocation identity and approved arguments. |
+| Policy updates | Explicitly apply a new policy to a supported idle instance so subsequent tasks use the new revision. |
 
-Prepare Rust through rustup, Python 3 and Node.js. Rust, rustfmt and Clippy are
-pinned in [rust-toolchain.toml](rust-toolchain.toml). Run from the repository root:
+Adapters connect native events and adopt supported effects; Providers implement policies.
+The sec-core Provider can check locally resolved Skills before Qoder SDK and QwenPaw load their instructions; see [security setup](../../docs/user-guide/en/aw/security.md#check-skills-before-loading).
+
+Core works independently. Install and enable the corresponding Providers for security checks and compression.
+Tool result replacement is limited to authorized slots, and native Agent permission checks retain precedence.
+
+## Hook support matrix
+
+✓ Declared with contract coverage; × unsupported. Generated from the [regression manifest](tests/regression-matrix.json). See [capability support](../../docs/user-guide/en/aw/capabilities.md) for native replacement limits, MCP and policy updates.
+
+<!-- aw-regression-matrix:start -->
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+<!-- aw-regression-matrix:end -->
+
+Ordinary resident Qoder SDK and QwenPaw can check submitted text before model
+requests through `input.submit`. The sec-core Provider supports fast prompt
+injection scanning with separate risk and failure policies; see
+[user submission checks](../../docs/user-guide/en/aw/security.md#check-user-submissions).
+
+
+<a id="install-and-use"></a>
+
+## Installation and first run
+
+Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
+AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
+Install and sign in to your Agent first, then generate configuration with `aw config init`.
+
+The example below uses an installed, signed-in Qoder. `AW_PREFIX` is the installation directory
+selected in the guide; both `qodercli` and `aw` must be on `PATH`.
 
 ```bash
-python3 src/aw/scripts/check.py
+export AW_HOME="$HOME/aw"
+install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
+  --qoder "$(command -v qodercli)"
+aw validate --config "$AW_HOME/aw.yaml"
+cd "$AW_HOME/workspace"
+aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
 
-The entry runs CI behavior tests, formatting, Clippy, all locked workspace tests,
-the Python/JavaScript digest vectors and rustdoc. Missing tools, empty or fully
-ignored contract/plan test targets, invalid vectors and command failures return
-nonzero. Each command has a timeout and its child process group is cleaned up on
-failure or interruption. Logs identify the failing command; individual commands
-can be run from `src/aw` for diagnosis.
+In Qoder, ask it to read the current directory with a tool and follow its native permission prompts.
+The local service remains reusable after the Agent exits. Inspect and stop it when finished.
 
-These checks run as a regular user without an Agent or service login. Cargo
-downloads uncached dependencies; schema validation reads only bundled resources.
-The runner requires Linux. The library remains portable, but this gate does not
-certify other operating systems or minimum supported versions.
+```bash
+aw status --config "$AW_HOME/aw.yaml"
+aw stop --config "$AW_HOME/aw.yaml"
+```
 
-[AW CI](../../.github/workflows/aw-ci.yml) runs on branch pushes, pull requests,
-merge groups and manual dispatch. It checks the candidate commit, including the
-merge result for pull requests. Unrelated changes produce an explicit no-op;
-scope errors, unexpected skips and mismatched tested commits fail `AW / required`.
-Repository administrators must select that check in branch protection to enforce
-it. A cancelled workflow is not a passing gate.
+<a id="hook-support"></a>
+<a id="adapter-capability-coverage"></a>
 
-Upstream CI uses the self-hosted `anolisa-k8s-general-ci-x64` runner; fork CI
-uses GitHub-hosted Ubuntu 24.04. Both use Python 3.12.3, Node.js 24.15.0 and
-the pinned Rust toolchain. Local validation also uses Linux ARM64.
+## Supported entrypoints
 
-## Source reference
+AW currently integrates Qoder CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
+Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
+SDK applications explicitly use managed factories. Runtime admission checks the required
+native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)
+record the tested framework versions.
+[Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers prewarming, native configuration with unmodified SDK/Worker files, Pilot runtime launcher grants, pinned Bash consumers and declarative role assets.
+The [capability matrix](../../docs/user-guide/en/aw/capabilities.md) compares result handling,
+MCP and policy updates by Adapter and launch mode, with links to verified baselines and setup.
 
-- [Registered schemas](schemas/) and [synthetic payload examples](tests/fixtures/contracts.json)
-- [Public API](src/lib.rs), [record validation](src/validation.rs) and [plan validation](src/orchestration.rs)
-- [Encoding tests](tests/canonical.rs), [schema tests](tests/schemas.rs),
-  [record tests](tests/contracts.rs) and [plan tests](tests/orchestration.rs)
 
-The Registry includes 21 schema resources. The eight v1 resources in `crates/aw-contracts/schemas/` are reference copies and are not registered. Callers must use matching schema IDs and digests; no automatic version conversion is provided.
+Resident tasks recheck service and owner validity during idle periods and before
+covered dispatch. Status separates live workers from failed AW bridges; see
+[operations](../../docs/user-guide/en/aw/operations.md) for recovery.
 
-Parse incoming bytes with `canonical::parse` before schema validation. Shape checks alone do not validate record relationships or grant authorization. Follow the public API documentation for plan-level checks; callers remain responsible for authenticating evidence and enforcing actions.
+## Documentation
+
+| Task | Guide |
+| --- | --- |
+| Install and complete a first run | [AW user manual](../../docs/user-guide/en/aw/index.md) |
+| Select an Agent, configure rules and update policy | [Configuration and launch](../../docs/user-guide/en/aw/configuration.md) |
+| Enable output compression or security checks | [Tokenless](../../docs/user-guide/en/aw/tokenless.md), [sec-core](../../docs/user-guide/en/aw/security.md) |
+| Inspect runtime records | [AgentSight](../../docs/user-guide/en/aw/observability.md) |
+| Check status, upgrade/uninstall and troubleshoot | [Operations](../../docs/user-guide/en/aw/operations.md) |
+| Write Providers, integrate SDKs or understand the architecture | [Developer guide](../../docs/developer-guide/en/aw/index.md) |
+
+<a id="code-architecture"></a>
+<a id="development-and-validation"></a>
+
+The [architecture overview](docs/design/en/architecture.md) describes framework and Provider ownership and call paths.
+See [Contributing](CONTRIBUTING.md) for source builds, tests and CI entrypoints.
+
+`aw config add-native-source` records native source references without opening or
+rewriting their files. The shared loader API retains native configuration and
+reports admission separately from activation; see [configuration](../../docs/user-guide/en/aw/configuration.md#record-native-configuration-sources).

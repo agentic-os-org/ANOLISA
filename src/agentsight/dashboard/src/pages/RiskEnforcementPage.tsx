@@ -14,6 +14,7 @@ import {
   type EnforcementViolation,
   type EnforcementPolicyMode,
 } from '../utils/apiClient';
+import { effectiveBindingMode } from '../utils/enforcementMode';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 
@@ -24,12 +25,6 @@ function policyFilePath(policyDsl: string): string {
       ?? line.match(/^\s*block open file "([^"]+)" if AGENT\s*$/))
     .filter((match): match is RegExpMatchArray => match !== null);
   return matches.length === 1 ? matches[0][1] : '—';
-}
-
-function legacyBindingMode(policyDsl: string): EnforcementPolicyMode {
-  if (/\bblock connect endpoint\b/.test(policyDsl) || /\bblock open file\b/.test(policyDsl)) return 'enforce';
-  if (/\bnotify connect endpoint\b/.test(policyDsl)) return 'audit';
-  return 'observe';
 }
 
 const modeLabels: Record<EnforcementPolicyMode, MessageKey> = {
@@ -190,8 +185,14 @@ export const RiskEnforcementPage: React.FC = () => {
     ? violations.filter((v) => v.agent_id === agentIdFilter)
     : violations;
 
-  const activeBindings = bindings.filter((binding) => binding.state === 'enforced');
-  const displayedViolations = enforcementViolationTotal(violations, health);
+  // The bindings table below shows `filteredBindings`, and `filteredBindings`
+  // is the full list when no agent filter is active, so both the summary card
+  // and the binding-limit check must derive from it to agree with the visible
+  // rows and the filter banner.
+  const activeBindings = filteredBindings.filter((binding) => binding.state === 'enforced');
+  // The table below shows `filteredViolations`; the summary card must count
+  // the same set or it disagrees with the visible rows and the filter banner.
+  const displayedViolations = enforcementViolationTotal(filteredViolations, health);
   const supportsMode = (candidate: EnforcementPolicyMode): boolean => (
     enforcementSupportsMode(health, candidate)
   );
@@ -209,6 +210,13 @@ export const RiskEnforcementPage: React.FC = () => {
   const newestViolations = [...filteredViolations]
     .sort((left, right) => right.occurred_at_ns - left.occurred_at_ns);
   const paginatedViolations = newestViolations.slice(violationOffset, violationOffset + VIOLATION_LIMIT);
+  // The list can shrink under the current offset (a refresh prunes expired
+  // bindings and their violations), leaving the slice empty; Pagination then
+  // hides itself once total <= limit, stranding the table with no control to
+  // go back. Clamp the offset to the newest list.
+  useEffect(() => {
+    setViolationOffset((current) => Math.min(current, Math.max(0, newestViolations.length - 1)));
+  }, [newestViolations.length]);
   const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canCreate) return;
@@ -272,6 +280,13 @@ export const RiskEnforcementPage: React.FC = () => {
     : health.capabilities.test_development
       ? t('risk.capability.testDev')
       : t('risk.capability.prod');
+  const fileDeleteGuardLabel = health?.capabilities.file_delete_guard === true
+    ? health.capabilities.file_delete_guard_mode
+      ? t('risk.capability.fileDeleteGuardWithMode', {
+        mode: health.capabilities.file_delete_guard_mode,
+      })
+      : t('risk.capability.fileDeleteGuard')
+    : null;
   const allowsCredentialEnforcement = health?.capabilities.credential_enforce === true;
 
   return (
@@ -386,7 +401,7 @@ export const RiskEnforcementPage: React.FC = () => {
                     </td>
                     <td className="px-4 py-3 text-gray-700">
                       {(() => {
-                        const bindingMode = binding.request.policy_mode ?? legacyBindingMode(binding.request.policy_dsl);
+                        const bindingMode = effectiveBindingMode(binding.request);
                         return (
                           <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${modeBadgeClass[bindingMode]}`}>
                             {t(modeLabels[bindingMode])}
@@ -434,6 +449,9 @@ export const RiskEnforcementPage: React.FC = () => {
         <form onSubmit={handleCreate} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <h2 className="font-semibold text-gray-900">{t('risk.form.title')}</h2>
           <p className="mt-1 text-xs text-gray-500">{capabilityLabel}</p>
+          {fileDeleteGuardLabel && (
+            <p className="mt-1 text-xs text-gray-600">{fileDeleteGuardLabel}</p>
+          )}
           <div className="mt-4 space-y-4">
             <label className="block text-sm font-medium text-gray-700">
               Agent ID

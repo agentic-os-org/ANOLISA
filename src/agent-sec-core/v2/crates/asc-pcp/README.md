@@ -8,7 +8,8 @@ The Client registry contains `TargetDeploymentClientFactory` ports. A due Apply
 opens one Client after translation and reuses it through prepare and create/update.
 Delete opens one Client per saved route. Initialization failures follow normal
 attempt bookkeeping and retry classification; no Client is opened for skipped work.
-There are no cross-call plans, prepared requests, pending outcomes or step cursors.
+Plans and prepared requests are call-local. Unconfirmed writes and actual outcomes
+remain in the caller-owned schedule until confirmed or superseded, never across a crash.
 
 The caller must serialize attempts for each Binding in the same Repository.
 In production one Runtime WorkQueue owns this responsibility: its Running entry
@@ -17,17 +18,19 @@ mark the entry dirty. The core has no execution lock or shared lock registry;
 callers must not bypass the queue or start independent queues over the same store.
 Blocking calls must be joined even if an async waiter times out.
 
-The call-local `ExecutionSlot` retains only an outcome and a pending write receipt
-for panic bookkeeping. It is discarded on return or unwind and cannot survive a
-process crash.
+The runtime-owned `ExecutionSlot` retains outcomes and exact pending writes through
+storage failures and panic bookkeeping. It contains no prepared request and is
+discarded on process exit.
 
 ## Storage and execution
 
 [`asc-policy-repository`](../asc-policy-repository/README.md) supplies consistent
 aggregate reads and field-scoped conditional writes. `ReconciliationPatch` has no
-spec field. Registration writes deployments only; completion merges observations
-and conditionally advances the claimed revision/status. A stale Apply can record
-valid target observations while preserving a newer Delete and its retry budget.
+spec field. Registration writes deployments only. Completion atomically saves
+status and observations only while the claimed revision/status version/lifecycle
+match. A stale Apply result is discarded entirely, retaining previously registered
+UNKNOWN cleanup responsibility. Successful writes use the actual receipt version;
+a newer Delete receives its own retry budget even when its notification is lost.
 
 Target references and UNKNOWN responsibility are registered before modifying I/O.
 Only confirmed Absent targets are removed. Delete removes the whole aggregate
@@ -89,9 +92,11 @@ cargo test -p asc-pcp -p asc-policy-runtime --locked --offline
 
 The [acceptance standard](../../fixtures/reconciliation/ACCEPTANCE.md) covers
 complete serialized records, dependency inputs/results and ordered traces. Tests
-also compose real PAP/memory and actual Adapter/Client/Ureq with a loopback mock.
-Storage is process-local memory. Full CLI/daemon E2E is a separate PR; SQL,
-crash/restart error injection and live PEP/kernel enforcement are separate gates.
+also compose real PAP/SQLite and actual Adapter/Client/Ureq with a loopback mock.
+Production and tests use `asc-policy-repository-sqlite`; tests own isolated temporary
+on-disk databases. SQL crash/restart recovery has its own
+[acceptance evidence](../../../docs/design/POLICY_SQLITE_PERSISTENCE_DESIGN_zh.md#9-实施分期与验收).
+Core tests do not establish full CLI/daemon E2E or live PEP/kernel enforcement.
 
 The Runtime holds AttemptSchedule only while the queue entry exists. Automatic
 retries preserve its attempt count and deadline; a new explicit Pending request

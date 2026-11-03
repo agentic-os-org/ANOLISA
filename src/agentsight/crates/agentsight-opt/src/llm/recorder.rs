@@ -101,14 +101,22 @@ impl TrajectoryRecorder {
             end_ts: params.end_ts.to_string(),
             label: params.label.map(str::to_string),
         };
-        if let Ok(mut calls) = self.calls.lock() {
-            calls.push(call);
-        }
+        // A poisoned lock means a panic happened while holding it; the
+        // recorded calls are still valid, so recover them rather than
+        // silently dropping every subsequent record.
+        let mut calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        calls.push(call);
     }
 
     /// Number of recorded calls.
     pub fn len(&self) -> usize {
-        self.calls.lock().map(|c| c.len()).unwrap_or(0)
+        self.calls
+            .lock()
+            .map(|c| c.len())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().len())
     }
 
     /// Whether no calls have been recorded.
@@ -124,7 +132,11 @@ impl TrajectoryRecorder {
     /// label with a `ToolCall(Agent)` and a `subagent_trajectory_ref`, mirroring
     /// how coding agents record delegated subagent tasks.
     pub fn to_atif(&self) -> AtifTrajectory {
-        let calls = self.calls.lock().map(|c| c.clone()).unwrap_or_default();
+        let calls = self
+            .calls
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
 
         let mut steps: Vec<Step> = Vec::new();
         let mut step_id: usize = 0;

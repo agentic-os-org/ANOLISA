@@ -1,0 +1,35 @@
+{
+  "schema": "cosh.audit.event",
+  "schema_version": 1,
+  "event_id": "6f1c2a9e-4d3b-4c1a-9e7f-2b8d5a0c3e14",
+  "event_type": "audit.truncated",
+  "occurred_at": "2026-10-12T00:00:00.000Z",
+  "observed_at": "2026-10-12T00:00:00.000Z",
+  "sequence": 3,
+  "component": {
+    "name": "cosh-shell",
+    "version": "0.22.0"
+  },
+  "identity": {
+    "shell_session_id": "session-1"
+  },
+  "actor": {
+    "kind": "user"
+  },
+  "outcome": {
+    "status": "failed",
+    "retryable": false
+  },
+  "subject": {
+    "kind": "audit"
+  },
+  "data": {
+    "operation": "event_snapshot_shrunk",
+    "seen": 2,
+    "len": 1
+  },
+  "redaction": {
+    "policy_version": "audit-redaction-v1",
+    "status": "clean"
+  }
+}

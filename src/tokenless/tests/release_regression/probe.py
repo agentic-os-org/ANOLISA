@@ -161,7 +161,7 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
             f"{index:04}{delimiter}{index * 7 + 11}{delimiter}record-{index}-{'payload ' * 12}\r\n"
             for index in range(100)
         )
-        cases.append((name, content, {}, "tabular_row_reduction"))
+        cases.append((name, content, {}, "tabular_compaction"))
     for name, delimiter in (("tabular_full_bom_csv", ","), ("tabular_full_bom_tsv", "\t")):
         content = f'"\ufeffid"{delimiter}"name"\r\n' + f'"001"{delimiter}"alpha"\r\n' * 50
         cases.append((name, content, {}, "tabular_compaction"))
@@ -188,7 +188,7 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
             assert operation in result["applied_operations"], (name, result["applied_operations"])
             assert result["recoverability"] == (
                 "lossless"
-                if name in ("full_toon", "search_path_sharing") or name.startswith("tabular_full")
+                if name in ("full_toon", "search_path_sharing") or name.startswith("tabular_")
                 else "retrievable"
             )
             assert result["after_tokens"] < result["before_tokens"]
@@ -209,24 +209,22 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
                     if record["status"] == "ok"
                     and f'request-{record["id"]} ' not in result["output"]
                 )
-            elif name.startswith("tabular_full"):
+            elif name.startswith("tabular_"):
                 delimiter = "\t" if name.endswith("_tsv") else ","
-                # Match CSV readers that consume a document BOM, but preserve
-                # U+FEFF inside a quoted first field as cell data.
+                # Preserve a quoted U+FEFF cell while consuming a document BOM.
                 output = result["output"].encode().decode("utf-8-sig")
                 assert list(csv.reader(io.StringIO(output), delimiter=delimiter)) == list(
                     csv.reader(io.StringIO(content), delimiter=delimiter)
                 ), "full table compaction changed cells"
-            elif name in ("tabular_csv", "tabular_tsv"):
-                (directory / "input.txt").write_bytes(content.encode())
-                REPORT[name] = {
-                    "target": next(
-                        index
-                        for index in range(4, 96)
-                        if f"record-{index}-" not in result["output"]
-                    ),
-                    "total": sum(index * 7 + 11 for index in range(100)),
-                }
+                assert not keys and not stashed
+                assert "Incomplete table" not in result["output"]
+                if name in ("tabular_csv", "tabular_tsv"):
+                    (directory / "input.txt").write_bytes(content.encode())
+                    REPORT[name] = {
+                        # Use a fixed interior row; every record is already visible.
+                        "target": 50,
+                        "total": sum(index * 7 + 11 for index in range(100)),
+                    }
             for entry in stashed:
                 marker = entry["hash"]
                 denied = request(
@@ -241,10 +239,6 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
                     assert json.loads(retrieved) == json.loads(
                         content
                     ), "full array recovery failed"
-                elif name.startswith("tabular_"):
-                    assert retrieved == content.encode(), "full table recovery changed bytes"
-                    assert result["content_type"] == "tabular"
-                    assert "Incomplete table" in result["output"]
                 else:
                     assert entry["payload"] in content, "stash payload is not a native log interval"
             hits = rows(directory, "stats.db", "SELECT * FROM retrieve_events")
@@ -383,6 +377,33 @@ def live_check(agent: str, case: str, prompt: str, expected_operation: str) -> N
     assert len(applied) == 1, f"expected one {expected_operation} statistic, got {len(applied)}"
     compressed = applied[0]
     visible = outputs.get(compressed["tool_use_id"], "")
+    if case.startswith("tabular_"):
+        assert isinstance(visible, str) and not REFERENCE.search(visible)
+        assert "Incomplete table" not in visible
+        original = (RESULTS / "core" / case / "input.txt").read_text()
+        delimiter = "\t" if case.endswith("_tsv") else ","
+        assert list(csv.reader(io.StringIO(visible), delimiter=delimiter)) == list(
+            csv.reader(io.StringIO(original), delimiter=delimiter)
+        ), "model did not receive the complete table"
+        assert not rows(directory, "stash.db", "SELECT hash FROM stash")
+        assert not rows(directory, "stats.db", "SELECT * FROM retrieve_events")
+        assert compressed["stash_writes"] == 0
+        assert not any("tokenless retrieve" in value for value in calls.values())
+        assert f'record-{REPORT[case]["target"]}-' in final
+        assert str(REPORT[case]["total"]) in final.replace(",", ""), "wrong full-table sum"
+        gross = compressed["before_tokens"] - compressed["after_tokens"]
+        REPORT["live"].append({
+            "case": case, "status": "passed", "command": command, "tool_calls": calls,
+            "model_visible_compressed_output": visible,
+            "applied_operations": json.loads(compressed["applied_operations"]),
+            "gross_saved_tokens": gross,
+            "saved_minus_retrieved_tokens": gross,
+            "cli_retrieve_byte_exact": None,
+            "model_tool_payload_byte_exact": None,
+            "retrieved_tokens": 0, "provider_usage": usage, "final_answer": final,
+        })
+        print(f"Live {agent}/{case}: passed", flush=True)
+        return
     assert isinstance(visible, str) and REFERENCE.search(
         visible
     ), "no recovery instruction in model-visible tool output"
@@ -417,11 +438,6 @@ def live_check(agent: str, case: str, prompt: str, expected_operation: str) -> N
         assert any(
             name in final and name not in visible for name in recovered_names
         ), "final answer lacks an omitted test"
-    elif case.startswith("tabular_"):
-        target = f'record-{REPORT[case]["target"]}-'
-        assert target in final and target not in visible
-        assert str(REPORT[case]["total"]) in final.replace(",", ""), "wrong full-table sum"
-        assert "Incomplete table" in visible
     else:
         target = f'request-{REPORT["record_target"]} '
         assert target.strip() in final and target not in visible
@@ -564,14 +580,14 @@ def main() -> None:
                 "Run exactly `node -e 'process.stdout.write(require(\"fs\").readFileSync(\""
                 f"/results/core/{case}/input.txt"
                 "\"))'` using the shell tool. "
-                f"This is a synthetic {format_name} recovery contract. "
+                f"This is a synthetic {format_name} full-data contract. "
                 "Do not filter, redirect or pipe the initial output. "
-                "Follow the recovery instruction exactly once to recover the full table. "
+                "The initial output contains every row; do not call Retrieve. "
                 f'Report the message for id {REPORT[case]["target"]:04}, '
                 "and the sum of the amount column over ALL 100 data rows. "
                 "Do not read the input file or database by another method. "
                 "Do not calculate from a partial table.",
-                "tabular_row_reduction",
+                "tabular_compaction",
             )
         )
     for case, prompt, operation in prompts:

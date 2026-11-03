@@ -318,6 +318,14 @@ fn sandbox_dispatch_with(
     let scenario = scenario.clone();
 
     if request.dry_run {
+        if !request.force {
+            scenario
+                .check_kernel(env.kernel.as_deref())
+                .map_err(|message| OsbaseInstallError::PhaseFailed {
+                    phase: "preflight".to_string(),
+                    message,
+                })?;
+        }
         load_state_for_layout(layout)?;
         eprintln!("[osbase] scenario: {}", scenario.name);
         let outcome = build_dry_run_outcome(request, &scenario);
@@ -1117,6 +1125,76 @@ mod tests {
                     phase.status
                 );
             }
+        }
+    }
+
+    #[test]
+    fn kernel_gate_rejects_invalid_and_unmet_requirements_without_effects() {
+        for dry_run in [true, false] {
+            for (requirement, diagnostic) in [
+                (">=cloud-native", "invalid requires_kernel"),
+                (">=4..0", "invalid requires_kernel"),
+                (">=99999999999999999999.0", "invalid requires_kernel"),
+                (">=999999999.0", "does not satisfy requirement"),
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let layout = FsLayout::system(Some(tmp.path().join("system")));
+                let mut manifest = fixture_manifest();
+                manifest.scenarios[0].requires_kernel = requirement.into();
+                let runtime = CountingRuntime::default();
+                let mut request = req(OsbaseDomain::Sandbox, "fixture");
+                request.dry_run = dry_run;
+                let result =
+                    sandbox_dispatch_with(&request, &root_env(), &layout, &runtime, &manifest);
+                let reason = match result {
+                    Err(OsbaseInstallError::PhaseFailed { phase, message }) => {
+                        assert_eq!(phase, "preflight");
+                        message
+                    }
+                    Ok(outcome) => {
+                        assert_eq!(outcome.exit_code, 1, "{requirement}, dry_run={dry_run}");
+                        assert_eq!(outcome.phases.len(), 1);
+                        assert_eq!(outcome.phases[0].status, PhaseStatus::Failed);
+                        outcome.phases[0].message.clone().unwrap()
+                    }
+                    other => panic!("unexpected result: {other:?}"),
+                };
+                assert!(reason.contains(diagnostic), "{reason}");
+                assert!(reason.contains(requirement), "{reason}");
+                assert_eq!(runtime.package_calls.get(), 0);
+                assert_eq!(runtime.service_calls.get(), 0);
+                assert_eq!(runtime.verify_calls.get(), 0);
+                assert!(!layout.lock_file.exists());
+                assert!(!layout.state_dir.join("installed.toml").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn dry_run_kernel_gate_accepts_valid_and_forced_requirements_without_effects() {
+        for (requirement, force) in [(">=4.0", false), (">=5.10", false), (">=999999999.0", true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let layout = FsLayout::system(Some(tmp.path().join("system")));
+            let mut manifest = fixture_manifest();
+            manifest.scenarios[0].requires_kernel = requirement.into();
+            let runtime = CountingRuntime::default();
+            let mut request = req(OsbaseDomain::Sandbox, "fixture");
+            request.force = force;
+            let outcome =
+                sandbox_dispatch_with(&request, &root_env(), &layout, &runtime, &manifest).unwrap();
+            assert_eq!(outcome.exit_code, 0);
+            assert_eq!(outcome.phases.len(), 5);
+            assert!(
+                outcome
+                    .phases
+                    .iter()
+                    .all(|p| p.status == PhaseStatus::Skipped)
+            );
+            assert_eq!(runtime.package_calls.get(), 0);
+            assert_eq!(runtime.service_calls.get(), 0);
+            assert_eq!(runtime.verify_calls.get(), 0);
+            assert!(!layout.lock_file.exists());
+            assert!(!layout.state_dir.join("installed.toml").exists());
         }
     }
 

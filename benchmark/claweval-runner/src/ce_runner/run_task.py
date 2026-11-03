@@ -157,6 +157,9 @@ def discover_tasks(tasks_dir: str, tag: str = None, range_str: str = None,
             sys.exit(1)
         lo, hi = int(m.group(1)), int(m.group(2))
         step = int(m.group(3)) if m.group(3) else 1
+        if lo < 1 or hi < lo:
+            log(f"[ERROR] Invalid --range bounds: {range_str} (range is 1-based, expected 1 <= L <= R, e.g. 1-10)")
+            sys.exit(1)
         if step < 1:
             log(f"[ERROR] Invalid --range step: {step} (must be >= 1)")
             sys.exit(1)

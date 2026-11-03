@@ -644,6 +644,10 @@ mod tests {
         server
             .set_read_timeout(Some(configured_timeout))
             .expect("set server timeout");
+        // The kernel keeps SO_RCVTIMEO in jiffies, so a CONFIG_HZ=250 kernel
+        // reads 250ms back as 252ms; the handshake must restore what the
+        // socket held, not the literal that was requested.
+        let expected_timeout = client.read_timeout().expect("configured client timeout");
         let server_secret = secret.clone();
         let join = std::thread::spawn(move || {
             let session = authenticate_server(
@@ -686,10 +690,10 @@ mod tests {
         assert_eq!(response, br#"{"schemaVersion":"1","ok":true}"#);
         assert_eq!(
             client.read_timeout().expect("client timeout"),
-            Some(configured_timeout)
+            expected_timeout
         );
         let server_timeout = join.join().expect("server thread");
-        assert_eq!(server_timeout, Some(configured_timeout));
+        assert_eq!(server_timeout, expected_timeout);
     }
 
     #[test]

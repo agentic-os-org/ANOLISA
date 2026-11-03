@@ -5,12 +5,13 @@
 
 use super::helpers::PidAgentNameCache;
 use super::id_resolver::IdResolver;
-use super::semantic::GenAISemanticEvent;
+use super::semantic::{GenAISemanticEvent, OutputMessage};
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::AnalysisResult;
-use crate::analyzer::token::TokenParser;
+use crate::analyzer::token::{TokenParser, merge_usage, merge_usage_from_event};
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
+use crate::runtime_metrics::StageTimer;
 use crate::storage::sqlite::{PendingCallInfo, PendingOrigin, SseEnrichment};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +25,34 @@ pub struct BuildOutput {
     /// the caller should retry the lookup later using this response ID.
     /// When the lookup succeeds, update the `session_id` metadata of all events.
     pub pending_response_id: Option<String>,
+}
+
+impl BuildOutput {
+    /// Transfer serialized bodies after HTTP persistence and semantic parsing.
+    pub(crate) fn take_raw_bodies(&mut self, results: &mut [AnalysisResult]) {
+        let Some(GenAISemanticEvent::LLMCall(call)) = self.events.first_mut() else {
+            return;
+        };
+        let Some(http) = results.iter_mut().find_map(|result| match result {
+            AnalysisResult::Http(http) => Some(http),
+            AnalysisResult::HttpContext(context) => Some(&mut context.http),
+            _ => None,
+        }) else {
+            return;
+        };
+        call.request.raw_body = take_serialized_body(&mut http.request_body);
+        call.response.raw_body = take_serialized_body(&mut http.response_body);
+    }
+}
+
+fn take_serialized_body(body: &mut Option<String>) -> Option<String> {
+    let mut body = body.take()?;
+    // Serializer growth can leave almost twice the payload capacity. Do not
+    // carry that spare allocation through session waiting and callbacks.
+    if body.capacity() > body.len().saturating_add(body.len() / 4) {
+        body.shrink_to_fit();
+    }
+    Some(body)
 }
 
 /// Builder that constructs GenAI semantic events from AnalysisResult
@@ -81,6 +110,40 @@ impl GenAIBuilder {
         format!("pmk-{:x}", hasher.finalize())
     }
 
+    pub(super) fn pending_match_key_json(
+        pid: u32,
+        timestamp: u64,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> String {
+        struct HashWriter<'a>(&'a mut Sha256);
+        impl std::io::Write for HashWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"agentsight-pending-v1\0");
+        for value in [
+            pid.to_string(),
+            timestamp.to_string(),
+            method.to_owned(),
+            path.to_owned(),
+        ] {
+            hasher.update(value.as_bytes());
+            hasher.update(b"\0");
+        }
+        if let Err(error) = serde_json::to_writer(HashWriter(&mut hasher), body) {
+            log::warn!("Cannot hash parsed request body: {error}");
+        }
+        format!("pmk-{:x}", hasher.finalize())
+    }
+
     fn parsed_request_match_body(
         request: &ParsedRequest,
         body: Option<&serde_json::Value>,
@@ -114,20 +177,99 @@ impl GenAIBuilder {
         response_mapper: &ResponseSessionMapper,
         pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> (BuildOutput, Option<PendingCallInfo>) {
+        self.build_for_delivery(results, response_mapper, pid_agent_name_cache, true)
+    }
+
+    /// Build semantic delivery without pending-row copies when no SQLite sink exists.
+    pub(crate) fn build_for_delivery(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+        need_pending: bool,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
+        self.build_delivery(
+            results,
+            response_mapper,
+            pid_agent_name_cache,
+            need_pending,
+            true,
+        )
+    }
+
+    /// Build without body copies; move bodies with `BuildOutput::take_raw_bodies`
+    /// only after deciding whether the original HTTP record is needed for fallback.
+    pub(crate) fn build_for_owned_delivery(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+        need_pending: bool,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
+        self.build_delivery(
+            results,
+            response_mapper,
+            pid_agent_name_cache,
+            need_pending,
+            false,
+        )
+    }
+
+    fn build_delivery(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &impl PidAgentNameCache,
+        need_pending: bool,
+        copy_raw: bool,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
+        let timer = StageTimer::start("genai");
         let mut events = Vec::new();
         let mut pending: Option<PendingCallInfo> = None;
         let mut pending_response_id = None;
 
-        if let Some(llm_call) = self.build_llm_call(results, response_mapper, pid_agent_name_cache)
-        {
+        let resource_only = results.iter().any(|r| {
+            matches!(r,
+            AnalysisResult::Abandoned(reason) if reason.metadata_only())
+        });
+        if let Some(mut llm_call) = if resource_only {
+            self.build_resource_metadata(results, response_mapper, pid_agent_name_cache)
+        } else {
+            self.build_llm_call_with_raw(results, response_mapper, pid_agent_name_cache, copy_raw)
+        } {
+            if let Some(reason) = results.iter().find_map(|result| match result {
+                AnalysisResult::Abandoned(reason) => Some(*reason),
+                _ => None,
+            }) {
+                llm_call
+                    .metadata
+                    .insert("abandon_reason".into(), reason.as_str().into());
+                llm_call.metadata.insert("incomplete".into(), "true".into());
+                if reason == crate::aggregator::RemoveReason::OverBudget {
+                    llm_call.metadata.insert("truncated".into(), "true".into());
+                }
+                if llm_call.response.messages.is_empty() {
+                    llm_call.response.messages.push(OutputMessage {
+                        role: "assistant".into(),
+                        parts: Vec::new(),
+                        name: None,
+                        finish_reason: Some("incomplete".into()),
+                    });
+                } else {
+                    for message in &mut llm_call.response.messages {
+                        message.finish_reason = Some("incomplete".into());
+                    }
+                }
+            }
             // Build PendingCallInfo from the same LLMCall before moving it
             let http_record = results.iter().find_map(|r| match r {
-                AnalysisResult::Http(h) => Some(h.clone()),
+                AnalysisResult::Http(h) => Some(h),
+                AnalysisResult::HttpContext(context) => Some(&context.http),
                 _ => None,
             });
 
             // Extract input messages for the pending record
-            let (input_messages_json, system_instructions_json) = {
+            let (input_messages_json, system_instructions_json) = if need_pending {
                 let sys: Vec<_> = llm_call
                     .request
                     .messages
@@ -148,6 +290,8 @@ impl GenAIBuilder {
                         serde_json::to_string(&sys).ok()
                     },
                 )
+            } else {
+                (None, None)
             };
 
             // Determine response_id from call metadata (may come from parsed_message
@@ -163,9 +307,25 @@ impl GenAIBuilder {
                     .get_session_by_pid(llm_call.pid as u32)
                     .is_some();
 
+            let request_session = results.iter().any(|result| match result {
+                AnalysisResult::Message(message) => message.request_metadata_session_id().is_some(),
+                AnalysisResult::HttpContext(context) => context
+                    .request
+                    .as_ref()
+                    .and_then(|request| request.get("metadata"))
+                    .and_then(crate::analyzer::message::types::session_id_from_metadata)
+                    .is_some(),
+                _ => false,
+            });
+
             // If response_id exists but mapper didn't resolve session_id, queue
             // for deferred resolution so the next FileWrite event can fix it.
-            if response_id.is_some() && !mapper_hit {
+            if response_id.is_some()
+                && response_mapper.is_enabled()
+                && !request_session
+                && !mapper_hit
+                && !llm_call.metadata.contains_key("abandon_reason")
+            {
                 pending_response_id = response_id;
                 log::debug!(
                     "GenAI response_id {} not yet in mapper, will defer session_id resolution",
@@ -173,7 +333,7 @@ impl GenAIBuilder {
                 );
             }
 
-            pending = Some(PendingCallInfo {
+            pending = need_pending.then(|| PendingCallInfo {
                 call_id: llm_call.call_id.clone(),
                 trace_id: llm_call.metadata.get("response_id").cloned(),
                 conversation_id: llm_call.metadata.get("conversation_id").cloned(),
@@ -202,13 +362,12 @@ impl GenAIBuilder {
             events.push(GenAISemanticEvent::LLMCall(llm_call));
         }
 
-        (
-            BuildOutput {
-                events,
-                pending_response_id,
-            },
-            pending,
-        )
+        let output = BuildOutput {
+            events,
+            pending_response_id,
+        };
+        timer.record_outputs(output.events.len());
+        (output, pending)
     }
 
     /// Build a `PendingCallInfo` directly from a raw `ParsedRequest` and
@@ -248,7 +407,7 @@ impl GenAIBuilder {
         pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> Option<PendingCallInfo> {
         // Only process known LLM API paths
-        let path_match = self.is_llm_api_path(&request.path);
+        let path_match = crate::parser::llm::is_llm_api_path(&request.path);
         let body_str = if request.body_len > 0 {
             Some(request.body_str().to_string())
         } else {
@@ -270,9 +429,22 @@ impl GenAIBuilder {
             match_body.as_deref(),
         );
 
-        // Determine if streaming
-        let is_sse = body
+        // A SysOM POP request wraps the LLM parameters in a JSON string
+        // (`llmParamString`). The match key above deliberately keeps the raw
+        // outer body (the completing call builds the same key from it), but
+        // every field below is an LLM parameter and has to come from the
+        // decoded object: reading the wrapper left `stream`, `model`, the
+        // messages and the conversation keys empty on every drained SysOM
+        // call.
+        let decoded_llm_body = body
             .as_ref()
+            .and_then(|value| value.get("llmParamString"))
+            .and_then(|value| value.as_str())
+            .and_then(|params| serde_json::from_str::<serde_json::Value>(params).ok());
+        let llm_body = decoded_llm_body.as_ref().or(body.as_ref());
+
+        // Determine if streaming
+        let is_sse = llm_body
             .and_then(|v| v.get("stream"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -296,7 +468,7 @@ impl GenAIBuilder {
             first_user_text,
             last_user_text,
             user_message_count,
-        ) = if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
+        ) = if let Some(view) = llm_body.and_then(crate::parser::llm::extract_messages_view) {
             let (messages, instructions_text) = view;
 
             // First user message raw text — used as `session_key` material
@@ -362,8 +534,7 @@ impl GenAIBuilder {
             super::helpers::classify_call_kind_from_raw(&system_instructions, &first_user_text);
 
         // Extract model from request body JSON "model" field
-        let model = body
-            .as_ref()
+        let model = llm_body
             .and_then(|v| v.get("model"))
             .and_then(|m| m.as_str())
             .filter(|s| !s.is_empty())
@@ -385,10 +556,16 @@ impl GenAIBuilder {
         .or_else(|| Some(request.source_event.comm_str()));
 
         // 从 request body.metadata 提取 session_id（复用 types.rs 共享函数）
-        let metadata_session: Option<String> = body
-            .as_ref()
+        let metadata_session: Option<String> = llm_body
             .and_then(|b| b.get("metadata"))
-            .and_then(crate::analyzer::message::types::session_id_from_metadata);
+            .and_then(crate::analyzer::message::types::session_id_from_metadata)
+            // The wrapper may carry metadata beside `llmParamString`; decoding
+            // the parameters must not hide it.
+            .or_else(|| {
+                body.as_ref()
+                    .and_then(|b| b.get("metadata"))
+                    .and_then(crate::analyzer::message::types::session_id_from_metadata)
+            });
 
         // 双层兜底计算 session_id / conversation_id（详见上方注释）。
         // 这里不使用 unwrap_or_else(|| "") 是为了让“同 PID 同 agent”上下文下
@@ -396,26 +573,35 @@ impl GenAIBuilder {
         let agent_name_str = agent_name.as_deref().unwrap_or("");
         let pid_i32 = conn_id.pid as i32;
 
-        let session_id = metadata_session
+        let session_id = metadata_session.or_else(|| {
+            // Mapper first (same order as call_builder.rs): a FileWrite
+            // from this pid already revealed the real session UUID, which
+            // groups the crash-drain record with the normal calls of the
+            // same session instead of an isolated crash bucket (#2059).
+            //
+            // Known limitation: pid_map has no lifecycle bound, so a
+            // recycled pid whose new process has not yet written a session
+            // file can surface the previous process's mapping here. This
+            // mis-groups only orphan calls that would otherwise get a
+            // synthetic crash hash, and needs pid reuse + zero FileWrite +
+            // drain to coincide — accepted instead of lifecycle tracking.
+            response_mapper
+                .get_session_by_pid(conn_id.pid)
+                .map(str::to_string)
+        });
+        let (session_key, conversation_key) = self.id_resolver.message_keys(
+            agent_name_str,
+            pid_i32,
+            &first_user_text,
+            &last_user_text,
+            user_message_count,
+            session_id.is_none(),
+        );
+        let session_id = session_id
             .or_else(|| {
-                // Mapper first (same order as call_builder.rs): a FileWrite
-                // from this pid already revealed the real session UUID, which
-                // groups the crash-drain record with the normal calls of the
-                // same session instead of an isolated crash bucket (#2059).
-                //
-                // Known limitation: pid_map has no lifecycle bound, so a
-                // recycled pid whose new process has not yet written a session
-                // file can surface the previous process's mapping here. This
-                // mis-groups only orphan calls that would otherwise get a
-                // synthetic crash hash, and needs pid reuse + zero FileWrite +
-                // drain to coincide — accepted instead of lifecycle tracking.
-                response_mapper
-                    .get_session_by_pid(conn_id.pid)
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                self.id_resolver
-                    .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+                session_key
+                    .as_ref()
+                    .and_then(|key| self.id_resolver.peek_session_id_with_key(key))
             })
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
@@ -426,9 +612,9 @@ impl GenAIBuilder {
                     0,
                 ))
             });
-        let conversation_id = self
-            .id_resolver
-            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text, user_message_count)
+        let conversation_id = conversation_key
+            .as_ref()
+            .and_then(|key| self.id_resolver.peek_conversation_id_with_key(key))
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
                     "conversation",
@@ -445,12 +631,9 @@ impl GenAIBuilder {
         // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
         // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
         // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
-        self.id_resolver.finish_conversation(
-            agent_name_str,
-            pid_i32,
-            &last_user_text,
-            user_message_count,
-        );
+        if let Some(key) = &conversation_key {
+            self.id_resolver.finish_conversation_with_key(key);
+        }
 
         Some(PendingCallInfo {
             call_id,
@@ -500,9 +683,10 @@ impl GenAIBuilder {
         let token_parser = TokenParser::new();
         let mut model: Option<String> = None;
         let mut trace_id: Option<String> = None;
-        let mut content_buf = String::new();
+        let mut chunks: Vec<serde_json::Value> = Vec::new();
 
-        // Forward scan for model, trace_id, and content deltas
+        // Forward scan for model, trace_id; collect the JSON bodies for the
+        // shared part merger below.
         for event in sse_events {
             if let Some(json) = event.json_body() {
                 // Extract model from first chunk that has it
@@ -513,36 +697,80 @@ impl GenAIBuilder {
                         }
                     }
                 }
-                // Extract response id (trace_id) from first chunk that has it
+                // Anthropic nests the model inside message_start's message
+                // object; none of its events carries a top-level "model" key,
+                // so without this lookup a drained Anthropic stream records
+                // no model from the response at all.
+                if model.is_none()
+                    && json.get("type").and_then(|v| v.as_str()) == Some("message_start")
+                {
+                    if let Some(m) = json.pointer("/message/model").and_then(|v| v.as_str()) {
+                        if !m.is_empty() {
+                            model = Some(m.to_string());
+                        }
+                    }
+                }
+                // The Responses protocol nests both the model and the response
+                // id inside the `response` object of response.created /
+                // response.completed; its chunks carry no top-level keys for
+                // either.
+                if model.is_none() {
+                    if let Some(m) = json.pointer("/response/model").and_then(|v| v.as_str()) {
+                        if !m.is_empty() {
+                            model = Some(m.to_string());
+                        }
+                    }
+                }
+                // Extract response id (trace_id) from the first chunk that has
+                // it. Anthropic nests it in the `message_start` envelope exactly
+                // like the model above, so a drained Anthropic stream recorded
+                // no response id at all and every correlation fell back to the
+                // internally generated call id.
                 if trace_id.is_none() {
-                    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+                    let id = json
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| json.pointer("/message/id").and_then(|v| v.as_str()))
+                        .filter(|id| !id.is_empty());
+                    if let Some(id) = id {
+                        trace_id = Some(id.to_string());
+                    }
+                }
+                if trace_id.is_none() {
+                    if let Some(id) = json.pointer("/response/id").and_then(|v| v.as_str()) {
                         if !id.is_empty() {
                             trace_id = Some(id.to_string());
                         }
                     }
                 }
-                // Accumulate content deltas
-                if let Some(choices) = json.get("choices").and_then(|v| v.as_array()) {
-                    for choice in choices {
-                        if let Some(delta) = choice.get("delta") {
-                            if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
-                                content_buf.push_str(c);
-                            }
-                        }
-                    }
-                }
+                chunks.push(json);
             }
         }
 
-        // Reverse scan for token usage (usage chunk is near the end)
-        let usage = sse_events
-            .iter()
-            .rev()
-            .find_map(|e| token_parser.parse_event(e));
+        // Merge token usage across every event. Anthropic splits usage across
+        // `message_start` and `message_delta`; the latter can carry final
+        // input/cache values that correct the preliminary start snapshot.
+        // The cache counters ride along into the enrichment: the live path
+        // stores them and totals the billed input, so the drain path must
+        // persist the same numbers for the same call.
+        let usage = sse_events.iter().fold(None, |usage, event| {
+            let Some(parsed) = token_parser.parse_event(event) else {
+                return usage;
+            };
+            match event.json_body() {
+                Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
+                None => merge_usage(usage, parsed),
+            }
+        });
 
-        let (input_tokens, output_tokens) = match &usage {
-            Some(u) => (Some(u.input_tokens as i64), Some(u.output_tokens as i64)),
-            None => (None, None),
+        let (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens) = match &usage {
+            Some(u) => (
+                Some(u.input_tokens as i64),
+                Some(u.output_tokens as i64),
+                u.cache_creation_input_tokens.map(|v| v as i64),
+                u.cache_read_input_tokens.map(|v| v as i64),
+            ),
+            None => (None, None, None, None),
         };
 
         // Use model from usage if not found in content chunks
@@ -552,16 +780,38 @@ impl GenAIBuilder {
             }
         }
 
-        // Build output_messages JSON from accumulated content
-        let output_messages = if !content_buf.is_empty() {
-            // Format as a JSON array matching OutputMessage structure
-            serde_json::to_string(&serde_json::json!([{
-                "role": "assistant",
-                "parts": [{"Text": {"content": content_buf}}]
-            }]))
-            .ok()
-        } else {
+        // Persist the output through the SAME part merger the live response
+        // path uses, so drained rows carry the internally-tagged
+        // (`"type": "text" | …`) shape every typed consumer deserializes —
+        // and keep tool-call and reasoning deltas instead of dropping them.
+        // The old hand-built `[{"Text": …}]` externally-tagged payload failed
+        // `Vec<OutputMessage>` parsing ("missing field `type`"), silently
+        // losing the row in skill metrics and ATIF export.
+        let (mut parts, mut finish_reason) = Self::merge_sse_chunks(&chunks);
+        // The DashScope/Bailian native envelope has no top-level `choices`, so
+        // the OpenAI merger yields nothing for it. The live path
+        // (`extract_parts_from_sse_body`) falls back to the native
+        // reconstruction; the drain path stopped at the merger, so an
+        // interrupted native stream was persisted with token counts but no
+        // output content — and `enrich_pending_from_sse` derives `tool_call_ids`
+        // from `output_messages`, so its tool calls vanished with it.
+        if parts.is_empty()
+            && let Some((native_parts, native_finish)) =
+                Self::extract_dashscope_native_parts(&chunks)
+        {
+            parts = native_parts;
+            finish_reason = native_finish;
+        }
+        let output_messages = if parts.is_empty() && finish_reason.is_none() {
             None
+        } else {
+            serde_json::to_string(&vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts,
+                name: None,
+                finish_reason,
+            }])
+            .ok()
         };
 
         let event_count = sse_events.len() as i64;
@@ -574,6 +824,8 @@ impl GenAIBuilder {
             sse_event_count: Some(event_count),
             input_tokens,
             output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
         })
     }
 
@@ -603,8 +855,38 @@ impl GenAIBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::genai::semantic::MessagePart;
     use crate::probes::sslsniff::SslEvent;
     use std::rc::Rc;
+
+    #[test]
+    fn payload_memory_delivery_does_not_defer_explicit_openai_request_session() {
+        let request = make_request(
+            "/v1/chat/completions",
+            r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"metadata":{"session_id":"session-fixture"}}"#,
+        );
+        let result = crate::aggregator::AggregatedResult::RequestOnly {
+            connection_id: ConnectionId {
+                pid: 1234,
+                ssl_ptr: 1,
+            },
+            request,
+        };
+        let analysis = crate::analyzer::Analyzer::new().analyze_for_delivery(&result, false);
+        let (output, _) = GenAIBuilder::new().build_with_pending(
+            &analysis,
+            &ResponseSessionMapper::new(),
+            &std::collections::HashMap::new(),
+        );
+        assert!(output.pending_response_id.is_none());
+        let GenAISemanticEvent::LLMCall(call) = &output.events[0] else {
+            panic!("expected LLM call")
+        };
+        assert_eq!(
+            call.metadata.get("session_id").map(String::as_str),
+            Some("session-fixture")
+        );
+    }
 
     fn make_request(path: &str, body: &str) -> ParsedRequest {
         let buf = body.as_bytes().to_vec();
@@ -631,6 +913,731 @@ mod tests {
             body_len: body.len(),
             source_event: ssl_event,
             reassembled_body: None,
+        }
+    }
+
+    /// Build a zero-copy `ParsedSseEvent` whose single `data:` line is `data`.
+    fn make_sse_event(data: &str) -> ParsedSseEvent {
+        let buf = data.as_bytes().to_vec();
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid: 1234,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw: 0,
+            comm: "test".to_string(),
+            buf,
+            is_handshake: false,
+            ssl_ptr: 0x1,
+        });
+        ParsedSseEvent::new(None, None, None, 0, data.len(), ssl_event)
+    }
+
+    /// Anthropic splits usage across SSE events: `message_start` carries
+    /// input_tokens plus the cache counters, while the terminal
+    /// `message_delta` carries only output_tokens. The drain path must merge
+    /// both, exactly like the analyzer's SSE token extractor, instead of
+    /// letting the last usage-bearing event win and recording input as 0.
+    #[test]
+    fn test_extract_sse_enrichment_output_messages_round_trips() {
+        // The persisted output_messages must deserialize as
+        // Vec<OutputMessage> — the old hand-built `[{"Text": …}]` shape
+        // failed with "missing field `type`" and silently dropped the row
+        // in every typed consumer (skill metrics, ATIF export).
+        let events = vec![
+            make_sse_event(
+                r#"{"model":"qwen-max","id":"resp_1","choices":[{"delta":{"content":"Hel"}}]}"#,
+            ),
+            make_sse_event(
+                r#"{"choices":[{"delta":{"content":"lo world"},"finish_reason":null}]}"#,
+            ),
+            make_sse_event(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("output_messages must be set");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].role, "assistant");
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(parsed[0].parts.len(), 1);
+        match &parsed[0].parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "Hello world"),
+            other => panic!("expected Text part, got {other:?}"),
+        }
+    }
+
+    /// A drained Responses capture that attached after the deltas holds only
+    /// the closing events. The enrichment is what the pending row persists,
+    /// so it must carry the answer instead of writing `output_messages = NULL`.
+    #[test]
+    fn test_extract_sse_enrichment_keeps_a_closing_responses_answer() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.created","response":{"id":"resp_close","model":"gpt-5"}}"#,
+            ),
+            make_sse_event(r#"{"type":"response.output_text.done","text":"hello there"}"#),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_close","status":"completed"}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("a closing Responses answer must persist");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert!(
+            matches!(&parsed[0].parts[0], MessagePart::Text { content } if content == "hello there"),
+            "got {:?}",
+            parsed[0].parts
+        );
+    }
+
+    /// The drain enrichment must carry the cache counters the stream reported,
+    /// as the provider reported them: Anthropic's terminal usage keeps them
+    /// outside `input_tokens`, while OpenAI-style usage counts the cached part
+    /// inside `prompt_tokens` and only details it separately.
+    #[test]
+    fn test_extract_sse_enrichment_carries_usage_cache_counters() {
+        let anthropic = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_cache","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1234,"cache_read_input_tokens":24576}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&anthropic).expect("enrichment");
+        assert_eq!(
+            (enrichment.input_tokens, enrichment.output_tokens),
+            (Some(10), Some(5))
+        );
+        assert_eq!(
+            (
+                enrichment.cache_creation_tokens,
+                enrichment.cache_read_tokens
+            ),
+            (Some(1234), Some(24576)),
+            "the drained call must keep the cache counters its stream reported"
+        );
+
+        let openai = vec![
+            make_sse_event(
+                r#"{"model":"gpt-4o","usage":{"prompt_tokens":100,"completion_tokens":7,"total_tokens":107,"prompt_tokens_details":{"cached_tokens":64}}}"#,
+            ),
+            make_sse_event(r#"{"choices":[{"delta":{"content":"hi"}}]}"#),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&openai).expect("enrichment");
+        assert_eq!(
+            enrichment.input_tokens,
+            Some(100),
+            "the reported prompt_tokens already include the cached part"
+        );
+        assert_eq!(enrichment.cache_read_tokens, Some(64));
+    }
+
+    /// A drained stream whose only content is a provider-side call
+    /// (`server_tool_use` / `mcp_tool_use`) persisted no output at all: the
+    /// merger folded the block into its text accumulator, so the call and
+    /// every `input_json_delta` fragment aimed at it were dropped and
+    /// `output_messages` stayed `None` — and with it the `tool_call_ids` the
+    /// pending row derives from it. The same stream captured live kept the
+    /// call, so the two paths disagreed on one response.
+    #[test]
+    fn test_extract_sse_enrichment_keeps_a_server_tool_call() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_srv","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"rust\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":0}"#),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"mcp_tool_use","id":"mcptoolu_1","name":"github_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"drain\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":1}"#),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("a drained server-tool turn must keep its calls");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("end_turn"));
+        let calls: Vec<(&str, &str, &serde_json::Value)> = parsed[0]
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => Some((
+                    id.as_deref().unwrap_or_default(),
+                    name.as_str(),
+                    arguments.as_ref().expect("the streamed input must parse"),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "srvtoolu_1",
+                    "web_search",
+                    &serde_json::json!({"query": "rust"})
+                ),
+                (
+                    "mcptoolu_1",
+                    "github_search",
+                    &serde_json::json!({"q": "drain"})
+                ),
+            ],
+            "both provider-side calls must reach the pending row: {json}"
+        );
+        assert_eq!(
+            crate::genai::semantic::tool_call_ids_json(&parsed).as_deref(),
+            Some(r#"["srvtoolu_1","mcptoolu_1"]"#),
+            "the tool_call_ids column is derived from these parts"
+        );
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_captures_streamed_tool_calls() {
+        // A pure tool-calling turn: the old walker only read delta.content,
+        // so output_messages was None; the shared merger now keeps the
+        // index-merged tool call.
+        let events = vec![
+            make_sse_event(
+                r#"{"model":"qwen-max","id":"resp_2","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}"#,
+            ),
+            make_sse_event(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Beijing\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("tool calls must be persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_calls"));
+        match &parsed[0].parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments
+                        .as_ref()
+                        .and_then(|a| a.get("city"))
+                        .and_then(|v| v.as_str()),
+                    Some("Beijing")
+                );
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_captures_reasoning_deltas() {
+        let events = vec![
+            make_sse_event(
+                r#"{"model":"deepseek-r","id":"resp_3","choices":[{"delta":{"reasoning_content":"think "}}]}"#,
+            ),
+            make_sse_event(
+                r#"{"choices":[{"delta":{"reasoning_content":"hard","content":"answer"},"finish_reason":"stop"}]}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("reasoning must be persisted");
+        let parsed: Vec<OutputMessage> = serde_json::from_str(&json).unwrap();
+        // Reasoning precedes text (live-path merger ordering).
+        assert_eq!(parsed[0].parts.len(), 2);
+        assert!(
+            matches!(&parsed[0].parts[0], MessagePart::Reasoning { content } if content == "think hard")
+        );
+        assert!(
+            matches!(&parsed[0].parts[1], MessagePart::Text { content } if content == "answer")
+        );
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_matches_live_path_shape() {
+        // Guard against future shape drift: serializing the same stream
+        // through the live-path types must produce the identical JSON the
+        // enrichment persists.
+        let events = vec![make_sse_event(
+            r#"{"model":"m","id":"i","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).unwrap();
+        let drain_json = enrichment.output_messages.unwrap();
+
+        let body = r#"[{"model":"m","id":"i","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}]"#;
+        let (parts, finish_reason) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        let live_json = serde_json::to_string(&vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts,
+            name: None,
+            finish_reason,
+        }])
+        .unwrap();
+        assert_eq!(drain_json, live_json);
+    }
+
+    /// A DashScope/Bailian *native* stream has no top-level `choices`, so the
+    /// shared OpenAI merger yields no parts for it. The live response path
+    /// falls back to the native reconstruction; the drain path did not, so an
+    /// interrupted native call was persisted with token counts but a NULL
+    /// output_messages — and the SSE enrichment derives `tool_call_ids` from
+    /// that column, so the call's tool invocations were lost with it.
+    #[test]
+    fn test_extract_sse_enrichment_keeps_dashscope_native_output() {
+        let events = vec![
+            make_sse_event(
+                r#"{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}}"#,
+            ),
+            make_sse_event(
+                r#"{"output":{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Beijing\"}"}}]}}]}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("a drained native stream must keep its output");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("output_messages must round-trip as OutputMessage");
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0].parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments.as_ref().unwrap()["city"], "Beijing");
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_empty_stream_yields_none() {
+        // A stream with no output deltas keeps output_messages = None
+        // (existing behavior for usage-only events).
+        let events = vec![make_sse_event(
+            r#"{"model":"m","id":"i","usage":{"prompt_tokens":5,"completion_tokens":0}}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).unwrap();
+        assert!(enrichment.output_messages.is_none());
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_keeps_terminal_only_gemini_reason() {
+        let events = vec![make_sse_event(
+            r#"{"candidates":[{"finishReason":"SAFETY","index":0}]}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let messages: Vec<OutputMessage> = serde_json::from_str(
+            enrichment
+                .output_messages
+                .as_deref()
+                .expect("output messages"),
+        )
+        .expect("parsed output messages");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].parts.is_empty());
+        assert_eq!(messages[0].finish_reason.as_deref(), Some("SAFETY"));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_keeps_partial_usage_scan_fallback() {
+        let events = vec![make_sse_event(
+            r#"{"usage":{"input_tokens":57,"output_tokens":3"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events)
+            .expect("partial SSE event should retain scanned token usage");
+        assert_eq!(enrichment.input_tokens, Some(57));
+        assert_eq!(enrichment.output_tokens, Some(3));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_merges_anthropic_split_usage() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":1234,"output_tokens":42,"cache_creation_input_tokens":5678,"cache_read_input_tokens":90}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from anthropic SSE");
+        assert_eq!(
+            enrichment.input_tokens,
+            Some(1234),
+            "input_tokens from message_start must survive the message_delta"
+        );
+        assert_eq!(enrichment.output_tokens, Some(42));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_uses_dashscope_terminal_input() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"model":"qwen3.7-max","usage":{"input_tokens":19247,"output_tokens":0,"cache_creation_input_tokens":20351,"cache_read_input_tokens":0}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"output_tokens":241,"cache_creation_input_tokens":20351,"cache_read_input_tokens":0}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from DashScope SSE");
+        assert_eq!(enrichment.input_tokens, Some(6));
+        assert_eq!(enrichment.output_tokens, Some(241));
+        assert_eq!(enrichment.cache_creation_tokens, Some(20351));
+    }
+
+    /// A drained Anthropic stream must keep its output content and model, not
+    /// just the usage. The live path reconstructs Anthropic content through the
+    /// analyzer's message parser, but the drain path has only
+    /// `extract_sse_enrichment`, whose merger previously understood OpenAI
+    /// `choices[].delta` alone — so the persisted row lost `output_messages`
+    /// (and the model, which Anthropic nests inside `message_start.message`).
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_stream_keeps_content() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo world"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Paris\"}"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":42}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from anthropic SSE");
+
+        // The model is nested in message_start.message, not top-level.
+        assert_eq!(
+            enrichment.model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "model must be read from message_start.message.model"
+        );
+        // So is the response id: without it a drained Anthropic call loses its
+        // trace_id and correlation falls back to the generated call id.
+        assert_eq!(
+            enrichment.trace_id.as_deref(),
+            Some("msg_1"),
+            "response id must be read from message_start.message.id"
+        );
+
+        let json = enrichment
+            .output_messages
+            .expect("drained anthropic output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_use"));
+        assert_eq!(parsed[0].parts.len(), 2, "text part + tool_use part");
+        match &parsed[0].parts[0] {
+            MessagePart::Text { content } => assert_eq!(content, "Hello world"),
+            other => panic!("expected Text part, got {other:?}"),
+        }
+        match &parsed[0].parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments,
+                    &Some(serde_json::json!({"city": "Paris"})),
+                    "input_json_delta fragments must concatenate into the arguments"
+                );
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+    }
+
+    /// A thinking block must survive the drain path too, in block order before
+    /// the text that follows it.
+    #[test]
+    fn test_extract_sse_enrichment_anthropic_stream_keeps_reasoning() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_2","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"pondering"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from anthropic SSE");
+        let json = enrichment
+            .output_messages
+            .expect("drained anthropic output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed[0].parts.len(), 2);
+        assert!(matches!(
+            &parsed[0].parts[0],
+            MessagePart::Reasoning { content } if content == "pondering"
+        ));
+        assert!(matches!(
+            &parsed[0].parts[1],
+            MessagePart::Text { content } if content == "answer"
+        ));
+    }
+
+    /// A drained OpenAI **Responses** stream (codex 0.137+ via /v1/responses)
+    /// must keep its output content, model and trace_id. The live path
+    /// reconstructs `response.*` events through the analyzer's message parser,
+    /// but the drain path had no Responses aggregation at all — the persisted
+    /// row lost `output_messages`, the model (nested in `response.model`) and
+    /// the trace_id (nested in `response.id`).
+    #[test]
+    fn test_extract_sse_enrichment_responses_stream_keeps_content() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.created","response":{"id":"resp_1","model":"qwen3-coder-plus"}}"#,
+            ),
+            make_sse_event(r#"{"type":"response.output_text.delta","delta":"Hel"}"#),
+            make_sse_event(r#"{"type":"response.output_text.delta","delta":"lo"}"#),
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"read_file"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"{\"path\":"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"\"/tmp/a.md\"}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_1","model":"qwen3-coder-plus","usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107}}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from responses SSE");
+
+        assert_eq!(
+            enrichment.model.as_deref(),
+            Some("qwen3-coder-plus"),
+            "model must be read from response.model"
+        );
+        assert_eq!(
+            enrichment.trace_id.as_deref(),
+            Some("resp_1"),
+            "trace_id must be read from response.id"
+        );
+        assert_eq!(enrichment.input_tokens, Some(100));
+        assert_eq!(enrichment.output_tokens, Some(7));
+
+        let json = enrichment
+            .output_messages
+            .expect("drained responses output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(parsed[0].parts.len(), 2, "text part + tool_call part");
+        assert!(matches!(
+            &parsed[0].parts[0],
+            MessagePart::Text { content } if content == "Hello"
+        ));
+        match &parsed[0].parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(
+                    arguments,
+                    &Some(serde_json::json!({"path": "/tmp/a.md"})),
+                    "argument deltas must concatenate"
+                );
+            }
+            other => panic!("expected ToolCall part, got {other:?}"),
+        }
+    }
+
+    /// Parallel Responses tool calls without per-call `done` events must all
+    /// survive the drain path (same invariant the analyzer aggregator holds).
+    #[test]
+    fn test_extract_sse_enrichment_responses_parallel_tool_calls() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"read_file"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"{\"a\": 1}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_2","name":"list_dir"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.delta","delta":"{\"b\": 2}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_2","model":"m","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from responses SSE");
+        let json = enrichment
+            .output_messages
+            .expect("drained responses output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        let tool_calls: Vec<&MessagePart> = parsed[0]
+            .parts
+            .iter()
+            .filter(|p| matches!(p, MessagePart::ToolCall { .. }))
+            .collect();
+        assert_eq!(
+            tool_calls.len(),
+            2,
+            "both in-flight calls must survive without done events"
+        );
+        match tool_calls[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments, &Some(serde_json::json!({"a": 1})));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        match tool_calls[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_2"));
+                assert_eq!(name, "list_dir");
+                assert_eq!(arguments, &Some(serde_json::json!({"b": 2})));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    /// `response.function_call_arguments.done` carries the complete arguments
+    /// for its call; the deltas that precede it are a best-effort stream a
+    /// late-attached capture can miss entirely. The analyzer's aggregator
+    /// prefers the done payload for that reason, so the drain merger has to as
+    /// well — otherwise a drained call is persisted with no arguments.
+    #[test]
+    fn test_extract_sse_enrichment_responses_done_arguments_are_kept() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_d1","name":"get_weather"}}"#,
+            ),
+            // Capture started after the argument deltas: the done event is the
+            // only place the arguments appear.
+            make_sse_event(
+                r#"{"type":"response.function_call_arguments.done","item_id":"fc_d1","arguments":"{\"city\":\"Beijing\"}"}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"response.completed","response":{"id":"resp_d1","model":"qwen-plus"}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from responses SSE");
+        let json = enrichment
+            .output_messages
+            .expect("drained responses output must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        match &parsed[0].parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_d1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(
+                    arguments,
+                    &Some(serde_json::json!({"city": "Beijing"})),
+                    "the done event's arguments are authoritative"
+                );
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
         }
     }
 
@@ -688,6 +1695,68 @@ mod tests {
         assert!(pending.user_query.as_deref() == Some("hello"));
     }
 
+    /// A SysOM POP request keeps its LLM parameters inside `llmParamString`.
+    /// The pending builder read the wrapper only, so a drained SysOM call
+    /// lost its model, streaming flag, messages and user query — every
+    /// conversation from one process then collapsed into the same crash
+    /// fallback bucket.
+    #[test]
+    fn test_build_pending_from_request_sysom_decodes_llm_params() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"llmParamString":"{\"model\":\"qwen3-coder-plus\",\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"hello\"}]}"}"#;
+        let req = make_request("/api/v1/copilot/generate_copilot_stream_response", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a SysOM POP request is an LLM call");
+
+        assert_eq!(pending.model.as_deref(), Some("qwen3-coder-plus"));
+        assert!(pending.is_sse, "stream:true lives inside llmParamString");
+        assert!(pending.system_instructions.is_some());
+        assert_eq!(pending.user_query.as_deref(), Some("hello"));
+        assert!(pending.input_messages.is_some());
+    }
+
+    /// Decoding must not hide metadata that sits on the wrapper rather than
+    /// inside `llmParamString`.
+    #[test]
+    fn test_build_pending_from_request_sysom_keeps_outer_metadata() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"llmParamString":"{\"model\":\"qwen\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}","metadata":{"session_id":"outer-session"}}"#;
+        let req = make_request("/api/v1/copilot/generate_copilot_stream_response", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("a SysOM POP request is an LLM call");
+
+        assert_eq!(pending.session_id.as_deref(), Some("outer-session"));
+        assert_eq!(pending.model.as_deref(), Some("qwen"));
+    }
+
+    /// A malformed `llmParamString` must fall back to the outer body instead
+    /// of failing the pending record.
+    #[test]
+    fn test_build_pending_from_request_sysom_malformed_params_fall_back() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"llmParamString":"not-json"}"#;
+        let req = make_request("/api/v1/copilot/generate_copilot_stream_response", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("the path still identifies a SysOM call");
+
+        assert!(pending.model.is_none());
+        assert!(pending.input_messages.is_none());
+        assert!(pending.user_query.is_none());
+        assert!(!pending.is_sse);
+    }
+
     #[test]
     fn test_build_pending_from_request_non_llm_path() {
         let builder = GenAIBuilder::new();
@@ -725,6 +1794,53 @@ mod tests {
     }
 
     #[test]
+    fn test_build_pending_from_request_count_tokens_is_skipped() {
+        // The drain path must not persist a pending row for an interrupted
+        // count-tokens call either: same conversation as the real turn, no
+        // max_tokens, no usage — a phantom interrupted llm_call.
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Long document"}]}"#;
+        let req = make_request("/v1/messages/count_tokens", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        assert!(
+            builder
+                .build_pending_from_request(
+                    &req,
+                    &ConnectionId { pid: 1, ssl_ptr: 2 },
+                    &mapper,
+                    &cache
+                )
+                .is_none(),
+            "count_tokens must not create a pending row"
+        );
+    }
+
+    #[test]
+    fn test_build_pending_from_request_responses_retrieval_is_skipped() {
+        // The drain path must not persist a pending row for an interrupted
+        // retrieval poll either: a GET /v1/responses/{id} has no request
+        // body to anchor a conversation — a phantom interrupted llm_call
+        // with no user input whose response would land on the next drain.
+        let builder = GenAIBuilder::new();
+        let mut req = make_request("/v1/responses/resp_abc123", "");
+        req.method = "GET".to_string();
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::new();
+        assert!(
+            builder
+                .build_pending_from_request(
+                    &req,
+                    &ConnectionId { pid: 1, ssl_ptr: 2 },
+                    &mapper,
+                    &cache
+                )
+                .is_none(),
+            "a retrieval poll must not create a pending row"
+        );
+    }
+
+    #[test]
     fn test_build_pending_from_request_evicts_conversation_anchor() {
         // build_pending_from_request 只在中断场景（进程崩溃或空闲超时）下被
         // 调用，因此总是会驱逐 conversation 锚点：固定文本先通过正常路径
@@ -733,9 +1849,10 @@ mod tests {
         // 同固定文本的下一轮对话重新锚定。
         let builder = GenAIBuilder::new();
         let pid = 1i32;
-        let text = "hello";
-        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
-        let req = make_request("/v1/chat/completions", body);
+        let text = "雪|\"\n\0".repeat(128 * 1024);
+        let body = serde_json::json!({"model":"gpt-4","messages":[{"role":"user","content":text}]})
+            .to_string();
+        let req = make_request("/v1/chat/completions", &body);
         let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
 
@@ -751,18 +1868,20 @@ mod tests {
         // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
         let turn1 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-1", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-1", 1)
             .unwrap();
 
         // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
-        builder
+        let pending = builder
             .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .expect("LLM path should create pending");
+        assert_eq!(pending.conversation_id.as_deref(), Some(turn1.as_str()));
+        assert_eq!(pending.user_query.as_deref(), Some(text.as_str()));
 
         // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
         let turn2 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-2", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-2", 1)
             .unwrap();
         assert_ne!(
             turn1, turn2,

@@ -6,7 +6,7 @@ use crate::approval::handoff::trust_key_from_command;
 use crate::config::parse_recommendations_environment_override;
 use crate::diagnostics::health::{spawn_startup_health_scan, startup_health_scan_enabled_for_env};
 use crate::hooks::{
-    dirs_for_hook_loading, is_trusted_project_root, load_hook_feedback_preferences,
+    dirs_for_hook_loading, load_hook_feedback_preferences, load_project_hooks_with_consent,
     project_hook_root_from_cwd,
 };
 use crate::recommendation::personal_analysis_runtime::AnalyzerCancellation;
@@ -18,24 +18,17 @@ use crate::runtime::startup::{
     resolve_bash_for_r2,
 };
 use crate::runtime::state::{AnalysisMode, InlineState};
-use crate::shell_host::ShellIntegration;
+use crate::shell_host::{LoginEffectGuard, LoginEffectSource, ShellIntegration};
+use crate::upgrade::check::{read_cached_notice, startup_upgrade_check_enabled_for_env};
 
+#[cfg(debug_assertions)]
+use super::failopen::maybe_inject_failopen_panic;
+use super::failopen::{FailOpenFailure, FreshLoginFailOpen};
 use super::render_raw_inline_event_view;
 
-fn build_adapter(kind: AdapterKind) -> AdapterInstance {
-    match adapter_for_kind(kind) {
-        AdapterInstance::ClaudeCode(adapter) => {
-            AdapterInstance::ClaudeCode(adapter.with_model_call(true))
-        }
-        AdapterInstance::QwenCli(adapter) => {
-            AdapterInstance::QwenCli(adapter.with_model_call(true))
-        }
-        AdapterInstance::CoshCore(adapter) => {
-            AdapterInstance::CoshCore(adapter.with_model_call(true))
-        }
-        other => other,
-    }
-}
+mod adapter_factory;
+
+use adapter_factory::build_adapter;
 
 pub(crate) fn run_demo() -> i32 {
     let events = demo_events();
@@ -79,6 +72,10 @@ fn integration_for_launch(resume_active: bool, configured: ShellIntegration) -> 
     }
 }
 
+fn managed_shell_started(effects: &LoginEffectGuard) -> bool {
+    effects.has(LoginEffectSource::ManagedShell)
+}
+
 pub(crate) fn run_raw(
     adapter_name: &str,
     shell_kind: RawShellKind,
@@ -94,6 +91,8 @@ pub(crate) fn run_raw(
         eprintln!("unknown adapter: {adapter_name}");
         return 2;
     };
+
+    let adapter = build_adapter(kind);
 
     let work_dir =
         std::env::temp_dir().join(format!("cosh-shell-raw-session-{}", std::process::id()));
@@ -123,6 +122,35 @@ pub(crate) fn run_raw(
         .first()
         .is_some_and(|argv0| crate::runtime::invocation::is_login_invocation(argv0, &args[1..]));
     config.login_shell = login;
+
+    // Only a fully terminal-backed session may fall open to an interactive
+    // bash (matches the classifier's TUI rule); a piped/non-tty `raw`
+    // invocation must keep the plain error path so automation never hangs.
+    let all_tty = {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal()
+    };
+
+    // Missing/unsupported shell selections are user-facing usage errors, not a
+    // fresh-login lockout; report them before any fail-open consideration so an
+    // explicit bad `--shell` is never masked by a bash fallback.
+    match &shell_kind {
+        RawShellKind::MissingShellValue => {
+            eprintln!("missing value for --shell; supported shells: bash, zsh");
+            return 2;
+        }
+        RawShellKind::Unsupported(shell) => {
+            let shell = crate::evidence::redact_sensitive_text(shell).0;
+            eprintln!("unsupported raw shell: {shell}; supported shells: bash, zsh");
+            return 2;
+        }
+        RawShellKind::Bash | RawShellKind::Zsh => {}
+    }
+
+    let effects = config.login_effect_guard();
+    let fail_open = FreshLoginFailOpen::new(login, all_tty, isolated, effects.clone());
     let cosh_config = load_config();
     config.status_symbols = cosh_config.status_symbols;
     // #R2 gate: sourced from shell.login_identity (default on; flip-on gate
@@ -132,6 +160,15 @@ pub(crate) fn run_raw(
     let Some(configured_integration) =
         ShellIntegration::parse_config(&cosh_config.shell_integration)
     else {
+        // A fresh login must not be locked out by a bad integration value.
+        drop(_work_dir_cleanup);
+        if let Some(status) = fail_open.try_exec(
+            FailOpenFailure::InvalidIntegration,
+            "cosh: invalid shell integration config (expected native or enhanced); \
+             falling back to bash",
+        ) {
+            return status;
+        }
         eprintln!(
             "invalid shell integration; expected shell.integration or \
              COSH_SHELL_INTEGRATION to be native or enhanced"
@@ -144,12 +181,18 @@ pub(crate) fn run_raw(
     config.integration =
         integration_for_launch(launch_options.resume.is_some(), configured_integration);
     let enhanced_integration = config.integration.uses_markers();
+    let startup_path_enabled = std::env::var("COSH_SHELL_BOOTSTRAP_PATH").as_deref() != Ok("0");
     if config.native_mode && enhanced_integration {
-        bootstrap_process_path_from_shell(&shell_kind, login, &config.winsize);
+        bootstrap_process_path_from_shell(
+            &shell_kind,
+            login,
+            startup_path_enabled,
+            &config.winsize,
+            &effects,
+        );
     }
-    // #R2: PATH bootstrap may change which bare `bash` would be launched. Only
-    // probe when every other R2 leg holds, resolve after PATH is final, and
-    // freeze the same absolute executable for both probe and spawn.
+    // #R2: only probe when every other R2 leg holds, and freeze the same
+    // absolute executable for both probe and spawn.
     if config.login_identity
         && config.login_shell
         && config.native_mode
@@ -157,7 +200,7 @@ pub(crate) fn run_raw(
         && matches!(&shell_kind, RawShellKind::Bash)
     {
         if let Some((path, supports_env_posix)) =
-            resolve_bash_for_r2(&config.bash_path, &config.winsize)
+            resolve_bash_for_r2(&config.bash_path, &config.winsize, &effects)
         {
             // ShellHostConfig currently stores a UTF-8 path. Freeze only when
             // lossless; for a non-UTF-8 PATH entry keep the bare name so execvp
@@ -187,10 +230,16 @@ pub(crate) fn run_raw(
         config.set_assistance_control(control);
     }
 
-    let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     inline_state.assistance_control = assistance_control;
     inline_state.shell_session_id = Some(config.session_id.clone());
+    let zsh = matches!(&shell_kind, RawShellKind::Zsh);
+    let enhanced = config.integration.uses_markers();
+    inline_state.shell_identity = Some(format!(
+        "{} ({})",
+        if zsh { "zsh" } else { "bash" },
+        if enhanced { "enhanced" } else { "native" },
+    ));
     // #2161: share the relay-side input-wait clock and productized timeout.
     inline_state.input_wait_status = config.input_wait_status.clone();
     inline_state.input_wait_timeout = (cosh_config.input_wait_timeout_secs > 0)
@@ -212,6 +261,7 @@ pub(crate) fn run_raw(
     }
     inline_state.personalization.bash_history = cosh_config.recommendations.bash_history;
     inline_state.personalization.ai_disabled = !cosh_config.ai_enabled;
+    let mut startup_path_receiver = None;
     if enhanced_integration {
         inline_state.personalization.analyzer_cancellation = Some(AnalyzerCancellation::new());
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -258,19 +308,23 @@ pub(crate) fn run_raw(
             inline_state.startup_health.pending =
                 Some(spawn_startup_health_scan(cosh_config.health.clone()));
         }
-        // The credential probe only feeds startup-banner surfaces; without a
-        // banner it would just cost an extra cosh-core process per launch.
-        if cosh_config.ai_enabled && crate::runtime::startup::startup_banner_enabled() {
-            if let AdapterInstance::CoshCore(core) = &adapter {
-                let core = core.clone();
-                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-                inline_state.startup_auth.pending = Some(receiver);
-                let _ = std::thread::Builder::new()
-                    .name("cosh-startup-auth-probe".to_string())
-                    .spawn(move || {
-                        let _ = sender.send(core.ai_configured().ok());
-                    });
-            }
+        let startup_auth_core = super::startup_auth::probe_core(&adapter, cosh_config.ai_enabled);
+        let managed_bash_login = startup_path_enabled
+            && config.native_mode
+            && login
+            && matches!(&shell_kind, RawShellKind::Bash);
+        (inline_state.startup_auth.pending, startup_path_receiver) =
+            super::startup_auth::arm(&mut config, startup_auth_core, managed_bash_login);
+    }
+    if startup_upgrade_check_enabled_for_env() && crate::runtime::startup::startup_banner_enabled()
+    {
+        if let Some(notice) = read_cached_notice(env!("CARGO_PKG_VERSION")) {
+            inline_state.startup_upgrade.resolved = Some(Some(notice));
+        }
+        if cosh_config.ai_enabled {
+            inline_state
+                .startup_upgrade
+                .start_probe(env!("CARGO_PKG_VERSION"), startup_path_receiver);
         }
     }
     let hook_feedback = load_hook_feedback_preferences();
@@ -310,23 +364,64 @@ pub(crate) fn run_raw(
     apply_readonly_config(&cosh_config);
     inline_state.hooks.engine = load_hook_engine(&cosh_config);
 
-    let raw_result = match shell_kind {
-        RawShellKind::Bash => {
-            run_raw_interactive_bash_with_event_view(&config, |events, output| {
-                render_raw_inline_event_view(events, output, &adapter, "bash", &mut inline_state)
-            })
+    // Catch relay panics so an eligible login can fall open while the guard is
+    // still armed. Any PATH/R2/managed-shell effect permanently suppresses that
+    // fallback to avoid replaying login startup. The panic hook and RawModeGuard
+    // restore the terminal before control returns here.
+    //
+    // Abort, SIGSEGV, and other non-unwinding process death remain the separate
+    // minimal login launcher's responsibility.
+    let relay_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(debug_assertions)]
+        maybe_inject_failopen_panic("pre-spawn", &effects);
+        match shell_kind {
+            RawShellKind::Bash => {
+                run_raw_interactive_bash_with_event_view(&config, |events, output| {
+                    #[cfg(debug_assertions)]
+                    maybe_inject_failopen_panic("post-spawn", &effects);
+                    render_raw_inline_event_view(
+                        events,
+                        output,
+                        &adapter,
+                        "bash",
+                        &mut inline_state,
+                    )
+                })
+            }
+            RawShellKind::Zsh => {
+                run_raw_interactive_zsh_with_event_view(&config, |events, output| {
+                    #[cfg(debug_assertions)]
+                    maybe_inject_failopen_panic("post-spawn", &effects);
+                    render_raw_inline_event_view(events, output, &adapter, "zsh", &mut inline_state)
+                })
+            }
+            RawShellKind::MissingShellValue | RawShellKind::Unsupported(_) => {
+                unreachable!("missing/unsupported shell handled before the relay")
+            }
         }
-        RawShellKind::Zsh => run_raw_interactive_zsh_with_event_view(&config, |events, output| {
-            render_raw_inline_event_view(events, output, &adapter, "zsh", &mut inline_state)
-        }),
-        RawShellKind::MissingShellValue => {
-            eprintln!("missing value for --shell; supported shells: bash, zsh");
-            return 2;
-        }
-        RawShellKind::Unsupported(shell) => {
-            let shell = crate::evidence::redact_sensitive_text(&shell).0;
-            eprintln!("unsupported raw shell: {shell}; supported shells: bash, zsh");
-            return 2;
+    }));
+    // Before any fail-open exec or exit: probe commands run in their own process groups
+    // and would otherwise outlive the session with no deadline left to stop them.
+    inline_state.startup_upgrade.shutdown();
+
+    let raw_result = match relay_outcome {
+        Ok(result) => result,
+        Err(_panic) => {
+            // A panic unwound out of the relay. Skip the normal cleanup path
+            // because locks may be poisoned.
+            drop(_work_dir_cleanup);
+            if let Some(status) = fail_open.try_exec(
+                FailOpenFailure::RelayPanic,
+                "cosh: runtime panicked before shell start; falling back to bash",
+            ) {
+                return status;
+            }
+            if managed_shell_started(&effects) {
+                eprintln!("raw shell failed: runtime panicked after shell start");
+            } else {
+                eprintln!("raw shell failed: runtime panicked before shell start");
+            }
+            return 1;
         }
     };
 
@@ -346,6 +441,13 @@ pub(crate) fn run_raw(
         Ok(output) => output.exit_status.unwrap_or(0),
         Err(err) => {
             let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
+            // The relay already dropped its RawModeGuard, so the terminal is
+            // sane before any eligible fallback exec.
+            let diagnostic = format!("cosh: runtime unavailable ({err}); falling back to bash");
+            drop(_work_dir_cleanup);
+            if let Some(status) = fail_open.try_exec(FailOpenFailure::RelayError, &diagnostic) {
+                return status;
+            }
             eprintln!("raw shell failed: {err}");
             1
         }
@@ -517,11 +619,12 @@ fn load_hook_engine(cosh_config: &CoshConfig) -> HookEngine {
     }
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(project_root) = project_hook_root_from_cwd(&cwd) {
-            let trusted = is_trusted_project_root(
+            load_project_hooks_with_consent(
+                &mut hook_engine,
                 &project_root,
-                cosh_config.trusted_project_roots.as_slice(),
+                &cosh_config.trusted_project_roots,
+                &cosh_config.consented_project_hooks,
             );
-            hook_engine.load_project_hooks_from_root(&project_root, trusted);
         }
     }
     hook_engine
@@ -530,6 +633,20 @@ fn load_hook_engine(cosh_config: &CoshConfig) -> HookEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell_host::{LoginEffectGuard, LoginEffectSource};
+
+    #[test]
+    fn managed_shell_phase_depends_only_on_managed_shell_effect() {
+        let effects = LoginEffectGuard::new();
+        assert!(!managed_shell_started(&effects));
+
+        effects.mark_possible(LoginEffectSource::PathBootstrapProbe);
+        effects.mark_possible(LoginEffectSource::R2CapabilityProbe);
+        assert!(!managed_shell_started(&effects));
+
+        effects.mark_possible(LoginEffectSource::ManagedShell);
+        assert!(managed_shell_started(&effects));
+    }
 
     #[test]
     fn temp_session_dir_guard_removes_session_directory_on_drop() {

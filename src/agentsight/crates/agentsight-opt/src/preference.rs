@@ -6,6 +6,8 @@
 //! findings. Failures are surfaced as [`PreferenceError`] so the API layer
 //! can degrade to rule-only results.
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 
 use crate::llm::{ChatMessage, LlmClient};
@@ -82,34 +84,56 @@ impl std::error::Error for PreferenceError {
 }
 
 /// Compact user turns into the prompt payload: trim, deduplicate exact
-/// repeats (agents re-send the same query across follow-up calls), cap each
-/// turn at [`MAX_TURN_CHARS`] chars and the total at [`MAX_TOTAL_CHARS`].
+/// repeats (agents re-send the same query across follow-up calls) at
+/// their NEWEST occurrence, cap each turn at [`MAX_TURN_CHARS`] chars and
+/// the total at [`MAX_TOTAL_CHARS`], keeping the NEWEST turns when the
+/// budget cannot fit the window — the same newest slice the /turns
+/// endpoint reports. Turns are expected in chronological order, and the
+/// output keeps it: the prompt presents the list as "most recent last".
 /// Returns an empty string when nothing usable remains.
 pub fn build_analysis_input(turns: &[String]) -> String {
-    let mut seen: Vec<&str> = Vec::new();
-    let mut out = String::new();
-    let mut index = 0usize;
-    for turn in turns {
+    // Walk newest-first so a turn repeated across the window dedupes at
+    // its newest occurrence, and so the budget, when it cannot fit every
+    // line, drops the OLDEST turns — recent behavior is the analysis
+    // target, not the start of the window.
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut newest_first: Vec<&str> = Vec::new();
+    for turn in turns.iter().rev() {
         let trimmed = turn.trim();
-        if trimmed.is_empty() || seen.contains(&trimmed) {
-            continue;
+        if !trimmed.is_empty() && seen.insert(trimmed) {
+            newest_first.push(trimmed);
         }
-        seen.push(trimmed);
-        index += 1;
-        let capped: String = if trimmed.chars().count() > MAX_TURN_CHARS {
-            let mut s: String = trimmed.chars().take(MAX_TURN_CHARS).collect();
-            s.push('…');
-            s
-        } else {
-            trimmed.to_string()
-        };
-        let line = format!("{index}. {capped}\n");
-        if out.chars().count() + line.chars().count() > MAX_TOTAL_CHARS {
-            break;
-        }
-        out.push_str(&line);
     }
-    out
+    // Back to chronological order (oldest first, most recent last).
+    newest_first.reverse();
+
+    // Number and emit chronologically; when the budget is exceeded, drop
+    // the oldest line and retry — the remaining newest lines renumber
+    // from 1, so the emitted list always ends on the newest turn.
+    let mut start = 0usize;
+    loop {
+        let mut out = String::new();
+        let mut fits = true;
+        for (index, trimmed) in newest_first[start..].iter().enumerate() {
+            let capped: String = if trimmed.chars().count() > MAX_TURN_CHARS {
+                let mut s: String = trimmed.chars().take(MAX_TURN_CHARS).collect();
+                s.push('…');
+                s
+            } else {
+                trimmed.to_string()
+            };
+            let line = format!("{}. {}\n", index + 1, capped);
+            if out.chars().count() + line.chars().count() > MAX_TOTAL_CHARS {
+                fits = false;
+                break;
+            }
+            out.push_str(&line);
+        }
+        if fits || start + 1 >= newest_first.len() {
+            return out;
+        }
+        start += 1;
+    }
 }
 
 /// Ask the LLM for preference findings over the given user turns.
@@ -169,6 +193,48 @@ mod tests {
         let input = build_analysis_input(&turns);
         assert!(input.chars().count() <= MAX_TOTAL_CHARS);
         assert!(!input.is_empty());
+    }
+
+    #[test]
+    fn build_input_preserves_chronological_order() {
+        // The prompt presents the list as "most recent last": a
+        // chronological input must come back in the same order.
+        let turns: Vec<String> = (1..=3).map(|i| format!("message {i}")).collect();
+        assert_eq!(
+            build_analysis_input(&turns),
+            "1. message 1\n2. message 2\n3. message 3\n"
+        );
+    }
+
+    #[test]
+    fn build_input_keeps_the_newest_turns_under_the_budget() {
+        // 100 distinct turns of ~300 chars each (~30K total) cannot all
+        // fit MAX_TOTAL_CHARS: the OLDEST turns are the ones that must be
+        // dropped — the same newest-slice rule the /turns endpoint applies
+        // — so the model still sees recent behavior and the list still
+        // ends with the newest turn.
+        let turns: Vec<String> = (0..100)
+            .map(|i| format!("turn {i:03} {}", "x".repeat(290)))
+            .collect();
+        let input = build_analysis_input(&turns);
+        assert!(input.chars().count() <= MAX_TOTAL_CHARS);
+        assert!(input.contains("turn 099"));
+        assert!(input.contains("turn 098"));
+        assert!(!input.contains("turn 000"));
+        assert!(!input.contains("turn 010"));
+        let first = input.lines().next().expect("non-empty");
+        assert!(first.starts_with("1. "), "numbering starts at 1");
+        let last = input.lines().next_back().expect("non-empty");
+        assert!(last.contains("turn 099"), "the newest turn must be last");
+    }
+
+    #[test]
+    fn build_input_dedupes_a_repeat_at_its_newest_position() {
+        // "alpha" is re-sent AFTER "beta": its newest occurrence is the
+        // later one, so the chronological list places it after beta — the
+        // same newest-position dedupe the /turns endpoint applies.
+        let turns = vec!["alpha".to_string(), "beta".to_string(), "alpha".to_string()];
+        assert_eq!(build_analysis_input(&turns), "1. beta\n2. alpha\n");
     }
 
     #[test]

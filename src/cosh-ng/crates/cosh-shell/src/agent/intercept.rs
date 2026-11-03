@@ -39,6 +39,21 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
             continue;
         }
 
+        let disabled_insight_submission = state.personalization.ai_disabled
+            && matches!(
+                (
+                    prompt_ghost_suggestion_id(event),
+                    state.pending_input_ghost_binding.as_ref(),
+                ),
+                (Some(suggestion_id), Some(PendingInputGhostBinding::Insight(binding)))
+                    if suggestion_id.is_none_or(|id| id == binding.suggestion_id)
+            );
+        if disabled_insight_submission {
+            // Consume the submission before it can fall back to a free-form request.
+            state.pending_input_ghost_binding = None;
+            continue;
+        }
+
         // Before handling this input, drive the background-compaction poll at
         // this safe boundary: harvest a finished compactor, render its
         // completion notice, and resume any user request that was held back
@@ -518,6 +533,13 @@ fn agent_request_from_pending_insight(
         state.pending_input_ghost_binding.as_ref(),
         Some(PendingInputGhostBinding::Insight(_))
     ) {
+        return None;
+    }
+    // COSH_SHELL_AI=off: defense in depth on the accept path. The render-side
+    // gate already prevents arming this binding; drop it here too in case a
+    // future arming path bypasses the render funnel.
+    if state.personalization.ai_disabled {
+        state.pending_input_ghost_binding = None;
         return None;
     }
     let PendingInputGhostBinding::Insight(binding) = state.pending_input_ghost_binding.take()?

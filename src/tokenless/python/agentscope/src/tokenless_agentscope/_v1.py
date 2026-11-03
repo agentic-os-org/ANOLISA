@@ -29,7 +29,6 @@ from anolisa_tokenless import (
     TokenlessSdk,
     ToolResultStatus,
 )
-
 from tokenless_agentscope._contracts import (
     ToolContract,
     build_tool_contracts,
@@ -56,11 +55,10 @@ class _TokenlessToolkit(Toolkit):
 
     def register_tool_function(self, tool_func: Any, *args: Any, **kwargs: Any) -> None:
         """Chain application postprocessing with Tokenless for every tool."""
-        arguments = (
-            inspect.signature(super().register_tool_function)
-            .bind_partial(tool_func, *args, **kwargs)
-            .arguments
+        bound = inspect.signature(super().register_tool_function).bind_partial(
+            tool_func, *args, **kwargs
         )
+        arguments = bound.arguments
         variadic = arguments.get("kwargs")
         if isinstance(variadic, dict):
             arguments = {**variadic, **arguments}
@@ -75,8 +73,12 @@ class _TokenlessToolkit(Toolkit):
                 raise ValueError(f"Tool name {name!r} is reserved for Tokenless retrieval")
         else:
             self._integration.contract_for(name)
-            kwargs["postprocess_func"] = self._wrap_postprocessor(kwargs.get("postprocess_func"))
-        super().register_tool_function(tool_func, *args, **kwargs)
+            postprocessor = self._wrap_postprocessor(arguments.get("postprocess_func"))
+            if "postprocess_func" in bound.signature.parameters:
+                bound.arguments["postprocess_func"] = postprocessor
+            else:
+                bound.arguments.setdefault("kwargs", {})["postprocess_func"] = postprocessor
+        super().register_tool_function(*bound.args, **bound.kwargs)
         if name == self._integration.config.retrieve_tool_name:
             self._retrieve_function = tool_func
 
@@ -236,6 +238,9 @@ class TokenlessAgentScope:
             return response
         contract = self.contract_for(tool_call["name"])
         optimization = toolkit.output_optimizations.pop(tool_call["id"], OutputOptimization.NONE)
+        command = None
+        if contract.command_field is not None:
+            command = (tool_call.get("input") or {}).get(contract.command_field)
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
         for index, block in enumerate(response.content):
@@ -260,6 +265,7 @@ class TokenlessAgentScope:
                         replace_with_text=True,
                     ),
                     attribution=self._attribution(tool_call["id"]),
+                    command=command if isinstance(command, str) else None,
                 )
             )
             extra_context = extra_context or transformed.additional_context

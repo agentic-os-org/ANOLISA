@@ -5,6 +5,7 @@ mod input_intent;
 mod io_loop;
 mod lifecycle;
 mod line_interactive;
+mod login_effect;
 mod marker;
 mod model;
 #[cfg(test)]
@@ -24,6 +25,7 @@ mod transcript;
 
 pub(crate) use bootstrap::{assistance_state_file, spawn_profile_probe_on_pty};
 pub use line_interactive::{run_line_interactive_bash, LineInteractiveOutput};
+pub(crate) use login_effect::{LoginEffectGuard, LoginEffectSource};
 pub(crate) use model::{HintCardRenderer, ShellEventView};
 pub use model::{ScriptedInput, ShellHostConfig, ShellHostOutput, ShellIntegration};
 pub(crate) use raw_relay::interactive_sentinel::InputWaitStatus;

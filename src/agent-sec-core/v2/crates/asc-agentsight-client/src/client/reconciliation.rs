@@ -71,7 +71,7 @@ fn configuration_failure(error: AgentSightClientConfigError) -> Failure {
 }
 
 /// Versioned opaque prepared payload consumed only by this Client.
-pub const AGENTSIGHT_PREPARED_APPLY_FORMAT: &str = "agentsight.enforcement.apply.v1";
+pub const AGENTSIGHT_PREPARED_APPLY_FORMAT: &str = "agentsight.enforcement.apply.v2";
 /// Default stable configuration reference; never reuse it for a different PEP.
 pub const DEFAULT_AGENTSIGHT_ROUTE: &str = "agentsight";
 const MAX_REQUEST_BYTES: usize = 2 * MAX_PLAN_BYTES;
@@ -81,6 +81,7 @@ const MAX_PREPARED_BYTES: usize = 8 * MAX_REQUEST_BYTES + 4096;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Cleanup {
     schema_version: u16,
+    endpoint: String,
     binding_id: ResourceId,
     binding_revision: Revision,
 }
@@ -90,6 +91,7 @@ struct Cleanup {
 struct PreparedRequest {
     schema_version: u16,
     boot_id: String,
+    pid_namespace: String,
     request: Vec<u8>,
     request_digest: String,
 }
@@ -130,8 +132,16 @@ impl<T, R> AgentSightClient<T, R> {
         let cleanup: Cleanup = serde_json::from_slice(&target.cleanup)
             .map_err(|_| rejected("AGENTSIGHT_INVALID_TARGET_REFERENCE"))?;
         let id = target_binding_id(&cleanup.binding_id, cleanup.binding_revision);
-        if cleanup.schema_version != 1 || target.id != id.to_string() {
+        if cleanup.schema_version != 2 || target.id != id.to_string() {
             return Err(rejected("AGENTSIGHT_INVALID_TARGET_REFERENCE"));
+        }
+        if cleanup.endpoint
+            != self
+                .endpoint
+                .as_deref()
+                .unwrap_or(crate::DEFAULT_AGENTSIGHT_BASE_URL)
+        {
+            return Err(rejected("AGENTSIGHT_ENDPOINT_MISMATCH"));
         }
         Ok(id)
     }
@@ -150,7 +160,7 @@ impl<T, R> AgentSightClient<T, R> {
             .map_err(|_| rejected("AGENTSIGHT_INVALID_PREPARED"))?;
         let boot = Uuid::parse_str(&payload.boot_id)
             .map_err(|_| rejected("AGENTSIGHT_INVALID_PREPARED"))?;
-        if payload.schema_version != 1
+        if payload.schema_version != 2
             || payload.request.len() > MAX_REQUEST_BYTES
             || payload.request_digest != digest(&payload.request)
             || boot.is_nil()
@@ -201,8 +211,15 @@ impl<T: AgentSightTransport, R: ProcessIdentityResolver> AgentSightClient<T, R> 
             .process_identity
             .process_start_time(plan.root_pid)
             .map_err(classify_process_identity_error)?;
-        if start == 0 {
-            return Err(rejected("AGENTSIGHT_INVALID_PROCESS_IDENTITY"));
+        let namespace = self
+            .process_identity
+            .pid_namespace(plan.root_pid)
+            .map_err(classify_process_identity_error)?;
+        if start != plan.process.start_time
+            || boot_id != plan.process.boot_id
+            || namespace != plan.process.pid_namespace
+        {
+            return Err(rejected("AGENTSIGHT_PROCESS_IDENTITY_CHANGED"));
         }
         let request = serde_json::to_vec(&plan.request(start))
             .map_err(|_| rejected("AGENTSIGHT_REQUEST_SERIALIZATION_FAILED"))?;
@@ -210,13 +227,19 @@ impl<T: AgentSightTransport, R: ProcessIdentityResolver> AgentSightClient<T, R> 
             return Err(rejected("AGENTSIGHT_REQUEST_TOO_LARGE"));
         }
         let payload = PreparedRequest {
-            schema_version: 1,
+            schema_version: 2,
+            pid_namespace: namespace,
             boot_id,
             request_digest: digest(&request),
             request,
         };
         let cleanup = Cleanup {
-            schema_version: 1,
+            schema_version: 2,
+            endpoint: self
+                .endpoint
+                .as_deref()
+                .unwrap_or(crate::DEFAULT_AGENTSIGHT_BASE_URL)
+                .to_owned(),
             binding_id: plan.binding_id,
             binding_revision: plan.binding_revision,
         };
@@ -350,7 +373,13 @@ impl<T: AgentSightTransport, R: ProcessIdentityResolver> AgentSightClient<T, R> 
             .process_identity
             .process_start_time(body.root_pid)
             .map_err(classify_process_identity_error)?;
-        if start != body.process_start_time {
+        if start != body.process_start_time
+            || self
+                .process_identity
+                .pid_namespace(body.root_pid)
+                .map_err(classify_process_identity_error)?
+                != payload.pid_namespace
+        {
             return Err(rejected("AGENTSIGHT_PROCESS_IDENTITY_CHANGED"));
         }
         Ok(())

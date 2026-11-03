@@ -28,6 +28,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::StartupAuthHintLine => {
             "\u{1f4a1} AI not configured — run /auth to unlock AI help, failure analysis, tips"
         }
+        MessageId::StartupUpgradeHintLine => {
+            "\u{1f4e6} Update available: cosh-ng {current} → {latest} — run `{command}` to upgrade, then log in again"
+        }
+        MessageId::StartupUpgradeNoticeTitle => "cosh-ng update available",
         _ => return None,
     })
 }

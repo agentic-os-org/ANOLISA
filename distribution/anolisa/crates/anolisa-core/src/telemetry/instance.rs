@@ -18,7 +18,8 @@ use std::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceInfo {
     pub id: String,
-    /// "ecs" | "swas" | "eds" | "unknown"
+    /// "ecs" | "swas" | "eds" | "container" | "unknown"; custom
+    /// `/etc/anolisa-release` values pass through verbatim.
     pub source: String,
     /// instance-type from metadata API (e.g. "ecs.c7.xlarge")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -327,11 +328,12 @@ impl InstanceProber {
 
     // ── Container runtime ─────────────────────────────────────────
 
-    /// Delegate to [`anolisa_env::detect_container`] so the snapshot
-    /// carries the same flavor classification as the rest of the agent
-    /// OS without re-implementing marker/cgroup heuristics here.
+    /// Resolve the container runtime flavor through the shared probe
+    /// ([`crate::telemetry::common::container_flavor`]) so the snapshot
+    /// carries the same classification as product-type detection without
+    /// re-implementing marker/cgroup heuristics here.
     fn probe_container() -> Option<String> {
-        anolisa_env::detect_container()
+        crate::telemetry::common::container_flavor()
     }
 }
 
@@ -447,19 +449,40 @@ pub fn write_instance_snapshot(
 
 // ── Parsing helpers ──────────────────────────────────────────────────
 
-/// Parse `/sys/devices/system/cpu/present` format (e.g. "0-3" → 4, "0" → 1)
+/// Parse a kernel CPU list, as exported by `/sys/devices/system/cpu/present`
+/// and friends: comma-separated segments, each a `lo-hi` range or a single
+/// CPU id (e.g. `"0-3"`, `"0"`, `"0-1,16-17"`). Returns the number of CPUs
+/// the list denotes, or `None` when the content is not a valid cpu list.
+///
+/// `present` is not necessarily contiguous: CPU hotplug and some
+/// virtualization/NUMA layouts leave holes, and a lone id like `"3"` means
+/// exactly one present CPU.
 fn parse_cpu_present(content: &str) -> Option<u32> {
-    let s = content.trim();
-    if s.contains('-') {
-        let parts: Vec<&str> = s.splitn(2, '-').collect();
-        if parts.len() == 2 {
-            let lo: u32 = parts[0].parse().ok()?;
-            let hi: u32 = parts[1].parse().ok()?;
-            return Some(hi - lo + 1);
-        }
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    // Single CPU: "0"
-    s.parse::<u32>().ok().map(|v| v + 1)
+    let mut total: u32 = 0;
+    for segment in trimmed.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+        let count = if let Some((lo, hi)) = segment.split_once('-') {
+            let lo: u32 = lo.trim().parse().ok()?;
+            let hi: u32 = hi.trim().parse().ok()?;
+            // Checked arithmetic (adopted from #3615 per review): a
+            // reversed range is malformed kernel output, and a range
+            // spanning the whole u32 id space must not overflow the
+            // count — both become `None` instead of a panic or a wrap.
+            hi.checked_sub(lo)?.checked_add(1)?
+        } else {
+            segment.parse::<u32>().ok()?; // must be a valid single id
+            1 // a lone id denotes exactly one CPU
+        };
+        total = total.checked_add(count)?;
+    }
+    Some(total)
 }
 
 /// Parse `image_id="..."` from `/etc/image-id` content.
@@ -527,29 +550,51 @@ mod tests {
                     ("image-id", 200, "ubuntu-test.vhd"),
                 ],
                 |base| {
-                    let dir = TempDir::new().unwrap();
-                    let mut config = crate::telemetry::test_config(&dir);
-                    config.metadata_url = format!("{base}/region-id");
-                    write_instance_snapshot(&config, false).unwrap();
-                    let content =
-                        fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
-                    let snapshot: serde_json::Value = serde_json::from_str(&content).unwrap();
-                    assert_eq!(snapshot["instance.source"], "ecs");
-                    assert_eq!(snapshot["instance.type"], "ecs.g9i.xlarge");
-                    assert_eq!(snapshot["instance.image-id"], "ubuntu-test.vhd");
-                    assert!(!content.contains("i-test"));
-                    assert!(!config.identity_cache_path.exists());
+                    crate::telemetry::common::with_container_flavor(None, || {
+                        let dir = TempDir::new().unwrap();
+                        let mut config = crate::telemetry::test_config(&dir);
+                        config.metadata_url = format!("{base}/region-id");
+                        write_instance_snapshot(&config, false).unwrap();
+                        let content =
+                            fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
+                        let snapshot: serde_json::Value = serde_json::from_str(&content).unwrap();
+                        assert_eq!(snapshot["instance.source"], "ecs");
+                        assert_eq!(snapshot["instance.type"], "ecs.g9i.xlarge");
+                        assert_eq!(snapshot["instance.image-id"], "ubuntu-test.vhd");
+                        assert!(!content.contains("i-test"));
+                        assert!(!config.identity_cache_path.exists());
+                    })
                 },
-            );
+            )
+        });
+    }
+
+    #[test]
+    fn test_snapshot_reports_container_product_type() {
+        // Inside a container the shared chain short-circuits before any
+        // metadata query: instance.source carries the device form while
+        // instance.container keeps the runtime flavor.
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            crate::telemetry::common::with_container_flavor(Some("docker"), || {
+                let dir = TempDir::new().unwrap();
+                let config = crate::telemetry::test_config(&dir);
+                write_instance_snapshot(&config, false).unwrap();
+                let content = fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
+                let snapshot: serde_json::Value = serde_json::from_str(&content).unwrap();
+                assert_eq!(snapshot["instance.source"], "container");
+                assert_eq!(snapshot["instance.container"], "docker");
+            });
         });
     }
 
     #[test]
     fn test_probe_product_type_unknown() {
         crate::telemetry::metadata::with_cloud_init_disabled(|| {
-            let dir = TempDir::new().unwrap();
-            let p = prober(&dir);
-            assert_eq!(p.probe_product_type(), "unknown");
+            crate::telemetry::common::with_container_flavor(None, || {
+                let dir = TempDir::new().unwrap();
+                let p = prober(&dir);
+                assert_eq!(p.probe_product_type(), "unknown");
+            })
         });
     }
 
@@ -558,9 +603,11 @@ mod tests {
         crate::telemetry::metadata::with_cloud_init_responses(
             &[("ds.meta_data.instance.instance-type", "ecs.c7.xlarge")],
             || {
-                let dir = TempDir::new().unwrap();
-                let p = prober(&dir);
-                assert_eq!(p.probe_product_type(), "ecs");
+                crate::telemetry::common::with_container_flavor(None, || {
+                    let dir = TempDir::new().unwrap();
+                    let p = prober(&dir);
+                    assert_eq!(p.probe_product_type(), "ecs");
+                })
             },
         );
     }
@@ -570,9 +617,11 @@ mod tests {
         crate::telemetry::metadata::with_cloud_init_responses(
             &[("ds.meta_data.desktop-id", "ecd-abc123")],
             || {
-                let dir = TempDir::new().unwrap();
-                let p = prober(&dir);
-                assert_eq!(p.probe_product_type(), "eds");
+                crate::telemetry::common::with_container_flavor(None, || {
+                    let dir = TempDir::new().unwrap();
+                    let p = prober(&dir);
+                    assert_eq!(p.probe_product_type(), "eds");
+                })
             },
         );
     }
@@ -868,5 +917,55 @@ mod tests {
         assert_eq!(parse_cpu_present("0-7"), Some(8));
         assert_eq!(parse_cpu_present("0"), Some(1));
         assert_eq!(parse_cpu_present("2-5"), Some(4));
+        assert_eq!(parse_cpu_present("0-3\n"), Some(4));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_multi_range() {
+        // CPU hotplug / NUMA layouts leave holes; each segment counts.
+        assert_eq!(parse_cpu_present("0-1,16-17"), Some(4));
+        assert_eq!(parse_cpu_present("0-3,8-11"), Some(8));
+        assert_eq!(parse_cpu_present("2-5,7"), Some(5));
+        assert_eq!(parse_cpu_present("0-1,16-17\n"), Some(4));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_lone_nonzero_id() {
+        // A lone id means exactly one present CPU, not id+1.
+        assert_eq!(parse_cpu_present("3"), Some(1));
+        assert_eq!(parse_cpu_present("1"), Some(1));
+    }
+
+    #[test]
+    fn test_parse_cpu_present_rejects_garbage() {
+        assert_eq!(parse_cpu_present(""), None);
+        assert_eq!(parse_cpu_present("   "), None);
+        assert_eq!(parse_cpu_present("abc"), None);
+        assert_eq!(parse_cpu_present("0-"), None);
+        assert_eq!(parse_cpu_present("-3"), None);
+        // Reversed ranges never come from the kernel; the old parser
+        // underflowed here in release builds.
+        assert_eq!(parse_cpu_present("3-1"), None);
+        assert_eq!(parse_cpu_present("0,,1"), None);
+        assert_eq!(parse_cpu_present("0-1,"), None);
+        assert_eq!(parse_cpu_present("0-3,abc"), None);
+        // A range spanning the whole u32 id space must not overflow the
+        // count: `hi - lo + 1` panicked in debug builds and wrapped to 0
+        // in release. Boundary adopted from #3615 per review.
+        assert_eq!(parse_cpu_present("0-4294967295"), None);
+        // The largest representable count still parses: it is one short
+        // of the overflow.
+        assert_eq!(parse_cpu_present("0-4294967294"), Some(u32::MAX));
+    }
+
+    #[test]
+    fn test_probe_vcpu_count_reads_multi_range_present() {
+        let dir = TempDir::new().unwrap();
+        let p = prober(&dir);
+        // On main this fails to parse and silently falls back to `nproc`,
+        // which reports the process affinity mask (the container's quota),
+        // not the present-CPU count.
+        fs::write(&p.cpu_present_path, "0-1,16-17\n").unwrap();
+        assert_eq!(p.probe_vcpu_count(), Some(4));
     }
 }

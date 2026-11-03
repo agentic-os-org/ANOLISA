@@ -19,9 +19,15 @@ pub use language::{
 };
 pub use load::load_config;
 pub(crate) use load::parse_recommendations_environment_override;
+pub(crate) use model::ConsentedProjectHook;
 pub use model::{
     CoshConfig, HealthConfig, HealthServiceConfig, HealthServiceExpectedState,
     RecommendationsConfig,
+};
+pub(crate) use trust::{
+    add_consented_project_hook_to_store_path, project_hook_trust,
+    read_consented_project_hooks_from_store_path, trust_project_root_to_store_path,
+    ProjectHookTrust,
 };
 pub use trust::{clear_project_trust_store, trust_project_root, untrust_project_root};
 

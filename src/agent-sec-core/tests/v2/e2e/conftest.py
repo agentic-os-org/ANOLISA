@@ -13,9 +13,10 @@ import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
+import tempfile
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -23,11 +24,9 @@ import pytest
 CLI_BIN = "agent-sec-cli"
 DAEMON_BIN = "agent-sec-daemon"
 
-# The socket appears shortly after the daemon binds; five seconds is generous
-# for a cold binary start under container I/O without masking a real hang.
-_SOCKET_WAIT_SECONDS = 5.0
-# SIGTERM is cooperative: the daemon drains in-flight work before unlinking the
-# socket, so allow a small margin beyond the daemon's own drain timeout.
+# Includes startup admission and a successful daemon.health response.
+_SOCKET_WAIT_SECONDS = 30.0
+# These process tests shut down idle daemons; worker-drain deadlines have separate coverage.
 _SHUTDOWN_WAIT_SECONDS = 5.0
 _POLL_INTERVAL = 0.02
 
@@ -66,18 +65,30 @@ def run_agent_sec_cli(
 class DaemonHandle:
     """A running ``agent-sec-daemon`` process bound to a known socket path."""
 
-    def __init__(self, process: subprocess.Popen, socket_path: Path) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen,
+        socket_path: Path,
+        caller_uid: int | None = None,
+    ) -> None:
         self.process = process
         self.socket_path = socket_path
+        self.caller_uid = caller_uid
 
-    def cli(self, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+    def cli(
+        self, *args: str, timeout: float = 30.0, input_text: str | None = None
+    ) -> subprocess.CompletedProcess:
         """Invokes ``agent-sec-cli --socket <this daemon> <args>``."""
         return subprocess.run(
             [_require(CLI_BIN), "--socket", str(self.socket_path), *args],
             capture_output=True,
             text=True,
+            input=input_text,
             timeout=timeout,
             check=False,
+            user=self.caller_uid,
+            group=self.caller_uid,
+            extra_groups=[] if self.caller_uid is not None else None,
         )
 
     def request(self, *args: str, timeout: float = 30.0) -> dict:
@@ -90,39 +101,113 @@ class DaemonHandle:
         return json.loads(result.stdout)
 
 
-def _start_daemon(socket_path: Path, admin_uids: list[int]) -> subprocess.Popen:
-    """Starts a foreground daemon and waits for a complete protocol response."""
-    argv = [_require(DAEMON_BIN), "--socket", str(socket_path)]
+def _daemon_settings(socket_path: Path) -> tuple[Path, dict[str, str]]:
+    """Keep test keys and audit data separate from the installed system daemon."""
+    if os.geteuid() != 0:
+        pytest.fail(
+            "V2 daemon E2E requires container root; clients may drop to an ordinary UID"
+        )
+    config = socket_path.with_suffix(".skillsec.json")
+    config.write_text(
+        json.dumps(
+            {
+                "stateDir": str(socket_path.with_suffix(".state")),
+                "managedSkillDirs": [str(socket_path.parent / "*")],
+                "enableDefaultSkillDirs": False,
+            }
+        )
+    )
+    config.chmod(0o600)
+    environment = os.environ.copy()
+    environment.setdefault("AGENT_SEC_DATA_DIR", str(socket_path.with_suffix(".audit")))
+    environment["AGENT_SEC_DAEMON_SOCKET"] = str(socket_path)
+    environment["AGENT_SEC_OLLAMA_MODEL"] = "agent-sec-core-e2e-unavailable"
+    environment["AGENT_SEC_MODEL_SERVICE_BASE_URL"] = "http://127.0.0.1:0"
+    # Enable daemon diagnostics without changing the CLI's stderr contract.
+    environment.setdefault("RUST_LOG", "info")
+    return config, environment
+
+
+@pytest.fixture
+def daemon_settings() -> Callable[[Path], tuple[Path, dict[str, str]]]:
+    """Provide isolated settings for tests that launch the process directly."""
+    return _daemon_settings
+
+
+def _start_daemon(
+    socket_path: Path,
+    admin_uids: list[int],
+    pii_rules: Path | None = None,
+    skillsec_roots: list[Path] | None = None,
+) -> subprocess.Popen:
+    """Starts a foreground daemon and waits for authenticated daemon.health success."""
+    config, environment = _daemon_settings(socket_path)
+    health = _require("agent-sec-daemon-health")
+    if skillsec_roots is not None:
+        settings = json.loads(config.read_text())
+        settings["managedSkillDirs"] = [str(root) for root in skillsec_roots]
+        config.write_text(json.dumps(settings))
+    argv = [
+        _require(DAEMON_BIN),
+        "--socket",
+        str(socket_path),
+        "--skillsec-config",
+        str(config),
+    ]
     for uid in admin_uids:
         argv += ["--policy-admin-uid", str(uid)]
+    if pii_rules is not None:
+        argv += ["--pii-rules", str(pii_rules)]
     process = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment,
     )
-    deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
+    started = time.monotonic()
+    deadline = started + _SOCKET_WAIT_SECONDS
+    last_probe = "socket not created"
+    print(f"DAEMON starting pid={process.pid} socket={socket_path}", flush=True)
     while time.monotonic() < deadline:
-        if socket_path.exists():
-            try:
-                with socket.socket(socket.AF_UNIX) as probe:
-                    probe.settimeout(0.2)
-                    probe.connect(str(socket_path))
-                    probe.sendall(
-                        b'{"method":"policy.templates.list","params":{"limit":1,"offset":0}}\n'
-                    )
-                    if probe.recv(4096).endswith(b"\n"):
-                        return process
-            except (OSError, TimeoutError):
-                pass
         if process.poll() is not None:
-            _, stderr = process.communicate()
+            stderr = _terminate(process)
             raise AssertionError(
                 f"agent-sec-daemon exited early (rc={process.returncode}): {stderr}"
             )
+        if socket_path.exists():
+            try:
+                probe = subprocess.run(
+                    [health],
+                    env=environment | {"AGENT_SEC_HEALTH_TIMEOUT_SECONDS": "0.2"},
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    print(
+                        f"DAEMON healthy pid={process.pid} "
+                        f"elapsed_ms={(time.monotonic() - started) * 1000:.3f}",
+                        flush=True,
+                    )
+                    return process
+                last_probe = probe.stderr.strip()
+            except subprocess.TimeoutExpired:
+                last_probe = "daemon.health probe timed out"
+            except OSError as error:
+                last_probe = str(error)
         time.sleep(_POLL_INTERVAL)
-    stderr = _terminate(process)
-    raise AssertionError(f"agent-sec-daemon did not create {socket_path}: {stderr}")
+    elapsed = time.monotonic() - started
+    message = (
+        f"agent-sec-daemon did not become healthy after {elapsed:.3f}s "
+        f"(pid={process.pid}, socket={socket_path}, last_probe={last_probe})"
+    )
+    try:
+        stderr = _terminate(process)
+    except AssertionError as error:
+        raise AssertionError(f"{message}; {error}") from error
+    raise AssertionError(f"{message}: {stderr}")
 
 
 def _terminate(process: subprocess.Popen) -> str:
@@ -130,12 +215,25 @@ def _terminate(process: subprocess.Popen) -> str:
     if process.poll() is None:
         process.send_signal(signal.SIGTERM)
     try:
-        _, stderr = process.communicate(timeout=_SHUTDOWN_WAIT_SECONDS)
+        stdout, stderr = process.communicate(timeout=_SHUTDOWN_WAIT_SECONDS)
     except subprocess.TimeoutExpired:
         process.kill()
-        _, stderr = process.communicate()
-        raise AssertionError("agent-sec-daemon did not exit within the shutdown window")
+        stdout, stderr = process.communicate()
+        raise AssertionError(
+            f"agent-sec-daemon did not exit within the shutdown window: {stderr}"
+        )
+    print(
+        f"DAEMON stopped pid={process.pid} rc={process.returncode}\n"
+        f"stdout:\n{stdout or ''}\nstderr:\n{stderr or ''}",
+        flush=True,
+    )
     return stderr or ""
+
+
+@pytest.fixture(autouse=True)
+def isolate_daemon_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevents the CI bootstrap daemon's storage from leaking into test daemons."""
+    monkeypatch.delenv("AGENT_SEC_DATA_DIR", raising=False)
 
 
 @pytest.fixture
@@ -151,6 +249,12 @@ def daemon_bin() -> str:
 
 
 @pytest.fixture
+def health_probe() -> str:
+    """Resolve the installed native probe, failing if the package omits it."""
+    return _require("agent-sec-daemon-health")
+
+
+@pytest.fixture
 def start_daemon(tmp_path: Path):
     """Returns a factory that starts a daemon and tears it down after the test.
 
@@ -159,11 +263,14 @@ def start_daemon(tmp_path: Path):
     started: list[subprocess.Popen] = []
 
     def _factory(
-        admin_uids: list[int] | None = None, name: str = "daemon.sock"
+        admin_uids: list[int] | None = None,
+        name: str = "daemon.sock",
+        pii_rules: Path | None = None,
+        skillsec_roots: list[Path] | None = None,
     ) -> DaemonHandle:
         socket_path = tmp_path / name
         uids = admin_uids if admin_uids is not None else [os.getuid()]
-        process = _start_daemon(socket_path, uids)
+        process = _start_daemon(socket_path, uids, pii_rules, skillsec_roots)
         started.append(process)
         return DaemonHandle(process, socket_path)
 
@@ -191,21 +298,32 @@ def daemon(tmp_path: Path):
 
 
 @pytest.fixture
-def unauthorized_daemon(tmp_path: Path):
-    """Yields a daemon whose admin set excludes the caller.
+def unauthorized_daemon() -> Iterator[DaemonHandle]:
+    """Run a root daemon and exercise real kernel-UID denial from an ordinary client."""
+    # A separate public runtime directory avoids changing pytest's private ancestors.
+    with tempfile.TemporaryDirectory(prefix="asc-v2-denied-", dir="/tmp") as directory:
+        runtime = Path(directory)
+        runtime.chmod(0o755)
+        socket_path = runtime / "daemon.sock"
+        process = _start_daemon(socket_path, [])
+        try:
+            yield DaemonHandle(process, socket_path, caller_uid=1001)
+        finally:
+            _terminate(process)
 
-    Only root is authorized, so a non-root caller acts as a plain local user.
-    Root is unconditionally authorized by design, so this scenario is
-    unreachable when the suite itself runs as root.
-    """
-    if os.getuid() == 0:
-        pytest.skip(
-            "root is unconditionally authorized; cannot exercise denial as root"
-        )
-    socket_path = tmp_path / "daemon.sock"
-    process = _start_daemon(socket_path, [])
-    handle = DaemonHandle(process, socket_path)
-    try:
-        yield handle
-    finally:
-        _terminate(process)
+
+@pytest.fixture
+def pii_environment(tmp_path, monkeypatch):
+    data = tmp_path / "audit"
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(data))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("AGENT_SEC_DAEMON_SOCKET", raising=False)
+    return data, home
+
+
+@pytest.fixture
+def pii_daemon(pii_environment, start_daemon):
+    # No policy-administrator grant is needed for PII scanning.
+    return start_daemon(admin_uids=[])

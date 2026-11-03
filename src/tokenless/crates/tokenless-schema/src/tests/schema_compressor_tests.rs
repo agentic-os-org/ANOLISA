@@ -1266,3 +1266,40 @@ fn test_gemini_wrapper_no_savings_returns_original() {
     // Nothing to compress: the original value is returned unchanged.
     assert_eq!(compressor.compress(&tool), tool);
 }
+
+/// The rollback-delete warning is purely diagnostic — the failed delete is
+/// already counted in `stash_errors` and surfaced by the caller — so its
+/// own write failure must not be able to fail the compression.
+/// `eprintln!` panics when stderr cannot be written (a full filesystem
+/// behind redirected logs, a closed or EPIPE'd descriptor), which turned
+/// the no-savings rollback into exit 101 in the CLI while the emitted
+/// original was fine. Redirect fd 2 to /dev/full, call the helper, restore,
+/// and assert the call returned — a panicking write makes this test fail.
+/// The end-to-end shape (a real `compress-schema` run against a stash
+/// database whose deletes are blocked, with fd 2 on /dev/full) lives in
+/// `tokenless-cli/tests/cli_integration.rs`.
+#[test]
+#[cfg(target_os = "linux")]
+fn warn_soft_survives_an_unwritable_stderr() {
+    use std::os::unix::io::AsRawFd;
+
+    let dev_full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let saved = unsafe { libc::dup(2) };
+    assert!(saved >= 0, "dup stderr");
+    unsafe {
+        libc::dup2(dev_full.as_raw_fd(), 2);
+    }
+    // The helper's whole contract: no panic, the write error is discarded.
+    crate::warn_soft("[tokenless] stash: simulated rollback delete failure");
+    // Restore before any assert can print.
+    let restored = unsafe { libc::dup2(saved, 2) };
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    assert!(restored >= 0, "restore stderr");
+    unsafe {
+        libc::close(saved);
+    }
+    drop(dev_full);
+}

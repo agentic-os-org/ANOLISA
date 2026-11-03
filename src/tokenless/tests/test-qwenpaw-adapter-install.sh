@@ -24,7 +24,8 @@ cp -R "$SOURCE_ADAPTER_DIR"/. "$ADAPTER_DIR"/
 # Source checkouts contain the version templates; packages contain the
 # stamped files. Stamp only the sandbox copy so this test never modifies the tree.
 for template in plugin.json requirements.txt; do
-    sed 's/@VERSION@/0.0.0-test/g' "$ADAPTER_DIR/qwenpaw/$template.in" > "$ADAPTER_DIR/qwenpaw/$template"
+    sed -e 's/@WHEEL_VERSION@/0.0.0-test/g' -e 's/@VERSION@/0.0.0-test/g' \
+        "$ADAPTER_DIR/qwenpaw/$template.in" > "$ADAPTER_DIR/qwenpaw/$template"
 done
 
 cat > "$QWENPAW_STUB" <<'STUBEOF'
@@ -130,7 +131,8 @@ else
     pass "installer fails when qwenpaw exits 0 without installing"
 fi
 
-if run env ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" | grep -q '^DRY-RUN: ' && [ ! -d "$PLUGIN_DST" ]; then
+run env ANOLISA_DRY_RUN=1 bash "$INSTALL_SH" >"$SANDBOX/install-dry-run.out"
+if [ "$?" -eq 0 ] && grep -q '^DRY-RUN: ' "$SANDBOX/install-dry-run.out" && [ ! -d "$PLUGIN_DST" ]; then
     pass "dry-run install prints the command and changes nothing"
 else
     fail "dry-run install misbehaved"
@@ -231,7 +233,8 @@ if run bash "$UNINSTALL_SH" >/dev/null && [ ! -d "$PLUGIN_DST" ] && \
 else
     fail "uninstaller missed the plugin in ~/.qwenpaw after ~/.copaw appeared"
 fi
-if run bash "$UNINSTALL_SH" | grep -q 'no tokenless plugin is installed'; then
+run bash "$UNINSTALL_SH" >"$SANDBOX/uninstall-empty.out"
+if [ "$?" -eq 0 ] && grep -q 'no tokenless plugin is installed' "$SANDBOX/uninstall-empty.out"; then
     pass "uninstaller reports where it looked when nothing is installed"
 else
     fail "uninstaller claimed success although nothing was installed"
@@ -259,46 +262,142 @@ run bash "$UNINSTALL_SH" >/dev/null || fail "failed to uninstall plugin after un
 
 # The stub CLI has a bash shebang, so the installer cannot find QwenPaw's
 # Python and leaves the SDK unverified; QWENPAW_PYTHON plus a fake package
-# exercises both verdicts.
-mkdir -p "$SANDBOX/sdk-ok/anolisa_tokenless" "$SANDBOX/sdk-old/anolisa_tokenless"
-printf '__version__ = "0.0.0-test"\nRecoveryMethod = object\n' > "$SANDBOX/sdk-ok/anolisa_tokenless/__init__.py"
+# exercises every verdict.
+#
+# The fixtures are copies of this tree's SDK, which is what a published wheel
+# contains: sdk-ok provides every field the plugin declares, and sdk-stale is
+# the published 0.8.4 wheel -- it exported every required class name and still
+# had no PostToolRequest.command, so a name-level check passed it and the first
+# tool call died with a TypeError.
+SDK_PY_SRC="$SCRIPT_DIR/../python/tokenless/python/anolisa_tokenless"
+# The SDK needs Python 3.11 (StrEnum). QWENPAW_PYTHON only stands in for
+# QwenPaw's interpreter here, so pick one that can import the fixtures.
+PYTHON3=""
+for candidate in python3 python3.13 python3.12 python3.11; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+        PYTHON3="$(command -v "$candidate")"
+        break
+    fi
+done
+
+# $1 = fixture root, $2 = reported version, $3 = 1 drops PostToolRequest.command
+make_sdk_fixture() {
+    mkdir -p "$1/anolisa_tokenless"
+    cp "$SDK_PY_SRC/__init__.py" "$SDK_PY_SRC/sdk.py" "$SDK_PY_SRC/stats.py" \
+        "$1/anolisa_tokenless/"
+    cat > "$1/anolisa_tokenless/_native.py" <<NATIVE
+"""Stand-in for the compiled extension: the guard only reads declarations."""
+
+__version__ = "$2"
+
+
+class TokenlessError(Exception):
+    pass
+
+
+class CompressionResult:
+    pass
+
+
+class TokenlessRuntime:
+    pass
+
+
+class _StatsQuery:
+    pass
+NATIVE
+    [ "${3:-0}" = "1" ] || return 0
+    "$PYTHON3" - "$1/anolisa_tokenless/sdk.py" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+field = "    command: str | None = None\n"
+assert text.count(field) == 1, "PostToolRequest.command moved; update this fixture"
+path.write_text(text.replace(field, "", 1), encoding="utf-8")
+PY
+}
+
+mkdir -p "$SANDBOX/sdk-old/anolisa_tokenless"
 printf '__version__ = "0.0.0-old"\n' > "$SANDBOX/sdk-old/anolisa_tokenless/__init__.py"
-PYTHON3="$(command -v python3)"
-if run bash "$INSTALL_SH" 2>&1 | grep -q 'import left unverified'; then
+run bash "$INSTALL_SH" >"$SANDBOX/install-sdk-unverified.out" 2>&1
+if [ "$?" -eq 0 ] && grep -q 'import left unverified' "$SANDBOX/install-sdk-unverified.out"; then
     pass "installer reports an unverified SDK when the CLI has no Python shebang"
 else
     fail "installer did not report the unverified SDK"
 fi
-if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$INSTALL_SH" | grep -q 'anolisa_tokenless 0.0.0-test is importable'; then
-    pass "installer verifies the SDK through QwenPaw's Python"
+if [ -z "$PYTHON3" ]; then
+    echo "[SKIP] no Python 3.11+ on PATH; the SDK verdicts are not exercised"
 else
-    fail "installer did not verify the SDK through QwenPaw's Python"
-fi
-if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-old" bash "$INSTALL_SH" >/dev/null 2>&1; then
-    fail "installer accepted a wheel without the required SDK surface"
-else
-    pass "installer fails when the installed SDK predates the plugin"
-fi
-if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/emptybin" bash "$INSTALL_SH" >/dev/null 2>&1; then
-    fail "installer accepted a QwenPaw environment without anolisa_tokenless"
-else
-    pass "installer fails when anolisa_tokenless is not importable"
-fi
-run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-old" bash "$DETECT_SH" >"$SANDBOX/detect-old.out" 2>&1
-if [ "$?" -eq 1 ] && grep -q 'not importable' "$SANDBOX/detect-old.out"; then
-    pass "detect reports an SDK that predates the plugin as not ready"
-else
-    fail "detect did not report the outdated SDK"
-fi
-if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$DETECT_SH" | grep -q 'importable (0.0.0-test)'; then
-    pass "detect reports the importable SDK version"
-else
-    fail "detect did not report the importable SDK version"
+    make_sdk_fixture "$SANDBOX/sdk-ok" "0.0.0-test"
+    make_sdk_fixture "$SANDBOX/sdk-stale" "0.0.0-test" 1
+    run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$INSTALL_SH" >"$SANDBOX/install-sdk-ok.out"
+    if [ "$?" -eq 0 ] && grep -q 'anolisa_tokenless 0.0.0-test is importable' "$SANDBOX/install-sdk-ok.out"; then
+        pass "installer verifies the SDK through QwenPaw's Python"
+    else
+        fail "installer did not verify the SDK through QwenPaw's Python"
+    fi
+    run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-stale" \
+        bash "$INSTALL_SH" >"$SANDBOX/install-sdk-stale.out" 2>&1
+    if [ "$?" -ne 0 ] && grep -q 'PostToolRequest.command' "$SANDBOX/install-sdk-stale.out"; then
+        pass "installer rejects a wheel that lacks a field the plugin passes"
+    else
+        fail "installer accepted a wheel whose PostToolRequest has no command field"
+    fi
+    if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-old" bash "$INSTALL_SH" >/dev/null 2>&1; then
+        fail "installer accepted a wheel without the required SDK surface"
+    else
+        pass "installer fails when the installed SDK predates the plugin"
+    fi
+    if run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/emptybin" bash "$INSTALL_SH" >/dev/null 2>&1; then
+        fail "installer accepted a QwenPaw environment without anolisa_tokenless"
+    else
+        pass "installer fails when anolisa_tokenless is not importable"
+    fi
+    # The verdict comes from the bundle's plugin.py, which the installer loads
+    # with AgentScope stubbed out. A bundle that cannot be loaded is no verdict:
+    # the installer must say so and still install, leaving the refusal to the
+    # plugin's own registration check.
+    cp "$ADAPTER_DIR/qwenpaw/plugin.py" "$SANDBOX/plugin.py.orig"
+    printf 'import definitely_not_installed\n' > "$ADAPTER_DIR/qwenpaw/plugin.py"
+    run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" \
+        bash "$INSTALL_SH" >"$SANDBOX/install-unloadable.out" 2>&1
+    if [ "$?" -eq 0 ] && grep -q 'could not check the SDK surface' "$SANDBOX/install-unloadable.out"; then
+        pass "installer reports an unverifiable bundle and still installs it"
+    else
+        fail "installer did not report the bundle it could not introspect"
+    fi
+    cp "$SANDBOX/plugin.py.orig" "$ADAPTER_DIR/qwenpaw/plugin.py"
+    # The case above installed the broken bundle, so put the real one back.
+    run bash "$INSTALL_SH" >/dev/null \
+        || fail "failed to reinstall plugin after unverifiable-bundle coverage"
+    run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-old" bash "$DETECT_SH" >"$SANDBOX/detect-old.out" 2>&1
+    if [ "$?" -eq 1 ] && grep -q 'unusable' "$SANDBOX/detect-old.out"; then
+        pass "detect reports an SDK that predates the plugin as not ready"
+    else
+        fail "detect did not report the outdated SDK"
+    fi
+    run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-stale" \
+        bash "$DETECT_SH" >"$SANDBOX/detect-stale.out" 2>&1
+    if [ "$?" -eq 1 ] && grep -q 'PostToolRequest.command' "$SANDBOX/detect-stale.out"; then
+        pass "detect reports a wheel that lacks a required field as not ready"
+    else
+        fail "detect did not report the stale wheel"
+    fi
+    run env QWENPAW_PYTHON="$PYTHON3" PYTHONPATH="$SANDBOX/sdk-ok" bash "$DETECT_SH" >"$SANDBOX/detect-sdk-ok.out"
+    if [ "$?" -eq 0 ] && grep -q 'importable (0.0.0-test)' "$SANDBOX/detect-sdk-ok.out"; then
+        pass "detect reports the importable SDK version"
+    else
+        fail "detect did not report the importable SDK version"
+    fi
 fi
 run bash "$UNINSTALL_SH" >/dev/null || fail "failed to uninstall plugin after SDK coverage"
 
-if run env PATH="$SANDBOX/emptybin:/usr/bin:/bin" QWENPAW_HOME="$SANDBOX/nowhere" \
-        bash "$INSTALL_SH" 2>/dev/null | grep -q 'skipping plugin installation' && [ ! -d "$PLUGIN_DST" ]; then
+run env PATH="$SANDBOX/emptybin:/usr/bin:/bin" QWENPAW_HOME="$SANDBOX/nowhere" \
+    bash "$INSTALL_SH" >"$SANDBOX/install-no-cli.out" 2>/dev/null
+if [ "$?" -eq 0 ] && grep -q 'skipping plugin installation' "$SANDBOX/install-no-cli.out" && [ ! -d "$PLUGIN_DST" ]; then
     pass "installer skips without a qwenpaw CLI"
 else
     fail "installer did not skip cleanly without a qwenpaw CLI"
@@ -318,7 +417,7 @@ fi
 # `qwenpaw plugin install` used to surface that as a bare pip HTTP error. The
 # installer now probes the asset for this host first and names the missing tag.
 case "$(uname -s)/$(uname -m)" in
-    Linux/x86_64 | Linux/aarch64 | Darwin/arm64) PREFLIGHT_PLATFORM=1 ;;
+    Linux/x86_64 | Linux/aarch64 | Darwin/arm64 | Darwin/x86_64) PREFLIGHT_PLATFORM=1 ;;
     *) PREFLIGHT_PLATFORM=0 ;;
 esac
 
@@ -408,6 +507,44 @@ PYSTUBEOF
         env PATH="$FAKE_HOME/.qwenpaw/bin:$SHADOW_BIN:/usr/local/bin:$MIN_BIN" \
             bash -c "$probe"
     }
+
+    # Exercise both Mac hosts on Linux CI, including a CLI whose Python
+    # interpreter cannot be verified after it copies the bundle.
+    MACOS_PROBE_BIN="$SANDBOX/macos-probebin"
+    mkdir -p "$MACOS_PROBE_BIN"
+    cp "$PROBE_BIN/curl" "$MACOS_PROBE_BIN/curl"
+    cat > "$MACOS_PROBE_BIN/uname" <<'UNAMEEOF'
+#!/usr/bin/env bash
+case "$1" in
+    -s) printf '%s\n' Darwin ;;
+    -m) printf '%s\n' "$PROBE_ARCH" ;;
+    *) exit 2 ;;
+esac
+UNAMEEOF
+    chmod +x "$MACOS_PROBE_BIN/uname"
+    for architecture in arm64 x86_64; do
+        wheel_url="https://github.com/alibaba/anolisa/releases/download/tokenless/v0.0.0-test/"
+        wheel_url+="anolisa_tokenless-0.0.0-test-cp311-abi3-macosx_11_0_${architecture}.whl"
+        status="$(PROBE_ARCH="$architecture" probe_case 404 "$MACOS_PROBE_BIN")"
+        if [ "$status" -eq 1 ] && used_tool curl &&
+            [ "$(grep -Fc " $wheel_url" "$PROBE_LOG")" -eq 2 ] &&
+            grep -Fq "$wheel_url" "$SANDBOX/preflight.out" &&
+            [ ! -d "$PLUGIN_DST" ] && ! grep -q '^plugin install ' "$STUB_LOG"; then
+            pass "Darwin/$architecture confirms a missing wheel before copying the bundle"
+        else
+            fail "Darwin/$architecture did not reject its missing wheel before installation (rc=$status)"
+        fi
+
+        status="$(PROBE_ARCH="$architecture" probe_case 200 "$MACOS_PROBE_BIN")"
+        if [ "$status" -eq 0 ] && used_tool curl &&
+            [ "$(grep -Fc " $wheel_url" "$PROBE_LOG")" -eq 1 ] &&
+            [ -f "$PLUGIN_DST/plugin.json" ] &&
+            grep -q '^plugin install ' "$STUB_LOG"; then
+            pass "Darwin/$architecture installs after probing its available wheel"
+        else
+            fail "Darwin/$architecture did not probe its available wheel before installation (rc=$status)"
+        fi
+    done
 
     status="$(probe_case 404 "$PROBE_BIN")"
     if [ "$status" -ne 0 ] && used_tool curl &&

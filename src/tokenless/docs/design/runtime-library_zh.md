@@ -30,7 +30,16 @@ OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约�
 候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
 提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
 携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
-Rust Core，而不是 Python 配置中。
+Rust Core，而不是 Python 配置中。Shell 工具的 `PostToolRequest` 在 `command` 字段携带实际
+执行的命令行；由 Core 而非 Adapter 把只打印本地文件的结果报告为 `file_read`，打印出的
+HTML 页面因此保持原样，输出中的数据仍照常压缩。
+
+PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，保留已识别的原生
+`head`、`tail` 调用，支持嵌套和 Shell 换行续行。所有参数形式均保持原生执行，包括字节
+窗口和持续跟踪模式。一旦识别到此类调用，其所在的整条 Pipeline 或复合命令都跳过 RTK
+改写。这避免了 RTK `read --max-lines` 路径的结构截断；显式 RTK 调用保持既有行为。
+不会读取自定义 `hooks.transparent_prefixes`，因此这些前缀下的调用仍可能被改写。
+该规则独立于搜索路径共享开关，保留现有 PostTool 文件读取策略。
 
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
@@ -38,25 +47,101 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
 后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
+千问办公的 Hook Adapter 在两个生命周期请求之前，将两个工作区 Shell MCP 名称统一为
+`Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
+确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置
+及结构化响应处理。插件私有二进制也由 Adapter 解析；私有 PATH 或工作区状态不代表
+模型可以调用恢复命令，因此这些路径声明 `recovery.kind = none`。
+
 非法输入、内置 RTK 缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
+OpenClaw 2026.6.6 或更高版本通过已声明且显式启用的工具结果 middleware，在模型消费前
+调用 PostTool。Adapter 保留结果信封，只处理单文本结果，声明 `recovery.kind = none`，
+并保留逐调用 RTK 归属信息。不再通过单独的持久化 hook 重复处理结果。Adapter 捕获压缩
+失败并保留收到的宿主结果，因为宿主会把 middleware 抛出的异常转为工具失败。
+旧版 middleware 预处理可能已裁剪文本或元数据。Tokenless 不会在 API 最低版本之上
+额外拒绝这些宿主，也不会重建缺失内容。仅 `applied` 压缩替换文本；工具错误诊断仍可
+追加上下文。详见[宿主兼容边界](../../../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
+
+构建 CLI 和 OpenClaw Adapter 后，可在 `src/tokenless` 使用本地宿主镜像运行可选容器回归：
+
+```bash
+python3 tests/test-openclaw-gateway.py --image <legacy-image> --host-output-policy legacy
+python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-policy normalized
+```
+
+根据镜像的源码来源选择预期策略，不依赖版本字符串。真实 Gateway 使用本地脚本模型，
+不发送云端请求。测试覆盖普通 CSV、150,000 字符纯文本／JSON 结果、失败透传、首次
+消费、历史重放、持久化和统计。旧版截断作为预期限制验证；normalized 策略要求完整
+原生输入进入 middleware，并无损交付 JSON 候选。此测试验证传输行为，不验证模型
+回答质量或计费节省。
+
 ## 搜索路径共享
 
-PostTool 仅在搜索路径共享已开启、来源为 `api_response` 且支持文本替换时，将识别为
-`search_results` 的内容交给 `SearchResultsCompressor`。这是按内容派发的 Core 能力，不限定 Agent ID；
-文件内容和命令输出均不进入该域，包括未由 RTK 处理的 Bash 输出。
+PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `search_results` 的内容交给
+`SearchResultsCompressor`。这是按内容派发的 Core 能力，不依赖命令名或 Agent ID；
+带行号的搜索记录仍要求来源为 `api_response`。
 成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
 行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；
 任意不支持的记录都会拒绝整份候选。字节数与估算 Token 均减少后，再经过现有 Runtime 仲裁。
 实际采用时操作为 `search_path_sharing`，Python SDK 对应 `AppliedOperation.SEARCH_PATH_SHARING`；
 恢复等级为 `lossless`，不写入 Stash。
 
+纯路径列表也可共享公共目录前缀，允许 `command_output` 和 `api_response` 来源。
+至少包含三条 POSIX 路径，使用统一的 LF 或 CRLF；收到的全部路径、顺序、重复项及末尾换行均保留。
+压缩器验证完整输入，包括超出检测器采样窗口的部分。空行、控制字符、含冒号的路径
+（包括 URL 和 Windows 路径）、混合行尾、双前导斜杠或有歧义的相对根目录均拒绝压缩。
+不带前缀的相对根目录仅接受字母、数字、`.`、`_`、`-`；以 `/`、`./`、`../` 开头的路径
+可包含空格、引号和反斜杠，通过 JSON 字符串编码。压缩器不读取文件，也不规范化路径。
+`file_content` 和 `file_read` 均跳过此路径列表策略；既有文件读取的 JSON、表格、日志处理不变。
+既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
+不会把路径中间或 CRLF 中间的字节截断片段视为记录。完整输入的路径列表候选只生成一次，随后复用到仲裁。
+
+路径列表视图以 `[Path list; all received paths retained; full path = base + each paths entry]`
+开头，随后是含 `base`、`paths`、`line_ending`、`trailing_newline` 的紧凑 JSON。
+将 `base` 与每个解码后的 `paths` 项拼接，以 `line_ending` 连接，仅当 `trailing_newline`
+为 true 时补充末尾行尾，即可逐字节还原。公共前缀始终以 `/` 结束。完整视图（包括声明和元数据）
+的字节数和估算 Token 都减少后，才进入收益仲裁。
+
+PreTool 保留已识别的原生 `find` 调用，以便 PostTool 接收原生结果。包含此类调用的整条复合命令也保留原样；
+混合输出不属于路径列表，不进入该压缩策略。后置路由本身不要求命令为 `find`，其他未优化工具结果
+只要内容符合格式也可复用。检测会穿透嵌套的透明 Shell 关键字（`noglob`、`command`、
+`builtin`、`exec`、`nocorrect`）、`env`、进程 Wrapper（`timeout`、`time`、`nice`、`nohup`）
+和 `uv run`。进程 Wrapper 与固定的 RTK v0.49.0 参数语法一致：带值选项、Flag、附加值、
+数字调整量、`--` 及位置参数；未知选项会停止识别。Tokenizer 在识别可执行命令前移除 Shell
+反斜杠换行续行。RTK 源码不变。不会读取或推断自定义 `hooks.transparent_prefixes`；
+配置此类前缀后，其中的 `find` 仍可能被 RTK 改写。
+
+此设计有意以 RTK 覆盖率换取原生命令保真：混合复合命令、`-print0`、`-ls`、`-printf`
+等非路径列表动作不使用路径列表压缩，少于三条路径或公共前缀无净收益的列表保持原样。
+首条为 `.` 或不带路径分隔符的起始目录也不符合严格路径列表格式；此版本不引入单独的头部记录编码。
+确定性的三条原生 find 回放中，60 条路径的列表得到压缩；含两条路径的混合复合命令和单路径
+查询透传，所有返回路径均可直接读取。这只是 fixture 覆盖情况，不是 Agent 整轮收益度量，
+也不是与 RTK Token 用量的比较。
+
 Claude Code Adapter 仅提取无上下文选项的原生 Grep `mode=content` 响应，将其文本槽声明为
 API 响应，再只替换原输出对象的 `content` 字段。包括宿主限额在内的其他元数据保持不变；
 完整性指保留收到的所有记录，不表示宿主裁剪前的全部可能命中。
-其他 Grep 模式和宿主保留既有路由。RTK 负责的 Bash 输出继续绕过原生 PostTool 压缩。
+其他 Grep 模式和宿主保留既有路由。
+
+RTK 输出所有权会在执行完成后再次确认。PreTool 在 Runtime 数据目录的 `rtk-outcomes.db`
+原子保存原命令和实际执行的完整命令，并为每条改写后的 RTK 命令分配执行批次和序号，独立于统计开关。随包 RTK 记录
+输出字节是否改变；Token 估算持平或增加不能证明内容未变。PostTool 按 Agent、会话、工具调用
+一次性消费结果之前，要求其 `command` 与记录的命令（含执行批次）完全一致；命令缺失或被修改时
+保留旁路，因此重试注册失败也不能复用旧结果。只有全部输出字节未变且工具执行成功，才使用
+保存的原命令继续进入原有管线，
+保留文件读取来源及其他命令相关保护。重试改写无法跟踪时尝试使前一批次失效；即使失效操作失败，
+命令匹配也阻止此次重试复用旧结果。迟到结果不能重建已删除的批次。
+输出已改变、结果缺失或过期、旧版 RTK、状态读写失败时，仍跳过后置压缩。复合调用要求每条
+新改写命令都有结果；包含既有或无法跟踪的 RTK 命令、无法可靠解析的 Shell 替换时，保守地停用后续处理。
+PowerShell Wrapper 目前不生成回执，保留 RTK 旁路。
+Core 会记录结果查询失败的警告；RTK 侧写入失败保持静默，避免污染工具输出。
+未消费结果一天后过期，后续改写通过索引清理过期记录。
+管线沿用宿主声明的能力。Common Hook、Hermes 和 OpenClaw 在查询结果前已为 RTK 输出声明
+`recovery: none`，因此回退仅接受无损候选；本次修改不会为这些调用启用 Stash/retrieve 恢复。
+继续 PostTool 不保证产生压缩：候选结果仍须通过原有保真与收益检查。
 
 搜索路径共享默认开启。CLI 可通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 关闭；
 未设置或为空时保持开启，`1`、`true`、`yes`（不区分大小写）也表示开启；其他值均关闭。
@@ -64,11 +149,19 @@ API 响应，再只替换原输出对象的 `content` 字段。包括宿主限�
 Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
 `TokenlessConfig(search_path_sharing_enabled=False)` 或 `TokenlessRuntime` 的同名参数。
 关闭该域时搜索列表原样返回且不计算搜索候选。其他工具名仍可使用 JSON、表格和日志压缩。
+关闭路径共享时，已识别的原生 `find` 仍跳过 RTK 改写。这是独立于压缩的正确性边界：停用优化
+不应重新引入摘要化或被改动的查询路径。完整恢复此前的 RTK 路由策略需要回退此变更。
 精确名称 `Grep` 始终排除这些域，以保留全部已收到命中；关闭路径共享不会恢复此功能引入前
 自定义 `Grep` 工具的 JSON、表格和日志派发。全局压缩开关仍控制已开启域的 dry-run。
 整任务节省取决于工作负载；保留全部收到的字节并不保证后续工具调用更少或总 Token 用量更低。
 
-首行为固定格式声明，后续 `File=` 行包含 JSON 编码的路径；数据行必以 ASCII 数字和 `:` 开头，
+两种视图有意共用 `search_path_sharing`，以该操作表示优化类别并保持 Protocol v2 不变。
+统计和 `AppliedOperation.SEARCH_PATH_SHARING` 无法区分两种格式。此处描述的头部是内部
+渲染细节，不是带版本保证的 SDK 判别字段；没有导出公开解码器或稳定的头部常量。
+这些示例用于说明无损视图，不构成 SDK 程序化解码契约。
+
+带行号记录的视图以 `[Search results grouped by file; all received lines retained]` 开头。
+后续 `File=` 行包含 JSON 编码的路径；数据行必以 ASCII 数字和 `:` 开头，
 因此不可能被误认为文件头。还原时在每个数据行前拼接当前解码路径与 `:`，保留原始行尾；
 同一路径在非连续位置出现时会生成新的文件头。
 

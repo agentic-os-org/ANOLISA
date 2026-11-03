@@ -164,6 +164,19 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashHooksAgentUnavailable => "(cosh-core 后端不可用)",
         MessageId::SlashExtensionsEmptyBody => "未安装扩展。",
         MessageId::SlashSkillsEmptyBody => "未发现技能。",
+        MessageId::HelpSummaryBug => "生成预填好的 GitHub 问题反馈",
+        MessageId::SlashBugTitle => "反馈问题",
+        MessageId::SlashBugLinkLine => {
+            "打开下方链接即可提交预填好的问题反馈，提交前请检查内容。"
+        }
+        MessageId::SlashBugFormLine => "请在表单中补充问题现象和复现步骤。",
+        MessageId::SlashBugLogsLine => {
+            "日志：可查看 {path} 下最新的日志文件，确认后将相关内容贴到问题中；粘贴前请删除 token、密钥和内网地址。"
+        }
+        MessageId::SlashBugOpenedLine => "正在浏览器中打开链接。",
+        MessageId::SlashBugCopyLine => {
+            "当前环境无法打开浏览器，请将链接复制到本地电脑的浏览器中打开。"
+        }
         _ => return None,
     })
 }

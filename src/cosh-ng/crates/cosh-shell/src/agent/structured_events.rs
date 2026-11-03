@@ -8,7 +8,7 @@ pub(crate) fn render_new_agent_structured_events<W: Write>(
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<()> {
-    let (events, run_request, origin) = {
+    let (events, run_request, origin, failed_without_recovery) = {
         let Some(active_run) = state.agent_run.active.as_mut() else {
             return Ok(());
         };
@@ -21,10 +21,34 @@ pub(crate) fn render_new_agent_structured_events<W: Write>(
         if events.iter().any(event_may_render_structured_surface) {
             active_run.prepare_structured_surface(output)?;
         }
-        active_run.rendered_governed_event_count = end;
-        (events, active_run.request.clone(), active_run.origin)
+        if !crate::agent::finish::failed_run_has_no_recovery(active_run) {
+            active_run.rendered_governed_event_count = end;
+        }
+        (
+            events,
+            active_run.request.clone(),
+            active_run.origin,
+            crate::agent::finish::failed_run_has_no_recovery(active_run),
+        )
     };
-    render_agent_structured_events(state, &events, Some(&run_request), origin, output, adapter)?;
+    if failed_without_recovery {
+        record_approval_requests(
+            state,
+            &events,
+            Some(&run_request),
+            origin,
+            adapter.capabilities().control_protocol,
+        );
+    } else {
+        render_agent_structured_events(
+            state,
+            &events,
+            Some(&run_request),
+            origin,
+            output,
+            adapter,
+        )?;
+    }
     // #1940 I1 batch drain assertion: whatever path the batch above took
     // (question rejection, trust/auto early return, dedup skip), every
     // control request registered by the poll loop must now have a home in
@@ -52,17 +76,7 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     let activity_events = question_rejection
         .map(|(_, event_index, _)| &governed_events[..event_index])
         .unwrap_or(governed_events);
-    let activity_ids = record_activity_rows_with_policy(
-        state,
-        activity_events,
-        ActivityRecordPolicy {
-            suppress_provider_native_shell: adapter.capabilities().control_protocol,
-            shell_evidence_tool_available: shell_evidence_tool_available(state, adapter),
-            origin,
-        },
-    );
-    render_provider_native_shell_transcript(state, &activity_ids, output)?;
-    render_activity_rows(state, &activity_ids, output)?;
+    render_terminal_activity(state, activity_events, origin, output, adapter)?;
     render_user_questions(state, &question_ids, output)?;
     if let Some((reason, _, should_report)) = question_rejection {
         if should_report {
@@ -116,6 +130,27 @@ pub(crate) fn render_agent_structured_events<W: Write>(
         crate::approval::panel::redraw_current_approval_request(state, output)?;
     }
     render_approval_requests(state, &approval_ids, output)?;
+    Ok(())
+}
+
+pub(crate) fn render_terminal_activity<W: Write>(
+    state: &mut InlineState,
+    activity_events: &[GovernedEvent],
+    origin: AgentRunOrigin,
+    output: &mut W,
+    adapter: &AdapterInstance,
+) -> std::io::Result<()> {
+    let activity_ids = record_activity_rows_with_policy(
+        state,
+        activity_events,
+        ActivityRecordPolicy {
+            suppress_provider_native_shell: adapter.capabilities().control_protocol,
+            shell_evidence_tool_available: shell_evidence_tool_available(state, adapter),
+            origin,
+        },
+    );
+    render_provider_native_shell_transcript(state, &activity_ids, output)?;
+    render_activity_rows(state, &activity_ids, output)?;
     Ok(())
 }
 

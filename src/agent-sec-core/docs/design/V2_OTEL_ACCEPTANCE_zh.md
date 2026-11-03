@@ -1,6 +1,6 @@
 # V2 OTel tracing 实现与验收
 
-本工作包实现 Rust CLI → client → UDS → daemon → PAP/compiler 的 tracing，及
+本工作包实现 Rust CLI → client → UDS → daemon → PAP 的 tracing，及
 SecurityEvent/observability 消费者使用的只读关联投影。code-scan 已将快照接入现有
 SecurityEvent JSONL/SQLite 和 telemetry JSONL；不新增存储 schema、本地链路重组、
 历史查询或尚未迁移的安全 capability。架构设计见 [实现设计](V2_OTEL_IMPLEMENTATION_DESIGN_zh.md)。
@@ -64,7 +64,7 @@ watchdog 通过不表示精确测量或证明 50 ms / 2 s 的关闭开销。
 | TO-010 | writer 单测 + process blocked stderr case | PASS：队列饱和丢诊断；启动前填满 stderr 后仍完成请求、重复 daemon 启动失败和关闭，RUST_LOG info/off 均覆盖。公开 exporter 故障测试已移出范围 |
 | TO-017 | process SIGTERM/blocked stderr + runtime shutdown test | PASS：正常与 stderr 阻塞时进程退出完成，stdout 无诊断污染；残留 blocking 工作不无限阻止应用 runtime 退出，不声称精确测量关闭耗时 |
 | TO-011/013 | 真实非 root peer 伪造 Baggage 用例 + 原有 PAP/CLI CRUD、拒绝、revision、digest、CAS、JSON/退出码 fixtures | PASS：保持当前 V2 行为；Agent attribution 不参与 Principal 构造 |
-| TO-012 | process correlation + client/context + `tracing_failures.rs` | PASS：两个真实二进制日志共享 trace、五字段和兼容标签；SDK 内存检查验证 parentage、PAP→compiler 成功/失败 span。未以本地日志声称证明跨进程每层 parent |
+| TO-012 | process correlation + client/context + `tracing_failures.rs` | PASS：两个真实二进制日志共享 trace、五字段和兼容标签；SDK 内存检查验证 parentage、daemon→PAP 成功/失败 span。未以本地日志声称证明跨进程每层 parent |
 | TO-019 | 无 | [SUPERSEDED] 公开 OTLP 导出与 wire 验收移出本期，无 mock Collector |
 | TO-014/016 | `tracing_failures.rs` + process canary + runtime tests | PASS：真实 UDS busy/read timeout/invalid envelope/unknown method/permission denied/handler panic 的内部 span 范围和错误类别；params/panic/普通消息/未知 Baggage 不进入新增关联诊断，原用户输出另按业务契约验收 |
 | TO-015 | `asc-daemon/tests/tracing.rs` | PASS：真实 UDS deadline 返回后 handler span 仍打开，工作完成后闭合并记录 `cancel_requested` |
@@ -89,7 +89,7 @@ OTEL-CR-009 增加了真实 code-scan 的 JSONL/SQLite 持久化和 telemetry �
 | --- | --- | --- |
 | OTEL-CR-001 | 原生 PAP envelope 增加可选 versioned carrier | 仅支持新 CLI/new daemon；部署先升级 daemon，旧 daemon 不属于兼容门禁，不做自动重试 |
 | OTEL-CR-002 | 旧 opaque trace ID 作为兼容标签 | 不转换、哈希或伪装成 OTel TraceId；V1 历史记录不在这里迁移 |
-| OTEL-CR-003 | 一个 Context + Baggage + native spans | 业务函数不添加 metadata/context 参数；首期只有 PAP/compiler 埋点 |
+| OTEL-CR-003 | 一个 Context + Baggage + native spans | 业务函数不添加 metadata/context 参数；首期只有 PAP 埋点 |
 | OTEL-CR-004 | 本期仅本地 OTel Context 与关联日志 | 取消公开 OTLP exporter、采样和 batch 配置；固定 AlwaysOff，本地 ID/Baggage 保留。有界诊断不得改变业务结果，原 CLI 结果输出保持 |
 | OTEL-CR-005 | 不新增 invocation UUID 或诊断请求 ID 生成器 | 显式 invocation 标签保留；当前公开 PAP requestId UUID 保留；日志以 trace_id + request_span_id 关联 |
 | OTEL-CR-006 | 独立请求 propagation 容量 | 4 MiB 业务 + 32 KiB propagation；响应不扩容；raw whitespace 不被隐藏 |
@@ -97,7 +97,7 @@ OTEL-CR-009 增加了真实 code-scan 的 JSONL/SQLite 持久化和 telemetry �
 | OTEL-CR-008 | metadata adapter 增加 hook kind，先校验再替换记录字段 | V1 必填/null/alias/extra 规则保持；父值不掩盖缺失，省略/null 的可选字段清除。agent_name 由原 trace-context/carrier 提供；只改内部 helper，无新增 RPC 或 caller 参数 |
 | OTEL-CR-009 | 共享 Finalizer 构造两类记录时复用一个 Context snapshot | 既有 audit 五个关联字段获得请求归属，trace_id 保持 opaque 兼容标签；telemetry 仅增加白名单 agent_name 值，无新字段、schema 或授权输入 |
 
-直接消费者：两个产品入口、同步 client、dispatcher/rejection encoder、PapService、compiler 和
+直接消费者：两个产品入口、同步 client、dispatcher/rejection encoder、PapService 和
 共享 Finalizer；ActionService 仅传递可信 CallerIdentity，Finalizer 构造两类记录时复用一次
 Context 快照，两个 sink 只写入完整记录。仅新增
 `traceContext/compatibility` wire 字段；没有修改 PAP domain model、revision、授权、

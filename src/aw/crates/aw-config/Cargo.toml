@@ -1,0 +1,15 @@
+[package]
+name = "aw-config"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Offline parsing and validation of unified AW configuration"
+repository = "https://github.com/alibaba/anolisa"
+publish = false
+
+[dependencies]
+jsonschema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }

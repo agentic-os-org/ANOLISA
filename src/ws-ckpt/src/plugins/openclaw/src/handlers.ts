@@ -7,8 +7,8 @@
 
 import { CommandExecutor, extractTiming } from "./commands.js";
 import { mapErrorToLLMMessage } from "./btrfs-manager.js";
-import type { AgentToolResult } from "../types-shim.js";
-import { pluginState, UNAVAILABLE_MSG, cwdInsideWorkspace, cwdInsideWorkspaceReason } from "./state.js";
+import type { AgentToolResult, OpenClawSessionContext } from "../types-shim.js";
+import { pluginState, UNAVAILABLE_MSG, cwdInsideWorkspace, cwdInsideWorkspaceReason, workspaceRegistrationPath, rememberRollback } from "./state.js";
 import { parseWorkspaceCleanupJson } from "./config.js";
 import { persistConfig } from "./persist.js";
 import { CrontabManager, parseSchedulesUpdate } from "./cron.js";
@@ -93,6 +93,7 @@ export async function handleRollback(
   workspace?: string,
   numAncestors?: number,
   preview: boolean = false,
+  context?: OpenClawSessionContext,
 ): Promise<{ text: string; isError: boolean }> {
   if (!pluginState.manager || !pluginState.environmentReady) {
     return { text: UNAVAILABLE_MSG, isError: true };
@@ -117,24 +118,39 @@ export async function handleRollback(
     return { text: "No workspace configured", isError: true };
   }
 
+  const rollbackManager = pluginState.manager;
+  const managerWorkspace = rollbackManager.getWorkspacePath();
+  let registration: string | undefined;
   if (!preview) {
-    const cwdCheck = cwdInsideWorkspace(resolvedWs);
-    if (cwdCheck.inside) {
-      return { text: cwdInsideWorkspaceReason(cwdCheck.cwd, resolvedWs), isError: true };
+    let registrationPath: string;
+    try {
+      registrationPath = await new CommandExecutor().resolveWorkspacePath(
+        workspace?.trim() ? resolvedWs : managerWorkspace ?? resolvedWs,
+      );
+    } catch (error) {
+      return { text: error instanceof Error ? error.message : String(error), isError: true };
     }
+    if (!workspace?.trim() && (pluginState.manager !== rollbackManager
+        || rollbackManager.getWorkspacePath() !== managerWorkspace)) {
+      return { text: "Workspace changed while resolving rollback. Retry with the intended workspace.", isError: true };
+    }
+    const cwdCheck = cwdInsideWorkspace(registrationPath);
+    if (cwdCheck.inside) {
+      return { text: cwdInsideWorkspaceReason(cwdCheck.cwd, registrationPath), isError: true };
+    }
+    registration = workspaceRegistrationPath(registrationPath);
   }
-
   if (workspace?.trim()) {
     const execResult = await runRollbackViaExecutor(resolvedWs, trimmed || undefined, numAncestors, preview);
-    if (!execResult.isError && !preview) {
-      pluginState.skipNextAutoCheckpoint = true;
+    if (!execResult.isError && registration !== undefined) {
+      rememberRollback(registration, context);
     }
     return execResult;
   }
 
   const result = await pluginState.manager.rollback(trimmed || undefined, numAncestors, preview);
-  if (result.success && !preview) {
-    pluginState.skipNextAutoCheckpoint = true;
+  if (result.success && registration !== undefined) {
+    rememberRollback(registration, context);
   }
   return { text: result.message, isError: !result.success };
 }
@@ -444,17 +460,39 @@ export async function handleConfig(
       if (!value) {
         return { text: "workspace requires a path value", isError: true };
       }
+      if (/[\n\r]/.test(value)) {
+        // The workspace path is interpolated into crontab lines; a line
+        // break would install everything after it as an independent cron
+        // entry (see cron.ts buildCronLine).
+        return { text: "workspace must be a single-line path without line breaks", isError: true };
+      }
+      // The new workspace is initialized immediately below (symlink swap /
+      // inode replacement); refuse first when this session's cwd sits inside
+      // it, mirroring the autoCheckpoint branch above and every other entry
+      // point that can init or checkpoint.
+      const cwdCheckNew = cwdInsideWorkspace(value);
+      if (cwdCheckNew.inside) {
+        return { text: cwdInsideWorkspaceReason(cwdCheckNew.cwd, value), isError: true };
+      }
       const oldWs = pluginState.resolvedConfig.workspace;
       pluginState.resolvedConfig.workspace = value;
       const schedules = pluginState.resolvedConfig.cronSchedules ?? [];
       const warnings = await CrontabManager.migrate(oldWs, value, schedules);
       const persistErr = persistConfig({ workspace: value });
-      // Re-initialize manager with new workspace so subsequent commands use it
+      // Re-initialize manager with new workspace so subsequent commands use it.
+      // A failed setup must be surfaced: reporting bare success here would
+      // leave the plugin pointed at a workspace it cannot operate on.
+      let setupFailed = false;
       if (pluginState.manager) {
-        await pluginState.manager.ensureWorkspace(value);
+        setupFailed = !(await pluginState.manager.ensureWorkspace(value));
       }
       let msg = `Config updated: workspace = ${value}`;
       if (persistErr) msg += `\n\nWARNING: Failed to persist config: ${persistErr}. Change is in-memory only.`;
+      if (setupFailed) {
+        msg += `\n\nWARNING: workspace setup failed for ${value} — the config now points at it, ` +
+          `but ws-ckpt commands will fail until it initializes. Check the daemon and ` +
+          `\`ws-ckpt init --workspace ${value}\`, then retry from a session outside that directory.`;
+      }
       if (warnings.length > 0) msg += "\n\n" + warnings.join("\n");
       return { text: msg, isError: false };
     }

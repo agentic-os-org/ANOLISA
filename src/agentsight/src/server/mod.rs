@@ -17,6 +17,7 @@ mod secret;
 pub(crate) mod storage_status;
 mod system_audit;
 mod token_savings;
+mod tokenless;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +98,10 @@ pub struct AppState {
     /// dashboard feature, so the rest of the server still serves and the
     /// endpoints report why rather than the process refusing to start.
     pub reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
+    /// Runtime configuration file backing the storage settings panel.
+    pub config_path: Option<PathBuf>,
+    /// Global SQLite capacity budget shared with the maintenance worker.
+    pub storage_budget: Arc<crate::storage_budget::StorageBudget>,
     /// Read-only store over collected trajectories (`trajectories.db`)
     ///
     /// Wrapped in `RwLock` so `trajectory_store()` can memoize lazy opens
@@ -279,6 +284,9 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 )
                 .service(handlers::get_interruption)
                 .service(token_savings::get_token_savings)
+                .service(tokenless::refresh)
+                .service(tokenless::get_records)
+                .service(tokenless::get_record)
                 .service(token_savings::get_session_savings)
                 // AgentSight local security and system-audit API routes
                 .service(handlers::security_status)
@@ -339,6 +347,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::get_trajectory_detail)
                 // Storage lifecycle status
                 .service(storage_status::get_storage_status)
+                .service(storage_status::post_storage_config)
                 // API self-documentation
                 .service(web::resource("/docs").route(web::get().to(api_docs)))
                 .default_service(web::route().to(api_not_found)),
@@ -685,6 +694,18 @@ fn path_extractor_config() -> web::PathConfig {
         .error_handler(|error, _req| extractor_error(format!("invalid path parameter: {error}")))
 }
 
+/// Builds the typed query extractor config registered on the server `App`.
+///
+/// `web::Query`'s default rejection is a `text/plain` serde message, so a
+/// mistyped query parameter was the one extractor failure that answered with a
+/// body no API consumer can parse — `?limit=abc` on a list route returned
+/// `Query deserialize error: invalid digit found in string` while the same
+/// mistake in a request body or a path got the `{"error":{...}}` envelope.
+fn query_extractor_config() -> web::QueryConfig {
+    web::QueryConfig::default()
+        .error_handler(|error, _req| extractor_error(format!("invalid query parameter: {error}")))
+}
+
 /// Wraps an extractor failure into a 400 response with the shared envelope.
 fn extractor_error(message: String) -> actix_web::Error {
     let response = system_audit::error_response(
@@ -807,16 +828,21 @@ fn server_maintenance_jobs(
     manager: &DatabaseManager,
     config: &StorageConfig,
     stores: ServerMaintenanceStores,
+    budget: Arc<crate::storage_budget::StorageBudget>,
 ) -> Result<Vec<Box<dyn MaintenanceJob>>, DatabaseManagerError> {
     let mut jobs = Vec::new();
     for (id, policy) in server_maintenance_schedule(config) {
         let interval = Duration::from_secs(policy.check_interval_secs);
+        let budget = Arc::clone(&budget);
         let job = match id {
-            DatabaseId::GenAi => stores.genai.as_ref().map(|store| {
-                let store = Arc::clone(store);
+            DatabaseId::GenAi => stores.genai.as_ref().map(|capture| {
+                let store = manager.open_read_write(id, |path| {
+                    GenAISqliteStore::open_maintenance_existing(path, policy, capture)
+                })?;
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain()
+                        .maintain_with_limit_mb(limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
@@ -824,8 +850,9 @@ fn server_maintenance_jobs(
             DatabaseId::Interruptions => stores.interruptions.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .purge_old_and_oversized(policy.retention_days, policy.max_db_size_mb)
+                        .purge_old_and_oversized(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
@@ -833,8 +860,10 @@ fn server_maintenance_jobs(
             DatabaseId::Optimization => stores.optimization.has_storage().then(|| {
                 let state = Arc::clone(&stores.optimization);
                 manager.maintenance_job(id, interval, move || {
+                    let mut effective = policy;
+                    effective.max_db_size_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     state
-                        .maintain_storage(policy)
+                        .maintain_storage(effective)
                         .map(|_| ())
                         .map_err(LifecycleError::MaintenanceJobFailed)
                 })
@@ -842,10 +871,11 @@ fn server_maintenance_jobs(
             DatabaseId::SecurityAudit => {
                 let store = Arc::clone(&stores.security_audit);
                 Some(manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
                         .maintain(agentsight_audit::AuditMaintenancePolicy {
                             retention_days: policy.retention_days,
-                            max_db_size_mb: policy.max_db_size_mb,
+                            max_db_size_mb: limit_mb,
                         })
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
@@ -854,8 +884,9 @@ fn server_maintenance_jobs(
             DatabaseId::Reuse => stores.reuse.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .maintain(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 })
@@ -863,10 +894,11 @@ fn server_maintenance_jobs(
             DatabaseId::Causal => stores.causal.as_ref().map(|store| {
                 let store = Arc::clone(store);
                 manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
                         .maintain(causal_store::CausalMaintenancePolicy {
                             retention_days: policy.retention_days,
-                            max_db_size_mb: policy.max_db_size_mb,
+                            max_db_size_mb: limit_mb,
                         })
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
@@ -875,8 +907,9 @@ fn server_maintenance_jobs(
             DatabaseId::Enforcement => {
                 let store = Arc::clone(&stores.enforcement);
                 Some(manager.maintenance_job(id, interval, move || {
+                    let limit_mb = budget.effective_limit_mb(id, policy.max_db_size_mb);
                     store
-                        .maintain(policy.retention_days, policy.max_db_size_mb)
+                        .maintain(policy.retention_days, limit_mb)
                         .map(|_| ())
                         .map_err(|error| LifecycleError::MaintenanceJobFailed(error.to_string()))
                 }))
@@ -896,6 +929,20 @@ fn stop_database_maintenance(manager: &DatabaseManager) {
     }
 }
 
+/// Mask a dashboard token for the startup log line: the first eight characters
+/// plus a fixed suffix, or `****` when the token is short enough that a preview
+/// would reveal all of it. Counts characters rather than bytes so a token set by
+/// hand with multi-byte characters cannot split a code point.
+fn mask_token(token: &str) -> String {
+    let mut chars = token.chars();
+    let head: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("{head}****")
+    } else {
+        "****".to_string()
+    }
+}
+
 /// Start the API server
 ///
 /// Binds to the given host:port and serves API endpoints + embedded frontend.
@@ -907,8 +954,13 @@ pub async fn run_server(
     auth_config: ServerAuthConfig,
     storage_config: StorageConfig,
     reuse_llm_judge_enabled: bool,
+    cmdline_rules: Vec<crate::config::CmdlineRule>,
+    config_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
+    let tokenless_client = tokenless::QueryClient::from_config_path(config_path.as_deref())
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .map(web::Data::new);
     let storage_base = storage_data_dir(&storage_path);
     let database_manager = Arc::new(
         DatabaseManager::new(
@@ -984,11 +1036,7 @@ pub async fn run_server(
     let dashboard_auth = Arc::new(DashboardAuth::init(&auth_config, storage_base));
     if dashboard_auth.enabled {
         if let Some(token) = dashboard_auth.read_token_from_file() {
-            let masked = if token.len() > 8 {
-                format!("{}****", &token[..8])
-            } else {
-                "****".to_string()
-            };
+            let masked = mask_token(&token);
             eprintln!(
                 "Dashboard auth enabled. Token: {masked}  (use `agentsight dashboard` to view)"
             );
@@ -1027,7 +1075,8 @@ pub async fn run_server(
 
     // Spin up the background health checker
     let health_store = Arc::new(RwLock::new(HealthStore::new()));
-    let mut checker = HealthChecker::new(Arc::clone(&health_store), Duration::from_secs(30));
+    let mut checker = HealthChecker::new(Arc::clone(&health_store), Duration::from_secs(30))
+        .with_cmdline_rules(cmdline_rules);
     if let Some(ref istore) = interruption_store {
         checker = checker.with_interruption_store(Arc::clone(istore));
     }
@@ -1067,6 +1116,13 @@ pub async fn run_server(
     };
     let optimize_state = optimize::OptimizeState::init(storage_base, optimization_store);
 
+    let storage_budget = Arc::new(
+        crate::storage_budget::StorageBudget::new(config_path.clone(), &storage_config)
+            // `--db` names the GenAI database; the config-derived path always
+            // carries the default name, so the override keeps the served file
+            // inside the combined cap.
+            .with_genai_path(&storage_path),
+    );
     let maintenance_jobs = server_maintenance_jobs(
         &database_manager,
         &storage_config,
@@ -1079,6 +1135,7 @@ pub async fn run_server(
             causal: causal_store.as_ref().map(Arc::clone),
             enforcement: Arc::clone(&enforcement_store),
         },
+        Arc::clone(&storage_budget),
     )
     .map_err(|error| std::io::Error::other(error.to_string()))?;
     database_manager
@@ -1124,6 +1181,8 @@ pub async fn run_server(
         auth: dashboard_auth.clone(),
         optimize: Some(optimize_state),
         reuse_store,
+        config_path,
+        storage_budget,
         reuse_llm_judge_enabled,
         causal_store,
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
@@ -1149,7 +1208,7 @@ pub async fn run_server(
             .allowed_headers(vec!["Content-Type", "Authorization"])
             .max_age(3600);
 
-        App::new()
+        let mut app = App::new()
             .wrap(cors)
             .wrap(AuthMiddleware::new(dashboard_auth.clone()))
             .app_data(data.clone())
@@ -1157,7 +1216,12 @@ pub async fn run_server(
             .app_data(database_manager_data.clone())
             .app_data(json_extractor_config())
             .app_data(path_extractor_config())
-            .configure(configure_routes)
+            .app_data(query_extractor_config())
+            .configure(configure_routes);
+        if let Some(client) = &tokenless_client {
+            app = app.app_data(client.clone());
+        }
+        app
     })
     .bind((host, port))
     {
@@ -1217,6 +1281,7 @@ fn stop_enforcement_ingestion(
 
 #[cfg(test)]
 mod tests {
+    use super::mask_token;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
     use std::time::Instant;
@@ -1260,8 +1325,8 @@ mod tests {
     use super::auth::DashboardAuth;
     use super::{
         AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes,
-        json_extractor_config, path_extractor_config, private_state_dir, serve_frontend,
-        serve_frontend_root,
+        json_extractor_config, path_extractor_config, private_state_dir, query_extractor_config,
+        serve_frontend, serve_frontend_root,
     };
     use crate::config::{ServerAuthConfig, StorageConfig};
 
@@ -1358,6 +1423,144 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn audit_read_filters_reject_unknown_closed_set_tokens() {
+        // `status` / `event_type` / `result` each have a closed set of writers
+        // (`risk_status`, `EventMetadata::from_event`), so a typo can never
+        // match a row: answering an empty 200 made it indistinguishable from a
+        // genuinely empty result.
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/audit/cases?status=oepn",
+            "/api/audit/events?event_type=file_actions",
+            "/api/audit/events?result=bloked",
+            "/api/audit/summary?event_type=file_actions",
+            "/api/audit/sessions?result=bloked",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Valid tokens still filter; the in-memory store is simply empty.
+        for uri in [
+            "/api/audit/cases?status=open",
+            "/api/audit/events?event_type=file_action",
+            "/api/audit/events?result=blocked",
+            "/api/audit/summary?event_type=file_action",
+            "/api/audit/sessions?result=blocked",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn audit_cases_reject_event_filters_they_cannot_apply() {
+        // `/audit/cases` reads the correlated `risk_cases` table, and its store
+        // query takes only `agent_id`, `status` and `blocked`. The event-level
+        // fields are shared through `AuditQuery`, so they were accepted and
+        // dropped: `/api/audit/cases?event_type=file_action` answered every case
+        // with a 200, indistinguishable from a filtered result.
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/audit/cases?event_type=file_action",
+            "/api/audit/cases?result=blocked",
+            "/api/audit/cases?policy_id=policy-1",
+            "/api/audit/cases?session_id=session-1",
+            "/api/audit/cases?binding_id=00000000-0000-0000-0000-000000000001",
+            "/api/audit/cases?start_ns=1000&end_ns=2000",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body: serde_json::Value = awtest::read_body_json(response).await;
+            let message = body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                message.contains("/api/audit/events"),
+                "{uri} must point at the endpoint that applies the filter, got: {message}"
+            );
+        }
+
+        // Controls: the filters the case query does apply still answer 200.
+        for uri in [
+            "/api/audit/cases?status=open",
+            "/api/audit/cases?agent_id=agent-1",
+            "/api/audit/cases?blocked=true",
+            "/api/audit/cases?limit=10&offset=0",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn audit_event_endpoints_reject_case_filters_they_cannot_apply() {
+        // `status` and `blocked` filter correlated cases, which only
+        // `/audit/cases` reads. The event endpoints share `AuditQuery` but
+        // their store filter has no parameter for either, so the pair was
+        // accepted and dropped: a filtered request answered the unfiltered
+        // events with a 200.
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/audit/events?status=open",
+            "/api/audit/events?blocked=true",
+            "/api/audit/sessions?status=open",
+            "/api/audit/summary?blocked=true",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body: serde_json::Value = awtest::read_body_json(response).await;
+            let message = body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                message.contains("/api/audit/cases"),
+                "{uri} must point at the endpoint that applies the filter, got: {message}"
+            );
+        }
+
+        // Controls: the event filters the three endpoints do apply still
+        // answer 200, and the endpoint named by the rejection keeps its own
+        // case filters.
+        for uri in [
+            "/api/audit/events?event_type=file_action",
+            "/api/audit/events?result=blocked",
+            "/api/audit/sessions?agent_id=agent-1",
+            "/api/audit/summary?event_type=file_action&limit=5",
+            "/api/audit/cases?status=open&blocked=true",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
     }
 
     #[actix_web::test]
@@ -1539,6 +1742,29 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn query_extractor_errors_return_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .app_data(query_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        // Without the QueryConfig handler actix answers `text/plain` with the
+        // raw serde message, so a client that parses the shared error envelope
+        // (and reads `error.code`) loses the reason for the 400.
+        let request = awtest::TestRequest::get()
+            .uri("/api/interruptions?limit=abc")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_bad_request_envelope(response, "invalid query parameter").await;
+    }
+
+    #[actix_web::test]
     async fn frontend_routes_handle_root_and_tail_paths() {
         let app = awtest::init_service(
             App::new()
@@ -1587,6 +1813,11 @@ mod tests {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
@@ -1619,7 +1850,146 @@ mod tests {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
             causal_store: None,
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
             trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
+    }
+
+    fn test_app_state_with_genai_store(
+        store: crate::storage::sqlite::GenAISqliteStore,
+    ) -> web::Data<AppState> {
+        let auth_config = ServerAuthConfig { enabled: false };
+        let auth = Arc::new(DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            genai_store: Some(Arc::new(store)),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
+            trajectory_store: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Audit scenario for the turns endpoint (issue #4475): five complete
+    /// main-flow llm_call events one minute apart, `limit=3` — the response
+    /// must carry the newest three turns, newest first, per the endpoint's
+    /// documented contract. The pre-fix handler iterated the store's
+    /// chronological rows forward and answered with the oldest three.
+    #[actix_web::test]
+    async fn preference_turns_return_newest_unique_turns_first() {
+        let path =
+            std::env::temp_dir().join(format!("test_pref_turns_order_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(
+            &path,
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+
+        // Seed the store through its file with a second connection: the
+        // server test cannot reach the store's private conn field, and raw
+        // SQL needs none of the batch machinery.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let minute = 60_000_000_000_i64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64;
+            for i in 0..5_i64 {
+                let ts = now - (4 - i) * minute;
+                conn.execute(
+                    "INSERT INTO genai_events (\
+                     call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+                     provider, model, input_tokens, output_tokens, total_tokens,\
+                     session_id, trace_id, conversation_id, agent_name, pid,\
+                     status, tool_call_ids, event_json, process_name, user_query, call_kind\
+                     ) VALUES (?1,'llm_call',?2,?3,?4,'openai','gpt-4',10,10,20,\
+                     'sess-t','trace-t','conv-t','agent-a',1,'complete','[]','[]','proc-a',?5,'main')",
+                    rusqlite::params![
+                        format!("pt-{i}"),
+                        ts,
+                        ts + 1_000,
+                        1_000,
+                        format!("turn {}", i + 1)
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_genai_store(store))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/preferences/turns?source=genai&limit=3&window_days=1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&awtest::read_body(response).await).unwrap();
+        let turns: Vec<&str> = body["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert_eq!(turns, vec!["turn 5", "turn 4", "turn 3"]);
+        assert_eq!(body["turns_count"].as_u64(), Some(3));
+        assert_eq!(body["source"].as_str(), Some("genai"));
+
+        // The shared selection used by both handler twins is exercised on
+        // its own in preferences::api tests (the macOS twin is cfg-gated
+        // off Linux); this end-to-end check pins the Linux wiring to it.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The dashboard token may be set by hand in `.dashboard_token`; slicing it
+    /// by bytes panicked on the startup log line whenever the token contained a
+    /// multi-byte character at byte 8.
+    #[test]
+    fn mask_token_keeps_multi_byte_tokens_masked() {
+        assert_eq!(
+            mask_token("密碼短語密碼短語密碼短語"),
+            "密碼短語密碼短語****"
+        );
+        assert_eq!(mask_token("123456789"), "12345678****");
+        assert_eq!(mask_token("12345678"), "****");
+        assert_eq!(mask_token("密碼"), "****");
     }
 }

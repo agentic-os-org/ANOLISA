@@ -107,6 +107,24 @@ pub struct TokenConsumptionStore {
 }
 
 impl TokenConsumptionStore {
+    /// Delete one expired row while a paced maintenance pass owns the writer.
+    pub(in crate::storage) fn purge_expired_step(&self, cutoff_ns: u64) -> anyhow::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (SELECT id FROM {} WHERE timestamp_ns < ?1 ORDER BY timestamp_ns LIMIT 1)",
+            self.table_name, self.table_name
+        );
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .execute(params![cutoff_ns.min(i64::MAX as u64) as i64])?)
+    }
+
+    /// Delegate commit-time checkpoints to the registered maintenance worker.
+    pub(in crate::storage) fn use_managed_checkpoints(&self) -> anyhow::Result<()> {
+        agentsight_sqlite_lifecycle::disable_auto_checkpoint(&self.conn)?;
+        Ok(())
+    }
+
     /// Create store with default table name
     pub fn new(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         Self::with_table(path, "token_consumption")
@@ -173,22 +191,20 @@ impl TokenConsumptionStore {
         );
 
         self.conn
-            .execute(
-                &sql,
-                params![
-                    timestamp_ns as i64,
-                    pid as i64,
-                    comm,
-                    breakdown.provider,
-                    breakdown.model,
-                    breakdown.total_input_tokens as i64,
-                    breakdown.total_output_tokens as i64,
-                    breakdown.tools_tokens as i64,
-                    breakdown.system_prompt_tokens as i64,
-                    by_role_json,
-                    output_by_type_json,
-                ],
-            )
+            .prepare_cached(&sql)?
+            .execute(params![
+                timestamp_ns as i64,
+                pid as i64,
+                comm,
+                breakdown.provider,
+                breakdown.model,
+                breakdown.total_input_tokens as i64,
+                breakdown.total_output_tokens as i64,
+                breakdown.tools_tokens as i64,
+                breakdown.system_prompt_tokens as i64,
+                by_role_json,
+                output_by_type_json,
+            ])
             .map_err(|e| anyhow::anyhow!("Failed to insert token_consumption record: {e}"))?;
 
         Ok(self.conn.last_insert_rowid())
@@ -293,7 +309,13 @@ impl TokenConsumptionStore {
         period_label: impl Into<String>,
         include_records: bool,
     ) -> anyhow::Result<TokenConsumptionQueryResult> {
-        let records = self.query(filter)?;
+        // The limit bounds the returned row list, not the rows an aggregate
+        // covers: scanning with it made every total describe only the newest
+        // N records of the filter match.
+        let requested_limit = filter.limit;
+        let mut scan_filter = filter.clone();
+        scan_filter.limit = 0;
+        let mut records = self.query(&scan_filter)?;
 
         let record_count = records.len() as u64;
         let total_input_tokens: u64 = records.iter().map(|r| r.total_input_tokens as u64).sum();
@@ -315,7 +337,14 @@ impl TokenConsumptionStore {
             }
         }
 
-        let rows = if include_records { records } else { Vec::new() };
+        let rows = if include_records {
+            if requested_limit > 0 {
+                records.truncate(requested_limit);
+            }
+            records
+        } else {
+            Vec::new()
+        };
 
         Ok(TokenConsumptionQueryResult {
             period: period_label.into(),
@@ -395,6 +424,23 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn unique_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentsight_token_consumption_{label}_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
     fn make_breakdown(provider: &str, model: &str) -> TokenConsumptionBreakdown {
         let mut by_role = HashMap::new();
         by_role.insert("user".to_string(), 100usize);
@@ -422,8 +468,8 @@ mod tests {
 
     #[test]
     fn test_insert_and_query() {
-        let path = "/tmp/test_token_consumption.db";
-        let store = TokenConsumptionStore::new(path).unwrap();
+        let path = unique_db_path("insert_query");
+        let store = TokenConsumptionStore::new(&path).unwrap();
 
         let bd = make_breakdown("openai", "gpt-4o");
         let id = store.insert(&bd, 1_000_000_000, 123, "python").unwrap();
@@ -438,13 +484,13 @@ mod tests {
         assert_eq!(rec.total_output_tokens, 80);
         assert_eq!(rec.by_role().get("user"), Some(&100));
 
-        std::fs::remove_file(path).ok();
+        cleanup_db(&path);
     }
 
     #[test]
     fn test_aggregate() {
-        let path = "/tmp/test_token_consumption_agg.db";
-        let store = TokenConsumptionStore::new(path).unwrap();
+        let path = unique_db_path("aggregate");
+        let store = TokenConsumptionStore::new(&path).unwrap();
 
         let bd = make_breakdown("anthropic", "claude-3-5-sonnet");
         store.insert(&bd, 2_000_000_000, 1, "claude").unwrap();
@@ -457,6 +503,41 @@ mod tests {
         assert_eq!(result.total_input_tokens, 300);
         assert_eq!(result.by_role.get("user"), Some(&200));
 
-        std::fs::remove_file(path).ok();
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn aggregate_totals_ignore_the_row_limit() {
+        // `limit` bounds the rows a caller wants to read, not the rows an
+        // aggregate sums: applying it to the scan reported the newest N rows
+        // as if they were the whole window.
+        let path = unique_db_path("aggregate_limit");
+        let store = TokenConsumptionStore::new(&path).unwrap();
+        let bd = make_breakdown("openai", "gpt-4o");
+        for second in 2..5 {
+            store
+                .insert(&bd, second * 1_000_000_000, 1, "python")
+                .unwrap();
+        }
+
+        let filter = TokenConsumptionFilter {
+            limit: 1,
+            ..Default::default()
+        };
+        let result = store.aggregate(&filter, "window", false).unwrap();
+
+        assert_eq!(result.record_count, 3);
+        assert_eq!(result.total_input_tokens, 450);
+        assert_eq!(result.total_output_tokens, 240);
+        assert_eq!(result.by_role.get("user"), Some(&300));
+        assert!(result.records.is_empty());
+
+        // Requesting the records back still honors the row limit, while the
+        // totals keep covering the whole match.
+        let with_rows = store.aggregate(&filter, "window", true).unwrap();
+        assert_eq!(with_rows.record_count, 3);
+        assert_eq!(with_rows.total_input_tokens, 450);
+        assert_eq!(with_rows.records.len(), 1);
+        cleanup_db(&path);
     }
 }

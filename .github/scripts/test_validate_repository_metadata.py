@@ -329,22 +329,22 @@ class RepositoryMetadataValidationTest(unittest.TestCase):
         lines = [
             line
             for line in path.read_text(encoding="utf-8").splitlines()
-            if "/src/blaze/" not in line
+            if "/src/ktuner/" not in line
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assert_validation_error(
-            "CODEOWNERS: /src/blaze/ does not map to component:blaze"
+            "CODEOWNERS: /src/ktuner/ does not map to component:ktuner"
         )
 
     def test_undeclared_path_leaves_no_codeowners_mapping(self) -> None:
         path = self.root / ".github/CODEOWNERS"
         path.write_text(
             path.read_text(encoding="utf-8")
-            + "/src/legacy-blaze/ @casparant # auto-label: component:blaze\n",
+            + "/src/legacy-ktuner/ @jfeng18 # auto-label: component:ktuner\n",
             encoding="utf-8",
         )
         self.assert_validation_error(
-            "CODEOWNERS: /src/legacy-blaze/ is not declared by blaze path prefixes"
+            "CODEOWNERS: /src/legacy-ktuner/ is not declared by ktuner path prefixes"
         )
 
     def test_complete_codeowners_annotation_is_validated(self) -> None:
@@ -475,14 +475,14 @@ class RepositoryMetadataValidationTest(unittest.TestCase):
         path = self.root / ".github/workflows/ci.yaml"
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                'grep -q "^src/blaze/"',
-                'grep -qE "^src/(legacy-blaze|blaze)/"',
+                'grep -q "^src/ktuner/"',
+                'grep -qE "^src/(legacy-ktuner|ktuner)/"',
                 1,
             ),
             encoding="utf-8",
         )
         self.assert_validation_error(
-            "ci.yaml: route pattern '^src/(legacy-blaze|blaze)/' "
+            "ci.yaml: route pattern '^src/(legacy-ktuner|ktuner)/' "
             "is not an exact declared component path"
         )
 

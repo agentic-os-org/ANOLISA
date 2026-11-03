@@ -26,8 +26,9 @@ use crate::security::{
     PendingInstallController, PostPublishGraceController, ProcessIdentityResolver,
     QuietTimeoutController, RefreshController, RuntimeMetricsSink, SecurityPolicy, SkillEventSink,
     SkillMetaProtectionPolicy, StagingMatcher, TrustedWriterConfig, default_identity_resolver,
+    lifecycle::is_reserved_lifecycle_name,
 };
-use crate::sync::{SyncEvent, spawn_sync_worker};
+use crate::sync::{SourceAlias, SyncEvent, spawn_sync_worker};
 
 mod callbacks;
 mod discover;
@@ -61,6 +62,10 @@ pub struct SkillFs {
     /// directive stage is enabled.
     transform_pipeline: TransformPipeline,
     transform_cache: transform_cache::TransformCache,
+    /// Ceiling for a single `SKILL.md` in bytes: the `max_skill_size` the
+    /// store was loaded with. Reads, listings and sync reparses all apply it,
+    /// so the mount never serves a file its parser would refuse.
+    max_skill_size: u64,
     /// View configuration loaded from skillfs-views.toml (if present).
     views_config: Option<ViewsConfig>,
     /// Optional reader-visible root for paths emitted by `skill-discover`.
@@ -177,6 +182,28 @@ impl SkillFs {
         in_place: bool,
         transform_pipeline: TransformPipeline,
     ) -> Self {
+        Self::new_with_pipeline_and_staging(
+            mountpoint,
+            source,
+            store,
+            in_place,
+            transform_pipeline,
+            None,
+        )
+    }
+
+    /// [`Self::new_with_pipeline`] with the staging matcher wired in at
+    /// construction, so the background sync worker (spawned here, before
+    /// the builder-style setters run) can apply the staging carve-out of
+    /// `upsert_checked_replacing_staging` on its re-parse refreshes.
+    pub(crate) fn new_with_pipeline_and_staging(
+        mountpoint: PathBuf,
+        source: PathBuf,
+        store: SharedSkillStore,
+        in_place: bool,
+        transform_pipeline: TransformPipeline,
+        staging_matcher: Option<Arc<StagingMatcher>>,
+    ) -> Self {
         // Load views config from the source directory if present.
         let views_config = ViewsConfig::load(&source);
         if views_config.is_some() {
@@ -203,10 +230,20 @@ impl SkillFs {
             None
         };
 
-        // Spawn the background sync worker.
+        // Spawn the background sync worker. In in-place mode the
+        // worker's re-parse I/O keeps addressing the source through the
+        // fd alias, while the entries it inserts carry the canonical
+        // source-root spelling (see `SourceAlias`).
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
         let sync_store = store.clone();
-        spawn_sync_worker(sync_rx, sync_store);
+        let sync_alias = source_dirfd.as_ref().map(|fd| {
+            use std::os::unix::io::AsRawFd;
+            SourceAlias::new(
+                PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())),
+                source.clone(),
+            )
+        });
+        spawn_sync_worker(sync_rx, sync_store, sync_alias, staging_matcher.clone());
 
         let fs = Self {
             mountpoint,
@@ -216,6 +253,7 @@ impl SkillFs {
             inodes: InodeManager::new(),
             transform_pipeline,
             transform_cache: transform_cache::TransformCache::default(),
+            max_skill_size: skillfs_core::DEFAULT_MAX_SKILL_SIZE as u64,
             views_config,
             skill_discover_root: None,
             source_dirfd,
@@ -229,7 +267,7 @@ impl SkillFs {
             notify_controller: None,
             trusted_writer: TrustedWriterConfig::disabled(),
             trusted_writer_identity: default_identity_resolver(),
-            staging_matcher: None,
+            staging_matcher,
             staging_controller: None,
             quiet_timeout_controller: None,
             pending_install_controller: None,
@@ -252,6 +290,14 @@ impl SkillFs {
             .allocate("/.skillfs-inbox", FileType::Directory, FUSE_ROOT_ID);
 
         fs
+    }
+
+    /// Set the per-file `SKILL.md` ceiling to the `max_skill_size` of the
+    /// [`skillfs_core::ParseConfig`] the store was loaded with. The default is
+    /// [`skillfs_core::DEFAULT_MAX_SKILL_SIZE`].
+    pub fn with_max_skill_size(mut self, max_skill_size: usize) -> Self {
+        self.max_skill_size = max_skill_size as u64;
+        self
     }
 
     /// Override the Skill Security policy. The S1 default is
@@ -458,7 +504,7 @@ impl SkillFs {
     ///
     /// Enabling it detects the runtime [`EnvironmentProfile`] and binds a fresh
     /// [`DirectiveStage`]; disabling it clears the stage. Environment detection
-    /// (which probes the command whitelist via `which`) therefore happens
+    /// (which probes the command whitelist on `PATH`) therefore happens
     /// **only** when the directive stage is enabled — an adapter-only or fully
     /// raw pipeline never probes the environment. Idempotent — the stage can
     /// never be present twice.
@@ -491,12 +537,15 @@ impl SkillFs {
     ///
     /// For [`SkillLayout::Hermes`] the lexical parser cannot tell a
     /// top-level skill (`skill/SKILL.md`) from a category container
-    /// (`category/skill/SKILL.md`) — it classifies every top-level entry
-    /// as a category. Real Hermes workspaces mix both, so this wrapper
-    /// probes the physical source and rewrites a top-level skill and its
-    /// descendants back into the flat [`PathType`] variants
+    /// (`category/skill/SKILL.md`) — it classifies every non-management
+    /// top-level entry as a category. Real Hermes workspaces mix both, so
+    /// this wrapper probes the physical source and rewrites a top-level
+    /// skill and its descendants back into the flat [`PathType`] variants
     /// (`SkillDir` / `SkillMd` / `Passthrough`) that the flat code paths
-    /// already handle. Categorized nested skills are left untouched.
+    /// already handle, and — in an in-place mount, whose root readdir is the
+    /// physical workspace — a top-level entry that is not a directory into
+    /// the `HermesMeta` passthrough label. Categorized nested skills are
+    /// left untouched.
     pub(super) fn parse_fuse_path(&self, path: &std::path::Path) -> crate::path::PathType {
         use crate::path::PathType;
         let parsed = crate::path::parse_path_with_layout(path, self.in_place, self.skill_layout);
@@ -507,10 +556,48 @@ impl SkillFs {
             return PathType::Invalid;
         }
         match parsed {
+            // A reserved lifecycle name is never ordinary hub content: the
+            // S3 contract hides it from lookup and readdir and denies
+            // mutation. The flat layout expresses that by classifying the
+            // name as a skill-shaped path, so reuse that classification
+            // here — otherwise a `.staging`/`.certified` entry would be a
+            // category (listed, resolvable) or, as a plain file, an ordinary
+            // passthrough that the lifecycle gate does not cover.
+            PathType::CategoryDir { category } if is_reserved_lifecycle_name(&category) => {
+                PathType::SkillDir {
+                    skill_name: category,
+                }
+            }
             PathType::CategoryDir { category } if self.hermes_is_top_level_skill(&category) => {
                 PathType::SkillDir {
                     skill_name: category,
                 }
+            }
+            // A plain *file* directly under an in-place source root
+            // (`README.md`, `.gitignore`) is lexically labelled `CategoryDir`
+            // even though it is not a directory. The root readdir lists the
+            // physical workspace, so leaving it a category made it a phantom
+            // entry: listed, while `lookup` answered ENOENT and `stat`, `cat`
+            // and `ls -l` all failed. Rewrite it to the top-level passthrough
+            // label so lookup/getattr/open/read serve it as an ordinary file;
+            // the depth-2 counterpart is the `CategoryPassthrough` rewrite
+            // below. Normal mounts keep the virtual `/skills` listing, so a
+            // top-level file stays unreachable there, exactly as it is in the
+            // flat layout.
+            //
+            // Reserved lifecycle names are excluded: `.staging`,
+            // `.certified`, `.quarantine`, and `.archive` must not become
+            // ordinary readable/writable files (the reservation gate and the
+            // hidden lookup/readdir contract only cover the skill-shaped
+            // path types), so a file with one of those names keeps the
+            // category classification and stays unreachable through the
+            // mount.
+            PathType::CategoryDir { category }
+                if self.in_place
+                    && !is_reserved_lifecycle_name(&category)
+                    && !self.source_base().join(&category).is_dir() =>
+            {
+                PathType::HermesMeta { name: category }
             }
             PathType::NestedSkillDir {
                 category,

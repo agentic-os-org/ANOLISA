@@ -116,6 +116,10 @@ pub struct MessageTokenCount {
 /// Unified analysis result from different analyzers
 #[derive(Debug, Clone)]
 pub enum AnalysisResult {
+    /// Incomplete correlation reason, retained through semantic delivery.
+    Abandoned(crate::aggregator::RemoveReason),
+    /// Parsed payloads and HTTP metadata without serialized body copies.
+    HttpContext(HttpContext),
     /// Audit record from AuditAnalyzer
     Audit(AuditRecord),
     /// Token record from TokenParser (from SSE response)
@@ -128,4 +132,17 @@ pub enum AnalysisResult {
     Http(HttpRecord),
     /// Token consumption breakdown by message role
     TokenConsumption(TokenConsumptionBreakdown),
+}
+
+/// Short-lived parsed payloads shared by semantic analysis and delivery.
+#[derive(Debug, Clone)]
+pub struct HttpContext {
+    /// Whether HTTP persistence or raw delivery needs the serialized bodies.
+    pub retain_raw: bool,
+    /// HTTP metadata; full body strings are built only for raw export.
+    pub http: HttpRecord,
+    /// Request JSON parsed once for this completed result.
+    pub request: Option<serde_json::Value>,
+    /// Response JSON or reduced SSE event array.
+    pub response: Option<serde_json::Value>,
 }

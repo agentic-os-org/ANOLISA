@@ -31,8 +31,8 @@ use anolisa_core::state::{FileOwner, ObjectKind, OwnedFile, OwnedFileKind, Servi
 use anolisa_core::state_store::StateStore;
 use anolisa_core::transaction::restore_backup_file;
 use anolisa_core::{
-    CapabilityRequest, FileKind, ResolvedLifecycleHooks, ServiceActivation, ServiceRequest,
-    ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
+    CapabilityRequest, FileKind, HookSpec, ResolvedLifecycleHooks, ServiceActivation,
+    ServiceRequest, ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
     capability_for_install_mode, deactivate_services, run_hooks, service_for_install_mode,
     user_service_for_install_mode,
 };
@@ -46,7 +46,10 @@ use super::io_util::{
     service_cleanup_suffix, write_installed_component_manifest,
 };
 use super::provision::{retained_packages_note, run_provision};
-use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
+use super::raw::{
+    InstallHooks, prepare_raw_execution, resolve_install_hooks,
+    strict_unrunnable_hook_phase_reason, unrunnable_hook_phase_warnings,
+};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
@@ -321,8 +324,29 @@ impl OwnedOps for RawReplayOps<'_> {
                         "failed to parse component manifest for preflight: {err}"
                     ))
                 })?;
-            warnings = super::provision::run_runtime_preflight(&manifest, &self.env, "update")
-                .map_err(|err| OwnedOpError(err.reason()))?;
+            if let Some(reason) = component_conflict(&manifest, self.store) {
+                return Err(OwnedOpError(reason));
+            }
+            // The same hook-phase contract a fresh install enforces
+            // (`validate_owned_install`): a strict declaration of a phase
+            // no command runs is an authoring defect the update path must
+            // refuse before replacing files or writing the new installation
+            // record. The artifact is already cached, and the update plan
+            // has already run its backup step. A non-strict declaration proceeds
+            // with a warning naming the phase: a hook the current CLI will not
+            // execute is a capability limitation to surface, not a reason to block
+            // the whole upgrade. Replay (repair) skips the preflight and
+            // this check with it: it re-places the recorded manifest and
+            // must not turn a legacy dead-phase declaration into a
+            // recovery blocker.
+            if let Some(reason) = strict_unrunnable_hook_phase_reason(&manifest, &self.component) {
+                return Err(OwnedOpError(reason));
+            }
+            let mut preflight_warnings =
+                super::provision::run_runtime_preflight(&manifest, &self.env, "update")
+                    .map_err(|err| OwnedOpError(err.reason()))?;
+            preflight_warnings.extend(unrunnable_hook_phase_warnings(&manifest, &self.component));
+            warnings = preflight_warnings;
         }
         self.prepared = Some(prepared);
         self.prepared_files = Some(prepared_files);
@@ -587,6 +611,9 @@ pub(crate) struct RawTeardownOps<'a> {
     /// Pre/post-uninstall hooks resolved from the installed manifest
     /// snapshot (best-effort: a missing snapshot means no hooks).
     hooks: ResolvedLifecycleHooks,
+    /// Copies of payload-shipped post-uninstall scripts staged before the
+    /// owned files are removed (see [`Self::stage_post_uninstall_hooks`]).
+    staged_post_uninstall: Vec<PathBuf>,
     store: &'a mut StateStore,
     state_path: &'a Path,
 }
@@ -614,6 +641,7 @@ impl<'a> RawTeardownOps<'a> {
             log: CentralLog::open(layout.central_log.clone()),
             prior,
             hooks,
+            staged_post_uninstall: Vec::new(),
             store,
             state_path,
         }
@@ -632,6 +660,357 @@ impl<'a> RawTeardownOps<'a> {
         Err(OwnedOpError(format!(
             "{what} is not wired for owned teardown yet"
         )))
+    }
+
+    /// Stage the `post_uninstall` scripts this uninstall is about to
+    /// delete, before the owned files are removed.
+    ///
+    /// The plan runs `RunHook(PostUninstall)` after `RemoveOwnedFiles`,
+    /// and hook scripts ship in the component payload as owned layout
+    /// files (the contract's canonical placement), so the removal step
+    /// deletes them before the post phase resolves - without staging,
+    /// every payload-shipped post_uninstall hook would be silently
+    /// skipped as `Missing`. Staging is scoped to the deletion list
+    /// (`prior.files`, the very list `remove_owned_files` iterates): a
+    /// hook the removal will not delete keeps its original path, because
+    /// the staging copy travels without the script's neighbors and would
+    /// break a hook that loads a same-directory helper (round-5 review).
+    fn stage_post_uninstall_hooks(&mut self) {
+        self.staged_post_uninstall = stage_post_uninstall_hook_copies(
+            self.layout,
+            &self.component,
+            &mut self.hooks.post_uninstall,
+            &self.prior.files,
+        );
+    }
+
+    /// Remove the staged post-uninstall copies (best effort) once the post
+    /// phase has run. `remove_dir` only succeeds when empty, so leftovers
+    /// from another uninstall are never destroyed.
+    fn cleanup_staged_post_uninstall_hooks(&mut self) {
+        let staged = std::mem::take(&mut self.staged_post_uninstall);
+        remove_staged_hook_copies(&staged, &self.layout.state_dir);
+    }
+}
+
+impl Drop for RawTeardownOps<'_> {
+    /// The teardown can abort between staging the post-uninstall copies
+    /// (`remove_owned_files`) and the post phase that consumes them - for
+    /// instance when a later owned-file removal fails. The executor then
+    /// returns without running `RunHook(PostUninstall)`, and if the hook's
+    /// own payload file was already deleted, a retry finds no source and
+    /// never re-stages, so an executable copy would sit in the state
+    /// directory forever. Dropping purges whatever the success path
+    /// ([`RawTeardownOps::cleanup_staged_post_uninstall_hooks`] empties
+    /// the list first) did not consume.
+    fn drop(&mut self) {
+        remove_staged_hook_copies(&self.staged_post_uninstall, &self.layout.state_dir);
+    }
+}
+
+/// Stage the `post_uninstall` scripts this uninstall is about to delete,
+/// before the owned files are removed.
+///
+/// The plan runs `RunHook(PostUninstall)` after `RemoveOwnedFiles`, and hook
+/// scripts ship in the component payload as owned layout files (the
+/// contract's canonical placement), so the removal step deletes them before
+/// the post phase resolves - without staging, every payload-shipped
+/// post_uninstall hook would be silently skipped as `Missing`.
+///
+/// Staging is scoped to `removal_list` - the `prior.files` list the removal
+/// loop iterates (round-5 review): the hook contract only requires the
+/// expanded script path to pass the owned-roots check, not that the file be
+/// owned by the uninstalling component, so a shared hook that the removal
+/// will not delete survives in place. Rewriting such a hook to a staging
+/// copy would be pure damage: the copy travels without the script's
+/// neighbors, and a hook that loads a same-directory helper via
+/// `dirname "$0"` breaks. A script not on the deletion list keeps its
+/// original path and `run_hook` executes it exactly as before.
+///
+/// Each listed script is copied into an owned staging directory under
+/// `state_dir` and the spec is pointed at the copy; the copy keeps the
+/// source's executable mode, because `run_hook` executes it. A script that
+/// is already missing or unreadable stays untouched so the run reports
+/// `Missing` exactly as before; a staging failure falls back to the original
+/// path rather than failing the uninstall. A source that fails the
+/// owned-roots boundary check - outside the roots, or a symlink under them
+/// pointing out - is likewise left untouched, so `run_hook` rejects the path
+/// exactly as it would without staging. A source that is itself a symlink is
+/// never read through (the copy opens it `O_NOFOLLOW`): the staged copy must
+/// run under its own name, not smuggle another file's bytes.
+///
+/// The copy itself follows the install-time hardening doctrine (see
+/// `anolisa_core::lifecycle::prepare_backup`): the destination leaf is
+/// created `create_new` + `O_NOFOLLOW`, so a pre-planted symlink at the
+/// staging path is never written through, and a copy that dies mid-stream
+/// leaves no partial residue behind. Both properties are pinned by
+/// regression tests in this module.
+///
+/// Returns every destination that was registered for cleanup, including
+/// entries whose copy later failed: the caller installs the list before the
+/// teardown can abort, so the success cleanup and the `Drop` guard purge a
+/// partial copy even when staging bailed out on it.
+///
+/// A staging path behind a symlinked parent is refused entirely: the link
+/// would redirect the copy and the cleanup into whatever it points at, and
+/// a link between owned roots is invisible to the boundary checks above
+/// (round-4 review), so nothing is written, deleted, or registered and the
+/// spec keeps its original path.
+fn stage_post_uninstall_hook_copies(
+    layout: &FsLayout,
+    component: &str,
+    hooks: &mut [HookSpec],
+    removal_list: &[OwnedFile],
+) -> Vec<PathBuf> {
+    let mut staged_copies = Vec::new();
+    if hooks.is_empty() {
+        return staged_copies;
+    }
+    let staging_root = layout.state_dir.join("uninstall-hooks").join(component);
+    for (index, spec) in hooks.iter_mut().enumerate() {
+        let source = spec.script.clone();
+        // Scope before any stat or copy (round-5 review): staging exists
+        // only so a hook the removal loop is about to delete survives to
+        // the post phase. A hook outside `removal_list` is not deleted -
+        // the contract requires only that its expanded path pass the
+        // owned-roots check, not that the uninstalling component own it -
+        // so rewriting it to a staging copy would break its
+        // same-directory dependencies (`dirname "$0"`) for no benefit. It
+        // keeps running from its original location, exactly as before
+        // staging existed.
+        if !removal_list.iter().any(|file| file.path == source) {
+            continue;
+        }
+        // Boundary before any stat or copy: the spec came from the
+        // persisted contract, so a source outside the owned roots -
+        // or a symlink under them pointing out - must not be copied
+        // into the state directory, trusted territory `run_hook`
+        // executes from without further questions. Leaving the spec
+        // untouched keeps the pre-staging behavior: `run_hook`
+        // rejects the path itself instead of running a smuggled
+        // script.
+        if validate_owned_path(layout, &source).is_err() {
+            continue;
+        }
+        if !source.is_file() {
+            continue;
+        }
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        let staged = staging_root.join(format!("{index}-{}", name.to_string_lossy()));
+        if validate_owned_path(layout, &staged).is_err() {
+            continue;
+        }
+        // A symlinked parent below the state root redirects every leaf
+        // operation into its referent - `O_NOFOLLOW` protects only the
+        // leaf - and a roots-to-roots link passes the boundary check
+        // above, so refuse the whole entry: no copy, no cleanup
+        // registration, and the spec keeps its original path.
+        if parent_chain_contains_symlink_below(&layout.state_dir, &staged) {
+            continue;
+        }
+        // Register the destination before any bytes move, so both the
+        // success cleanup and the `Drop` guard cover a partial copy even
+        // when the copy fails partway or the teardown aborts between
+        // staging and the post phase. Entries whose copy failed point at
+        // an already-removed path, which the best-effort cleanup ignores.
+        staged_copies.push(staged.clone());
+        if stage_hook_copy(&source, &staged, &layout.state_dir).is_err() {
+            continue;
+        }
+        spec.script = staged;
+    }
+    staged_copies
+}
+
+/// Whether any ancestor of `path` strictly below `root` is a symlink.
+///
+/// Leaf operations on the staging namespace (`open` with `O_NOFOLLOW`,
+/// `unlink`, `rmdir`) resolve every parent component, so a symlinked
+/// parent redirects them into whatever it points at - and a link between
+/// owned roots (`state_dir/uninstall-hooks/<component> -> bin_dir`, the
+/// round-4 review's plant) passes `validate_owned_path`, because every
+/// owned root is an equally valid containment target. The staging
+/// namespace must be reached through real directories only: an entry
+/// behind a symlinked parent is not ours to write or delete, and every
+/// layer of the staging machinery refuses it (fail safe). The `root`
+/// itself is not inspected: the layout's owned roots are the trust
+/// anchor, and a deployment may legitimately place one behind a symlink.
+/// Components that cannot be inspected are left for the following
+/// open/remove to fail on their own.
+fn parent_chain_contains_symlink_below(root: &Path, path: &Path) -> bool {
+    let mut current = match path.parent() {
+        Some(parent) => parent,
+        None => return false,
+    };
+    while current.starts_with(root) && current != root {
+        if fs::symlink_metadata(current)
+            .map(|meta| meta.is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    false
+}
+
+/// Copy a hook script to its staging path with the install-time hardening
+/// doctrine, so staging can never damage a file it does not own:
+///
+///   * The source is opened `O_NOFOLLOW` and its mode is read off the open
+///     descriptor, then pinned on the copy with `fchmod`, so an executable
+///     hook stays executable regardless of the umask (unlike
+///     `prepare_backup`'s owner-only scratch copies, the staged file is
+///     *executed*, not merely read back).
+///   * The destination leaf is opened `create_new` + `O_NOFOLLOW`, so a
+///     pre-planted symlink at the staging path fails the open instead of
+///     being written through. Writing through such a link would clobber
+///     whatever it points at - `validate_owned_path` accepts in-roots
+///     links, and the cleanup would only delete the link, leaving the
+///     clobbered referent behind.
+///   * A stale non-directory entry at the staging path (residue of a
+///     hard-killed earlier uninstall) is removed first - a symlink as a
+///     link, never its referent - so a retry can stage again. A directory
+///     occupying the path is refused outright.
+///   * A staging parent that is itself a symlink refuses the copy
+///     outright (`O_NOFOLLOW` protects only the leaf): the link would
+///     redirect this copy and the later cleanup into whatever it points
+///     at, and between owned roots the boundary check sees nothing wrong
+///     (round-4 review).
+///   * Any failure after the leaf was created removes the partial copy: a
+///     truncated executable in the state directory is worse than no
+///     staging at all.
+fn stage_hook_copy(source: &Path, staged: &Path, state_root: &Path) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+
+    if parent_chain_contains_symlink_below(state_root, staged) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a symlinked parent redirects the hook staging path",
+        ));
+    }
+
+    let mut src_opts = fs::OpenOptions::new();
+    src_opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        src_opts.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut src = src_opts.open(source)?;
+    let src_mode = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            Some(src.metadata()?.permissions().mode() & 0o7777)
+        }
+        #[cfg(not(unix))]
+        None
+    };
+
+    if let Some(parent) = staged.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let mut dst_opts = fs::OpenOptions::new();
+    dst_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        dst_opts.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut dst = match dst_opts.open(staged) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Retry once through a stale-entry clear: `create_new` refuses
+            // *any* existing entry, and the only legitimate one is our own
+            // residue from a hard-killed earlier run.
+            clear_stale_staging_entry(staged, state_root)?;
+            dst_opts.open(staged)?
+        }
+        Err(err) => return Err(err),
+    };
+
+    let outcome = (|| -> std::io::Result<()> {
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = src.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            dst.write_all(&buf[..n])?;
+        }
+        dst.flush()?;
+        if let Some(mode) = src_mode {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                dst.set_permissions(fs::Permissions::from_mode(mode))?;
+            }
+            let _ = mode;
+        }
+        Ok(())
+    })();
+    if outcome.is_err() {
+        // The leaf may hold a partial copy (the stream can fail mid-write,
+        // e.g. `EFBIG` under an `RLIMIT_FSIZE` ceiling). Neither the
+        // success cleanup nor the `Drop` guard would remove it on the
+        // failure path by itself, so purge it here.
+        let _ = fs::remove_file(staged);
+    }
+    outcome
+}
+
+/// Remove a pre-existing non-directory entry at a staging path so the
+/// `create_new` copy can proceed. A regular file is residue of a
+/// hard-killed earlier staging run (the staging namespace holds only hook
+/// copies, ours by construction); a symlink is removed as a *link* - its
+/// referent is never touched. A directory is refused: it is not ours to
+/// remove, and staging must fail rather than destroy it. A symlinked
+/// parent is refused the same way (round-4 review): the delete would land
+/// in whatever the link points at, not in the staging namespace.
+fn clear_stale_staging_entry(staged: &Path, state_root: &Path) -> std::io::Result<()> {
+    if parent_chain_contains_symlink_below(state_root, staged) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a symlinked parent redirects the hook staging path",
+        ));
+    }
+    match fs::symlink_metadata(staged) {
+        Ok(meta) if meta.is_dir() => Err(std::io::Error::new(
+            std::io::ErrorKind::IsADirectory,
+            "a directory occupies the hook staging path",
+        )),
+        Ok(_) => fs::remove_file(staged),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Delete a staged-copy list and its now-empty directories, best effort.
+/// Entries behind a symlinked parent are skipped: the link would redirect
+/// the delete into whatever it points at (round-4 review), so a staging
+/// namespace that cannot be reached through real directories is not ours
+/// to clean.
+fn remove_staged_hook_copies(staged: &[PathBuf], state_root: &Path) {
+    let reachable: Vec<&PathBuf> = staged
+        .iter()
+        .filter(|path| !parent_chain_contains_symlink_below(state_root, path))
+        .collect();
+    for path in &reachable {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(component_dir) = reachable.first().and_then(|path| path.parent()) {
+        let _ = fs::remove_dir(component_dir);
+        if let Some(root) = component_dir.parent() {
+            let _ = fs::remove_dir(root);
+        }
     }
 }
 
@@ -658,6 +1037,9 @@ impl OwnedOps for RawTeardownOps<'_> {
             "cli",
             &self.install_mode,
         );
+        if matches!(kind, HookKind::PostUninstall) {
+            self.cleanup_staged_post_uninstall_hooks();
+        }
         self.hook_step(run)
     }
 
@@ -728,6 +1110,10 @@ impl OwnedOps for RawTeardownOps<'_> {
     /// arbitrary-delete primitive, and skipping keeps the operation moving
     /// on the legitimate files.
     fn remove_owned_files(&mut self) -> Result<StepSuccess, OwnedOpError> {
+        // The post-uninstall phase runs after this step and its scripts
+        // ship in the payload as owned files, so they are about to be
+        // deleted by the loop below - stage surviving copies first.
+        self.stage_post_uninstall_hooks();
         let mut warnings = Vec::new();
         let mut removed_parents: Vec<PathBuf> = Vec::new();
         for file in &self.prior.files {
@@ -1009,7 +1395,7 @@ pub(crate) fn validate_owned_install(
     command: &str,
 ) -> Result<ValidatedInstall, CliError> {
     let component = resolution.component.clone();
-    let prepared = prepare_raw_execution(ctx, layout, resolution)?;
+    let mut prepared = prepare_raw_execution(ctx, layout, resolution)?;
     let manifest = anolisa_core::ComponentManifest::from_toml_str(&prepared.manifest_toml)
         .map_err(|err| CliError::Runtime {
             command: command.to_string(),
@@ -1017,6 +1403,13 @@ pub(crate) fn validate_owned_install(
         })?;
     validate_component_conflict(&manifest, store, &HashSet::new(), command)?;
     let hooks = resolve_install_hooks(&manifest, layout, &component)?;
+    // Non-strict declarations of phases no command runs ride the
+    // resolution's warning channel so the install output names exactly
+    // which declared hook this CLI will not execute.
+    prepared
+        .resolution
+        .warnings
+        .extend(unrunnable_hook_phase_warnings(&manifest, &component));
     let prepared_files = InstallRunner::new(layout)
         .prepare_files(
             artifact_type_wire(&prepared.resolution.entry.artifact_type),
@@ -1869,5 +2262,393 @@ mod tests {
             "nested libexec root must survive the climb"
         );
         assert!(layout.lib_dir.exists(), "outer lib root must survive");
+    }
+
+    /// Environment variable carrying the child half's scratch directory for
+    /// `staged_hook_copy_leaves_no_partial_residue_when_the_stream_dies`.
+    const STAGING_RESIDUE_CHILD_DIR: &str = "ANOLISA_TEST_STAGING_RESIDUE_CHILD_DIR";
+
+    /// Minimal owned-record entry for the staging tests: a payload file at
+    /// `path` on this uninstall's deletion list.
+    fn owned_layout_file(path: PathBuf) -> OwnedFile {
+        OwnedFile {
+            path,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        }
+    }
+
+    /// Regression (review round 2, P2): a pre-planted symlink at the
+    /// deterministic staging path must never be written through. The old
+    /// `fs::copy` followed the link and clobbered whatever it pointed at -
+    /// a referent inside the owned roots passes `validate_owned_path`, so
+    /// the boundary check offered no protection - and the cleanup then
+    /// deleted only the link, leaving the clobbered referent behind.
+    #[test]
+    #[cfg(unix)]
+    fn staging_replaces_a_planted_symlink_without_touching_its_referent() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        use anolisa_core::HookPhase;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let component = "ws-ckpt";
+
+        // A payload-shipped hook script inside an owned root.
+        let hook_dir = layout.datadir.join("components").join(component);
+        fs::create_dir_all(&hook_dir).expect("hook dir");
+        let source = hook_dir.join("post-uninstall.sh");
+        fs::write(&source, b"#!/bin/sh\n# payload hook\n").expect("hook script");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+
+        // The victim: another component's file under `bin_dir` - inside the
+        // owned roots, so a link pointing at it passes the boundary check
+        // exactly as in the review's diagnostic.
+        fs::create_dir_all(&layout.bin_dir).expect("bin dir");
+        let victim = layout.bin_dir.join("anolisa-report");
+        fs::write(&victim, b"original victim bytes").expect("victim");
+        let victim_bytes = fs::read(&victim).expect("victim readable");
+
+        // The planted symlink exactly where staging will copy.
+        let staged = layout
+            .state_dir
+            .join("uninstall-hooks")
+            .join(component)
+            .join("0-post-uninstall.sh");
+        fs::create_dir_all(staged.parent().expect("staging parent")).expect("staging dir");
+        symlink(&victim, &staged).expect("plant the staging symlink");
+
+        let mut hooks = vec![HookSpec::new(
+            component,
+            HookPhase::PostUninstall,
+            source.clone(),
+        )];
+        // The hook ships in the payload, so its script is on this
+        // uninstall's deletion list.
+        let removal_list = vec![owned_layout_file(source.clone())];
+        let staged_copies =
+            stage_post_uninstall_hook_copies(&layout, component, &mut hooks, &removal_list);
+
+        // The referent is untouched: staging replaced the link itself.
+        assert_eq!(
+            fs::read(&victim).expect("victim readable"),
+            victim_bytes,
+            "staging must never write through a planted symlink"
+        );
+        // The hook still staged, under its own name, executable.
+        assert_eq!(
+            hooks[0].script, staged,
+            "hook spec must point at the staged copy"
+        );
+        assert!(staged.is_file(), "the staged copy must be a regular file");
+        assert_eq!(
+            fs::read(&staged).expect("staged copy readable"),
+            b"#!/bin/sh\n# payload hook\n",
+        );
+        assert_eq!(
+            fs::symlink_metadata(&staged)
+                .expect("staged metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755,
+            "the staged copy must keep the hook's executable mode"
+        );
+        assert_eq!(staged_copies, vec![staged], "cleanup registration");
+    }
+
+    /// Regression (review round 5, P2): staging must be scoped to the
+    /// hooks on this uninstall's deletion list. A shared hook the removal
+    /// loop will not delete survives in place, so rewriting its spec to a
+    /// staging copy would be pure damage - the copy travels without the
+    /// script's neighbors, and a hook that loads a same-directory helper
+    /// via `dirname "$0"` breaks. The spec must keep its original path,
+    /// and nothing may be staged or registered for cleanup.
+    #[test]
+    #[cfg(unix)]
+    fn staging_skips_a_hook_outside_the_removal_list() {
+        use anolisa_core::HookPhase;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let component = "ws-ckpt";
+
+        // A shared hook script inside an owned root, but not on this
+        // uninstall's deletion list.
+        let hook_dir = layout.datadir.join("hooks").join("shared");
+        fs::create_dir_all(&hook_dir).expect("hook dir");
+        let source = hook_dir.join("post-uninstall.sh");
+        fs::write(&source, b"#!/bin/sh\n# shared hook\n").expect("hook script");
+
+        let mut hooks = vec![HookSpec::new(
+            component,
+            HookPhase::PostUninstall,
+            source.clone(),
+        )];
+        // The deletion list names only the binary; the shared hook is not
+        // on it.
+        let removal_list = vec![owned_layout_file(layout.bin_dir.join("ws-ckpt"))];
+        let staged_copies =
+            stage_post_uninstall_hook_copies(&layout, component, &mut hooks, &removal_list);
+
+        assert_eq!(
+            hooks[0].script, source,
+            "a hook outside the removal list must keep its original path"
+        );
+        assert!(
+            staged_copies.is_empty(),
+            "a hook outside the removal list must not be registered for cleanup"
+        );
+        assert!(
+            !layout.state_dir.join("uninstall-hooks").exists(),
+            "a hook outside the removal list must not be staged at all"
+        );
+    }
+
+    /// Regression (review round 2, P2): a copy that dies mid-stream must
+    /// leave no partial residue. The old `fs::copy` created the destination
+    /// and could write part of it before failing, and the destination only
+    /// joined the cleanup list after a *successful* copy - so neither the
+    /// success cleanup nor the `Drop` guard removed the truncated file. The
+    /// review reproduced it with a 128 KiB `0755` hook, `RLIMIT_FSIZE` at
+    /// 32 KiB and `SIGXFSZ` ignored: the non-strict uninstall succeeded,
+    /// the original hook was deleted, and a 32 KiB `0755` copy stayed in
+    /// the staging directory.
+    ///
+    /// The fault is injected in a re-executed child process, because the
+    /// rlimit and the signal disposition belong to the whole process and
+    /// must not leak into the other tests in this binary. The child caps
+    /// only the *soft* ceiling and restores it before exiting: the
+    /// coverage runtime writes its `.profraw` at exit, and a 32 KiB
+    /// ceiling left in place truncates it into a profile the CI's merge
+    /// step rejects (round-4 review) - while a lowered *hard* ceiling
+    /// could not be raised again by an unprivileged process at all.
+    #[test]
+    #[cfg(unix)]
+    fn staged_hook_copy_leaves_no_partial_residue_when_the_stream_dies() {
+        // Child half: cap the writable file size, ignore SIGXFSZ, then
+        // stage a hook that cannot fit. The staging must fail AND leave
+        // nothing behind at the staged path.
+        if let Some(dir) = std::env::var_os(STAGING_RESIDUE_CHILD_DIR) {
+            let dir = PathBuf::from(dir);
+            // Cap only the *soft* ceiling and restore it before exiting:
+            // the coverage runtime writes this process's `.profraw` at
+            // exit, and a 32 KiB `RLIMIT_FSIZE` left in place truncates
+            // it into a profile the CI's merge step rejects (the round-4
+            // review diagnosed exactly that). Lowering the *hard*
+            // ceiling instead would be irreversible for an unprivileged
+            // process.
+            let mut inherited = nix::libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            unsafe {
+                assert_eq!(
+                    nix::libc::getrlimit(nix::libc::RLIMIT_FSIZE, &mut inherited),
+                    0,
+                    "child: getrlimit(RLIMIT_FSIZE)"
+                );
+                let ceiling = nix::libc::rlimit {
+                    rlim_cur: 32 * 1024,
+                    rlim_max: inherited.rlim_max,
+                };
+                assert_eq!(
+                    nix::libc::setrlimit(nix::libc::RLIMIT_FSIZE, &ceiling),
+                    0,
+                    "child: setrlimit(RLIMIT_FSIZE)"
+                );
+                nix::libc::signal(nix::libc::SIGXFSZ, nix::libc::SIG_IGN);
+            }
+            let source = dir.join("hook.sh");
+            let staged = dir
+                .join("uninstall-hooks")
+                .join("ws-ckpt")
+                .join("0-hook.sh");
+            let outcome = stage_hook_copy(&source, &staged, &dir);
+            let residue = fs::symlink_metadata(&staged);
+            unsafe {
+                assert_eq!(
+                    nix::libc::setrlimit(nix::libc::RLIMIT_FSIZE, &inherited),
+                    0,
+                    "child: restore the soft ceiling for the coverage runtime"
+                );
+            }
+            let code = match (outcome.is_err(), residue) {
+                (true, Err(err)) if err.kind() == std::io::ErrorKind::NotFound => 0,
+                (true, Ok(meta)) => {
+                    eprintln!(
+                        "[staging child] copy failed but left a residue: {:?}, {} bytes",
+                        meta.file_type(),
+                        meta.len()
+                    );
+                    3
+                }
+                (true, Err(err)) => {
+                    eprintln!("[staging child] stat error: {err}");
+                    5
+                }
+                (false, _) => {
+                    eprintln!("[staging child] staging unexpectedly succeeded under the cap");
+                    4
+                }
+            };
+            std::process::exit(code);
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("hook.sh");
+        let payload = vec![b'#'; 128 * 1024];
+        fs::write(&source, &payload).expect("hook script");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+        }
+
+        let spawned =
+            std::process::Command::new(std::env::current_exe().expect("locate this test binary"))
+                // A plain substring filter runs only this test in the child (its
+                // name is unique in the binary) without the module-qualified path
+                // that `--exact` would require.
+                .arg("staged_hook_copy_leaves_no_partial_residue_when_the_stream_dies")
+                .arg("--nocapture")
+                .env(STAGING_RESIDUE_CHILD_DIR, dir.path().as_os_str())
+                .spawn()
+                .expect("spawn the staging child");
+        // Never leak the child, even when an assertion below fails.
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = ChildGuard(spawned);
+
+        let status = child.0.wait().expect("wait for the staging child");
+        assert!(
+            status.success(),
+            "the capped staging child must exit cleanly, got {status}              (3 = partial copy left behind, 4 = staging unexpectedly              succeeded, 5 = stat error)"
+        );
+        // The failed staging must not damage the source hook either.
+        assert_eq!(
+            fs::read(&source).expect("source readable"),
+            payload,
+            "the failed staging must leave the source hook untouched"
+        );
+    }
+
+    /// Regression (review round 4, P2): a symlinked *parent* of the staging
+    /// path must refuse the whole staging entry. `O_NOFOLLOW` guards only
+    /// the leaf, so a `state_dir/uninstall-hooks/<component>` symlink aimed
+    /// at `bin_dir` - another owned root, hence invisible to
+    /// `validate_owned_path` - let the stale-entry clear delete
+    /// `bin_dir/0-post-uninstall.sh`, the copy replace it, and the cleanup
+    /// delete the copy again: an out-of-manifest file destroyed with no
+    /// race and no escape out of the owned roots.
+    #[test]
+    #[cfg(unix)]
+    fn staging_refuses_a_symlinked_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        use anolisa_core::HookPhase;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let component = "ws-ckpt";
+
+        // A payload-shipped hook script inside an owned root.
+        let hook_dir = layout.datadir.join("components").join(component);
+        fs::create_dir_all(&hook_dir).expect("hook dir");
+        let source = hook_dir.join("post-uninstall.sh");
+        fs::write(
+            &source,
+            b"#!/bin/sh
+# payload hook
+",
+        )
+        .expect("hook script");
+
+        // The victim: another component's file under `bin_dir`, sitting
+        // exactly where the staging leaf resolves to once the component
+        // staging directory is a symlink there - inside the owned roots,
+        // so the round-4 diagnostic passes every boundary check.
+        fs::create_dir_all(&layout.bin_dir).expect("bin dir");
+        let victim = layout.bin_dir.join("0-post-uninstall.sh");
+        fs::write(&victim, b"original victim bytes").expect("victim");
+
+        // The planted parent: the component staging directory itself
+        // points at `bin_dir`.
+        let staging_parent = layout.state_dir.join("uninstall-hooks").join(component);
+        fs::create_dir_all(staging_parent.parent().expect("uninstall-hooks"))
+            .expect("uninstall-hooks dir");
+        symlink(&layout.bin_dir, &staging_parent).expect("plant the parent symlink");
+
+        let mut hooks = vec![HookSpec::new(
+            component,
+            HookPhase::PostUninstall,
+            source.clone(),
+        )];
+        // The hook ships in the payload, so its script is on this
+        // uninstall's deletion list.
+        let removal_list = vec![owned_layout_file(source.clone())];
+        let staged_copies =
+            stage_post_uninstall_hook_copies(&layout, component, &mut hooks, &removal_list);
+
+        // Nothing was deleted or written through the link: the victim
+        // keeps its bytes.
+        assert_eq!(
+            fs::read(&victim).expect("victim readable"),
+            b"original victim bytes",
+            "staging behind a symlinked parent must not touch the referent"
+        );
+        // Fail safe: the spec keeps its original path instead of pointing
+        // through the link at another component's territory...
+        assert_eq!(
+            hooks[0].script, source,
+            "the hook spec must keep its original path when staging is refused"
+        );
+        // ... and nothing was registered for cleanup.
+        assert!(
+            staged_copies.is_empty(),
+            "no staging entry may be registered behind a symlinked parent"
+        );
+    }
+
+    /// The cleanup side of the same guarantee: an entry registered behind a
+    /// symlinked parent - planted after staging, or left by any older path -
+    /// must be skipped, never deleted through the link.
+    #[test]
+    #[cfg(unix)]
+    fn staged_hook_cleanup_skips_entries_behind_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let component = "ws-ckpt";
+
+        fs::create_dir_all(&layout.bin_dir).expect("bin dir");
+        let victim = layout.bin_dir.join("0-post-uninstall.sh");
+        fs::write(&victim, b"original victim bytes").expect("victim");
+
+        let staging_parent = layout.state_dir.join("uninstall-hooks").join(component);
+        fs::create_dir_all(staging_parent.parent().expect("uninstall-hooks"))
+            .expect("uninstall-hooks dir");
+        symlink(&layout.bin_dir, &staging_parent).expect("plant the parent symlink");
+
+        // An entry exactly as a previous run would have registered: the
+        // staging leaf behind the symlinked parent.
+        let staged = staging_parent.join("0-post-uninstall.sh");
+        remove_staged_hook_copies(&[staged], &layout.state_dir);
+
+        assert_eq!(
+            fs::read(&victim).expect("victim readable"),
+            b"original victim bytes",
+            "cleanup must not delete through a symlinked parent"
+        );
     }
 }

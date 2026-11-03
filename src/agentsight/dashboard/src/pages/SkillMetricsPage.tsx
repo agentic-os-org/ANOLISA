@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useI18n } from '../i18n';
 import type { MessageKey } from '../i18n';
 import {
@@ -35,19 +35,35 @@ export const SkillMetricsPage: React.FC = () => {
   const [report, setReport] = useState<SkillMetricsReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The effect below re-issues `loadData` whenever any filter changes, so two
+  // loads can be in flight at once; only the newest may write state, or a slow
+  // older response lands last and the report shows the previous agent or
+  // window while the controls say otherwise. Same pattern as
+  // `loadRequestIdRef` on the agent-health and reuse-labels pages.
+  const loadRequestIdRef = useRef(0);
 
   const loadData = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setError(null);
     try {
       const startNs = startMs * 1_000_000;
       const endNs = endMs * 1_000_000;
       const data = await fetchSkillMetrics(startNs, endNs, agentName || undefined, granularity);
+      if (requestId !== loadRequestIdRef.current) return;
       setReport(data);
     } catch (e: any) {
-      setError((e && e.message) || t('skill.error.loadFailed'));
+      if (requestId === loadRequestIdRef.current) {
+        // Drop the previous report: the banner explains the failure, but its
+        // numbers would otherwise sit under the new filter controls and read
+        // as current. Same clear-on-failure as the security overview cards.
+        setReport(null);
+        setError((e && e.message) || t('skill.error.loadFailed'));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [startMs, endMs, agentName, granularity, t]);
 
@@ -56,9 +72,23 @@ export const SkillMetricsPage: React.FC = () => {
   }, [loadData]);
 
   useEffect(() => {
+    // Every time-range change re-issues this request, so responses can
+    // interleave: if the older range's response resolves last, setAgents
+    // would overwrite the newer range's list with agents that may not exist
+    // under it, and the dropdown would offer choices that return empty
+    // reports. The cleanup flag drops responses from superseded ranges —
+    // same shape as the session-events effect on the security page.
+    let cancelled = false;
     const startNs = startMs * 1_000_000;
     const endNs = endMs * 1_000_000;
-    fetchAgentNames(startNs, endNs).then(setAgents).catch(() => {});
+    fetchAgentNames(startNs, endNs)
+      .then((names) => {
+        if (!cancelled) setAgents(names);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [startMs, endMs]);
 
   return (

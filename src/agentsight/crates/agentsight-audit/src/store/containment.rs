@@ -242,6 +242,10 @@ impl AuditStore {
 
     /// Requests immediate reverse reconciliation for one live containment binding.
     ///
+    /// Entering the restore regime resets the attempt counter so earlier
+    /// attach-phase retries cannot pre-consume the bounded audit-restoration
+    /// budget that detachment failures draw from.
+    ///
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
@@ -257,7 +261,8 @@ impl AuditStore {
                  failure_stage = NULL,
                  failure_reason = NULL,
                  next_retry_at_ns = ?1,
-                 updated_at_ns = MAX(updated_at_ns + 1, ?1)
+                 updated_at_ns = MAX(updated_at_ns + 1, ?1),
+                 attempt_count = 0
              WHERE binding_id = ?2
                AND lifecycle_state IN ('pending', 'active', 'expiring')",
             params![current_time_ns, binding_id.to_string()],

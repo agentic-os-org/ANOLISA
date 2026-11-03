@@ -24,11 +24,43 @@ use super::process::{control_request, terminate_marked, ProcessBindings};
 
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum AdmissionState {
+    #[default]
+    Idle,
+    Run {
+        queued: bool,
+    },
+    Registry,
+}
+
+impl AdmissionState {
+    pub(super) fn finish_run(&mut self) {
+        *self = match *self {
+            Self::Run { queued: true } => Self::Run { queued: false },
+            Self::Run { queued: false } => Self::Idle,
+            state => state,
+        };
+    }
+}
+
+// A live registry command transfers ownership to the service instead.
+struct ShortRegistryReservation(Arc<Mutex<AdmissionState>>);
+
+impl Drop for ShortRegistryReservation {
+    fn drop(&mut self) {
+        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if *state == AdmissionState::Registry {
+            *state = AdmissionState::Idle;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct PersistentCoshCoreRuntime {
     pub(super) command_tx: Mutex<Option<mpsc::Sender<ServiceCommand>>>,
     pub(super) live: Arc<AtomicBool>,
-    pub(super) busy: Arc<AtomicBool>,
+    pub(super) admission: Arc<Mutex<AdmissionState>>,
     pub(super) cancel_pending: Arc<AtomicBool>,
     pub(super) reload_pending: Arc<AtomicBool>,
     /// Snapshot of the currently live process: expected-stop flag and pid are
@@ -89,19 +121,27 @@ impl PersistentCoshCoreRuntime {
         let cancelled = Arc::new(AtomicBool::new(false));
         let run_done = Arc::new(AtomicBool::new(false));
 
-        let acquired = self
-            .busy
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        // A failed answer write cancels the owning turn and immediately starts
-        // a fallback turn. Queue that one successor behind teardown; unrelated
-        // concurrent starts still fail closed.
-        let queued_after_cancel = !acquired
-            && self
-                .cancel_pending
-                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok();
-        if !acquired && !queued_after_cancel {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = match *admission {
+            AdmissionState::Idle => {
+                *admission = AdmissionState::Run { queued: false };
+                Some(AdmissionState::Idle)
+            }
+            AdmissionState::Run { queued: false }
+                if self
+                    .cancel_pending
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok() =>
+            {
+                *admission = AdmissionState::Run { queued: true };
+                Some(AdmissionState::Run { queued: false })
+            }
+            _ => None,
+        };
+        if previous.is_none() {
             let _ = mark_recovery_failure(
                 &session_state,
                 &resume_attempt,
@@ -181,7 +221,9 @@ impl PersistentCoshCoreRuntime {
         }) {
             Ok(()) => {}
             Err(error) => {
-                self.busy.store(false, Ordering::SeqCst);
+                if let Some(previous) = previous {
+                    *admission = previous;
+                }
                 let _ = mark_recovery_failure(&recovery_state, &recovery_attempt, &error.message);
                 let _ = service_error_tx.send(Err(error));
             }
@@ -199,20 +241,72 @@ impl PersistentCoshCoreRuntime {
         }
     }
 
+    pub(crate) fn registry_activation_query(
+        &self,
+        params: Value,
+        short: impl FnOnce() -> Result<Value, RegistryQueryError>,
+    ) -> Result<Value, RegistryQueryError> {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *admission != AdmissionState::Idle {
+            return Err(RegistryQueryError::Response {
+                message: "cosh-core runtime is busy; retry provider activation when idle".into(),
+                code: Some("runtime_busy".into()),
+            });
+        }
+        *admission = AdmissionState::Registry;
+        if self.live.load(Ordering::SeqCst) {
+            let receiver = match self.enqueue_registry("auth", "activate", params) {
+                Ok(receiver) => receiver,
+                Err(error) => {
+                    *admission = AdmissionState::Idle;
+                    return Err(error);
+                }
+            };
+            drop(admission);
+            return Self::receive_registry(receiver, registry_timeout("auth", "activate"));
+        }
+        drop(admission);
+        let _reservation = ShortRegistryReservation(Arc::clone(&self.admission));
+        short()
+    }
+
     pub(crate) fn live_registry_query(
         &self,
         domain: &str,
         action: &str,
         params: Value,
     ) -> Option<Result<Value, RegistryQueryError>> {
-        if !self.live.load(Ordering::SeqCst)
-            || self
-                .busy
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.live.load(Ordering::SeqCst) || *admission != AdmissionState::Idle {
             return None;
         }
+        *admission = AdmissionState::Registry;
+        let receiver = match self.enqueue_registry(domain, action, params) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                *admission = AdmissionState::Idle;
+                return Some(Err(error));
+            }
+        };
+        drop(admission);
+        Some(Self::receive_registry(
+            receiver,
+            registry_timeout(domain, action),
+        ))
+    }
+
+    fn enqueue_registry(
+        &self,
+        domain: &str,
+        action: &str,
+        params: Value,
+    ) -> Result<mpsc::Receiver<Result<Value, RegistryQueryError>>, RegistryQueryError> {
         let request_id = format!(
             "live-reg-{}-{}",
             std::process::id(),
@@ -226,24 +320,24 @@ impl PersistentCoshCoreRuntime {
             params,
             response_tx,
         };
-        let sent = self
-            .sender()
-            .map_err(|error| RegistryQueryError::Transport(error.message))
-            .and_then(|sender| {
-                sender.send(ServiceCommand::Registry(command)).map_err(|_| {
-                    RegistryQueryError::Transport("cosh-core runtime service stopped".to_string())
-                })
-            });
-        if let Err(error) = sent {
-            self.busy.store(false, Ordering::SeqCst);
-            return Some(Err(error));
-        }
-        let timeout = registry_timeout(domain, action);
-        Some(response_rx.recv_timeout(timeout).unwrap_or_else(|_| {
+        self.sender()
+            .map_err(|error| RegistryQueryError::Transport(error.message))?
+            .send(ServiceCommand::Registry(command))
+            .map_err(|_| {
+                RegistryQueryError::Transport("cosh-core runtime service stopped".into())
+            })?;
+        Ok(response_rx)
+    }
+
+    fn receive_registry(
+        receiver: mpsc::Receiver<Result<Value, RegistryQueryError>>,
+        timeout: Duration,
+    ) -> Result<Value, RegistryQueryError> {
+        receiver.recv_timeout(timeout).unwrap_or_else(|_| {
             Err(RegistryQueryError::Transport(
-                "live registry query timed out".to_string(),
+                "live registry query timed out".into(),
             ))
-        }))
+        })
     }
 
     pub(crate) fn note_external_mutation(&self, domain: &str, action: &str) {
@@ -261,7 +355,7 @@ impl PersistentCoshCoreRuntime {
         }
         let (sender, receiver) = mpsc::channel();
         let live = Arc::clone(&self.live);
-        let busy = Arc::clone(&self.busy);
+        let admission = Arc::clone(&self.admission);
         let cancel_pending = Arc::clone(&self.cancel_pending);
         let reload_pending = Arc::clone(&self.reload_pending);
         let current_process = Arc::clone(&self.current_process);
@@ -270,7 +364,7 @@ impl PersistentCoshCoreRuntime {
             super::service_loop(
                 receiver,
                 live,
-                busy,
+                admission,
                 cancel_pending,
                 reload_pending,
                 current_process,
@@ -279,5 +373,154 @@ impl PersistentCoshCoreRuntime {
         });
         *current = Some(sender.clone());
         Ok(sender)
+    }
+}
+
+#[cfg(test)]
+mod provider_activation_tests {
+    use super::*;
+    use crate::adapter::CoshCoreAdapter;
+
+    #[test]
+    fn auth_activate_before_runtime_keeps_short_registry_path() {
+        let adapter = CoshCoreAdapter::new("/nonexistent-core-activation", false);
+        let error = adapter
+            .registry_query_classified("auth", "activate", Value::Null)
+            .unwrap_err()
+            .into_message();
+        assert!(error.contains("spawn"), "{error}");
+    }
+
+    #[test]
+    fn auth_activate_never_uses_short_process_while_runtime_is_busy_or_starting() {
+        for live in [false, true] {
+            let adapter = CoshCoreAdapter::new("/nonexistent-core-activation", false);
+            adapter.runtime.live.store(live, Ordering::SeqCst);
+            *adapter.runtime.admission.lock().unwrap() = AdmissionState::Run { queued: false };
+            let error = adapter
+                .registry_query_classified("auth", "activate", Value::Null)
+                .unwrap_err()
+                .into_message();
+            assert!(error.contains("busy"), "live={live}: {error}");
+            assert!(!error.contains("spawn"));
+        }
+    }
+    fn run(runtime: &PersistentCoshCoreRuntime) -> AgentRunHandle {
+        runtime.start_run(
+            "admission-test".into(),
+            PreparedInvocation {
+                program: "/nonexistent-admission-core".into(),
+                args: Vec::new(),
+                prompt: "test".into(),
+            },
+            None,
+            CoshApprovalMode::Auto,
+            Arc::new(Mutex::new(SessionRuntimeState::default())),
+            "/tmp".into(),
+            SessionResumeAttempt::Fresh { generation: 0 },
+        )
+    }
+
+    #[test]
+    fn failed_run_enqueue_restores_only_its_reservation() {
+        for previous in [AdmissionState::Idle, AdmissionState::Run { queued: false }] {
+            let runtime = PersistentCoshCoreRuntime::default();
+            let (sender, receiver) = mpsc::channel();
+            drop(receiver);
+            *runtime.command_tx.lock().unwrap() = Some(sender);
+            *runtime.admission.lock().unwrap() = previous;
+            runtime
+                .cancel_pending
+                .store(previous != AdmissionState::Idle, Ordering::SeqCst);
+            let handle = run(&runtime);
+            let error = handle
+                .poll_event_timeout(Duration::from_secs(1))
+                .err()
+                .expect("closed sender must reject the run");
+            assert!(error.message.contains("service stopped"), "{error:?}");
+            assert_eq!(*runtime.admission.lock().unwrap(), previous);
+        }
+    }
+
+    #[test]
+    fn cancelled_successor_retains_run_admission_until_it_finishes() {
+        let runtime = PersistentCoshCoreRuntime::default();
+        let (sender, receiver) = mpsc::channel();
+        *runtime.command_tx.lock().unwrap() = Some(sender);
+        *runtime.admission.lock().unwrap() = AdmissionState::Run { queued: false };
+        runtime.cancel_pending.store(true, Ordering::SeqCst);
+        let _successor = run(&runtime);
+        let _queued_command = receiver.try_recv().expect("successor must be enqueued");
+        assert_eq!(
+            *runtime.admission.lock().unwrap(),
+            AdmissionState::Run { queued: true }
+        );
+        let rejected = run(&runtime);
+        assert!(rejected.poll_event_timeout(Duration::from_secs(1)).is_err());
+        runtime.admission.lock().unwrap().finish_run();
+        assert_eq!(
+            *runtime.admission.lock().unwrap(),
+            AdmissionState::Run { queued: false }
+        );
+        assert!(runtime
+            .registry_activation_query(Value::Null, || panic!(
+                "registry must not steal queued run admission"
+            ))
+            .is_err());
+        runtime.admission.lock().unwrap().finish_run();
+        assert_eq!(*runtime.admission.lock().unwrap(), AdmissionState::Idle);
+    }
+
+    #[test]
+    fn short_activation_releases_admission_after_error_and_panic() {
+        let runtime = PersistentCoshCoreRuntime::default();
+        let result = runtime.registry_activation_query(Value::Null, || {
+            assert_eq!(
+                *runtime.admission.try_lock().unwrap(),
+                AdmissionState::Registry
+            );
+            Err(RegistryQueryError::Transport("test failure".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(*runtime.admission.lock().unwrap(), AdmissionState::Idle);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.registry_activation_query(Value::Null, || panic!("short process panicked"))
+        }));
+        assert!(panic.is_err());
+        assert_eq!(*runtime.admission.lock().unwrap(), AdmissionState::Idle);
+    }
+
+    #[test]
+    fn failed_live_registry_enqueue_restores_admission_without_short_fallback() {
+        let runtime = PersistentCoshCoreRuntime::default();
+        runtime.live.store(true, Ordering::SeqCst);
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        *runtime.command_tx.lock().unwrap() = Some(sender);
+        assert!(runtime
+            .registry_activation_query(Value::Null, || panic!(
+                "live failure must not activate another process"
+            ))
+            .is_err());
+        assert_eq!(*runtime.admission.lock().unwrap(), AdmissionState::Idle);
+    }
+
+    #[test]
+    fn caller_timeout_does_not_release_service_registry_admission() {
+        let runtime = PersistentCoshCoreRuntime::default();
+        runtime.live.store(true, Ordering::SeqCst);
+        let (sender, receiver) = mpsc::channel();
+        *runtime.command_tx.lock().unwrap() = Some(sender);
+        let result = runtime
+            .live_registry_query("auth", "state", Value::Null)
+            .unwrap();
+        assert!(result.unwrap_err().into_message().contains("timed out"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ServiceCommand::Registry(_))
+        ));
+        assert_eq!(*runtime.admission.lock().unwrap(), AdmissionState::Registry);
+        let rejected = run(&runtime);
+        assert!(rejected.poll_event_timeout(Duration::from_secs(1)).is_err());
     }
 }

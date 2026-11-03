@@ -4,6 +4,45 @@ use std::sync::Mutex;
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+#[cfg(windows)]
+#[test]
+fn resolves_native_executable_from_path_without_a_shell() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("tokenless-resolver-test.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+    let _guard = EnvGuard::set("PATH", directory.path().to_str().unwrap());
+    assert_eq!(
+        resolve_binary_path("tokenless-resolver-test"),
+        Some(binary.to_string_lossy().into_owned())
+    );
+    assert!(resolve_binary_path("tokenless-missing-test").is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn resolves_and_executes_cmd_shim_from_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("tokenless-shim-test.cmd");
+    std::fs::write(&binary, "@echo shim-version-1.0\r\n").unwrap();
+    let mut guard = EnvGuard::set("PATH", directory.path().to_str().unwrap());
+    guard
+        .previous
+        .push(("PATHEXT", std::env::var_os("PATHEXT")));
+    unsafe { std::env::set_var("PATHEXT", ".EXE;.CMD") };
+    let resolved = resolve_binary_path("tokenless-shim-test").unwrap();
+    assert_eq!(std::path::Path::new(&resolved), binary);
+    let output = std::process::Command::new(resolved)
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "shim-version-1.0"
+    );
+    assert!(!windows_binary_paths("tokenless-shim-test", ".EXE").contains(&binary));
+}
+
 struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -196,16 +235,21 @@ fn version_ge_patch_comparison() {
     assert!(!version_ge("1.0.0", "1.0.1"));
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn binary_fallback_paths_cover_supported_installers() {
     let paths = binary_fallback_paths("rtk", "/home/alice");
     let expected = [
         "/home/alice/.local/bin/rtk",
+        "/home/alice/.local/libexec/tokenless/rtk",
         "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
         "/home/alice/.local/libexec/anolisa/tokenless/rtk",
         "/usr/local/bin/rtk",
+        "/usr/local/libexec/tokenless/rtk",
         "/usr/local/libexec/anolisa/tokenless/rtk",
         "/usr/bin/rtk",
+        "/usr/libexec/tokenless/rtk",
         "/usr/libexec/anolisa/tokenless/rtk",
         "/usr/lib/anolisa/tokenless/rtk",
         "/home/alice/.local/share/anolisa/tokenless/rtk",
@@ -215,6 +259,8 @@ fn binary_fallback_paths_cover_supported_installers() {
     assert_eq!(paths, expected);
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn generic_binary_fallbacks_do_not_probe_component_helpers() {
     let paths = binary_fallback_paths("docker", "/home/alice");
@@ -228,6 +274,8 @@ fn generic_binary_fallbacks_do_not_probe_component_helpers() {
     );
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn binary_fallback_paths_skip_user_layout_without_absolute_home() {
     for home in ["", "relative/home"] {
@@ -305,7 +353,7 @@ fn format_dep_status_all() {
 
 #[test]
 fn expand_path_home() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let home = crate::get_home_dir();
     let expanded = expand_path("~/.copilot-shell/settings.json");
     assert_eq!(expanded, format!("{home}/.copilot-shell/settings.json"));
 }
@@ -433,9 +481,13 @@ fn rtk_resolution_skips_incompatible_path_candidate() {
     chmod_file(&bundled, 0o700);
 
     assert_eq!(
-        select_rtk_path(
-            Some(incompatible),
-            directory.path().to_str().unwrap()
+        select_rtk_candidates(
+            std::iter::once(incompatible)
+                .chain(binary_fallback_paths(
+                    "rtk",
+                    directory.path().to_str().unwrap()
+                ))
+                .collect()
         ),
         Some(bundled.to_string_lossy().into_owned())
     );
@@ -617,6 +669,8 @@ fn check_config_file_tilde_expansion() {
     assert!(!result);
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_permission_file_read() {
     assert!(check_permission("file_read"));
@@ -628,6 +682,8 @@ fn check_permission_file_write() {
     let _ = check_permission("file_write");
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_permission_exec_shell() {
     assert!(check_permission("exec_shell"));
@@ -708,6 +764,8 @@ fn normalize_dep_object_with_apt_apk_packages() {
     assert_eq!(dep.apk_package.as_deref(), Some("curl-alpine"));
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_tool_all_ready() {
     let spec = ToolDepSpec {
@@ -737,6 +795,8 @@ fn check_tool_not_ready_missing_required() {
     assert_eq!(result.status, ReadyStatus::NotReady);
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_tool_partial_missing_recommended() {
     let spec = ToolDepSpec {
@@ -751,6 +811,8 @@ fn check_tool_partial_missing_recommended() {
     assert_eq!(result.status, ReadyStatus::Partial);
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_tool_partial_recommended_version_low() {
     // bash>=999.0.0 is always VersionLow; the overall status must be PARTIAL, not READY.
@@ -778,11 +840,16 @@ fn check_tool_partial_recommended_version_low() {
     assert_eq!(result.status, ReadyStatus::Partial);
     // Confirm the dep itself is VersionLow, not Missing
     assert!(
-        matches!(result.recommended_results[0].1, DepStatus::VersionLow { .. }),
+        matches!(
+            result.recommended_results[0].1,
+            DepStatus::VersionLow { .. }
+        ),
         "expected VersionLow for bash>=999.0.0"
     );
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_tool_partial_missing_config() {
     let spec = ToolDepSpec {
@@ -854,6 +921,8 @@ fn format_dep_status_label_all() {
     assert!(low.contains("2.0"));
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_dep_available_binary() {
     let dep = make_dep("sh");
@@ -866,6 +935,23 @@ fn check_dep_missing_binary() {
     assert_eq!(check_dep(&dep), DepStatus::Missing);
 }
 
+#[cfg(unix)]
+#[test]
+fn independent_resources_follow_xdg_without_bypassing_trust_checks() {
+    let directory = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set("XDG_DATA_HOME", directory.path().to_str().unwrap());
+    let resource = directory
+        .path()
+        .join("tokenless/adapters/common/tool-ready-spec.json");
+    std::fs::create_dir_all(resource.parent().unwrap()).unwrap();
+    std::fs::write(&resource, "{}").unwrap();
+    assert!(spec_path_candidates().contains(&resource.to_string_lossy().into_owned()));
+    assert!(is_trusted_path(&resource));
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&resource, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(!is_trusted_path(&resource));
+}
+
 #[test]
 fn spec_path_candidates_ordered_correctly() {
     // Pure-function check: no file-system dependency, deterministic.
@@ -873,6 +959,10 @@ fn spec_path_candidates_ordered_correctly() {
     let _guard = EnvGuard::set_spec("/custom/spec.json");
     let c = spec_path_candidates();
     assert_eq!(c[0], "/custom/spec.json");
+    assert!(
+        c.iter()
+            .any(|path| path == "/usr/local/share/tokenless/adapters/common/tool-ready-spec.json")
+    );
 
     // All four /usr/local paths (FHS + legacy) must be present.
     assert!(
@@ -913,8 +1003,8 @@ fn fix_script_candidates_ordered_correctly() {
         "missing /usr/local FHS fix-script path in {c:?}"
     );
     assert!(
-        c.iter().any(|p| p
-            == "/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"),
+        c.iter()
+            .any(|p| p == "/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"),
         "missing /usr/local legacy fix-script path in {c:?}"
     );
 
@@ -948,8 +1038,7 @@ fn load_spec_error_on_nonexistent_file() {
 
 #[test]
 fn load_spec_error_on_invalid_json() {
-    let tmp =
-        std::env::temp_dir().join(format!("tokenless-bad-spec-{}.json", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("tokenless-bad-spec-{}.json", std::process::id()));
     std::fs::write(&tmp, "not json").unwrap();
     let result = load_spec(&tmp);
     assert!(result.is_err());
@@ -1000,6 +1089,8 @@ fn expand_path_tilde_only() {
     assert_eq!(expanded, home);
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_dep_with_version_available() {
     let dep = DepEntry {
@@ -1193,6 +1284,8 @@ fn write_versioned_spec(dir: &std::path::Path) -> std::path::PathBuf {
     spec_path
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_tool_all_available() {
     let dir = tempfile::tempdir().unwrap();
@@ -1212,6 +1305,8 @@ fn check_tool_with_missing_dep() {
     assert!(!result.required_results.is_empty());
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_tool_versioned_available() {
     let dir = tempfile::tempdir().unwrap();
@@ -1399,7 +1494,10 @@ fn run_fix_skips_recommended_only_missing_deps() {
     }
 
     assert!(result.is_ok());
-    assert!(!marker_path.exists(), "recommended deps must not trigger auto-fix");
+    assert!(
+        !marker_path.exists(),
+        "recommended deps must not trigger auto-fix"
+    );
 }
 
 #[test]
@@ -1520,6 +1618,7 @@ fn is_trusted_path_owned_file() {
 }
 
 #[test]
+#[cfg(unix)]
 fn is_trusted_path_symlink_to_owned_file() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target_file");
@@ -1531,6 +1630,7 @@ fn is_trusted_path_symlink_to_owned_file() {
 }
 
 #[test]
+#[cfg(unix)]
 fn is_trusted_path_symlink_to_system_path() {
     let dir = tempfile::tempdir().unwrap();
     let link = dir.path().join("link_to_usr_share");
@@ -1542,6 +1642,7 @@ fn is_trusted_path_symlink_to_system_path() {
 }
 
 #[test]
+#[cfg(unix)]
 fn is_trusted_path_broken_symlink() {
     let dir = tempfile::tempdir().unwrap();
     let link = dir.path().join("broken_link");
@@ -1551,6 +1652,7 @@ fn is_trusted_path_broken_symlink() {
 }
 
 #[test]
+#[cfg(unix)]
 fn is_trusted_path_symlink_in_different_dir() {
     let dir1 = tempfile::tempdir().unwrap();
     let dir2 = tempfile::tempdir().unwrap();
@@ -1562,6 +1664,8 @@ fn is_trusted_path_symlink_in_different_dir() {
     assert!(result);
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_dep_available_ls() {
     let dep = make_dep("ls");
@@ -1578,6 +1682,8 @@ fn check_dep_with_version_ls() {
     let _ = status;
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_dep_with_version_bash() {
     let mut dep = make_dep("bash");
@@ -1586,13 +1692,18 @@ fn check_dep_with_version_bash() {
     assert_eq!(status, DepStatus::Available);
 }
 
+// Legacy readiness checks require Unix tools or filesystem layouts.
+#[cfg(unix)]
 #[test]
 fn check_dep_version_low() {
     let mut dep = make_dep("bash");
     dep.version = Some(">=999.0".to_string());
     let status = check_dep(&dep);
     match status {
-        DepStatus::VersionLow { installed, required } => {
+        DepStatus::VersionLow {
+            installed,
+            required,
+        } => {
             assert_eq!(required, "999.0");
             assert!(!installed.is_empty());
         }
@@ -1626,7 +1737,6 @@ fn resolve_package_with_apt_override() {
     // Will resolve based on detected system manager
     assert!(!pkg.is_empty());
 }
-
 
 #[test]
 fn format_dep_status_label_all_variants() {
@@ -1725,7 +1835,13 @@ fn checklist_json_schema_covers_all_categories() {
     // Every tool entry carries the status label plus all five categories.
     for tool in tools {
         assert!(tool["status"].is_string());
-        for category in ["required", "recommended", "config", "permissions", "network"] {
+        for category in [
+            "required",
+            "recommended",
+            "config",
+            "permissions",
+            "network",
+        ] {
             assert!(
                 tool[category].is_array(),
                 "tool {} must serialize category {}",

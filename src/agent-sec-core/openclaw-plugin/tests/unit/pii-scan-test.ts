@@ -10,11 +10,15 @@ type RegisteredHook = {
   priority: number;
 };
 
-function createMockApi(pluginConfig: Record<string, any> = {}) {
+function createMockApi(
+  pluginConfig: Record<string, any> = {},
+  version: unknown = "2026.4.14",
+) {
   const hooks: RegisteredHook[] = [];
   const logs: string[] = [];
   const api = {
     pluginConfig,
+    runtime: { version },
     logger: {
       info: (msg: string) => logs.push(`[INFO] ${msg}`),
       error: (msg: string) => logs.push(`[ERROR] ${msg}`),
@@ -32,7 +36,9 @@ function registerHandlersWithoutDebug(pluginConfig: Record<string, any> = {}) {
   const { api, hooks, logs } = createMockApi(pluginConfig);
   delete api.logger.debug;
   piiScan.register(api);
-  const beforeDispatch = hooks.find((hook) => hook.hookName === "before_dispatch");
+  const beforeDispatch = hooks.find(
+    (hook) => hook.hookName === "before_dispatch",
+  );
   assert.ok(beforeDispatch, "before_dispatch handler should be registered");
   return { beforeDispatch, hooks, logs };
 }
@@ -40,7 +46,9 @@ function registerHandlersWithoutDebug(pluginConfig: Record<string, any> = {}) {
 function registerHandlers(pluginConfig: Record<string, any> = {}) {
   const { api, hooks, logs } = createMockApi(pluginConfig);
   piiScan.register(api);
-  const beforeDispatch = hooks.find((hook) => hook.hookName === "before_dispatch");
+  const beforeDispatch = hooks.find(
+    (hook) => hook.hookName === "before_dispatch",
+  );
   assert.ok(beforeDispatch, "before_dispatch handler should be registered");
   return { beforeDispatch, hooks, logs };
 }
@@ -53,7 +61,9 @@ function enableBlockConfig(enableBlock: boolean): Record<string, any> {
   };
 }
 
-function policyConfig(policy: "observe" | "warn" | "ask" | "block"): Record<string, any> {
+function policyConfig(
+  policy: "observe" | "warn" | "ask" | "block",
+): Record<string, any> {
   return { capabilities: { "pii-scan-user-input": { policy } } };
 }
 
@@ -118,6 +128,7 @@ describe("pii-scan-user-input", () => {
       ["before_dispatch", "before_tool_call", "after_tool_call", "llm_output"],
     );
     assert.deepEqual(piiScan.hooks, [
+      "before_agent_run",
       "before_dispatch",
       "before_tool_call",
       "after_tool_call",
@@ -126,11 +137,205 @@ describe("pii-scan-user-input", () => {
     assert.equal(hooks[0].priority, 200);
   });
 
+  for (const [version, expected] of [
+    ["2026.4.14", "before_dispatch"],
+    ["2026.5.7", "before_dispatch"],
+    ["2026.5.11", "before_dispatch"],
+    ["2026.5.12", "before_agent_run"],
+    ["2026.9.2", "before_agent_run"],
+    ["2026.10.1+build.1", "before_agent_run"],
+    ["2026.5.12-2", "before_agent_run"],
+    ["2026.7.1-2", "before_agent_run"],
+    ["2027.1.1", "before_agent_run"],
+    ["2026.5.12-beta.1", "before_dispatch"],
+    ["2026.9.2-dev", "before_dispatch"],
+    ["unknown", "before_dispatch"],
+    [null, "before_dispatch"],
+  ]) {
+    it(`selects ${expected} for host version ${version}`, () => {
+      const { api, hooks, logs } = createMockApi({}, version);
+      piiScan.register(api);
+      assert.deepEqual(
+        hooks.map((hook) => hook.hookName),
+        [expected, "before_tool_call", "after_tool_call", "llm_output"],
+      );
+      assert.ok(logs.some((log) => log.includes(`input hook: ${expected}`)));
+      assert.equal(
+        logs.some((log) => log.includes("legacy inbound scanning")),
+        expected === "before_dispatch",
+      );
+    });
+  }
+
+  for (const policy of ["observe", "warn", "ask", "block"] as const) {
+    for (const verdict of ["pass", "warn", "deny"]) {
+      it(`model-entry gate applies ${policy} to ${verdict}`, async () => {
+        const { api, hooks, logs } = createMockApi(
+          policyConfig(policy),
+          "2026.5.12",
+        );
+        piiScan.register(api);
+        mockCli(
+          scanResult(
+            verdict,
+            verdict === "pass"
+              ? []
+              : [verdict === "deny" ? denyFinding : warnFinding],
+          ),
+        );
+        const result = await hooks[0].handler({
+          prompt: "password=secret",
+          messages: [],
+        });
+        if (policy === "block" && verdict === "deny") {
+          assert.equal(result?.outcome, "block");
+          assert.equal(result?.reason, "pii_detected");
+          assert.match(result?.message, /当前策略已阻断本次请求/);
+          assert.equal(result?.handled, undefined);
+        } else {
+          assert.equal(result, undefined);
+        }
+        assert.ok(
+          !JSON.stringify({ result, logs }).includes("password=secret"),
+        );
+        assert.equal(lastCliOpts?.timeout, 10_000);
+        assert.equal(lastCliArgs?.at(-1), "model_input");
+        assert.ok(!lastCliArgs?.includes("--redact-output"));
+      });
+    }
+  }
+
+  it("scans only the current prompt without changing the event", async () => {
+    const { api, hooks } = createMockApi({}, "2026.9.2");
+    piiScan.register(api);
+    mockCli(scanResult("pass", []));
+    const event = {
+      prompt: "  current prompt\nwith whitespace  ",
+      systemPrompt: "system text",
+      senderId: "excluded-sender",
+      messages: [
+        { role: "user", content: "history text", id: "excluded-id" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "assistant text" },
+            {
+              type: "thinking",
+              thinking: "reasoning text",
+              signature: "excluded-signature",
+            },
+            {
+              type: "toolCall",
+              id: "excluded-call-id",
+              name: "exec",
+              arguments: { command: "tool argument" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          content: [
+            { type: "text", text: "tool result" },
+            { type: "image", data: "excluded-image", mimeType: "image/png" },
+          ],
+          details: { raw: "excluded-details" },
+        },
+        null,
+        { content: [null, { type: "audio", data: "excluded-audio" }] },
+      ],
+    };
+    const original = structuredClone(event);
+    await hooks[0].handler(event);
+    assert.equal(lastCliOpts?.stdin, event.prompt);
+    assert.deepEqual(event, original);
+  });
+
+  it("blocks a sensitive prompt without blocking a later clean prompt on history", async () => {
+    const { api, hooks } = createMockApi(policyConfig("block"), "2026.9.2");
+    piiScan.register(api);
+    _setCliMock(async (_args, opts) =>
+      opts?.stdin?.includes("password=secret")
+        ? scanResult("deny", [denyFinding])
+        : scanResult("pass", []),
+    );
+    const context = {
+      systemPrompt: "password=secret",
+      messages: [{ role: "user", content: "password=secret" }],
+    };
+    assert.equal(
+      (await hooks[0].handler({ ...context, prompt: "password=secret" }))
+        ?.outcome,
+      "block",
+    );
+    assert.equal(
+      await hooks[0].handler({ ...context, prompt: "Hello" }),
+      undefined,
+    );
+  });
+
+  for (const prompt of [undefined, null, "", " \n ", 42]) {
+    it(`skips a missing or empty current prompt (${JSON.stringify(prompt)})`, async () => {
+      const { api, hooks } = createMockApi(policyConfig("block"), "2026.9.2");
+      piiScan.register(api);
+      mockCli(scanResult("deny", [denyFinding]));
+      assert.equal(
+        await hooks[0].handler({
+          prompt,
+          content: "password=secret",
+          systemPrompt: "password=secret",
+          messages: [{ role: "user", content: "password=secret" }],
+        }),
+        undefined,
+      );
+      assert.equal(lastCliArgs, undefined);
+    });
+  }
+
+  it("skips empty model input and preserves the environment policy override", async () => {
+    process.env.PII_CHECKER_MODE = "observe";
+    const { api, hooks } = createMockApi(policyConfig("block"), "2026.9.2");
+    piiScan.register(api);
+    mockCli(scanResult("deny", [denyFinding]));
+    assert.equal(
+      await hooks[0].handler({ prompt: "  ", messages: [] }),
+      undefined,
+    );
+    assert.equal(lastCliArgs, undefined);
+    assert.equal(
+      await hooks[0].handler({ prompt: "password=secret" }),
+      undefined,
+    );
+    assert.equal(lastCliArgs?.at(-1), "model_input");
+  });
+
+  for (const failure of [
+    { exitCode: 124, stdout: "", stderr: "timeout" },
+    { exitCode: 1, stdout: "", stderr: "failed" },
+    { exitCode: 0, stdout: "not-json", stderr: "" },
+  ]) {
+    it(`model-entry scanner fails open for ${failure.stderr || "invalid JSON"}`, async () => {
+      const { api, hooks, logs } = createMockApi(
+        policyConfig("block"),
+        "2026.9.2",
+      );
+      piiScan.register(api);
+      mockCli(failure);
+      assert.equal(
+        await hooks[0].handler({ prompt: "sensitive input" }),
+        undefined,
+      );
+      assert.ok(logs.some((log) => log.startsWith("[WARN]")));
+    });
+  }
+
   it("does not call CLI for empty inbound text", async () => {
     const { beforeDispatch } = registerHandlers();
     mockCliNoCall();
 
-    const result = await beforeDispatch.handler({ content: "   ", body: "   " });
+    const result = await beforeDispatch.handler({
+      content: "   ",
+      body: "   ",
+    });
 
     assert.equal(result, undefined);
   });
@@ -168,7 +373,9 @@ describe("pii-scan-user-input", () => {
   });
 
   it("adds --include-low-confidence when configured", async () => {
-    const { beforeDispatch } = registerHandlers({ piiIncludeLowConfidence: true });
+    const { beforeDispatch } = registerHandlers({
+      piiIncludeLowConfidence: true,
+    });
     mockCli(scanResult("pass", []));
 
     await beforeDispatch.handler({ content: "hello" });
@@ -187,16 +394,30 @@ describe("pii-scan-user-input", () => {
 
   for (const enableBlock of [false, true]) {
     it(`warn verdict logs and allows when enableBlock=${enableBlock}`, async () => {
-      const { beforeDispatch, logs } = registerHandlers(enableBlockConfig(enableBlock));
+      const { beforeDispatch, logs } = registerHandlers(
+        enableBlockConfig(enableBlock),
+      );
       mockCli(scanResult("warn", [warnFinding]));
 
-      const result = await beforeDispatch.handler({ content: "email alice@example.com" });
+      const result = await beforeDispatch.handler({
+        content: "email alice@example.com",
+      });
 
       assert.equal(result, undefined);
-      assert.ok(logs.some((log) => log.includes("[WARN] [pii-checker] 检测到")));
-      assert.ok(!logs.some((log) => log.startsWith("[WARN]") && log.includes("verdict=")));
-      assert.ok(logs.some((log) => log.includes("检测到 1 项一般风险敏感信息")));
-      assert.ok(logs.some((log) => log.includes("本次仅提醒，未触发确认或阻断")));
+      assert.ok(
+        logs.some((log) => log.includes("[WARN] [pii-checker] 检测到")),
+      );
+      assert.ok(
+        !logs.some(
+          (log) => log.startsWith("[WARN]") && log.includes("verdict="),
+        ),
+      );
+      assert.ok(
+        logs.some((log) => log.includes("检测到 1 项一般风险敏感信息")),
+      );
+      assert.ok(
+        logs.some((log) => log.includes("本次仅提醒，未触发确认或阻断")),
+      );
       assert.ok(!logs.some((log) => log.includes("a***@example.com")));
       assert.ok(!logs.some((log) => log.includes("alice@example.com")));
     });
@@ -229,7 +450,9 @@ describe("pii-scan-user-input", () => {
   });
 
   it("block policy works when the host logger has no debug method", async () => {
-    const { beforeDispatch } = registerHandlersWithoutDebug(policyConfig("block"));
+    const { beforeDispatch } = registerHandlersWithoutDebug(
+      policyConfig("block"),
+    );
     mockCli(scanResult("deny", [denyFinding]));
 
     const result = await beforeDispatch.handler({ content: "password=secret" });
@@ -237,6 +460,39 @@ describe("pii-scan-user-input", () => {
     assert.equal(result?.handled, true);
     assert.match(result?.text, /当前策略已阻断本次请求/);
   });
+
+  for (const version of ["2026.4.14", "2026.5.12"]) {
+    it(`uses complete reduced-report counts on ${version}`, async () => {
+      const { api, hooks } = createMockApi(policyConfig("block"), version);
+      piiScan.register(api);
+      mockCli({
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          verdict: "deny",
+          findings: [denyFinding],
+          summary: {
+            total: 20001,
+            by_severity: { deny: 1, warn: 20000 },
+            findings_truncated: true,
+          },
+        }),
+      });
+      const result = await hooks[0].handler({
+        content: "password=secret",
+        prompt: "password=secret",
+      });
+      if (version === "2026.4.14") {
+        assert.equal(result?.handled, true);
+      } else {
+        assert.equal(result?.outcome, "block");
+      }
+      assert.match(
+        result?.text ?? result?.message,
+        /20001.*高风险 1、一般风险 20000.*明细已省略/,
+      );
+    });
+  }
 
   it("summarizes mixed findings by per-finding risk", async () => {
     const { beforeDispatch } = registerHandlers(policyConfig("block"));
@@ -263,7 +519,9 @@ describe("pii-scan-user-input", () => {
 
   it("block policy blocks a before_tool_call deny verdict", async () => {
     const { hooks } = registerHandlers(policyConfig("block"));
-    const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
+    const beforeToolCall = hooks.find(
+      (hook) => hook.hookName === "before_tool_call",
+    );
     assert.ok(beforeToolCall);
     mockCli(scanResult("deny", [denyFinding]));
 
@@ -304,7 +562,9 @@ describe("pii-scan-user-input", () => {
 
   it("ask policy requests approval for a before_tool_call deny verdict", async () => {
     const { hooks } = registerHandlers(policyConfig("ask"));
-    const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
+    const beforeToolCall = hooks.find(
+      (hook) => hook.hookName === "before_tool_call",
+    );
     assert.ok(beforeToolCall);
     mockCli(scanResult("deny", [denyFinding]));
 
@@ -318,12 +578,62 @@ describe("pii-scan-user-input", () => {
 
     assert.equal(result?.requireApproval?.title, "PII Checker Security Review");
     assert.equal(result?.requireApproval?.severity, "critical");
-    assert.match(result?.requireApproval?.description, /检测到 1 项高风险敏感信息/);
-    assert.match(result?.requireApproval?.description, /当前策略要求确认，请确认后继续/);
+    assert.ok(result?.requireApproval?.description.length <= 256);
+    assert.match(
+      result?.requireApproval?.description,
+      /检测到 1 项高风险敏感信息/,
+    );
+    assert.match(
+      result?.requireApproval?.description,
+      /当前策略要求确认，请确认后继续/,
+    );
     assert.doesNotMatch(result?.requireApproval?.description, /credential/);
-    assert.doesNotMatch(result?.requireApproval?.description, /password=\[REDACTED\]/);
-    assert.doesNotMatch(result?.requireApproval?.description, /password=secret/);
-    assert.doesNotMatch(result?.requireApproval?.description, /仅提醒|继续处理/);
+    assert.doesNotMatch(
+      result?.requireApproval?.description,
+      /password=\[REDACTED\]/,
+    );
+    assert.doesNotMatch(
+      result?.requireApproval?.description,
+      /password=secret/,
+    );
+    assert.doesNotMatch(
+      result?.requireApproval?.description,
+      /仅提醒|继续处理/,
+    );
+  });
+
+  it("keeps summary-count approval bounded without exposing evidence", async () => {
+    const { hooks, logs } = registerHandlers(policyConfig("ask"));
+    const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
+    assert.ok(beforeToolCall);
+    mockCli({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        verdict: "deny",
+        findings: [denyFinding, warnFinding],
+        summary: {
+          findings_truncated: true,
+          total: 12000,
+          by_severity: { deny: 8000, warn: 4000 },
+        },
+      }),
+      stderr: "",
+    });
+
+    const result = await beforeToolCall.handler({
+      toolName: "exec",
+      params: { command: "password=secret alice@example.com" },
+    }, {});
+
+    const description = result?.requireApproval?.description;
+    assert.equal(typeof description, "string");
+    assert.ok(description.length <= 256);
+    assert.match(description, /12000 项敏感信息（高风险 8000、一般风险 4000；明细已省略）/);
+    assert.match(description, /当前策略要求确认，请确认后继续/);
+    assert.doesNotMatch(JSON.stringify({ result, logs }), /password=secret|alice@example\.com/);
+    assert.doesNotMatch(description, /credential|password=\[REDACTED\]|a\*\*\*@example\.com/);
+    assert.equal(result.requireApproval.title, "PII Checker Security Review");
+    assert.equal(result.requireApproval.severity, "critical");
   });
 
   it("ask policy falls back to a warning before dispatch", async () => {
@@ -335,18 +645,16 @@ describe("pii-scan-user-input", () => {
     assert.equal(result, undefined);
     assert.ok(logs.some((log) => log.includes("verdict=deny policy=ask")));
     assert.ok(!logs.some((log) => log.startsWith("[WARN]") && log.includes("policy=")));
-    assert.ok(
-      logs.some((log) =>
-        log.includes("当前环节不支持确认/阻断，本次仅提醒，不会阻断"),
-      ),
-    );
+    assert.ok(logs.some((log) => log.includes("当前环节不支持确认/阻断，本次仅提醒，不会阻断")));
     assert.ok(!logs.some((log) => log.includes("password=[REDACTED]")));
     assert.ok(!logs.some((log) => log.includes("当前策略已阻断本次请求")));
   });
 
   it("after_tool_call logs warning without raw evidence", async () => {
     const { hooks, logs } = registerHandlers(policyConfig("warn"));
-    const afterToolCall = hooks.find((hook) => hook.hookName === "after_tool_call");
+    const afterToolCall = hooks.find(
+      (hook) => hook.hookName === "after_tool_call",
+    );
     assert.ok(afterToolCall);
     mockCli(scanResult("warn", [warnFinding]));
 
@@ -374,7 +682,9 @@ describe("pii-scan-user-input", () => {
 
   it("block policy falls back to a warning after tool execution", async () => {
     const { hooks, logs } = registerHandlers(policyConfig("block"));
-    const afterToolCall = hooks.find((hook) => hook.hookName === "after_tool_call");
+    const afterToolCall = hooks.find(
+      (hook) => hook.hookName === "after_tool_call",
+    );
     assert.ok(afterToolCall);
     mockCli(scanResult("deny", [denyFinding]));
 
@@ -388,7 +698,9 @@ describe("pii-scan-user-input", () => {
 
     assert.equal(result, undefined);
     assert.ok(logs.some((log) => log.includes("verdict=deny policy=block")));
-    assert.ok(!logs.some((log) => log.startsWith("[WARN]") && log.includes("policy=")));
+    assert.ok(
+      !logs.some((log) => log.startsWith("[WARN]") && log.includes("policy=")),
+    );
     assert.ok(logs.some((log) => log.includes("工具已经执行")));
     assert.ok(logs.some((log) => log.includes("本次仅提醒")));
     assert.ok(logs.some((log) => log.includes("工具结果仍会进入模型上下文")));
@@ -425,7 +737,9 @@ describe("pii-scan-user-input", () => {
     const { beforeDispatch } = registerHandlers(enableBlockConfig(true));
     mockCli({ exitCode: 1, stdout: "", stderr: "boom" });
 
-    const result = await beforeDispatch.handler({ content: "email alice@example.com" });
+    const result = await beforeDispatch.handler({
+      content: "email alice@example.com",
+    });
 
     assert.equal(result, undefined);
   });
@@ -434,7 +748,9 @@ describe("pii-scan-user-input", () => {
     const { beforeDispatch, logs } = registerHandlers(enableBlockConfig(true));
     mockCli({ exitCode: 0, stdout: "not-json", stderr: "" });
 
-    const result = await beforeDispatch.handler({ content: "email alice@example.com" });
+    const result = await beforeDispatch.handler({
+      content: "email alice@example.com",
+    });
 
     assert.equal(result, undefined);
     assert.ok(logs.some((log) => log.includes("CLI returned invalid JSON")));
@@ -487,7 +803,9 @@ describe("pii-scan-user-input", () => {
     assert.equal(result, undefined);
     assert.ok(
       logs.some((log) =>
-        log.includes("[WARN] [pii-checker] invalid PII_CHECKER_MODE; using observe"),
+        log.includes(
+          "[WARN] [pii-checker] invalid PII_CHECKER_MODE; using observe",
+        ),
       ),
     );
     assert.ok(!logs.some((log) => log.includes("[pii-checker] DENY")));

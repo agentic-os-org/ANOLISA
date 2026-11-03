@@ -12,7 +12,7 @@ export type SecurityCapability = {
   id: string;
   /** 可读名称 */
   name: string;
-  /** 挂载的 hook（仅用于日志，支持多 hook） */
+  /** Supported hooks; runtime registration may select a version-specific subset. */
   hooks: string[];
   /** 注册函数 — 插件启动时调用一次（若该能力已启用） */
   register: (api: OpenClawPluginApi) => void;

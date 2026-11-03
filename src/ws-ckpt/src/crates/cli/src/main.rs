@@ -79,7 +79,8 @@ struct ConfigArgs {
     #[arg(long, conflicts_with_all = ["enable_auto_cleanup", "disable_auto_cleanup", "auto_cleanup_keep", "auto_cleanup_interval", "health_check_interval", "img_size", "img_max_percent"])]
     reset: bool,
 
-    /// Set health check interval in seconds (0 disables the scheduler loop).
+    /// Set periodic health diagnostic interval in seconds (0 disables diagnostics).
+    /// The advisory cache still refreshes at the default interval when set to 0.
     /// Global-only.
     #[arg(long)]
     health_check_interval: Option<u64>,
@@ -637,17 +638,85 @@ fn generate_auto_id() -> String {
 }
 
 const ADAPTER_RELATIVE_ROOT: &str = "anolisa/adapters/ws-ckpt";
+const STANDALONE_ADAPTER_RELATIVE_ROOT: &str = "ws-ckpt/adapters";
 const SYSTEM_ADAPTER_DATA_DIRS: [&str; 2] = ["/usr/share", "/usr/local/share"];
 
-fn plugin_adapter_roots(home: Option<&Path>) -> Vec<PathBuf> {
-    let mut roots = SYSTEM_ADAPTER_DATA_DIRS
-        .iter()
-        .map(|data_dir| PathBuf::from(data_dir).join(ADAPTER_RELATIVE_ROOT))
-        .collect::<Vec<_>>();
+fn executable_install_prefix(path: &Path) -> Option<&Path> {
+    let bin = path.parent()?;
+    if bin.file_name()? == "bin" {
+        bin.parent()
+    } else {
+        None
+    }
+}
+
+fn plugin_adapter_roots(
+    home: Option<&Path>,
+    executable: Option<&Path>,
+    target_dir: Option<&Path>,
+    system_data_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(prefix) = target_dir {
+        for relative in [ADAPTER_RELATIVE_ROOT, STANDALONE_ADAPTER_RELATIVE_ROOT] {
+            roots.push(prefix.join("share").join(relative));
+        }
+    }
+    if let Some(prefix) = executable.and_then(executable_install_prefix) {
+        // Prefer the independent resources installed alongside this binary.
+        let root = prefix.join("share").join(STANDALONE_ADAPTER_RELATIVE_ROOT);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots.extend(
+        system_data_dirs
+            .iter()
+            .map(|data_dir| data_dir.join(ADAPTER_RELATIVE_ROOT)),
+    );
     if let Some(home) = home {
         roots.push(home.join(".local/share").join(ADAPTER_RELATIVE_ROOT));
     }
+    // The binary prefix permits namespaced installations outside /usr/local.
+    if let Some(prefix) = executable.and_then(executable_install_prefix) {
+        let root = prefix.join("share").join(ADAPTER_RELATIVE_ROOT);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    for data_dir in system_data_dirs {
+        let root = data_dir.join(STANDALONE_ADAPTER_RELATIVE_ROOT);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     roots
+}
+
+fn plugin_script_prefix<'a>(adapter_dir: &Path, executable: Option<&'a Path>) -> Option<&'a Path> {
+    let prefix = executable.and_then(executable_install_prefix)?;
+    let adapter_root = adapter_dir.parent()?;
+    let standard_prefix = prefix == Path::new("/usr") || prefix == Path::new("/usr/local");
+    if adapter_root == prefix.join("share").join(STANDALONE_ADAPTER_RELATIVE_ROOT)
+        || (!standard_prefix && adapter_root == prefix.join("share").join(ADAPTER_RELATIVE_ROOT))
+    {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+fn plugin_script_command(script: &Path, adapter_dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("bash");
+    command.arg(script);
+    if std::env::var_os("ANOLISA_TARGET_DIR").is_none() {
+        let executable = std::env::current_exe().ok();
+        if let Some(prefix) = plugin_script_prefix(adapter_dir, executable.as_deref()) {
+            // The adapter scripts use this prefix to find its plugin and skill payloads.
+            command.env("ANOLISA_TARGET_DIR", prefix);
+        }
+    }
+    command
 }
 
 fn resolve_plugin_adapter_dir(
@@ -686,7 +755,17 @@ fn handle_plugin(action: PluginAction) -> Result<()> {
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let adapter_roots = plugin_adapter_roots(home.as_deref());
+    let executable = std::env::current_exe().ok();
+    let target_dir = std::env::var_os("ANOLISA_TARGET_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let system_data_dirs = SYSTEM_ADAPTER_DATA_DIRS.map(PathBuf::from);
+    let adapter_roots = plugin_adapter_roots(
+        home.as_deref(),
+        executable.as_deref(),
+        target_dir.as_deref(),
+        &system_data_dirs,
+    );
     handle_plugin_with_adapter_roots(action, &adapter_roots)
 }
 
@@ -731,8 +810,7 @@ fn handle_plugin_with_adapter_roots(action: PluginAction, adapter_roots: &[PathB
 
     if let PluginAction::Install { .. } = &action {
         let detect_script = adapter_dir.join(detect_script);
-        let detect_code = std::process::Command::new("bash")
-            .arg(&detect_script)
+        let detect_code = plugin_script_command(&detect_script, &adapter_dir)
             .status()
             .with_context(|| format!("failed to run {}", detect_script.display()))?
             .code()
@@ -755,8 +833,7 @@ fn handle_plugin_with_adapter_roots(action: PluginAction, adapter_roots: &[PathB
     }
 
     let script_path = adapter_dir.join(&action_script);
-    let status = std::process::Command::new("bash")
-        .arg(&script_path)
+    let status = plugin_script_command(&script_path, &adapter_dir)
         .status()
         .with_context(|| format!("failed to run {}", script_path.display()))?;
 
@@ -1009,7 +1086,7 @@ async fn handle_response(response: Response, original_request: &Request) -> Resu
             message,
         } => {
             eprintln!("\x1b[33m⚠ {}\x1b[0m", message);
-            eprint!("确认操作? [y/N]: ");
+            eprint!("Confirm operation? [y/N]: ");
             io::stderr().flush()?;
 
             let stdin = io::stdin();
@@ -1035,7 +1112,7 @@ async fn handle_response(response: Response, original_request: &Request) -> Resu
                 let response = send_request_to_daemon(&force_request).await?;
                 Box::pin(handle_response(response, &force_request)).await?;
             } else {
-                println!("操作已取消");
+                println!("Operation cancelled");
             }
         }
         Response::Error {
@@ -1317,20 +1394,42 @@ fn print_diff_entries(changes: &[ws_ckpt_common::DiffEntry]) {
     }
 
     for entry in changes {
-        let marker = match entry.change_type {
-            ChangeType::Added => "\x1b[32m+",
-            ChangeType::Deleted => "\x1b[31m-",
-            ChangeType::Modified => "\x1b[33mM",
-            ChangeType::Renamed => "\x1b[36mR",
-        };
-        let detail = entry
-            .detail
-            .as_deref()
-            .map(|d| format!(" ({})", d))
-            .unwrap_or_default();
-        println!("{}  {}{}\x1b[0m", marker, entry.path, detail);
+        println!("{}", format_diff_entry(entry));
     }
     println!("\n{} change(s)", changes.len());
+}
+
+fn format_diff_entry(entry: &ws_ckpt_common::DiffEntry) -> String {
+    let marker = match entry.change_type {
+        ChangeType::Added => "\x1b[32m+",
+        ChangeType::Deleted => "\x1b[31m-",
+        ChangeType::Modified => "\x1b[33mM",
+        ChangeType::Renamed => "\x1b[36mR",
+    };
+    let detail = entry
+        .detail
+        .as_deref()
+        .map(|detail| format!(" ({})", escape_diff_text(detail)))
+        .unwrap_or_default();
+    format!(
+        "{}  {}{}\x1b[0m",
+        marker,
+        escape_diff_text(&entry.path),
+        detail
+    )
+}
+
+fn escape_diff_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        // Backslashes distinguish literal escape text from encoded controls.
+        if character.is_control() || character == '\\' {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 /// Handle StatusOk response, formatting the status report.
@@ -2332,6 +2431,54 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn diff_display_escapes_path_and_rename_detail_controls() {
+        let entry = ws_ckpt_common::DiffEntry {
+            path: "new\nline\t\r\x1b[2J".into(),
+            change_type: ChangeType::Renamed,
+            detail: Some("old\x1b]0;title\x07\nline → new\nline\t\r\x1b[2J".into()),
+        };
+        assert_eq!(
+            format_diff_entry(&entry),
+            "\x1b[36mR  new\\nline\\t\\r\\u{1b}[2J (old\\u{1b}]0;title\\u{7}\\nline → new\\nline\\t\\r\\u{1b}[2J)\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn diff_display_preserves_spaces_unicode_and_change_markers() {
+        for (change_type, marker) in [
+            (ChangeType::Added, "\x1b[32m+"),
+            (ChangeType::Deleted, "\x1b[31m-"),
+            (ChangeType::Modified, "\x1b[33mM"),
+            (ChangeType::Renamed, "\x1b[36mR"),
+        ] {
+            let entry = ws_ckpt_common::DiffEntry {
+                path: "目录/file with spaces.txt".into(),
+                change_type,
+                detail: Some("old name → new name".into()),
+            };
+            assert_eq!(
+                format_diff_entry(&entry),
+                format!("{marker}  目录/file with spaces.txt (old name → new name)\x1b[0m")
+            );
+        }
+    }
+
+    #[test]
+    fn diff_display_distinguishes_literal_escape_names() {
+        let literal = ws_ckpt_common::DiffEntry {
+            path: r"file\n".into(),
+            change_type: ChangeType::Added,
+            detail: None,
+        };
+        let control = ws_ckpt_common::DiffEntry {
+            path: "file\n".into(),
+            change_type: ChangeType::Added,
+            detail: None,
+        };
+        assert_eq!(format_diff_entry(&literal), "\x1b[32m+  file\\\\n\x1b[0m");
+        assert_eq!(format_diff_entry(&control), "\x1b[32m+  file\\n\x1b[0m");
+    }
     fn assert_existing_plugin_install_behavior(
         runtime: PluginRuntime,
         runtime_dir: &str,
@@ -2382,13 +2529,97 @@ mod tests {
     #[test]
     fn plugin_adapter_roots_cover_supported_install_locations() {
         assert_eq!(
-            plugin_adapter_roots(Some(Path::new("/home/test"))),
+            plugin_adapter_roots(
+                Some(Path::new("/home/test")),
+                Some(Path::new("/opt/custom/bin/ws-ckpt")),
+                None,
+                &SYSTEM_ADAPTER_DATA_DIRS.map(PathBuf::from),
+            ),
             vec![
+                PathBuf::from("/opt/custom/share/ws-ckpt/adapters"),
                 PathBuf::from("/usr/share/anolisa/adapters/ws-ckpt"),
                 PathBuf::from("/usr/local/share/anolisa/adapters/ws-ckpt"),
                 PathBuf::from("/home/test/.local/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/opt/custom/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/usr/share/ws-ckpt/adapters"),
+                PathBuf::from("/usr/local/share/ws-ckpt/adapters"),
             ]
         );
+    }
+
+    #[test]
+    fn plugin_adapter_roots_include_explicit_target_dir() {
+        let roots = plugin_adapter_roots(
+            None,
+            None,
+            Some(Path::new("/opt/custom")),
+            &SYSTEM_ADAPTER_DATA_DIRS.map(PathBuf::from),
+        );
+        assert_eq!(
+            &roots[..2],
+            &[
+                PathBuf::from("/opt/custom/share/anolisa/adapters/ws-ckpt"),
+                PathBuf::from("/opt/custom/share/ws-ckpt/adapters"),
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_script_prefix_keeps_standalone_payload_with_the_local_binary() {
+        let executable = Path::new("/usr/local/bin/ws-ckpt");
+        assert_eq!(
+            plugin_script_prefix(
+                Path::new("/usr/local/share/ws-ckpt/adapters/openclaw"),
+                Some(executable),
+            ),
+            Some(Path::new("/usr/local"))
+        );
+        assert_eq!(
+            plugin_script_prefix(
+                Path::new("/usr/local/share/anolisa/adapters/ws-ckpt/openclaw"),
+                Some(executable),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn plugin_adapter_resolution_prefers_standalone_and_falls_back_to_anolisa() {
+        let prefix =
+            std::env::temp_dir().join(format!("ws-ckpt-independent-prefix-{}", std::process::id()));
+        let executable = prefix.join("bin/ws-ckpt");
+        let root = prefix.join("share/ws-ckpt/adapters");
+        let runtime = root.join("hermes");
+        let system_data_dir = prefix.join("system/share");
+        let system_runtime = system_data_dir.join(ADAPTER_RELATIVE_ROOT).join("hermes");
+        let _ = std::fs::remove_dir_all(&prefix);
+        for adapter in [&runtime, &system_runtime] {
+            std::fs::create_dir_all(adapter).unwrap();
+            std::fs::write(adapter.join("detect-hermes.sh"), "").unwrap();
+            std::fs::write(adapter.join("install-hermes.sh"), "").unwrap();
+        }
+        let roots = plugin_adapter_roots(None, Some(&executable), None, &[system_data_dir]);
+        let selected = resolve_plugin_adapter_dir(
+            "hermes",
+            &["detect-hermes.sh", "install-hermes.sh"],
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(selected, runtime);
+        assert_eq!(
+            plugin_script_prefix(&selected, Some(&executable)),
+            Some(prefix.as_path())
+        );
+        std::fs::remove_dir_all(&runtime).unwrap();
+        let fallback = resolve_plugin_adapter_dir(
+            "hermes",
+            &["detect-hermes.sh", "install-hermes.sh"],
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(fallback, system_runtime);
+        assert_eq!(plugin_script_prefix(&fallback, Some(&executable)), None);
+        std::fs::remove_dir_all(&prefix).unwrap();
     }
 
     #[test]

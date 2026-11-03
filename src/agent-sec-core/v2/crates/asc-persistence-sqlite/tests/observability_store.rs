@@ -27,8 +27,6 @@ fn store(path: &Path, read_only: bool) -> Arc<SqliteStore> {
             read_only,
             OBSERVABILITY_SQLITE_SCHEMA_VERSION,
             OBSERVABILITY_TABLES,
-            // This stream is still at revision 1, so it passes no migrator at all
-            // — the framework must converge without one.
             None,
             LOG_PREFIX,
         )
@@ -97,28 +95,40 @@ fn minimal(
 /// Two sessions: `s-1` with two runs, `s-2` with one.
 fn seed(path: &Path) {
     let sink = sink(path);
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "r-1"),
-        metrics(&[("user_input", json!("first turn"))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "r-1"),
+            metrics(&[("user_input", json!("first turn"))]),
+        ),
+        1000,
     ));
-    sink.write(&minimal(
-        ObservabilityHook::AfterAgentRun,
-        at(1, 1),
-        ObservabilityMetadata::new("s-1", "r-1"),
+    sink.write(&(
+        minimal(
+            ObservabilityHook::AfterAgentRun,
+            at(1, 1),
+            ObservabilityMetadata::new("s-1", "r-1"),
+        ),
+        1000,
     ));
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(2, 0),
-        ObservabilityMetadata::new("s-1", "r-2"),
-        metrics(&[("user_input", json!("second turn"))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(2, 0),
+            ObservabilityMetadata::new("s-1", "r-2"),
+            metrics(&[("user_input", json!("second turn"))]),
+        ),
+        1000,
     ));
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(3, 0),
-        ObservabilityMetadata::new("s-2", "r-9"),
-        metrics(&[("user_input", json!("other session"))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(3, 0),
+            ObservabilityMetadata::new("s-2", "r-9"),
+            metrics(&[("user_input", json!("other session"))]),
+        ),
+        1000,
     ));
     sink.close(1000.0);
 }
@@ -135,7 +145,8 @@ fn a_written_record_round_trips_with_its_wire_fields_intact() {
     );
 
     let sink = sink(&path);
-    sink.write_or_raise(&written).expect("write");
+    sink.write_or_raise(&(written.clone(), 1000))
+        .expect("write");
     sink.close(1000.0);
 
     let rows = read(&path).query_or_default(|repo, conn| {
@@ -171,21 +182,27 @@ fn the_correlation_columns_follow_the_hook_metadata_shape() {
 
     let sink = sink(&path);
     // A model-call hook keeps `callId` and drops `toolCallId`.
-    sink.write_or_raise(&minimal(
-        ObservabilityHook::BeforeLlmCall,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "r-1")
-            .with_call_id("c-1")
-            .with_tool_call_id("t-1"),
+    sink.write_or_raise(&(
+        minimal(
+            ObservabilityHook::BeforeLlmCall,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "r-1")
+                .with_call_id("c-1")
+                .with_tool_call_id("t-1"),
+        ),
+        1000,
     ))
     .expect("model call");
     // A tool-call hook keeps both.
-    sink.write_or_raise(&minimal(
-        ObservabilityHook::BeforeToolCall,
-        at(1, 1),
-        ObservabilityMetadata::new("s-1", "r-1")
-            .with_call_id("c-2")
-            .with_tool_call_id("t-2"),
+    sink.write_or_raise(&(
+        minimal(
+            ObservabilityHook::BeforeToolCall,
+            at(1, 1),
+            ObservabilityMetadata::new("s-1", "r-1")
+                .with_call_id("c-2")
+                .with_tool_call_id("t-2"),
+        ),
+        1000,
     ))
     .expect("tool call");
     sink.close(1000.0);
@@ -299,17 +316,23 @@ fn the_preview_comes_from_the_first_before_agent_run_of_the_run() {
 
     let sink = sink(&path);
     let metadata = ObservabilityMetadata::new("s-1", "r-1");
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 0),
-        metadata.clone(),
-        metrics(&[("user_input", json!("earliest"))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 0),
+            metadata.clone(),
+            metrics(&[("user_input", json!("earliest"))]),
+        ),
+        1000,
     ));
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 5),
-        metadata.clone(),
-        metrics(&[("user_input", json!("later"))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 5),
+            metadata.clone(),
+            metrics(&[("user_input", json!("later"))]),
+        ),
+        1000,
     ));
     sink.close(1000.0);
 
@@ -329,10 +352,13 @@ fn a_run_without_a_before_agent_run_row_has_no_preview() {
     let path = dir.path().join("observability.db");
 
     let sink = sink(&path);
-    sink.write(&minimal(
-        ObservabilityHook::AfterAgentRun,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "r-1"),
+    sink.write(&(
+        minimal(
+            ObservabilityHook::AfterAgentRun,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "r-1"),
+        ),
+        1000,
     ));
     sink.close(1000.0);
 
@@ -352,11 +378,14 @@ fn the_preview_falls_back_to_prompt_and_is_truncated() {
     let sink = sink(&path);
     // `before_agent_run` declares both metrics; an empty `user_input` is falsy in
     // v1, so the preview must fall through to `prompt`.
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "r-1"),
-        metrics(&[("user_input", json!("")), ("prompt", json!(long))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "r-1"),
+            metrics(&[("user_input", json!("")), ("prompt", json!(long))]),
+        ),
+        1000,
     ));
     sink.close(1000.0);
 
@@ -425,10 +454,13 @@ fn a_malformed_record_surfaces_without_disposing_the_connection() {
     let sink = sink(&path);
 
     // Prime the connection so a dispose would be observable.
-    sink.write_or_raise(&minimal(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "r-1"),
+    sink.write_or_raise(&(
+        minimal(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "r-1"),
+        ),
+        1000,
     ))
     .expect("first write");
     assert!(sink.store().is_open());
@@ -439,10 +471,13 @@ fn a_malformed_record_surfaces_without_disposing_the_connection() {
             conn.execute("DROP TABLE observability_events", [])?;
             ObservabilityEventRepository.insert_or_raise(
                 conn,
-                &minimal(
-                    ObservabilityHook::BeforeAgentRun,
-                    at(1, 1),
-                    ObservabilityMetadata::new("s-1", "r-1"),
+                &(
+                    minimal(
+                        ObservabilityHook::BeforeAgentRun,
+                        at(1, 1),
+                        ObservabilityMetadata::new("s-1", "r-1"),
+                    ),
+                    1000,
                 ),
             )
         })
@@ -462,10 +497,13 @@ fn a_write_to_a_disabled_stream_surfaces_the_v1_message() {
 
     let sink = sink(&path);
     let error = sink
-        .write_or_raise(&minimal(
-            ObservabilityHook::BeforeAgentRun,
-            at(1, 0),
-            ObservabilityMetadata::new("s-1", "r-1"),
+        .write_or_raise(&(
+            minimal(
+                ObservabilityHook::BeforeAgentRun,
+                at(1, 0),
+                ObservabilityMetadata::new("s-1", "r-1"),
+            ),
+            1000,
         ))
         .expect_err("the path is not a database");
     // The exact class depends on what SQLite reports for a directory; what
@@ -502,10 +540,13 @@ fn close_runs_retention_through_the_maintenance_gate() {
     let path = dir.path().join("observability.db");
 
     let sink = sink(&path);
-    sink.write(&minimal(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "r-1"),
+    sink.write(&(
+        minimal(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "r-1"),
+        ),
+        1000,
     ));
     // Retention is 7 days and the fixture row is far in the past relative to now.
     sink.close(epoch(at(30, 0)));
@@ -593,17 +634,23 @@ fn listing_events_is_scoped_to_the_session_when_run_ids_collide() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("observability.db");
     let sink = sink(&path);
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "shared-run"),
-        metrics(&[("user_input", json!("belongs to s-1"))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "shared-run"),
+            metrics(&[("user_input", json!("belongs to s-1"))]),
+        ),
+        1000,
     ));
-    sink.write(&record(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 1),
-        ObservabilityMetadata::new("s-2", "shared-run"),
-        metrics(&[("user_input", json!("belongs to s-2"))]),
+    sink.write(&(
+        record(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 1),
+            ObservabilityMetadata::new("s-2", "shared-run"),
+            metrics(&[("user_input", json!("belongs to s-2"))]),
+        ),
+        1000,
     ));
     sink.close(1000.0);
 
@@ -637,19 +684,25 @@ fn a_reader_keeps_up_with_a_writer_that_is_still_appending() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("observability.db");
     let sink = sink(&path);
-    sink.write(&minimal(
-        ObservabilityHook::BeforeAgentRun,
-        at(1, 0),
-        ObservabilityMetadata::new("s-1", "r-1"),
+    sink.write(&(
+        minimal(
+            ObservabilityHook::BeforeAgentRun,
+            at(1, 0),
+            ObservabilityMetadata::new("s-1", "r-1"),
+        ),
+        1000,
     ));
 
     let source = read(&path);
     assert_eq!(source.query_or(0, ObservabilityEventRepository::count), 1);
 
-    sink.write(&minimal(
-        ObservabilityHook::AfterAgentRun,
-        at(1, 1),
-        ObservabilityMetadata::new("s-1", "r-1"),
+    sink.write(&(
+        minimal(
+            ObservabilityHook::AfterAgentRun,
+            at(1, 1),
+            ObservabilityMetadata::new("s-1", "r-1"),
+        ),
+        1000,
     ));
 
     assert_eq!(

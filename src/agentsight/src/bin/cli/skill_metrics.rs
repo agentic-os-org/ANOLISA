@@ -22,6 +22,8 @@
 //! agentsight skill-metrics all --last 168 --agent Cosh
 //! ```
 
+use std::collections::BTreeMap;
+
 use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::skill_metrics::{MetricOptions, compute_skill_metrics};
 use agentsight::storage::sqlite::GenAISqliteStore;
@@ -60,6 +62,10 @@ pub enum SkillMetricsAction {
         /// Override database path
         #[structopt(long)]
         db: Option<String>,
+
+        /// Bucket the hotness trend by day or week (default: week)
+        #[structopt(long, possible_values = GRANULARITY_VALUES)]
+        granularity: Option<String>,
     },
 
     /// Show skill download tracking (first appearance in available_skills).
@@ -120,7 +126,29 @@ pub enum SkillMetricsAction {
         json: bool,
         #[structopt(long)]
         db: Option<String>,
+
+        /// Bucket the ranking by day or week (default: week)
+        #[structopt(long, possible_values = GRANULARITY_VALUES)]
+        granularity: Option<String>,
     },
+}
+
+/// Bucket widths the hotness trend can be cut by.
+///
+/// The same closed set `GET /api/skill-metrics` validates against, so a typo
+/// is refused instead of silently served as weekly buckets that look valid.
+const GRANULARITY_VALUES: &[&str] = &["day", "week"];
+
+/// Map a validated `--granularity` value onto the computation's bucket width.
+///
+/// `structopt` restricts the value to [`GRANULARITY_VALUES`] and the default
+/// stays [`MetricOptions::all`]'s weekly width, so an absent flag is not a
+/// behaviour change: only an explicit `day` cuts daily buckets.
+fn parse_granularity(raw: &str) -> agentsight::skill_metrics::HotnessGranularity {
+    match raw {
+        "day" => agentsight::skill_metrics::HotnessGranularity::Day,
+        _ => agentsight::skill_metrics::HotnessGranularity::Week,
+    }
 }
 
 impl SkillMetricsCommand {
@@ -132,19 +160,24 @@ impl SkillMetricsCommand {
     }
 
     fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let (last, agent, json, db, options) = match &self.action {
+        let (last, agent, json, db, mut options, granularity) = match &self.action {
             SkillMetricsAction::All {
                 last,
                 agent,
                 json,
                 db,
+                granularity,
             } => (
                 *last,
                 agent.as_deref(),
                 *json,
                 db.as_deref(),
                 MetricOptions::all(),
+                granularity.as_deref(),
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::Downloads {
                 last,
                 agent,
@@ -159,7 +192,11 @@ impl SkillMetricsCommand {
                     downloads: true,
                     ..Default::default()
                 },
+                None,
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::Loads {
                 last,
                 agent,
@@ -174,7 +211,11 @@ impl SkillMetricsCommand {
                     loads: true,
                     ..Default::default()
                 },
+                None,
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::UsageRatio {
                 last,
                 agent,
@@ -189,7 +230,11 @@ impl SkillMetricsCommand {
                     usage_ratio: true,
                     ..Default::default()
                 },
+                None,
             ),
+            // No hotness trend on this subcommand, so it declares no
+            // `--granularity`: the flag is not advertised where it would have
+            // to be refused.
             SkillMetricsAction::Distribution {
                 last,
                 agent,
@@ -204,12 +249,14 @@ impl SkillMetricsCommand {
                     distribution: true,
                     ..Default::default()
                 },
+                None,
             ),
             SkillMetricsAction::Hotness {
                 last,
                 agent,
                 json,
                 db,
+                granularity,
             } => (
                 *last,
                 agent.as_deref(),
@@ -219,14 +266,27 @@ impl SkillMetricsCommand {
                     hotness: true,
                     ..Default::default()
                 },
+                granularity.as_deref(),
             ),
         };
+
+        if let Some(granularity) = granularity {
+            options.hotness_granularity = parse_granularity(granularity);
+        }
 
         // Resolve database path
         let db_path = match db {
             Some(p) => std::path::PathBuf::from(p),
             None => GenAISqliteStore::default_path(),
         };
+
+        // Check the path before opening it, like the sibling query commands:
+        // without this, a directory answers "SQLite database does not exist"
+        // for a path that exists.
+        if let Err(error) = agentsight::check_data_file(&db_path) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
 
         // Open store
         let store = DatabaseManager::open_query(
@@ -243,12 +303,12 @@ impl SkillMetricsCommand {
         // Query events
         let events = store.get_events_in_time_range(start_ns, end_ns, agent)?;
 
-        if events.is_empty() {
-            if json {
-                println!("{{\"message\": \"No events found in the specified time range\"}}");
-            } else {
-                eprintln!("No events found in the last {last} hours.");
-            }
+        // `--json` answers with the report on every range, including one with
+        // no events: a machine caller reads `event_count`, and it cannot be
+        // asked to tell a bare notice object apart from a report. The human
+        // mode keeps the notice.
+        if events.is_empty() && !json {
+            eprintln!("No events found in the last {last} hours.");
             return Ok(());
         }
 
@@ -281,7 +341,7 @@ fn print_report(report: &agentsight::skill_metrics::SkillMetricsReport, options:
             println!("  (no downloads detected)");
         } else {
             println!("  {:30} {:>12} {:>10}", "Skill", "First Seen", "Sessions");
-            for (name, info) in &d.downloads {
+            for (name, info) in sorted_downloads(&d.downloads) {
                 println!(
                     "  {:30} {:>12} {:>10}",
                     name,
@@ -299,10 +359,8 @@ fn print_report(report: &agentsight::skill_metrics::SkillMetricsReport, options:
         println!("--- Skill Load Counts ---");
         println!("  Total loads: {}", l.total_loads);
         if !l.loads.is_empty() {
-            let mut sorted: Vec<_> = l.loads.iter().collect();
-            sorted.sort_by(|a, b| b.1.cmp(a.1));
             println!("  {:30} {:>8}", "Skill", "Count");
-            for (name, count) in sorted {
+            for (name, count) in sorted_loads(&l.loads) {
                 println!("  {name:30} {count:>8}");
             }
         }
@@ -372,4 +430,85 @@ fn format_timestamp_ns(ns: i64) -> String {
         .unwrap_or_default()
         .naive_utc();
     dt.format("%m-%d %H:%M").to_string()
+}
+
+/// Table order for the downloads view.
+///
+/// Sessions desc, name asc for ties: the map iterates in an order that is
+/// randomized per process, so the table used to differ between two runs over
+/// the same report. `9dd52fe12` / `947a9bde2` applied the same rule to the
+/// other aggregate views.
+fn sorted_downloads(
+    downloads: &BTreeMap<String, agentsight::skill_metrics::types::SkillFirstSeen>,
+) -> Vec<(&String, &agentsight::skill_metrics::types::SkillFirstSeen)> {
+    let mut sorted: Vec<_> = downloads.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.1.total_sessions
+            .cmp(&a.1.total_sessions)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    sorted
+}
+
+/// Table order for the loads view: count desc, name asc for count ties.
+fn sorted_loads(loads: &BTreeMap<String, u64>) -> Vec<(&String, &u64)> {
+    let mut sorted: Vec<_> = loads.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    sorted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentsight::skill_metrics::types::SkillFirstSeen;
+    use std::collections::BTreeMap;
+
+    fn download(sessions: u64) -> SkillFirstSeen {
+        SkillFirstSeen {
+            first_seen_session_id: "s".to_string(),
+            first_seen_timestamp_ns: 0,
+            total_sessions: sessions,
+        }
+    }
+
+    /// Six skills loaded the same number of times: a count-only sort leaves
+    /// the rows in HashMap order, which is randomized per process, so two
+    /// runs over one report printed different tables.
+    #[test]
+    fn tied_load_counts_are_ordered_by_name() {
+        let loads: BTreeMap<String, u64> =
+            (0..6).map(|index| (format!("skill-{index}"), 1)).collect();
+
+        for _ in 0..16 {
+            let names: Vec<&str> = sorted_loads(&loads)
+                .into_iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let mut expected: Vec<&str> = names.clone();
+            expected.sort();
+            assert_eq!(names, expected, "count ties must be broken by name");
+        }
+    }
+
+    /// The downloads table used to print in map order, so every run could
+    /// differ; sessions desc, name asc for ties.
+    #[test]
+    fn downloads_are_ordered_by_sessions_then_name() {
+        let mut downloads: BTreeMap<String, SkillFirstSeen> = BTreeMap::new();
+        downloads.insert("zeta".to_string(), download(3));
+        downloads.insert("alpha".to_string(), download(3));
+        downloads.insert("beta".to_string(), download(5));
+
+        for _ in 0..16 {
+            let names: Vec<&str> = sorted_downloads(&downloads)
+                .into_iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            assert_eq!(
+                names,
+                vec!["beta", "alpha", "zeta"],
+                "sessions desc, name asc for ties"
+            );
+        }
+    }
 }

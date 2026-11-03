@@ -56,7 +56,7 @@ clap (v4.5)
   Source: https://crates.io/crates/clap
   Licensed under the MIT License
 
-toon-format (v0.5)
+toon-format (v0.7)
   Source: https://crates.io/crates/toon-format
   Copyright (c) 2025-PRESENT Shreyas S Bhat
   Copyright (c) 2025-PRESENT Johann Schopplich
@@ -75,14 +75,15 @@ Third-Party Software
 =========================================================================
 
 rtk (src/tokenless/third_party/rtk/)
-  Git submodule from https://github.com/rtk-ai/rtk.git
+  Pinned source from https://github.com/rtk-ai/rtk.git
+  Built using src/tokenless/packaging/build/setup-rtk.sh and Tokenless patches
   Copyright RTK Contributors
   Licensed under the Apache License, Version 2.0
 
   RTK (Rust Token Killer) is a high-performance CLI proxy for LLM
   token optimization, providing command rewriting and output filtering
   to achieve 60-90% token savings on common development commands.
-  Included in the tokenless component.
+  Included in the tokenless component and AW Tokenless Provider package.
 
 ripgrep (deprecated/copilot-shell/dist/)
   Vendored binary

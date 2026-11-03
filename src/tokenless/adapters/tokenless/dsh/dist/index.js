@@ -31,6 +31,7 @@ const TOKENLESS_RETRIEVE_COMMAND_RE = /^[ \t]*(?:"tokenless"|'tokenless'|tokenle
 
 // DSH does not expose content origin, so map its built-in tool names at the
 // host boundary. Core owns every compression decision after this translation.
+// tests/test-dsh-adapter.sh checks both sets against common/hooks/tool_categories.json.
 const FILE_TOOLS = new Set([
   'read',
   'read_file',
@@ -51,6 +52,7 @@ const FILE_TOOLS = new Set([
 const COMMAND_TOOLS = new Set([
   'bash',
   'pwsh',
+  'powershell',
   'shell',
   'exec',
   'terminal',
@@ -358,23 +360,29 @@ function postToolRequest(
   if (typeof exec.callId === 'string' && exec.callId.length > 0) {
     attribution.tool_use_id = exec.callId
   }
+  const input = {
+    result_kind: resultKind,
+    tool_name: exec.name,
+    content,
+    status,
+    content_origin: origin,
+    output_optimization: 'none',
+    capabilities: {
+      replace_output: replaceOutput,
+      recovery: { kind: retrievalAvailable ? "shell" : "none" },
+      replace_with_text: replaceOutput,
+    },
+  }
+  // Core reports a plain file print (`cat page.html`) as file_read from the
+  // command line, so the page stays verbatim while data still compresses.
+  if (origin === 'command_output' && typeof exec.arguments?.command === 'string') {
+    input.command = exec.arguments.command
+  }
   return {
     protocol_version: 2,
     operation: 'post_tool',
     attribution,
-    input: {
-      result_kind: resultKind,
-      tool_name: exec.name,
-      content,
-      status,
-      content_origin: origin,
-      output_optimization: 'none',
-      capabilities: {
-        replace_output: replaceOutput,
-        recovery: { kind: retrievalAvailable ? "shell" : "none" },
-        replace_with_text: replaceOutput,
-      },
-    },
+    input,
   }
 }
 

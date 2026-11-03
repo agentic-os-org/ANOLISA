@@ -390,6 +390,63 @@ fn shell_host_runs_bash_pty_and_emits_command_events() {
     assert!(output_ref_text.contains("No such file") || output_ref_text.contains("cannot access"));
 }
 
+/// A real-login-identity session (Bash started as `argv0="-bash" --posix -i`
+/// with the marker delivered through `$ENV`) reads no startup files itself,
+/// so the system profile replay inside the marker is the only system pass.
+/// Natural-language input must stay intercepted for the Agent even when the
+/// system profile provides a `command_not_found_handle` (a distribution's
+/// command-not-found integration): a system-provided handler is baseline
+/// state, not a user handler to delegate to.
+#[test]
+fn shell_host_bash_login_identity_intercepts_natural_language_input() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("SKIP: bash is unavailable");
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-login-identity-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bash_profile"),
+        "PS1='__LOGIN_IDENTITY_NL__ '\n",
+    )
+    .expect("bash_profile");
+    let mut config = ShellHostConfig::new("login-identity-nl", &work_dir)
+        .with_integration(ShellIntegration::Enhanced)
+        .with_env("HOME", home_dir.display().to_string());
+    config.login_shell = true;
+    config.login_identity = true;
+
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line("please explain the last error")],
+    )
+    .expect("scripted bash pty");
+    let _ = std::fs::remove_dir_all(&work_dir);
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("please explain the last error")
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "natural-language input must be intercepted in a real-login-identity session: \
+         {terminal}\n{:?}",
+        output.events
+    );
+    assert!(
+        !terminal.contains("please: command not found")
+            && !terminal.contains("bash: please: command not found"),
+        "natural-language input must not be executed as a missing command: {terminal}"
+    );
+}
+
 #[test]
 fn shell_host_bash_valid_cue_named_function_wins_over_natural_language() {
     if Command::new("bash").arg("--version").output().is_err() {

@@ -24,6 +24,32 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// so contract authors, the install resolver, and docs cannot drift.
 pub const RENDER_ANOLISA_PATHS_V1: &str = "anolisa-paths-v1";
 
+/// Render layout placeholders in the command field of a JSON document.
+pub const RENDER_ANOLISA_JSON_COMMAND_V1: &str = "anolisa-json-command-v1";
+
+/// Components whose discovery contracts ship with ANOLISA's distribution.
+pub const DISTRIBUTION_REGISTRY_COMPONENTS: [&str; 7] = [
+    "cosh-ng",
+    "sec-core",
+    "agentsight",
+    "tokenless",
+    "skillfs",
+    "ws-ckpt",
+    "agent-memory",
+];
+
+/// Whether a path is a discovery contract shipped by ANOLISA itself.
+///
+/// Old component archives and ownership records may still claim this path;
+/// component lifecycle operations must leave the distribution registry intact.
+pub fn is_distribution_discovery_contract(
+    layout: &anolisa_platform::fs_layout::FsLayout,
+    component: &str,
+    path: &Path,
+) -> bool {
+    DISTRIBUTION_REGISTRY_COMPONENTS.contains(&component) && path == layout.contract_path(component)
+}
+
 // ---------------------------------------------------------------------------
 // ComponentManifest
 // ---------------------------------------------------------------------------
@@ -468,6 +494,13 @@ pub struct ManifestHookSpec {
     /// Failure handling. When false (default), a failure warns and the verb
     /// continues; when true, it aborts and the installer rolls back. ws-ckpt's
     /// pre-uninstall recover stays false to match the RPM `recover || warn`.
+    ///
+    /// The same flag is the explicit contract for hook *phases* the
+    /// running CLI cannot execute: a strict declaration of such a phase
+    /// refuses the install/update (the author requires the hook to run and
+    /// this CLI cannot run it), while a non-strict declaration proceeds
+    /// with a warning naming the phase. Phases every CLI executes are
+    /// unaffected by this rule.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strict: bool,
 }
@@ -1931,7 +1964,7 @@ mod tests {
             display_name = "Tokenless"
             owner = "tokenless-team"
             license = "MIT"
-            repository = "https://github.com/alibaba/anolisa"
+            repository = "https://github.com/agentic-os-org/ANOLISA"
 
             [component.contract]
             schema_version = "1.0"

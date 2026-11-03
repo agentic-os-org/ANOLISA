@@ -36,6 +36,19 @@ describe("mapErrorToLLMMessage", () => {
     expect(msg).toContain("retryable");
   });
 
+  it.each(["UnsupportedWorkspacePath", "InternalError"])(
+    "classifies %s path encoding failures before generic filename substrings",
+    (code) => {
+      const token = String.raw`./snap/timeout-insufficient\\377`;
+      const stderr = `\x1b[31mError [${code}]: rename destination cannot be represented as UTF-8: "${token}"\x1b[0m`;
+      const msg = mapErrorToLLMMessage(stderr);
+      expect(msg).toContain("NOT retryable until the filename is fixed");
+      expect(msg).toContain("rename destination");
+      expect(msg).toContain(token);
+      expect(msg).not.toContain("\x1b");
+    },
+  );
+
   it("have cwd inside workspace", () => {
     const msg = mapErrorToLLMMessage("have cwd inside workspace");
     expect(msg).toContain("NOT retryable");
@@ -255,6 +268,31 @@ describe("BtrfsManager with mocked executor", () => {
     expect(mgr.getStore().count).toBe(1);
   });
 
+  it("keeps a generated snapshot ID stable across an asynchronous checkpoint", async () => {
+    const mgr = new BtrfsManager(cfg);
+    const exec = (mgr as any).executor;
+    exec.init = vi.fn().mockResolvedValue(ok());
+    exec.list = vi.fn().mockResolvedValue(ok("[]"));
+    await mgr.initialize("/ws");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    exec.checkpoint = vi.fn().mockImplementation(async () => {
+      clock.mockReturnValue(2000);
+      return ok("done");
+    });
+    try {
+      const result = await mgr.createCheckpoint();
+      expect(exec.checkpoint).toHaveBeenCalledWith("/ws", "snap-1000", {
+        message: undefined,
+        metadata: undefined,
+      });
+      expect(result.snapshot).toBe("snap-1000");
+      expect(result.message).toContain("snap-1000");
+      expect(mgr.getStore().getAll()[0].snapshot).toBe("snap-1000");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("createCheckpoint with invalid metadata JSON", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
@@ -306,6 +344,24 @@ describe("BtrfsManager with mocked executor", () => {
     exec.rollback = vi.fn().mockResolvedValue(fail("Snapshot not found"));
     const r = await mgr.rollback("bad");
     expect(r.success).toBe(false);
+  });
+
+  it.each(["diff", "preview"])("reports non-retryable %s path failures to tools", async (operation) => {
+    const mgr = new BtrfsManager(cfg);
+    const exec = (mgr as any).executor;
+    exec.init = vi.fn().mockResolvedValue(ok());
+    exec.list = vi.fn().mockResolvedValue(ok("[]"));
+    await mgr.initialize("/ws");
+    const diagnostic = String.raw`Error [UnsupportedWorkspacePath]: mkfile path cannot be represented as UTF-8: "./snap/bad\\377"`;
+    exec.diff = vi.fn().mockResolvedValue(fail(diagnostic));
+    exec.rollback = vi.fn().mockResolvedValue(fail(diagnostic));
+    const result = operation === "diff"
+      ? await mgr.execDiffRaw("snap1")
+      : await mgr.rollback("snap1", undefined, true);
+    expect(result.success).toBe(false);
+    const message = "text" in result ? result.text : result.message;
+    expect(message).toContain("NOT retryable until the filename is fixed");
+    expect(message).toContain(diagnostic);
   });
 
   it("rollback exception", async () => {
@@ -594,18 +650,17 @@ describe("BtrfsManager with mocked executor", () => {
     expect(r).toBe(true);
   });
 
-  it("parseSnapshotList handles empty stdout", async () => {
+  it("parseSnapshotList rejects empty stdout", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
     exec.list = vi.fn().mockResolvedValue(ok(""));
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("Invalid snapshot list JSON");
   });
 
-  it("parseSnapshotList handles invalid JSON", async () => {
+  it("parseSnapshotList rejects invalid JSON", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
@@ -614,11 +669,10 @@ describe("BtrfsManager with mocked executor", () => {
       .mockResolvedValueOnce(ok("not json"));  // listCheckpoints
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("Invalid snapshot list JSON");
   });
 
-  it("parseSnapshotList handles non-array JSON", async () => {
+  it("parseSnapshotList rejects non-array JSON", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
     exec.init = vi.fn().mockResolvedValue(ok());
@@ -627,7 +681,6 @@ describe("BtrfsManager with mocked executor", () => {
       .mockResolvedValueOnce(ok('{"not": "array"}'));
     await mgr.initialize("/ws");
 
-    const list = await mgr.listCheckpoints();
-    expect(list).toEqual([]);
+    await expect(mgr.listCheckpoints()).rejects.toThrow("expected an array");
   });
 });

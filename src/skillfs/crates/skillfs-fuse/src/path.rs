@@ -42,6 +42,64 @@ pub enum SkillLayout {
 /// Well-known Hermes management paths that must be passthrough.
 const HERMES_MANAGEMENT_PATHS: &[&str] = &[".hub", ".bundled_manifest", ".no-bundled-skills"];
 
+/// Whether a Hermes nested manifest is eligible for store
+/// synchronization: discovery (`SkillStore::load_from_directory`) skips
+/// dot-prefixed directories at both the category and the leaf, so a
+/// hidden working copy (`.draft`, `cloud/.new`, `.hidden-parent/...`)
+/// never enters the store on a scan. The write-path re-parse sites must
+/// apply the same eligibility — `skill-discover` renders the store
+/// directly, so syncing a hidden manifest through a mount edit would
+/// advertise it as a managed skill and diverge the live store from a
+/// fresh scan.
+///
+/// Staging roots are the configured counterpart of hidden working
+/// copies (I2: installer-private, never listed, never advertised). The
+/// observe dispatcher drops mutations whose nested-ID components match
+/// a staging pattern, but the nested send sites enqueue independently
+/// of it — without the same check a non-dot staging root (an Exact
+/// `pip-staging` or a PrefixStar `build-*` category) syncs its private
+/// leaves into the shared store and skill-discover through the mount.
+/// Both the category and the leaf are matched, mirroring
+/// the dispatcher's nested-ID rule.
+///
+/// The marker itself must be a real regular manifest: discovery loads a
+/// nested skill only from a real directory whose `SKILL.md` is a regular
+/// file, checked no-follow ([`has_regular_skill_md`]). The sync worker's
+/// parser follows symlinks, so without this rule a non-regular marker (a
+/// relative symlink renamed onto a nested `SKILL.md` path) would sync a
+/// skill a fresh discovery scan excludes. The physical mutation is
+/// preserved — only the store synchronization is suppressed.
+pub fn hermes_nested_sync_eligible(
+    matcher: Option<&crate::security::StagingMatcher>,
+    category: &str,
+    skill_name: &str,
+    marker: &Path,
+) -> bool {
+    if category.starts_with('.') || skill_name.starts_with('.') {
+        return false;
+    }
+    if matcher.is_some_and(|m| m.is_staging_root(category) || m.is_staging_root(skill_name)) {
+        return false;
+    }
+    hermes_nested_marker_is_regular(marker)
+}
+
+/// Whether a nested manifest marker is a real regular manifest by
+/// discovery's no-follow rule: its directory is a real directory and
+/// its `SKILL.md` is a regular file ([`has_regular_skill_md`]).
+///
+/// Distinct from the full eligibility check: dot- and staging-named
+/// markers are ineligible for synchronization yet keep separate
+/// replacement semantics, so callers that must react to a non-regular
+/// marker specifically (withdrawing the entry the destination identity
+/// backs when a replacement leaves none behind) check this predicate
+/// rather than treating every ineligible marker alike.
+pub fn hermes_nested_marker_is_regular(marker: &Path) -> bool {
+    marker
+        .parent()
+        .is_some_and(skillfs_core::store::has_regular_skill_md)
+}
+
 pub fn is_hermes_management_path(name: &str) -> bool {
     HERMES_MANAGEMENT_PATHS.contains(&name)
 }
@@ -93,8 +151,10 @@ pub enum PathType {
         skill_name: String,
         relative_path: PathBuf,
     },
-    /// Hermes management top-level entry (`.hub`, `.bundled_manifest`,
-    /// `.no-bundled-skills`). Physical passthrough, not a skill.
+    /// Top-level non-skill passthrough in Hermes layout: a management entry
+    /// (`.hub`, `.bundled_manifest`, `.no-bundled-skills`) or, in an in-place
+    /// mount, any other top-level entry that is not a directory (e.g.
+    /// `README.md`, `.gitignore`). Physical passthrough, not a skill.
     HermesMeta { name: String },
     /// Child path under a Hermes management entry
     /// (e.g. `.hub/some/file`).

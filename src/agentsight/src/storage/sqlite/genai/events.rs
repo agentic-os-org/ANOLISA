@@ -1,6 +1,6 @@
 //! Event storage and retrieval methods for GenAI SQLite store.
 
-use rusqlite::params;
+use rusqlite::{Connection, TransactionBehavior, params};
 
 use super::GenAISqliteStore;
 use super::schema::MAX_PRUNE_RETRIES;
@@ -88,7 +88,10 @@ impl GenAISqliteStore {
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -132,10 +135,21 @@ impl GenAISqliteStore {
     }
 
     /// Fetch the narrow column set preference analysis needs for completed
-    /// main-flow LLM calls at or after `since_ns`, oldest first, capped at
+    /// main-flow LLM calls at or after `since_ns`, capped at
     /// [`PREFERENCE_WINDOW_MAX_ROWS`]. Read-only: no schema or writes.
     /// `input_messages` is deliberately not selected — no rule reads it and
     /// it would multiply the memory peak of a window fetch.
+    ///
+    /// When the window is over the cap the NEWEST rows are kept — preference
+    /// analysis is about recent behavior ("wider windows only add stale
+    /// evidence"), and the trajectory provider below agrees on the cap
+    /// (`list_recent_atif_jsons` also LIMITs a DESC fetch; unlike this
+    /// store it returns rows newest-first, with no reversal). The
+    /// previous ASC-first LIMIT kept the OLDEST rows, freezing every
+    /// preference/turns/export view on the start of the window on any box
+    /// past ~43 calls/day. Rows are returned oldest-first for consumer
+    /// compatibility — the turns endpoint reverses again to answer its
+    /// documented newest-first contract.
     ///
     /// Rows are returned as raw columns: interpreting them (stripping agent
     /// template noise, mining tool names) belongs to the preference layer
@@ -146,6 +160,9 @@ impl GenAISqliteStore {
     ) -> Result<Vec<PreferenceWindowRow>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
+            // Fetch newest-first (DESC LIMIT) and reverse in Rust so the cap
+            // drops the oldest rows, not the newest — the same DESC cap as
+            // list_recent_atif_jsons, which returns newest-first directly.
             "SELECT id, session_id, conversation_id, start_timestamp_ns,
                     user_query, output_messages
              FROM genai_events
@@ -153,7 +170,7 @@ impl GenAISqliteStore {
                AND event_type = 'llm_call'
                AND status = 'complete'
                AND call_kind = 'main'
-             ORDER BY start_timestamp_ns ASC
+             ORDER BY start_timestamp_ns DESC
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(
@@ -173,6 +190,9 @@ impl GenAISqliteStore {
         for row in rows {
             result.push(row?);
         }
+        // DESC fetch, chronological return — consumers index by recency and
+        // compare adjacent rows in time order.
+        result.reverse();
         Ok(result)
     }
 
@@ -185,7 +205,10 @@ impl GenAISqliteStore {
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -237,7 +260,10 @@ impl GenAISqliteStore {
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -293,7 +319,10 @@ impl GenAISqliteStore {
         let sql = if agent_name.is_some() {
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -302,12 +331,15 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE start_timestamp_ns BETWEEN ?1 AND ?2
                AND event_type = 'llm_call'
-               AND COALESCE(agent_name, process_name) = ?3
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE
              ORDER BY start_timestamp_ns ASC"
         } else {
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -362,6 +394,38 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
+    /// Roll back the group if any row needs the pending-promotion path.
+    /// Serialize one event at a time so transactions do not retain extra large JSON copies.
+    pub(super) fn try_store_batch(
+        &self,
+        events: &[GenAISemanticEvent],
+        reconcile_pending: bool,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let _priority = self.prioritize_capture();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|error| format!("GenAI batch insertion mutex poisoned: {error}"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for event in events {
+            let _timer = reconcile_pending
+                .then(|| crate::runtime_metrics::StageTimer::start("genai_capture_complete"));
+            if reconcile_pending && Self::has_pending_completion(&tx, event)? {
+                return Ok(false);
+            }
+            let event_json = super::pending::completed_event_json(event)?;
+            let columns = match event {
+                GenAISemanticEvent::LLMCall(call) => {
+                    super::pending::message_columns(call, &event_json)
+                }
+                _ => (None, None),
+            };
+            Self::insert_serialized_event(&tx, event, &event_json, &columns)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Store a single GenAI event.
     ///
     /// Normal lifecycle work runs on the database maintenance worker. If the
@@ -371,10 +435,25 @@ impl GenAISqliteStore {
         &self,
         event: &GenAISemanticEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let event_json = super::pending::completed_event_json(event)?;
+        let columns = match event {
+            GenAISemanticEvent::LLMCall(call) => super::pending::message_columns(call, &event_json),
+            _ => (None, None),
+        };
+        self.store_serialized_event(event, &event_json, &columns)
+    }
+
+    /// Reuse completed JSON without another allocation on an insertion retry.
+    pub(super) fn store_serialized_event(
+        &self,
+        event: &GenAISemanticEvent,
+        event_json: &str,
+        columns: &super::pending::MessageColumns<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Attempt insert with retry on SQLITE_FULL
         let mut retries = 0;
         loop {
-            match self.try_insert_event(event) {
+            match self.try_insert_event(event, event_json, columns) {
                 Ok(()) => {
                     return Ok(());
                 }
@@ -408,14 +487,26 @@ impl GenAISqliteStore {
         }
     }
 
-    /// Try to insert an event without size check
+    /// Keep message slices alive across retries without reparsing the completed JSON.
     fn try_insert_event(
         &self,
         event: &GenAISemanticEvent,
+        event_json: &str,
+        columns: &super::pending::MessageColumns<'_>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let event_json = serde_json::to_string(event)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| format!("GenAI insertion mutex poisoned: {error}"))?;
+        Self::insert_serialized_event(&conn, event, event_json, columns)
+    }
 
+    fn insert_serialized_event(
+        conn: &Connection,
+        event: &GenAISemanticEvent,
+        event_json: &str,
+        columns: &super::pending::MessageColumns<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match event {
             GenAISemanticEvent::LLMCall(call) => {
                 let (input_tokens, output_tokens, total_tokens) = call
@@ -453,23 +544,7 @@ impl GenAISqliteStore {
                     }
                 };
 
-                // Extract input messages (incremental: latest round only)
-                let input_messages: Option<String> = {
-                    let latest =
-                        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
-                    if latest.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&latest).ok()
-                    }
-                };
-
-                // Extract output messages
-                let output_messages: Option<String> = if call.response.messages.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&call.response.messages).ok()
-                };
+                let (input_messages, output_messages) = columns;
 
                 // Extract finish reasons
                 let finish_reasons: Option<String> = if call.response.messages.is_empty() {
@@ -489,35 +564,13 @@ impl GenAISqliteStore {
                 };
 
                 // Extract tool_call_ids from response messages (outgoing tool calls)
-                let tool_call_ids: Option<String> = {
-                    let ids: Vec<String> = call
-                        .response
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.parts.iter())
-                        .filter_map(|p| {
-                            if let crate::genai::semantic::MessagePart::ToolCall {
-                                id: Some(tc_id),
-                                ..
-                            } = p
-                            {
-                                Some(tc_id.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&ids).ok()
-                    }
-                };
+                let tool_call_ids =
+                    crate::genai::semantic::tool_call_ids_json(&call.response.messages);
 
                 // Get instance ID (same logic as SLS uploader)
                 let instance = crate::genai::instance_id::get_instance_id();
 
-                conn.execute(
+                conn.prepare_cached(
                     "INSERT INTO genai_events (
                         event_type, call_id, trace_id, conversation_id, session_id, instance,
                         start_timestamp_ns, end_timestamp_ns, duration_ns, pid, process_name, agent_name,
@@ -529,14 +582,14 @@ impl GenAISqliteStore {
                         system_instructions, input_messages, output_messages,
                         user_query, http_method, http_path, status_code,
                         is_sse, sse_event_count, event_json, tool_call_ids, call_kind,
-                        first_output_timestamp_ns
+                        first_output_timestamp_ns, pending_match_key, input_tokens_includes_cache
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                         ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44
                     )",
-                    params![
+                    )?.execute(params![
                         "llm_call",
                         call.call_id,
                         call.metadata.get("response_id"),
@@ -567,8 +620,8 @@ impl GenAISqliteStore {
                         cache_creation,
                         cache_read,
                         system_instructions,
-                        input_messages,
-                        output_messages,
+                        input_messages.as_deref(),
+                        output_messages.as_deref(),
                         call.metadata.get("user_query"),
                         call.metadata.get("method"),
                         call.metadata.get("path"),
@@ -581,52 +634,54 @@ impl GenAISqliteStore {
                         call.metadata
                             .get("first_output_timestamp_ns")
                             .and_then(|value| value.parse::<i64>().ok()),
+                        call.metadata.get("pending_match_key"),
+                        1i64,
                     ],
                 )?;
             }
             GenAISemanticEvent::ToolUse(tool) => {
-                conn.execute(
+                conn.prepare_cached(
                     "INSERT INTO genai_events (
-                        event_type, call_id, timestamp_ns, pid,
+                        event_type, call_id, start_timestamp_ns, pid,
                         event_json
                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        "tool_use",
-                        tool.parent_llm_call_id,
-                        tool.timestamp_ns as i64,
-                        tool.pid,
-                        event_json,
-                    ],
-                )?;
+                )?
+                .execute(params![
+                    "tool_use",
+                    tool.parent_llm_call_id,
+                    tool.timestamp_ns as i64,
+                    tool.pid,
+                    event_json,
+                ])?;
             }
             GenAISemanticEvent::AgentInteraction(interaction) => {
-                conn.execute(
+                conn.prepare_cached(
                     "INSERT INTO genai_events (
-                        event_type, timestamp_ns, pid,
+                        event_type, start_timestamp_ns, pid,
                         event_json
                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        "agent_interaction",
-                        interaction.timestamp_ns as i64,
-                        interaction.pid,
-                        event_json,
-                    ],
-                )?;
+                )?
+                .execute(params![
+                    "agent_interaction",
+                    interaction.timestamp_ns as i64,
+                    interaction.pid,
+                    event_json,
+                ])?;
             }
             GenAISemanticEvent::StreamChunk(chunk) => {
-                conn.execute(
+                conn.prepare_cached(
                     "INSERT INTO genai_events (
-                        event_type, call_id, timestamp_ns, pid,
+                        event_type, call_id, start_timestamp_ns, pid,
                         event_json
                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        "stream_chunk",
-                        chunk.parent_llm_call_id,
-                        chunk.timestamp_ns as i64,
-                        chunk.pid,
-                        event_json,
-                    ],
-                )?;
+                )?
+                .execute(params![
+                    "stream_chunk",
+                    chunk.parent_llm_call_id,
+                    chunk.timestamp_ns as i64,
+                    chunk.pid,
+                    event_json,
+                ])?;
             }
         }
         Ok(())

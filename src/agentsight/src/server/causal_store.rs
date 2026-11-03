@@ -66,6 +66,9 @@ pub enum CausalStoreError {
     /// A stored round cannot be decoded as a supported cache key.
     #[error("stored round {0} is not a valid round or {LAST_ROUND}")]
     CorruptRound(i64),
+    /// A round index cannot be represented in the store's signed key column.
+    #[error("round index {0} exceeds the storable range")]
+    RoundOutOfRange(usize),
     /// The database was written by a newer binary. Refusing is the only safe
     /// option: the rows may mean something this version does not understand.
     #[error("causal.db schema {found} is newer than supported {supported}")]
@@ -156,7 +159,7 @@ impl CausalCaseStore {
              WHERE session_key = ?1 AND round = ?2 AND complaint = ?3",
         )?;
         let row = stmt.query_row(
-            params![key.session_key, encode_round(key.round), key.complaint],
+            params![key.session_key, encode_round(key.round)?, key.complaint],
             |row| row.get::<_, String>(0),
         );
         match row {
@@ -183,7 +186,7 @@ impl CausalCaseStore {
                  case_json = ?4, updated_at_ns = ?5",
             params![
                 key.session_key,
-                encode_round(key.round),
+                encode_round(key.round)?,
                 key.complaint,
                 case_json,
                 now
@@ -319,10 +322,13 @@ impl CausalCaseStore {
     }
 }
 
-fn encode_round(round: Option<usize>) -> i64 {
+fn encode_round(round: Option<usize>) -> Result<i64> {
     match round {
-        Some(index) => index as i64,
-        None => LAST_ROUND,
+        // A plain `as i64` wraps: `usize::MAX` becomes -1, the sentinel
+        // reserved for "the last round", and the lookup silently hits that
+        // case. Reject anything the signed key column cannot represent.
+        Some(index) => i64::try_from(index).map_err(|_| CausalStoreError::RoundOutOfRange(index)),
+        None => Ok(LAST_ROUND),
     }
 }
 

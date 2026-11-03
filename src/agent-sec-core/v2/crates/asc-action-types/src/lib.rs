@@ -5,14 +5,26 @@
 
 #![forbid(unsafe_code)]
 
+mod pii;
+mod prompt_scan;
+
+pub use pii::{PiiScanOptions, PiiScanRequest, Source};
+pub use prompt_scan::{PromptScanRequest, PromptScanWarmupRequest};
+
 use serde_json::Map;
 use serde_json::Value;
 
-/// Implemented action identities used by the common lifecycle.
+/// Identities supported by implemented action capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionId {
     /// Scans Bash or Python code before execution.
     CodeScan,
+    /// Detects personal information and credentials in supplied text.
+    PiiScan,
+    /// Scans prompt text for injection or jailbreak before it reaches a model.
+    PromptScan,
+    /// Scans, authenticates and manages Skill versions and activation.
+    SkillSec,
 }
 
 impl ActionId {
@@ -21,6 +33,9 @@ impl ActionId {
     pub const fn event_type(self) -> &'static str {
         match self {
             Self::CodeScan => "code_scan",
+            Self::PiiScan => "pii_scan",
+            Self::PromptScan => "prompt_scan",
+            Self::SkillSec => "skill_ledger",
         }
     }
 
@@ -29,6 +44,9 @@ impl ActionId {
     pub const fn category(self) -> &'static str {
         match self {
             Self::CodeScan => "code_scan",
+            Self::PiiScan => "pii_scan",
+            Self::PromptScan => "prompt_scan",
+            Self::SkillSec => "skill_ledger",
         }
     }
 }
@@ -143,3 +161,8 @@ pub struct CodeScanRequest {
     /// Optional engine mode.
     pub mode: Option<String>,
 }
+
+pub mod skill_sec;
+pub use skill_sec::{
+    DecisionAction, SkillIdentity, SkillSecCommand, SkillSecInputError, SkillSecRequest,
+};

@@ -20,7 +20,13 @@ from typing import Any
 
 from .config import MSG_TRUNCATE_LEN
 from .cron import CrontabManager
-from .checkpoint_manager import cwd_inside_workspace, cwd_inside_workspace_reason, get_manager
+from .checkpoint_manager import (
+    cwd_inside_workspace,
+    cwd_inside_workspace_reason,
+    get_manager,
+    workspace_registration_path,
+    resolve_workspace_path,
+)
 from .tools import TOOLS, check_ws_ckpt_available
 
 # ---------------------------------------------------------------------------
@@ -125,12 +131,19 @@ def _on_session_end(
     """Handle on_session_end — create a checkpoint after the turn."""
     manager = get_manager()
 
-    if manager.skip_next_auto_checkpoint:
-        manager.skip_next_auto_checkpoint = False
-        return
-
+    restored = manager.skip_auto_checkpoint_workspaces.copy()
+    manager.skip_auto_checkpoint_workspaces.clear()
     if not manager.config.auto_checkpoint:
         return
+    if restored:
+        try:
+            workspace = workspace_registration_path(
+                resolve_workspace_path(manager.config.workspace)
+            )
+            if workspace in restored:
+                return
+        except ValueError as error:
+            print(f"[ws-ckpt] Rollback suppression lookup failed: {error}", flush=True)
 
     # Retrieve the user message captured by pre_llm_call
     with _msg_lock:

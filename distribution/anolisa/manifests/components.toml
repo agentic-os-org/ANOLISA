@@ -82,6 +82,10 @@ package = "agent-memory"
 provides = "anolisa-component(agent-memory)"
 legacy_adopt = true
 
+[[components.aliases]]
+kind = "rpm-package"
+name = "agent-memory-core"
+
 [[components]]
 name = "os-skills"
 display_name = "OS Skills"
@@ -135,6 +139,10 @@ name = "sec-core"
 display_name = "Agent Security Core"
 summary = "Agent security core adapters and runtime"
 platforms = ["linux"]
+
+[[components.backends]]
+kind = "raw"
+package = "sec-core"
 
 [[components.backends]]
 kind = "rpm"

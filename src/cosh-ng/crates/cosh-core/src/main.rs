@@ -123,15 +123,12 @@ async fn main() {
 
 #[cfg(unix)]
 async fn run_until_sigint() {
+    // Applies to every run mode (headless, session-control, registry,
+    // compact): the SIGINT wait wraps run() as a whole, see the contract
+    // on wait_for_sigint below.
     tokio::select! {
-        signal = wait_for_sigint() => {
-            match signal {
-                Ok(()) => tracing::info!("received SIGINT, shutting down cosh-core"),
-                Err(error) => {
-                    eprintln!("failed to install SIGINT handler: {error}");
-                    std::process::exit(1);
-                }
-            }
+        _ = wait_for_sigint() => {
+            tracing::info!("received SIGINT, shutting down cosh-core");
         }
         _ = run() => {}
     }
@@ -171,8 +168,20 @@ async fn run() {
     }
     let (project_root, session_workspace) = if agent_headless {
         let requested_root = args.workspace_path();
-        match tool::SessionWorkspace::try_new(&requested_root) {
+        let workspace_policy = if args.execution_profile.is_brokered() {
+            tool::WorkspaceStartupPolicy::RequireConfinement
+        } else {
+            tool::WorkspaceStartupPolicy::AllowUnavailableFileTools
+        };
+        match tool::SessionWorkspace::try_new(&requested_root, workspace_policy) {
             Ok(workspace) => {
+                if workspace.openat2_unavailable() {
+                    eprintln!(
+                        "[cosh-core] openat2 is unavailable; workspace-confined file tools are \
+                         disabled. Shell commands remain subject to the configured tool selection, \
+                         approval policy, and hooks."
+                    );
+                }
                 let project_root = workspace.root().to_path_buf();
                 (project_root, Some(workspace))
             }
@@ -230,8 +239,29 @@ fn is_agent_headless_mode(args: &cli::CliArgs) -> bool {
 }
 
 #[cfg(unix)]
-async fn wait_for_sigint() -> std::io::Result<()> {
-    tokio::signal::ctrl_c().await
+async fn wait_for_sigint() {
+    // SIGINT contract by (registration outcome x inherited disposition):
+    // - Registered: the handler overrides any inherited disposition and we
+    //   shut down gracefully (the inherited-ignored launcher case is pinned
+    //   by tests/sigint.rs).
+    // - Registration failed: the inherited disposition stays in effect.
+    //   Inherited-default means Ctrl-C still terminates the process;
+    //   inherited-ignored means SIGINT cannot terminate it (ignored
+    //   dispositions survive exec), so SIGTERM has to be used instead.
+    //   Restoring SIG_DFL here would take another sigaction-family call,
+    //   which is neither guaranteed to work in environments where
+    //   registration already failed nor expressible under
+    //   forbid(unsafe_code). Warn once and never resolve: exiting instead
+    //   would race the run() branch, because select! polls branches in
+    //   random order.
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        eprintln!(
+            "failed to install SIGINT handler: {error}; \
+             the inherited SIGINT disposition stays in effect \
+             (stop with SIGTERM if Ctrl-C does not terminate the process)"
+        );
+        std::future::pending::<()>().await;
+    }
 }
 
 #[cfg(test)]

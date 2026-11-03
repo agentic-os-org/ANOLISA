@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -11,8 +11,9 @@ use nix::libc;
 use crate::types::{AgentEvent, PROVIDER_TIMEOUT_ERROR_CODE};
 
 use super::{
-    AdapterError, PreparedInvocation, ProviderCancellationArtifact,
-    ProviderCancellationArtifactKind, ProviderCancellationArtifactStore,
+    command_with_trusted_startup_path, AdapterError, PreparedInvocation,
+    ProviderCancellationArtifact, ProviderCancellationArtifactKind,
+    ProviderCancellationArtifactStore,
 };
 
 mod driver;
@@ -72,7 +73,7 @@ pub(crate) fn spawn_provider_child(
     const MAX_SPAWN_ATTEMPTS: usize = 3;
 
     for attempt in 0..MAX_SPAWN_ATTEMPTS {
-        let mut command = Command::new(&prepared.program);
+        let mut command = command_with_trusted_startup_path(&prepared.program);
         command.args(&prepared.args);
         match prompt_mode {
             ProviderPromptArgMode::None => {}

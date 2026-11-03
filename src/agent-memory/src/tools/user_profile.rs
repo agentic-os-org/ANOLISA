@@ -15,7 +15,7 @@ use std::path::Path;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::AuditEntry;
+use crate::audit::{AuditEntry, is_sanitized_query_path};
 use crate::error::Result;
 use crate::service::MemoryService;
 
@@ -142,8 +142,15 @@ fn analyze_session_logs(dir: &Path, profile: &mut UserProfile) -> Result<()> {
             // Track tool frequency
             *tool_frequency.entry(tool.to_string()).or_insert(0) += 1;
 
-            // Track search topics
-            if tool == "memory_search" || tool == "mem_grep" {
+            // Track search topics. `memory_search` logs a sanitized
+            // `<mode>:len=<bytes>` marker instead of the query, and the query
+            // is unrecoverable from it — counting the marker would synthesize
+            // a permanent "interested in: len=9" topic out of nothing. Rows
+            // that recorded a query are left alone, including legacy ones whose
+            // query itself ends in a `len=<digits>`-looking segment
+            // (`bm25:packet:len=14` recorded `packet:len=14`).
+            if (tool == "memory_search" || tool == "mem_grep") && !is_sanitized_query_path(path_str)
+            {
                 // Extract query from path field (format: "mode:query")
                 if let Some(query) = path_str.split(':').nth(1) {
                     let query = query.trim().to_lowercase();
@@ -361,12 +368,13 @@ fn parse_frontmatter_flat(content: &str) -> HashMap<String, String> {
 }
 
 fn extract_body(content: &str) -> String {
-    if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            return rest[end + 5..].trim().to_string();
-        }
+    // Same fence rule as the canonical key reader, so a file that ends at its
+    // closing fence yields an empty body instead of the raw fence block
+    // (GH-3580).
+    match super::frontmatter::split(content) {
+        Some((_, body)) => body.trim().to_string(),
+        None => content.trim().to_string(),
     }
-    content.trim().to_string()
 }
 
 #[cfg(test)]
@@ -389,6 +397,15 @@ mod tests {
     }
 
     #[test]
+    fn extract_body_closing_fence_without_trailing_newline() {
+        // GH-3580: the fence block is not body text just because the file
+        // ends at its closing fence.
+        let content = "---\nid: abc\n---";
+        assert_eq!(extract_body(content), "");
+        assert_eq!(extract_body("---\nid: abc\n---\nreal body"), "real body");
+    }
+
+    #[test]
     fn extract_body_without_frontmatter() {
         let content = "Just plain text.";
         let body = extract_body(content);
@@ -405,5 +422,90 @@ mod tests {
         let toml_str = toml::to_string(&entry).unwrap();
         assert!(toml_str.contains("test"));
         assert!(toml_str.contains("5"));
+    }
+
+    #[test]
+    fn session_log_reader_counts_only_recorded_queries() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = |tool: &str, path: &str| {
+            serde_json::json!({
+                "ts": "2026-10-04T08:00:00Z",
+                "tool": tool,
+                "path": path,
+                "ok": true,
+            })
+            .to_string()
+        };
+        let log = [
+            // Sanitized markers: two searches of a 9-byte query.
+            row("memory_search", "bm25:len=9"),
+            row("memory_search", "bm25(fallback from hybrid):len=9"),
+            // Legacy rows that still record the query itself.
+            row("memory_search", "bm25:rust ownership"),
+            row("memory_search", "hybrid:Rust Ownership"),
+        ]
+        .join("\n");
+        std::fs::write(dir.path().join("session-1.jsonl"), log + "\n").unwrap();
+
+        let mut profile = UserProfile::default();
+        analyze_session_logs(dir.path(), &mut profile).unwrap();
+
+        let topics: Vec<&str> = profile
+            .context
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert_eq!(
+            topics,
+            ["interested in: rust ownership"],
+            "sanitized markers must not become profile topics"
+        );
+        assert_eq!(profile.tool_calls_analyzed, 4);
+    }
+
+    #[test]
+    fn session_log_reader_keeps_legacy_queries_with_inner_colons() {
+        // Regression: `bm25:packet:len=14` recorded the query `packet:len=14`
+        // before sanitization landed. Treating it as a marker dropped the
+        // `interested in: packet` topic these rows used to synthesize, while a
+        // genuine marker must still contribute nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let row = |path: &str| {
+            serde_json::json!({
+                "ts": "2026-10-04T08:00:00Z",
+                "tool": "memory_search",
+                "path": path,
+                "ok": true,
+            })
+            .to_string()
+        };
+        let log = [
+            row("bm25:packet:len=14"),
+            row("bm25:packet:len=14"),
+            row("bm25:packet:len=14"),
+            row("bm25:len=14"),
+            row("bm25(fallback from hybrid):len=14"),
+        ]
+        .join("\n");
+        std::fs::write(dir.path().join("session-1.jsonl"), log + "\n").unwrap();
+
+        let mut profile = UserProfile::default();
+        analyze_session_logs(dir.path(), &mut profile).unwrap();
+
+        let topics: Vec<&str> = profile
+            .context
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert_eq!(
+            topics,
+            ["interested in: packet"],
+            "legacy rows keep their recorded query; markers stay skipped"
+        );
+        assert_eq!(
+            profile.context[0].evidence_count, 3,
+            "only the three recorded rows count as evidence"
+        );
+        assert_eq!(profile.tool_calls_analyzed, 5);
     }
 }

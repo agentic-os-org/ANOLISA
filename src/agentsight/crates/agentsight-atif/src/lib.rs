@@ -85,6 +85,39 @@ pub fn same_call_id(a: &str, b: &str) -> bool {
     normalized(a) == normalized(b)
 }
 
+/// Resolve an echoed tool-call ID against the original IDs in its scope.
+///
+/// An exact ID takes precedence over tolerant echoes. Without an exact match,
+/// return an owner only when all matching candidates name the same original ID.
+/// Repeated occurrences of that ID are allowed; distinct aliases are ambiguous.
+/// Empty echoes and empty candidate IDs do not identify a call.
+pub fn resolve_call_id<'a>(
+    echo: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    if echo.is_empty() {
+        return None;
+    }
+    let mut owner = None;
+    let mut ambiguous = false;
+    for candidate in candidates {
+        if candidate == echo {
+            return Some(candidate);
+        }
+        if !candidate.is_empty() && same_call_id(candidate, echo) {
+            if owner.is_some_and(|previous| previous != candidate) {
+                ambiguous = true;
+            }
+            owner = Some(candidate);
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        owner
+    }
+}
+
 /// A single observation result from a tool call or action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservationResult {
@@ -259,12 +292,38 @@ impl StepCategory {
     }
 }
 
+/// Flatten a step message to the text consumers read.
+///
+/// ATIF v1.6+ types `StepObject.message` as `String | Array<ContentPart>`, the
+/// array form being how a multimodal step carries its text and attachments. The
+/// in-repo producers always write the string form, but the format is
+/// interoperable, so a document from another producer — or a hand-written one —
+/// used to fail the whole parse with "invalid type: sequence, expected a
+/// string", losing every step rather than flattening one field. Non-string
+/// values are flattened to their JSON text, the same result the analyzer-side
+/// reader (`agentsight-opt`'s `de_step_message`) produces, so every reader of
+/// this schema accepts the same documents.
+///
+/// An explicit `null` message means the producer recorded no text, not the
+/// four-character string "null"; flatten it to the empty string, which is what
+/// the analyzer-side reader's `None` conveys.
+fn de_message<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text,
+        other => other.to_string(),
+    })
+}
+
 /// A single step in an ATIF trajectory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub step_id: usize,
     pub source: StepSource,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_message")]
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
@@ -386,13 +445,12 @@ fn default_schema_version() -> String {
 }
 
 impl AtifTrajectory {
-    /// Serialize to a JSON Value with `None` fields stripped out.
+    /// Serialize with absent optional fields omitted and JSON payloads preserved.
     ///
     /// # Errors
     /// Returns a `serde_json` error if serialization fails.
     pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
-        let v = serde_json::to_value(self)?;
-        Ok(strip_nulls(v))
+        serde_json::to_value(self)
     }
 
     /// Validate step_id sequence (1-based, contiguous).
@@ -411,24 +469,6 @@ impl AtifTrajectory {
             }
         }
         Ok(())
-    }
-}
-
-/// Recursively strip null values from a JSON object.
-fn strip_nulls(v: serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::Object(map) => {
-            let filtered: serde_json::Map<String, serde_json::Value> = map
-                .into_iter()
-                .filter(|(_, val)| !val.is_null())
-                .map(|(k, val)| (k, strip_nulls(val)))
-                .collect();
-            serde_json::Value::Object(filtered)
-        }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(strip_nulls).collect())
-        }
-        other => other,
     }
 }
 
@@ -504,6 +544,22 @@ mod tests {
     }
 
     #[test]
+    fn explicit_null_message_is_absent_not_the_text_null() {
+        // A producer that serializes an absent message as JSON null must not
+        // hand consumers the four-character string "null", which would read as
+        // a fabricated user turn and be written back on the next round trip.
+        let json = r#"{
+            "agent": {"name": "a"},
+            "steps": [{"step_id": 1, "source": "user", "message": null}]
+        }"#;
+        let traj: AtifTrajectory = serde_json::from_str(json).expect("null message parses");
+        assert_eq!(traj.steps[0].message, "");
+
+        let round_trip = serde_json::to_value(&traj).expect("trajectory serializes");
+        assert_eq!(round_trip["steps"][0]["message"], "");
+    }
+
+    #[test]
     fn serialize_skips_none_fields() {
         let traj = minimal_trajectory();
         let json = serde_json::to_string(&traj).unwrap();
@@ -522,6 +578,50 @@ mod tests {
         assert_eq!(parsed.steps.len(), 1);
     }
 
+    /// ATIF v1.6+ types `StepObject.message` as `String | Array<ContentPart>`,
+    /// the array form being how a multimodal step carries its text and
+    /// attachments. In-repo producers write the string form, but the format is
+    /// interoperable: a document from another producer used to fail the whole
+    /// parse with "invalid type: sequence, expected a string", losing every
+    /// step of the trajectory rather than flattening one field.
+    #[test]
+    fn accepts_the_content_part_message_union() {
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "session_id": "s-union",
+            "agent": {"name": "qoder", "version": "unknown"},
+            "steps": [{
+                "step_id": 1,
+                "source": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "image", "source": {"media_type": "image/png", "path": "a.png"}}
+                ]
+            }]
+        }"#;
+        let parsed =
+            validate_trajectory_str(json).expect("the v1.6+ content-part message must validate");
+        assert!(
+            parsed.steps[0].message.contains("What is in this image?"),
+            "the text part must survive the flattening: {:?}",
+            parsed.steps[0].message
+        );
+    }
+
+    /// The string form stays the canonical shape: it parses untouched and is
+    /// what serialization writes back, so consumers never re-encode a document
+    /// they only read.
+    #[test]
+    fn the_string_message_writes_back_unchanged() {
+        let mut traj = minimal_trajectory();
+        traj.steps[0].message = "plain text".into();
+        let json = serde_json::to_string(&traj).unwrap();
+        assert!(json.contains(r#""message":"plain text""#));
+        let parsed = validate_trajectory_str(&json).unwrap();
+        assert_eq!(parsed.steps[0].message, "plain text");
+    }
+
     #[test]
     fn validate_rejects_bad_step_ids() {
         let mut traj = minimal_trajectory();
@@ -530,10 +630,14 @@ mod tests {
     }
 
     #[test]
-    fn strip_nulls_removes_nested_nulls() {
-        let v = serde_json::json!({"a": null, "b": {"c": null, "d": 1}, "e": [null, 2]});
-        let stripped = strip_nulls(v);
-        assert_eq!(stripped, serde_json::json!({"b": {"d": 1}, "e": [null, 2]}));
+    fn json_value_omits_unset_metadata_and_roundtrips() {
+        let value = minimal_trajectory().to_json_value().unwrap();
+        assert!(value.get("trajectory_id").is_none());
+        assert!(value["agent"].get("tool_definitions").is_none());
+        assert!(value["steps"][0].get("reasoning_content").is_none());
+        let parsed = validate_trajectory_str(&value.to_string()).unwrap();
+        assert_eq!(parsed.steps[0].message, "hello");
+        assert_eq!(parsed.session_id.as_deref(), Some("s-1"));
     }
 
     // ─── Derived step categories ─────────────────────────────────────────
@@ -699,5 +803,27 @@ mod tests {
             let json = serde_json::to_string(&source).unwrap();
             assert_eq!(json, format!("\"{}\"", source.as_str()));
         }
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::resolve_call_id;
+    #[test]
+    fn exact_ids_win_in_either_iteration_order() {
+        for ids in [["call_x", "callx"], ["callx", "call_x"]] {
+            assert_eq!(resolve_call_id("callx", ids), Some("callx"));
+        }
+        assert_eq!(resolve_call_id("CALL", ["call", "CALL"]), Some("CALL"));
+    }
+    #[test]
+    fn only_unique_nonempty_aliases_can_resolve() {
+        assert_eq!(resolve_call_id("callx", ["call_x", "call-x"]), None);
+        assert_eq!(
+            resolve_call_id("callx", ["call_x", "call_x"]),
+            Some("call_x")
+        );
+        assert_eq!(resolve_call_id("", [""]), None);
+        assert_eq!(resolve_call_id("unknown", ["call_x"]), None);
     }
 }

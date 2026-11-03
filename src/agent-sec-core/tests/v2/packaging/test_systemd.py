@@ -33,23 +33,31 @@ def test_v2_stages_root_system_unit(tmp_path):
         "RuntimeDirectoryPreserve=yes",
         "Type=simple",
         "Restart=on-failure",
-        "TimeoutStopSec=45",
+        "TimeoutStopSec=75",
         "KillMode=control-group",
         "StartLimitBurst=5",
         "StandardError=journal",
-        "CapabilityBoundingSet=",
+        "CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SYS_PTRACE",
+        "AmbientCapabilities=",
+        "StateDirectory=agent-sec/skillsec",
+        "LogsDirectory=agent-sec",
         "SystemCallFilter=@system-service",
         "SystemCallArchitectures=native",
         "MemoryDenyWriteExecute=true",
     ):
         assert setting in content.splitlines()
     assert not (tmp_path / "usr/lib/sysusers.d/agent-sec-core.conf").exists()
-    spec = (ROOT / "agent-sec-core.spec.v2.in").read_text()
+    spec = (ROOT / "packaging/rpm/agent-sec-core.spec.v2.in").read_text()
     assert "%systemd_postun_with_restart agent-sec-core.service" in spec
+    assert "rpm -qa --qf '%%{NAME}\\n'" in spec
+    assert "grep -Fxq agent-sec-cli" in spec
+    assert "%pre\n" in spec and "%posttrans\n" in spec
+    assert "if [ -e /usr/lib/systemd/user/agent-sec-core.service ]; then" in spec
+    assert "/usr/bin/systemctl enable --now agent-sec-core.service" in spec
     assert "systemd_user_" not in spec and "_userunitdir" not in spec
     assert "systemd-sysusers" not in spec
     assert "%pre -n agent-sec-cli" not in spec
-    makefile = (ROOT / "Makefile").read_text()
+    makefile = (ROOT / "packaging/install.mk").read_text()
     targets = [
         line
         for line in makefile.splitlines()
@@ -57,6 +65,26 @@ def test_v2_stages_root_system_unit(tmp_path):
     ]
     assert any("install-systemd-system" in line for line in targets)
     assert all("install-systemd-user" not in line for line in targets)
+
+
+def test_source_build_stages_v2_unit_with_source_binary_path(tmp_path):
+    subprocess.run(
+        [
+            "make",
+            "install-systemd-system-source",
+            f"DESTDIR={tmp_path}",
+            "BINDIR=/usr/local/bin",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    unit = tmp_path / "etc/systemd/system/agent-sec-core.service"
+    content = unit.read_text()
+    assert 'ExecStart="/usr/local/bin/agent-sec-daemon" serve' in content
+    assert "{bindir}" not in content
+    assert not (tmp_path / "usr/lib/systemd/user").exists()
 
 
 def test_shared_manifest_staging(tmp_path):
@@ -80,7 +108,7 @@ def test_shared_manifest_staging(tmp_path):
     assert (
         installed.read_bytes()
         == staged.read_bytes()
-        == (ROOT / ".anolisa/component.toml").read_bytes()
+        == (ROOT / "packaging/anolisa/component.toml").read_bytes()
     )
     component = tomllib.loads(installed.read_text())["component"]
-    assert component["services"][0]["scope"] == "user"
+    assert component["services"][0]["scope"] == "system"

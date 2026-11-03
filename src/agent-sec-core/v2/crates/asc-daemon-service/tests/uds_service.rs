@@ -13,6 +13,17 @@ use tokio::net::UnixStream;
 
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
+// Release blocking test workers during unwinding so runtime shutdown can finish.
+struct ReleaseGateOnDrop<'a>(&'a (Mutex<bool>, Condvar));
+
+impl Drop for ReleaseGateOnDrop<'_> {
+    fn drop(&mut self) {
+        let (lock, ready) = self.0;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+    }
+}
+
 #[derive(Default)]
 struct FakeDispatcher {
     requests: Mutex<Vec<DispatchRequest>>,
@@ -158,10 +169,13 @@ fn config() -> ServiceConfig {
         max_request_frame_bytes: 64,
         max_response_frame_bytes: 64,
         max_connections: 4,
+        reserved_administrator_connections: 0,
+        max_connections_per_uid: 4,
         max_rejection_connections: 2,
         rejection_encode_timeout: Duration::from_millis(100),
         request_read_timeout: Duration::from_millis(250),
         dispatch_timeout: Duration::from_millis(250),
+        max_dispatch_timeout: Duration::from_secs(1),
         response_write_timeout: Duration::from_millis(250),
         drain_timeout: Duration::from_millis(500),
         accept_error_backoff: Duration::from_millis(10),
@@ -218,6 +232,7 @@ fn start_service_with_rejection_encoder(
 
 async fn request(path: &PathBuf, payload: &[u8], eof_terminated: bool) -> Vec<u8> {
     let mut stream = UnixStream::connect(path).await.unwrap();
+    // An empty payload reads admission rejections without writing to a closed peer.
     stream.write_all(payload).await.unwrap();
     if eof_terminated {
         stream.shutdown().await.unwrap();
@@ -289,10 +304,32 @@ async fn idle_client_does_not_block_a_healthy_request_and_receives_one_deadline(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
+async fn request_read_timeout_releases_the_uid_quota() {
     let dispatcher = Arc::new(FakeDispatcher::default());
     let mut limits = config();
-    limits.max_connections = 1;
+    limits.max_connections_per_uid = 1;
+    let service = start_service("uid-timeout", limits, dispatcher);
+    let mut idle = UnixStream::connect(&service.socket_path).await.unwrap();
+    assert_eq!(
+        request(&service.socket_path, b"", false).await,
+        b"reject:busy\n"
+    );
+    let mut response = Vec::new();
+    idle.read_to_end(&mut response).await.unwrap();
+    assert_eq!(response, b"reject:timeout\n");
+    assert_eq!(
+        request(&service.socket_path, b"after\n", false).await,
+        b"ok:after\n"
+    );
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
+    let mut limits = config();
+    limits.max_connections_per_uid = 1;
     let service = start_service("busy", limits, dispatcher.clone());
     let held_path = service.socket_path.clone();
     let held = tokio::spawn(async move { request(&held_path, b"hold\n", false).await });
@@ -300,7 +337,7 @@ async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
 
     let busy = tokio::time::timeout(
         Duration::from_secs(1),
-        request(&service.socket_path, b"busy\n", false),
+        request(&service.socket_path, b"", false),
     )
     .await;
     dispatcher.release_hold();
@@ -322,6 +359,7 @@ async fn bounded_admission_returns_busy_without_disrupting_later_requests() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_blocked_dispatch_does_not_block_an_independent_healthy_request() {
     let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
     let mut limits = config();
     limits.max_connections = 2;
     limits.dispatch_timeout = Duration::from_secs(1);
@@ -345,6 +383,7 @@ async fn one_blocked_dispatch_does_not_block_an_independent_healthy_request() {
 async fn blocked_rejection_encoder_is_bounded_and_does_not_block_dispatch() {
     let dispatcher = Arc::new(FakeDispatcher::default());
     let rejection_encoder = Arc::new(BlockingRejectionEncoder::default());
+    let _release = ReleaseGateOnDrop(&rejection_encoder.gate);
     let mut limits = config();
     limits.request_read_timeout = Duration::from_millis(20);
     limits.rejection_encode_timeout = Duration::from_millis(30);
@@ -378,8 +417,10 @@ async fn blocked_rejection_encoder_is_bounded_and_does_not_block_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_deadline_cancels_lifetime_and_releases_connection_capacity() {
     let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
     let mut limits = config();
     limits.max_connections = 1;
+    limits.max_connections_per_uid = 1;
     limits.dispatch_timeout = Duration::from_millis(50);
     let service = start_service("dispatch-timeout", limits, dispatcher.clone());
     let held_path = service.socket_path.clone();
@@ -408,6 +449,7 @@ async fn dispatch_deadline_cancels_lifetime_and_releases_connection_capacity() {
 async fn request_and_response_frame_failures_are_bounded_and_connection_local() {
     let dispatcher = Arc::new(FakeDispatcher::default());
     let mut limits = config();
+    limits.max_connections_per_uid = 1;
     limits.max_request_frame_bytes = 8;
     limits.max_response_frame_bytes = 32;
     let service = start_service("bounds", limits, dispatcher);
@@ -468,6 +510,7 @@ async fn disconnected_client_cannot_terminate_the_service() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_admission_and_bounds_the_drain_wait() {
     let dispatcher = Arc::new(FakeDispatcher::default());
+    let _release = ReleaseGateOnDrop(&dispatcher.hold_gate);
     let mut limits = config();
     limits.drain_timeout = Duration::from_millis(50);
     let service = start_service("drain", limits, dispatcher.clone());

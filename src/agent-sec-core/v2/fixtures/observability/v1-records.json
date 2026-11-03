@@ -1,0 +1,200 @@
+[
+  {
+    "id": "before_agent_run",
+    "input": {
+      "hook": "before_agent_run",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001",
+        "toolCallId": "tool-001",
+        "ignored": "drop"
+      },
+      "metrics": {
+        "user_input": "fixture-input",
+        "ignored_metric": "drop"
+      },
+      "ignored": "drop"
+    },
+    "expected": {
+      "hook": "before_agent_run",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001"
+      },
+      "metrics": {
+        "user_input": "fixture-input"
+      }
+    }
+  },
+  {
+    "id": "before_llm_call",
+    "input": {
+      "hook": "before_llm_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001",
+        "toolCallId": "tool-001",
+        "ignored": "drop"
+      },
+      "metrics": {
+        "model_id": "model",
+        "prompt": null,
+        "ignored_metric": "drop"
+      },
+      "ignored": "drop"
+    },
+    "expected": {
+      "hook": "before_llm_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001"
+      },
+      "metrics": {
+        "prompt": null,
+        "model_id": "model"
+      }
+    }
+  },
+  {
+    "id": "after_llm_call",
+    "input": {
+      "hook": "after_llm_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001",
+        "toolCallId": "tool-001",
+        "ignored": "drop"
+      },
+      "metrics": {
+        "latency_ms": 12,
+        "outcome": "success",
+        "ignored_metric": "drop"
+      },
+      "ignored": "drop"
+    },
+    "expected": {
+      "hook": "after_llm_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001"
+      },
+      "metrics": {
+        "latency_ms": 12,
+        "outcome": "success"
+      }
+    }
+  },
+  {
+    "id": "before_tool_call",
+    "input": {
+      "hook": "before_tool_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001",
+        "toolCallId": "tool-001",
+        "ignored": "drop"
+      },
+      "metrics": {
+        "tool_name": "read_file",
+        "parameters": {
+          "path": "README.md"
+        },
+        "ignored_metric": "drop"
+      },
+      "ignored": "drop"
+    },
+    "expected": {
+      "hook": "before_tool_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "toolCallId": "tool-001",
+        "callId": "call-001"
+      },
+      "metrics": {
+        "tool_name": "read_file",
+        "parameters": {
+          "path": "README.md"
+        }
+      }
+    }
+  },
+  {
+    "id": "after_tool_call",
+    "input": {
+      "hook": "after_tool_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001",
+        "toolCallId": "tool-001",
+        "ignored": "drop"
+      },
+      "metrics": {
+        "status": "success",
+        "duration_ms": 2,
+        "ignored_metric": "drop"
+      },
+      "ignored": "drop"
+    },
+    "expected": {
+      "hook": "after_tool_call",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "toolCallId": "tool-001",
+        "callId": "call-001"
+      },
+      "metrics": {
+        "duration_ms": 2,
+        "status": "success"
+      }
+    }
+  },
+  {
+    "id": "after_agent_run",
+    "input": {
+      "hook": "after_agent_run",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001",
+        "callId": "call-001",
+        "toolCallId": "tool-001",
+        "ignored": "drop"
+      },
+      "metrics": {
+        "response": "done",
+        "ignored_metric": "drop"
+      },
+      "ignored": "drop"
+    },
+    "expected": {
+      "hook": "after_agent_run",
+      "observedAt": "2030-01-02T03:04:05.123456+08:00",
+      "metadata": {
+        "sessionId": "  session,一=1%  ",
+        "runId": "run-001"
+      },
+      "metrics": {
+        "response": "done"
+      }
+    }
+  }
+]

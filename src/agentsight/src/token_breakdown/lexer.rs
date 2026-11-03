@@ -10,7 +10,7 @@
 //! <|im_end|>
 //! ```
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use super::types::{ChatMLBlock, ChatMLDocument};
 
@@ -33,24 +33,23 @@ pub fn parse_chatml(input: &str) -> Result<ChatMLDocument> {
         // Find the role: text from after <|im_start|> to the first newline
         let role_end = input[after_marker..]
             .find('\n')
-            .ok_or_else(|| anyhow!("No newline after <|im_start|> at byte offset {}", block_start))?;
-        let role = input[after_marker..after_marker + role_end].trim().to_string();
+            .ok_or_else(|| anyhow!("No newline after <|im_start|> at byte offset {block_start}"))?;
+        let role = input[after_marker..after_marker + role_end]
+            .trim()
+            .to_string();
 
         // Content starts after the role line's newline
         let content_start = after_marker + role_end + 1;
 
         // Find the matching <|im_end|>
-        let end_offset = input[content_start..]
-            .find(IM_END)
-            .ok_or_else(|| anyhow!("No matching <|im_end|> for <|im_start|>{} at byte offset {}", role, block_start))?;
+        let end_offset = input[content_start..].find(IM_END).ok_or_else(|| {
+            anyhow!("No matching <|im_end|> for <|im_start|>{role} at byte offset {block_start}")
+        })?;
         let content_end = content_start + end_offset;
 
         let raw_content = input[content_start..content_end].to_string();
 
-        blocks.push(ChatMLBlock {
-            role,
-            raw_content,
-        });
+        blocks.push(ChatMLBlock { role, raw_content });
 
         // Move past <|im_end|>
         pos = content_end + IM_END.len();

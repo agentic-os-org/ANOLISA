@@ -3,12 +3,504 @@
 use super::*;
 use crate::aggregator::{AggregatedResult, ConnectionState};
 use crate::config::RuntimeLimits;
+use crate::parser::Parser;
 use crate::probes::sslsniff::SslEvent;
 use crate::storage::sqlite::PendingOrigin;
 
 const PID: u32 = 3_999_989;
 
-fn feed(aggregator: &mut Aggregator, rw: i32, bytes: &[u8]) -> Vec<AggregatedResult> {
+#[test]
+fn local_sqlite_completion_releases_payload_and_repairs_session() {
+    let dir = super::tests::unique_tmp_dir("local-completion");
+    let store = Arc::new(
+        GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap(),
+    );
+    let log_path = dir.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    let exporters: Vec<Box<dyn GenAIExporter>> =
+        vec![Box::new(Arc::clone(&store)), Box::new(Arc::clone(&logtail))];
+    let local_delivery = super::delivery::can_complete_locally(false, true, &exporters);
+    assert!(
+        local_delivery,
+        "an undeployed default file sink must not retain payloads"
+    );
+    let mut aggregator = Aggregator::new();
+    let text = "x".repeat(1024 * 1024);
+    let body = serde_json::json!({"model":"fixture","messages":[{"role":"user","content":text}],"stream":true}).to_string();
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    assert!(
+        feed(
+            &mut aggregator,
+            0,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+        )
+        .is_empty()
+    );
+    let response = "data: {\"id\":\"local-fixture\",\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":1000,\"total_tokens\":1012}}\n\ndata: [DONE]\n\n";
+    let captured = feed(&mut aggregator, 0, response.as_bytes());
+    assert_eq!(captured.len(), 1);
+    let mut analysis = Analyzer::new().analyze_for_delivery(&captured[0], true);
+    drop(captured);
+    let mut mapper = ResponseSessionMapper::new();
+    let (mut output, pending) = GenAIBuilder::new().build_for_owned_delivery(
+        &analysis,
+        &mapper,
+        &HashMap::new(),
+        !local_delivery,
+    );
+    assert!(
+        pending.is_none(),
+        "local completion needs no pending-row body copies"
+    );
+    assert_eq!(output.pending_response_id.as_deref(), Some("local-fixture"));
+    output.take_raw_bodies(&mut analysis);
+    drop(analysis);
+    let GenAISemanticEvent::LLMCall(call) = &output.events[0] else {
+        panic!("expected captured call")
+    };
+    let conversation = call.metadata["conversation_id"].clone();
+    let mut expected = serde_json::to_value(&output.events[0]).unwrap();
+    let pid = super::delivery::complete_local_genai(&output, &store, &exporters)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pid, PID);
+    assert!(
+        !log_path.exists(),
+        "inactive export must not create a deployment file"
+    );
+    {
+        let rows = store.get_events_by_conversation(&conversation).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status.as_deref(), Some("complete"));
+        assert_eq!(rows[0].total_tokens, 1012);
+        assert_eq!(rows[0].user_query.as_deref(), Some(text.as_str()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(rows[0].event_json.as_deref().unwrap())
+                .unwrap(),
+            expected
+        );
+    }
+    let mut fixups = lru::LruCache::new(std::num::NonZeroUsize::new(4).unwrap());
+    fixups.put(
+        pid,
+        retro_fixup_call_ids(pid, &output.events)
+            .into_iter()
+            .map(|id| (id, std::time::Instant::now(), None))
+            .collect(),
+    );
+    drop(output);
+    let session = "550e8400-e29b-41d4-a716-446655440000";
+    mapper.process_filewrite(&FileWriteEvent {
+        timestamp_ns: 2_000_000_000,
+        pid,
+        tid: pid,
+        uid: 0,
+        write_size: 0,
+        comm: "fixture".into(),
+        filename: format!("{session}.jsonl"),
+        cgroup_id: 0,
+        buf: br#"{"responseId":"local-fixture"}"#.to_vec(),
+    });
+    apply_retro_session_fixup(&mut fixups, &mapper, &store, None, pid, None);
+    assert!(fixups.peek(&pid).is_none());
+    let rows = store.get_events_by_session(session).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "late mapping repairs the persisted session column"
+    );
+    expected["LLMCall"]["metadata"]["session_id"] = serde_json::json!(session);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rows[0].event_json.as_deref().unwrap()).unwrap(),
+        expected
+    );
+    drop(rows);
+    drop(exporters);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_sqlite_completion_preserves_exporter_activation_and_session_wait() {
+    let dir = super::tests::unique_tmp_dir("local-completion-activation");
+    let store = Arc::new(
+        GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap(),
+    );
+    let log_path = dir.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    let exporters: Vec<Box<dyn GenAIExporter>> =
+        vec![Box::new(Arc::clone(&store)), Box::new(Arc::clone(&logtail))];
+    let mut mapper = ResponseSessionMapper::new();
+    assert!(super::delivery::can_complete_locally(
+        false, true, &exporters
+    ));
+    let (first, pending) = delivery_fixture("activation-fixture", &mapper, false);
+    assert!(pending.is_none());
+
+    // A sink becoming active after route selection must still see this call.
+    std::fs::File::create(&log_path).unwrap();
+    super::delivery::complete_local_genai(&first, &store, &exporters).unwrap();
+    let first_record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&log_path).unwrap().trim()).unwrap();
+    assert_eq!(first_record["gen_ai.response.id"], "activation-fixture");
+    drop(first);
+
+    // Subsequent calls use the existing queue until their session is mapped.
+    let local_delivery = super::delivery::can_complete_locally(false, true, &exporters);
+    assert!(!local_delivery);
+    let (output, pending) = delivery_fixture("active-fixture", &mapper, !local_delivery);
+    let pending = pending.unwrap();
+    let call_id = pending.call_id.clone();
+    store.insert_pending(&pending).unwrap();
+    drop(pending);
+    let mut queue = PendingGenAiQueue::default();
+    queue.push(PendingGenAI {
+        response_id: output.pending_response_id.unwrap(),
+        events: output.events.into(),
+        pid: PID,
+        created_at: std::time::Instant::now(),
+    });
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap().lines().count(),
+        1
+    );
+    let session = "550e8400-e29b-41d4-a716-446655440000";
+    mapper.process_filewrite(&FileWriteEvent {
+        timestamp_ns: 2_000_000_000,
+        pid: PID,
+        tid: PID,
+        uid: 0,
+        write_size: 0,
+        comm: "fixture".into(),
+        filename: format!("{session}.jsonl"),
+        cgroup_id: 0,
+        buf: br#"{"responseId":"active-fixture"}"#.to_vec(),
+    });
+    for batch in queue.resolve(&mapper) {
+        let events = batch.events.into_events();
+        complete_deferred_genai(&events, Some(&store), &exporters, None);
+    }
+    assert_eq!(queue.len(), 0);
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1]["gen_ai.response.id"], "active-fixture");
+    assert_eq!(records[1]["gen_ai.session.id"], session);
+    let saved = store.get_events_by_session(session).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].call_id.as_deref(), Some(call_id.as_str()));
+    assert_eq!(saved[0].status.as_deref(), Some("complete"));
+
+    std::fs::remove_file(&log_path).unwrap();
+    assert!(super::delivery::can_complete_locally(
+        false, true, &exporters
+    ));
+    assert!(
+        !super::delivery::can_complete_locally(true, true, &exporters),
+        "FFI still needs deferred delivery"
+    );
+    drop(exporters);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_sqlite_write_failure_still_delivers_to_the_active_sink() {
+    let dir = super::tests::unique_tmp_dir("local-completion-failure");
+    let path = dir.join("genai_events.db");
+    drop(
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap(),
+    );
+    let store = GenAISqliteStore::open_read_only_existing(&path).unwrap();
+    let log_path = dir.join("events.jsonl");
+    std::fs::File::create(&log_path).unwrap();
+    let exporter = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    let exporters: Vec<Box<dyn GenAIExporter>> = vec![Box::new(exporter)];
+    assert!(!super::delivery::can_complete_locally(
+        false, true, &exporters
+    ));
+    assert!(!super::delivery::can_complete_locally(false, false, &[]));
+    let (output, pending) =
+        delivery_fixture("failed-local-fixture", &ResponseSessionMapper::new(), false);
+    assert!(pending.is_none());
+    let error = super::delivery::complete_local_genai(&output, &store, &exporters).unwrap_err();
+    assert!(error.to_string().contains("readonly"), "{error}");
+    let record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&log_path).unwrap().trim()).unwrap();
+    assert_eq!(record["gen_ai.response.id"], "failed-local-fixture");
+    assert_eq!(record["gen_ai.usage.input_tokens"], "12");
+    assert_eq!(record["gen_ai.usage.output_tokens"], "1");
+    drop(exporters);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn busy_local_completions_survive_retry_and_deliver_each_external_record_once() {
+    let dir = super::tests::unique_tmp_dir("local-write-busy");
+    let path = dir.join("genai_events.db");
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let log_path = dir.join("events.jsonl");
+    std::fs::File::create(&log_path).unwrap();
+    let exporters: Vec<Box<dyn GenAIExporter>> = vec![Box::new(Arc::new(
+        LogtailExporter::new_with_path_dynamic(log_path.to_str().unwrap(), None, true, false, true),
+    ))];
+    let mut queue = PendingGenAiQueue::default();
+    let mut mapper = ResponseSessionMapper::new();
+    let limits = RuntimeLimits::default();
+    let mut expected = Vec::new();
+    for index in 0..5 {
+        let (output, _) = delivery_fixture(&format!("busy-call-{index}"), &mapper, false);
+        let error = super::delivery::complete_local_genai(&output, &store, &exporters).unwrap_err();
+        assert!(super::delivery::is_retryable_sqlite_write(error.as_ref()));
+        expected.push(serde_json::to_value(&output.events[0]).unwrap());
+        assert!(
+            queue
+                .queue_local_completion(output, &store, &limits)
+                .is_ok()
+        );
+    }
+    assert_eq!(queue.len(), 5);
+    assert!(queue.bytes > 0 && queue.bytes <= limits.pending_genai_max_bytes);
+    let bytes = queue.bytes;
+    assert!(queue.flush_for_pid(PID).is_empty());
+    assert!(queue.flush_all().is_empty());
+    assert_eq!(
+        queue.bytes, bytes,
+        "session drains must keep retry accounting"
+    );
+    let next_retry = queue.local_retry_after.unwrap();
+    assert!(
+        queue
+            .retry_local_completion(
+                &store,
+                &mapper,
+                next_retry - std::time::Duration::from_nanos(1),
+                false,
+            )
+            .is_none()
+    );
+    assert_eq!(queue.local_retry_after, Some(next_retry));
+    assert!(
+        queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .is_none()
+    );
+    assert_eq!(
+        queue.len(),
+        5,
+        "a second busy result must preserve the owned batch"
+    );
+    assert_eq!(queue.bytes, bytes);
+
+    let session = "00000000-0000-0000-0000-000000000001";
+    mapper.process_filewrite(&FileWriteEvent {
+        timestamp_ns: 2_000_000_000,
+        pid: PID,
+        tid: PID,
+        uid: 0,
+        write_size: 0,
+        comm: "fixture".into(),
+        filename: format!("{session}.jsonl"),
+        cgroup_id: 0,
+        buf: br#"{"responseId":"busy-call-0"}"#.to_vec(),
+    });
+    blocker.execute_batch("ROLLBACK").unwrap();
+    for mut expected in expected {
+        let (events, fixup) = queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .expect("completed capture survives a transient writer lock");
+        assert!(
+            fixup.is_none(),
+            "the mapping arrived while the write was queued"
+        );
+        expected["LLMCall"]["metadata"]["session_id"] = serde_json::json!(session);
+        assert_eq!(serde_json::to_value(&events[0]).unwrap(), expected);
+        // Replayed batches remain idempotent when a previous attempt partly succeeded.
+        store.complete_captured(&events[0]).unwrap();
+    }
+    assert_eq!(queue.len(), 0);
+    assert_eq!(queue.bytes, 0);
+    assert!(queue.local_retry_priority.is_none());
+    let rows = store.get_events_by_session(session).unwrap();
+    assert_eq!(rows.len(), 5);
+    assert!(
+        rows.iter()
+            .all(|row| row.status.as_deref() == Some("complete") && row.total_tokens == 13)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap().lines().count(),
+        5
+    );
+    assert!(
+        queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .is_none()
+    );
+    drop(rows);
+    drop(blocker);
+    drop(store);
+    drop(exporters);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_write_retries_share_session_count_and_byte_limits() {
+    let dir = super::tests::unique_tmp_dir("local-write-limits");
+    let store = Arc::new(
+        GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap(),
+    );
+    let mapper = ResponseSessionMapper::new();
+    let mut queue = PendingGenAiQueue::default();
+    let (output, _) = delivery_fixture("session-wait", &mapper, true);
+    queue.push(PendingGenAI {
+        response_id: output.pending_response_id.unwrap(),
+        events: output.events.into(),
+        pid: PID,
+        created_at: std::time::Instant::now(),
+    });
+    let limits = RuntimeLimits {
+        pending_genai_max_count: 2,
+        ..Default::default()
+    };
+    let (output, _) = delivery_fixture("local-retry", &mapper, false);
+    assert!(
+        queue
+            .queue_local_completion(output, &store, &limits)
+            .is_ok()
+    );
+    let bytes = queue.bytes;
+    let (output, _) = delivery_fixture("count-overflow", &mapper, false);
+    assert!(
+        queue
+            .queue_local_completion(output, &store, &limits)
+            .is_err()
+    );
+    let (output, _) = delivery_fixture("byte-overflow", &mapper, false);
+    assert!(
+        queue
+            .queue_local_completion(
+                output,
+                &store,
+                &RuntimeLimits {
+                    pending_genai_max_bytes: bytes,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.bytes, bytes);
+    queue.resync();
+    assert_eq!(queue.bytes, bytes);
+    assert_eq!(queue.enforce_limits(&limits).len(), 1);
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.bytes, queue.local_retries[0].estimated_bytes());
+    drop(queue);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn local_write_retry_does_not_loop_on_non_lock_failures() {
+    let dir = super::tests::unique_tmp_dir("local-write-readonly");
+    let path = dir.join("genai_events.db");
+    drop(
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap(),
+    );
+    let store = GenAISqliteStore::open_read_only_existing(&path).unwrap();
+    let mapper = ResponseSessionMapper::new();
+    let (output, _) = delivery_fixture("readonly-retry", &mapper, false);
+    let error = super::delivery::complete_local_genai(&output, &store, &[]).unwrap_err();
+    assert!(!super::delivery::is_retryable_sqlite_write(error.as_ref()));
+    let mut queue = PendingGenAiQueue::default();
+    assert!(
+        queue
+            .queue_local_completion(output, &store, &RuntimeLimits::default())
+            .is_ok()
+    );
+    assert!(
+        queue
+            .retry_local_completion(&store, &mapper, std::time::Instant::now(), true)
+            .is_none()
+    );
+    assert_eq!(queue.len(), 0);
+    assert_eq!(queue.bytes, 0);
+    assert!(queue.local_retry_priority.is_none());
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn delivery_fixture(
+    response_id: &str,
+    mapper: &ResponseSessionMapper,
+    need_pending: bool,
+) -> (
+    crate::genai::builder::BuildOutput,
+    Option<crate::storage::sqlite::PendingCallInfo>,
+) {
+    let mut aggregator = fixture(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+    let response = serde_json::json!({"id":response_id,"model":"fixture","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}});
+    let bytes = format!("data: {response}\n\ndata: [DONE]\n\n");
+    let captured = feed(&mut aggregator, 0, bytes.as_bytes());
+    assert_eq!(captured.len(), 1);
+    let mut analysis = Analyzer::new().analyze_for_delivery(&captured[0], true);
+    drop(captured);
+    let (mut output, pending) = GenAIBuilder::new().build_for_owned_delivery(
+        &analysis,
+        mapper,
+        &HashMap::new(),
+        need_pending,
+    );
+    output.take_raw_bodies(&mut analysis);
+    (output, pending)
+}
+
+pub(super) fn feed(aggregator: &mut Aggregator, rw: i32, bytes: &[u8]) -> Vec<AggregatedResult> {
     let event = SslEvent {
         source: 0,
         timestamp_ns: 1_000_000_000,
@@ -67,7 +559,8 @@ fn response_pending_exit_and_dead_pid_preserve_crash_evidence() {
                     aggregator.drain_connections_for_pid(PID)
                 };
                 assert_eq!(drained.len(), 1);
-                let (id, state) = &drained[0];
+                let id = &drained[0].id;
+                let state = &drained[0].state;
                 assert!(matches!(state, ConnectionState::ResponsePending { .. }));
                 let pending = GenAIBuilder::new()
                     .build_pending_from_request(
@@ -136,18 +629,22 @@ fn response_pending_idle_snapshot_persists_once_and_can_resume() {
         for deferred in [false, true] {
             let mut aggregator = fixture(prefix);
             aggregator.http_mut().evict_idle_and_oversized();
-            let snapshots = aggregator.snapshot_idle_connections();
-            assert_eq!(snapshots.len(), 1);
-            assert!(aggregator.snapshot_idle_connections().is_empty());
-            let (id, state) = &snapshots[0];
-            let mut pending = GenAIBuilder::new()
-                .build_pending_from_request(
-                    state.pending_request().expect("retained request"),
+            let builder = GenAIBuilder::new();
+            let snapshots = aggregator.snapshot_idle_connections(|id, request| {
+                builder.build_pending_from_request(
+                    request,
                     id,
                     &ResponseSessionMapper::new(),
                     &HashMap::new(),
                 )
-                .unwrap();
+            });
+            assert_eq!(snapshots.len(), 1);
+            assert!(
+                aggregator
+                    .snapshot_idle_connections(|_, _| Some(()))
+                    .is_empty()
+            );
+            let mut pending = snapshots.into_iter().next().unwrap();
             pending.pending_origin = PendingOrigin::IdleDrain;
             let dir = super::tests::unique_tmp_dir("response-pending");
             let store = GenAISqliteStore::new_with_path(
@@ -247,5 +744,328 @@ fn response_pending_idle_snapshot_persists_once_and_can_resume() {
             drop(store);
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+}
+
+/// Minimal ChatML tokenizer (WordLevel + Whitespace) so the drain fallback's
+/// chat-template path runs without the network or the real Qwen tokenizer,
+/// which is not vendored in the repository.
+const DRAIN_TOKENIZER_JSON: &str = r#"{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {"id": 0, "content": "<|im_start|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+    {"id": 1, "content": "<|im_end|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+    {"id": 2, "content": "[UNK]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {"type": "Whitespace"},
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<|im_start|>": 0,
+      "<|im_end|>": 1,
+      "[UNK]": 2,
+      "system": 3,
+      "user": 4,
+      "assistant": 5
+    },
+    "unk_token": "[UNK]"
+  }
+}"#;
+
+/// ChatML template in the shape the Qwen models use; the `+` concatenation of
+/// `role` and `content` fails on a non-string `content` exactly like the real
+/// template does.
+const DRAIN_TOKENIZER_CONFIG_JSON: &str = r#"{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "chat_template": "{% if tools %}{{ '<|tools|>' + (tools | tojson) + '<|/tools|>' }}{% endif %}{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "bos_token": "<|im_start|>",
+  "eos_token": "<|im_end|>",
+  "unk_token": "[UNK]",
+  "model_max_length": 32768
+}"#;
+
+fn drain_fixture_tokenizer() -> LlmTokenizer {
+    let dir = super::tests::unique_tmp_dir("drain-tokenizer");
+    let tokenizer_path = dir.join("tokenizer.json");
+    let config_path = dir.join("tokenizer_config.json");
+    std::fs::write(&tokenizer_path, DRAIN_TOKENIZER_JSON).expect("write tokenizer.json");
+    std::fs::write(&config_path, DRAIN_TOKENIZER_CONFIG_JSON).expect("write tokenizer config");
+    LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+}
+
+/// One request on `path`, answered by an SSE stream that stops after a content
+/// delta — the shape of a process that dies before the terminal usage event.
+fn drain_fixture(path: &str, body: &str) -> Aggregator {
+    let mut aggregator = Aggregator::with_limits(
+        4,
+        &RuntimeLimits {
+            connection_idle_timeout_secs: 0,
+            ..Default::default()
+        },
+    );
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    let sse = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"
+    );
+    assert!(feed(&mut aggregator, 0, sse.as_bytes()).is_empty());
+    aggregator
+}
+
+/// A drained stream that broke before the terminal usage event must still get
+/// its input tokens counted, for every request shape the capture pipeline
+/// understands. The fallback used to read a private top-level `messages`
+/// array, so Responses `input` and DashScope native `input.messages` requests
+/// kept `input_tokens` NULL while the output side was counted from the same
+/// events.
+#[test]
+fn drain_fallback_counts_every_request_shape() {
+    let tokenizer = drain_fixture_tokenizer();
+    let cases = [
+        (
+            "/v1/responses",
+            r#"{"model":"gpt-5","instructions":"Be terse.","input":[{"type":"message","role":"user","content":"hello there"}]}"#,
+        ),
+        (
+            "/api/v1/services/aigc/text-generation/generation",
+            r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]}}"#,
+        ),
+        (
+            "/v1/chat/completions",
+            r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello there"}]}"#,
+        ),
+        // A replay that carries tool calls: `arguments` arrives as a JSON
+        // string and is decoded before the template sees the messages.
+        (
+            "/v1/chat/completions",
+            r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}]}"#,
+        ),
+        // Typed Responses content: the chat template cannot render a block
+        // array, so the raw-message count is the one that must answer.
+        (
+            "/v1/responses",
+            r#"{"model":"gpt-5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello there"}]}]}"#,
+        ),
+    ];
+    for (path, body) in cases {
+        let mut aggregator = drain_fixture(path, body);
+        assert!(!crate::utils::procfs::proc_pid(PID).exists());
+        let drained = aggregator.drain_dead_pid_connections();
+        assert_eq!(
+            drained.len(),
+            1,
+            "{path}: the dead-PID drain keeps the call"
+        );
+        let state = drained.into_iter().next().unwrap().state;
+        let request_body = state.pending_request().and_then(|r| r.json_body());
+        let sse_events = match state {
+            ConnectionState::SseActive { sse_events, .. } => sse_events,
+            _ => panic!("{path}: expected an active SSE stream to drain"),
+        };
+        let mut enrichment =
+            GenAIBuilder::extract_sse_enrichment(&sse_events).expect("enrichment from events");
+        assert!(
+            enrichment.input_tokens.is_none(),
+            "{path}: the truncated stream carries no usage"
+        );
+        // The drain path fills the missing input side from the request body.
+        if enrichment.input_tokens.is_none() {
+            if let Some(body) = request_body.as_ref() {
+                enrichment.input_tokens = drain_request_input_tokens(body, &tokenizer);
+            }
+        }
+        assert!(
+            enrichment.input_tokens.is_some_and(|n| n > 0),
+            "{path}: the drain fallback must count the request messages"
+        );
+    }
+}
+
+/// DashScope/Bailian native requests nest their tool definitions under
+/// `parameters` (the OpenAI-compatible spelling is top level). The live
+/// request parser reads both spellings; the drain fallback read only the top
+/// level, so a drained native call was estimated without the tool definitions
+/// the same request carries — and the chat template renders them.
+#[test]
+fn drain_fallback_counts_dashscope_native_parameter_tools() {
+    let tokenizer = drain_fixture_tokenizer();
+    let native_path = "/api/v1/services/aigc/text-generation/generation";
+    let with_tools = r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]},"parameters":{"result_format":"message","tools":[{"type":"function","function":{"name":"get_weather","description":"Look up the forecast for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}}"#;
+
+    // Walk the real drain so the fallback sees the captured request body.
+    let mut aggregator = drain_fixture(native_path, with_tools);
+    assert!(!crate::utils::procfs::proc_pid(PID).exists());
+    let drained = aggregator.drain_dead_pid_connections();
+    assert_eq!(drained.len(), 1, "the dead-PID drain keeps the call");
+    let state = drained.into_iter().next().unwrap().state;
+    let body = state
+        .pending_request()
+        .and_then(|r| r.json_body())
+        .expect("the native request body survives capture");
+    assert!(
+        body.get("parameters")
+            .and_then(|p| p.get("tools"))
+            .is_some(),
+        "the native tools live under parameters and must survive capture"
+    );
+
+    let counted = drain_request_input_tokens(&body, &tokenizer).expect("count");
+    let without_tools: serde_json::Value = serde_json::from_str(
+        r#"{"model":"qwen3.5-plus","input":{"messages":[{"role":"user","content":"hello there"}]},"parameters":{"result_format":"message"}}"#,
+    )
+    .unwrap();
+    let baseline = drain_request_input_tokens(&without_tools, &tokenizer).expect("count");
+    assert!(
+        counted > baseline,
+        "the native tool definitions must reach the template: {counted} vs {baseline}"
+    );
+}
+/// The #7553 clean-exit completion path: a headers-only response that the
+/// application never reads must land as a usable `complete` row through
+/// `complete_pid_partial_responses` + `persist_drained_pending`.
+#[test]
+fn persist_drained_pending_completes_headers_only_response() {
+    let dir = super::tests::unique_tmp_dir("persist-drained");
+    let store = Arc::new(
+        GenAISqliteStore::new_with_path(
+            &dir.join("genai_events.db"),
+            crate::config::PeriodicStoragePolicy::default(),
+        )
+        .unwrap(),
+    );
+
+    let mut aggregator = Aggregator::new();
+    let body = serde_json::json!({
+        "id": "msg_7553", "type": "message", "role": "assistant",
+        "model": "claude-x",
+        "content": [{"type": "text", "text": "the visible answer"}],
+        "usage": {"input_tokens": 15, "output_tokens": 25}
+    })
+    .to_string();
+    let request = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    // Headers only: the application never reads the declared body.
+    assert!(
+        feed(
+            &mut aggregator,
+            0,
+            b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 74\r\n\r\n"
+        )
+        .is_empty()
+    );
+
+    // Clean-exit sweep completes the pair from the captured headers.
+    let completed = aggregator.http_mut().complete_pid_partial_responses(PID);
+    assert_eq!(completed.len(), 1, "the partial response must complete");
+
+    let analysis = Analyzer::new().analyze_aggregated(&completed[0]);
+    let (output, pending) = GenAIBuilder::new().build_with_pending(
+        &analysis,
+        &ResponseSessionMapper::new(),
+        &HashMap::new(),
+    );
+    assert!(
+        !output.events.is_empty(),
+        "the drained pair must build events"
+    );
+    let mut pending = pending.expect("drained call carries pending info");
+
+    let exporters: Vec<Box<dyn GenAIExporter>> = vec![Box::new(Arc::clone(&store))];
+    super::persist_drained_genai_events(
+        Some(&mut pending),
+        &output.events,
+        Some(store.as_ref()),
+        &exporters,
+        None,
+    );
+
+    let conn = rusqlite::Connection::open(dir.join("genai_events.db")).unwrap();
+    let (status, in_tok, out_tok, origin): (String, i64, i64, String) = conn
+        .query_row(
+            "SELECT status, COALESCE(input_tokens,-1), COALESCE(output_tokens,-1), pending_origin FROM genai_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "complete", "the drained call must land complete");
+    assert_eq!(origin, "clean_exit_partial", "provenance must be stamped");
+    // The body was never captured (the app never read it), so tokens stay 0 —
+    // the regression being fixed is the row vanishing, not the token count.
+    assert_eq!((in_tok, out_tok), (0, 0));
+}
+
+/// finish_partial must reject an unusable (truncated) header block so the
+/// entry stays on the request-evidence path instead of emitting a broken row.
+#[test]
+fn finish_partial_rejects_truncated_headers() {
+    let mut aggregator = Aggregator::new();
+    let request = "POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n";
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    // Truncated header block: no terminating blank line ever arrives.
+    assert!(feed(&mut aggregator, 0, b"HTTP/1.0 200 OK\r\nContent-Type: appl").is_empty());
+
+    let completed = aggregator.http_mut().complete_pid_partial_responses(PID);
+    assert!(
+        completed.is_empty(),
+        "a truncated header block must not produce a row"
+    );
+    // The entry stays on the evidence path: the dead-PID drain still sees it.
+    let drained = aggregator.http_mut().drain_dead_pid_connections();
+    assert_eq!(drained.len(), 1, "request evidence must be preserved");
+}
+
+/// finish_partial must accept buffered body bytes for a dead connection whose
+/// framing never completed, clamping the body to the accumulated bytes.
+#[test]
+fn finish_partial_accepts_buffered_partial_body() {
+    let mut aggregator = Aggregator::new();
+    let body = "{\"id\":\"x\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}";
+    let request = format!(
+        "POST /v1/messages HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+    // Full response in one read — completes in the live path, so instead feed
+    // headers and body split with the body truncated mid-stream.
+    assert!(
+        feed(
+            &mut aggregator,
+            0,
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+        )
+        .is_empty()
+    );
+    assert!(
+        feed(
+            &mut aggregator,
+            0,
+            format!("{:x}\r\n{}\r\n", body.len(), body).as_bytes()
+        )
+        .is_empty()
+    );
+
+    // Chunked without the terminal chunk: framing never completes.
+    let completed = aggregator.http_mut().complete_pid_partial_responses(PID);
+    assert_eq!(completed.len(), 1, "buffered body must be surfaced");
+    if let AggregatedResult::HttpComplete(pair) = &completed[0] {
+        let text = pair.response.body_string();
+        assert!(
+            text.contains("\"input_tokens\":7"),
+            "buffered body bytes must be preserved: {text}"
+        );
+    } else {
+        panic!("expected HttpComplete");
     }
 }

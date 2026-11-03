@@ -95,6 +95,9 @@ pub struct DriverCtx<'a> {
     /// framework's own unsafe-install flag when the host also exposes it.
     /// Defaults to `false` for every non-enable operation.
     pub allow_unsafe_plugin_install: bool,
+    /// Withhold automatic OpenClaw capability-consent grants. This does not
+    /// revoke prior host authorization or bypass plugin safety checks.
+    pub no_accept_capabilities: bool,
     /// True when the caller passed `--dry-run`; drivers must not mutate
     /// framework state in this mode (the Manager also guards this).
     pub dry_run: bool,
@@ -139,8 +142,8 @@ pub struct DriverPlan {
 /// Driver-private state produced by [`FrameworkDriver::prepare_enable`] and
 /// handed to [`FrameworkDriver::apply_enable`] within the same locked enable.
 ///
-/// It carries the host capabilities a driver resolved by read-only probing
-/// *before* the first mutation, so apply can act on them without re-probing —
+/// It carries the caller's policy and host capabilities resolved by read-only
+/// probing *before* the first mutation, so apply can act without re-probing —
 /// keeping every probe to once per enable while still completing all probing
 /// up front. It is deliberately **not** part of the receipt: the persisted
 /// [`AdapterClaim`] stays pure typed resource data, and this transient value
@@ -148,13 +151,20 @@ pub struct DriverPlan {
 /// [`PreparedEnable::None`].
 #[derive(Debug, Clone, Default)]
 pub enum PreparedEnable {
+    /// QwenWork preflight warnings emitted after successful sideloading.
+    QwenWork {
+        /// Version compatibility and optional dependency diagnostics.
+        warnings: Vec<String>,
+    },
     /// The driver needs no prepared host state for apply.
     #[default]
     None,
-    /// OpenClaw install/verify capabilities resolved before the first
-    /// mutation. `apply_enable` uses these to choose consent arguments, the
+    /// OpenClaw consent policy and install/verify capabilities resolved before
+    /// the first mutation. `apply_enable` uses these to choose consent arguments, the
     /// unsafe-retry hint, and the runtime-inspect form without a second probe.
     OpenClaw {
+        /// The caller's consent decision, frozen independently of host support.
+        no_accept_capabilities: bool,
         /// The host's installer supports accepting the plugin's declared capabilities.
         supports_accept_capabilities: bool,
         /// The host's enable command supports accepting declared capabilities.
@@ -727,6 +737,13 @@ pub trait FrameworkDriver: Send + Sync {
         Ok(())
     }
 
+    /// Whether this driver decides itself how to treat a materialized
+    /// destination that already exists without a prior receipt (for example
+    /// through an ownership marker). When `false`, the Manager refuses to
+    /// enable into a non-empty destination the prior receipt does not own.
+    fn owns_preexisting_materialized_roots(&self) -> bool {
+        false
+    }
     /// Source-to-resource copies this driver will explicitly materialize.
     ///
     /// The Manager maps only package-owned source entries through these

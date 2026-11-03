@@ -199,6 +199,7 @@ int trace_execve_exit(struct syscall_trace_exit *ctx)
     // The actual data length is recorded in data_len field
     struct proc_event_header *event = bpf_ringbuf_reserve(&rb, MAX_EXEC_EVENT_SIZE, 0);
     if (!event) {
+        record_ring_buffer_drop();
         bpf_map_delete_elem(&pending_exec_events, &pid);
         return 0;
     }
@@ -281,8 +282,10 @@ int trace_write_enter(struct syscall_trace_enter *ctx)
     // Use fixed maximum size for ringbuffer reservation (BPF verifier requirement)
     // The actual data length is recorded in data_len field
     struct proc_event_header *event = bpf_ringbuf_reserve(&rb, MAX_STDOUT_EVENT_SIZE, 0);
-    if (!event)
+    if (!event) {
+        record_ring_buffer_drop();
         return 0;
+    }
     
     // Fill header
     event->source = EVENT_SOURCE_PROC;
@@ -345,8 +348,10 @@ int trace_process_exit(void *ctx)
         sizeof(struct proc_event_header) + sizeof(struct proc_exit_data), 
         0
     );
-    if (!event)
+    if (!event) {
+        record_ring_buffer_drop();
         return 0;
+    }
     
     // Fill header
     event->source = EVENT_SOURCE_PROC;

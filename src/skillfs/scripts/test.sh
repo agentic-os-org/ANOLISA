@@ -222,6 +222,16 @@ description = "Skills listed via skill-discover"
 skills = ["secondary-skill", "tertiary-skill"]
 EOF
 
+mkdir -p "$SOURCE_DIR/unassigned-skill"
+cat > "$SOURCE_DIR/unassigned-skill/SKILL.md" <<'EOF'
+---
+name: unassigned-skill
+description: Synthetic skill without a saved view assignment.
+---
+# Unassigned Skill
+EOF
+cp "$SOURCE_DIR/skillfs-views.toml" "$TMP_ROOT/views-before.toml"
+
 printf 'passthrough-ok\n' > "$SOURCE_DIR/primary-skill/assets/info.txt"
 
 info "启动 FUSE 挂载"
@@ -243,6 +253,10 @@ assert_contains "$ROOT_LIST" "skills" "根目录暴露 skills"
 
 SKILLS_LIST="$(ls -1 "$MOUNT_DIR/skills")"
 assert_contains "$SKILLS_LIST" "primary-skill" "默认视图技能可见"
+assert_contains "$SKILLS_LIST" "unassigned-skill" "Unassigned skills remain visible"
+cmp -s "$TMP_ROOT/views-before.toml" "$SOURCE_DIR/skillfs-views.toml" \
+	|| fail "Mount rewrote the operator's views configuration"
+pass "Mount preserves views configuration byte-for-byte"
 assert_contains "$SKILLS_LIST" "skill-discover" "skill-discover 始终可见"
 assert_not_contains "$SKILLS_LIST" "secondary-skill" "secondary 技能不直接出现在 /skills"
 

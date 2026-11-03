@@ -10,9 +10,110 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
-use skillfs_fuse::{MountConfig, MountOptions, mount_background_configured};
+use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
 
 mod common;
+
+#[test]
+fn moving_a_skill_into_an_existing_directory_matches_fresh_discovery() {
+    skip_if_no_fuse!();
+
+    for (category, in_place, layout, inbox, target_is_skill) in [
+        ("", false, SkillLayout::Flat, false, true),
+        ("catalog", false, SkillLayout::Flat, false, true),
+        ("", true, SkillLayout::Flat, false, true),
+        ("catalog", false, SkillLayout::Hermes, false, true),
+        ("", false, SkillLayout::Flat, true, true),
+        ("", false, SkillLayout::Flat, true, false),
+    ] {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        let physical_parent = source.path().join(category);
+        for name in ["demo", "other"] {
+            let dir = physical_parent.join(name);
+            std::fs::create_dir_all(&dir).expect("skill directory");
+            if name == "demo" || target_is_skill {
+                std::fs::write(
+                    dir.join("SKILL.md"),
+                    format!("---\nname: {name}\ndescription: {name}\n---\n{name} body\n"),
+                )
+                .expect("skill manifest");
+            }
+        }
+        let mut initial_store = SkillStore::new();
+        initial_store.load_from_directory(source.path(), &ParseConfig::default());
+        let store: SharedSkillStore = Arc::new(RwLock::new(initial_store));
+        let mount_path = if in_place {
+            source.path()
+        } else {
+            mountpoint.path()
+        };
+        let handle = mount_background_configured(
+            mount_path,
+            source.path(),
+            store.clone(),
+            MountOptions::default(),
+            in_place,
+            MountConfig {
+                skill_layout: Some(layout),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount source");
+        let skills_root = if in_place {
+            mount_path.to_path_buf()
+        } else if layout == SkillLayout::Hermes {
+            mount_path.join("skills").join(category)
+        } else {
+            mount_path.join("skills")
+        };
+        let rename_root = if inbox {
+            mount_path.join(".skillfs-inbox")
+        } else {
+            skills_root.clone()
+        };
+
+        // `mv demo other` issues this rename when other already exists.
+        let result = std::fs::rename(rename_root.join("demo"), rename_root.join("other/demo"));
+        assert!(
+            result.is_ok(),
+            "move skill ({category:?}, {in_place}, {layout:?}, {inbox}, {target_is_skill}): {result:?}"
+        );
+        assert_eq!(store.read().get("demo").is_none(), target_is_skill);
+        if target_is_skill {
+            assert!(
+                std::fs::read_dir(&skills_root)
+                    .expect("live skills listing")
+                    .all(|entry| entry.expect("directory entry").file_name() != "demo"),
+                "the moved skill must disappear from the live listing"
+            );
+            assert!(
+                std::fs::read_to_string(skills_root.join("other/SKILL.md"))
+                    .expect("remaining skill manifest")
+                    .contains("other body")
+            );
+            if layout == SkillLayout::Flat {
+                let discover = std::fs::read_to_string(skills_root.join("skill-discover/SKILL.md"))
+                    .expect("live discovery");
+                assert!(!discover.contains("| demo |"));
+                assert!(discover.contains("| other |"));
+            }
+        }
+
+        handle.unmount().expect("unmount source");
+        assert!(physical_parent.join("other/demo/SKILL.md").is_file());
+        let mut fresh_store = SkillStore::new();
+        fresh_store.load_from_directory(source.path(), &ParseConfig::default());
+        let live = store.read();
+        assert_eq!(live.list(), fresh_store.list());
+        for (name, entry) in fresh_store.iter() {
+            assert_eq!(
+                live.get(name).expect("live entry").source_path,
+                entry.source_path
+            );
+        }
+    }
+}
 
 fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
@@ -228,4 +329,85 @@ fn categorized_source_supports_flat_reads_writes_and_sync() {
     );
 
     handle.unmount().expect("unmount categorized source");
+}
+
+/// kongche-jbw P2 on #7742: `mkdir <mount>/.skillfs-inbox/notes` loses the
+/// duplicate-name collision to the categorized `apple/notes` owner (the
+/// placeholder is dropped, the apple entry retained) — but `rmdir` of that
+/// empty inbox candidate then removed the store key by bare leaf name, so
+/// the retained apple skill vanished from the live store although its
+/// manifest was untouched; a fresh scan restored it. Removal must verify
+/// the candidate owns the stored source before deleting the key.
+#[test]
+fn inbox_loser_rmdir_keeps_the_categorized_owner() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let owner_md = source.path().join("apple/notes/SKILL.md");
+    std::fs::create_dir_all(owner_md.parent().expect("owner dir")).expect("owner skill dir");
+    std::fs::write(
+        &owner_md,
+        "---\nname: notes\ndescription: categorized owner\n---\nowner body\n",
+    )
+    .expect("owner SKILL.md");
+
+    let mut initial_store = SkillStore::new();
+    initial_store.load_from_directory(source.path(), &ParseConfig::default());
+    let store: SharedSkillStore = Arc::new(RwLock::new(initial_store));
+    assert_eq!(
+        store.read().get("notes").expect("owner entry").source_path,
+        owner_md
+    );
+
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        store.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount");
+
+    // Wait for the mount to serve the discovered owner before mutating.
+    let served = mountpoint.path().join("skills/notes/SKILL.md");
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(&served).is_ok()
+        }),
+        "mount never served the discovered owner"
+    );
+
+    // mkdir the same-leaf inbox candidate: its placeholder loses the
+    // collision, so the categorized owner keeps the key.
+    let inbox_candidate = mountpoint.path().join(".skillfs-inbox/notes");
+    std::fs::create_dir(&inbox_candidate).expect("mkdir inbox candidate");
+    assert!(
+        store.read().get("notes").is_some(),
+        "the categorized owner must survive the inbox candidate's mkdir"
+    );
+    assert_eq!(
+        store
+            .read()
+            .get("notes")
+            .expect("retained owner")
+            .source_path,
+        owner_md,
+        "the categorized owner keeps the key after the inbox mkdir"
+    );
+
+    // rmdir the empty candidate: it never owned the key, so the retained
+    // owner must survive exactly as a fresh scan would re-discover it.
+    std::fs::remove_dir(&inbox_candidate).expect("rmdir inbox candidate");
+    let retained = store.read().get("notes").cloned();
+    assert!(
+        retained.is_some(),
+        "rmdir of a losing inbox candidate must not drop the retained owner"
+    );
+    assert_eq!(
+        retained.expect("retained owner").source_path,
+        owner_md,
+        "the retained owner's manifest is untouched and keeps the key"
+    );
 }

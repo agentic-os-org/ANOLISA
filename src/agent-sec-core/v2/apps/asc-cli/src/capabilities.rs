@@ -5,10 +5,8 @@
 //! files or home directories, and it never proves that a hook is loaded in a
 //! target Agent process. The daemon is not involved.
 //!
-//! Migration contract, the two gaps that a future capability migration must
-//! close (G1, G4) and the items that follow from V1's design, the rolling
-//! migration itself or an accepted trade-off (G2, G3, G5, G6, G7, G8) are
-//! recorded in `docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md`.
+//! Migration contract and accepted implementation trade-offs are recorded in
+//! `docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md`.
 
 pub(crate) mod manifest;
 pub(crate) mod render;
@@ -227,7 +225,7 @@ fn normalize(
     let Some(value) = value else {
         return Ok(None);
     };
-    let normalized = value.trim().to_lowercase();
+    let normalized = resolve::v1_strip(value).to_lowercase();
     allowed
         .iter()
         .find(|candidate| **candidate == normalized)
@@ -324,6 +322,16 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].agent, "qoder");
         assert_eq!(records[0].capability, "prompt-scan");
+
+        // V1 strips the information separators too; see `resolve::v1_strip`.
+        let records = query(
+            &empty(),
+            Some("\u{1c}qoder\u{1f}"),
+            Some("prompt-scan\u{1e}"),
+        )
+        .expect("filters");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].agent, "qoder");
     }
 
     #[test]

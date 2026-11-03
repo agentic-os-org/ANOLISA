@@ -13,6 +13,22 @@ fn sample(op: OperationType, mode: CompressionMode, session: &str) -> StatsRecor
         .with_mode(mode)
 }
 
+/// Simulate a row that was written under a different UTC offset (or with a
+/// sub-millisecond timestamp) than this machine's clock would produce today:
+/// rewrite the stored text and keep the derived instant key in sync, exactly
+/// as a recorder running at that time would have persisted both.
+fn rewrite_timestamp(conn: &rusqlite::Connection, id: i64, text: &str) {
+    let ns = chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap()
+        .timestamp_nanos_opt()
+        .unwrap();
+    conn.execute(
+        "UPDATE stats SET timestamp = ?1, timestamp_ns = ?2 WHERE id = ?3",
+        rusqlite::params![text, ns, id],
+    )
+    .unwrap();
+}
+
 #[test]
 fn records_and_reads_mode() {
     let (rec, _dir) = new_recorder();
@@ -228,6 +244,327 @@ fn session_diff_database_linking_matches_record_semantics() {
     assert_eq!(json["chains"][0]["mode"], "dry-run");
     assert_eq!(json["chains"][1]["status"], "linked");
     assert_eq!(json["chains"][1]["stages"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn session_diff_links_records_written_across_a_utc_offset_change() {
+    // A session that spans a UTC-offset change (DST fall-back, travel, or a
+    // machine move) persists rfc3339 timestamps whose wall-clock text no
+    // longer sorts in instant order: the -05:00 half of the repeated hour
+    // text-sorts before the earlier -04:00 half. The database-side link
+    // must order by the instant the timestamps denote, not their text, or
+    // the prelinked flags describe a different adjacency than the report
+    // builder iterates and real compression chains split apart.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let first = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("before".to_string(), "middle".to_string());
+    let second = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("middle".to_string(), "after".to_string());
+    let unrelated = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("unrelated".to_string(), "other".to_string());
+    let first_id = rec.record(&first).unwrap();
+    let second_id = rec.record(&second).unwrap();
+    let third_id = rec.record(&unrelated).unwrap();
+
+    // 01:30-04:00 (05:30Z) precedes 01:15-05:00 (06:15Z) in instant order,
+    // but sorts after it lexicographically.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        rewrite_timestamp(&conn, first_id, "2026-11-01T01:30:00.000000-04:00");
+        rewrite_timestamp(&conn, second_id, "2026-11-01T01:15:00.000000-05:00");
+        rewrite_timestamp(&conn, third_id, "2026-11-01T01:45:00.000000-05:00");
+    }
+
+    let records = rec.records_for_diff("dst-session", None).unwrap();
+    let report = crate::diff::session_report(
+        &records,
+        "dst-session",
+        20,
+        crate::diff::DiffSort::Time,
+    );
+    let json = serde_json::to_value(report).unwrap();
+    let chains = json["chains"].as_array().unwrap();
+
+    assert_eq!(chains.len(), 2, "chains: {chains:?}");
+    let linked = chains
+        .iter()
+        .find(|chain| chain["status"] == "linked")
+        .unwrap_or_else(|| panic!("no linked chain in {chains:?}"));
+    assert_eq!(linked["stages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        chains
+            .iter()
+            .filter(|chain| chain["status"] == "standalone")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn newest_record_windows_span_a_utc_offset_change() {
+    // A limited newest-first window must keep the records with the latest
+    // instants. Text ordering of rfc3339 timestamps spans offsets by
+    // wall clock only, so during a fall-back the repeated hour's -05:00
+    // text sorts before the earlier -04:00 text and would let an older
+    // record displace a newer one from the window.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let oldest = sample(OperationType::CompressSchema, CompressionMode::Active, "dst-list");
+    let middle = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "dst-list",
+    );
+    let newest = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "dst-list",
+    );
+    let oldest_id = rec.record(&oldest).unwrap();
+    let middle_id = rec.record(&middle).unwrap();
+    let newest_id = rec.record(&newest).unwrap();
+
+    // Instants: oldest 05:30Z, middle 06:15Z, newest 06:45Z; the middle
+    // record's -05:00 text sorts before the oldest record's -04:00 text.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        rewrite_timestamp(&conn, oldest_id, "2026-11-01T01:30:00.000000-04:00");
+        rewrite_timestamp(&conn, middle_id, "2026-11-01T01:15:00.000000-05:00");
+        rewrite_timestamp(&conn, newest_id, "2026-11-01T01:45:00.000000-05:00");
+    }
+
+    let window: Vec<i64> = rec
+        .all_records(Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(window, vec![newest_id, middle_id]);
+
+    let session_window: Vec<i64> = rec
+        .records_by_session("dst-list", Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(session_window, vec![newest_id, middle_id]);
+}
+
+#[test]
+fn newest_record_windows_separate_submillisecond_timestamps() {
+    // SQLite's date functions only parse timestamps to whole milliseconds,
+    // so a millisecond-collapsed key orders sub-millisecond records by their
+    // insert id instead of their instant. Records get their timestamp when
+    // they are constructed, before the recorder lock serializes the
+    // inserts, so insertion order can differ from instant order: a limited
+    // window must still keep the genuinely newer record, and the diff
+    // window must link the chain in instant order.
+    let (rec, _dir) = new_recorder();
+    let later_instant =
+        chrono::DateTime::parse_from_rfc3339("2026-11-15T01:15:00.000200+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+    let earlier_instant =
+        chrono::DateTime::parse_from_rfc3339("2026-11-15T01:15:00.000100+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+    // Inserted first (lower id) but 100ns later than the second record.
+    let newer = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "subms-session",
+    )
+    .with_tool_use_id("tool-subms")
+    .with_text("middle".to_string(), "after".to_string())
+    .with_timestamp(later_instant);
+    let older = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "subms-session",
+    )
+    .with_tool_use_id("tool-subms")
+    .with_text("before".to_string(), "middle".to_string())
+    .with_timestamp(earlier_instant);
+    let newer_id = rec.record(&newer).unwrap();
+    let older_id = rec.record(&older).unwrap();
+    assert!(newer_id < older_id);
+
+    let window: Vec<i64> = rec
+        .all_records(Some(1))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(window, vec![newer_id]);
+
+    let session_window: Vec<i64> = rec
+        .records_by_session("subms-session", Some(1))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(session_window, vec![newer_id]);
+
+    let records = rec.records_for_diff("subms-session", None).unwrap();
+    let report = crate::diff::session_report(
+        &records,
+        "subms-session",
+        20,
+        crate::diff::DiffSort::Time,
+    );
+    let json = serde_json::to_value(report).unwrap();
+    let chains = json["chains"].as_array().unwrap();
+    assert_eq!(chains.len(), 1, "chains: {chains:?}");
+    assert_eq!(chains[0]["status"], "linked");
+    let stages = chains[0]["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 2);
+    assert_eq!(stages[0]["record_id"], older_id);
+    assert_eq!(stages[1]["record_id"], newer_id);
+}
+
+#[test]
+fn newest_record_windows_read_through_the_instant_index() {
+    // A limited newest-first window must read the newest rows through
+    // idx_stats_instant instead of scanning the payload-bearing table and
+    // sorting it: the plan for the window's ordering must not fall back to
+    // a temporary b-tree.
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    rec.record(&sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "idx-session",
+    ))
+    .unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT id FROM stats \
+             ORDER BY timestamp_ns DESC, id DESC LIMIT 20",
+        )
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let plan = plan.join(" | ");
+    assert!(plan.contains("idx_stats_instant"), "plan: {plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "plan: {plan}");
+}
+
+#[test]
+fn opening_a_legacy_database_backfills_the_instant_key() {
+    // Databases written before the instant key existed carry offset-bearing
+    // text with no timestamp_ns column. Opening one derives each key from
+    // the stored text at full chrono precision, so legacy rows order
+    // exactly like rows the recorder writes today, while text that never
+    // parses keeps the unparseable sentinel and still sorts last in
+    // ascending order.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let rec = StatsRecorder::new(&db_path).unwrap();
+    let first_id = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "legacy",
+        ))
+        .unwrap();
+    let second_id = rec
+        .record(&sample(
+            OperationType::CompressSchema,
+            CompressionMode::Active,
+            "legacy",
+        ))
+        .unwrap();
+    let corrupt_id = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "legacy",
+        ))
+        .unwrap();
+    {
+        // A legacy writer had no instant-key column: rewrite only the
+        // stored text and let the reopen backfill derive the keys.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("DROP INDEX idx_stats_instant", []).unwrap();
+        conn.execute("ALTER TABLE stats DROP COLUMN timestamp_ns", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-15T01:30:00.000000-04:00' WHERE id = ?1",
+            [first_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = '2026-11-15T01:15:00.000000-05:00' WHERE id = ?1",
+            [second_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE stats SET timestamp = 'not-a-date' WHERE id = ?1",
+            [corrupt_id],
+        )
+        .unwrap();
+    }
+    drop(rec);
+
+    let rec = StatsRecorder::new(&db_path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (id, text) in [
+            (first_id, "2026-11-15T01:30:00.000000-04:00"),
+            (second_id, "2026-11-15T01:15:00.000000-05:00"),
+        ] {
+            let expected = chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_nanos_opt()
+                .unwrap();
+            let key: i64 = conn
+                .query_row(
+                    "SELECT timestamp_ns FROM stats WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(key, expected, "legacy key for row {id}");
+        }
+        let corrupt_key: i64 = conn
+            .query_row(
+                "SELECT timestamp_ns FROM stats WHERE id = ?1",
+                [corrupt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(corrupt_key, i64::MAX);
+    }
+    // 01:15-05:00 (06:15Z) is newer than 01:30-04:00 (05:30Z); the corrupt
+    // sentinel sorts first in newest-first windows, where the previous text
+    // comparison already placed it.
+    let window: Vec<i64> = rec
+        .all_records(Some(2))
+        .unwrap()
+        .iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(window, vec![corrupt_id, second_id]);
 }
 
 #[test]
@@ -463,6 +800,207 @@ fn schema_migration_adds_missing_columns() {
     assert_eq!(indexed_columns, ["session_id", "tool_use_id"]);
 }
 
+fn create_legacy_stats_database(path: &Path, extra_retrieve_columns: usize) -> Connection {
+    let conn = Connection::open(path).unwrap();
+    let extra_columns = (0..extra_retrieve_columns)
+        .map(|index| format!(", extra_{index} TEXT"))
+        .collect::<String>();
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE stats (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             timestamp TEXT NOT NULL,
+             operation TEXT NOT NULL,
+             agent_id TEXT NOT NULL,
+             source_pid INTEGER,
+             session_id TEXT,
+             tool_use_id TEXT,
+             before_chars INTEGER NOT NULL,
+             before_tokens INTEGER NOT NULL,
+             after_chars INTEGER NOT NULL,
+             after_tokens INTEGER NOT NULL,
+             before_text TEXT,
+             after_text TEXT
+         );
+         INSERT INTO stats (
+             timestamp, operation, agent_id, before_chars, before_tokens,
+             after_chars, after_tokens
+         ) VALUES ('2024-01-01T00:00:00+00:00', 'compress-response', 'old', 10, 4, 5, 2);
+         CREATE TABLE retrieve_events (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             timestamp TEXT NOT NULL,
+             hash TEXT NOT NULL,
+             outcome TEXT NOT NULL,
+             source TEXT NOT NULL,
+             payload_tokens INTEGER,
+             tokenizer_id TEXT{extra_columns}
+         );
+         INSERT INTO retrieve_events (
+             timestamp, hash, outcome, source, payload_tokens
+         ) VALUES ('2024-01-01T00:00:00+00:00', 'old-hash', 'hit', 'cli', 120);",
+    ))
+    .unwrap();
+    conn
+}
+
+fn record_concurrently(path: &Path, workers: usize) {
+    let barrier = std::sync::Barrier::new(workers);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let barrier = &barrier;
+                scope.spawn(move || -> StatsResult<()> {
+                    barrier.wait();
+                    let recorder = StatsRecorder::new(path)?;
+                    recorder.record(&sample(
+                        OperationType::CompressResponse,
+                        CompressionMode::Active,
+                        "concurrent",
+                    ))?;
+                    recorder.record_retrieve_event(
+                        "new-hash",
+                        "hit",
+                        "cli",
+                        Some(10),
+                        None,
+                        Some("new-agent"),
+                        Some("concurrent"),
+                        Some("tool"),
+                    )?;
+                    Ok(())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+    });
+}
+
+#[test]
+fn concurrent_legacy_migrations_preserve_historical_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..4 {
+        let path = dir.path().join(format!("legacy-{round}.db"));
+        drop(create_legacy_stats_database(&path, 0));
+        record_concurrently(&path, 8);
+
+        let recorder = StatsRecorder::new(&path).unwrap();
+        let legacy = recorder.record_by_id(1).unwrap().unwrap();
+        assert_eq!(legacy.agent_id, "old");
+        assert_eq!(legacy.before_tokens, 4);
+        assert_eq!(legacy.after_tokens, 2);
+        assert_eq!(legacy.applied_operations, None);
+        assert_eq!(recorder.count().unwrap(), 9);
+        assert_eq!(
+            recorder.retrieve_totals().unwrap(),
+            RetrieveTotals {
+                hits: 9,
+                retrieved_tokens: 200,
+                ..RetrieveTotals::default()
+            }
+        );
+    }
+}
+
+#[test]
+fn concurrent_fresh_openers_keep_all_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh.db");
+    record_concurrently(&path, 8);
+
+    let recorder = StatsRecorder::new(&path).unwrap();
+    assert_eq!(recorder.count().unwrap(), 8);
+    assert_eq!(recorder.retrieve_totals().unwrap().hits, 8);
+    assert_eq!(recorder.retrieve_totals().unwrap().retrieved_tokens, 80);
+}
+
+#[test]
+fn wal_contention_obeys_one_wait_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("busy.db");
+    let reader = Connection::open(&path).unwrap();
+    reader
+        .execute_batch("CREATE TABLE existing (value TEXT); BEGIN; SELECT * FROM existing;")
+        .unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let connection = Connection::open(path).unwrap();
+        let started = Instant::now();
+        let result = StatsRecorder::enable_wal(&connection, Duration::from_millis(100));
+        sender.send((result, started.elapsed())).unwrap();
+    });
+    let outcome = receiver.recv_timeout(Duration::from_secs(2));
+    // Release the lock before asserting, so an unbounded retry still has a
+    // way to finish and cannot strand a test thread on the failure path.
+    drop(reader);
+    worker.join().unwrap();
+    let (result, elapsed) = outcome.expect("WAL initialization exceeded its wait budget");
+    assert!(matches!(
+        result,
+        Err(StatsError::Database(rusqlite::Error::SqliteFailure(code, _)))
+            if code.code == rusqlite::ErrorCode::DatabaseBusy
+    ));
+    assert!(elapsed >= Duration::from_millis(70));
+}
+
+#[test]
+fn wal_initialization_preserves_non_busy_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("readonly.db");
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TABLE existing (value TEXT);").unwrap();
+    drop(connection);
+    let readonly = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    assert!(matches!(
+        StatsRecorder::enable_wal(&readonly, Duration::from_millis(100)),
+        Err(StatsError::Database(rusqlite::Error::SqliteFailure(code, _)))
+            if code.code == rusqlite::ErrorCode::ReadOnly
+    ));
+}
+
+#[test]
+fn failed_retrieve_migration_rolls_back_stats_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollback.db");
+    let conn = Connection::open(&path).unwrap();
+    let max_column: String = conn
+        .query_row(
+            "SELECT compile_options FROM pragma_compile_options
+             WHERE compile_options LIKE 'MAX_COLUMN=%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let max_column: usize = max_column.strip_prefix("MAX_COLUMN=").unwrap().parse().unwrap();
+    drop(conn);
+    // Exhaust the second table's column limit so its migration fails after
+    // stats has already added columns. Both tables must roll back together.
+    let conn = create_legacy_stats_database(&path, max_column - 7);
+    assert!(matches!(StatsRecorder::new(&path), Err(StatsError::Database(_))));
+    let added: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = 'before_output'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(added, 0, "failed migration left stats partially upgraded");
+
+    for index in 0..3 {
+        conn.execute(
+            &format!("ALTER TABLE retrieve_events DROP COLUMN extra_{index}"),
+            [],
+        )
+        .unwrap();
+    }
+    let recorder = StatsRecorder::new(&path).unwrap();
+    assert_eq!(recorder.record_by_id(1).unwrap().unwrap().agent_id, "old");
+    assert_eq!(recorder.count().unwrap(), 1);
+    assert_eq!(recorder.retrieve_totals().unwrap().retrieved_tokens, 120);
+}
+
 #[test]
 fn all_records_handles_corrupt_row() {
     let dir = tempfile::tempdir().unwrap();
@@ -647,4 +1185,38 @@ fn clear_empties_the_attribution_tables() {
         })
         .unwrap();
     assert_eq!(artifacts, 0);
+}
+
+/// A stats or SLS warning must not be able to fail the command when
+/// stderr itself cannot be written (a full filesystem behind redirected
+/// logs, a closed descriptor). `eprintln!` panics on that shape, turning
+/// the fail-soft warning into a process failure while the compression
+/// output is fine; `warn_stats` must survive it. Redirect fd 2 to
+/// /dev/full, call the helper, restore, and assert the call returned —
+/// a panicking write makes this test fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn warn_stats_survives_an_unwritable_stderr() {
+    use std::os::unix::io::AsRawFd;
+
+    let dev_full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let saved = unsafe { libc::dup(2) };
+    assert!(saved >= 0, "dup stderr");
+    unsafe {
+        libc::dup2(dev_full.as_raw_fd(), 2);
+    }
+    // The helper's whole contract: no panic, the write error is
+    // discarded.
+    crate::warn_stats("[tokenless-stats] WARNING: simulated stderr failure");
+    // Restore before any assert can print.
+    let restored = unsafe { libc::dup2(saved, 2) };
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    assert!(restored >= 0, "restore stderr");
+    unsafe {
+        libc::close(saved);
+    }
+    drop(dev_full);
 }

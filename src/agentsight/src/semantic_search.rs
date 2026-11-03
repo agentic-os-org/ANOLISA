@@ -116,23 +116,66 @@ fn build_ranking_messages(query: &str, candidates: &[SemanticSearchCandidate]) -
     ]
 }
 
-/// Clamp `relevance` to the documented `high` / `medium` buckets.
+/// Clamp `relevance` to the documented `high` / `medium` buckets, and order the
+/// results by them.
+///
+/// The response is documented as ranked, and the prompt only *asks* the model
+/// for relevance order rather than enforcing it, so a `medium` answered before a
+/// `high` used to reach the caller as-is. The sort is stable, so the model's own
+/// order survives inside a bucket.
 fn normalize_results(mut items: Vec<SemanticSearchResult>) -> Vec<SemanticSearchResult> {
     for item in &mut items {
         if item.relevance != "high" && item.relevance != "medium" {
             item.relevance = "medium".to_string();
         }
     }
+    items.sort_by_key(|item| item.relevance != "high");
     items
+}
+
+/// Keep only the verdicts this request asked for.
+///
+/// The prompt asks the model to rank the candidates, but the answer is free
+/// text: it can name a session the request never listed or repeat one it liked.
+/// The dashboard masks both client-side — `base.find` drops unknown ids and its
+/// id-keyed map collapses repeats — so every other consumer of
+/// `POST /api/sessions/search` received phantom sessions and duplicated rows in
+/// a list documented as ranked, the same masking that once hid unordered
+/// relevance buckets. Repeats collapse to their first occurrence, keeping the
+/// model's own priority, and a drop is logged so a shrunken answer stays
+/// attributable.
+fn anchor_to_candidates(
+    items: Vec<SemanticSearchResult>,
+    candidates: &[SemanticSearchCandidate],
+) -> Vec<SemanticSearchResult> {
+    let total = items.len();
+    let listed: std::collections::HashSet<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.session_id.as_str())
+        .collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let kept: Vec<SemanticSearchResult> = items
+        .into_iter()
+        .filter(|item| {
+            listed.contains(item.session_id.as_str()) && seen.insert(item.session_id.clone())
+        })
+        .collect();
+    let dropped = total - kept.len();
+    if dropped > 0 {
+        log::warn!(
+            "semantic_search: dropped {dropped} ranked result(s) the request did not list or repeated"
+        );
+    }
+    kept
 }
 
 /// Ask the configured LLM to rank `candidates` by semantic relevance to `query`.
 ///
-/// Returns the normalized, relevance-ordered results, or an empty vector on
-/// timeout, LLM error, or unparseable output. Degrading to empty stays
-/// deliberate — search keeps working (as "no matches") when the LLM is slow
-/// or down — but every degraded path logs a WARN so an empty page is
-/// attributable after the fact.
+/// Returns the verdicts for the request's own candidates, normalized and
+/// relevance-ordered, or an empty vector on timeout, LLM error, or unparseable
+/// output. Degrading to empty stays deliberate — search keeps working (as "no
+/// matches") when the LLM is slow or down — but every degraded path logs a WARN
+/// so an empty page is attributable after the fact.
 pub async fn rank_sessions(
     client: &LlmClient,
     query: &str,
@@ -151,7 +194,7 @@ pub async fn rank_sessions(
     .await;
 
     match parsed {
-        Ok(Ok(items)) => normalize_results(items),
+        Ok(Ok(items)) => normalize_results(anchor_to_candidates(items, candidates)),
         Ok(Err(error)) => {
             log::warn!("semantic_search: LLM ranking failed, returning empty results: {error}");
             vec![]
@@ -304,6 +347,52 @@ mod tests {
         assert!(messages[1].content.contains("[session_id=sess-1]"));
     }
 
+    /// The response is documented as relevance-ordered, and the prompt only asks
+    /// the model for that order — so a `medium` returned ahead of a `high` used
+    /// to reach the caller unchanged. The dashboard masked it by re-sorting;
+    /// every other consumer of `POST /api/sessions/search` did not.
+    #[test]
+    fn normalize_results_orders_high_before_medium() {
+        let results = vec![
+            SemanticSearchResult {
+                session_id: "m1".into(),
+                relevance: "medium".into(),
+                reason: "medium".into(),
+            },
+            SemanticSearchResult {
+                session_id: "h1".into(),
+                relevance: "high".into(),
+                reason: "high".into(),
+            },
+            SemanticSearchResult {
+                session_id: "u1".into(),
+                relevance: "?".into(),
+                reason: "unknown bucket".into(),
+            },
+            SemanticSearchResult {
+                session_id: "h2".into(),
+                relevance: "high".into(),
+                reason: "high".into(),
+            },
+        ];
+
+        let normalized = normalize_results(results);
+
+        let order: Vec<&str> = normalized
+            .iter()
+            .map(|result| result.session_id.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["h1", "h2", "m1", "u1"],
+            "highs first, and the model's order kept inside a bucket"
+        );
+        assert_eq!(
+            normalized[3].relevance, "medium",
+            "an unrecognised bucket still clamps to medium"
+        );
+    }
+
     #[test]
     fn normalize_results_clamps_relevance_and_preserves_known_buckets() {
         let results = vec![
@@ -433,6 +522,148 @@ mod tests {
             }
         });
         format!("http://{addr}/v1")
+    }
+
+    /// Accepts completions and answers each with `content` as the assistant
+    /// message, so the ranking path can be driven without an LLM.
+    fn completion_server(content: String) -> String {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind completion fixture server");
+        let addr = listener.local_addr().expect("completion fixture addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut buffer = [0u8; 4096];
+                    match std::io::Read::read(&mut stream, &mut buffer) {
+                        Ok(0) | Err(_) => break 0,
+                        Ok(count) => {
+                            bytes.extend_from_slice(&buffer[..count]);
+                            if let Some(offset) =
+                                bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                            {
+                                break offset + 4;
+                            }
+                        }
+                    }
+                };
+                if header_end == 0 {
+                    continue;
+                }
+                let headers = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + length {
+                    let mut buffer = [0u8; 4096];
+                    match std::io::Read::read(&mut stream, &mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                    }
+                }
+                let body = serde_json::json!({
+                    "id": "fixture-completion",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "fixture-model",
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": content}
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// The negative twin of the anchoring above: an answer that only names
+    /// listed sessions passes through unchanged (apart from the documented
+    /// bucket order), so the guard cannot turn a faithful ranking into an
+    /// empty or reordered one.
+    #[test]
+    fn ranked_results_for_listed_sessions_pass_through() {
+        let answer = serde_json::json!([
+            {"session_id": "s1", "relevance": "medium", "reason": "listed once"},
+            {"session_id": "s2", "relevance": "high", "reason": "listed once"}
+        ])
+        .to_string();
+        let client = LlmClient::with_config(completion_server(answer), "test-key", "fixture-model");
+        let candidates = vec![candidate("s1"), candidate("s2")];
+        let results = actix_web::rt::System::new().block_on(rank_sessions(
+            &client,
+            "q",
+            &candidates,
+            std::time::Duration::from_secs(30),
+        ));
+
+        let ids: Vec<&str> = results
+            .iter()
+            .map(|result| result.session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["s2", "s1"], "highs first, both sessions kept");
+        assert_eq!(results[0].reason, "listed once");
+    }
+
+    /// The endpoint answers the ranked verdict for *this request's* candidates.
+    /// The model sometimes names a session the request never listed or repeats
+    /// one it liked; the dashboard masks both client-side (`base.find` drops
+    /// unknown ids and its id-keyed map collapses repeats), so every other
+    /// consumer received phantom sessions and duplicated rows in a list
+    /// documented as ranked — the same masking that once hid unordered
+    /// relevance buckets.
+    #[test]
+    fn ranked_results_are_anchored_to_the_requested_candidates() {
+        let captured = captured_logs();
+        let answer = serde_json::json!([
+            {"session_id": "ghost-1", "relevance": "medium", "reason": "never listed"},
+            {"session_id": "s1", "relevance": "medium", "reason": "listed"},
+            {"session_id": "s2", "relevance": "high", "reason": "listed"},
+            {"session_id": "s1", "relevance": "high", "reason": "repeated"}
+        ])
+        .to_string();
+        let client = LlmClient::with_config(completion_server(answer), "test-key", "fixture-model");
+        let candidates = vec![candidate("s1"), candidate("s2")];
+        let results = actix_web::rt::System::new().block_on(rank_sessions(
+            &client,
+            "q",
+            &candidates,
+            std::time::Duration::from_secs(30),
+        ));
+
+        let ids: Vec<&str> = results
+            .iter()
+            .map(|result| result.session_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["s2", "s1"],
+            "only the listed sessions, highs first, no repeats"
+        );
+        assert_eq!(
+            results[1].relevance, "medium",
+            "a repeat keeps the bucket of its first occurrence"
+        );
+        let lines = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            lines.iter().any(|l| l.contains("semantic_search: dropped")),
+            "an answer that lost ids must stay attributable, got: {lines:?}"
+        );
     }
 
     #[test]

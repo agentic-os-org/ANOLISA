@@ -1,6 +1,7 @@
 use crate::runtime::mode::render_mode_command;
 use crate::runtime::prelude::*;
 use crate::slash::audit::render_audit_command;
+use crate::slash::bug::render_bug_command;
 use crate::slash::config::render_config_command;
 use crate::slash::debug::render_debug_command;
 use crate::slash::extensions::render_extensions_command;
@@ -60,6 +61,10 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Help => {
             render_help(state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Bug(description) => {
+            render_bug_command(description, adapter, state, output)?;
             Ok(true)
         }
         SlashCommand::Agent => {

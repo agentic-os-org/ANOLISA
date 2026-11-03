@@ -58,7 +58,6 @@ fn very_deep_nesting_returns_a_parser_error() {
             recovery: &RecoveryMethod::Shell,
             stash: None,
             allow_toon: false,
-            preserve_top_level_shape: false,
             min_toon_chars: usize::MAX,
             allow_unrecoverable: true,
         },
@@ -72,9 +71,8 @@ fn null_bomb() {
     for i in 0..1000 {
         obj.insert(format!("k{i}"), Value::Null);
     }
-    let out = compress_ok(&Value::Object(obj));
-    // All nulls dropped by default.
-    assert!(out.as_object().unwrap().is_empty());
+    let input = Value::Object(obj);
+    assert_eq!(compress_ok(&input), input);
 }
 
 #[test]
@@ -83,8 +81,8 @@ fn empty_field_bomb() {
     for i in 0..1000 {
         obj.insert(format!("k{i}"), json!(""));
     }
-    let out = compress_ok(&Value::Object(obj));
-    assert!(out.as_object().unwrap().is_empty());
+    let input = Value::Object(obj);
+    assert_eq!(compress_ok(&input), input);
 }
 
 #[test]
@@ -163,8 +161,11 @@ fn wide_object_many_keys() {
 }
 
 #[test]
-fn deeply_nested_debug_fields_are_still_dropped_near_root() {
+fn nested_debug_fields_use_normal_string_bounds() {
     let v = json!({ "ok": 1, "debug": { "huge": "x".repeat(10_000) } });
     let out = compress_ok(&v);
-    assert!(out.as_object().unwrap().get("debug").is_none());
+    assert_eq!(out["ok"], v["ok"]);
+    let text = out["debug"]["huge"].as_str().unwrap();
+    assert!(text.chars().count() <= 4096);
+    assert!(text.contains("… (truncated)"));
 }

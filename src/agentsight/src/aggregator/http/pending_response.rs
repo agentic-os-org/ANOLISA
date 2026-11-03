@@ -4,12 +4,21 @@ use super::{
     AggregatedResponse, AggregatedResult, ConnectionId, ConnectionState, HttpConnectionAggregator,
     HttpPair,
 };
+use crate::aggregator::RemoveReason;
 use crate::parser::http::{HttpParser, ParsedHttpMessage, ParsedRequest, ParsedResponse};
 use crate::probes::sslsniff::SslEvent;
 use anyhow::{Result, bail};
 use std::rc::Rc;
 
 const MAX_RESPONSE_HEADERS: usize = 64 * 1024;
+
+/// Interim 1xx statuses that do not finalize the request they answer.
+///
+/// 101 is excluded: it switches protocols and the response state machine
+/// treats it as a final response.
+pub(super) fn is_informational(status: u16) -> bool {
+    (100..200).contains(&status) && status != 101
+}
 
 impl ConnectionState {
     /// Request evidence shared by idle, process-exit and dead-PID persistence.
@@ -119,15 +128,56 @@ impl Framing {
 }
 
 impl PendingResponse {
-    /// Select message framing without decoding the response body.
-    pub(super) fn body(response: ParsedResponse, method: Option<&str>) -> Result<Self> {
-        let framing = Framing::new(&response, method)?;
-        let end_timestamp_ns = response.source_event.timestamp_ns;
-        Ok(Self::Body {
-            response,
-            framing,
-            end_timestamp_ns,
-        })
+    fn exceeds_limit(&self, limit: usize) -> bool {
+        matches!(self, Self::Body { response, framing, .. }
+            if response.body_len > limit || matches!(framing, Framing::Length(n) if *n > limit))
+    }
+
+    fn discard_body(&mut self) {
+        if let Self::Body { response, .. } = self {
+            super::lifecycle::metadata_response(response);
+        }
+    }
+    /// Finish an in-flight response on the clean-exit path with whatever
+    /// bytes arrived, yielding a completable pair when at least the final
+    /// response headers are present (issue #7553: an application that never
+    /// reads the declared body leaves the connection `ResponsePending`
+    /// forever; the clean-exit sweep must surface the call instead of
+    /// stranding it as a pending row that the stale scan later flips to
+    /// `interrupted`). Returns the response plus its provenance timestamp.
+    ///
+    /// Returns `None` when even the header block is unusable (truncated or
+    /// unparsable), leaving the entry to the request-evidence path. The
+    /// dead-PID drain (vanished PIDs without an exit event) intentionally
+    /// keeps the interrupted-evidence semantics.
+    pub(super) fn finish_partial(
+        &mut self,
+        limit: usize,
+        max_headers: usize,
+    ) -> Option<(ParsedResponse, u64)> {
+        // The provenance timestamp of the buffered response bytes: the header
+        // event for a headers-only assembly, the retained fragment timestamp
+        // for one with body bytes.
+        let end_timestamp_ns = match self {
+            Self::Headers(event) => event.timestamp_ns,
+            Self::Body {
+                end_timestamp_ns, ..
+            } => *end_timestamp_ns,
+        };
+        let response = match self {
+            Self::Headers(_) => self.parsed_headers(max_headers).ok().flatten()?,
+            Self::Body { response, .. } => {
+                // Framing never completed: accept the buffered bytes as the
+                // final (partial) body rather than dropping the response.
+                let mut response = response.clone();
+                response.body_len = response.body_len.min(limit);
+                response
+            }
+        };
+        if is_informational(response.status_code) {
+            return None;
+        }
+        Some((response, end_timestamp_ns))
     }
 
     /// SSL direction that owns the response.
@@ -153,7 +203,6 @@ impl PendingResponse {
             } => {
                 *end_timestamp_ns = event.timestamp_ns;
                 let used = response.body_len;
-                response.body_len = used.saturating_add(data.len());
                 (&mut response.source_event, used, limit)
             }
         };
@@ -163,11 +212,18 @@ impl PendingResponse {
         let source = Rc::make_mut(source);
         source.buf.extend_from_slice(data);
         source.len = source.buf.len() as u32;
+        if let Self::Body { response, .. } = self {
+            response.body_len = used.saturating_add(data.len());
+        }
         Ok(())
     }
 
     /// Parse a bounded complete header block, preserving its first timestamp.
-    pub(super) fn parsed_headers(&self) -> Result<Option<ParsedResponse>> {
+    ///
+    /// `max_headers` is the caller's configured HTTP/1 header cap
+    /// (`AgentsightConfig::max_headers`) so assembled responses are held to
+    /// the same cap as the ones the parser accepted whole.
+    pub(super) fn parsed_headers(&self, max_headers: usize) -> Result<Option<ParsedResponse>> {
         let Self::Headers(event) = self else {
             return Ok(None);
         };
@@ -180,7 +236,7 @@ impl PendingResponse {
         if end + 4 > MAX_RESPONSE_HEADERS {
             bail!("response headers exceed {MAX_RESPONSE_HEADERS} bytes");
         }
-        match HttpParser::new().parse(Rc::clone(event))? {
+        match HttpParser::with_max_headers(max_headers).parse(Rc::clone(event))? {
             ParsedHttpMessage::Response(response) => Ok(Some(response)),
             _ => bail!("invalid response headers"),
         }
@@ -239,10 +295,31 @@ impl HttpConnectionAggregator {
         request: Option<ParsedRequest>,
         response: ParsedResponse,
     ) -> Option<AggregatedResult> {
-        match PendingResponse::body(response, request.as_ref().map(|r| r.method.as_str())) {
-            Ok(assembly) => self.advance_response(id, request, assembly),
+        let end_timestamp_ns = response.source_event.timestamp_ns;
+        match Framing::new(&response, request.as_ref().map(|r| r.method.as_str())) {
+            Ok(framing) => self.advance_response(
+                id,
+                request,
+                PendingResponse::Body {
+                    response,
+                    framing,
+                    end_timestamp_ns,
+                },
+            ),
             Err(error) => {
-                log::warn!("[HttpAggregator] discarded invalid response | conn={id:?}: {error}");
+                log::warn!("[HttpAggregator] cannot frame response | conn={id:?}: {error}");
+                self.insert(
+                    id,
+                    ConnectionState::ResponsePending {
+                        request,
+                        assembly: PendingResponse::Body {
+                            response,
+                            framing: Framing::CloseDelimited,
+                            end_timestamp_ns,
+                        },
+                    },
+                );
+                self.abandon(&id, RemoveReason::ProtocolError);
                 None
             }
         }
@@ -279,7 +356,17 @@ impl HttpConnectionAggregator {
             }
             Ok(false) => self.insert(id, ConnectionState::ResponsePending { request, assembly }),
             Err(error) => {
-                log::warn!("[HttpAggregator] discarded incomplete response | conn={id:?}: {error}")
+                log::warn!(
+                    "[HttpAggregator] incomplete response finalized early | conn={id:?}: {error}"
+                );
+                let reason = if assembly.exceeds_limit(self.max_body_bytes) {
+                    assembly.discard_body();
+                    RemoveReason::OverBudget
+                } else {
+                    RemoveReason::ProtocolError
+                };
+                self.insert(id, ConnectionState::ResponsePending { request, assembly });
+                self.abandon(&id, reason);
             }
         }
         None
@@ -296,8 +383,10 @@ impl HttpConnectionAggregator {
             } => {
                 if let Err(error) = assembly.append(event, self.max_body_bytes) {
                     log::warn!(
-                        "[HttpAggregator] discarded incomplete response | conn={id:?}: {error}"
+                        "[HttpAggregator] response append exceeds byte limit | conn={id:?}: {error}"
                     );
+                    self.insert(id, ConnectionState::ResponsePending { request, assembly });
+                    self.abandon(&id, RemoveReason::OverBudget);
                     return None;
                 }
                 (request, assembly)
@@ -308,21 +397,40 @@ impl HttpConnectionAggregator {
             ),
             ConnectionState::RequestBodyPending {
                 mut request,
+                expected_body_len,
                 body_buffer,
-                ..
             } => {
-                request.reassembled_body = Some(body_buffer);
-                (
-                    Some(request),
-                    PendingResponse::Headers(Rc::new(event.clone())),
-                )
+                let assembly = PendingResponse::Headers(Rc::new(event.clone()));
+                // An interim 1xx response (`100 Continue`) does not answer the
+                // request: a client that sent `Expect: 100-continue` writes the
+                // body only after receiving it. Collapsing to RequestPending
+                // here would expose `reassembled_body` as the empty partial
+                // body and every body continuation afterwards would hit the
+                // no-op fallback of `process_raw_body_data`, silently dropping
+                // the prompt. Keep the pending body state instead.
+                if matches!(
+                    assembly.parsed_headers(self.max_headers),
+                    Ok(Some(ref response)) if is_informational(response.status_code)
+                ) {
+                    self.insert(
+                        id,
+                        ConnectionState::RequestBodyPending {
+                            request,
+                            expected_body_len,
+                            body_buffer,
+                        },
+                    );
+                    return None;
+                }
+                request.set_reassembled_body(body_buffer);
+                (Some(request), assembly)
             }
             other => {
                 self.insert(id, other);
                 return None;
             }
         };
-        match assembly.parsed_headers() {
+        match assembly.parsed_headers(self.max_headers) {
             Ok(Some(response)) => {
                 drop(assembly);
                 if let Some(request) = request {
@@ -347,9 +455,9 @@ impl HttpConnectionAggregator {
                 return result;
             }
             Err(error) => {
-                log::warn!(
-                    "[HttpAggregator] discarded invalid response headers | conn={id:?}: {error}"
-                );
+                log::warn!("[HttpAggregator] invalid response headers | conn={id:?}: {error}");
+                self.insert(id, ConnectionState::ResponsePending { request, assembly });
+                self.abandon(&id, RemoveReason::ProtocolError);
                 return None;
             }
             Ok(None) => {}

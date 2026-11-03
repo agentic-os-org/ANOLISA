@@ -95,9 +95,10 @@ by what the diff touches, not as separate reviewer roles.
 
 Hard-won on this repo's CI:
 
-Baseline gates: see root AGENTS.md §3.5 (pre-commit checks), §6 (commit rules)
-and §13 (commit discipline). This section builds on those and adds review-side
-methodology they do not cover.
+Baseline gates: see root AGENTS.md §3.5 (pre-commit checks) and
+`specs/commit-message-standard.md` (commit rules and commit discipline, which
+AGENTS.md §6 and §13 redirect to). This section builds on those and adds
+review-side methodology they do not cover.
 
 - **Reproduce with the toolchain CI pins**, not just your local default — a lint
   that passes on an older toolchain can fail on the pinned one. Run

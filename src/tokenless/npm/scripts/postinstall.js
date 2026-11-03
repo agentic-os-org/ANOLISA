@@ -33,6 +33,7 @@ import {
   unlinkSync,
   chmodSync,
   cpSync,
+  copyFileSync,
   rmSync,
 } from 'node:fs';
 import { execSync, execFileSync } from 'node:child_process';
@@ -67,6 +68,7 @@ const FORCE_ADAPTERS_ENV = 'ANOLISA_TOKENLESS_FORCE_ADAPTERS';
 
 // Map Node.js platform/arch to package names
 const PLATFORM_MAP = {
+  'win32-x64': '@anolisa/tokenless-win32-x64',
   'linux-x64': '@anolisa/tokenless-linux-x64',
   'linux-arm64': '@anolisa/tokenless-linux-arm64',
   'darwin-x64': '@anolisa/tokenless-darwin-x64',
@@ -211,10 +213,14 @@ function main() {
   if (!existsSync(binDir)) {
     mkdirSync(binDir, { recursive: true });
   }
+  if (platform() === 'win32') {
+    // Node 16.7 cannot load extensionless ESM entries; preserve the existing npm bin paths.
+    writeFileSync(join(binDir, 'package.json'), '{"type":"commonjs"}\n');
+  }
 
   const missing = [];
   for (const binary of BINARIES) {
-    const nativeBinary = join(pkgDir, 'bin', binary);
+    const nativeBinary = join(pkgDir, 'bin', binary + (platform() === 'win32' ? '.exe' : ''));
     if (!existsSync(nativeBinary)) {
       console.error(`anolisa-tokenless: Binary ${binary} not found in ${pkgName}`);
       missing.push(binary);
@@ -223,13 +229,26 @@ function main() {
 
     const linkPath = join(binDir, binary);
 
-    // Remove existing symlink or file
-    if (existsSync(linkPath)) {
+    // Unlink the entry itself: existsSync follows dangling symlinks.
+    try {
       unlinkSync(linkPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
     }
 
-    symlinkSync(nativeBinary, linkPath);
-    chmodSync(linkPath, 0o755);
+    if (platform() === 'win32') {
+      copyFileSync(nativeBinary, join(binDir, `${binary}.exe`));
+      writeFileSync(linkPath, `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process');
+const { join } = require('node:path');
+const result = spawnSync(join(__dirname, '${binary}.exe'), process.argv.slice(2), { stdio: 'inherit' });
+if (result.error) { console.error(result.error.message); process.exit(1); }
+process.exit(result.status ?? 1);
+`);
+    } else {
+      symlinkSync(nativeBinary, linkPath);
+      chmodSync(linkPath, 0o755);
+    }
   }
 
   if (missing.length > 0) {
@@ -363,7 +382,8 @@ function installAdapters() {
     }
     if (movedAside) rmSync(previous, { recursive: true, force: true });
     console.log(`anolisa-tokenless: Installed Agent adapters to ${dest}`);
-    enableClaudeAdapter(dest);
+    if (platform() !== 'win32') enableClaudeAdapter(dest);
+    else console.log('anolisa-tokenless: Windows supports the QwenWork adapter; Claude auto-enable is skipped.');
   } catch (err) {
     rmSync(staged, { recursive: true, force: true });
     console.warn(`anolisa-tokenless: Could not install adapters to ${dest}: ${err.message}`);

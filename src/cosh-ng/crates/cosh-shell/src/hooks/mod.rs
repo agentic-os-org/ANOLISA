@@ -21,6 +21,6 @@ pub(crate) use engine::{
 };
 pub(crate) use feedback::load_hook_feedback_preferences;
 pub(crate) use loading::{
-    dirs_for_hook_loading, is_trusted_project_root, project_hook_root_from_cwd,
+    dirs_for_hook_loading, load_project_hooks_with_consent, project_hook_root_from_cwd,
 };
 pub(crate) use presentation::render_consultation_details;

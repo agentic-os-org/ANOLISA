@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asc_daemon_service::{
     BindError, BoundUnixSocket, ConfigError, RejectionEncoder, RequestDispatcher, ServeError,
@@ -8,7 +8,9 @@ use asc_daemon_service::{
 };
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-const DEFAULT_MAX_CONNECTIONS: usize = 64;
+const DEFAULT_PUBLIC_CONNECTIONS: usize = 64;
+const DEFAULT_RESERVED_ADMINISTRATOR_CONNECTIONS: usize = 16;
+const DEFAULT_MAX_CONNECTIONS_PER_UID: usize = 16;
 const DEFAULT_MAX_REJECTION_CONNECTIONS: usize = 8;
 const DEFAULT_REJECTION_ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,11 +47,14 @@ pub const fn default_service_config() -> ServiceConfig {
     ServiceConfig {
         max_request_frame_bytes: asc_daemon_protocol::MAX_REQUEST_FRAME_BYTES,
         max_response_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
-        max_connections: DEFAULT_MAX_CONNECTIONS,
+        max_connections: DEFAULT_PUBLIC_CONNECTIONS + DEFAULT_RESERVED_ADMINISTRATOR_CONNECTIONS,
+        reserved_administrator_connections: DEFAULT_RESERVED_ADMINISTRATOR_CONNECTIONS,
+        max_connections_per_uid: DEFAULT_MAX_CONNECTIONS_PER_UID,
         max_rejection_connections: DEFAULT_MAX_REJECTION_CONNECTIONS,
         rejection_encode_timeout: DEFAULT_REJECTION_ENCODE_TIMEOUT,
         request_read_timeout: DEFAULT_REQUEST_READ_TIMEOUT,
         dispatch_timeout: DEFAULT_DISPATCH_TIMEOUT,
+        max_dispatch_timeout: asc_model_client::MAX_CODE_SCAN_BUDGET,
         response_write_timeout: DEFAULT_RESPONSE_WRITE_TIMEOUT,
         drain_timeout: DEFAULT_DRAIN_TIMEOUT,
         accept_error_backoff: DEFAULT_ACCEPT_ERROR_BACKOFF,
@@ -71,8 +76,14 @@ pub async fn serve(
     rejection_encoder: Arc<dyn RejectionEncoder>,
     shutdown: ShutdownToken,
 ) -> Result<ServeReport, BootstrapError> {
+    let started = Instant::now();
+    tracing::info!(target: "asc_observability::diagnostic",
+        reason = "startup_stage", stage = "uds_bind", phase = "started");
     let socket = BoundUnixSocket::bind(&config.socket_path, config.socket_mode)?;
     let service = UnixService::new(socket, config.service, dispatcher, rejection_encoder)?;
+    tracing::info!(target: "asc_observability::diagnostic",
+        reason = "startup_stage", stage = "rpc_ready", phase = "completed",
+        duration_ms = started.elapsed().as_secs_f64() * 1000.0);
     Ok(service.serve(shutdown).await?)
 }
 

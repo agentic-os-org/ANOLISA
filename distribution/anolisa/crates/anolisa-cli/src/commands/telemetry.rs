@@ -161,6 +161,37 @@ fn render_mutation(result: TelemetryApplicationOutcome, ctx: &CliContext) -> Res
                     });
                 }
             }
+            if ctx.json {
+                // Preserve these public JSON keys: scripts consume them independently
+                // of human messages and internal result variant names.
+                let data = match &result {
+                    // collection_enabled reports the resulting collection setting.
+                    TelemetryApplied::Enabled => serde_json::json!({"collection_enabled": true}),
+                    TelemetryApplied::Disabled => serde_json::json!({"collection_enabled": false}),
+                    // link/unlink report named-reporting state via linked, independently
+                    // of collection. link_id echoes the persisted ID used by the uploader;
+                    // already_linked distinguishes an idempotent no-op from ID creation.
+                    TelemetryApplied::Linked {
+                        link_id,
+                        already_linked,
+                    } => serde_json::json!({
+                        "linked": true,
+                        "link_id": link_id,
+                        "already_linked": already_linked,
+                    }),
+                    TelemetryApplied::Unlinked => serde_json::json!({"linked": false}),
+                    // loop_flag identifies whether the completed uploader ran continuously.
+                    TelemetryApplied::Uploaded { loop_flag } => {
+                        serde_json::json!({"loop_flag": loop_flag})
+                    }
+                    // initialized confirms ops-channel setup, without changing consent.
+                    TelemetryApplied::Initialized => serde_json::json!({"initialized": true}),
+                };
+                for warning in outcome.warnings() {
+                    eprintln!("warn: {warning}");
+                }
+                return render_json(result.command(), data);
+            }
             for output in applied_output(&result, outcome.warnings()) {
                 match output {
                     TelemetryOutput::Stdout(line) => println!("{line}"),
@@ -612,7 +643,13 @@ mod tests {
                                 .lines()
                                 .find_map(|line| line.strip_prefix("STATUS_READ_ERROR="))
                                 .unwrap();
-                            format!("[anolisa] warn: cannot read {path}: {reason}\n")
+                            // The child echoes the raw io error, while the
+                            // register module's Read cause renders the
+                            // fallback policy in the warning, like every
+                            // other degraded-record case above.
+                            format!(
+                                "[anolisa] warn: cannot read {path}: {reason}; treating as INIT\n"
+                            )
                         }
                         _ => String::new(),
                     };

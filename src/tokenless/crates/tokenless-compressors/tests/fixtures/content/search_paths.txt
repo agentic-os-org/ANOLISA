@@ -1,0 +1,12 @@
+crates/customer_service/src/handlers/deployment_status.rs:1:check_status(1);
+crates/customer_service/src/handlers/deployment_status.rs:2:check_status(2);
+crates/customer_service/src/handlers/deployment_status.rs:3:check_status(3);
+crates/customer_service/src/handlers/deployment_status.rs:4:check_status(4);
+crates/customer_service/src/handlers/deployment_status.rs:5:check_status(5);
+crates/customer_service/src/handlers/deployment_status.rs:6:check_status(6);
+crates/customer_service/src/handlers/deployment_status.rs:7:check_status(7);
+crates/customer_service/src/handlers/deployment_status.rs:8:check_status(8);
+crates/customer_service/src/handlers/deployment_status.rs:9:check_status(9);
+crates/customer_service/src/handlers/deployment_status.rs:10:check_status(10);
+crates/customer_service/src/handlers/deployment_status.rs:11:check_status(11);
+crates/customer_service/src/handlers/deployment_status.rs:12:check_status(12);

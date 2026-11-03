@@ -4,16 +4,18 @@ use std::time::Duration;
 
 use asc_action_runtime::{
     ActionRuntime, AuditProjector, CapabilityExecutor, Diagnostic, DiagnosticSink,
-    ExecutionControl, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus,
+    ExecutionControl, Finalizer, SecurityEventSink, TelemetrySink, TelemetryStatus, WarmupStatus,
 };
-use asc_action_types::{ActionId, ActionOutcome, AuditProjection, CodeScanRequest};
+use asc_action_types::{
+    ActionId, ActionOutcome, AuditProjection, CodeScanRequest, PromptScanRequest,
+    PromptScanWarmupRequest,
+};
 use asc_daemon::{BootstrapConfig, serve};
 use asc_daemon_core::{ActionService, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_daemon_service::ShutdownToken;
 use asc_pap::PapService;
-use asc_pap_repository_memory::ProcessLocalPapRepository;
-use asc_policy_engine::PolicyTemplateCompiler;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_security_events::SecurityEvent;
 use asc_telemetry::TelemetryRecord;
 use serde_json::{Map, json};
@@ -28,6 +30,11 @@ struct ControlledExecutor {
 impl CapabilityExecutor for ControlledExecutor {
     type Request = CodeScanRequest;
     fn execute(&self, _: &ExecutionControl, _: &CodeScanRequest) -> ActionOutcome {
+        self.run()
+    }
+}
+impl ControlledExecutor {
+    fn run(&self) -> ActionOutcome {
         self.entered
             .lock()
             .unwrap()
@@ -52,6 +59,13 @@ impl CapabilityExecutor for ControlledExecutor {
         }
     }
 }
+struct ControlledSkillExecutor(ControlledExecutor);
+impl CapabilityExecutor for ControlledSkillExecutor {
+    type Request = asc_action_types::SkillSecRequest;
+    fn execute(&self, _: &ExecutionControl, _: &Self::Request) -> ActionOutcome {
+        self.0.run()
+    }
+}
 struct Projector;
 impl AuditProjector for Projector {
     type Request = CodeScanRequest;
@@ -61,6 +75,34 @@ impl AuditProjector for Projector {
             result: outcome.data.clone(),
             failure: None,
         }
+    }
+}
+// The scenario drives `action.code_scan` only; the prompt-scan registration
+// just has to satisfy the service's constructor.
+struct UnusedPromptScan;
+impl CapabilityExecutor for UnusedPromptScan {
+    type Request = PromptScanRequest;
+    fn execute(&self, _: &ExecutionControl, _: &PromptScanRequest) -> ActionOutcome {
+        unreachable!("the lifecycle scenario never calls action.prompt_scan")
+    }
+}
+struct UnusedPromptScanProjector;
+impl AuditProjector for UnusedPromptScanProjector {
+    type Request = PromptScanRequest;
+    fn project(&self, _: &PromptScanRequest, outcome: &ActionOutcome) -> AuditProjection {
+        AuditProjection::Completed {
+            request: Map::new(),
+            result: outcome.data.clone(),
+            failure: None,
+        }
+    }
+}
+// The warmup registration likewise just satisfies the service's constructor.
+struct UnusedWarmup;
+impl asc_action_runtime::CapabilityWarmup for UnusedWarmup {
+    type Request = PromptScanWarmupRequest;
+    fn warmup(&self, _: &PromptScanWarmupRequest) -> WarmupStatus {
+        unreachable!("the lifecycle scenario never calls action.prompt_scan.warmup")
     }
 }
 #[derive(Default)]
@@ -92,28 +134,79 @@ enum Scenario {
     Shutdown,
 }
 
-async fn scenario(kind: Scenario) {
+fn controlled_actions(
+    skill_sec: bool,
+    executor: ControlledExecutor,
+    finalizer: Finalizer,
+) -> ActionService {
+    if skill_sec {
+        ActionService::new(
+            ActionRuntime::new(
+                ActionId::CodeScan,
+                asc_capability_code_scan::CodeScanExecutor::default(),
+                asc_capability_code_scan::CodeScanAuditProjector,
+                finalizer.clone(),
+            ),
+            ActionRuntime::new(
+                ActionId::PiiScan,
+                asc_capability_pii_scan::PiiScanExecutor::new(Arc::new(
+                    asc_capability_pii_scan::PiiRuleSet::builtin().unwrap(),
+                )),
+                asc_capability_pii_scan::PiiAuditProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                UnusedPromptScan,
+                UnusedPromptScanProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            UnusedWarmup,
+        )
+        .with_skill_sec(ActionRuntime::new(
+            ActionId::SkillSec,
+            ControlledSkillExecutor(executor),
+            asc_capability_skill_sec::executor::SkillSecAuditProjector,
+            finalizer,
+        ))
+    } else {
+        ActionService::new(
+            ActionRuntime::new(ActionId::CodeScan, executor, Projector, finalizer),
+            ActionRuntime::new(
+                ActionId::PiiScan,
+                asc_capability_pii_scan::PiiScanExecutor::new(Arc::new(
+                    asc_capability_pii_scan::PiiRuleSet::builtin().unwrap(),
+                )),
+                asc_capability_pii_scan::PiiAuditProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            ActionRuntime::new(
+                ActionId::PromptScan,
+                UnusedPromptScan,
+                UnusedPromptScanProjector,
+                asc_action_runtime::testing::discarding_finalizer(),
+            ),
+            UnusedWarmup,
+        )
+    }
+}
+
+async fn scenario(kind: Scenario, skill_sec: bool) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("daemon.sock");
     let output = Arc::new(Outputs::default());
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let runtime = ActionRuntime::new(
-        ActionId::CodeScan,
-        ControlledExecutor {
-            entered: Mutex::new(Some(entered_tx)),
-            release: Mutex::new(release_rx),
-        },
-        Projector,
-        Finalizer::new(output.clone(), output.clone(), output.clone()),
-    );
+    let executor = ControlledExecutor {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    };
+    let finalizer = Finalizer::new(output.clone(), output.clone(), output.clone());
+    let actions = controlled_actions(skill_sec, executor, finalizer);
     let dispatcher = Arc::new(DaemonDispatcher::new(
-        PapService::new(
-            Arc::new(ProcessLocalPapRepository::default()),
-            Arc::new(PolicyTemplateCompiler),
-        ),
+        PapService::new(Arc::new(SqlitePolicyRepository::temporary().unwrap())),
         Arc::new(RootManagedPrincipalPolicy::default()),
-        Arc::new(ActionService::new(runtime)),
+        Arc::new(actions),
     ));
     let shutdown = ShutdownToken::new();
     let service_shutdown = shutdown.clone();
@@ -139,7 +232,15 @@ async fn scenario(kind: Scenario) {
     })
     .await
     .unwrap();
-    stream.write_all(b"{\"method\":\"action.code_scan\",\"params\":{\"code\":\"echo hi\",\"language\":\"bash\"}}\n").await.unwrap();
+    let payload = if skill_sec {
+        json!({"method":"action.skill_sec","params":{"command":"list-scanners", "timeoutMs": if matches!(kind, Scenario::Timeout) {100} else {5000}}})
+    } else {
+        json!({"method":"action.code_scan","params":{"code":"echo hi","language":"bash"}})
+    };
+    stream
+        .write_all(format!("{payload}\n").as_bytes())
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), entered_rx)
         .await
         .unwrap()
@@ -181,13 +282,16 @@ async fn scenario(kind: Scenario) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timeout_does_not_suppress_eventual_finalization() {
-    scenario(Scenario::Timeout).await;
+    scenario(Scenario::Timeout, false).await;
+    scenario(Scenario::Timeout, true).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disconnected_caller_does_not_suppress_finalization() {
-    scenario(Scenario::Disconnect).await;
+    scenario(Scenario::Disconnect, false).await;
+    scenario(Scenario::Disconnect, true).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graceful_drain_allows_inflight_finalization() {
-    scenario(Scenario::Shutdown).await;
+    scenario(Scenario::Shutdown, false).await;
+    scenario(Scenario::Shutdown, true).await;
 }

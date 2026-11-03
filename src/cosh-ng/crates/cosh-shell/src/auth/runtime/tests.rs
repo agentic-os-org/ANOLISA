@@ -900,3 +900,79 @@ fn empty_enter_on_a_secret_field_still_keeps_the_masked_value() {
         Some("\u{2022}\u{2022}\u{2022}")
     );
 }
+
+#[test]
+fn failed_activation_keeps_provider_panel_and_observed_model() {
+    let mut state = ecs_state_with_saved_dashscope();
+    state.personalization.foreground_model = Some("old-model".into());
+    state.startup_auth.resolved = Some(true);
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ProviderAction { provider_idx: 0 };
+    auth.existing_providers[0].is_active = false;
+    auth.selected_provider = 0;
+    let id = auth_capture_id(auth);
+    let mut output = Vec::new();
+    let result = handle_auth_answer(
+        &adapter_without_registry(),
+        &mut state,
+        &id,
+        "1",
+        &mut output,
+    );
+    assert!(
+        result.is_ok(),
+        "recoverable activation failure escaped the auth panel: {result:?}"
+    );
+    let auth = state
+        .auth
+        .state
+        .as_ref()
+        .expect("provider panel remains active");
+    assert_eq!(auth.phase, AuthPhase::ProviderAction { provider_idx: 0 });
+    assert_eq!(auth.selected_provider, 0);
+    assert!(!auth.existing_providers[0].is_active);
+    assert_eq!(
+        state.personalization.foreground_model.as_deref(),
+        Some("old-model")
+    );
+    assert_eq!(state.startup_auth.resolved, Some(true));
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("Provider switch not confirmed"), "{output}");
+    assert!(!output.contains("Provider switched"), "{output}");
+}
+
+#[test]
+fn failed_activation_rearms_capture_and_accepts_fresh_retry() {
+    let mut state = ecs_state_with_saved_dashscope();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ProviderAction { provider_idx: 0 };
+    auth.existing_providers[0].is_active = false;
+    auth.selected_provider = 0;
+    let first_id = auth_capture_id(auth);
+    let mut first = empty_submission(&first_id);
+    first.started_at_ms = Some(1);
+    assert!(relay_card_event(&mut state, first).contains("Provider switch not confirmed"));
+    let retry_id = auth_capture_id(state.auth.state.as_ref().unwrap());
+    assert_ne!(
+        retry_id, first_id,
+        "failed submission must rearm raw input capture"
+    );
+    let mut stale = empty_submission(&first_id);
+    stale.started_at_ms = Some(2);
+    assert!(
+        relay_card_event(&mut state, stale).is_empty(),
+        "stale submission must not retry automatically"
+    );
+    assert_eq!(
+        auth_capture_id(state.auth.state.as_ref().unwrap()),
+        retry_id
+    );
+    let mut retry = empty_submission(&retry_id);
+    retry.started_at_ms = Some(2);
+    assert!(relay_card_event(&mut state, retry).contains("Provider switch not confirmed"));
+    assert_ne!(
+        auth_capture_id(state.auth.state.as_ref().unwrap()),
+        retry_id,
+        "fresh retry was swallowed by handled-card deduplication"
+    );
+}

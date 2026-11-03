@@ -1,10 +1,14 @@
 blank_issues_enabled: false
 
 contact_links:
+  - name: Community Roadmap / Discussions
+    url: https://github.com/agentic-os-org/ANOLISA/discussions/categories/community-roadmap
+    about: Explore recommended contribution directions; bug reports, bug fixes, and other Issues and PRs are also welcome.
+
   - name: 📖 Documentation / 文档
     url: https://agentic-os.sh/docs
     about: Check the documentation before opening an issue.
 
   - name: 🔒 Report a security vulnerability
-    url: https://github.com/alibaba/anolisa/security/advisories/new
+    url: https://github.com/agentic-os-org/ANOLISA/security/advisories/new
     about: Report vulnerabilities privately. Do not include security details in a public issue.

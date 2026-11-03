@@ -4,14 +4,56 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-_MODES = ("binary", "module")
+_V2 = os.environ.get("PII_E2E_RUNTIME") == "v2"
+_MODES = ("binary",) if _V2 else ("binary", "module")
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("sentence", [False, True])
+def test_scan_pii_email_sentence_boundaries(
+    mode: str, sentence: bool, tmp_path: Path
+) -> None:
+    email = "asc-pii-cosh-20261008@pii-fixture-20261008.net"
+    text = email + "."
+    if sentence:
+        text = (
+            "Reply with exactly this synthetic test email address and nothing else: "
+            + text
+            + " Do not call any tools. The address is invented test data."
+        )
+    result = _run_cli(
+        mode,
+        "scan-pii",
+        "--text",
+        text,
+        "--source",
+        "user_input",
+        "--raw-evidence",
+        "--redact-output",
+        data_dir=tmp_path / "data",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["verdict"] == "warn"
+    assert report["summary"]["by_type"] == {"email": 1}
+    finding = report["findings"][0]
+    start = text.index(email)
+    assert finding["span"] == {"start": start, "end": start + len(email)}
+    assert finding["raw_evidence"] == email
+    assert report["redacted_text"] == text.replace(
+        email, "a***@pii-fixture-20261008.net"
+    )
 
 
 def _module_mode_available() -> bool:
@@ -45,23 +87,101 @@ def _run_cli(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     data_dir.mkdir(parents=True, exist_ok=True)
+    if _V2:
+        # The test-owned parent must also pass the daemon's ancestor checks.
+        data_dir.parent.chmod(0o700)
+        data_dir.chmod(0o700)
     env = os.environ.copy()
     env["AGENT_SEC_DATA_DIR"] = str(data_dir)
     home_dir = data_dir / "home"
     home_dir.mkdir(parents=True, exist_ok=True)
     env["HOME"] = str(home_dir)
-    try:
-        return subprocess.run(
-            [*_command(mode), *args],
-            capture_output=True,
-            text=True,
-            input=input_text,
-            check=False,
-            timeout=30,
-            env=env,
+    with _scan_endpoint(data_dir, env) as endpoint:
+        try:
+            return subprocess.run(
+                [*_command(mode), *endpoint, *args],
+                capture_output=True,
+                text=True,
+                input=input_text,
+                check=False,
+                timeout=30,
+                env=env,
+            )
+        except FileNotFoundError as exc:
+            raise AssertionError("agent-sec-cli binary not found on PATH") from exc
+
+
+def _rules_path(data_dir: Path) -> Path:
+    if _V2:
+        return data_dir / "central-rules.yaml"
+    return data_dir / "home/.config/agent-sec/pii-checker/rules.yaml"
+
+
+@contextmanager
+def _scan_endpoint(data_dir: Path, env: dict[str, str]):
+    if not _V2:
+        yield []
+        return
+    binary = shutil.which("agent-sec-daemon")
+    assert binary, "V2 shared PII acceptance requires the installed Rust daemon"
+    # Use a short private directory to stay within the UDS path-length limit.
+    with tempfile.TemporaryDirectory(prefix="pii-e2e-", dir="/tmp") as directory:
+        socket_path = Path(directory) / "daemon.sock"
+        config = Path(directory) / "skillsec.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "stateDir": str(Path(directory) / "skillsec-state"),
+                    "enableDefaultSkillDirs": False,
+                }
+            )
         )
-    except FileNotFoundError as exc:
-        raise AssertionError("agent-sec-cli binary not found on PATH") from exc
+        config.chmod(0o600)
+        argv = [binary, "--socket", str(socket_path), "--skillsec-config", str(config)]
+        if _rules_path(data_dir).exists():
+            argv += ["--pii-rules", str(_rules_path(data_dir))]
+        process = subprocess.Popen(
+            argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        try:
+            deadline = time.monotonic() + 30
+            while (
+                not socket_path.exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            if not socket_path.exists():
+                process.terminate()
+                _, stderr = process.communicate(timeout=5)
+                raise AssertionError(
+                    "owned V2 PII daemon did not start "
+                    f"(rc={process.returncode}): {stderr.decode(errors='replace')}"
+                )
+            yield ["--socket", str(socket_path)]
+        finally:
+            process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise AssertionError("owned V2 PII daemon did not stop")
+
+
+def _read_events(mode: str, data_dir: Path) -> list[dict[str, Any]]:
+    if _V2:
+        # The V2 event-query command is not migrated. Read only this test's
+        # owned sink, after daemon shutdown has flushed it.
+        return [
+            json.loads(line)
+            for line in (data_dir / "security-events.jsonl").read_text().splitlines()
+        ]
+    result = _run_cli(
+        mode, "events", "--category", "pii_scan", "--output", "json", data_dir=data_dir
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 def _load_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -71,8 +191,17 @@ def _load_json(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return data
 
 
+@pytest.fixture(params=[0o022, 0o002], ids=["umask022", "umask002"])
+def process_umask(request: pytest.FixtureRequest):
+    previous = os.umask(request.param)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 @pytest.mark.parametrize("mode", _MODES)
-def test_scan_pii_text_json(mode: str, tmp_path: Path) -> None:
+def test_scan_pii_text_json(mode: str, tmp_path: Path, process_umask: None) -> None:
     result = _run_cli(
         mode,
         "scan-pii",
@@ -294,17 +423,7 @@ def test_scan_pii_raw_evidence_stays_out_of_security_events(
     scan_data = _load_json(scan_result)
     assert any("raw_evidence" in finding for finding in scan_data["findings"])
 
-    events_result = _run_cli(
-        mode,
-        "events",
-        "--category",
-        "pii_scan",
-        "--output",
-        "json",
-        data_dir=data_dir,
-    )
-    assert events_result.returncode == 0, events_result.stderr
-    events = json.loads(events_result.stdout)
+    events = _read_events(mode, data_dir)
     assert isinstance(events, list)
     assert len(events) == 1
 
@@ -326,9 +445,7 @@ def test_scan_pii_raw_evidence_stays_out_of_security_events(
 @pytest.mark.parametrize("mode", _MODES)
 def test_scan_pii_loads_fixed_custom_regex_rules(mode: str, tmp_path: Path) -> None:
     data_dir = tmp_path / mode / "custom-rules"
-    rules_path = (
-        data_dir / "home" / ".config" / "agent-sec" / "pii-checker" / "rules.yaml"
-    )
+    rules_path = _rules_path(data_dir)
     rules_path.parent.mkdir(parents=True, exist_ok=True)
     rules_path.write_text(
         """
@@ -367,17 +484,7 @@ def test_scan_pii_loads_fixed_custom_regex_rules(mode: str, tmp_path: Path) -> N
     assert "ORDER-ABC12345" not in data["redacted_text"]
     assert "DFT-ABCDEF1234567890" not in data["redacted_text"]
 
-    events_result = _run_cli(
-        mode,
-        "events",
-        "--category",
-        "pii_scan",
-        "--output",
-        "json",
-        data_dir=data_dir,
-    )
-    assert events_result.returncode == 0, events_result.stderr
-    events = json.loads(events_result.stdout)
+    events = _read_events(mode, data_dir)
     assert len(events) == 1
     details = events[0]["details"]
     details_text = json.dumps(details, ensure_ascii=False)
@@ -394,9 +501,7 @@ def test_scan_pii_loads_fixed_custom_regex_rules(mode: str, tmp_path: Path) -> N
 @pytest.mark.parametrize("mode", _MODES)
 def test_scan_pii_invalid_custom_rules_fail_open(mode: str, tmp_path: Path) -> None:
     data_dir = tmp_path / mode / "invalid-custom-rules"
-    rules_path = (
-        data_dir / "home" / ".config" / "agent-sec" / "pii-checker" / "rules.yaml"
-    )
+    rules_path = _rules_path(data_dir)
     rules_path.parent.mkdir(parents=True, exist_ok=True)
     sensitive_pattern = "[private-business-pattern"
     rules_path.write_text(
@@ -421,17 +526,7 @@ def test_scan_pii_invalid_custom_rules_fail_open(mode: str, tmp_path: Path) -> N
     assert "invalid_regex" in result.stderr
     assert sensitive_pattern not in result.stderr
 
-    events_result = _run_cli(
-        mode,
-        "events",
-        "--category",
-        "pii_scan",
-        "--output",
-        "json",
-        data_dir=data_dir,
-    )
-    assert events_result.returncode == 0, events_result.stderr
-    events = json.loads(events_result.stdout)
+    events = _read_events(mode, data_dir)
     assert len(events) == 1
     details = events[0]["details"]
     details_text = json.dumps(details, ensure_ascii=False)
@@ -442,3 +537,24 @@ def test_scan_pii_invalid_custom_rules_fail_open(mode: str, tmp_path: Path) -> N
     assert sensitive_pattern not in details_text
     assert "alice@company.cn" not in details_text
     assert ".config" not in details_text
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_scan_pii_model_input_source(mode: str, tmp_path: Path) -> None:
+    secret = "sk-test9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA"
+    result = _run_cli(
+        mode,
+        "scan-pii",
+        "--stdin",
+        "--source",
+        "model_input",
+        "--format",
+        "json",
+        data_dir=tmp_path / mode / "model-input",
+        input_text=secret,
+    )
+    data = _load_json(result)
+    assert data["summary"]["source"] == "model_input"
+    assert data["verdict"] == "deny"
+    assert "redacted_text" not in data
+    assert secret not in result.stdout

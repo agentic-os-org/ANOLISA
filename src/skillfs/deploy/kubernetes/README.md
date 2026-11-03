@@ -4,8 +4,8 @@ These manifests run SkillFS as a privileged FUSE sidecar and expose its view to
 a non-privileged workload container.
 
 See the
-[Kubernetes sidecar user guide](../../../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md)
-([中文](../../../../docs/user-guide/zh/runtime/skillfs-kubernetes-sidecar.md))
+[Kubernetes sidecar user guide](../../../../docs/user-guide/en/skillfs/kubernetes-sidecar.md)
+([中文](../../../../docs/user-guide/zh/skillfs/kubernetes-sidecar.md))
 for the complete workflow.
 
 ## Prerequisites

@@ -3,6 +3,7 @@ pub mod backends;
 pub mod dispatcher;
 pub mod fs_watcher;
 mod guarded_checkpoint;
+mod health_probe;
 pub mod index_store;
 pub mod listener;
 mod lockfile;

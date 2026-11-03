@@ -1,13 +1,15 @@
 import type {Config} from '@docusaurus/types';
 import type {Options, ThemeConfig} from '@docusaurus/preset-classic';
 import {themes as prismThemes} from 'prism-react-renderer';
+import {readFileSync} from 'node:fs';
+import path from 'node:path';
 
 const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
 const baseUrl = process.env.BASE_URL ?? '/';
 
 const config: Config = {
   title: 'ANOLISA',
-  tagline: 'The operating layer for agent workloads',
+  tagline: 'A multi-component system software stack for AI Agent workloads.',
   url: siteUrl,
   baseUrl,
   organizationName: 'agentic-os-org',
@@ -50,6 +52,7 @@ const config: Config = {
     },
   },
   staticDirectories: ['static', '.generated/static'],
+  plugins: ['./plugins/document-redirects.mjs'],
   i18n: {
     defaultLocale: 'en',
     locales: ['en', 'zh'],
@@ -67,6 +70,14 @@ const config: Config = {
           path: '.generated/docs',
           routeBasePath: 'docs',
           sidebarPath: './sidebars.ts',
+          async sidebarItemsGenerator({defaultSidebarItemsGenerator, ...args}) {
+            const items = await defaultSidebarItemsGenerator(args);
+            if (/^user-guide\/[^/]+$/.test(args.item.dirName)) {
+              // The component category already links to its manual entry.
+              return items.filter((item) => item.type !== 'doc' || item.id !== `${args.item.dirName}/index`);
+            }
+            return items;
+          },
           showLastUpdateAuthor: false,
         },
         blog: false,
@@ -82,7 +93,7 @@ const config: Config = {
       {
         name: 'description',
         content:
-          'ANOLISA is a local-first operating layer for building, running, securing, and observing agent workloads.',
+          'ANOLISA is a multi-component system software stack providing context management, Skills delivery, workspace recovery, security, and observability for AI Agent applications, frameworks, and platforms.',
       },
     ],
     colorMode: {
@@ -100,55 +111,13 @@ const config: Config = {
       },
       hideOnScroll: false,
       items: [
-        {to: '/docs/user-guide', label: 'User Guide', position: 'left'},
-        {to: '/docs/developer-guide', label: 'Developer Guide', position: 'left'},
-        {to: '/changelog', label: 'Changelog', position: 'left'},
-        {to: '/agents/', label: 'For Agents', position: 'left'},
-        {
-          href: 'https://github.com/agentic-os-org/ANOLISA',
-          label: 'GitHub',
-          position: 'right',
-          className: 'headerGithubLink',
-          'aria-label': 'ANOLISA GitHub repository',
-        },
+        ...JSON.parse(readFileSync(path.join(__dirname, '.generated/navbar-items.json'), 'utf8')),
         {type: 'localeDropdown', position: 'right'},
       ],
     },
     footer: {
       style: 'dark',
-      links: [
-        {
-          title: 'Docs',
-          items: [
-            {label: 'Documentation', to: '/docs'},
-            {label: 'Quickstart', to: '/docs/quickstart'},
-            {label: 'Building', to: '/docs/building'},
-            {label: 'Changelog', to: '/changelog'},
-            {label: 'For Agents', to: '/agents/'},
-          ],
-        },
-        {
-          title: 'Guides',
-          items: [
-            {label: 'User Guide', to: '/docs/user-guide'},
-            {label: 'Developer Guide', to: '/docs/developer-guide'},
-          ],
-        },
-        {
-          title: 'Community',
-          items: [
-            {label: 'GitHub', href: 'https://github.com/agentic-os-org/ANOLISA'},
-            {
-              label: 'Contributing',
-              href: 'https://github.com/agentic-os-org/ANOLISA/blob/main/CONTRIBUTING.md',
-            },
-            {
-              label: 'Security',
-              href: 'https://github.com/agentic-os-org/ANOLISA/blob/main/SECURITY.md',
-            },
-          ],
-        },
-      ],
+      links: JSON.parse(readFileSync(path.join(__dirname, '.generated/footer-links.json'), 'utf8')),
       copyright: `Copyright © ${new Date().getFullYear()} ANOLISA contributors. Apache-2.0.`,
     },
     prism: {

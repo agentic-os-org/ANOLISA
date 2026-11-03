@@ -84,6 +84,20 @@ if [ "$1" = config ] && [ "$2" = set ]; then
     exit 0
 fi
 if [ "$1" = plugins ] && [ "$2" = uninstall ]; then
+    # Model OpenClaw 2026.5.7 cleanup for this fixture, not every host version.
+    # A separate real install/uninstall probe checks this slot behavior.
+    python3 - "$OPENCLAW_STATE_DIR/openclaw.json" <<'CLEAN'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+if path.exists():
+    cfg = json.loads(path.read_text())
+    plugins = cfg.get("plugins", {})
+    plugins["allow"] = [p for p in plugins.get("allow", []) if p != "memory-anolisa"]
+    plugins.get("entries", {}).pop("memory-anolisa", None)
+    if plugins.get("slots", {}).get("memory") == "memory-anolisa":
+        plugins["slots"]["memory"] = "memory-core"
+    path.write_text(json.dumps(cfg))
+CLEAN
     exit 0
 fi
 [ "$1" = plugins ] && [ "$2" = install ]
@@ -577,7 +591,7 @@ assert plugins['entries']['memory-core']['enabled'] == (sys.argv[3] == 'true')
 assert 'memory-anolisa' not in plugins['entries']
 assert 'memory-anolisa' not in plugins['allow']
 assert plugins['entries']['memory-lancedb']['enabled'] is True
-assert plugins['slots'].get('memory') == (None if sys.argv[2] == 'memory-anolisa' else sys.argv[2])
+assert plugins['slots'].get('memory') == ("memory-core" if sys.argv[2] == 'memory-anolisa' else sys.argv[2])
 PYTEST
             if [ "$legacy" = yes ]; then
                 expect_log 'previous installer recorded'
@@ -590,3 +604,80 @@ PYTEST
         done
     done
 done
+
+# ── ANOLISA_DRY_RUN previews the lifecycle without acting ───────────────────
+# The adapter family contract (tokenless's nine adapters, ws-ckpt's openclaw and
+# hermes scripts) is that ANOLISA_DRY_RUN=1 previews and changes nothing. A dry
+# run must name the negotiated install argv and the config-set that follows it.
+#
+# One deliberate divergence from the family's stricter no-CLI-touch rule:
+# install.sh's preview names the *negotiated* argv, so the read-only
+# `plugins install --help` probe still runs under a dry run — that probe is
+# what decides the flags the preview prints, and naming the resolved flags
+# beats a conditional wording. (ws-ckpt's OpenClaw script takes the other route
+# and names the probe it would run: "DRY-RUN: probe '$OPENCLAW_BIN --version'
+# before config cleanup".) The argv assertions below therefore carve the
+# `--help` probe out of the "the CLI was not invoked" count rather than
+# requiring an empty argv log.
+: > "$TEST_ARGV_LOG"
+rm -f "$TEST_INSTALLED"
+dry_install_out="$(env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    ANOLISA_DRY_RUN=1 TEST_HELP=modern TEST_GATE=new bash "$INSTALL_SH" 2>&1)" \
+    || fail 'dry-run install exited non-zero'
+case "$dry_install_out" in
+    *"DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN $(argv no yes)"*) : ;;
+    *) fail 'dry-run install did not name the negotiated install argv' ;;
+esac
+case "$dry_install_out" in
+    *"DRY-RUN: $OPENCLAW_BIN config set plugins.entries.memory-anolisa.hooks.allowConversationAccess true"*) : ;;
+    *) fail 'dry-run install did not name the config-set follow-up' ;;
+esac
+[ "$(awk '/^plugins install / && !/--help$/ {n++} END {print n+0}' "$TEST_ARGV_LOG")" = 0 ] \
+    || fail 'dry-run install invoked the installer'
+[ ! -f "$TEST_INSTALLED" ] || fail 'dry-run install marked the plugin installed'
+echo "PASS: dry-run install previews the install and the settings write"
+
+# A host without the CLI still gets a preview: the real install stops at the
+# CLI gate, and a dry run that printed nothing at all would leave the operator
+# unable to tell "nothing to do on this host" from "the preview is broken".
+: > "$TEST_ARGV_LOG"
+dry_nocli_install_out="$(env -u AGENT_MEMORY_SAFE_INSTALL -u AGENT_MEMORY_ACCEPT_CAPABILITIES \
+    ANOLISA_DRY_RUN=1 OPENCLAW_BIN="$SANDBOX/absent-openclaw" TEST_HELP=modern TEST_GATE=new \
+    bash "$INSTALL_SH" 2>&1)" || fail 'no-CLI dry-run install exited non-zero'
+case "$dry_nocli_install_out" in
+    *"DRY-RUN: $SANDBOX/absent-openclaw is not on PATH"*) : ;;
+    *) fail 'no-CLI dry-run install produced no preview' ;;
+esac
+[ ! -s "$TEST_ARGV_LOG" ] || fail 'no-CLI dry-run install invoked a CLI'
+echo 'PASS: a no-CLI dry-run install names the gate it stops at'
+
+# A dry-run uninstall names the CLI deregistration and touches nothing.
+mkdir -p -- "$OPENCLAW_STATE_DIR/plugins/memory-anolisa"
+: > "$TEST_INSTALLED"
+: > "$TEST_ARGV_LOG"
+dry_uninstall_out="$(ANOLISA_DRY_RUN=1 bash "$UNINSTALL_SH" 2>&1)" \
+    || fail 'dry-run uninstall exited non-zero'
+case "$dry_uninstall_out" in
+    *"DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins uninstall memory-anolisa --force"*) : ;;
+    *) fail 'dry-run uninstall did not name the CLI deregistration' ;;
+esac
+[ -f "$TEST_INSTALLED" ] || fail 'dry-run uninstall ran the CLI'
+[ "$(awk '/^plugins uninstall / {n++} END {print n+0}' "$TEST_ARGV_LOG")" = 0 ] \
+    || fail 'dry-run uninstall called the CLI'
+echo "PASS: dry-run uninstall previews the CLI deregistration"
+
+# Without the CLI the preview names the refusal and still changes nothing.
+dry_manual_out="$(ANOLISA_DRY_RUN=1 OPENCLAW_BIN="$SANDBOX/absent-openclaw" \
+    bash "$UNINSTALL_SH" 2>&1)" || fail 'no-CLI dry-run uninstall exited non-zero'
+case "$dry_manual_out" in
+    *"a real uninstall would fail"*) : ;;
+    *) fail 'no-CLI dry-run uninstall did not preview the refusal' ;;
+esac
+case "$dry_manual_out" in
+    *"rm -rf"*) fail 'no-CLI dry-run uninstall promised a direct removal' ;;
+esac
+[ -d "$OPENCLAW_STATE_DIR/plugins/memory-anolisa" ] || fail 'the no-CLI dry run removed the plugin tree'
+echo "PASS: a no-CLI dry-run uninstall previews the refusal"
+
+# These isolated subprocess cases pin the host-owned configuration boundary.
+python3 "$SCRIPT_DIR/test_openclaw_uninstall.py"

@@ -1,6 +1,16 @@
 use anyhow::Result;
 use std::time::Instant;
 
+/// Removes the wrapped path when dropped, so a mid-run write/sync failure
+/// cannot leak the bench temp file. Unlink-while-open is fine on Linux: the
+/// kernel keeps the inode alive until the file handle closes.
+struct RemoveOnDrop<'a>(&'a str);
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        std::fs::remove_file(self.0).ok();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BenchResult {
     pub name: String,
@@ -135,13 +145,19 @@ fn bench_context_switch() -> Result<BenchResult> {
 
     child.join().unwrap();
 
-    let us_per_switch = elapsed.as_micros() as f64 / iterations as f64;
+    Ok(context_switch_result(elapsed, iterations))
+}
 
-    Ok(BenchResult {
+/// Label the unix-socket ping-pong cost. One iteration is a full round-trip
+/// that wakes the peer twice (once for the request, once for the reply), so
+/// the value is per RTT — like `bench_net_latency` — not per single switch.
+fn context_switch_result(elapsed: std::time::Duration, iterations: u64) -> BenchResult {
+    let us_per_rtt = elapsed.as_micros() as f64 / iterations as f64;
+    BenchResult {
         name: "context switch".to_string(),
-        value: us_per_switch,
-        unit: "μs/switch".to_string(),
-    })
+        value: us_per_rtt,
+        unit: "μs/RTT".to_string(),
+    }
 }
 
 fn bench_mem_bandwidth() -> Result<BenchResult> {
@@ -174,25 +190,47 @@ fn bench_mem_bandwidth() -> Result<BenchResult> {
     })
 }
 
-fn bench_mem_latency() -> Result<BenchResult> {
-    let size = 4 * 1024 * 1024; // 4M entries = 32MB on 64-bit
+/// A Fisher-Yates shuffle of `0..size` from a fixed seed, so the pointer
+/// chain below is random but reproducible.
+fn shuffled_order(size: usize, seed: u64) -> Vec<usize> {
     let mut chain: Vec<usize> = (0..size).collect();
-
-    // Shuffle to create random pointer chain
-    let mut seed = 42u64;
+    let mut seed = seed;
     for i in (1..size).rev() {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let j = (seed as usize) % (i + 1);
         chain.swap(i, j);
     }
+    chain
+}
+
+/// The index chain [`bench_mem_latency`] chases: the whole `chain` order as
+/// one cycle, every entry written exactly once.
+///
+/// Walking the order and linking each node to its successor
+/// (`indices[pos] = next; pos = next`, starting at 0) instead places node
+/// `chain[i]` at slot `chain[i - 1]`, so the link into slot 0 is written by
+/// whichever step follows the order's `0` — and the order's last node is never
+/// a write position at all. A `0` anywhere but the last slot therefore splits
+/// the permutation into the cycle reachable from slot 0 and the tail behind it,
+/// and the walk reports ns per access over that fragment: at the production
+/// seed the `0` lands at slot 7224, so 7224 of the 4194304 entries are never
+/// touched while the benchmark still reports the latency of a 32 MB structure.
+fn pointer_chain(chain: &[usize]) -> Vec<usize> {
+    let mut indices = vec![0usize; chain.len()];
+    let Some(last) = chain.len().checked_sub(1) else {
+        return indices;
+    };
+    for (i, &node) in chain.iter().enumerate() {
+        indices[node] = chain[if i == last { 0 } else { i + 1 }];
+    }
+    indices
+}
+
+fn bench_mem_latency() -> Result<BenchResult> {
+    let size = 4 * 1024 * 1024; // 4M entries = 32MB on 64-bit
 
     // Build linked list via index chain
-    let mut indices = vec![0usize; size];
-    let mut pos = 0;
-    for &next in &chain {
-        indices[pos] = next;
-        pos = next;
-    }
+    let indices = pointer_chain(&shuffled_order(size, 42));
 
     // Chase pointers
     let iterations = 2_000_000;
@@ -213,12 +251,24 @@ fn bench_mem_latency() -> Result<BenchResult> {
     })
 }
 
+/// Scratch file path for an IO benchmark, unique to this process.
+///
+/// The cleanup guard is already in place; what the name has to add is that two
+/// concurrent `ktuner bench` runs do not share a path. With a fixed name they
+/// open the same file with `truncate(true)` and both report throughput numbers
+/// measured while the other process was rewriting the file underneath them.
+/// `bench_io_dir` prefers the current working directory, so the collision is
+/// between two shells in the same project rather than an exotic setup.
+fn bench_io_path(dir: &str, name: &str) -> String {
+    format!("{dir}/.{name}.{}", std::process::id())
+}
+
 fn bench_io_latency() -> Result<BenchResult> {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
-    let path = format!("{}/.ktuner_io_bench", bench_io_dir());
+    let path = bench_io_path(&bench_io_dir(), "ktuner_io_bench");
     let path = path.as_str();
     let iterations = 1000u64;
 
@@ -231,6 +281,8 @@ fn bench_io_latency() -> Result<BenchResult> {
 
     let data = [0u8; 4096];
 
+    let _cleanup = RemoveOnDrop(path);
+
     // Warm up
     file.write_all(&data)?;
 
@@ -240,7 +292,7 @@ fn bench_io_latency() -> Result<BenchResult> {
     }
     let elapsed = start.elapsed();
 
-    std::fs::remove_file(path).ok();
+    drop(_cleanup);
 
     let us_per_write = elapsed.as_micros() as f64 / iterations as f64;
 
@@ -255,7 +307,7 @@ fn bench_io_throughput() -> Result<BenchResult> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    let path = format!("{}/.ktuner_io_tput_bench", bench_io_dir());
+    let path = bench_io_path(&bench_io_dir(), "ktuner_io_tput_bench");
     let path = path.as_str();
     let block_size = 1024 * 1024; // 1MB blocks
     let total_size = 128 * 1024 * 1024; // 128MB total
@@ -269,6 +321,8 @@ fn bench_io_throughput() -> Result<BenchResult> {
         .truncate(true)
         .open(path)?;
 
+    let _cleanup = RemoveOnDrop(path);
+
     let start = Instant::now();
     for _ in 0..blocks {
         file.write_all(&data)?;
@@ -276,15 +330,20 @@ fn bench_io_throughput() -> Result<BenchResult> {
     file.sync_all()?;
     let elapsed = start.elapsed();
 
-    std::fs::remove_file(path).ok();
+    drop(_cleanup);
 
-    let mb_per_sec = total_size as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+    Ok(io_throughput_result(total_size as u64, elapsed))
+}
 
-    Ok(BenchResult {
+/// Label the sequential-write throughput. The math divides bytes by
+/// 1024*1024, so the unit is MiB/s, not MB/s.
+fn io_throughput_result(total_bytes: u64, elapsed: std::time::Duration) -> BenchResult {
+    let mib_per_sec = total_bytes as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+    BenchResult {
         name: "IO throughput (seq)".to_string(),
-        value: mb_per_sec,
-        unit: "MB/s".to_string(),
-    })
+        value: mib_per_sec,
+        unit: "MiB/s".to_string(),
+    }
 }
 
 fn bench_net_latency() -> Result<BenchResult> {
@@ -332,4 +391,124 @@ fn bench_net_latency() -> Result<BenchResult> {
         value: us_per_rtt,
         unit: "μs/RTT".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_on_drop_guard_removes_the_file() {
+        let path =
+            std::env::temp_dir().join(format!("ktuner-bench-guard-{}.tmp", std::process::id()));
+        std::fs::write(&path, b"x").expect("write guard test file");
+        {
+            let _guard = RemoveOnDrop(path.to_str().expect("utf-8 temp path"));
+            assert!(path.exists(), "file must exist while the guard is live");
+        }
+        assert!(!path.exists(), "guard must remove the file on drop");
+    }
+
+    #[test]
+    fn the_pointer_chain_reaches_every_entry() {
+        // One cycle through the whole permutation: `bench_mem_latency` reports
+        // ns per access over the chain it walks, so a node the walk cannot
+        // reach shortens the measured footprint without changing the count.
+        let size = 16;
+        let order = shuffled_order(size, 42);
+        let zero_at = order.iter().position(|&node| node == 0).unwrap();
+        assert!(
+            zero_at != size - 1,
+            "the production seed must place the zero mid-order, or this \
+             fixture cannot exercise the split: {order:?}"
+        );
+
+        let indices = pointer_chain(&order);
+        let mut seen = vec![false; size];
+        let mut idx = 0usize;
+        for _ in 0..size {
+            assert!(!seen[idx], "the chain revisits entry {idx}: {order:?}");
+            seen[idx] = true;
+            idx = indices[idx];
+        }
+        assert_eq!(idx, 0, "the cycle must close on its start: {order:?}");
+        assert!(
+            seen.iter().all(|&visited| visited),
+            "every entry must be reachable from 0: {seen:?} order {order:?}"
+        );
+    }
+
+    #[test]
+    fn the_pointer_chain_covers_a_single_entry() {
+        // `size - 1` would underflow on the empty case's guard, so the one-node
+        // ring is pinned separately: the walk must stay on 0 rather than read
+        // an out-of-range slot.
+        assert_eq!(pointer_chain(&[0]), vec![0]);
+        assert!(pointer_chain(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_pointer_chain_reaches_every_entry_at_every_zero_position() {
+        // The split depends on where the shuffle happened to place the 0, so
+        // pin the positions rather than one seed's accident: start, middle and
+        // end of the order.
+        for zero_at in 0..6usize {
+            let mut order: Vec<usize> = (1..=6).collect();
+            order.insert(zero_at, 0);
+            let indices = pointer_chain(&order);
+            let mut seen = vec![false; order.len()];
+            let mut idx = 0usize;
+            for _ in 0..order.len() {
+                assert!(
+                    !seen[idx],
+                    "zero at {zero_at} revisits entry {idx}: {order:?}"
+                );
+                seen[idx] = true;
+                idx = indices[idx];
+            }
+            assert_eq!(idx, 0, "zero at {zero_at} does not close: {order:?}");
+            assert!(
+                seen.iter().all(|&visited| visited),
+                "zero at {zero_at} leaves entries unreachable: {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn io_throughput_is_labeled_mib_per_sec() {
+        // 2 MiB written in 2 s is exactly 1.0 MiB/s; the divisor is
+        // 1024*1024, so the label must be MiB/s, not MB/s.
+        let r = io_throughput_result(2 * 1024 * 1024, std::time::Duration::from_secs(2));
+        assert_eq!(r.unit, "MiB/s");
+        assert_eq!(r.name, "IO throughput (seq)");
+        assert!((r.value - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn context_switch_is_labeled_per_round_trip() {
+        // One iteration is a full ping-pong round-trip (the peer wakes for
+        // the request and again for the reply), so the unit is per RTT,
+        // matching the μs/RTT convention of bench_net_latency.
+        let r = context_switch_result(std::time::Duration::from_micros(200), 100);
+        assert_eq!(r.unit, "μs/RTT");
+        assert_eq!(r.name, "context switch");
+        assert!((r.value - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn io_benchmark_paths_are_unique_per_process() {
+        let dir = std::env::temp_dir();
+        let dir = dir.to_string_lossy().to_string();
+
+        let latency = bench_io_path(&dir, "ktuner_io_bench");
+        let throughput = bench_io_path(&dir, "ktuner_io_tput_bench");
+        assert_ne!(latency, throughput);
+
+        // The process id is what keeps two concurrent runs apart, and a second
+        // call from this process must still produce the same path so the guard
+        // removes the file the benchmark actually wrote.
+        assert!(latency.contains(&std::process::id().to_string()));
+        assert_eq!(latency, bench_io_path(&dir, "ktuner_io_bench"));
+        assert!(std::path::Path::new(&latency).parent() == Some(std::path::Path::new(&dir)));
+    }
 }

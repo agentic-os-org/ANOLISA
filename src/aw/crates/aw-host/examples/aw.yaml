@@ -1,0 +1,51 @@
+# Local Host demonstration. Run from src/aw after building the policy example.
+# Agent argv is configuration data; this example does not launch an Agent.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: provider-host-example
+spec:
+  daemon:
+    startup: on_demand
+    endpoint: auto
+    state_dir: auto
+  execution:
+    guarantee: native_hook
+    default_event_budget_ms: 5000
+  audit:
+    enabled: true
+    payload: metadata_only
+  agents:
+    qoder:
+      adapter: qoder
+      argv: [qodercli]
+  providers:
+    policy:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        argv: [./target/debug/examples/policy]
+        location: agent
+      timeout_ms: 2000
+      max_output_bytes: 65536
+      config:
+        blocked_tools: [DeleteFile]
+  events:
+    tool.before:
+      enabled: true
+      required: true
+      steps:
+        - id: before-policy
+          provider: policy
+          operation: check
+          effects: [observe, block]
+          on_error: block
+    tool.after:
+      enabled: true
+      required: true
+      steps:
+        - id: after-policy
+          provider: policy
+          operation: check
+          effects: [observe]
+          on_error: report

@@ -40,7 +40,7 @@ The plugin registers four hooks with Codex:
 
 ### Prerequisites
 
-- Rust toolchain ≥ 1.89.0
+- Rust toolchain ≥ 1.91.0
 - The `anolisa` source tree (this repository)
 
 ### Install
@@ -141,7 +141,7 @@ codex-plugin-tokenless/
 
 ## Related
 
-- [Tokenless Rust CLI](../../crates/tokenless-cli/) — core compression engine
+- [Tokenless Rust CLI](../../../crates/tokenless-cli/) — core compression engine
 - [OpenClaw Plugin](../openclaw/) — same compression for OpenClaw
 - [Hermes Plugin](../hermes/) — same compression for Hermes
 

@@ -14,6 +14,7 @@
 //! (treated as "SLS collection not active").
 
 use crate::trace::TraceContext;
+use crate::warn_stats;
 use crate::{StatsRecord, VERSION};
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -90,6 +91,9 @@ fn canonicalize_or_reconstruct(path: &std::path::Path) -> PathBuf {
 /// NOTE: `SlsWriter` stores the canonicalized path at construction time
 /// to narrow the TOCTOU window between validation and write.
 fn validate_sls_path(path: &std::path::Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
     if path
         .components()
         .any(|c| c == std::path::Component::ParentDir)
@@ -124,11 +128,11 @@ fn resolve_sls_path(env_val: Option<&str>) -> PathBuf {
         .and_then(|p| match validate_sls_path(&p) {
             Some(resolved) => Some(resolved),
             None => {
-                eprintln!(
+                warn_stats(&format!(
                     "tokenless-sls: TOKENLESS_SLS_PATH rejected (must be under \
                      /var/log/ or /tmp/, and must not contain '..'), \
                      falling back to default: {DEFAULT_SLS_PATH}"
-                );
+                ));
                 None
             }
         })
@@ -295,7 +299,7 @@ impl SlsWriter {
     /// creates, truncates, or deletes the file or its parent directory.
     pub fn write(&self, record: &StatsRecord) {
         // Skip silently when the SLS collector has not created the file yet.
-        if !self.path.exists() {
+        if !self.path.is_absolute() || !self.path.exists() {
             return;
         }
 
@@ -307,7 +311,7 @@ impl SlsWriter {
         let line = match serde_json::to_string(&sls_record) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("tokenless-sls: serialization error: {e}");
+                warn_stats(&format!("tokenless-sls: serialization error: {e}"));
                 return;
             }
         };
@@ -330,12 +334,12 @@ impl SlsWriter {
         }) {
             static WRITE_ERROR_WARNED: AtomicBool = AtomicBool::new(false);
             if !WRITE_ERROR_WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!(
+                warn_stats(&format!(
                     "tokenless-sls: write error to {}: {} \
                      (further write errors suppressed)",
                     self.path.display(),
                     e
-                );
+                ));
             }
         }
     }
@@ -654,6 +658,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_resolve_sls_path_accepts_valid_path() {
         // Valid paths under /var/log/ or /tmp/ are accepted.
         assert_eq!(
@@ -667,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_validate_sls_path_symlinked_prefix() {
         // When /var/log is symlinked to another filesystem, canonicalization
         // resolves it to the real target which no longer starts with

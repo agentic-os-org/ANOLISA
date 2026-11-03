@@ -41,6 +41,12 @@ if [ -e "$PLUGIN_LINK" ] || [ -L "$PLUGIN_LINK" ]; then
 fi
 
 if [ "${ANOLISA_DRY_RUN:-0}" = "1" ]; then
+    # Every write the real path performs, conditionally where it acts
+    # conditionally: the plugin directory is created only when it is missing,
+    # while the link is the write that always follows.
+    if [ ! -d "$PLUGIN_DIR" ]; then
+        echo "DRY-RUN: mkdir -p ${PLUGIN_DIR}"
+    fi
     echo "DRY-RUN: ln -s ${PLUGIN_SOURCE} ${PLUGIN_LINK}"
     exit 0
 fi

@@ -159,7 +159,10 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
       } else {
         data = [];
       }
-      setEvents(data);
+      // The session/conversation endpoints return resolved rows too; this panel
+      // shows and counts only what still needs attention, and a resolved event
+      // must not be offered the Resolve action again.
+      setEvents(data.filter((event) => !event.resolved));
     } catch (e: any) {
       setError(e.message ?? t('comp.interrupt.failedToLoad'));
     } finally {

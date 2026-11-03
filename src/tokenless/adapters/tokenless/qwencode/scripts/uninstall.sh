@@ -5,6 +5,7 @@ set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-qwencode}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
+DRY_RUN="${ANOLISA_DRY_RUN:-0}"
 
 EXTENSION_NAME="tokenless"
 
@@ -15,6 +16,18 @@ echo "[${COMPONENT}] Uninstalling ${AGENT} plugin..."
 
 if [ -z "$QWEN_BIN" ]; then
     QWEN_BIN="$(command -v qwen 2>/dev/null || true)"
+fi
+
+# Preview before any removal: the CLI path uninstalls the active
+# extension and the manual fallback deletes the extension directory —
+# a dry run must leave both in place.
+if [ "$DRY_RUN" = "1" ]; then
+    if [ -n "$QWEN_BIN" ] && [ -x "$QWEN_BIN" ]; then
+        echo "DRY-RUN: $QWEN_BIN extensions uninstall $EXTENSION_NAME"
+    fi
+    echo "DRY-RUN: rm -rf ${HOME}/.qwen/extensions/${EXTENSION_NAME} (manual fallback)"
+    echo "DRY-RUN: clean ${HOME}/.qwen/extension-enablement.json (manual fallback)"
+    exit 0
 fi
 
 if [ -n "$QWEN_BIN" ] && [ -x "$QWEN_BIN" ]; then

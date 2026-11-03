@@ -47,6 +47,7 @@
 //! AgentSight is not mentioned anywhere on purpose: this primitive is
 //! shared by every component the package manager knows about.
 
+use anolisa_platform::fs_layout::create_install_dir_all;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
@@ -480,7 +481,7 @@ impl Transaction {
         };
 
         if !journal_dir.as_os_str().is_empty() {
-            fs::create_dir_all(journal_dir)
+            create_install_dir_all(journal_dir)
                 .map_err(|err| TransactionError::Io(journal_dir.to_path_buf(), err))?;
         }
 
@@ -840,7 +841,7 @@ impl Transaction {
         if let Some(parent) = self.journal_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent)
+            create_install_dir_all(parent)
                 .map_err(|err| TransactionError::Io(parent.to_path_buf(), err))?;
         }
         let content = toml::to_string_pretty(self).map_err(|err| {
@@ -897,7 +898,7 @@ pub fn restore_backup_file(
         if let Some(parent) = dest.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent)
+            create_install_dir_all(parent)
                 .map_err(|err| TransactionError::Io(parent.to_path_buf(), err))?;
         }
         match fs::remove_file(dest) {
@@ -1022,7 +1023,7 @@ fn write_atomic_with_mode(
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent)?;
+        create_install_dir_all(parent)?;
     }
     let tmp = tmp_path_for(path);
     // Owner-only while the bytes are in flight when we know the target

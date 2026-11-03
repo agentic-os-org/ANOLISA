@@ -297,19 +297,35 @@ fn setup_runtime_dir<R: CommandRunner>(
 /// Determine the sandbox.toml deployment path.
 ///
 /// - System-level (euid==0): `<layout.etc_dir>/sandbox.toml`
-/// - User-level: `$XDG_CONFIG_HOME/anolisa/sandbox.toml`
+/// - User-level: `$XDG_CONFIG_HOME/anolisa/sandbox.toml`, falling back to
+///   `$HOME/.config/anolisa/sandbox.toml` when `XDG_CONFIG_HOME` is unset,
+///   empty, or relative (XDG Base Directory spec).
 fn resolve_sandbox_config_path(layout: &FsLayout) -> PathBuf {
     if privilege::is_root() {
         layout.etc_dir.join("sandbox.toml")
     } else {
-        let config_home = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-            format!("{home}/.config")
-        });
-        PathBuf::from(config_home)
-            .join("anolisa")
-            .join("sandbox.toml")
+        let config_home = user_config_home(
+            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+        );
+        config_home.join("anolisa").join("sandbox.toml")
     }
+}
+
+/// Resolve the deploy-time user config home per the XDG Base Directory spec:
+/// a non-empty absolute `$XDG_CONFIG_HOME` wins; unset, empty, or relative
+/// values fall back to an absolute `$HOME/.config`. `/root/.config` remains
+/// the last resort when `HOME` is unusable — unset, empty, or itself
+/// relative, matching the historical fallback. Any relative root would make
+/// the deploy target depend on the CWD.
+fn user_config_home(xdg: Option<&str>, home: Option<&str>) -> PathBuf {
+    if let Some(xdg) = xdg.filter(|v| !v.is_empty() && Path::new(v).is_absolute()) {
+        return PathBuf::from(xdg);
+    }
+    let home = home
+        .filter(|v| !v.is_empty() && Path::new(v).is_absolute())
+        .unwrap_or("/root");
+    Path::new(home).join(".config")
 }
 
 fn deploy_sandbox_config(cmd: &str, layout: &FsLayout) -> Result<(), CliError> {
@@ -923,6 +939,38 @@ mod tests {
 
     use super::*;
     use crate::helper_client::ScriptedTransport;
+
+    #[test]
+    fn user_config_home_follows_xdg_spec() {
+        // A non-empty absolute XDG_CONFIG_HOME wins.
+        assert_eq!(
+            user_config_home(Some("/xdg"), Some("/h")),
+            PathBuf::from("/xdg")
+        );
+        // Empty or relative values are ignored per the spec and fall back to
+        // $HOME/.config — never to a CWD-relative deploy target.
+        assert_eq!(
+            user_config_home(Some(""), Some("/h")),
+            PathBuf::from("/h/.config")
+        );
+        assert_eq!(
+            user_config_home(Some("rel/dir"), Some("/h")),
+            PathBuf::from("/h/.config")
+        );
+        // Historical last resort when HOME is unusable — unset, empty, or
+        // itself relative; a relative HOME is rejected by the same rule as a
+        // relative XDG_CONFIG_HOME, or the deploy target would be
+        // CWD-relative again.
+        assert_eq!(user_config_home(None, None), PathBuf::from("/root/.config"));
+        assert_eq!(
+            user_config_home(Some("rel/dir"), Some("rel/home")),
+            PathBuf::from("/root/.config")
+        );
+        assert_eq!(
+            user_config_home(None, Some("rel/home")),
+            PathBuf::from("/root/.config")
+        );
+    }
 
     enum FakeOutcome {
         Output(CommandOutput),

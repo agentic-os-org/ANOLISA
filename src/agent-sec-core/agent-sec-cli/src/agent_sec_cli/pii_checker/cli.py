@@ -18,6 +18,7 @@ scanner_app = typer.Typer(
 _OUTPUT_FORMATS = {"json", "text"}
 _SOURCES = {
     "user_input",
+    "model_input",
     "tool_input",
     "tool_output",
     "model_output",
@@ -68,7 +69,7 @@ _SOURCE_OPTION = typer.Option(
     "unknown",
     "--source",
     help=(
-        "Audit and policy context label: user_input, tool_input, tool_output, "
+        "Audit and policy context label: user_input, model_input, tool_input, tool_output, "
         "model_output, observability, manual, or unknown. This does not modify "
         "input content."
     ),
@@ -206,7 +207,7 @@ def scan_pii(
         raise typer.Exit(code=1)
     if source not in _SOURCES:
         typer.echo(
-            "Error: --source must be one of: user_input, tool_input, tool_output, "
+            "Error: --source must be one of: user_input, model_input, tool_input, tool_output, "
             "model_output, observability, manual, unknown.",
             err=True,
         )

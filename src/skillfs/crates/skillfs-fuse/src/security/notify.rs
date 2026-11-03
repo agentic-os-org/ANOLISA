@@ -55,6 +55,10 @@ pub const DEFAULT_NOTIFY_DEBOUNCE_MS: u64 = 300;
 /// `paths: []` to signal "whole skill may have changed".
 pub const MAX_NOTIFY_PATHS: usize = 64;
 
+/// Maximum LF-terminated request frame accepted by the ASC daemon.
+const MAX_SESSION_FRAME_BYTES: usize = 64 * 1024;
+const MAX_SESSION_FRAME_PAYLOAD_BYTES: usize = MAX_SESSION_FRAME_BYTES - 1;
+
 /// Maximum response body size (bytes) accepted from the daemon.
 /// Responses exceeding this limit are rejected as `InvalidResponse`
 /// to prevent unbounded memory allocation on a malicious/buggy peer.
@@ -136,7 +140,7 @@ impl NotifyEventKind {
 // Wire format
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NotifyChangeEvent {
     pub id: String,
     pub method: &'static str,
@@ -145,7 +149,7 @@ pub struct NotifyChangeEvent {
     pub timeout_ms: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Versioned notify parameters sent inside the daemon request envelope.
 pub struct NotifyParams {
@@ -159,6 +163,34 @@ pub struct NotifyParams {
     pub event_kind: String,
     /// Sorted changed paths relative to the canonical Skill directory.
     pub paths: Vec<String>,
+}
+
+/// Serializes a request that fits the authenticated session's payload cap.
+///
+/// An oversized path list is replaced with an empty list, which means the
+/// daemon must rescan the whole skill. If the remaining request still cannot
+/// fit, it is rejected locally instead of being sent into a session the
+/// daemon will close.
+fn serialize_session_request(event: &NotifyChangeEvent) -> Result<Vec<u8>, NotifyError> {
+    let serialize = |event: &NotifyChangeEvent| {
+        serde_json::to_vec(event).map_err(|error| NotifyError::Write(std::io::Error::other(error)))
+    };
+
+    let mut request = serialize(event)?;
+    if request.len() > MAX_SESSION_FRAME_PAYLOAD_BYTES && !event.params.paths.is_empty() {
+        let mut whole_skill_event = event.clone();
+        whole_skill_event.params.paths.clear();
+        request = serialize(&whole_skill_event)?;
+    }
+    if request.len() > MAX_SESSION_FRAME_PAYLOAD_BYTES {
+        return Err(NotifyError::Write(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "notify request exceeds the authenticated session payload limit of {MAX_SESSION_FRAME_PAYLOAD_BYTES} bytes"
+            ),
+        )));
+    }
+    Ok(request)
 }
 
 impl NotifyChangeEvent {
@@ -225,6 +257,10 @@ pub enum NotifyError {
     /// wrong key material, or an oversized frame. Retrying with the same
     /// key would only produce the same refusal.
     AuthRejected(String),
+    /// The daemon answered but cannot admit the request yet (notify queue
+    /// full, worker stopping). The daemon's own message says "reconcile
+    /// later"; an identical retry succeeds once it drains or restarts.
+    DaemonUnavailable(String),
 }
 
 impl std::fmt::Display for NotifyError {
@@ -254,6 +290,9 @@ impl std::fmt::Display for NotifyError {
             }
             Self::AuthRejected(message) => {
                 write!(f, "notify: authentication rejected: {message}")
+            }
+            Self::DaemonUnavailable(body) => {
+                write!(f, "notify: daemon temporarily unavailable: {body}")
             }
         }
     }
@@ -293,9 +332,10 @@ impl NotifyError {
     pub fn retry_class(&self) -> NotifyRetryClass {
         match self {
             Self::Connect(e) | Self::Write(e) | Self::Read(e) => io_retry_class(e.kind()),
-            Self::Timeout | Self::EndpointUnavailable(_) | Self::AuthTransport(_) => {
-                NotifyRetryClass::Transient
-            }
+            Self::Timeout
+            | Self::EndpointUnavailable(_)
+            | Self::AuthTransport(_)
+            | Self::DaemonUnavailable(_) => NotifyRetryClass::Transient,
             Self::AuthInconclusive(_) => NotifyRetryClass::Ambiguous,
             Self::InvalidResponse { .. }
             | Self::Rejected { .. }
@@ -438,10 +478,22 @@ impl UnixSocketNotifyClient {
 
 impl NotifyClient for UnixSocketNotifyClient {
     fn send(&self, event: &NotifyChangeEvent) -> Result<(), NotifyError> {
-        if self.auth_secret.is_some() {
-            validate_authenticated_notify_endpoint(&self.socket_path)?;
-        }
+        let expected_peer = if self.auth_secret.is_some() {
+            Some(validate_authenticated_notify_endpoint(&self.socket_path)?)
+        } else {
+            None
+        };
         let mut stream = UnixStream::connect(&self.socket_path).map_err(NotifyError::Connect)?;
+        if let Some(expected_uid) = expected_peer {
+            let peer = super::control_socket::get_peer_credentials(&stream).map_err(|error| {
+                endpoint_untrusted_error(format!("cannot verify daemon peer: {error}"))
+            })?;
+            if peer.uid != expected_uid {
+                return Err(endpoint_untrusted_error(
+                    "daemon kernel UID differs from socket owner",
+                ));
+            }
+        }
         stream
             .set_write_timeout(Some(self.timeout))
             .map_err(NotifyError::Write)?;
@@ -463,13 +515,14 @@ impl NotifyClient for UnixSocketNotifyClient {
             None
         };
 
-        let request = serde_json::to_vec(event)
-            .map_err(|e| NotifyError::Write(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         if let Some(session) = &authenticated_session {
+            let request = serialize_session_request(event)?;
             session
                 .write_frame(&mut stream, FrameSender::Client, &request)
                 .map_err(auth_error_to_notify)?;
         } else {
+            let request = serde_json::to_vec(event)
+                .map_err(|e| NotifyError::Write(std::io::Error::other(e)))?;
             let mut writer = std::io::BufWriter::new(&stream);
             writer.write_all(&request).map_err(NotifyError::Write)?;
             writer.write_all(b"\n").map_err(NotifyError::Write)?;
@@ -498,7 +551,16 @@ impl NotifyClient for UnixSocketNotifyClient {
                         "notify acknowledgement ended before any response",
                     )));
                 }
-                Ok(n) if n as u64 > MAX_RESPONSE_BYTES => {
+                Ok(n)
+                    if {
+                        // read_line counts the trailing newline; the limit is on
+                        // the response body, so exactly MAX bytes + '\n' (n =
+                        // MAX+1) is legal. take() already caps the read at
+                        // MAX+1, so only a body that is itself too long remains.
+                        let body_len = n - usize::from(line.ends_with('\n'));
+                        body_len as u64 > MAX_RESPONSE_BYTES
+                    } =>
+                {
                     return Err(NotifyError::InvalidResponse {
                         body: format!("response exceeds {MAX_RESPONSE_BYTES} byte limit"),
                     });
@@ -525,62 +587,63 @@ impl NotifyClient for UnixSocketNotifyClient {
     }
 }
 
-fn validate_authenticated_notify_endpoint(socket_path: &Path) -> Result<(), NotifyError> {
-    let expected_uid = unsafe { libc::geteuid() };
+fn validate_authenticated_notify_endpoint(socket_path: &Path) -> Result<u32, NotifyError> {
+    let effective_uid = unsafe { libc::geteuid() };
+    let raw = socket_path
+        .to_str()
+        .ok_or_else(|| endpoint_untrusted_error("socket path must be UTF-8"))?;
+    if !socket_path.is_absolute()
+        || raw.contains('\0')
+        || raw.split('/').any(|p| p == "." || p == "..")
+        || raw.contains("//")
+    {
+        return Err(endpoint_untrusted_error(
+            "socket path must be absolute and normalized",
+        ));
+    }
     let parent = socket_path
         .parent()
-        .filter(|path| !path.as_os_str().is_empty())
         .ok_or_else(|| endpoint_untrusted_error("socket path has no parent directory"))?;
-    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
-        endpoint_stat_error(
-            format!("cannot inspect parent '{}': {error}", parent.display()),
-            &error,
-        )
-    })?;
-    if !parent_metadata.file_type().is_dir() {
-        return Err(endpoint_untrusted_error(format!(
-            "parent '{}' is not a directory",
-            parent.display()
-        )));
+    // Validate ancestors as well as the endpoint. Root-owned sticky /tmp is allowed;
+    // HMAC and the connected kernel peer remain mandatory after this path inspection.
+    for ancestor in parent.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
+            endpoint_stat_error(
+                format!("cannot inspect parent '{}': {error}", ancestor.display()),
+                &error,
+            )
+        })?;
+        if !metadata.is_dir()
+            || ![0, effective_uid].contains(&metadata.uid())
+            || (metadata.mode() & 0o022 != 0
+                && !(metadata.uid() == 0 && metadata.mode() & 0o1000 != 0))
+        {
+            return Err(endpoint_untrusted_error(
+                "parent has unsafe ownership, type or group or other permissions",
+            ));
+        }
     }
-    if parent_metadata.uid() != expected_uid {
-        return Err(endpoint_untrusted_error(format!(
-            "parent '{}' is not owned by the effective uid",
-            parent.display()
-        )));
-    }
-    if parent_metadata.mode() & 0o077 != 0 {
-        return Err(endpoint_untrusted_error(format!(
-            "parent '{}' must not grant group or other permissions",
-            parent.display()
-        )));
-    }
-
-    let socket_metadata = std::fs::symlink_metadata(socket_path).map_err(|error| {
-        endpoint_stat_error(
-            format!("cannot inspect socket '{}': {error}", socket_path.display()),
-            &error,
-        )
-    })?;
+    let parent_metadata = std::fs::symlink_metadata(parent)
+        .map_err(|error| endpoint_stat_error(format!("cannot inspect parent: {error}"), &error))?;
+    let socket_metadata = std::fs::symlink_metadata(socket_path)
+        .map_err(|error| endpoint_stat_error(format!("cannot inspect socket: {error}"), &error))?;
     if !socket_metadata.file_type().is_socket() {
-        return Err(endpoint_untrusted_error(format!(
-            "endpoint '{}' is not a Unix socket",
-            socket_path.display()
-        )));
+        return Err(endpoint_untrusted_error("endpoint is not a Unix socket"));
     }
-    if socket_metadata.uid() != expected_uid {
-        return Err(endpoint_untrusted_error(format!(
-            "socket '{}' is not owned by the effective uid",
-            socket_path.display()
-        )));
+    let private = parent_metadata.uid() == effective_uid
+        && parent_metadata.mode() & 0o077 == 0
+        && socket_metadata.uid() == effective_uid
+        && socket_metadata.mode() & 0o077 == 0;
+    let public = parent_metadata.uid() == 0
+        && parent_metadata.mode() & 0o777 == 0o755
+        && socket_metadata.uid() == 0
+        && socket_metadata.mode() & 0o777 == 0o666;
+    if !private && !public {
+        return Err(endpoint_untrusted_error(
+            "invalid endpoint owner or group or other permissions; expected private socket or root-owned 0755/0666 daemon endpoint",
+        ));
     }
-    if socket_metadata.mode() & 0o077 != 0 {
-        return Err(endpoint_untrusted_error(format!(
-            "socket '{}' must not grant group or other permissions",
-            socket_path.display()
-        )));
-    }
-    Ok(())
+    Ok(socket_metadata.uid())
 }
 
 /// A `stat` failure on the parent directory or the socket itself.
@@ -610,10 +673,33 @@ fn validate_response(body: &str) -> Result<(), NotifyError> {
             body: body.trim().to_string(),
         })?;
 
-    let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    if !ok {
-        return Err(NotifyError::Rejected {
+    // Only an explicit boolean `ok` participates in the verdict protocol.
+    // Treating a missing or wrongly-typed field as `false` would let a
+    // malformed reply (no `ok` at all, or `"ok":"false"`) reach the error
+    // decoding below and be classified from its error code — e.g. a
+    // corrupt `{"error":{"code":"unavailable"}}` would masquerade as a
+    // retryable capacity condition and keep reconcile retrying a protocol
+    // mismatch forever. Malformed shape is a permanent InvalidResponse.
+    let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) else {
+        return Err(NotifyError::InvalidResponse {
             body: body.trim().to_string(),
+        });
+    };
+    if !ok {
+        // The daemon distinguishes "cannot admit yet" (notify queue full,
+        // worker stopping — SkillFsError::Unavailable on its side) from
+        // verdicts an identical retry would reproduce, via the
+        // machine-readable error code; only the latter is permanent.
+        let code = parsed
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str);
+        return Err(if code == Some("unavailable") {
+            NotifyError::DaemonUnavailable(body.trim().to_string())
+        } else {
+            NotifyError::Rejected {
+                body: body.trim().to_string(),
+            }
         });
     }
 
@@ -756,6 +842,9 @@ pub enum ScriptedNotifyFailure {
     AuthRejected,
     /// `Rejected` — daemon answered but refused the request. Permanent.
     DaemonRejected,
+    /// `DaemonUnavailable` — daemon answered `error.code = "unavailable"`
+    /// (notify queue full, worker stopping). Transient.
+    DaemonUnavailable,
 }
 
 impl ScriptedNotifyFailure {
@@ -782,6 +871,10 @@ impl ScriptedNotifyFailure {
             Self::DaemonRejected => NotifyError::Rejected {
                 body: r#"{"ok":false,"error":{"code":"unknown_skill"}}"#.to_string(),
             },
+            Self::DaemonUnavailable => NotifyError::DaemonUnavailable(
+                r#"{"ok":false,"error":{"code":"unavailable","message":"SkillFS: notify queue is full; reconcile later"}}"#
+                    .to_string(),
+            ),
         }
     }
 }
@@ -2227,6 +2320,60 @@ mod tests {
     }
 
     #[test]
+    fn validate_response_classifies_unavailable_as_transient() {
+        // The daemon's SkillFsError::Unavailable (notify queue full, worker
+        // stopping) carries error.code = "unavailable" and its message says
+        // "reconcile later" — the client must treat it as retryable, not as
+        // a permanent rejection that drops the reconcile forever.
+        let body = r#"{"ok":false,"error":{"code":"unavailable","message":"SkillFS: notify queue is full; reconcile later"}}"#;
+        match validate_response(body) {
+            Err(error @ NotifyError::DaemonUnavailable(_)) => {
+                assert_eq!(error.retry_class(), NotifyRetryClass::Transient);
+            }
+            other => panic!("expected DaemonUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_response_rejects_ok_false_without_error_code() {
+        // A refusal without the machine-readable code stays a plain
+        // Permanent rejection.
+        let body = r#"{"ok":false,"stderr":"nope"}"#;
+        assert!(matches!(
+            validate_response(body),
+            Err(NotifyError::Rejected { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_response_missing_ok_is_not_unavailable() {
+        // Review regression: a reply with no `ok` field at all used to be
+        // decoded as a refusal and classified from its error code, so this
+        // malformed body was treated as retryable DaemonUnavailable and
+        // reconcile kept it as a transient capacity condition forever.
+        let body = r#"{"error":{"code":"unavailable"}}"#;
+        match validate_response(body) {
+            Err(error @ NotifyError::InvalidResponse { .. }) => {
+                assert_eq!(error.retry_class(), NotifyRetryClass::Permanent);
+            }
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_response_non_boolean_ok_is_not_unavailable() {
+        // Same regression class: a string "ok" is a malformed verdict, not
+        // a refusal the error decoder may reclassify.
+        let body = r#"{"ok":"false","error":{"code":"unavailable"}}"#;
+        match validate_response(body) {
+            Err(error @ NotifyError::InvalidResponse { .. }) => {
+                assert_eq!(error.retry_class(), NotifyRetryClass::Permanent);
+            }
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_response_rejects_accepted_false() {
         let body = r#"{"ok":true,"data":{"schemaVersion":2,"accepted":false}}"#;
         assert!(matches!(
@@ -3353,6 +3500,27 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_retries_when_the_daemon_answers_unavailable() {
+        // A queue-full / worker-stopping answer ("error.code":"unavailable")
+        // is a capacity condition, not a verdict: the reconcile must be
+        // requeued and delivered once the daemon drains.
+        let client = Arc::new(ScriptedNotifyClient::new(
+            ScriptedNotifyFailure::DaemonUnavailable,
+            2,
+        ));
+        let ctrl = retry_controller(client.clone());
+
+        assert_eq!(ctrl.enqueue_startup_reconcile(&["alpha".to_string()]), 1);
+        let attempts = ctrl.flush_until_delivered_for_testing(10);
+
+        assert_eq!(attempts, 3, "two unavailable answers then one success");
+        assert_eq!(client.attempts(), 3);
+        assert_eq!(ctrl.pending_len(), 0, "unavailable must not drop the entry");
+        assert_eq!(client.events().len(), 1);
+        ctrl.shutdown();
+    }
+
+    #[test]
     fn reconcile_retries_when_the_socket_appears_only_later() {
         let client = Arc::new(ScriptedNotifyClient::new(
             ScriptedNotifyFailure::SocketMissing,
@@ -4297,6 +4465,111 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_notify_preserves_paths_at_frame_limit_and_falls_back_above() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        for excess_bytes in [0, 1] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let sock_path = dir.path().join("test.sock");
+            let key_path = dir.path().join("key");
+            std::fs::write(&key_path, [5_u8; 32]).unwrap();
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let listener = UnixListener::bind(&sock_path).unwrap();
+            std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let client = UnixSocketNotifyClient::new_authenticated(
+                &sock_path,
+                Duration::from_secs(5),
+                &key_path,
+            )
+            .unwrap();
+            let server_secret = SharedSecret::load(&key_path).unwrap();
+            let paths = (0..16)
+                .map(|index| format!("{index:02}") + &"a".repeat(3998))
+                .collect::<Vec<_>>();
+            let mut event = NotifyChangeEvent::new(
+                "/srv/skills/alpha",
+                "alpha",
+                NotifyEventKind::Write,
+                paths,
+                5000,
+            );
+            // ASC's request reader counts LF inside its 64 KiB wire budget,
+            // unlike the local SkillFS authenticated payload reader.
+            let target_bytes = 64 * 1024 - 1 + excess_bytes;
+            let padding = target_bytes - serde_json::to_vec(&event).unwrap().len();
+            let path_count = event.params.paths.len();
+            for index in 0..padding {
+                event.params.paths[index % path_count].push('a');
+            }
+            assert_eq!(serde_json::to_vec(&event).unwrap().len(), target_bytes);
+            let original_paths = event.params.paths.clone();
+            let expected_paths = if excess_bytes == 0 {
+                original_paths.clone()
+            } else {
+                vec![]
+            };
+
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let session = authenticate_server(
+                    &mut stream,
+                    &server_secret,
+                    NOTIFY_CLIENT_DOMAIN,
+                    NOTIFY_SERVER_DOMAIN,
+                )
+                .unwrap();
+                let request = {
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut wire = Vec::new();
+                    (&mut reader)
+                        .take(64 * 1024 + 1)
+                        .read_until(b'\n', &mut wire)
+                        .unwrap();
+                    assert!(wire.ends_with(b"\n"));
+                    assert!(
+                        wire.len() <= 64 * 1024,
+                        "request exceeds the production daemon's LF-inclusive budget"
+                    );
+                    wire.pop();
+
+                    let mut tag = Vec::new();
+                    (&mut reader)
+                        .take(64 * 1024 + 1)
+                        .read_until(b'\n', &mut tag)
+                        .unwrap();
+                    assert!(tag.ends_with(b"\n") && tag.len() <= 64 * 1024);
+                    let tag: serde_json::Value = serde_json::from_slice(&tag).unwrap();
+                    assert_eq!(tag["type"], "auth.frame");
+                    wire
+                };
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                assert_eq!(request["method"], NOTIFY_METHOD);
+                assert!(
+                    request["params"]["paths"] == serde_json::json!(expected_paths),
+                    "unexpected path hints for a {target_bytes}-byte request"
+                );
+                session
+                    .write_frame(
+                        &mut stream,
+                        FrameSender::Server,
+                        br#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#,
+                    )
+                    .unwrap();
+            });
+
+            let result = client.send(&event);
+            handle.join().unwrap();
+            assert!(result.is_ok(), "authenticated notify failed: {result:?}");
+            assert_eq!(
+                event.params.paths, original_paths,
+                "serialization must not mutate the logged event"
+            );
+        }
+    }
+
+    #[test]
     fn authenticated_notify_rejects_permissive_socket() {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener;
@@ -4460,6 +4733,49 @@ mod tests {
     }
 
     #[test]
+    fn unix_socket_client_accepts_response_at_the_byte_limit() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = UnixSocketNotifyClient::new(&sock_path, Duration::from_secs(5));
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut _req = String::new();
+            reader.read_line(&mut _req).unwrap();
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(&stream);
+            // Body of exactly MAX_RESPONSE_BYTES bytes (JSON plus padding)
+            // followed by the framing newline: legal, the limit is on the body.
+            let mut body =
+                String::from(r#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#);
+            body.push_str(&" ".repeat(MAX_RESPONSE_BYTES as usize - body.len()));
+            assert_eq!(body.len() as u64, MAX_RESPONSE_BYTES);
+            writer.write_all(body.as_bytes()).unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+        });
+
+        let result = client.send(&event);
+        handle.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "exactly-limit response must be accepted: {result:?}"
+        );
+    }
+
+    #[test]
     fn reload_outcome_emitted_as_protocol_event_after_flush() {
         use super::super::activation_reload::ActivationReloadController;
 
@@ -4539,5 +4855,36 @@ mod tests {
         );
 
         ctrl.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod public_endpoint_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn public_endpoint_requires_root_owner_and_no_writable_or_symlink_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = directory.path().join("daemon.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let result = validate_authenticated_notify_endpoint(&socket);
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(result.unwrap(), 0);
+        } else {
+            assert!(matches!(result, Err(NotifyError::EndpointUntrusted(_))));
+        }
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_authenticated_notify_endpoint(&socket).is_err());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let alias = tempfile::tempdir().unwrap();
+        symlink(directory.path(), alias.path().join("linked-parent")).unwrap();
+        assert!(
+            validate_authenticated_notify_endpoint(&alias.path().join("linked-parent/daemon.sock"))
+                .is_err()
+        );
     }
 }

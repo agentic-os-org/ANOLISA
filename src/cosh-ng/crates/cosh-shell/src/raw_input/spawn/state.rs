@@ -25,6 +25,7 @@ use super::prompt_ghost::{PendingPromptGhostEscape, PendingReplacedPromptGhostSu
 use super::InputRead;
 
 pub(crate) struct RawInputShellRoute {
+    native_terminal: Option<File>,
     pub(crate) main_prompt_gate: MainPromptGate,
     pub(crate) slash_route_enabled: bool,
     pub(crate) zsh_path_prompt_buffering: Option<ZshPathPromptBuffering>,
@@ -92,15 +93,22 @@ impl RawInputShellRoute {
         zsh_path_prompt_buffering: Option<ZshPathPromptBuffering>,
     ) -> Self {
         Self {
+            native_terminal: None,
             main_prompt_gate,
             slash_route_enabled,
             zsh_path_prompt_buffering,
         }
     }
+
+    pub(crate) fn with_native_terminal(mut self, terminal: File) -> Self {
+        self.native_terminal = Some(terminal);
+        self
+    }
 }
 
 #[derive(Default)]
 pub(in super::super) struct RawInputRelayState {
+    pub(super) native_terminal: Option<File>,
     pub(super) card_state: CardInputState,
     pub(super) line_buffer: CandidateLineBuffer,
     pub(super) native_line_state: NativeLineState,
@@ -119,6 +127,8 @@ pub(in super::super) struct RawInputRelayState {
     pub(super) pending_replaced_prompt_ghost_suffix: Option<PendingReplacedPromptGhostSuffix>,
     pub(super) capture_owned_input: CaptureOwnedInput,
     pub(super) deferred_input: Option<InputRead>,
+    pub(super) pending_replay_input: std::collections::VecDeque<InputRead>,
+    pub(super) pending_replay_input_bytes: usize,
     /// Deadline for a bare ESC held inside the draft card (#1721): on
     /// expiry the relay injects a second ESC which resolves to a cancel.
     pub(super) pending_draft_escape_deadline: Option<std::time::Instant>,
@@ -144,6 +154,7 @@ impl RawInputRelayState {
     ) -> Self {
         Self {
             input_generation,
+            native_terminal: route.native_terminal,
             main_prompt_gate: route.main_prompt_gate,
             slash_route_enabled: route.slash_route_enabled,
             zsh_path_prompt_buffering: route.zsh_path_prompt_buffering,

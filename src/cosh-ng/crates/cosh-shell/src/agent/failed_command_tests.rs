@@ -1277,3 +1277,128 @@ fn credential_prompt_output_stays_silent_end_to_end() {
         FailureAnalysisDisposition::SilentRecord
     );
 }
+
+#[test]
+fn ai_disabled_auto_trigger_skips_agent_start_without_bookkeeping() {
+    let block = failed_block(1, "cargo test");
+    let blocks = std::slice::from_ref(&block);
+    let findings = findings_from_blocks(blocks);
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Auto,
+        ..InlineState::default()
+    };
+    state.personalization.ai_disabled = true;
+    state.agent_run.active = Some(test_active_run());
+    let mut output = Vec::new();
+
+    start_agent_for_block(
+        &block,
+        blocks,
+        &findings,
+        &adapter,
+        &mut state,
+        &mut output,
+        FailedCommandAgentStartOptions {
+            selectable_after_event_index: None,
+            trigger: FailedCommandAnalysisTrigger::Auto,
+        },
+    )
+    .expect("skip auto analysis");
+
+    assert!(output.is_empty());
+    assert!(state.agent_run.queued_requests.is_empty());
+    assert!(!state.analyzed_blocks.contains(&block.id));
+}
+
+#[test]
+fn ai_disabled_user_confirmed_trigger_skips_agent_start_without_bookkeeping() {
+    let block = failed_block(1, "cargo test");
+    let blocks = std::slice::from_ref(&block);
+    let findings = findings_from_blocks(blocks);
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+    state.personalization.ai_disabled = true;
+    state.agent_run.active = Some(test_active_run());
+    let mut output = Vec::new();
+
+    start_agent_for_block(
+        &block,
+        blocks,
+        &findings,
+        &adapter,
+        &mut state,
+        &mut output,
+        FailedCommandAgentStartOptions {
+            selectable_after_event_index: None,
+            trigger: FailedCommandAnalysisTrigger::UserConfirmed,
+        },
+    )
+    .expect("skip confirmed analysis");
+
+    assert!(output.is_empty());
+    assert!(state.agent_run.queued_requests.is_empty());
+    assert!(!state.analyzed_blocks.contains(&block.id));
+}
+
+fn hook_consultation_for(block: &CommandBlock) -> crate::hooks::state::PendingConsultation {
+    crate::hooks::state::PendingConsultation {
+        finding_id: "finding-memory".to_string(),
+        card_id: "card-memory".to_string(),
+        block_id: block.id.clone(),
+        command: block.command.clone(),
+        output_ref: None,
+        state: crate::hooks::state::PendingConsultationState::Analyzed,
+        created_at_ms: 1,
+        expires_at_ms: u64::MAX,
+        ended_at_ms: 2,
+        queued_at: Instant::now(),
+        prompt_hint: String::new(),
+        hook_finding: None,
+        recommended_skill: None,
+        context_hints: Vec::new(),
+        suppression_key: "memory-pressure".to_string(),
+        topic: "memory".to_string(),
+        entity_key: "host".to_string(),
+        confidence: "high".to_string(),
+        display_reason: "allowed".to_string(),
+    }
+}
+
+#[test]
+fn ai_disabled_hook_consultation_does_not_start_agent() {
+    // Both the consultation card "approve" and `/hint <id> analyze` reach
+    // `start_agent_for_hook_consultation`. With an active run every start is
+    // queued, so a queued request is the observable start; the AI-on row is
+    // the positive control that this harness sees a consultation start at all.
+    for ai_disabled in [false, true] {
+        let block = failed_block(1, "cargo test");
+        let blocks = std::slice::from_ref(&block);
+        let consultation = hook_consultation_for(&block);
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.personalization.ai_disabled = ai_disabled;
+        state.agent_run.active = Some(test_active_run());
+        let mut output = Vec::new();
+
+        crate::runtime::hooks::start_agent_for_hook_consultation(
+            &block,
+            blocks,
+            &consultation,
+            &adapter,
+            &mut state,
+            &mut output,
+        )
+        .expect("hook consultation start");
+
+        assert_eq!(
+            state.agent_run.queued_requests.is_empty(),
+            ai_disabled,
+            "ai_disabled={ai_disabled}: queued={}",
+            state.agent_run.queued_requests.len()
+        );
+    }
+}

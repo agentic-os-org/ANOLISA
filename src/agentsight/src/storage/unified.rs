@@ -36,8 +36,8 @@
 //! ```
 
 use agentsight_sqlite_lifecycle::{
-    CheckpointOutcome, MaintenanceStatus, SizeBasis, SizePolicy, enforce_size_policy,
-    retention_cutoff_ns,
+    CheckpointOutcome, MaintenanceReport, MaintenanceStatus, SizeBasis, SizePolicy,
+    enforce_size_policy, retention_cutoff_ns,
 };
 use anyhow::Result;
 use std::path::PathBuf;
@@ -45,6 +45,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::sqlite::{AuditStore, HttpStore, TokenConsumptionStore, TokenStore};
 use crate::analyzer::AnalysisResult;
+
+#[path = "maintenance.rs"]
+mod maintenance;
+pub(crate) use maintenance::MaintenanceCursor;
 
 /// Storage backend type
 #[derive(Debug, Clone, Default)]
@@ -138,6 +142,19 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Delegate WAL checkpoints on every primary writer to the maintenance worker.
+    pub(crate) fn use_managed_checkpoints(&self) -> Result<()> {
+        self.audit_store.use_managed_checkpoints()?;
+        self.token_store.use_managed_checkpoints()?;
+        self.http_store.use_managed_checkpoints()?;
+        self.token_consumption_store.use_managed_checkpoints()
+    }
+
+    /// Checkpoint the shared physical database without excluding capture writes.
+    pub(crate) fn checkpoint_passive(&self) -> Result<()> {
+        self.audit_store.checkpoint_passive().map(|_| ())
+    }
+
     /// Create a new Storage with the specified backend
     pub fn new(backend: StorageBackend) -> Result<Self> {
         match &backend {
@@ -146,7 +163,10 @@ impl Storage {
                 Self::with_sqlite_config(&config)
             }
             StorageBackend::Sls { .. } => {
-                // TODO: Implement SLS storage
+                // TODO(sight-storage): implement the SLS backend — the
+                // StorageBackend::Sls enum variant exists so callers can
+                // parse config that selects it, but every store here is
+                // SQLite-shaped and there is no SLS writer yet.
                 anyhow::bail!("SLS storage backend is not yet implemented");
             }
             StorageBackend::Noop => Self::noop(),
@@ -243,15 +263,17 @@ impl Storage {
     /// This hot path only persists data; lifecycle maintenance is owned by the
     /// process-wide database worker.
     pub fn store(&self, result: &AnalysisResult) -> Result<i64> {
-        if let AnalysisResult::Http(_) = result {
-            return Ok(0);
-        }
         if matches!(self.backend, StorageBackend::Noop) {
             log::trace!("Noop storage dropping analysis result");
             return Ok(0);
         }
         log::debug!("Storing analysis result: {result:?}");
         let id = match result {
+            AnalysisResult::Abandoned(_) => Ok(0),
+            AnalysisResult::HttpContext(context) if context.retain_raw => {
+                self.http_store.insert(&context.http)
+            }
+            AnalysisResult::HttpContext(_) => Ok(0),
             AnalysisResult::Audit(record) => self.audit_store.insert(record),
             AnalysisResult::Token(record) => self.token_store.insert(record),
             AnalysisResult::Message(_msg) => {
@@ -320,14 +342,24 @@ impl Storage {
     ///
     /// Returns an error when retention, checkpoint, measurement, or pruning fails.
     pub fn maintain(&self) -> Result<()> {
+        self.maintain_with_limit_bytes(self.max_db_size_bytes)
+    }
+
+    /// Same as [`maintain`] with an explicit size limit in bytes, used when
+    /// the global storage budget reduces this store's effective capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when retention, checkpoint, measurement, or pruning fails.
+    pub fn maintain_with_limit_bytes(&self, limit_bytes: u64) -> Result<()> {
         let deleted_by_age = self.purge_expired()?;
-        if (deleted_by_age > 0 || self.max_db_size_bytes > 0)
+        if (deleted_by_age > 0 || limit_bytes > 0)
             && self.audit_store.checkpoint_outcome()? == CheckpointOutcome::Busy
         {
             log::warn!("Primary WAL checkpoint remained busy before size maintenance");
             return Ok(());
         }
-        self.purge_oversized()
+        self.purge_oversized_with(limit_bytes)
     }
 
     /// Purge oldest records when the database exceeds the size limit.
@@ -335,10 +367,14 @@ impl Storage {
     /// The lifecycle crate controls measurement and convergence while each
     /// business store retains ownership of its deletion query.
     pub fn purge_oversized(&self) -> Result<()> {
+        self.purge_oversized_with(self.max_db_size_bytes)
+    }
+
+    fn purge_oversized_with(&self, limit_bytes: u64) -> Result<()> {
         let policy = SizePolicy {
-            limit_bytes: self.max_db_size_bytes,
-            trigger_bytes: self.max_db_size_bytes,
-            target_bytes: self.max_db_size_bytes.saturating_mul(9) / 10,
+            limit_bytes,
+            trigger_bytes: limit_bytes,
+            target_bytes: limit_bytes.saturating_mul(9) / 10,
             trigger_basis: SizeBasis::Physical,
             target_basis: SizeBasis::Logical,
             max_rounds: 20,
@@ -369,27 +405,9 @@ impl Storage {
             || self.audit_store.checkpoint_outcome(),
         )?;
 
-        match report.status {
-            MaintenanceStatus::CheckpointBusy => log::warn!(
-                "WAL checkpoint during size-based purge was busy after deleting {} rows",
-                report.deleted_rows
-            ),
-            MaintenanceStatus::Stalled | MaintenanceStatus::MaxRounds => log::error!(
-                "Size-based purge stopped with {:?}: database remains {} bytes (limit {})",
-                report.status,
-                report.after.logical_bytes,
-                self.max_db_size_bytes
-            ),
-            MaintenanceStatus::TargetReached => log::info!(
-                "Size-based purge deleted {} rows in {} rounds; logical size is {} bytes",
-                report.deleted_rows,
-                report.rounds,
-                report.after.logical_bytes
-            ),
-            MaintenanceStatus::Disabled
-            | MaintenanceStatus::BelowTrigger
-            | MaintenanceStatus::ReusableCapacity
-            | MaintenanceStatus::NoRows => {}
+        if let Some((level, message)) = purge_report_log(&report, policy.target_bytes, limit_bytes)
+        {
+            log::log!(level, "{}", message);
         }
         Ok(())
     }
@@ -468,10 +486,63 @@ fn purge_share(rows: u64, pct: f64) -> usize {
     ((rows as f64 * pct) as usize).max(1)
 }
 
+/// Log level for a Stalled/MaxRounds purge stop: remains within the limit is a
+/// warning (short of the 0.9x convergence goal, not a failure); remains above
+/// the limit is an error.
+fn purge_stop_level(remains_logical: u64, limit_bytes: u64) -> log::Level {
+    if remains_logical <= limit_bytes {
+        log::Level::Warn
+    } else {
+        log::Level::Error
+    }
+}
+
+/// Log level and message for a finished size-based purge, or `None` for
+/// statuses not worth logging.
+///
+/// The convergence target is 0.9x limit, so a Stalled/MaxRounds stop with
+/// remains between target and limit means "short of goal", not "over limit":
+/// print both figures instead of measuring against the limit alone.
+fn purge_report_log(
+    report: &MaintenanceReport,
+    target_bytes: u64,
+    limit_bytes: u64,
+) -> Option<(log::Level, String)> {
+    match report.status {
+        MaintenanceStatus::CheckpointBusy => Some((
+            log::Level::Warn,
+            format!(
+                "WAL checkpoint during size-based purge was busy after deleting {} rows",
+                report.deleted_rows
+            ),
+        )),
+        MaintenanceStatus::Stalled | MaintenanceStatus::MaxRounds => Some((
+            purge_stop_level(report.after.logical_bytes, limit_bytes),
+            format!(
+                "Size-based purge stopped with {:?}: database remains {} bytes (target {}, limit {})",
+                report.status, report.after.logical_bytes, target_bytes, limit_bytes
+            ),
+        )),
+        MaintenanceStatus::TargetReached => Some((
+            log::Level::Info,
+            format!(
+                "Size-based purge deleted {} rows in {} rounds; logical size is {} bytes",
+                report.deleted_rows, report.rounds, report.after.logical_bytes
+            ),
+        )),
+        MaintenanceStatus::Disabled
+        | MaintenanceStatus::BelowTrigger
+        | MaintenanceStatus::ReusableCapacity
+        | MaintenanceStatus::NoRows => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::HttpRecord;
     use crate::analyzer::token::TokenRecord;
+    use agentsight_sqlite_lifecycle::SizeSnapshot;
 
     #[test]
     fn test_noop_storage_is_noop() {
@@ -512,6 +583,68 @@ mod tests {
         // Just verify it doesn't panic
         let _ = storage.is_noop();
         drop(storage);
+    }
+
+    /// Minimal HTTP record used by the Http persistence contract tests.
+    pub(super) fn sample_http_record() -> HttpRecord {
+        HttpRecord {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            pid: 4242,
+            comm: "python".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            status_code: 200,
+            request_headers: "{}".to_string(),
+            request_body: Some("{}".to_string()),
+            response_headers: "{}".to_string(),
+            response_body: Some("{}".to_string()),
+            duration_ns: 1_000_000,
+            first_output_timestamp_ns: None,
+            is_sse: false,
+            sse_event_count: 0,
+        }
+    }
+
+    /// `should_persist_analysis_result` routes Http records to `store`, the
+    /// docs list `http_records` as a persistence output, and the table is
+    /// created, indexed and maintained. Pin that Http results are actually
+    /// inserted: a silent early return previously dropped every HTTP record.
+    #[test]
+    fn test_store_http_result_persists_to_http_store() {
+        let dir = unique_base_dir("http_persist");
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
+
+        let record = sample_http_record();
+        let id = storage
+            .store(&AnalysisResult::Http(record.clone()))
+            .unwrap();
+
+        assert!(
+            id > 0,
+            "Http analysis results must be inserted, not dropped (id={id})"
+        );
+        assert_eq!(storage.http().count().unwrap(), 1);
+        let stored = storage.http().query_since(0).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].path, record.path);
+        assert_eq!(stored[0].method, record.method);
+        assert_eq!(stored[0].pid, record.pid);
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The noop backend silently drops every result type, including Http.
+    /// This pins the other half of the contract so a persist-path fix cannot
+    /// accidentally start writing through the noop backend.
+    #[test]
+    fn test_noop_storage_drops_http_result() {
+        let storage = Storage::noop().unwrap();
+        let id = storage
+            .store(&AnalysisResult::Http(sample_http_record()))
+            .unwrap();
+        assert_eq!(id, 0);
+        assert_eq!(storage.http().count().unwrap(), 0);
     }
 
     /// Unique per-test directory under the system temp dir.
@@ -744,6 +877,75 @@ mod tests {
 
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn purge_stop_level_warns_within_limit_and_errors_above() {
+        // Boundary: remains equal to the limit is still "within".
+        assert_eq!(purge_stop_level(90, 100), log::Level::Warn);
+        assert_eq!(purge_stop_level(100, 100), log::Level::Warn);
+        assert_eq!(purge_stop_level(101, 100), log::Level::Error);
+    }
+
+    fn purge_report(status: MaintenanceStatus, remains_logical: u64) -> MaintenanceReport {
+        let snapshot = |logical: u64| SizeSnapshot {
+            database_bytes: logical,
+            wal_bytes: 0,
+            shm_bytes: 0,
+            freelist_bytes: 0,
+            physical_bytes: logical,
+            logical_bytes: logical,
+        };
+        MaintenanceReport {
+            status,
+            rounds: 3,
+            deleted_rows: 42,
+            before: snapshot(200),
+            after: snapshot(remains_logical),
+        }
+    }
+
+    #[test]
+    fn purge_report_log_speaks_only_for_noteworthy_statuses() {
+        for status in [
+            MaintenanceStatus::Disabled,
+            MaintenanceStatus::BelowTrigger,
+            MaintenanceStatus::ReusableCapacity,
+            MaintenanceStatus::NoRows,
+        ] {
+            assert_eq!(purge_report_log(&purge_report(status, 100), 90, 100), None);
+        }
+        let (level, message) = purge_report_log(
+            &purge_report(MaintenanceStatus::CheckpointBusy, 150),
+            90,
+            100,
+        )
+        .expect("CheckpointBusy must log");
+        assert_eq!(level, log::Level::Warn);
+        assert!(message.contains("busy"), "message was: {message}");
+        let (level, message) =
+            purge_report_log(&purge_report(MaintenanceStatus::TargetReached, 80), 90, 100)
+                .expect("TargetReached must log");
+        assert_eq!(level, log::Level::Info);
+        assert!(message.contains("42 rows"), "message was: {message}");
+    }
+
+    #[test]
+    fn purge_report_log_grades_stalled_stop_by_limit_not_target() {
+        // Remains between target and limit: short of goal, not over limit.
+        let (level, message) =
+            purge_report_log(&purge_report(MaintenanceStatus::Stalled, 95), 90, 100)
+                .expect("Stalled must log");
+        assert_eq!(level, log::Level::Warn);
+        assert!(
+            message.contains("remains 95 bytes (target 90, limit 100)"),
+            "message was: {message}"
+        );
+        // Remains above the limit: the purge genuinely failed to enforce it.
+        let (level, _) =
+            purge_report_log(&purge_report(MaintenanceStatus::MaxRounds, 150), 90, 100)
+                .expect("MaxRounds must log");
+        assert_eq!(level, log::Level::Error);
     }
 
     /// When another connection holds a read snapshot, the truncating WAL

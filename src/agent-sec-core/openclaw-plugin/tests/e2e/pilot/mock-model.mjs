@@ -10,6 +10,8 @@ import {
   POLICY_CODE_DONE_TEXT,
   POLICY_PROMPT_DENY_MARKER,
   POLICY_PROMPT_REACHED_MODEL_TEXT,
+  PII_GATEWAY_MARKER,
+  PII_GATEWAY_REPLY,
   sleep,
 } from "./common.mjs";
 import { formatError } from "./errors.mjs";
@@ -259,6 +261,7 @@ function resolveMockScenario(messages) {
     .filter((message) => message?.role === "user")
     .map((message) => collectMessageText(message.content))
     .join("\n");
+  if (userText.includes(PII_GATEWAY_MARKER)) return "pii";
   if (userText.includes(POLICY_PROMPT_DENY_MARKER)) {
     return "policy-prompt";
   }
@@ -288,12 +291,15 @@ function buildStreamingMockChunks({ hasToolResult, id, model, created, scenario 
     created,
     model,
   };
-  if (scenario === "policy-prompt") {
+  if (scenario === "policy-prompt" || scenario === "pii") {
     return [
       { ...base, choices: [{ index: 0, delta: { role: "assistant" } }] },
       {
         ...base,
-        choices: [{ index: 0, delta: { content: POLICY_PROMPT_REACHED_MODEL_TEXT } }],
+        choices: [{
+          index: 0,
+          delta: { content: scenario === "pii" ? PII_GATEWAY_REPLY : POLICY_PROMPT_REACHED_MODEL_TEXT },
+        }],
       },
       { ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
     ];
@@ -350,7 +356,7 @@ function buildStreamingMockChunks({ hasToolResult, id, model, created, scenario 
 }
 
 function buildNonStreamingMockCompletion({ hasToolResult, id, model, created, scenario }) {
-  if (scenario === "policy-prompt") {
+  if (scenario === "policy-prompt" || scenario === "pii") {
     return {
       id,
       object: "chat.completion",
@@ -361,7 +367,7 @@ function buildNonStreamingMockCompletion({ hasToolResult, id, model, created, sc
           index: 0,
           message: {
             role: "assistant",
-            content: POLICY_PROMPT_REACHED_MODEL_TEXT,
+            content: scenario === "pii" ? PII_GATEWAY_REPLY : POLICY_PROMPT_REACHED_MODEL_TEXT,
           },
           finish_reason: "stop",
         },

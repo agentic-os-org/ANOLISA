@@ -9,13 +9,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 use serde::{Deserialize, Serialize};
 
 use crate::telemetry::metadata::MetadataClient;
 
 // ── Product type ─────────────────────────────────────────────────────
 
-/// Product type, read from the `PRODUCT_TYPE` field in `/etc/anolisa-release`.
+/// Product type resolved through the shared probe chain
+/// (release file → container detection → metadata API → unknown).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProductType {
@@ -25,6 +29,10 @@ pub enum ProductType {
     Swas,
     /// Elastic Desktop Service (EDS)
     Eds,
+    /// Any container runtime flavor (docker, podman, kubepods, ...): the
+    /// process runs inside a container, which counts as its own statistical
+    /// device rather than inheriting the host's cloud product label.
+    Container,
     /// Unknown / self-hosted environment
     Unknown,
 }
@@ -35,6 +43,7 @@ impl ProductType {
             ProductType::Ecs => "ECS",
             ProductType::Swas => "Simple Application Server",
             ProductType::Eds => "Elastic Desktop Service",
+            ProductType::Container => "Container",
             ProductType::Unknown => "Unknown",
         }
     }
@@ -57,6 +66,49 @@ pub(crate) fn find_product_type_in_release(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+// Test-only pin of the container flavor probe result:
+// `Some(Some(flavor))` forces that flavor, `Some(None)` forces a
+// bare-metal answer, `None` means "use the real probe".
+#[cfg(test)]
+thread_local! {
+    static CONTAINER_FLAVOR_OVERRIDE: RefCell<Option<Option<String>>> =
+        const { RefCell::new(None) };
+}
+
+/// Resolve the container runtime flavor, honouring the test override.
+///
+/// Delegates to `anolisa_env::detect_container` (marker files + cgroup
+/// heuristics); the override lets unit tests pin the result so assertions
+/// do not flip when the suite itself runs inside a container. Shared by
+/// product-type probing and the instance snapshot so both see one answer.
+pub(crate) fn container_flavor() -> Option<String> {
+    #[cfg(test)]
+    if let Some(flavor) = CONTAINER_FLAVOR_OVERRIDE.with(|o| o.borrow().clone()) {
+        return flavor;
+    }
+    anolisa_env::detect_container()
+}
+
+/// Test helper: run `f` with the container flavor probe pinned.
+///
+/// `Some("docker")` forces a container flavor, `None` forces a bare-metal
+/// answer, regardless of the host the suite runs on. Thread-local, so
+/// parallel tests on other threads are unaffected.
+#[cfg(test)]
+pub(crate) fn with_container_flavor<F, R>(flavor: Option<&str>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    CONTAINER_FLAVOR_OVERRIDE.with(|o| {
+        *o.borrow_mut() = Some(flavor.map(|s| s.to_string()));
+    });
+    let result = f();
+    CONTAINER_FLAVOR_OVERRIDE.with(|o| {
+        *o.borrow_mut() = None;
+    });
+    result
 }
 
 /// Shared filesystem paths for telemetry setup and instance probing.
@@ -114,47 +166,70 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// Detect product type from `/etc/anolisa-release`, falling back to `Unknown`.
-pub fn detect_product_type(release_path: &Path) -> ProductType {
-    fs::read_to_string(release_path)
-        .ok()
-        .and_then(|content| {
-            find_product_type_in_release(&content).map(|pt| match pt.as_str() {
-                "ecs" => ProductType::Ecs,
-                "swas" => ProductType::Swas,
-                "eds" => ProductType::Eds,
-                _ => ProductType::Unknown,
-            })
-        })
-        .unwrap_or(ProductType::Unknown)
+/// Detect the product type through the shared probe chain.
+///
+/// Wraps [`probe_product_type`] so register status and telemetry reporting
+/// agree on one resolution order (release file → container → metadata →
+/// unknown). Custom `PRODUCT_TYPE` values from downstream distributions
+/// collapse to [`ProductType::Unknown`] here while [`probe_product_type`]
+/// passes them through verbatim; extend this mapping when a value needs
+/// first-class CLI display.
+pub fn detect_product_type(release_path: &Path, client: &MetadataClient) -> ProductType {
+    match probe_product_type(release_path, client).as_str() {
+        "ecs" => ProductType::Ecs,
+        "swas" => ProductType::Swas,
+        "eds" => ProductType::Eds,
+        "container" => ProductType::Container,
+        _ => ProductType::Unknown,
+    }
 }
 
 /// Probe product type with full fallback chain.
 ///
 /// Resolution order:
-/// 1. `/etc/anolisa-release` `PRODUCT_TYPE` field.
-/// 2. Metadata API / cloud-init `desktop-id` starting with `ecd` → `eds`.
-/// 3. Metadata API / cloud-init `instance/instance-type` starting with `ecs` → `ecs`.
-/// 4. Fallback: `unknown`.
+/// 1. `/etc/anolisa-release` `PRODUCT_TYPE` field, passed through verbatim
+///    (custom values included).
+/// 2. Container detection: any runtime flavor → `container`.
+/// 3. Metadata API / cloud-init `desktop-id` starting with `ecd` → `eds`.
+/// 4. Metadata API / cloud-init `instance/instance-type` starting with `ecs`
+///    → `ecs`.
+/// 5. Fallback: `unknown`.
+///
+/// The container check deliberately precedes the metadata probes: from
+/// inside a container the metadata endpoint usually remains reachable but
+/// answers for the *host*, which would mislabel the container — a separate
+/// statistical device — as its host's cloud product. Consequently, container
+/// images built from VM images must remove or refresh
+/// `/etc/anolisa-release`; a stale file left in an image layer wins over
+/// container detection.
 ///
 /// Reuses the caller's [`MetadataClient`] so the short-circuit flag
 /// (metadata-unreachable) is shared across all probes.
 pub fn probe_product_type(release_path: &Path, client: &MetadataClient) -> String {
-    // 1. /etc/anolisa-release PRODUCT_TYPE field
+    // 1. /etc/anolisa-release PRODUCT_TYPE field — an explicit declaration
+    //    always wins over probing.
     if let Ok(content) = fs::read_to_string(release_path)
         && let Some(pt) = find_product_type_in_release(&content)
     {
         return pt;
     }
 
-    // 2. EDS detection: desktop-id starts with "ecd"
+    // 2. Container detection — local and deterministic. Inside a container
+    //    the metadata API typically stays reachable but answers for the
+    //    host, so this check must come first for the container device to be
+    //    labelled "container" rather than its host's cloud product.
+    if container_flavor().is_some() {
+        return "container".to_string();
+    }
+
+    // 3. EDS detection: desktop-id starts with "ecd"
     if let Some(desktop_id) = client.query("desktop-id")
         && desktop_id.starts_with("ecd")
     {
         return "eds".to_string();
     }
 
-    // 3. ECS detection: instance-type starts with "ecs"
+    // 4. ECS detection: instance-type starts with "ecs"
     if let Some(instance_type) = client.query("instance/instance-type")
         && instance_type.starts_with("ecs")
     {
@@ -254,13 +329,103 @@ pub(crate) fn test_config(dir: &tempfile::TempDir) -> TelemetryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::metadata::MetadataClient;
+
+    fn dead_client() -> MetadataClient {
+        MetadataClient::new("http://127.0.0.1:19999/no-such-endpoint")
+    }
 
     #[test]
     fn test_detect_product_type_case_insensitive() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("anolisa-release");
         std::fs::write(&path, "PRODUCT_TYPE=ECS\n").unwrap();
-        assert_eq!(detect_product_type(&path), ProductType::Ecs);
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            with_container_flavor(None, || {
+                assert_eq!(detect_product_type(&path, &dead_client()), ProductType::Ecs);
+            })
+        });
+    }
+
+    #[test]
+    fn test_probe_product_type_container_when_no_release() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("anolisa-release");
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            with_container_flavor(Some("docker"), || {
+                assert_eq!(probe_product_type(&path, &dead_client()), "container");
+            })
+        });
+    }
+
+    #[test]
+    fn test_probe_product_type_release_wins_over_container() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("anolisa-release");
+        std::fs::write(&path, "PRODUCT_TYPE=ecs\n").unwrap();
+        with_container_flavor(Some("docker"), || {
+            assert_eq!(probe_product_type(&path, &dead_client()), "ecs");
+        });
+    }
+
+    #[test]
+    fn test_probe_product_type_container_wins_over_metadata() {
+        // cloud-init would answer "ecs" for instance-type; the container
+        // layer must short-circuit before any metadata query runs.
+        crate::telemetry::metadata::with_cloud_init_responses(
+            &[("ds.meta_data.instance.instance-type", "ecs.c7.xlarge")],
+            || {
+                with_container_flavor(Some("docker"), || {
+                    let dir = tempfile::TempDir::new().unwrap();
+                    let path = dir.path().join("anolisa-release");
+                    assert_eq!(probe_product_type(&path, &dead_client()), "container");
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn test_detect_product_type_maps_container() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("anolisa-release");
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            with_container_flavor(Some("docker"), || {
+                assert_eq!(
+                    detect_product_type(&path, &dead_client()),
+                    ProductType::Container
+                );
+            })
+        });
+    }
+
+    #[test]
+    fn test_detect_product_type_custom_release_collapses_to_unknown() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("anolisa-release");
+        std::fs::write(&path, "PRODUCT_TYPE=mycloud\n").unwrap();
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            with_container_flavor(None, || {
+                // The String path passes custom values through; the enum
+                // path deliberately collapses them (documented divergence).
+                assert_eq!(probe_product_type(&path, &dead_client()), "mycloud");
+                assert_eq!(
+                    detect_product_type(&path, &dead_client()),
+                    ProductType::Unknown
+                );
+            })
+        });
+    }
+
+    #[test]
+    fn test_product_type_container_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&ProductType::Container).unwrap(),
+            "\"container\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ProductType>("\"container\"").unwrap(),
+            ProductType::Container
+        );
     }
 
     #[test]

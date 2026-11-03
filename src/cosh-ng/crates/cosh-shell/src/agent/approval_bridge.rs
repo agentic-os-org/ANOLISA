@@ -5,7 +5,7 @@ use crate::approval::broker::{
     provider_deny_response, ApprovalExecutionMetadata, ApprovalOutcome, ApprovalOutcomeInput,
     ProviderApprovalStatus, ProviderResponseInput,
 };
-use crate::approval::handoff::shell_handoff_command_from_request;
+use crate::approval::handoff::{shell_handoff_command_from_request, trusted_command_from_request};
 use crate::approval::journal::approval_audit_input;
 use crate::approval::provider::mark_provider_approval_resolved;
 use crate::approval::resolution::request_can_receive_host_executed_result;
@@ -173,12 +173,12 @@ fn trust_mode_blocks_shell_request(
         .is_some_and(|assessment| assessment_requires_interactive_approval(&assessment))
 }
 
-fn shell_command_requires_interactive_approval(request: &mut RuntimeApprovalRequest) -> bool {
-    refresh_shell_request_assessment(
-        request,
+fn shell_command_requires_interactive_approval(command: &str) -> bool {
+    let assessment = assess_shell_command(
+        command,
         AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
-    )
-    .is_some_and(|assessment| assessment_requires_interactive_approval(&assessment))
+    );
+    assessment_requires_interactive_approval(&assessment)
 }
 
 pub(crate) fn render_auto_approved_tool<W: Write>(
@@ -266,14 +266,23 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             }
         }
 
-        let raw_cmd = request
-            .preview
-            .strip_prefix("$ ")
-            .unwrap_or(&request.preview);
-
-        let trust_key_match = request_is_executable_bash_tool(&request)
-            && command_matches_trust_key(raw_cmd, state.control.trust.session_trusted_commands());
-        if trust_key_match && shell_command_requires_interactive_approval(&mut request) {
+        // Trust is matched on the command a handoff executes, never on the
+        // card's display preview: a `{"cmd": ...}` request shows the serialized
+        // object and runs the `cmd` value, while the uncertain-effect revocation
+        // keys off the executed text. Matching on the preview would therefore
+        // replay a command whose effect nobody can account for, and a request
+        // with no derivable command matches nothing.
+        let executable_command = request_is_executable_bash_tool(&request)
+            .then(|| trusted_command_from_request(&request))
+            .flatten();
+        let trust_key_match = executable_command.as_deref().is_some_and(|command| {
+            command_matches_trust_key(command, state.control.trust.session_trusted_commands())
+        });
+        if trust_key_match
+            && executable_command
+                .as_deref()
+                .is_some_and(shell_command_requires_interactive_approval)
+        {
             // A trust key can never override the high-risk gate: config
             // may preload `reboot` via `trusted_commands`, and a key
             // minted before this guard would otherwise replay (#2064).

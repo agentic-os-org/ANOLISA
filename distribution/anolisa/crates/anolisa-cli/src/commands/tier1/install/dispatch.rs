@@ -64,7 +64,7 @@ use super::owned_ops::{
 use super::raw::{load_dry_run_install_contract, resolve_raw};
 use super::render::repo_config_err;
 use super::rpm::{
-    PinError, RpmTarget, check_rpm_install, resolve_pinned_candidate,
+    PinError, RpmTarget, check_rpm_install, installed_component_packages, resolve_pinned_candidate,
     rpm_package_candidates_with_index,
 };
 use super::types::{RawRepositoryOrigin, RawResolution, ResolveInputs};
@@ -339,6 +339,13 @@ pub(crate) fn plan_component(
     }
 
     let family = install_family(args, &store, &component, &repo_config);
+    if args.no_deps && family == "rpm" {
+        return Err(CliError::InvalidArgument {
+            command,
+            reason: "--no-deps is only supported by the raw backend; the selected backend is rpm"
+                .to_string(),
+        });
+    }
 
     // Backend gate: only the raw and rpm families have executors. The
     // selection call validates the name and its configuration first, so an
@@ -491,7 +498,24 @@ pub(crate) fn plan_component(
                     &command,
                 )?;
                 delegated_pin = fresh.pin;
-                (fresh.target, Some(fresh.package))
+                let probe_package = if args.package.is_none() {
+                    let index = invocation_component_index(
+                        &layout,
+                        env,
+                        &repo_config,
+                        index_base_override.as_deref(),
+                    );
+                    select_installed_probe(
+                        query,
+                        &component,
+                        &fresh.package,
+                        index.as_ref(),
+                        &command,
+                    )?
+                } else {
+                    fresh.package
+                };
+                (fresh.target, Some(probe_package))
             }
         }
     };
@@ -561,6 +585,7 @@ pub(crate) fn plan_component(
     let request = InstallRequest {
         target,
         requested_version: args.version.clone(),
+        no_deps: args.no_deps,
     };
     let install_plan = plan(&Intent::Install(request.clone()), &facts)
         .map_err(|err| plan_error_to_cli(err, &component, &command))?;
@@ -657,6 +682,8 @@ pub(super) fn execute_planned(
     let layout = common::resolve_layout(ctx);
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
     let index_base_override = normalized_repo_override(args)?;
+    let component_index =
+        invocation_component_index(&layout, env, &repo_config, index_base_override.as_deref());
     let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = rpm_install::journal_dir(&layout);
 
@@ -792,6 +819,9 @@ pub(super) fn execute_planned(
             &now,
             &request,
             &provider,
+            query,
+            args.package.is_none(),
+            component_index.as_ref(),
             &command,
             reporter,
             InstallApply::Owned {
@@ -817,6 +847,9 @@ pub(super) fn execute_planned(
         &now,
         &request,
         &provider,
+        query,
+        args.package.is_none(),
+        component_index.as_ref(),
         &command,
         reporter,
         InstallApply::Delegated {
@@ -1097,9 +1130,63 @@ fn system_probe_package(
         Err(err) => return Err(pkg_query_err(err, command)),
     };
     Ok(match candidates.as_slice() {
+        [single] if args.package.is_none() => {
+            let installed = match installed_component_packages(
+                query,
+                component,
+                Some(&single.package),
+                component_index.as_ref(),
+            ) {
+                Ok(installed) => installed,
+                Err(PackageQueryError::CommandMissing { command: bin }) => {
+                    if missing_rpm_tooling_is_fatal(env, rpmdb) {
+                        return Err(rpm_tooling_missing_error(command, &bin, component));
+                    }
+                    return Ok(fallback());
+                }
+                Err(err) => return Err(pkg_query_err(err, command)),
+            };
+            select_probe_candidate(component, &single.package, command, &installed)?
+        }
         [single] => single.package.clone(),
         _ => fallback(),
     })
+}
+
+fn select_installed_probe(
+    query: &dyn PackageQuery,
+    component: &str,
+    preferred: &str,
+    index: Option<&ComponentIndex>,
+    command: &str,
+) -> Result<String, CliError> {
+    let installed = installed_component_packages(query, component, Some(preferred), index)
+        .map_err(|err| match err {
+            PackageQueryError::CommandMissing { command: binary } => {
+                rpm_tooling_missing_error(command, &binary, component)
+            }
+            err => pkg_query_err(err, command),
+        })?;
+    select_probe_candidate(component, preferred, command, &installed)
+}
+
+fn select_probe_candidate(
+    component: &str,
+    preferred: &str,
+    command: &str,
+    installed: &[String],
+) -> Result<String, CliError> {
+    match installed {
+        [] => Ok(preferred.to_string()),
+        [package] => Ok(package.clone()),
+        many => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "multiple installed RPM packages provide '{component}': {}; cannot select a package to observe",
+                many.join(", ")
+            ),
+        }),
+    }
 }
 
 /// Fresh delegated resolution result: the provider target, its bare package,
@@ -1255,6 +1342,9 @@ fn install_applied(
     now: &str,
     request: &InstallRequest,
     provider: &DelegatedProvider,
+    query: &dyn PackageQuery,
+    check_component_provider: bool,
+    component_index: Option<&ComponentIndex>,
     command: &str,
     reporter: &mut dyn ProgressReporter,
     apply: InstallApply<'_>,
@@ -1307,6 +1397,9 @@ fn install_applied(
         journal_dir,
         request,
         degraded_rpmdb,
+        query,
+        check_component_provider,
+        component_index,
         command,
     )?;
 
@@ -1491,6 +1584,9 @@ fn locked_install_steps(
     journal_dir: &Path,
     request: &InstallRequest,
     degraded_rpmdb: Option<&RpmdbProbe>,
+    query: &dyn PackageQuery,
+    check_component_provider: bool,
+    component_index: Option<&ComponentIndex>,
     command: &str,
 ) -> Result<Vec<Step>, CliError> {
     let state_snapshot = observe_install_state(target, scope, now, store, layout, journal_dir)
@@ -1511,6 +1607,29 @@ fn locked_install_steps(
         && rpmdb.rpmdb_exists()
     {
         return Err(rpmdb_appeared_error(command, target));
+    }
+
+    if check_component_provider && matches!(scope, InstallationScope::System) {
+        match installed_component_packages(query, target, native_package, component_index) {
+            Ok(installed) if !installed.is_empty() => {
+                return Err(CliError::InvalidArgument {
+                    command: command.to_string(),
+                    reason: format!(
+                        "system RPM '{}' appeared while '{target}' was being resolved; nothing was changed — run `sudo anolisa --install-mode system adopt {target}` or retry after removing the external package",
+                        installed.join(", ")
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(PackageQueryError::CommandMissing { command: binary }) => match degraded_rpmdb {
+                None => return Err(rpm_tooling_missing_error(command, &binary, target)),
+                Some(rpmdb) if rpmdb.rpmdb_exists() => {
+                    return Err(rpmdb_appeared_error(command, target));
+                }
+                Some(_) => {}
+            },
+            Err(err) => return Err(pkg_query_err(err, command)),
+        }
     }
 
     let snapshot = match observe_install_snapshot(
@@ -1852,7 +1971,7 @@ fn plan_error_to_cli(err: PlanError, target: &str, command: &str) -> CliError {
         PlanError::UseUpdate => CliError::InvalidArgument {
             command,
             reason: format!(
-                "component '{target}' is already installed at a different version; run `anolisa update {target} --version <version>` to change versions"
+                "component '{target}' is already installed at a different version; run `anolisa update {target}` to update it to the repository's candidate version (a specific version cannot be requested)"
             ),
         },
         PlanError::AlreadyManaged => CliError::InvalidArgument {
@@ -2003,6 +2122,53 @@ mod tests {
             &rpmdb
         ));
         assert!(missing_rpm_tooling_is_fatal(&env(None, None), &rpmdb));
+    }
+
+    #[test]
+    fn use_update_remediation_names_the_supported_update_flow() {
+        // Neither version-carrying command works for an Owned record at a
+        // different version: `UpdateArgs` declares no `--version` flag (with
+        // `propagate_version` clap's built-in intercepts it, DisplayVersion,
+        // exit 0), and `install {target} --version <v>` re-enters
+        // `plan(Intent::Install)`, where planner.rs maps the same Owned
+        // record straight back to `UseUpdate`. The remediation must name
+        // plain `anolisa update {target}` — the workflow update really
+        // supports — and must not promise a specific version.
+        let err = plan_error_to_cli(PlanError::UseUpdate, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &err else {
+            panic!("UseUpdate must render InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("anolisa update cosh"),
+            "remediation must name `anolisa update cosh`, got: {reason}"
+        );
+        assert!(
+            reason.contains("candidate version"),
+            "remediation must say update moves to the repository's candidate version, got: {reason}"
+        );
+        assert!(
+            !reason.contains("--version"),
+            "remediation must not name a version flag: `update --version` is intercepted by clap and `install --version` re-hits UseUpdate, got: {reason}"
+        );
+
+        // Other remediation messages keep their existing commands verbatim.
+        let already_present =
+            plan_error_to_cli(PlanError::AlreadyPresentOnSystem, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &already_present else {
+            panic!("AlreadyPresentOnSystem must render InvalidArgument");
+        };
+        assert!(
+            reason.contains("anolisa adopt cosh"),
+            "adopt remediation unchanged, got: {reason}"
+        );
+        let already_managed = plan_error_to_cli(PlanError::AlreadyManaged, "cosh", "install");
+        let CliError::InvalidArgument { reason, .. } = &already_managed else {
+            panic!("AlreadyManaged must render InvalidArgument");
+        };
+        assert!(
+            reason.contains("anolisa update cosh`"),
+            "AlreadyManaged keeps its `update` (no --version) remediation, got: {reason}"
+        );
     }
 
     #[test]
@@ -2666,6 +2832,31 @@ scope = "@anolisa"
             .expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("ftp"), "got: {}", err.reason());
+    }
+
+    #[test]
+    fn install_repo_variables_are_rejected_before_fetch() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let tmp = tempdir().expect("tmpdir");
+        for url in [
+            format!("file://{}/$arch", tmp.path().display()),
+            format!("http://{}/$arch", listener.local_addr().expect("address")),
+        ] {
+            let mut a = args("fixture-comp");
+            a.backend = Some("raw".to_string());
+            a.version = Some("1.0.0".to_string());
+            a.repo = Some(url);
+            let err =
+                handle_with_fake_rpm(a, &ctx_with_prefix(true, Some(tmp.path().to_path_buf())))
+                    .expect_err("variables must be rejected");
+            assert_eq!(err.code(), "INVALID_ARGUMENT");
+            assert!(err.reason().contains("not substituted"), "{}", err.reason());
+        }
+        assert!(matches!(
+            listener.accept(),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 
     /// A `--repo` override replaces the DNF source's base URL — the same

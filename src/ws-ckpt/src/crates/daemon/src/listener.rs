@@ -340,8 +340,8 @@ mod tests {
         {
             let arc = state.get_by_wsid("ws-b").unwrap();
             let mut guard = arc.write().await;
-            guard.index.snapshots.remove("s-000001");
-            guard.index.snapshots.insert(
+            guard.remove_snapshot("s-000001");
+            guard.insert_snapshot(
                 "s-000000a".into(),
                 SnapshotMeta {
                     message: Some("inserted within first-page bound".into()),
@@ -353,7 +353,7 @@ mod tests {
                     child_ids: vec![],
                 },
             );
-            guard.index.snapshots.insert(
+            guard.insert_snapshot(
                 "s-newer".into(),
                 SnapshotMeta {
                     message: Some("newer than first-page bound".into()),

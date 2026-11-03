@@ -231,6 +231,11 @@ pub struct SessionLabel {
     /// The automatic verdict changed after a human decided, and still disagrees
     /// with them — the trajectory grew new rounds, most likely. A prompt to
     /// take another look, never a reason to stop honouring the human label.
+    ///
+    /// Sticky: once set it stays set across later recomputes that keep
+    /// disagreeing — including a recompute that leaves the verdict unchanged —
+    /// and clears only when the rules come round to the human's verdict, or
+    /// when a new decision settles the disagreement.
     pub auto_changed_since_decision: bool,
     /// Verdict of the second-level model judge, when one has run.
     ///
@@ -242,8 +247,9 @@ pub struct SessionLabel {
     pub llm_reason: Option<String>,
     /// Steps the model's verdict rests on. Empty for anything but `bad`.
     pub llm_cited_steps: Vec<usize>,
-    /// Whether the model said `bad` without citing a step and was reduced to
-    /// `unknown`. Recorded so the rate can be counted rather than guessed at.
+    /// Whether the model said `bad` without citing a step the judged round
+    /// contains and was reduced to `unknown`. Recorded so the rate can be
+    /// counted rather than guessed at.
     pub llm_downgraded: bool,
     pub llm_at_ns: Option<i64>,
     pub metrics: TriageMetrics,
@@ -361,6 +367,13 @@ impl SessionLabel {
     /// endorse it. Pinning the in-force label also keeps `effective_label` to a
     /// single rule: a later recompute cannot move it out from under a decision
     /// somebody already made.
+    ///
+    /// A `Confirm` of a row already `Overridden` endorses the human's own
+    /// verdict, so the state stays `Overridden`. Recording it as `Confirmed`
+    /// would move the row out of the `overridden` bucket in
+    /// [`super::store::ReuseStore::rule_override_stats`], erasing a rule
+    /// misfire a person had already identified — exactly the signal the
+    /// statistics exist to preserve.
     pub fn apply_decision(
         &mut self,
         action: LabelAction,
@@ -369,11 +382,14 @@ impl SessionLabel {
         now_ns: i64,
     ) -> LabelEventKind {
         let (label, state, kind) = match action {
-            LabelAction::Confirm => (
-                self.effective_label(),
-                ConfirmState::Confirmed,
-                LabelEventKind::Confirm,
-            ),
+            LabelAction::Confirm => {
+                let state = if self.was_overridden() {
+                    ConfirmState::Overridden
+                } else {
+                    ConfirmState::Confirmed
+                };
+                (self.effective_label(), state, LabelEventKind::Confirm)
+            }
             LabelAction::Override(label) => {
                 (label, ConfirmState::Overridden, LabelEventKind::Override)
             }
@@ -392,11 +408,17 @@ impl SessionLabel {
     /// Applies a recomputed automatic verdict, leaving any human decision
     /// untouched.
     ///
-    /// Sets [`Self::auto_changed_since_decision`] only when the rules actually
-    /// changed their mind *and* still disagree with the human — a recompute that
-    /// merely comes round to the human's view is not worth interrupting them
-    /// for, and flagging every recompute would make the marker meaningless on
-    /// rows that were overridden precisely because the rules were wrong.
+    /// [`Self::auto_changed_since_decision`] records a disagreement that
+    /// survived a human decision, so it is sticky rather than a per-recompute
+    /// flag:
+    ///
+    /// * a recompute that changed the verdict *and* still disagrees with the
+    ///   human sets it;
+    /// * a recompute that agrees with the human clears it — the disagreement
+    ///   the marker prompts about is resolved;
+    /// * a recompute that leaves the verdict unchanged while still disagreeing
+    ///   keeps the previous value: the change that set the marker is still
+    ///   unresolved, so a reviewer filtering on it must not lose the row.
     pub fn apply_retriage(
         &mut self,
         identity: TrajectoryIdentity,
@@ -406,20 +428,41 @@ impl SessionLabel {
         now_ns: i64,
     ) {
         let previous_auto = self.auto_label;
+        let new_hash = source_content_hash.into();
+        // A model verdict describes the document it read. Re-collecting the
+        // same session with new bytes invalidates it: keeping it would let a
+        // judgement of the old content outrank the fresh automatic verdict
+        // forever, because the judge only considers rows with no verdict yet.
+        let content_changed =
+            !self.source_content_hash.is_empty() && self.source_content_hash != new_hash;
         self.auto_label = outcome.label;
         self.auto_reason = outcome.reason;
         self.auto_rules = outcome.rules;
         self.metrics = outcome.metrics;
         self.n_findings = outcome.n_findings;
-        self.source_content_hash = source_content_hash.into();
+        self.source_content_hash = new_hash;
+        if content_changed {
+            self.llm_label = None;
+            self.llm_reason = None;
+            self.llm_cited_steps.clear();
+            self.llm_downgraded = false;
+            self.llm_at_ns = None;
+        }
         self.triage_version = triage_version.into();
         // Identity is refreshed here too: a changed source file forces a
         // re-triage, and a re-titled conversation should show its new title.
         self.identity = identity;
         if let Some(human) = self.human_label {
-            if previous_auto != outcome.label && human != outcome.label {
+            if human == outcome.label {
+                // The rules now agree with the human: nothing left to revisit.
+                self.auto_changed_since_decision = false;
+            } else if previous_auto != outcome.label {
+                // A change after the decision that still disagrees: prompt.
                 self.auto_changed_since_decision = true;
             }
+            // Unchanged verdict that still disagrees: leave the marker as it
+            // is. It records a change after the decision that remains
+            // unresolved, not "the latest recompute changed something".
         }
         self.updated_at_ns = now_ns;
     }
@@ -523,6 +566,64 @@ mod tests {
         assert_eq!(label.auto_label, TrajectoryLabel::Bad);
         assert_eq!(label.auto_rules, vec!["R1".to_string()]);
         assert!(label.was_overridden());
+    }
+
+    #[test]
+    fn retriage_of_new_content_clears_the_model_verdict() {
+        // The judge verdict describes the document it read. A re-collection
+        // with different bytes must retire it, or a stale `good` keeps
+        // outranking the fresh automatic verdict and the judge never sees the
+        // row again (it only considers labels without an LLM verdict).
+        let mut label = row(TrajectoryLabel::Good);
+        label.apply_judgement(
+            TrajectoryLabel::Good,
+            "looked fine".to_string(),
+            vec![2],
+            false,
+            200,
+        );
+        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Bad),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
+
+        assert_eq!(label.llm_label, None);
+        assert_eq!(label.llm_reason, None);
+        assert!(label.llm_cited_steps.is_empty());
+        assert!(!label.llm_downgraded);
+        assert_eq!(label.llm_at_ns, None);
+        assert_eq!(label.effective_label(), TrajectoryLabel::Bad);
+        assert_eq!(label.source_content_hash, "hash-2");
+    }
+
+    #[test]
+    fn retriage_of_identical_content_keeps_the_model_verdict() {
+        // A rules-version bump recomputes the automatic verdict from the same
+        // bytes; the model read those bytes too, so its verdict stays valid.
+        let mut label = row(TrajectoryLabel::Good);
+        label.apply_judgement(
+            TrajectoryLabel::Good,
+            "looked fine".to_string(),
+            vec![2],
+            false,
+            200,
+        );
+
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Bad),
+            "hash-1",
+            "triage-v2",
+            300,
+        );
+
+        assert_eq!(label.llm_label, Some(TrajectoryLabel::Good));
+        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
     }
 
     #[test]
@@ -637,6 +738,102 @@ mod tests {
         label.apply_decision(LabelAction::Confirm, "alice", None, 400);
         assert!(!label.auto_changed_since_decision);
         assert_eq!(label.effective_label(), TrajectoryLabel::Useless);
+    }
+
+    #[test]
+    fn retriage_agreeing_after_a_disagreement_clears_the_flag() {
+        // The field documents "changed after a human decided *and still
+        // disagrees*". A recompute that comes round to the human's verdict
+        // resolves the disagreement, so the amber revisit marker (and the
+        // `changed_since_decision` review filter) must stop reporting it.
+        let mut label = row(TrajectoryLabel::Bad);
+        label.apply_decision(
+            LabelAction::Override(TrajectoryLabel::Good),
+            "alice",
+            None,
+            200,
+        );
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Useless),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
+        assert!(
+            label.auto_changed_since_decision,
+            "precondition: the retriage disagrees with the human"
+        );
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Good),
+            "hash-3",
+            "triage-v1",
+            400,
+        );
+        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+        assert!(
+            !label.auto_changed_since_decision,
+            "an agreeing retriage must clear the stale revisit marker"
+        );
+    }
+
+    #[test]
+    fn unchanged_disagreeing_recompute_keeps_the_sticky_marker() {
+        // The field contract is "changed after a human decided, *and still
+        // disagrees*": a fact about the decision, not a per-recompute flag.
+        // human=Bad, auto Useless -> Good sets the marker; a later recompute
+        // that returns Good again has changed nothing, so the disagreement the
+        // row was flagged for is still unresolved and the
+        // `changed_since_decision` review queue must keep the row.
+        let mut label = row(TrajectoryLabel::Useless);
+        label.apply_decision(
+            LabelAction::Override(TrajectoryLabel::Bad),
+            "alice",
+            None,
+            200,
+        );
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Good),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
+        assert!(
+            label.auto_changed_since_decision,
+            "precondition: the retriage changed the verdict and still disagrees"
+        );
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Good),
+            "hash-3",
+            "triage-v1",
+            400,
+        );
+        assert_eq!(label.effective_label(), TrajectoryLabel::Bad);
+        assert!(
+            label.auto_changed_since_decision,
+            "an unchanged recompute that still disagrees must keep the sticky marker"
+        );
+    }
+
+    #[test]
+    fn recompute_without_a_human_decision_never_sets_the_marker() {
+        // No decision means no revisit prompt: the marker exists for
+        // disagreements with a human verdict.
+        let mut label = row(TrajectoryLabel::Useless);
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Good),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
+        assert!(
+            !label.auto_changed_since_decision,
+            "without a human decision the revisit marker stays clear"
+        );
     }
 
     #[test]

@@ -39,12 +39,15 @@
 //! ```
 
 mod anthropic;
+pub mod gemini;
 mod openai;
 pub mod sysom;
 pub mod types;
 
 pub use anthropic::AnthropicParser;
+pub use gemini::GeminiParser;
 pub use openai::OpenAIParser;
+pub(crate) use openai::ResponsesToolCalls;
 pub use sysom::SysomParser;
 pub use types::*;
 
@@ -119,11 +122,42 @@ impl MessageParser {
             return Some(parsed);
         }
 
-        // The analyzer pre-filters non-LLM paths before calling in, so
-        // reaching this point is unexpected but harmless — keep it at debug
-        // as a last-resort diagnostic rather than a per-request alert.
-        log::debug!("Path '{path}' does not match any known LLM API endpoint");
+        // Try Gemini. The model and the streaming action live in the URL, not
+        // the body, so the path has to hand them to the parser.
+        if let Some(model) = Self::gemini_model_from_path(path) {
+            let streaming = path
+                .split('?')
+                .next()
+                .unwrap_or(path)
+                .ends_with(":streamGenerateContent");
+            let request =
+                request_body.and_then(|body| GeminiParser::parse_request(body, model, streaming));
+            let response = response_body.and_then(GeminiParser::parse_response);
+
+            if request.is_some() || response.is_some() {
+                return Some(ParsedApiMessage::GeminiMessage { request, response });
+            }
+        }
+
+        // Reaching this point means no parser claimed the path. That is only
+        // surprising for a path the analyzer already knows to be an LLM
+        // endpoint (the request body may simply not have parsed), so keep the
+        // diagnostic for genuinely unknown paths only — a known provider that
+        // failed to parse is not "does not match any known endpoint".
+        if Self::fallthrough_log_applies(path) {
+            log::debug!("Path '{path}' does not match any known LLM API endpoint");
+        }
         None
+    }
+
+    /// Whether the fall-through diagnostic applies to `path`.
+    ///
+    /// `parse_by_path` reaches its tail for two different reasons: the path is
+    /// not an LLM endpoint at all, or it is one but neither body parsed. Only
+    /// the first is the "unknown endpoint" case the debug line describes, so
+    /// the decision is a predicate a test can pin without capturing logs.
+    fn fallthrough_log_applies(path: &str) -> bool {
+        Self::detect_provider(path).is_none()
     }
 
     /// Parse request/response bodies against the SysOM parser only.
@@ -205,6 +239,7 @@ impl MessageParser {
     /// # Returns
     /// * `Some("anthropic")` for Anthropic paths
     /// * `Some("openai")` for OpenAI paths
+    /// * `Some("gemini")` for Gemini generation paths
     /// * `None` for unknown paths
     pub fn detect_provider(path: &str) -> Option<&'static str> {
         if AnthropicParser::matches_path(path) {
@@ -213,16 +248,57 @@ impl MessageParser {
             Some("openai")
         } else if SysomParser::matches_path(path) {
             Some("sysom")
+        } else if Self::gemini_model_from_path(path).is_some() {
+            Some("gemini")
         } else {
             None
         }
     }
 
-    /// Check if a path matches any known LLM API endpoint
+    /// Extract the requested model name from a Gemini generation path.
+    ///
+    /// Google's generative-language API embeds the model in the URL instead
+    /// of the request body: `POST /v1beta/models/{model}:streamGenerateContent`
+    /// (streaming, `?alt=sse`), or `:generateContent` (non-streaming). The
+    /// Vertex AI publisher spelling carries the same tail:
+    /// `/v1/projects/{p}/locations/{l}/publishers/google/models/{model}:...`.
+    ///
+    /// Returns the `{model}` segment for inference actions only — token
+    /// counting (`:countTokens`) is not an inference call — or `None` for
+    /// any other path shape.
+    pub fn gemini_model_from_path(path: &str) -> Option<&str> {
+        // The request target carries the query string (`?alt=sse`); it is
+        // never part of the model name.
+        let path = path.split('?').next().unwrap_or(path);
+        let action = [":streamGenerateContent", ":generateContent"]
+            .iter()
+            .find(|a| path.ends_with(*a))?;
+        let rest = path.strip_suffix(action)?;
+        let idx = rest.rfind("/models/")?;
+        let model = &rest[idx + "/models/".len()..];
+        if model.is_empty() {
+            return None;
+        }
+        Some(model)
+    }
+
+    /// Check if a path matches any known LLM API endpoint.
+    ///
+    /// This is the gate on message parsing itself: `should_parse_message`
+    /// calls it for every aggregated result, so a path missing here never
+    /// reaches `parse_by_path` no matter what the per-provider parsers accept.
+    /// It therefore has to stay in lockstep with [`Self::detect_provider`],
+    /// which is what picks the parser once this gate admits the request — a
+    /// provider `detect_provider` names but this predicate rejects can never be
+    /// parsed at all.
+    ///
+    /// Gemini was exactly that: `detect_provider` and [`Self::parse_by_path`]
+    /// both handled `:generateContent`/`:streamGenerateContent`, but the gate
+    /// rejected those paths, so a Gemini exchange produced no parsed message on
+    /// any of the aggregated paths while the drain and the token counters read
+    /// it fine.
     pub fn is_llm_api_path(path: &str) -> bool {
-        AnthropicParser::matches_path(path)
-            || OpenAIParser::matches_path(path)
-            || SysomParser::matches_path(path)
+        Self::detect_provider(path).is_some()
     }
 }
 
@@ -390,12 +466,81 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_provider_gemini_generation_paths() {
+        // Google's generative-language endpoints embed the model in the path
+        // (`POST /v1beta/models/{model}:streamGenerateContent?alt=sse`), and
+        // the Vertex AI publisher spelling carries the same `models/{model}:`
+        // tail. Both must classify as gemini.
+        assert_eq!(
+            MessageParser::detect_provider(
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            ),
+            Some("gemini")
+        );
+        assert_eq!(
+            MessageParser::detect_provider("/v1/models/gemini-2.0-flash:generateContent"),
+            Some("gemini")
+        );
+        assert_eq!(
+            MessageParser::detect_provider(
+                "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent"
+            ),
+            Some("gemini")
+        );
+        // Token counting is not an inference call and must stay unclassified.
+        assert_eq!(
+            MessageParser::detect_provider("/v1beta/models/gemini-2.5-pro:countTokens"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_gemini_model_from_path_extracts_the_requested_model() {
+        assert_eq!(
+            MessageParser::gemini_model_from_path(
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            ),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(
+            MessageParser::gemini_model_from_path(
+                "/v1/models/gemini-2.0-flash-001:generateContent"
+            ),
+            Some("gemini-2.0-flash-001")
+        );
+        // The Vertex AI publisher spelling shares the `models/{model}:` tail.
+        assert_eq!(
+            MessageParser::gemini_model_from_path(
+                "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent"
+            ),
+            Some("gemini-2.5-pro")
+        );
+        // Non-Gemini paths and a missing model segment stay None.
+        assert_eq!(
+            MessageParser::gemini_model_from_path("/v1/chat/completions"),
+            None
+        );
+        assert_eq!(
+            MessageParser::gemini_model_from_path("/v1beta/models/:generateContent"),
+            None
+        );
+        assert_eq!(
+            MessageParser::gemini_model_from_path("/v1beta/models/gemini-2.5-pro:countTokens"),
+            None
+        );
+    }
+
+    #[test]
     fn test_is_llm_api_path() {
         assert!(MessageParser::is_llm_api_path("/v1/messages"));
         assert!(MessageParser::is_llm_api_path("/v1/chat/completions"));
         assert!(MessageParser::is_llm_api_path("/v1/completions"));
         assert!(!MessageParser::is_llm_api_path("/v1/embeddings"));
         assert!(!MessageParser::is_llm_api_path("/health"));
+        // Anthropic's count-tokens / Batch sub-endpoints are not inference
+        // calls; they must not pass the gate (phantom llm_call rows).
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/count_tokens"));
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/batches"));
     }
 
     #[test]
@@ -427,6 +572,51 @@ mod tests {
         assert_eq!(openai_msg.provider(), "openai");
         assert_eq!(openai_msg.model(), Some("gpt-4"));
         assert_eq!(openai_msg.is_streaming(), Some(true));
+    }
+
+    /// The message-parsing gate must admit every provider `detect_provider`
+    /// names, because it is the gate on `parse_by_path` itself. Gemini's
+    /// generation endpoints were named by `detect_provider` and rejected here,
+    /// so those exchanges produced no parsed message on any aggregated path.
+    #[test]
+    fn is_llm_api_path_admits_every_detected_provider() {
+        for path in [
+            "/v1/messages",
+            "https://api.anthropic.com/v1/messages",
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-pro:generateContent",
+        ] {
+            assert!(
+                MessageParser::detect_provider(path).is_some(),
+                "{path} must have a provider"
+            );
+            assert!(
+                MessageParser::is_llm_api_path(path),
+                "{path} is detected but the parsing gate rejects it"
+            );
+        }
+    }
+
+    /// Gemini token counting shares the generation prefix but is not an
+    /// inference call: it must stay out of the gate even though the model
+    /// rides the path the same way.
+    #[test]
+    fn is_llm_api_path_still_rejects_gemini_count_tokens() {
+        for path in [
+            "/v1beta/models/gemini-2.5-pro:countTokens",
+            "/v1/messages/count_tokens",
+            "/v1/messages/batches",
+            "/v1/embeddings",
+            "/health",
+        ] {
+            assert!(
+                !MessageParser::is_llm_api_path(path),
+                "{path} is not an inference call"
+            );
+        }
     }
 
     #[test]
@@ -522,9 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_by_path_with_sse_openai_returns_none() {
-        // The OpenAI parser does not deep-parse SSE arrays — the genai
-        // builder's SSE fallback handles OpenAI streaming instead.
+    fn test_parse_by_path_with_sse_parses_slim_openai() {
+        // The OpenAI parser deep-parses SSE arrays like every other provider
+        // (see the scoping note above). The chunk here is the slim shape
+        // OpenAI-compatible gateways stream — no `object`, `created` or
+        // choice `index` — which used to fail the chunk's deserialization
+        // and made this test's old "returns None" premise hold by accident.
         let parser = MessageParser::new();
         let chunk = serde_json::json!({
             "id": "chatcmpl-123",
@@ -534,7 +727,20 @@ mod tests {
         let events = vec![make_sse_event(&chunk.to_string())];
 
         let result = parser.parse_by_path_with_sse("/v1/chat/completions", None, &events);
-        assert!(result.is_none());
+        let response = match result {
+            Some(ParsedApiMessage::OpenAICompletion {
+                response: Some(response),
+                ..
+            }) => response,
+            other => panic!("a slimmed OpenAI SSE stream must be deep-parsed, got {other:?}"),
+        };
+        let content = response.choices[0]
+            .message
+            .content
+            .as_ref()
+            .expect("the delta text must reach the message");
+        assert_eq!(content.as_text(), "hi".to_string());
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 
     #[test]
@@ -591,6 +797,210 @@ mod tests {
                 assert_eq!(resp.choices[0].message.content, "hi");
             }
             other => panic!("expected SysomMessage with response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_by_path_gemini() {
+        let parser = MessageParser::new();
+        let path = "/v1beta/models/gemini-2.5-pro:generateContent";
+        let request = serde_json::json!({
+            "systemInstruction": {"parts": [{"text": "Be concise"}]},
+            "contents": [
+                {"role": "user", "parts": [{"text": "What is 2+2?"}]},
+                {"role": "model", "parts": [{"text": "4"}]}
+            ],
+            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 32}
+        });
+        let response = serde_json::json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "4"}]},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1, "totalTokenCount": 11},
+            "responseId": "resp-gemini"
+        });
+
+        let parsed = parser
+            .parse_by_path(path, Some(&request), Some(&response))
+            .expect("Gemini path must parse");
+
+        assert_eq!(parsed.provider(), "gemini");
+        assert_eq!(parsed.model(), Some("gemini-2.5-pro"));
+        assert_eq!(parsed.response_id(), Some("resp-gemini"));
+        assert_eq!(parsed.is_streaming(), Some(false));
+        match parsed {
+            ParsedApiMessage::GeminiMessage {
+                request: Some(request),
+                response: Some(response),
+            } => {
+                assert_eq!(request.contents.len(), 2);
+                assert_eq!(request.contents[0].role.as_deref(), Some("user"));
+                assert_eq!(response.finish_reason(), Some("STOP"));
+            }
+            other => panic!("expected GeminiMessage, got {other:?}"),
+        }
+    }
+
+    /// The gate and `parse_by_path` must name the same provider set: a path
+    /// `is_llm_api_path` admits cannot fall through to the unknown-path branch.
+    #[test]
+    fn parse_by_path_handles_every_detected_provider() {
+        let parser = MessageParser::new();
+        let openai_request = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let anthropic_request = serde_json::json!({
+            "model": "claude-3-opus-20240229",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let sysom_params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let sysom_request = serde_json::json!({"llmParamString": sysom_params.to_string()});
+        let gemini_request = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}]
+        });
+
+        let cases = [
+            ("/v1/chat/completions", openai_request),
+            ("/v1/messages", anthropic_request),
+            ("/api/v1/copilot/generate_copilot", sysom_request),
+            (
+                "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+                gemini_request,
+            ),
+        ];
+        for (path, request) in cases {
+            assert!(
+                MessageParser::is_llm_api_path(path),
+                "{path} must pass the message gate"
+            );
+            assert!(
+                parser.parse_by_path(path, Some(&request), None).is_some(),
+                "{path} is admitted by the gate but no parser claimed it"
+            );
+        }
+
+        // An unknown path still falls through to `None`.
+        assert!(
+            parser
+                .parse_by_path(
+                    "/v1/embeddings",
+                    Some(&serde_json::json!({"model": "x"})),
+                    None
+                )
+                .is_none()
+        );
+    }
+
+    /// The fall-through debug line is the "unknown endpoint" diagnostic. A
+    /// path `detect_provider` already names is not unknown: the parser reaching
+    /// the tail means a body failed to parse, and logging "does not match any
+    /// known LLM API endpoint" for it is false. Gemini made that reachable for
+    /// a path the gate admits.
+    #[test]
+    fn fallthrough_log_covers_only_unknown_paths() {
+        for path in [
+            "/v1/messages",
+            "/v1/chat/completions",
+            "/api/v1/copilot/generate_copilot",
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+        ] {
+            assert!(
+                MessageParser::detect_provider(path).is_some(),
+                "{path} is a known provider"
+            );
+            assert!(
+                !MessageParser::fallthrough_log_applies(path),
+                "{path} is a known provider, so the unknown-endpoint line must not fire"
+            );
+            // Sanity: the parser really does reach the tail for this path when
+            // no body parses, which is the case the line used to misdescribe.
+            assert!(
+                MessageParser::new()
+                    .parse_by_path(path, Some(&serde_json::json!({"unexpected": true})), None)
+                    .is_none(),
+                "{path} with an unparsable body falls through"
+            );
+        }
+
+        for path in ["/v1/embeddings", "/health", "/v1/messages/count_tokens"] {
+            assert!(
+                MessageParser::detect_provider(path).is_none(),
+                "{path} must stay unknown"
+            );
+            assert!(
+                MessageParser::fallthrough_log_applies(path),
+                "{path} is genuinely unknown, so the diagnostic applies"
+            );
+            assert!(
+                MessageParser::new()
+                    .parse_by_path(path, None, None)
+                    .is_none()
+            );
+        }
+    }
+
+    /// A Gemini `streamGenerateContent` stream is the highest-frequency Gemini
+    /// shape. The SSE path already hands the parser the decoded chunk array, so
+    /// the assistant answer must come out of it rather than being decoded and
+    /// then dropped.
+    #[test]
+    fn test_parse_by_path_with_sse_parses_gemini() {
+        let parser = MessageParser::new();
+        let request = serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "What is 2+2?"}]}]
+        });
+        let events = vec![
+            make_sse_event(
+                &serde_json::json!({
+                    "candidates": [{"content": {"role": "model", "parts": [{"text": "4"}]}, "index": 0}]
+                })
+                .to_string(),
+            ),
+            make_sse_event(
+                &serde_json::json!({
+                    "candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP", "index": 0}],
+                    "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1, "totalTokenCount": 11}
+                })
+                .to_string(),
+            ),
+        ];
+
+        let result = parser.parse_by_path_with_sse(
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            Some(&request),
+            &events,
+        );
+
+        match result {
+            Some(ParsedApiMessage::GeminiMessage {
+                request: Some(request),
+                response: Some(response),
+            }) => {
+                assert_eq!(request.model, "gemini-2.5-pro");
+                assert!(request.stream);
+                assert_eq!(response.finish_reason(), Some("STOP"));
+                let text: String = response.candidates[0]
+                    .content
+                    .as_ref()
+                    .map(|content| {
+                        content
+                            .parts
+                            .iter()
+                            .filter_map(|part| part.text.as_deref())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert_eq!(text, "4");
+            }
+            other => panic!("expected GeminiMessage with request and response, got {other:?}"),
         }
     }
 }

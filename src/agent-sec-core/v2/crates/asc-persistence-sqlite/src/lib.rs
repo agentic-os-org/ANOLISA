@@ -12,7 +12,10 @@
 #![forbid(unsafe_code)]
 
 pub mod observability;
+pub mod scope;
 pub mod security_events;
+
+pub use scope::QueryScope;
 
 #[cfg(test)]
 mod tests {
@@ -102,3 +105,6 @@ mod tests {
             .collect()
     }
 }
+
+/// Strict owner-aware daemon query adapters.
+pub mod query;

@@ -1,9 +1,10 @@
 //! Closed daemon method inventory and access metadata.
 //!
-//! Two method families exist: PAP administration, which requires a Policy
-//! administrator, and Action capabilities, which any authenticated local peer
-//! may call. Keeping both in one closed inventory means an unregistered method
-//! is rejected before authorization rather than defaulting into a family.
+//! PAP administration requires a Policy administrator. Action capabilities,
+//! observability ingestion, and read-only queries accept any authenticated
+//! local peer; the query family is additionally row-scoped to the caller's
+//! owner by the handler. The closed inventory rejects unregistered methods
+//! before authorization rather than defaulting into a family.
 
 /// Create one Policy identity from an authored template.
 pub const POLICY_TEMPLATES_CREATE: &str = "policy.templates.create";
@@ -15,51 +16,104 @@ pub const POLICY_TEMPLATES_GET: &str = "policy.templates.get";
 pub const POLICY_TEMPLATES_LIST: &str = "policy.templates.list";
 /// Delete one exact current Policy revision.
 pub const POLICY_TEMPLATES_DELETE: &str = "policy.templates.delete";
-/// Create one Scope identity from an authored selector.
+/// Create an immutable assignment with exact Policy snapshots.
 pub const POLICY_SCOPES_CREATE: &str = "policy.scopes.create";
-/// Update one existing Scope identity.
-pub const POLICY_SCOPES_UPDATE: &str = "policy.scopes.update";
-/// Read one exact current Scope revision.
+/// Retry failed work owned by one Scope.
+pub const POLICY_SCOPES_RETRY: &str = "policy.scopes.retry";
+/// Read an assignment and its lifecycle status.
 pub const POLICY_SCOPES_GET: &str = "policy.scopes.get";
 /// List current Scopes.
 pub const POLICY_SCOPES_LIST: &str = "policy.scopes.list";
-/// Delete one exact current Scope revision.
+/// Stop discovery and request cleanup of all owned Bindings.
 pub const POLICY_SCOPES_DELETE: &str = "policy.scopes.delete";
-/// Create one Binding Apply intent.
-pub const POLICY_BINDINGS_CREATE: &str = "policy.bindings.create";
-/// Update one existing Binding and request Apply.
-pub const POLICY_BINDINGS_UPDATE: &str = "policy.bindings.update";
 /// Read one current Binding spec and lifecycle status.
 pub const POLICY_BINDINGS_GET: &str = "policy.bindings.get";
 /// List current Bindings and lifecycle statuses.
 pub const POLICY_BINDINGS_LIST: &str = "policy.bindings.list";
-/// Request deletion of one current Binding.
-pub const POLICY_BINDINGS_DELETE: &str = "policy.bindings.delete";
+
+/// Append one observability record using `OTel` attribution.
+pub const OBS_RECORD: &str = "obs.record";
+
+/// Check daemon responsiveness and process uptime.
+pub const DAEMON_HEALTH: &str = "daemon.health";
 
 /// Scan one Bash or Python snippet for pre-execution security issues.
 pub const ACTION_CODE_SCAN: &str = "action.code_scan";
+/// Detect personal information and credentials without authorizing an operation.
+pub const ACTION_PII_SCAN: &str = "action.pii_scan";
+/// Scan one prompt for injection or jailbreak attempts before it reaches a model.
+pub const ACTION_PROMPT_SCAN: &str = "action.prompt_scan";
+/// Probe that the models a prompt-scan mode requires are ready to serve.
+pub const ACTION_PROMPT_SCAN_WARMUP: &str = "action.prompt_scan.warmup";
+/// Manage Skill scanning, integrity, history and activation.
+pub const ACTION_SKILL_SEC: &str = "action.skill_sec";
+
+/// Return the dashboard summary of the caller's own security events.
+pub const SEC_SUMMARY: &str = "sec.summary";
+/// List the caller's own security events, newest first.
+pub const SEC_EVENTS_LIST: &str = "sec.events.list";
+/// Return one of the caller's own security events by id.
+pub const SEC_EVENTS_GET: &str = "sec.events.get";
+/// Count the caller's own security events grouped by one field.
+pub const SEC_EVENTS_COUNT_BY: &str = "sec.events.count_by";
+
+/// Lists owner-qualified observability sessions.
+pub const OBS_SESSIONS_LIST: &str = "obs.sessions.list";
+/// Lists runs within one owner-qualified session.
+pub const OBS_RUNS_LIST: &str = "obs.runs.list";
+/// Lists observations and their same-owner security correlations.
+pub const OBS_TIMELINE_GET: &str = "obs.timeline.get";
+/// Read-only observability query inventory.
+pub const OBS_QUERY_METHODS: [&str; 3] = [OBS_SESSIONS_LIST, OBS_RUNS_LIST, OBS_TIMELINE_GET];
+
+/// Bounded read-only observability operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservabilityQueryMethod {
+    /// Owner-qualified session summaries.
+    Sessions,
+    /// Runs within a session.
+    Runs,
+    /// Observations and optional security correlations.
+    Timeline,
+}
 
 /// Complete PAP method inventory for this protocol version.
-pub const PAP_METHODS: [&str; 15] = [
+pub const PAP_METHODS: [&str; 12] = [
     POLICY_TEMPLATES_CREATE,
     POLICY_TEMPLATES_UPDATE,
     POLICY_TEMPLATES_GET,
     POLICY_TEMPLATES_LIST,
     POLICY_TEMPLATES_DELETE,
     POLICY_SCOPES_CREATE,
-    POLICY_SCOPES_UPDATE,
+    POLICY_SCOPES_RETRY,
     POLICY_SCOPES_GET,
     POLICY_SCOPES_LIST,
     POLICY_SCOPES_DELETE,
-    POLICY_BINDINGS_CREATE,
-    POLICY_BINDINGS_UPDATE,
     POLICY_BINDINGS_GET,
     POLICY_BINDINGS_LIST,
-    POLICY_BINDINGS_DELETE,
 ];
 
 /// Complete Action-capability method inventory for this protocol version.
-pub const ACTION_METHODS: [&str; 1] = [ACTION_CODE_SCAN];
+pub const ACTION_METHODS: [&str; 5] = [
+    ACTION_CODE_SCAN,
+    ACTION_PII_SCAN,
+    ACTION_PROMPT_SCAN,
+    ACTION_PROMPT_SCAN_WARMUP,
+    ACTION_SKILL_SEC,
+];
+
+/// Complete read-only query method inventory for this protocol version.
+///
+/// The v1 observability query methods (`obs.sessions.list`, `obs.runs.list`,
+/// `obs.timeline.get`) stay outside this inventory until the observability
+/// stream carries an owner column, because exposing them without one would
+/// turn the system daemon into a cross-UID reader (issue #6608).
+pub const QUERY_METHODS: [&str; 4] = [
+    SEC_SUMMARY,
+    SEC_EVENTS_LIST,
+    SEC_EVENTS_GET,
+    SEC_EVENTS_COUNT_BY,
+];
 
 /// One Policy operation resolved from its exact wire method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +135,8 @@ pub enum PolicyMethod {
 pub enum ScopeMethod {
     /// Create.
     Create,
-    /// Update.
-    Update,
+    /// Retry failed owned work.
+    Retry,
     /// Get.
     Get,
     /// List.
@@ -94,16 +148,10 @@ pub enum ScopeMethod {
 /// One Binding operation resolved from its exact wire method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingMethod {
-    /// Create Apply intent.
-    Create,
-    /// Update and request Apply.
-    Update,
     /// Get current state.
     Get,
     /// List current state.
     List,
-    /// Request Delete.
-    Delete,
 }
 
 /// One PAP operation resolved before parameter decoding.
@@ -122,15 +170,44 @@ pub enum PapMethod {
 pub enum ActionMethod {
     /// Pre-execution code scan.
     CodeScan,
+    /// PII and credential scan.
+    PiiScan,
+    /// Pre-execution prompt scan.
+    PromptScan,
+    /// Readiness probe for the models a prompt-scan mode requires.
+    PromptScanWarmup,
+    /// `SkillSec` core operations.
+    SkillSec,
+}
+
+/// One read-only security-event query resolved from its exact wire method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryMethod {
+    /// Dashboard aggregates plus the newest rows.
+    Summary,
+    /// Paginated rows, newest first.
+    EventsList,
+    /// One row by id, scoped to the caller.
+    EventsGet,
+    /// Grouped counts over the caller's rows.
+    EventsCountBy,
 }
 
 /// Closed daemon method identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodId {
+    /// Process health for any authenticated local peer.
+    Health,
+    /// Read-only owner-authorized observability query.
+    ObservabilityQuery(ObservabilityQueryMethod),
     /// PAP administration method.
     Pap(PapMethod),
     /// Action capability method.
     Action(ActionMethod),
+    /// Single-record observability ingestion.
+    ObservabilityRecord,
+    /// Read-only owner-scoped query method.
+    Query(QueryMethod),
 }
 
 /// Server-owned access policy for a method.
@@ -161,7 +238,16 @@ impl MethodId {
             Self::Pap(_) => Metadata {
                 access: AccessPolicy::PolicyAdministrator,
             },
-            Self::Action(_) => Metadata {
+            // Action capabilities, observability ingestion, and read-only
+            // queries share one access policy: any kernel-authenticated local
+            // peer. The query family adds row-level owner scoping inside its
+            // handler, derived from the transport-authenticated principal
+            // rather than from the request.
+            Self::Health
+            | Self::Action(_)
+            | Self::ObservabilityRecord
+            | Self::Query(_)
+            | Self::ObservabilityQuery(_) => Metadata {
                 access: AccessPolicy::LocalUser,
             },
         }
@@ -171,22 +257,36 @@ impl MethodId {
 /// Resolves an exact wire method without inspecting its parameters.
 pub fn resolve(method: &str) -> Option<MethodId> {
     match method {
+        DAEMON_HEALTH => Some(MethodId::Health),
         POLICY_TEMPLATES_CREATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Create))),
         POLICY_TEMPLATES_UPDATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Update))),
         POLICY_TEMPLATES_GET => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Get))),
         POLICY_TEMPLATES_LIST => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::List))),
         POLICY_TEMPLATES_DELETE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Delete))),
         POLICY_SCOPES_CREATE => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Create))),
-        POLICY_SCOPES_UPDATE => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Update))),
+        POLICY_SCOPES_RETRY => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Retry))),
         POLICY_SCOPES_GET => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Get))),
         POLICY_SCOPES_LIST => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::List))),
         POLICY_SCOPES_DELETE => Some(MethodId::Pap(PapMethod::Scope(ScopeMethod::Delete))),
-        POLICY_BINDINGS_CREATE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Create))),
-        POLICY_BINDINGS_UPDATE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Update))),
         POLICY_BINDINGS_GET => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Get))),
         POLICY_BINDINGS_LIST => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::List))),
-        POLICY_BINDINGS_DELETE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Delete))),
+        OBS_SESSIONS_LIST => Some(MethodId::ObservabilityQuery(
+            ObservabilityQueryMethod::Sessions,
+        )),
+        OBS_RUNS_LIST => Some(MethodId::ObservabilityQuery(ObservabilityQueryMethod::Runs)),
+        OBS_TIMELINE_GET => Some(MethodId::ObservabilityQuery(
+            ObservabilityQueryMethod::Timeline,
+        )),
+        OBS_RECORD => Some(MethodId::ObservabilityRecord),
         ACTION_CODE_SCAN => Some(MethodId::Action(ActionMethod::CodeScan)),
+        ACTION_PII_SCAN => Some(MethodId::Action(ActionMethod::PiiScan)),
+        ACTION_PROMPT_SCAN => Some(MethodId::Action(ActionMethod::PromptScan)),
+        ACTION_PROMPT_SCAN_WARMUP => Some(MethodId::Action(ActionMethod::PromptScanWarmup)),
+        ACTION_SKILL_SEC => Some(MethodId::Action(ActionMethod::SkillSec)),
+        SEC_SUMMARY => Some(MethodId::Query(QueryMethod::Summary)),
+        SEC_EVENTS_LIST => Some(MethodId::Query(QueryMethod::EventsList)),
+        SEC_EVENTS_GET => Some(MethodId::Query(QueryMethod::EventsGet)),
+        SEC_EVENTS_COUNT_BY => Some(MethodId::Query(QueryMethod::EventsCountBy)),
         _ => None,
     }
 }

@@ -82,8 +82,14 @@ explicitly `not_run`; that result is not a complete release sign-off.
   That fixture checks recovery contracts only; its savings are not evidence
   about real workload performance. The target record is selected from records
   actually omitted by Core before asking the model to retrieve it.
-- Each live shell task must show one applied compression, one emitted Stash entry,
-  one model-issued standalone Retrieve command, and one CLI Retrieve hit.
+- CSV/TSV checks preserve all 100 rows and every cell, report lossless compaction,
+  and emit no Stash entries or retrieval instructions. Their live shell tasks answer
+  directly from the full output without Retrieve. Their report entries use zero
+  retrieved tokens and `null` for retrieval-only byte-exactness checks;
+  `saved_minus_retrieved_tokens` equals gross savings.
+- Each BuildLog or record-reduction live shell task must show one applied compression,
+  one emitted Stash entry, one model-issued standalone Retrieve command, and one CLI
+  Retrieve hit.
   The recovered output must bypass compression. The final answer must cite
   an omitted test or the omitted record, as appropriate.
 - AgentScope runs the synthetic record task with a custom static Retrieve Tool and no shell tool.

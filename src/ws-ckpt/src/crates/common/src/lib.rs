@@ -424,6 +424,8 @@ pub enum ErrorCode {
     DiskSpaceInsufficient,
     CwdOccupied,
     CwdScanFailed,
+    /// A diff path cannot be represented as UTF-8; fix the filename before retrying.
+    UnsupportedWorkspacePath,
 }
 
 /// Opaque identity for one live writable-subvolume generation of a workspace.
@@ -499,6 +501,8 @@ pub enum GuardedCheckpointRejectionCodeV2 {
     WriteLockConflict,
     CallerMismatch,
     EvidenceCapacityReached,
+    /// Backend space or metadata pressure refused the snapshot; retry after cleanup.
+    InsufficientSpace,
 }
 
 /// Outcome durably bound to one guarded rollback operation.
@@ -560,6 +564,10 @@ pub enum GuardedRollbackRejectionCodeV2 {
     EvidenceCapacityReached,
     CwdOccupied,
     CwdScanFailed,
+    /// A diff path cannot be represented as UTF-8; unchanged input must not be retried.
+    UnsupportedWorkspacePath,
+    /// Backend space or metadata pressure refused the rollback; retry after cleanup.
+    InsufficientSpace,
 }
 
 /// Validates the canonical `ws-xxxxxx` identifier and optional `-N` collision suffix.
@@ -619,6 +627,85 @@ pub fn validate_checkpoint_id_v2(checkpoint_id: &str) -> Result<(), String> {
         return Err(
             "checkpoint id may contain only ASCII letters, digits, '-', '_', and '.'".to_string(),
         );
+    }
+    Ok(())
+}
+
+/// Maximum byte length accepted for a snapshot identifier on the legacy
+/// surface. This is the filesystem component bound (`NAME_MAX`, 255 bytes on
+/// the Linux filesystems ws-ckpt deploys on), not the guarded protocol's
+/// policy bound: every id at or under it could have been recorded on disk by
+/// the CLI, so refusing longer ids strands no existing record.
+pub const SNAPSHOT_ID_MAX_BYTES: usize = 255;
+
+/// Validates a snapshot identifier for the legacy IPC surface.
+///
+/// The legacy protocol accepts every id the CLI parser accepts, so unlike
+/// [`validate_checkpoint_id_v2`] this is deliberately *not* a charset check:
+/// interior spaces and non-ASCII names stay valid. It rejects exactly the
+/// shapes that are unsafe as a path component or reserved by the index:
+/// empty and whitespace-only ids, path separators (`/` and `\\`), `.` and
+/// `..`, NUL (which can never arrive through argv but can through a
+/// serialized frame), over-length ids, and the [`LIVE_CHILD`] sentinel —
+/// a snapshot record named like the live-subvolume marker aliases the
+/// sentinel the DAG code special-cases.
+pub fn validate_snapshot_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.trim().is_empty() {
+        return Err("snapshot id must not be empty or whitespace".to_string());
+    }
+    if id == "." || id == ".." {
+        return Err("snapshot id must not be '.' or '..'".to_string());
+    }
+    if id.contains('/') || id.contains('\\') {
+        return Err("snapshot id must be a single path component (no '/' or '\\')".to_string());
+    }
+    if id.contains('\u{0}') {
+        return Err(format!("snapshot id must not contain NUL: {id:?}"));
+    }
+    if id == LIVE_CHILD {
+        return Err("snapshot id is reserved for the live workspace marker".to_string());
+    }
+    if id.len() > SNAPSHOT_ID_MAX_BYTES {
+        return Err(format!("snapshot id exceeds {SNAPSHOT_ID_MAX_BYTES} bytes"));
+    }
+    Ok(())
+}
+
+/// Validates a snapshot lookup reference (exact id or unique prefix) for the
+/// legacy IPC surface.
+///
+/// `Rollback`, `RollbackPreview` and `Diff` carry a reference that
+/// [`SnapshotIndex::resolve_by_prefix`] expands to the final id, so the
+/// caller's string is not necessarily a complete id and must not be held to
+/// [`validate_snapshot_id`]: `__live__` legitimately addresses
+/// `__live__backup` as its unique prefix, and `.`/`..` address dot-prefixed
+/// names. Only shapes no id accepted by [`validate_snapshot_id`] can contain
+/// are refused here — path separators, NUL, over-length strings — plus
+/// references with no non-whitespace content: no CLI-reachable query is
+/// blank, and blank ids are exactly the poison family the id validator
+/// rejects.
+///
+/// The resolved final id must still pass [`validate_snapshot_id`] before it
+/// drives any backend call; consumers map that failure to
+/// [`ResolveError::Unsafe`].
+pub fn validate_snapshot_ref(reference: &str) -> Result<(), String> {
+    if reference.trim().is_empty() {
+        return Err("snapshot reference must not be empty or whitespace".to_string());
+    }
+    if reference.contains('/') || reference.contains('\\') {
+        return Err(
+            "snapshot reference must be a single path component (no '/' or '\\')".to_string(),
+        );
+    }
+    if reference.contains('\u{0}') {
+        return Err(format!(
+            "snapshot reference must not contain NUL: {reference:?}"
+        ));
+    }
+    if reference.len() > SNAPSHOT_ID_MAX_BYTES {
+        return Err(format!(
+            "snapshot reference exceeds {SNAPSHOT_ID_MAX_BYTES} bytes"
+        ));
     }
     Ok(())
 }
@@ -715,6 +802,39 @@ pub struct SnapshotIndex {
     pub recovered_orphans: HashSet<String>,
 }
 
+/// Repairs made while pruning parent cycles from a snapshot index.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Cycle repairs that were also reported to operators as warnings.
+    pub cycle_repairs: Vec<PruneCycleRepair>,
+}
+
+/// A surviving child or head repaired after its deleted parents formed a cycle.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PruneCycleRepair {
+    /// A surviving child has no surviving ancestor and becomes a root.
+    ReparentedChild { cycle_at: String },
+    /// The head lies in a deleted parent cycle and is cleared.
+    ClearedHead { cycle_at: String },
+}
+
+impl PruneCycleRepair {
+    fn warning(&self, workspace_path: &Path) -> String {
+        match self {
+            Self::ReparentedChild { cycle_at } => format!(
+                "prune_chain: parent cycle in the snapshot index of workspace {workspace_path:?} \
+                 at snapshot {cycle_at} (reparenting a surviving child): the deleted set has no \
+                 surviving ancestor, so the child is reparented onto none"
+            ),
+            Self::ClearedHead { cycle_at } => format!(
+                "prune_chain: parent cycle in the snapshot index of workspace {workspace_path:?} \
+                 at snapshot {cycle_at} (repairing the head): the head lies inside the \
+                 deleted set's cycle and is cleared"
+            ),
+        }
+    }
+}
+
 impl SnapshotIndex {
     pub fn new(workspace_path: PathBuf) -> Self {
         Self {
@@ -769,7 +889,10 @@ impl SnapshotIndex {
     }
 
     /// Remove a batch of nodes from the DAG, processing only boundary edges.
-    pub fn prune_chain(&mut self, ids: &HashSet<String>) {
+    ///
+    /// Returns cycle repairs while also emitting operator warnings for them.
+    pub fn prune_chain(&mut self, ids: &HashSet<String>) -> PruneReport {
+        let mut report = PruneReport::default();
         let mut edges: Vec<(String, String)> = Vec::new();
         let mut surviving_parents: Vec<(String, String)> = Vec::new();
         for id in ids {
@@ -798,8 +921,23 @@ impl SnapshotIndex {
                 .snapshots
                 .get(deleted_parent)
                 .and_then(|m| m.parent_id.clone());
+            let mut walked: HashSet<String> = HashSet::new();
             while let Some(ref pid) = sp {
                 if !ids.contains(pid) {
+                    break;
+                }
+                if !walked.insert(pid.clone()) {
+                    // A parent cycle inside the deleted set has no surviving
+                    // ancestor: following it never ends, and a load that walks
+                    // it would never finish. No ancestor is the answer, and the
+                    // recovery is reported rather than silent: a corrupt index
+                    // otherwise surfaces later as "no head set" with no clue.
+                    report
+                        .cycle_repairs
+                        .push(PruneCycleRepair::ReparentedChild {
+                            cycle_at: pid.clone(),
+                        });
+                    sp = None;
                     break;
                 }
                 sp = self.snapshots.get(pid).and_then(|m| m.parent_id.clone());
@@ -819,8 +957,20 @@ impl SnapshotIndex {
         if let Some(ref h) = self.head.clone() {
             if ids.contains(h) {
                 let mut p = self.snapshots.get(h).and_then(|m| m.parent_id.clone());
+                let mut walked: HashSet<String> = HashSet::new();
                 while let Some(ref pid) = p {
                     if !ids.contains(pid) {
+                        break;
+                    }
+                    if !walked.insert(pid.clone()) {
+                        // The same cycle guard as the reparenting walk above,
+                        // reported for the same reason: the head fix-up is a
+                        // repair, and a repair nobody can see becomes a mystery
+                        // "no head set" later.
+                        report.cycle_repairs.push(PruneCycleRepair::ClearedHead {
+                            cycle_at: pid.clone(),
+                        });
+                        p = None;
                         break;
                     }
                     p = self.snapshots.get(pid).and_then(|m| m.parent_id.clone());
@@ -835,6 +985,10 @@ impl SnapshotIndex {
                 }
             }
         }
+        for repair in &report.cycle_repairs {
+            tracing::warn!("{}", repair.warning(&self.workspace_path));
+        }
+        report
     }
 }
 
@@ -903,6 +1057,11 @@ impl SnapshotIndex {
 pub enum ResolveError {
     NotFound,
     Ambiguous(usize),
+    /// The reference resolved to an index key that is not an acceptable
+    /// snapshot id (e.g. a pre-poisoned `..` or [`LIVE_CHILD`] key). Carries
+    /// the validator's message; consumers map this to `InvalidPath`, not
+    /// `SnapshotNotFound`.
+    Unsafe(String),
 }
 
 impl SnapshotIndex {
@@ -1651,6 +1810,96 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    // ── validate_snapshot_id (legacy IPC surface) ──
+
+    #[test]
+    fn validate_snapshot_id_accepts_every_cli_compatible_id() {
+        let name_max = "a".repeat(SNAPSHOT_ID_MAX_BYTES);
+        for id in [
+            "snap-1",
+            "ckpt-20261015T104500.123",
+            "my snapshot",
+            "  padded  ",
+            "快照-1",
+            name_max.as_str(),
+        ] {
+            assert_eq!(
+                validate_snapshot_id(id),
+                Ok(()),
+                "id {id:?} must stay valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_empty_and_whitespace_only() {
+        for id in ["", " ", "\t", " \n "] {
+            assert!(
+                validate_snapshot_id(id).is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_traversal_and_separator_shapes() {
+        for id in [".", "..", "../escape", "a/b", "a\\b", "./.diff-tmp-backup"] {
+            assert!(
+                validate_snapshot_id(id).is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_nul_reserved_marker_and_over_length() {
+        assert!(validate_snapshot_id("a\u{0}b").is_err());
+        assert_eq!(
+            validate_snapshot_id(LIVE_CHILD).unwrap_err(),
+            "snapshot id is reserved for the live workspace marker"
+        );
+        let too_long = "a".repeat(SNAPSHOT_ID_MAX_BYTES + 1);
+        assert!(validate_snapshot_id(&too_long).is_err());
+    }
+
+    // ── validate_snapshot_ref (legacy IPC lookup references) ──
+
+    #[test]
+    fn validate_snapshot_ref_accepts_shapes_that_can_be_unique_prefixes() {
+        // A lookup reference is not the final id: `__live__` is the unique
+        // prefix of the valid id `__live__backup`, and `.`/`..` prefix
+        // dot-prefixed names. The resolved id is re-validated separately.
+        let name_max = "a".repeat(SNAPSHOT_ID_MAX_BYTES);
+        for reference in [
+            "snap-1",
+            LIVE_CHILD,
+            "__live__backup",
+            ".",
+            "..",
+            ".diff-tmp-backup",
+            "快照",
+            name_max.as_str(),
+        ] {
+            assert_eq!(
+                validate_snapshot_ref(reference),
+                Ok(()),
+                "reference {reference:?} must stay valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_ref_rejects_shapes_no_valid_id_can_contain() {
+        for reference in ["", " ", "\t", " \n ", "a/b", "a\\b", "../x", "a\u{0}b"] {
+            assert!(
+                validate_snapshot_ref(reference).is_err(),
+                "reference {reference:?} must be rejected"
+            );
+        }
+        let too_long = "a".repeat(SNAPSHOT_ID_MAX_BYTES + 1);
+        assert!(validate_snapshot_ref(&too_long).is_err());
+    }
+
     // ── Helper: encode then decode round-trip ──
     fn round_trip_request(req: &Request) -> Request {
         let frame = encode_frame(req).expect("encode_frame failed");
@@ -1928,6 +2177,7 @@ mod tests {
             ErrorCode::DiskSpaceInsufficient,
             ErrorCode::CwdOccupied,
             ErrorCode::CwdScanFailed,
+            ErrorCode::UnsupportedWorkspacePath,
         ];
         for code in codes {
             let resp = Response::Error {
@@ -3335,7 +3585,7 @@ mod tests {
         idx.head = Some("e".into());
 
         let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        idx.prune_chain(&ids);
+        assert!(idx.prune_chain(&ids).cycle_repairs.is_empty());
 
         assert_eq!(idx.snapshots["c"].parent_id, None);
         assert_eq!(idx.head.as_deref(), Some("e"));
@@ -3639,6 +3889,10 @@ mod tests {
             bincode::serialize(&ErrorCode::CwdScanFailed).unwrap(),
             12_u32.to_le_bytes()
         );
+        assert_eq!(
+            bincode::serialize(&ErrorCode::UnsupportedWorkspacePath).unwrap(),
+            13_u32.to_le_bytes()
+        );
     }
 
     #[test]
@@ -3656,8 +3910,9 @@ mod tests {
             GuardedCheckpointRejectionCodeV2::WriteLockConflict,
             GuardedCheckpointRejectionCodeV2::CallerMismatch,
             GuardedCheckpointRejectionCodeV2::EvidenceCapacityReached,
+            GuardedCheckpointRejectionCodeV2::InsufficientSpace,
         ];
-        for (code, expected_discriminant) in rejection_codes.iter().zip(0_u32..=11) {
+        for (code, expected_discriminant) in rejection_codes.iter().zip(0_u32..=12) {
             assert_eq!(
                 bincode::serialize(code).unwrap(),
                 expected_discriminant.to_le_bytes()
@@ -3700,11 +3955,20 @@ mod tests {
             GuardedRollbackRejectionCodeV2::EvidenceCapacityReached,
             GuardedRollbackRejectionCodeV2::CwdOccupied,
             GuardedRollbackRejectionCodeV2::CwdScanFailed,
+            GuardedRollbackRejectionCodeV2::UnsupportedWorkspacePath,
+            GuardedRollbackRejectionCodeV2::InsufficientSpace,
         ];
-        for (code, expected_discriminant) in rollback_rejections.iter().zip(0_u32..=15) {
+        for (code, expected_discriminant) in rollback_rejections.iter().zip(0_u32..=17) {
             assert_eq!(
                 bincode::serialize(code).unwrap(),
                 expected_discriminant.to_le_bytes()
+            );
+            assert_eq!(
+                bincode::deserialize::<GuardedRollbackRejectionCodeV2>(
+                    &expected_discriminant.to_le_bytes()
+                )
+                .unwrap(),
+                *code
             );
         }
     }
@@ -3761,6 +4025,102 @@ mod tests {
         assert!(validate_checkpoint_id_v2(&"a".repeat(GUARDED_CHECKPOINT_ID_MAX_BYTES_V2)).is_ok());
         assert!(
             validate_checkpoint_id_v2(&"a".repeat(GUARDED_CHECKPOINT_ID_MAX_BYTES_V2 + 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn prune_chain_terminates_on_a_parent_cycle_below_the_head() {
+        // a ↔ b form a cycle entirely inside the deleted set, and c hangs off b.
+        // Reparenting c has no surviving ancestor to find, so the walk must stop
+        // rather than follow the cycle forever.
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots.insert("a".into(), meta(Some("b"), vec!["b"]));
+        idx.snapshots.insert("b".into(), meta(Some("a"), vec!["c"]));
+        idx.snapshots
+            .insert("c".into(), meta(Some("b"), vec![LIVE_CHILD]));
+        idx.head = Some("c".into());
+
+        let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let report = idx.prune_chain(&ids);
+            let _ = tx.send((idx, report));
+        });
+        let (idx, report) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("prune_chain must terminate on a parent cycle inside the deleted set");
+
+        assert_eq!(
+            idx.snapshots["c"].parent_id, None,
+            "with no surviving ancestor the child becomes a root"
+        );
+        assert_eq!(idx.head.as_deref(), Some("c"));
+        assert_eq!(report.cycle_repairs.len(), 1);
+        let PruneCycleRepair::ReparentedChild { cycle_at } = &report.cycle_repairs[0] else {
+            panic!("the surviving child repair must be reported: {report:?}");
+        };
+        assert!(["a", "b"].contains(&cycle_at.as_str()));
+        let warning = report.cycle_repairs[0].warning(&idx.workspace_path);
+        assert!(warning.contains("parent cycle") && warning.contains("/ws"));
+        assert!(warning.contains("reparenting a surviving child"));
+    }
+
+    #[test]
+    fn prune_chain_terminates_when_the_head_is_inside_a_cycle() {
+        // The head itself carries the cycle, so the head fix-up walk is the one
+        // that has to stop.
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots.insert("a".into(), meta(Some("b"), vec!["b"]));
+        idx.snapshots
+            .insert("b".into(), meta(Some("a"), vec![LIVE_CHILD]));
+        idx.head = Some("b".into());
+
+        let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let report = idx.prune_chain(&ids);
+            let _ = tx.send((idx, report));
+        });
+        let (idx, report) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("prune_chain must terminate when the head sits in a parent cycle");
+
+        assert_eq!(idx.head, None, "no surviving ancestor means no head");
+        assert_eq!(report.cycle_repairs.len(), 1);
+        let PruneCycleRepair::ClearedHead { cycle_at } = &report.cycle_repairs[0] else {
+            panic!("the head repair must be reported: {report:?}");
+        };
+        assert!(["a", "b"].contains(&cycle_at.as_str()));
+        let warning = report.cycle_repairs[0].warning(&idx.workspace_path);
+        assert!(warning.contains("parent cycle") && warning.contains("repairing the head"));
+    }
+
+    #[test]
+    fn prune_chain_terminates_on_a_self_parented_snapshot() {
+        // The degenerate cycle: a snapshot whose parent is itself.
+        let mut idx = SnapshotIndex::new(PathBuf::from("/ws"));
+        idx.snapshots.insert("a".into(), meta(Some("a"), vec!["c"]));
+        idx.snapshots
+            .insert("c".into(), meta(Some("a"), vec![LIVE_CHILD]));
+        idx.head = Some("c".into());
+
+        let ids: HashSet<String> = ["a"].iter().map(|s| s.to_string()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let report = idx.prune_chain(&ids);
+            let _ = tx.send((idx, report));
+        });
+        let (idx, report) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a self-parented snapshot must not make the walk run forever");
+
+        assert_eq!(idx.snapshots["c"].parent_id, None);
+        assert_eq!(idx.head.as_deref(), Some("c"));
+        assert_eq!(
+            report.cycle_repairs,
+            vec![PruneCycleRepair::ReparentedChild {
+                cycle_at: "a".into()
+            }]
         );
     }
 }

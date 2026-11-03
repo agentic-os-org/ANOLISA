@@ -6,6 +6,7 @@ Application persistence and health endpoints are separate acceptance gates.
 import json
 import os
 import pwd
+import shutil
 import signal
 import socket
 import stat
@@ -16,22 +17,220 @@ from pathlib import Path
 
 import pytest
 
+from tests.v2.e2e.conftest import _SOCKET_WAIT_SECONDS
+
 
 def test_bound_socket_allows_ordinary_users(daemon):
     mode = stat.S_IMODE(os.stat(daemon.socket_path).st_mode)
     assert mode == 0o666, f"socket mode is {oct(mode)}, expected 0o666"
+    assert os.stat(daemon.socket_path).st_uid == 0
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="cross-UID UDS test requires root")
-def test_ordinary_uid_connects_but_cannot_administer_or_replace_socket(daemon_bin):
+@pytest.mark.parametrize("client", ["cli", "health"])
+def test_dproc_uds_002_rejects_fake_peer_even_with_root_owned_socket(
+    cli, health_probe, client
+):
+    untrusted = pwd.getpwnam("nobody")
+    with tempfile.TemporaryDirectory(prefix="asc-fake-peer-") as directory:
+        runtime = Path(directory)
+        runtime.chmod(0o777)
+        endpoint = runtime / "daemon.sock"
+        server = subprocess.Popen(
+            [
+                "/usr/bin/python3",
+                "-c",
+                """import os, socket, sys
+with socket.socket(socket.AF_UNIX) as listener:
+    listener.settimeout(5)
+    listener.bind(sys.argv[1])
+    listener.listen(1)
+    os.chmod(sys.argv[1], 0o666)
+    connection, _ = listener.accept()
+    with connection:
+        connection.settimeout(5)
+        request = connection.recv(65536)
+        if request:
+            connection.sendall(b'{"requestId":"forged","result":{"status":"ok"}}\\n')
+        assert not request, "client sent request bytes before authenticating server"
+""",
+                str(endpoint),
+            ],
+            user=untrusted.pw_uid,
+            group=untrusted.pw_gid,
+            extra_groups=[],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while (
+                not endpoint.exists() or stat.S_IMODE(endpoint.stat().st_mode) != 0o666
+            ):
+                assert server.poll() is None, "fake server exited during startup"
+                assert time.monotonic() < deadline, "fake server did not bind"
+                time.sleep(0.02)
+            # A file-owner check would accept this endpoint; its listener remains nobody.
+            os.chown(endpoint, 0, 0)
+            if client == "cli":
+                result = cli(
+                    "--socket", str(endpoint), "policy", "list", "--timeout-ms", "1000"
+                )
+            else:
+                environment = os.environ.copy()
+                environment["AGENT_SEC_DAEMON_SOCKET"] = str(endpoint)
+                # Installed binaries must ignore the workspace-only bypass setting.
+                environment["AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK"] = "1"
+                result = subprocess.run(
+                    [health_probe],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            assert result.returncode == 1, result.stderr
+            assert result.stdout == ""
+            assert (
+                "server identity verification failed; request not sent" in result.stderr
+            )
+            assert f"expected daemon UID 0, got {untrusted.pw_uid}" in result.stderr
+            _, stderr = server.communicate(timeout=5)
+            assert server.returncode == 0, stderr
+        finally:
+            if server.poll() is None:
+                server.kill()
+                server.communicate(timeout=5)
+
+
+def test_native_health_probe_accepts_real_root_daemon(daemon, health_probe):
+    environment = os.environ.copy()
+    environment["AGENT_SEC_DAEMON_SOCKET"] = str(daemon.socket_path)
+    result = subprocess.run(
+        [health_probe],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("peer_uid", [0, 1000])
+@pytest.mark.parametrize("client", ["cli", "health"])
+def test_dproc_uds_002_authenticates_uid_with_zero_peer_pid(
+    health_probe, peer_uid, client, monkeypatch
+):
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        pytest.skip("unshare is required for the PID namespace fixture")
+    namespace = [
+        unshare,
+        "-Upf",
+        f"--map-user={peer_uid}",
+        f"--map-group={peer_uid}",
+        "--kill-child",
+    ]
+    available = subprocess.run(
+        namespace + ["true"], capture_output=True, text=True, timeout=5, check=False
+    )
+    if available.returncode:
+        pytest.skip(f"user/PID namespaces unavailable: {available.stderr.strip()}")
+    with (
+        tempfile.TemporaryDirectory(prefix="asc-peer-pid-") as directory,
+        socket.socket(socket.AF_UNIX) as listener,
+    ):
+        endpoint = str(Path(directory) / "daemon.sock")
+        command, method = [health_probe], "daemon.health"
+        if client == "cli":
+            command = [shutil.which("agent-sec-cli"), "policy", "list"]
+            method = "policy.templates.list"
+        monkeypatch.setenv("AGENT_SEC_DAEMON_SOCKET", endpoint)
+        monkeypatch.delenv("AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK", raising=False)
+        listener.bind(endpoint)
+        listener.listen(2)
+        listener.settimeout(5)
+        # Keep the listener outside the client's PID namespace; map its owner
+        # to either UID without requiring host root.
+        process = subprocess.Popen(
+            namespace
+            + [
+                "/usr/bin/python3",
+                "-c",
+                """import os, socket, struct, sys
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.connect(sys.argv[1])
+    credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    pid, uid, _ = struct.unpack("iII", credentials)
+    assert (pid, uid) == (0, int(sys.argv[2])), (pid, uid)
+os.execv(sys.argv[3], sys.argv[3:])
+""",
+                endpoint,
+                str(peer_uid),
+                *command,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(5)
+                assert connection.recv(1) == b""  # Credential observation only.
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(5)
+                with connection.makefile("rb") as reader:
+                    request = reader.readline()
+                if peer_uid == 0:
+                    assert json.loads(request)["method"] == method
+                    connection.sendall(
+                        b'{"requestId":"pid-zero","result":{"status":"ok"}}\n'
+                    )
+                else:
+                    assert request == b"", "untrusted server received request bytes"
+            stdout, stderr = process.communicate(timeout=5)
+            assert process.returncode == (0 if peer_uid == 0 else 1), stderr
+            if peer_uid == 0:
+                assert stderr == ""
+            else:
+                assert stdout == ""
+                assert "server identity verification failed; request not sent" in stderr
+                assert f"expected daemon UID 0, got {peer_uid}" in stderr
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="cross-UID UDS test requires root")
+def test_ordinary_uid_connects_but_cannot_administer_or_replace_socket(
+    daemon_bin, daemon_settings
+):
     client = pwd.getpwnam("nobody")
     with tempfile.TemporaryDirectory(prefix="asc-public-uds-") as directory:
         runtime = Path(directory)
         runtime.chmod(0o755)
         endpoint = runtime / "daemon.sock"
-        process = subprocess.Popen([daemon_bin, "serve", "--socket", str(endpoint)])
+        config, environment = daemon_settings(endpoint)
+        process = subprocess.Popen(
+            [
+                daemon_bin,
+                "serve",
+                "--socket",
+                str(endpoint),
+                "--skillsec-config",
+                str(config),
+            ],
+            env=environment,
+        )
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
             while (
                 not endpoint.exists() or stat.S_IMODE(endpoint.stat().st_mode) != 0o666
             ):
@@ -92,18 +291,64 @@ else:
                 raise
 
 
-def test_sigterm_cooperatively_exits_and_removes_socket(start_daemon):
-    handle = start_daemon()
+def test_sigterm_cooperatively_exits_and_removes_socket(start_daemon, monkeypatch):
+    with monkeypatch.context() as environment:
+        environment.setenv("RUST_LOG", "info")
+        handle = start_daemon()
     socket_path = handle.socket_path
     assert socket_path.exists()
     socket_inode = os.stat(socket_path).st_ino
 
     handle.process.send_signal(signal.SIGTERM)
-    handle.process.communicate(timeout=5.0)
+    _, stderr = handle.process.communicate(timeout=5.0)
 
     assert handle.process.returncode == 0
     # The daemon owns its socket and unlinks exactly the inode it bound.
     assert not socket_path.exists(), f"socket inode {socket_inode} was left behind"
+    records = [json.loads(line) for line in stderr.splitlines() if line.startswith("{")]
+    startup = [
+        record
+        for record in records
+        if record.get("fields", {}).get("reason") == "startup_stage"
+    ]
+    stages = [record["fields"]["stage"] for record in startup]
+    required = [
+        "policy_storage",
+        "skillsec",
+        "event_storage",
+        "skill_worker",
+        "policy_runtime",
+        "retention_catchup",
+        "uds_bind",
+        "rpc_ready",
+    ]
+    assert set(required) <= set(stages), stderr
+    positions = [stages.index(stage) for stage in required]
+    assert positions == sorted(positions), stderr
+    assert all(record["timestamp"] and record["level"] == "INFO" for record in startup)
+    elapsed = [
+        record["fields"]["elapsed_ms"]
+        for record in startup
+        if "elapsed_ms" in record["fields"]
+    ]
+    assert elapsed == sorted(elapsed)
+    assert startup[-1]["fields"]["duration_ms"] >= 0
+    retention = [
+        record["fields"]
+        for record in records
+        if record.get("fields", {}).get("reason") == "retention_stage"
+    ]
+    assert {(entry["store"], entry["phase"]) for entry in retention} == {
+        ("security", "started"),
+        ("security", "completed"),
+        ("observability", "started"),
+        ("observability", "completed"),
+    }, stderr
+    assert all(
+        entry["duration_ms"] >= 0
+        for entry in retention
+        if entry["phase"] == "completed"
+    )
 
 
 def test_relative_socket_fails(daemon_bin):
@@ -265,19 +510,27 @@ def test_dproc_012_existing_socket_is_not_blindly_unlinked(daemon_bin, tmp_path,
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_socket_environment_and_explicit_precedence(daemon_bin, tmp_path, explicit):
+def test_socket_environment_and_explicit_precedence(
+    daemon_bin, tmp_path, explicit, daemon_settings
+):
     endpoint = tmp_path / "env.sock"
-    env = dict(
-        os.environ,
-        AGENT_SEC_DAEMON_SOCKET="relative.sock" if explicit else str(endpoint),
-    )
+    config, env = daemon_settings(endpoint)
+    env["AGENT_SEC_DAEMON_SOCKET"] = "relative.sock" if explicit else str(endpoint)
     socket_args = ["--socket", str(endpoint)] if explicit else []
     process = subprocess.Popen(
-        [daemon_bin, "serve", *socket_args, "--policy-admin-uid", str(os.getuid())],
+        [
+            daemon_bin,
+            "serve",
+            *socket_args,
+            "--policy-admin-uid",
+            str(os.getuid()),
+            "--skillsec-config",
+            str(config),
+        ],
         env=env,
     )
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
         while not endpoint.exists():
             assert process.poll() is None
             assert time.monotonic() < deadline

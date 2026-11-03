@@ -32,7 +32,18 @@ share that Stash and roll back keys whenever a candidate is discarded. TOON is l
 library and never starts a process. RTK is used only when an adapter supplies `command_field`; every
 rewritten wrapper is anchored to the packaged executable and carries per-execution attribution.
 Content detection, thresholds, TOON selection, diagnostics, authorization, and Stash policy remain
-in Rust Core rather than Python configuration.
+in Rust Core rather than Python configuration. A shell tool's `PostToolRequest` carries the executed
+command line in `command`; Core, not the adapter, reports a plain print of local files as
+`file_read` so that a printed HTML page stays verbatim while data in that output still compresses.
+
+PreTool preserves recognized native `head` and `tail` calls using the same direct-call and
+built-in wrapper recognition as `find`, including nesting and shell line continuations. Every
+argument form keeps native execution, including byte windows and follow mode. A recognized call
+keeps its entire pipeline or compound command outside RTK rewriting. This avoids structural
+truncation in RTK's `read --max-lines` path; explicit RTK calls retain their existing behavior.
+Custom `hooks.transparent_prefixes` are not inspected, so calls behind those prefixes may still
+be rewritten. The rule is independent of search path sharing and retains the existing PostTool
+file-read policy.
 
 The SDK never stores a process-global current session. `before_model` returns the exact visible
 marker set. An adapter declares whether it has a marker-authorized recovery path and owns any
@@ -42,22 +53,95 @@ in that set. Host applications
 retain raw tool values for UI and business logic and pass only copied, final model-visible text to
 `post_tool`. Retrieve output never enters PostTool again.
 
+QwenWork's hook adapter normalizes its two workspace Shell MCP names to `Bash`
+before either lifecycle request. It unwraps only an exact single plain text block;
+unknown block arrays pass through without compression. The workspace event's
+absolute `cwd` anchors `.tokenless` state for both hooks and the RTK command.
+Native Bash keeps the existing state location and structured response handling.
+Plugin-private binaries are resolved by the adapter. Neither that private PATH
+nor workspace state implies model-visible recovery access, so these paths declare
+`recovery.kind = none`.
+
 Invalid inputs, missing packaged RTK, lifecycle operation failures, attachment failures, and
 tool-name collisions fail fast. Normal Core dispositions such as passthrough, no savings, and
 recoverability unavailable return typed results. A candidate is applied only when it is strictly
 smaller; schema and response truncation must also remain retrievable.
 
+OpenClaw 2026.6.6 or later uses declared, explicitly enabled tool-result middleware to call
+PostTool before model consumption. The adapter preserves the result envelope and handles only
+single-text results, declares `recovery.kind = none`, and retains per-call RTK attribution.
+No separate persistence hook reprocesses the result. Adapter failures retain the received
+host result; the adapter catches them because the host treats thrown middleware errors as
+tool failures. Legacy middleware preprocessing can already have clipped text or metadata.
+Tokenless neither rejects such hosts above the API minimum nor reconstructs missing content.
+Only `applied` compression replaces text; tool-error diagnostics may still append context.
+See the [host compatibility boundary](../../../../docs/user-guide/en/tokenless/framework-integration.md#openclaw).
+
+After building the CLI and OpenClaw adapter, run the optional container regression from
+`src/tokenless` with a local host image:
+
+```bash
+python3 tests/test-openclaw-gateway.py --image <legacy-image> --host-output-policy legacy
+python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-policy normalized
+```
+
+Select the expected policy from the image's source provenance, not its version string.
+The real Gateway uses a scripted local model with no cloud requests. The test covers ordinary
+CSV and 150,000-character plain/JSON results, failure passthrough, first consumption, replay,
+persistence and statistics. Legacy truncation is an expected limitation; the normalized policy
+requires full native input at middleware entry and lossless JSON candidate delivery. This
+checks transport behavior, not model answer quality or billing savings.
+
 ## Search path sharing
 
-PostTool routes detected `search_results` through `SearchResultsCompressor` only when search path
-sharing is enabled, the origin is `api_response`, and text replacement is available. This is a
-content-based Core capability; it is not restricted to a particular agent ID. File content and
-command output do not enter it, including Bash output without RTK. Successful `path:line:text` listings with at least three records can share full
+PostTool routes detected `search_results` through `SearchResultsCompressor` when search path
+sharing is enabled and text replacement is available. Routing depends on content, not the command
+or agent name. Numbered search records require `api_response` origin. Successful `path:line:text` listings with at least three records can share full
 paths across consecutive rows. Line numbers, row text, order and line endings remain byte-reversible.
 The input contract excludes colons in paths and context listings. Unsupported rows reject the whole
 candidate; byte length and estimated tokens must both decrease before normal Runtime arbitration.
 The applied operation is `search_path_sharing` (`AppliedOperation.SEARCH_PATH_SHARING` in the
 Python SDK), with `lossless` recoverability and no Stash writes.
+
+Plain path lists can also share a common directory prefix for `command_output` and `api_response`
+origins. At least three POSIX paths are required, with uniform LF or CRLF endings; all received
+paths, their order, duplicates, and the final newline are retained. The entire input is validated,
+including beyond the detector's bounded sample. Blank lines, control characters, colon-bearing
+paths (including URLs and Windows paths), mixed endings, double-leading slashes, and ambiguous relative roots reject
+the candidate. Bare relative roots use letters, digits, `.`, `_`, or `-`; paths starting with `/`,
+`./`, or `../` can include spaces and quoted or backslash characters, encoded as JSON strings.
+The compressor never reads files or normalizes paths. Both `file_content` and `file_read` origins
+bypass this path-list strategy; existing file-read JSON, table, and log handling is unchanged.
+Established source and table detection takes precedence over plain path-list detection. A bounded
+path probe stops at its last complete line so a byte cut inside a path or CRLF is not a record.
+The selected path-list candidate is built once from the full input and reused for arbitration.
+
+The path-list view starts with
+`[Path list; all received paths retained; full path = base + each paths entry]`, followed by compact
+JSON with `base`, `paths`, `line_ending`, and `trailing_newline`. Concatenate `base` with each decoded
+`paths` entry, join with `line_ending`, and append that ending only when `trailing_newline` is true
+to reconstruct the input byte for byte. The shared prefix always ends at `/`. The full view,
+including its header and metadata, must reduce bytes and estimated tokens before arbitration.
+
+PreTool leaves recognized native `find` invocations unchanged so PostTool receives native results. This also
+preserves an entire compound command containing such a call; mixed output is not a path list and stays
+unchanged. The path-list route itself does not require `find`: other unoptimized tool results with
+the same content shape may use it. Transparent shell keywords (`noglob`, `command`, `builtin`,
+`exec`, `nocorrect`), `env`, process wrappers (`timeout`, `time`, `nice`, `nohup`), and `uv run`
+are inspected through nesting. Process wrappers mirror the pinned RTK v0.49.0 option grammar:
+value options, flags, attached values, numeric adjustments, `--`, and positional arguments.
+Unknown options stop recognition. The tokenizer removes shell backslash-newline continuations
+before inspecting the executable. RTK's source is unchanged. Custom `hooks.transparent_prefixes`
+are not read or inferred; a configured custom prefix can still let RTK rewrite wrapped `find`.
+
+This intentionally trades RTK coverage for faithful native execution: mixed compounds, `-print0`,
+`-ls`, `-printf`, and other non-path-list actions do not receive path-list compression, and lists
+with fewer than three paths or no profitable shared prefix remain unchanged. A leading `.` or bare
+start-point directory also rejects the strict path-list format; this version does not add a separate
+head-record encoding. In the deterministic
+three-command native-find replay, the 60-path list compresses; the mixed compound with two paths
+and the single-path query pass through, and every returned path can be read directly. This is fixture
+coverage, not a measurement of whole-Agent savings or a comparison with RTK token usage.
 
 Search path sharing is enabled by default. CLI callers can disable it with
 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`. When unset or empty it stays enabled; `1`, `true`,
@@ -66,6 +150,9 @@ is independent of the JSON config file.
 Rust callers use `RuntimeConfig.search_path_sharing_enabled`; Python callers use
 `TokenlessConfig(search_path_sharing_enabled=False)` or the matching `TokenlessRuntime` keyword.
 Disabling this domain returns search listings unchanged without computing a search candidate.
+Recognized native `find` calls still bypass RTK rewriting when path sharing is disabled. This is a correctness
+boundary independent of compression: disabling an optimization must not reintroduce summarized or
+altered lookup paths. Revert the change to restore the previous RTK routing policy completely.
 JSON, table, and log compression remain available for other tool names. The exact name `Grep`
 always excludes those domains to retain every received match; disabling path sharing does not
 restore pre-feature JSON/table/log dispatch for a custom tool named `Grep`.
@@ -73,7 +160,14 @@ The global compression switch still controls dry-run behavior for enabled domain
 Whole-task savings depend on the workload; preserving all received bytes does not guarantee
 fewer follow-up tool calls or lower total token use.
 
-The first line is the fixed format header. Subsequent `File=` lines contain a JSON-encoded path;
+Both views intentionally use `search_path_sharing` to identify the optimization family without
+changing Protocol v2. Statistics and `AppliedOperation.SEARCH_PATH_SHARING` cannot distinguish
+the two formats. The headers described here are internal rendering details, not versioned SDK
+discriminators; no public decoder or stable header constants are exported. These examples explain
+the lossless views rather than establishing a programmatic SDK decoding contract.
+
+The numbered-record view begins with `[Search results grouped by file; all received lines retained]`.
+Subsequent `File=` lines contain a JSON-encoded path;
 data lines always begin with ASCII digits followed by `:`, so they cannot be mistaken for file
 headers. To reconstruct, prefix each data line with the decoded current path and `:` and retain
 its original line ending. Repeated nonconsecutive paths receive separate headers.
@@ -86,7 +180,30 @@ Unwrapped Grep listings are recorded as `api_response` in statistics, rather tha
 they are filtered tool responses, not authoritative file copies. Historical origin-grouped queries
 therefore have a version boundary. Core treats the exact tool name `Grep` as a search-only tool:
 it cannot enter JSON, table, or log compressors, even when search path sharing is disabled. SDK
-callers should use that name only for this search contract. RTK-owned output still bypasses Core.
+callers should use that name only for this search contract.
+
+RTK ownership is provisional until execution completes. PreTool atomically stores the original and exact executed commands
+and assigns each rewritten RTK invocation a generation and ordinal in `rtk-outcomes.db` under
+the Runtime data directory, independently of statistics collection. Bundled RTK records whether
+it changed any output bytes; a tied or increased token estimate does not prove unchanged output.
+PostTool requires its `command` to match the registered command, including the generation, before
+consuming evidence once per agent/session/tool call. Missing or modified commands retain the bypass,
+so a failed retry registration cannot reuse older receipts. Complete unchanged receipts
+allow a successful result back into the normal pipeline using the saved original command, so
+file-read origin and other command-based guards still apply. A retry with an untrackable rewrite
+attempts to invalidate the previous generation; even if this fails, command matching prevents
+reuse by that retry. Late reports cannot recreate a deleted generation.
+Changed output, missing or expired receipts, old RTK binaries, or state failures retain the RTK
+bypass. Compound calls require receipts for every newly wrapped invocation; existing or
+untracked RTK wrappers and ambiguous shell substitutions conservatively disable fallback.
+PowerShell wrappers currently have no receipts and retain the RTK bypass.
+Receipt lookup failures warn in Core; RTK-side writes fail silently to preserve tool output.
+Abandoned receipts expire after one day and an indexed sweep removes them on a later rewrite.
+The pipeline retains the host's declared capabilities. Common Hooks, Hermes and OpenClaw declare
+`recovery: none` for RTK output before receipt lookup, so their fallback accepts only lossless
+candidates; this change does not enable Stash/retrieve recovery for those calls.
+Continuing PostTool does not guarantee compression: its candidate must still pass normal
+fidelity and savings checks.
 
 ## Statistics queries
 

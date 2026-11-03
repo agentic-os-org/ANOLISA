@@ -158,6 +158,10 @@
       "hex": "0c000000"
     },
     {
+      "name": "error/unsupported_workspace_path",
+      "hex": "0d000000"
+    },
+    {
       "name": "response/init_ok",
       "hex": "0000000002000000000000006964"
     },
@@ -318,6 +322,10 @@
       "hex": "0b000000"
     },
     {
+      "name": "rejection/insufficient_space",
+      "hex": "0c000000"
+    },
+    {
       "name": "rollback_rejection/daemon_not_ready",
       "hex": "00000000"
     },
@@ -380,6 +388,14 @@
     {
       "name": "rollback_rejection/cwd_scan_failed",
       "hex": "0f000000"
+    },
+    {
+      "name": "rollback_rejection/unsupported_workspace_path",
+      "hex": "10000000"
+    },
+    {
+      "name": "rollback_rejection/insufficient_space",
+      "hex": "11000000"
     }
   ]
 }

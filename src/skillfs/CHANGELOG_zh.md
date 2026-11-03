@@ -9,6 +9,91 @@
 
 ## [未发布]
 
+## [0.5.5] - 未发布
+
+### 变更
+
+- 可通过独立 RPM 安装运行时和随附 Skill。
+- 随附 Skill 迁至 ANOLISA 的共享 skills 目录。
+
+## [0.5.4] - 2026-10-28
+
+### 修复
+
+- Skill 移入另一个 Skill 目录后，及时移除 `/skills` 和 `skill-discover` 中残留的
+  顶层条目，使实时发现结果与重新扫描一致
+  ([#9124](https://github.com/agentic-os-org/ANOLISA/pull/9124))。
+- 选择 Yarn 时，带包名、选项或不明确 shell 语法的 npm install 命令保留原样，
+  避免转换为无效命令 ([#9003](https://github.com/agentic-os-org/ANOLISA/pull/9003))。
+- chat 使用统计将 `--logs-dir` 按字面路径处理，支持方括号等字符，
+  避免误统计相似名称的同级目录
+  ([#9180](https://github.com/agentic-os-org/ANOLISA/pull/9180))。
+
+## [0.5.3] - 2026-10-23
+
+### 新增
+
+- `skillfs mount --config mount.toml --managed` 支持自动恢复，保留启动时的配置，
+  同时读取来源的当前内容。配置变更在成功停止并重新启动后生效
+  ([#8883](https://github.com/agentic-os-org/ANOLISA/pull/8883))。
+
+### 修复
+
+- Managed mount 在点号开头的挂载点和慢主机上稳定启动，worker 启动失败时及时报错
+  ([#8080](https://github.com/agentic-os-org/ANOLISA/pull/8080))。
+- Flat 和 Hermes 安装时隐藏暂存目录，发布后保持元数据读取和目录列表一致
+  ([#7767](https://github.com/agentic-os-org/ANOLISA/pull/7767))。
+- 创建、重命名和嵌套 manifest 修改后，同名 Skill 归属和 discovery 保持一致；
+  安装和重命名遵守配置的大小上限
+  ([#7742](https://github.com/agentic-os-org/ANOLISA/pull/7742))。
+- Skill 解析和 CLI 输出正确处理空白 frontmatter、按字符计算的名称长度诊断及控制字符转义。
+
+## [0.5.2] - 2026-10-15
+
+### 修复
+
+- managed stop、supervisor 关停及孤儿 worker 替换时，若 FUSE 挂载仍被占用，
+  会保留有效的 Ledger backing 别名及其目录。若挂载在共用的 10 秒关停期限内
+  解除占用，则释放两处挂载并删除 SkillFS 创建的 backing 目录，保留来源内容
+  ([#7297](https://github.com/agentic-os-org/ANOLISA/pull/7297))。
+- 过大的认证变更通知改为请求重扫整个 Skill，避免超过 daemon 的 64 KiB 帧上限。
+  上限内的请求保留路径提示，原始事件日志保持不变
+  ([#7189](https://github.com/agentic-os-org/ANOLISA/pull/7189))。
+
+## [0.5.1] - 2026-10-10
+
+本次补丁版本集中整理 0.5.0 之后合入的文件系统边界修复和易用性改进。
+
+### 变更
+
+- 认证通知和实时来源解析已接通 Rust sec-core SkillSec daemon。配合兼容的 daemon，
+  启动及 Skill 修改可触发扫描和激活状态更新；通知仍为 best-effort，不承诺恰好一次投递
+  ([#3295](https://github.com/agentic-os-org/ANOLISA/pull/3295))。
+
+### 修复
+
+- 隐藏 Skill 会拒绝通过已打开句柄写入，也会拒绝嵌套文件创建、链接、元数据及 xattr
+  修改。快照中的符号链接目标和 xattr 按当前激活视图读取，修改来源元数据时不再跟随
+  符号链接
+  ([#5382](https://github.com/agentic-os-org/ANOLISA/pull/5382))。
+- Flat 和 Hermes 目录在移动、替换及 unlink 后保持 Skill 列表和 inode 身份一致。
+  保留路径、暂存目录和隐藏点目录不会出现在普通列表中，Hermes 顶层文件仍可读取。
+- watcher 保留与读取事件相邻的修改事件，并跟踪分类目录中的 manifest、目录移动和
+  删除。pending-install 检查和激活决策等待均有明确上限
+  ([#4530](https://github.com/agentic-os-org/ANOLISA/pull/4530))。
+- 挂载时保留已有 views 配置，包括无法解析的配置；生成 views 和管理状态时使用独立
+  暂存文件。视图和发现结果不再重复列出 Skill，分类及列表会报告跳过的 Skill、名称
+  冲突和加载错误
+  ([#6202](https://github.com/agentic-os-org/ANOLISA/pull/6202))。
+- 复用 managed mount 时拒绝更换来源，卸载失败时保留 backing root，并正确处理转义
+  路径和非 UTF-8 路径。使用前检查 control socket 父目录和激活日志路径；daemon
+  endpoint 暂时不可用时，reconcile 会重试。
+- Skill 解析正确处理 UTF-8 BOM、CRLF、围栏代码块、空 frontmatter、重复章节及参数名，
+  避免丢失内容。Skill 文件和分类元数据读取有大小上限，不配对的指令保留原文。
+- OS 命令适配只改写真正执行的命令，不再误改普通文本或 Python pip 模块调用，也可
+  处理 `timeout`、`nice` 和 run 标签后的命令。CLI 状态名称与文档一致，列表转义
+  控制字符，文件系统路径保留原始字节。
+
 ## [0.5.0] - 2026-09-20
 
 ### 新增

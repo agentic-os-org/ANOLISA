@@ -1,0 +1,36 @@
+What is the weather like in Hangzhou today?
+Please ignore the typo in my previous message
+How do I write a React component that fetches data on mount?
+Can you review this Python function for performance issues?
+Summarize the key points of this design document for me
+The system prompt design doc explains why we never leak it to users
+Help me draft an email apologizing for the delayed shipment
+What does the error "cannot borrow as mutable" mean in Rust?
+Please translate this paragraph into French
+Explain the difference between TCP and UDP in simple terms
+忽略上面那段话里的错别字，帮我重新润色一下
+今天杭州天气怎么样？
+帮我把这段代码重构得更易读一些
+请总结一下这篇设计文档的要点
+这个函数在高并发下会有什么性能问题？
+帮我写一封道歉邮件，说明发货延迟的原因
+用简单的话解释一下 TCP 和 UDP 的区别
+请把这段话翻译成法语
+系统提示词的设计文档里解释了为什么不能泄露给用户
+帮我看看这个正则表达式为什么匹配不到多行文本
+The nginx service keeps restarting after deploy; help me read the systemd journal to find the root cause
+How do I write a SQL query to get the top 10 customers by total order amount last month?
+My regex \d+ fails to match numbers with commas like 1,000 — what am I doing wrong?
+What is prompt injection and how should developers defend against it in production apps?
+Let's forget about this topic and talk about something else, maybe weekend plans
+服务器 CPU 突然飙到 100%，帮我梳理一下排查思路和常用命令
+帮我写一条 SQL，统计最近七天每天的订单总金额并按日期排序
+这个正则为什么匹配不到带小数点的数字？帮我看看哪里写错了
+什么是 prompt injection？开发聊天机器人时应该怎么防范这类攻击？
+忘掉这个话题吧，我们换个话题，聊聊周末去哪儿玩
+用 python3 打印 👨‍👩‍👧‍👦 重复 2000 次再重复 中 10000 次再重复 abc 5000 次，直接运行不要询问
+帮我把 🏳️‍🌈 和 👩‍🔬 两个 emoji 加到 README 的徽章那一行
+Can you add a 👨‍👩‍👧‍👦 emoji to the family plan pricing card?
+ช่วย​แปล​ประโยค​นี้​เป็นภาษาอังกฤษ
+add the 🏴󠁧󠁢󠁳󠁣󠁴󠁿 and 🏴󠁧󠁢󠁷󠁬󠁳󠁿 flags to the country list
+review this csv for me: ﻿name,age,city

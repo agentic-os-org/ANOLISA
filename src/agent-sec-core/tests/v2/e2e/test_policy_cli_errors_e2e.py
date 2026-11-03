@@ -10,6 +10,10 @@ The CLI exit-code contract is exercised end to end:
 """
 
 import json
+import tempfile
+from pathlib import Path
+
+from tests.v2.e2e.test_policy_cli_e2e import _write_template
 
 
 def test_transport_failure_when_daemon_absent(cli, tmp_path):
@@ -45,3 +49,92 @@ def test_unauthorized_caller_gets_permission_denied(unauthorized_daemon):
     assert envelope["error"]["code"] == "permission_denied"
     assert envelope["error"]["message"] != ""
     assert envelope["requestId"]
+
+
+def test_explicit_nonroot_administrator_can_manage_assignments_and_is_revoked_on_restart(
+    start_daemon, monkeypatch
+):
+    # The socket and authored input must be reachable without exposing the root-owned database.
+    with tempfile.TemporaryDirectory(prefix="asc-v2-admin-", dir="/tmp") as directory:
+        runtime = Path(directory)
+        runtime.chmod(0o755)
+        monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(runtime / "data"))
+        template = Path(_write_template(runtime, "policy.json", ["/protected/**"]))
+        template.chmod(0o644)
+        socket_path = str(runtime / "daemon.sock")
+        daemon = start_daemon(admin_uids=[1001], name=socket_path)
+        daemon.caller_uid = 1001
+        policy = daemon.request(
+            "policy", "create", "--name", "ordinary-admin", "--file", str(template)
+        )
+        scope = daemon.request(
+            "scope",
+            "create",
+            "--pid",
+            str(2**32 - 1),
+            "--policy-id",
+            policy["policyId"],
+            "--policy-revision",
+            "1",
+        )
+        updated = daemon.request(
+            "policy",
+            "update",
+            "--policy-id",
+            policy["policyId"],
+            "--name",
+            "updated",
+            "--file",
+            str(template),
+        )
+        assert updated["revision"] == 2
+        assert daemon.request("scope", "get", "--scope-id", scope["scopeId"]) == scope
+        assert daemon.request("scope", "retry", "--scope-id", scope["scopeId"]) == scope
+        assert daemon.request("policy", "list")["items"] == [updated]
+        assert daemon.request("binding", "list")["total"] == 0
+        for _ in range(2):
+            assert daemon.request("scope", "delete", "--scope-id", scope["scopeId"])[
+                "completed"
+            ]
+        assert (
+            daemon.request(
+                "policy", "get", "--policy-id", policy["policyId"], "--revision", "2"
+            )
+            == updated
+        )
+        assert (
+            daemon.request(
+                "policy", "delete", "--policy-id", policy["policyId"], "--revision", "2"
+            )
+            == updated
+        )
+        persisted = daemon.request(
+            "policy", "create", "--name", "persisted", "--file", str(template)
+        )
+        daemon.process.terminate()
+        assert daemon.process.wait(timeout=5) == 0
+        restarted = start_daemon(admin_uids=[], name=socket_path)
+        assert (
+            restarted.request(
+                "policy", "get", "--policy-id", persisted["policyId"], "--revision", "1"
+            )
+            == persisted
+        )
+        restarted.caller_uid = 1001
+        for command in [
+            ("policy", "list"),
+            (
+                "policy",
+                "delete",
+                "--policy-id",
+                persisted["policyId"],
+                "--revision",
+                "1",
+            ),
+        ]:
+            result = restarted.cli(*command)
+            assert result.returncode == 1
+            assert result.stdout == ""
+            assert json.loads(result.stderr)["error"]["code"] == "permission_denied"
+        restarted.process.terminate()
+        assert restarted.process.wait(timeout=5) == 0

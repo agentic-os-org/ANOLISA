@@ -245,6 +245,7 @@ function resolveBinaryPath(explicit?: string): string {
 
 function isExecutable(filePath: string): boolean {
   try {
+    if (!fs.statSync(filePath).isFile()) return false;
     fs.accessSync(filePath, fs.constants.X_OK);
     return true;
   } catch {

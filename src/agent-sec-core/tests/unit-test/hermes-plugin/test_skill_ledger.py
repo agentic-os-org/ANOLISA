@@ -262,7 +262,7 @@ class TestSkillLedgerHooks:
         root = tmp_path / "skills"
         _make_skill(root, "test-skill")
         cap = _make_capability(root, policy="block")
-        mock_cli.return_value = _cli_status("tampered", exit_code=1)
+        mock_cli.return_value = _cli_status("tampered")
 
         result = cap._on_pre_tool_call("skill_view", {"name": "test-skill"})
 
@@ -453,3 +453,30 @@ class TestSkillResolution:
 
         assert cap._on_pre_tool_call("skill_view", {"name": "risky"}) is None
         mock_cli.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload,exit_code",
+    [
+        ({"status": "error", "error": "private failure"}, 1),
+        ({"status": "error", "error": "private failure"}, 0),
+        ({"latestStatus": "pass", "message": None}, 1),
+        ({"latestStatus": "deny"}, 0),
+        ({"latestStatus": "mystery", "message": "private failure"}, 0),
+        ({"latestStatus": "pass", "message": 7}, 0),
+        (None, 0),
+        ([], 0),
+    ],
+)
+def test_failed_show_is_diagnostic_not_a_clean_result(
+    tmp_path, caplog, payload, exit_code
+):
+    _make_skill(tmp_path, "example")
+    cap = _make_capability(tmp_path, policy="block")
+    with patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli") as cli:
+        cli.return_value = CliResult(
+            stdout=json.dumps(payload), stderr="private failure", exit_code=exit_code
+        )
+        assert cap._on_pre_tool_call("skill_view", {"name": "example"}) is None
+    assert "skill-ledger" in caplog.text
+    assert "private failure" not in caplog.text

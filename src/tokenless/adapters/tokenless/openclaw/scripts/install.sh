@@ -45,6 +45,7 @@ if [ ! -f "$PLUGIN_SRC/dist/index.js" ]; then
 fi
 
 if [ "$DRY_RUN" = "1" ]; then
+    echo "DRY-RUN: require OpenClaw >= 2026.6.6 before installation"
     echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins install $PLUGIN_SRC --force"
     echo "DRY-RUN: add --dangerously-force-unsafe-install only while the advertised option still has effect (legacy hosts)"
     echo "DRY-RUN: add --accept-capabilities only if advertised by plugins install --help"
@@ -55,6 +56,28 @@ if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
     echo "[${COMPONENT}] openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}) — skipping plugin installation."
     echo "[${COMPONENT}] Install OpenClaw first, then run this script again."
     exit 0
+fi
+
+if ! VERSION_OUTPUT="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" --version 2>&1)"; then
+    echo "[${COMPONENT}] Cannot read OpenClaw version; require >= 2026.6.6." >&2
+    exit 1
+fi
+VERSION_PATTERN='(^|[[:space:]])([0-9]{4})\.([0-9]{1,6})\.([0-9]{1,6})(-[[:alnum:].-]+)?(\+[[:alnum:].-]+)?([[:space:]]|$)'
+if [[ ! "$VERSION_OUTPUT" =~ $VERSION_PATTERN ]]; then
+    echo "[${COMPONENT}] Cannot identify OpenClaw version; require >= 2026.6.6." >&2
+    exit 1
+fi
+VERSION_YEAR="${BASH_REMATCH[2]}"
+VERSION_MINOR="${BASH_REMATCH[3]}"
+VERSION_PATCH="${BASH_REMATCH[4]}"
+VERSION_PRERELEASE="${BASH_REMATCH[5]}"
+if (( 10#$VERSION_YEAR < 2026 \
+    || (10#$VERSION_YEAR == 2026 && 10#$VERSION_MINOR < 6) \
+    || (10#$VERSION_YEAR == 2026 && 10#$VERSION_MINOR == 6 && 10#$VERSION_PATCH < 6) )) \
+    || { (( 10#$VERSION_YEAR == 2026 && 10#$VERSION_MINOR == 6 && 10#$VERSION_PATCH == 6 )) \
+         && [ -n "$VERSION_PRERELEASE" ]; }; then
+    echo "[${COMPONENT}] OpenClaw >= 2026.6.6 is required for live tool-result replacement." >&2
+    exit 1
 fi
 
 INSTALL_ARGS=(plugins install "$PLUGIN_SRC" --force)
@@ -101,7 +124,7 @@ if [ "$UNSAFE_SUPPORT" = "effective" ]; then
 fi
 
 env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" "${INSTALL_ARGS[@]}" || {
-    echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
+    echo "[${COMPONENT}] openclaw CLI install failed — require OpenClaw >= 2026.6.6." >&2
     if [ "$UNSAFE_SUPPORT" = "noop" ]; then
         echo "[${COMPONENT}]       this OpenClaw advertises --dangerously-force-unsafe-install as a" >&2
         echo "[${COMPONENT}]       deprecated no-op; the safety scan follows the operator-owned" >&2

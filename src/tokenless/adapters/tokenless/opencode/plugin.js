@@ -30,9 +30,7 @@ function isFile(path) {
 
 function findHookRunner() {
   const adapterDir = process.env.ANOLISA_ADAPTER_DIR;
-  const userHome = process.env.HOME && isAbsolute(process.env.HOME)
-    ? process.env.HOME
-    : homedir();
+  const userHome = process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : homedir();
   const candidates = [
     process.env.TOKENLESS_HOOK_RUNNER,
     adapterDir ? join(adapterDir, "common", "hooks", "run-hook.sh") : "",
@@ -77,15 +75,18 @@ function runHook(runner, hookName, payload) {
 
   return new Promise((resolve) => {
     let stdout = "";
+    let stdoutBytes = 0;
     let settled = false;
     let child;
     let timer;
+    const ownProcessGroup = process.platform !== "win32";
     try {
       child = spawn("bash", [runner, hookName], {
         env: {
           ...process.env,
           TOKENLESS_AGENT_ID: AGENT_ID,
         },
+        detached: ownProcessGroup,
         stdio: ["pipe", "pipe", "ignore"],
       });
     } catch {
@@ -93,31 +94,47 @@ function runHook(runner, hookName, payload) {
       return;
     }
 
-    const finish = (value) => {
+    const finish = (value, terminate = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (terminate) {
+        // A hook can exit while its descendants still hold stdout open. Kill
+        // only our detached group, and do not let inherited pipes pin the host.
+        if (ownProcessGroup && child.pid) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+        } else {
+          child.kill("SIGKILL");
+        }
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.unref();
+      }
       resolve(value);
     };
-    timer = setTimeout(() => {
-      child.kill();
-      finish(null);
-    }, HOOK_TIMEOUT_MS);
+    timer = setTimeout(() => finish(null, true), HOOK_TIMEOUT_MS);
 
     child.on("error", () => finish(null));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      if (stdout.length < MAX_HOOK_OUTPUT_BYTES) {
-        stdout += chunk.slice(0, MAX_HOOK_OUTPUT_BYTES - stdout.length);
+      if (settled) return;
+      stdoutBytes += Buffer.byteLength(chunk, "utf8");
+      if (stdoutBytes > MAX_HOOK_OUTPUT_BYTES) {
+        finish(null, true);
+        return;
       }
+      stdout += chunk;
     });
     child.on("close", (code) => {
       finish(code === 0 ? parseHookOutput(stdout) : null);
     });
 
     child.stdin.on("error", () => {
-      child.kill();
-      finish(null);
+      finish(null, true);
     });
     child.stdin.end(serialized);
   });
@@ -143,6 +160,14 @@ function hookSpecificOutput(result) {
 function prependContext(context, content) {
   if (typeof context !== "string" || !context) return content;
   return content ? `${context}\n${content}` : context;
+}
+
+// Host codecs carry executable validation; only plain JSON schemas cross the hook boundary.
+function isJsonSchema(value) {
+  if (typeof value === "boolean") return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 export const TokenlessPlugin = async () => {
@@ -172,9 +197,7 @@ export const TokenlessPlugin = async () => {
       const payload = toolPayload(input, output.args);
       const readyResult = await runHook(runner, "tool_ready_hook.sh", payload);
       if (readyResult?.decision === "block") {
-        throw new Error(
-          readyResult.reason || "Tokenless reports that the tool is not ready",
-        );
+        throw new Error(readyResult.reason || "Tokenless reports that the tool is not ready");
       }
 
       const readyOutput = hookSpecificOutput(readyResult);
@@ -197,11 +220,17 @@ export const TokenlessPlugin = async () => {
       const readyContext = readinessContext.get(key);
       readinessContext.delete(key);
 
-      const result = await runHook(
-        runner,
-        "compress_response_hook.py",
-        toolPayload(input, input.args, output.output),
-      );
+      const payload = toolPayload(input, input.args, output.output);
+      // OpenCode keeps Bash's exit code outside the model-visible text.
+      // Forward failure evidence so Core preserves it and can add diagnostics.
+      if (
+        input.tool === "bash" &&
+        Number.isInteger(output.metadata?.exit) &&
+        output.metadata.exit !== 0
+      ) {
+        payload.is_error = true;
+      }
+      const result = await runHook(runner, "compress_response_hook.py", payload);
       const hookOutput = hookSpecificOutput(result);
       const compressedOutput = hookOutput?.updatedToolOutput;
       if (typeof compressedOutput === "string") {
@@ -214,10 +243,14 @@ export const TokenlessPlugin = async () => {
     },
 
     "tool.definition": async (input, output) => {
+      const schemaField = output.jsonSchema !== undefined ? "jsonSchema" : "parameters";
+      const parameters = output[schemaField];
+      // Older hosts expose only a runtime codec. Leave it intact until they expose a JSON schema.
+      if (!isJsonSchema(parameters)) return;
       const declaration = {
         name: input.toolID,
         description: output.description,
-        parameters: output.parameters,
+        parameters,
       };
       let cacheKey;
       try {
@@ -238,8 +271,8 @@ export const TokenlessPlugin = async () => {
       }
 
       if (typeof tools[0].description === "string") output.description = tools[0].description;
-      if (tools[0].parameters && typeof tools[0].parameters === "object") {
-        output.parameters = tools[0].parameters;
+      if (isJsonSchema(tools[0].parameters)) {
+        output[schemaField] = JSON.parse(JSON.stringify(tools[0].parameters));
       }
     },
   };

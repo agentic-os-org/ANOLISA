@@ -8,10 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use fuser::FUSE_ROOT_ID;
+use fuser::{FUSE_ROOT_ID, FileType};
 
 use super::SkillFs;
-use crate::path::{PathType, is_skill_discover_path};
+use crate::path::{PathType, is_hermes_management_path, is_skill_discover_path};
 use crate::security::{
     inbox::{is_inbox_dir_name, is_valid_inbox_skill_name},
     lifecycle::is_reserved_lifecycle_name,
@@ -55,11 +55,22 @@ impl SkillFs {
     }
 
     /// Inode for the skills directory (the parent of individual skill dirs).
+    ///
+    /// Single resolution point for every `/skills` inode lookup (metadata
+    /// callbacks, root readdir, parent references): reallocates when the
+    /// kernel has FORGETten the dentry, so callers never receive the root
+    /// id or a dangling constant for a live directory.
     pub(super) fn skills_dir_ino(&self) -> u64 {
         if self.in_place {
             FUSE_ROOT_ID
         } else {
-            self.inodes.lookup_by_path("/skills").unwrap_or(2)
+            // `2` (the pre-fix fallback) is a dangling constant: ino
+            // allocation is monotonic and never reused, so it maps to
+            // nothing or to an unrelated inode.
+            self.inodes.lookup_by_path("/skills").unwrap_or_else(|| {
+                self.inodes
+                    .allocate("/skills", FileType::Directory, FUSE_ROOT_ID)
+            })
         }
     }
 
@@ -76,6 +87,38 @@ impl SkillFs {
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                 .unwrap_or_else(|| self.source.join(skill_name))
         }
+    }
+
+    /// The in-place mount's `/proc/self/fd/{n}` spelling of the source
+    /// root, when the pre-opened dirfd exists.
+    pub(super) fn source_alias_root(&self) -> Option<PathBuf> {
+        self.source_dirfd.as_ref().map(|fd| {
+            use std::os::unix::io::AsRawFd;
+            PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+        })
+    }
+
+    /// Rewrite a physical path's in-place fd alias back to the canonical
+    /// source-root spelling.
+    ///
+    /// Write-path I/O addresses the source through [`Self::source_base`]
+    /// (the pre-opened `/proc/self/fd/{n}` dirfd) so it bypasses the FUSE
+    /// over-mount, but the store keys and compares entries by
+    /// `source_path`, and the initial scan records the real source-root
+    /// spelling. Inserting the fd spelling would make one manifest look
+    /// like two different sources: the duplicate-name rule would compare
+    /// `/home/.../SKILL.md` against `/proc/self/fd/N/SKILL.md` and drop
+    /// or steal the post-write refresh by alias ordering, so the live
+    /// store would diverge from a fresh discovery scan. Store identity
+    /// and ordering always use the canonical spelling; only the I/O keeps
+    /// the fd alias.
+    pub(super) fn canonical_source_spelling(&self, physical: &Path) -> PathBuf {
+        if let Some(alias) = self.source_alias_root() {
+            if let Ok(rest) = physical.strip_prefix(&alias) {
+                return self.source.join(rest);
+            }
+        }
+        physical.to_path_buf()
     }
 
     /// Resolve the live directory used by flat installer-authorized I/O.
@@ -305,13 +348,60 @@ impl SkillFs {
             if m.is_staging_root(skill_name) {
                 return true;
             }
-            // H3: Hermes nested ID — check the leaf component.
-            if let Some(leaf) = skill_name.split('/').next_back() {
-                if leaf != skill_name {
-                    return m.is_staging_root(leaf);
-                }
+            // H3: Hermes nested ID — both components name a top-level
+            // directory of the workspace, so both are checked against the
+            // staging patterns. A PrefixStar pattern matches the whole ID
+            // through its category prefix, but an Exact pattern
+            // (".pip-staging" is a documented example) matches only the
+            // category; checking nothing but the leaf let a nested skill
+            // staged inside it escape the staging exemption (the hidden
+            // write gate, raw SKILL.md serving, and listing filters all
+            // route through this helper).
+            if skill_name.contains('/') {
+                return skill_name.split('/').any(|c| m.is_staging_root(c));
             }
             false
+        })
+    }
+
+    /// I2: whether a store entry is installer-private staging content.
+    ///
+    /// The loader enforces no staging rule of its own — it skips only
+    /// dot-prefixed top-level directories, while the staging validator
+    /// accepts non-dot patterns — so a staging root pre-seeded on disk
+    /// (an installer that stages before the mount, or the residue of a
+    /// crashed install) is scanned in as a category and its nested
+    /// skills enter the store under their bare leaf names. Matching the
+    /// pattern against the leaf alone then lets the staged half-install
+    /// surface in the ordinary views; the entry is staging-private when
+    /// either the adopted name or the category it was scanned under
+    /// names a staging root. Write-path mutations inside a staging root
+    /// never reach the store: the observe dispatcher drops them first
+    /// (H3), so the category record of a scan-loaded entry is the
+    /// authoritative staging signal for the listing surfaces.
+    ///
+    /// The caller supplies the borrowed store — this predicate must
+    /// never acquire the store lock itself. Discover rendering holds
+    /// one read guard across the whole listing, and parking_lot's
+    /// RwLock is fair: a second acquisition from inside that guard
+    /// blocks behind any queued writer (the background sync worker's
+    /// reparse refresh queues exactly such a write) while the writer
+    /// waits for the outer guard to drop, so reading or statting the
+    /// discover manifest would stall FUSE request processing for good.
+    /// Callers that do not already hold a guard take one before
+    /// filtering the names.
+    pub(super) fn store_entry_is_staging_private(
+        &self,
+        store: &skillfs_core::store::SkillStore,
+        name: &str,
+    ) -> bool {
+        self.staging_matcher.as_ref().is_some_and(|m| {
+            if m.is_staging_root(name) {
+                return true;
+            }
+            store
+                .category_of(name)
+                .is_some_and(|category| m.is_staging_root(category))
         })
     }
 
@@ -345,6 +435,48 @@ impl SkillFs {
             return false;
         }
         !self.is_post_publish_grace_allowed(skill_name, relative_path)
+    }
+
+    /// Whether a top-level Hermes root entry must be hidden from the ordinary
+    /// view.
+    ///
+    /// The Hermes root listing is the physical workspace, so the filters the
+    /// flat `/skills` listing applies have to run here as well: reserved
+    /// lifecycle roots (S3), installer staging roots (I2),
+    /// activation-hidden skills (D1.1), and dot-prefixed directories the
+    /// store loader skips (they are never managed Skills). Only skill-shaped
+    /// leaves are gated by activation — plain files and category directories
+    /// are passthrough content and stay visible.
+    pub(super) fn hermes_root_entry_is_hidden(
+        &self,
+        name: &str,
+        physical: &std::path::Path,
+    ) -> bool {
+        use crate::fs::read_resolution::ReadResolution;
+        if is_reserved_lifecycle_name(name) {
+            return true;
+        }
+        if let Some(ref matcher) = self.staging_matcher {
+            if matcher.is_staging_root(name) {
+                return true;
+            }
+        }
+        // The store loader skips dot-prefixed directories, so they are never
+        // managed Skills and the flat `/skills` listing cannot surface them.
+        // A hidden directory that carries SKILL.md would otherwise parse as
+        // a top-level skill and be listed while the store holds no entry for
+        // it (non-in-place reads answer ENOENT). Hide it like the flat
+        // listing does; plain dot content and management paths (`.hub`,
+        // `.bundled_manifest`, …) keep their existing rules.
+        if name.starts_with('.')
+            && !is_hermes_management_path(name)
+            && skillfs_core::store::has_regular_skill_md(physical)
+        {
+            return true;
+        }
+        self.active_resolver.is_some()
+            && skillfs_core::store::has_regular_skill_md(physical)
+            && matches!(self.resolve_skill_read(name), ReadResolution::Hidden)
     }
 
     /// Hidden-write gate for a Hermes nested path (`category/skill/...`).
@@ -468,6 +600,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn skills_dir_ino_survives_kernel_forget() {
+        // Kernel dentry reclaim sends FORGET, which releases the /skills
+        // path mapping. Resolution must reallocate — reverting this single
+        // point (or any former caller) to the old unwrap_or(FUSE_ROOT_ID/2)
+        // fallbacks makes this test fail: the view would collapse onto the
+        // root inode or a dangling constant.
+        let source = tempfile::tempdir().expect("source tempdir");
+        let store = SkillStore::new();
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            Arc::new(RwLock::new(store)),
+            false,
+        );
+
+        let first = fs.skills_dir_ino();
+        assert_ne!(first, FUSE_ROOT_ID);
+
+        // Simulate the kernel lifecycle: entry remembered, then forgotten.
+        fs.inodes.remember(first);
+        fs.inodes.forget(first, 1);
+        assert_eq!(fs.inodes.lookup_by_path("/skills"), None);
+
+        let second = fs.skills_dir_ino();
+        assert_ne!(second, first, "forgotten ino must not be handed back");
+        assert_ne!(
+            second, FUSE_ROOT_ID,
+            "skills view must not collapse to root"
+        );
+        assert_ne!(second, 2, "the old dangling constant must not come back");
+        assert_eq!(
+            fs.inodes.lookup_by_path("/skills"),
+            Some(second),
+            "reallocated inode must rebind the path"
+        );
+    }
+
+    #[test]
     fn flat_paths_and_grace_use_the_stored_categorized_source_dir() {
         let source = tempfile::tempdir().expect("source tempdir");
         let skill_dir = source.path().join("catalog/demo");
@@ -524,5 +694,33 @@ mod tests {
             std::fs::canonicalize(fd_path).expect("canonical parent fd"),
             std::fs::canonicalize(&skill_dir).expect("canonical skill dir")
         );
+    }
+
+    #[test]
+    fn hidden_top_level_skill_dir_is_not_a_visible_root_entry() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let hidden = source.path().join(".hidden-skill");
+        std::fs::create_dir_all(&hidden).expect("hidden dir");
+        std::fs::write(
+            hidden.join("SKILL.md"),
+            "---\nname: h\ndescription: x\n---\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: skillfs_core::SharedSkillStore = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared,
+            true,
+        );
+        assert!(
+            fs.hermes_root_entry_is_hidden(".hidden-skill", &hidden),
+            "predicate must hide a dot-prefixed skill dir"
+        );
+        // Reverse: management paths and ordinary entries stay visible.
+        assert!(!fs.hermes_root_entry_is_hidden(".hub", &hidden));
     }
 }

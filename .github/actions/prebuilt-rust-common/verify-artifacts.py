@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import re
 import sys
 import tarfile
+import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
-from targets import TARGETS
+from targets import component_targets
 
 
 def die(message: str) -> None:
@@ -62,6 +65,16 @@ def cargo_sbom_tool_present(metadata: dict[str, Any]) -> bool:
     )
 
 
+def skills_packager_present(metadata: dict[str, Any]) -> bool:
+    """Recognize the static OS Skills SBOM generator."""
+    return any(
+        isinstance(tool, dict)
+        and tool.get("name") == "os-skills-packager"
+        and tool.get("version") == "1"
+        for tool in metadata.get("tools", [])
+    )
+
+
 def component_refs(component: dict[str, Any]) -> list[str]:
     """Collect non-empty bom-ref values from one nested component tree."""
     references: list[str] = []
@@ -80,7 +93,8 @@ def expected_files(
     component_name: str, version: str, target_os: str, target_arch: str
 ) -> set[str]:
     """Return the exact four release asset names for one target."""
-    archive = f"{component_name}-{version}-{target_os}-{target_arch}.tar.gz"
+    extension = "zip" if target_os == "windows" else "tar.gz"
+    archive = f"{component_name}-{version}-{target_os}-{target_arch}.{extension}"
     return {
         archive,
         f"{archive}.sha256",
@@ -111,16 +125,26 @@ def validate_directory(
             f"missing={missing or 'none'} extra={extra or 'none'}"
         )
 
-    archive_name = f"{component_name}-{version}-{target_os}-{target_arch}.tar.gz"
+    extension = "zip" if target_os == "windows" else "tar.gz"
+    archive_name = f"{component_name}-{version}-{target_os}-{target_arch}.{extension}"
     archive = directory / archive_name
     archive_sha = sha256_file(archive)
     if read_sidecar(Path(f"{archive}.sha256"), archive.name) != archive_sha:
         die(f"archive checksum mismatch: {archive}")
     try:
-        with tarfile.open(archive, "r:gz") as package:
-            if not package.getmembers():
-                die(f"archive is empty: {archive}")
-    except (OSError, tarfile.TarError) as error:
+        if target_os == "windows":
+            with zipfile.ZipFile(archive) as package:
+                if not package.namelist() or package.testzip() is not None:
+                    die(f"archive is empty or corrupt: {archive}")
+        else:
+            with gzip.open(archive, "rb") as compressed:
+                with tarfile.open(fileobj=compressed, mode="r:") as package:
+                    if not package.getmembers():
+                        die(f"archive is empty: {archive}")
+                # Tar end markers can precede gzip's CRC/size trailer and later members.
+                while compressed.read(1024 * 1024):
+                    pass
+    except (OSError, EOFError, zlib.error, tarfile.TarError, zipfile.BadZipFile) as error:
         die(f"cannot read archive {archive}: {error}")
 
     sbom = Path(f"{archive}.cdx.json")
@@ -137,7 +161,8 @@ def validate_directory(
         die(f"SBOM is not CycloneDX 1.6: {sbom}")
     metadata = data.get("metadata")
     component = metadata.get("component") if isinstance(metadata, dict) else None
-    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-tar"
+    archive_format = "zip" if target_os == "windows" else "tar"
+    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-{archive_format}"
     if not isinstance(metadata, dict) or not isinstance(component, dict):
         die(f"SBOM is missing metadata.component: {sbom}")
     if (
@@ -166,7 +191,10 @@ def validate_directory(
         or property_map.get("anolisa:target:arch") != target_arch
     ):
         die(f"SBOM target properties mismatch: {sbom}")
-    if not cargo_sbom_tool_present(metadata):
+    if component_name == "os-skills":
+        if not skills_packager_present(metadata):
+            die(f"SBOM does not identify os-skills-packager 1: {sbom}")
+    elif not cargo_sbom_tool_present(metadata):
         die(f"SBOM does not identify cargo-sbom 0.10.0: {sbom}")
 
     components = data.get("components")
@@ -190,6 +218,20 @@ def validate_directory(
     ):
         die(f"SBOM contains invalid or duplicate dependency refs: {sbom}")
     known_refs = set(references)
+    root_dependency = next((item for item in dependencies if item["ref"] == artifact_id), None)
+    root_targets = root_dependency.get("dependsOn") if root_dependency else None
+    root_children = {
+        item["bom-ref"]
+        for item in component.get("components", [])
+        if isinstance(item, dict) and isinstance(item.get("bom-ref"), str)
+    }
+    if (
+        not isinstance(root_targets, list)
+        or not root_targets
+        or any(not isinstance(value, str) for value in root_targets)
+        or not root_children.issubset(root_targets)
+    ):
+        die(f"SBOM archive root is not connected to its components: {sbom}")
     for dependency in dependencies:
         depends_on = dependency.get("dependsOn")
         if dependency.get("ref") not in known_refs:
@@ -210,6 +252,7 @@ def main() -> int:
     parser.add_argument("--layout", choices=("flat", "actions"), required=True)
     parser.add_argument("--os", dest="target_os")
     parser.add_argument("--arch", dest="target_arch")
+    parser.add_argument("--tokenless-source-root", type=Path)
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.component):
         parser.error("component must be a lowercase release component name")
@@ -228,13 +271,13 @@ def main() -> int:
     if args.target_os or args.target_arch:
         parser.error("actions layout does not accept --os or --arch")
 
-    component_targets = TARGETS.get(args.component)
-    if component_targets is None:
+    selected_targets = component_targets(args.component, args.tokenless_source_root)
+    if not selected_targets:
         parser.error(f"component has no prebuilt target matrix: {args.component}")
     expected_directories = {
         f"{args.component}-prebuilt-{args.version}-"
         f"{target['target-os']}-{target['target-arch']}"
-        for target in component_targets
+        for target in selected_targets
     }
     try:
         entries = list(root.iterdir())
@@ -248,7 +291,8 @@ def main() -> int:
             "unexpected Actions Artifacts; "
             f"missing={missing or 'none'} extra={extra or 'none'}"
         )
-    for target in component_targets:
+    artifact_component = "sec-core" if args.component == "agent-sec-core" else args.component
+    for target in selected_targets:
         target_os = target["target-os"]
         target_arch = target["target-arch"]
         directory = (
@@ -256,9 +300,11 @@ def main() -> int:
             / f"{args.component}-prebuilt-{args.version}-{target_os}-{target_arch}"
         )
         validate_directory(
-            directory, args.component, args.version, target_os, target_arch
+            directory, artifact_component, args.version, target_os, target_arch
         )
-    print(f"Verified {4 * len(component_targets)} {args.component} prebuilt release assets under {root}")
+    print(
+        f"Verified {4 * len(selected_targets)} {args.component} prebuilt release assets under {root}"
+    )
     return 0
 
 

@@ -9,6 +9,7 @@ pub enum RawObserverAction {
     HoldShellOutput,
     DelayShellOutput,
     CaptureInput(RawInputCapture),
+    InvalidateApprovalCapture(String),
     EmitToPty(ShellHandoffRequest),
     EmitToPtyWithPromptRestore(ShellHandoffRequest),
     InterruptForeground,
@@ -141,6 +142,7 @@ impl PostCaptureOwner {
                 ..
             } => Self::PromptGhost,
             RawObserverAction::CaptureInput(_)
+            | RawObserverAction::InvalidateApprovalCapture(_)
             | RawObserverAction::Continue
             | RawObserverAction::EmitToPty(_)
             | RawObserverAction::EmitToPtyWithPromptRestore(_)

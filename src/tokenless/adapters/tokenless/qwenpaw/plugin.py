@@ -14,8 +14,10 @@ table are passed through untouched.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import os
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
@@ -120,6 +122,86 @@ _REQUIRED_SDK_NAMES = (
     "ToolResultStatus",
 )
 
+# Keyword arguments this plugin passes to each SDK constructor it calls. A
+# released wheel that renames or drops one of them still imports and still
+# exposes the class, so the name check alone passes and the middleware dies
+# with a TypeError on the first model or tool call -- which is exactly how a
+# wheel built before ``PostToolRequest.command`` reached users as a runtime
+# crash instead of an install-time refusal.
+_REQUIRED_SDK_FIELDS = {
+    "BeforeModelCapabilities": ("recovery", "replace_tools"),
+    "BeforeModelRequest": (
+        "attribution",
+        "capabilities",
+        "tools",
+        "visible_context",
+    ),
+    "PostToolCapabilities": ("recovery", "replace_output", "replace_with_text"),
+    "PostToolRequest": (
+        "attribution",
+        "capabilities",
+        "command",
+        "content",
+        "content_origin",
+        "output_optimization",
+        "result_kind",
+        "status",
+        "tool_name",
+    ),
+    "PreToolCapabilities": ("block_and_suggest", "replace_arguments"),
+    "PreToolRequest": (
+        "arguments",
+        "attribution",
+        "capabilities",
+        "command_field",
+        "tool_name",
+    ),
+    "TokenlessConfig": ("data_dir", "retrieve_tool_name", "rtk_enabled"),
+}
+
+
+def _missing_sdk_surface(sdk: Any) -> list[str]:
+    """Members of ``sdk`` this plugin needs but the installed wheel lacks.
+
+    Reports missing module attributes as bare names and constructor arguments
+    this plugin cannot pass as ``Class.field``. Every field is handed over by
+    keyword, so a parameter declared positional-only is unpassable and reported
+    exactly like an absent one -- including when the same constructor also takes
+    ``**kwargs``, which absorbs only the names it does not declare. A constructor
+    whose signature cannot be introspected is left alone: this guard must never
+    be the reason a compatible wheel is refused.
+    """
+    missing = [name for name in _REQUIRED_SDK_NAMES if not hasattr(sdk, name)]
+    for class_name, fields in _REQUIRED_SDK_FIELDS.items():
+        constructor = getattr(sdk, class_name, None)
+        if constructor is None:
+            continue  # already reported as a missing name
+        try:
+            parameters = inspect.signature(constructor).parameters
+        except (TypeError, ValueError):
+            continue
+        # ``**kwargs`` covers only the names a signature does not declare, so it
+        # is no excuse to skip the class: a field declared positional-only can
+        # never receive the keyword this plugin passes, however permissive the
+        # rest of the signature is.
+        takes_any_keyword = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        positional_only = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+        }
+        missing.extend(
+            f"{class_name}.{field}"
+            for field in fields
+            if field in positional_only
+            or (field not in parameters and not takes_any_keyword)
+        )
+    return missing
+
+
 _SDKS: dict[str, Any] = {}
 
 
@@ -143,6 +225,7 @@ class TokenlessMiddleware(MiddlewareBase):
     def __init__(self, sdk: Any, data_dir: str) -> None:
         self.sdk = sdk
         self.data_dir = data_dir
+        self.post_tool_failures = 0
 
     async def on_model_call(
         self,
@@ -207,10 +290,31 @@ class TokenlessMiddleware(MiddlewareBase):
         attribution = Attribution(AGENT_ID, agent.state.session_id, source.id)
         optimization = OutputOptimization.NONE
         forwarded = source
+        command = None
         if command_field is not None:
-            arguments = json.loads(source.input)
-            if not isinstance(arguments, dict):
-                raise TypeError(f"{source.name} arguments must be a JSON object")
+            try:
+                arguments = json.loads(source.input)
+                if not isinstance(arguments, dict):
+                    raise TypeError(f"{source.name} arguments must be a JSON object")
+            except (json.JSONDecodeError, TypeError):
+                # The host (agentscope 2.x) repairs malformed tool
+                # arguments upstream, but the raw string still reaches the
+                # middleware; raising here kills the whole agent reply.
+                # Fail open: forward the call untransformed and keep
+                # lossless-only output handling.
+                async for item in next_handler(**input_kwargs):
+                    if isinstance(item, ToolResponse):
+                        yield await self._after_response(
+                            item,
+                            source.name,
+                            origin,
+                            optimization,
+                            attribution,
+                            None,
+                        )
+                    else:
+                        yield item
+                return
             transformed = await self.sdk.pre_tool(
                 PreToolRequest(
                     tool_name=source.name,
@@ -236,10 +340,16 @@ class TokenlessMiddleware(MiddlewareBase):
                     )
                 }
             )
+            command = transformed.arguments.get(command_field)
         async for item in next_handler(**{**input_kwargs, "tool_call": forwarded}):
             if isinstance(item, ToolResponse):
                 yield await self._after_response(
-                    item, source.name, origin, optimization, attribution
+                    item,
+                    source.name,
+                    origin,
+                    optimization,
+                    attribution,
+                    command if isinstance(command, str) else None,
                 )
             else:
                 yield item
@@ -251,6 +361,7 @@ class TokenlessMiddleware(MiddlewareBase):
         origin: str,
         optimization: Any,
         attribution: Any,
+        command: str | None,
     ) -> ToolResponse:
         from anolisa_tokenless import (
             ContentOrigin,
@@ -281,22 +392,35 @@ class TokenlessMiddleware(MiddlewareBase):
         for index, block in enumerate(content):
             if not isinstance(block, TextBlock):
                 continue
-            transformed = await self.sdk.post_tool(
-                PostToolRequest(
-                    result_kind=ResultKind.TOOL,
-                    tool_name=tool_name,
-                    content=block.text,
-                    status=status,
-                    content_origin=ContentOrigin(origin),
-                    output_optimization=optimization,
-                    capabilities=PostToolCapabilities(
-                        replace_output=True,
-                        recovery=recovery,
-                        replace_with_text=True,
-                    ),
-                    attribution=attribution,
+            try:
+                transformed = await self.sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name=tool_name,
+                        content=block.text,
+                        status=status,
+                        content_origin=ContentOrigin(origin),
+                        output_optimization=optimization,
+                        capabilities=PostToolCapabilities(
+                            replace_output=True,
+                            recovery=recovery,
+                            replace_with_text=True,
+                        ),
+                        attribution=attribution,
+                        command=command,
+                    )
                 )
-            )
+            except Exception:
+                # A compression failure must not turn a successful host tool
+                # response into an agent error or partially rewrite its blocks.
+                self.post_tool_failures += 1
+                logger.exception(
+                    "tokenless: post_tool failed for %s; preserving original result "
+                    "(failures=%d)",
+                    tool_name,
+                    self.post_tool_failures,
+                )
+                return response
             extra_context = extra_context or transformed.additional_context
             if transformed.output != block.text:
                 content[index] = block.model_copy(update={"text": transformed.output})
@@ -310,7 +434,14 @@ class TokenlessMiddleware(MiddlewareBase):
 def _factory(ctx: Any, agent_config: Any) -> TokenlessMiddleware:
     del agent_config
     # TokenlessConfig rejects relative data directories.
-    data_dir = str(Path(ctx.workspace.workspace_dir).expanduser().resolve() / ".tokenless")
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if not configured_path.is_absolute():
+            raise ValueError("TOKENLESS_DATA_DIR must be absolute")
+        data_dir = str(configured_path.resolve())
+    else:
+        data_dir = str(Path(ctx.workspace.workspace_dir).expanduser().resolve() / ".tokenless")
     return TokenlessMiddleware(_sdk_for(data_dir), data_dir)
 
 
@@ -357,9 +488,7 @@ class TokenlessPlugin:
         manifest = json.loads(
             (Path(__file__).parent / "plugin.json").read_text(encoding="utf-8")
         )
-        missing = [
-            name for name in _REQUIRED_SDK_NAMES if not hasattr(anolisa_tokenless, name)
-        ]
+        missing = _missing_sdk_surface(anolisa_tokenless)
         if missing:
             logger.error(
                 "tokenless: anolisa_tokenless %s lacks %s required by plugin %s; "

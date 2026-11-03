@@ -3,12 +3,12 @@ mod admission_tests;
 use super::queue::Entry;
 use super::*;
 use asc_pap::{BindingReconcileEnqueuer, PapRepository, PapService};
-use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_pcp::{
     DeploymentReport, Failure, FailureKind, Observation, PreparedApply, Presence, RetryPolicy,
     TargetDeploymentClient, TargetRef,
 };
 use asc_policy_repository::BindingStateSnapshot;
+use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::binding::{BindingView, PreparedBinding};
 use asc_policy_types::target::{TargetBindingPlan, TranslationOutcome};
 use std::collections::{BTreeMap, VecDeque};
@@ -27,7 +27,9 @@ fn record(n: u32) -> BindingStateSnapshot {
     ))
     .unwrap();
     spec.binding_id = id(n);
+    spec.scope.scope_id = ResourceId::new(format!("scope-{n}")).unwrap();
     BindingStateSnapshot {
+        status_version: 1,
         binding: BindingView {
             spec,
             status: (BindingStatus::PendingApply).into(),
@@ -35,11 +37,13 @@ fn record(n: u32) -> BindingStateSnapshot {
         deployments: vec![],
     }
 }
+#[track_caller]
 fn wait_until(mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !condition() {
         assert!(Instant::now() < deadline, "condition did not converge");
-        thread::yield_now();
+        // Let workers and the scanner acquire shared locks between polls.
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -288,7 +292,7 @@ impl TargetDeploymentClient for Client {
     }
 }
 fn start(
-    repo: Arc<ProcessLocalPapRepository>,
+    repo: Arc<SqlitePolicyRepository>,
     client: Arc<Client>,
     clock: Arc<TestClock>,
     capacity: usize,
@@ -296,7 +300,7 @@ fn start(
     start_with_workers(repo, client, clock, capacity, 1)
 }
 fn start_with_workers(
-    repo: Arc<ProcessLocalPapRepository>,
+    repo: Arc<SqlitePolicyRepository>,
     client: Arc<Client>,
     clock: Arc<TestClock>,
     capacity: usize,
@@ -346,7 +350,7 @@ fn core(
         .unwrap(),
     )
 }
-fn status(repo: &ProcessLocalPapRepository, n: u32) -> Option<BindingStatus> {
+fn status(repo: &SqlitePolicyRepository, n: u32) -> Option<BindingStatus> {
     repo.get_binding_state(&id(n))
         .unwrap()
         .map(|r| r.binding.status.phase)
@@ -354,9 +358,8 @@ fn status(repo: &ProcessLocalPapRepository, n: u32) -> Option<BindingStatus> {
 
 #[test]
 fn one_worker_serves_other_bindings_during_retry_and_reprepares_on_deadline() {
-    let repo = Arc::new(
-        ProcessLocalPapRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
-    );
+    let repo =
+        Arc::new(SqlitePolicyRepository::with_binding_states(vec![record(1), record(2)]).unwrap());
     let client = Arc::new(Client::default());
     client
         .failures
@@ -418,7 +421,7 @@ fn compensation_pages_past_capacity_without_any_notifications() {
     let mut terminal = record(0);
     terminal.binding.status.phase = BindingStatus::ApplyFailed;
     records.insert(0, terminal);
-    let repo = Arc::new(ProcessLocalPapRepository::with_binding_states(records).unwrap());
+    let repo = Arc::new(SqlitePolicyRepository::with_binding_states(records).unwrap());
     let client = Arc::new(Client::default());
     let service = start(
         repo.clone(),
@@ -433,7 +436,7 @@ fn compensation_pages_past_capacity_without_any_notifications() {
 
 #[test]
 fn delete_admitted_during_apply_waits_for_exit_and_preserves_cleanup() {
-    let repo = Arc::new(ProcessLocalPapRepository::with_binding_states(vec![record(1)]).unwrap());
+    let repo = Arc::new(SqlitePolicyRepository::with_binding_states(vec![record(1)]).unwrap());
     let client = Arc::new(Client::default());
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -445,13 +448,13 @@ fn delete_admitted_during_apply_waits_for_exit_and_preserves_cleanup() {
         2,
         2,
     );
-    let pap = PapService::new(
-        repo.clone(),
-        Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-    )
-    .with_reconcile_enqueuer(service.enqueuer());
+    let pap = PapService::new(repo.clone())
+        .with_reconcile_enqueuer(service.enqueuer())
+        .with_scope_discovery(Arc::new(Discovery));
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let accepted = pap.delete_binding(&id(1)).unwrap();
+    pap.delete_scope(&record(1).binding.spec.scope.scope_id)
+        .unwrap();
+    let accepted = pap.get_binding(&id(1)).unwrap();
     assert_eq!(accepted.spec, record(1).binding.spec);
     assert_eq!(accepted.status, BindingStatus::PendingDelete);
     assert_eq!(client.calls.lock().unwrap().len(), 1);
@@ -459,7 +462,15 @@ fn delete_admitted_during_apply_waits_for_exit_and_preserves_cleanup() {
     // remains Running/dirty. No core mutex participates in this exclusion.
     let mut other = record(2).binding;
     other.spec.binding_revision = asc_foundation_types::Revision::new(1).unwrap();
-    repo.update_binding(None, &other).unwrap();
+    repo.put_policy(&other.spec.policy).unwrap();
+    repo.put_scope(&asc_policy_types::scope::PreparedScope {
+        scope_id: other.spec.scope.scope_id.clone(),
+        selector: other.spec.scope.selector.clone(),
+        policy_snapshots: vec![other.spec.policy.clone()],
+        status: asc_policy_types::scope::ScopeStatus::Active,
+    })
+    .unwrap();
+    repo.admit_binding_for_test(None, &other).unwrap();
     service.enqueuer().enqueue(&id(2)).unwrap();
     wait_until(|| status(&repo, 2) == Some(BindingStatus::Ready));
     assert_eq!(status(&repo, 1), Some(BindingStatus::PendingDelete));
@@ -490,7 +501,7 @@ fn delete_admitted_during_apply_waits_for_exit_and_preserves_cleanup() {
 
 #[test]
 fn delete_preempts_waiting_retry_without_waiting_for_clock() {
-    let repo = Arc::new(ProcessLocalPapRepository::with_binding_states(vec![record(1)]).unwrap());
+    let repo = Arc::new(SqlitePolicyRepository::with_binding_states(vec![record(1)]).unwrap());
     let client = Arc::new(Client::default());
     client
         .failures
@@ -509,12 +520,11 @@ fn delete_preempts_waiting_retry_without_waiting_for_clock() {
             Some(Entry::WaitingRetry { .. })
         )
     });
-    let pap = PapService::new(
-        repo.clone(),
-        Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-    )
-    .with_reconcile_enqueuer(service.enqueuer());
-    pap.delete_binding(&id(1)).unwrap();
+    let pap = PapService::new(repo.clone())
+        .with_reconcile_enqueuer(service.enqueuer())
+        .with_scope_discovery(Arc::new(Discovery));
+    pap.delete_scope(&record(1).binding.spec.scope.scope_id)
+        .unwrap();
     wait_until(|| status(&repo, 1).is_none());
     assert_eq!(client.preparations.load(Ordering::SeqCst), 1);
     service.shutdown().unwrap();
@@ -522,7 +532,7 @@ fn delete_preempts_waiting_retry_without_waiting_for_clock() {
 
 #[test]
 fn shutdown_retains_actual_call_until_join_and_closes_write_admission() {
-    let repo = Arc::new(ProcessLocalPapRepository::with_binding_states(vec![record(1)]).unwrap());
+    let repo = Arc::new(SqlitePolicyRepository::with_binding_states(vec![record(1)]).unwrap());
     let client = Arc::new(Client::default());
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -545,68 +555,25 @@ fn shutdown_retains_actual_call_until_join_and_closes_write_admission() {
 }
 
 #[test]
-fn pap_create_and_changed_spec_update_notify_after_commit_and_deliver_latest_input() {
-    let repo = Arc::new(ProcessLocalPapRepository::default());
-    let spec = record(1).binding.spec;
-    repo.put_policy(&spec.policy).unwrap();
-    let mut scope = spec.scope.clone();
-    scope.revision = asc_foundation_types::Revision::new(1).unwrap();
-    repo.put_scope(&scope).unwrap();
+fn scope_replacement_delivers_distinct_bindings_and_cleans_owned_state() {
+    let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let client = Arc::new(Client::default());
     let service = start(
         repo.clone(),
         client.clone(),
         Arc::new(TestClock::default()),
-        2,
+        4,
     );
-    let pap = PapService::new(
-        repo.clone(),
-        Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-    )
-    .with_reconcile_enqueuer(service.enqueuer());
-    let first = pap
-        .create_binding(
-            &spec.policy.policy_id,
-            spec.policy.revision,
-            &scope.scope_id,
-            scope.revision,
-        )
-        .unwrap();
-    assert_eq!(first.status, BindingStatus::PendingApply);
-    wait_until(|| pap.get_binding(&first.spec.binding_id).unwrap().status == BindingStatus::Ready);
-    let scope = pap
-        .update_scope(
-            &scope.scope_id,
-            &asc_policy_types::scope::ScopeSelector::Pid { pid: 9999 },
-        )
-        .unwrap();
-    let second = pap
-        .update_binding(
-            &first.spec.binding_id,
-            &spec.policy.policy_id,
-            spec.policy.revision,
-            &scope.scope_id,
-            scope.revision,
-        )
-        .unwrap();
-    wait_until(|| pap.get_binding(&first.spec.binding_id).unwrap().status == BindingStatus::Ready);
+    exercise_independent_pap_crud(&repo, &service.enqueuer());
     let requests = client.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(
-        serde_json::from_slice::<PreparedBinding>(&requests[0].content).unwrap(),
-        first.spec
-    );
-    assert_eq!(
-        serde_json::from_slice::<PreparedBinding>(&requests[1].content).unwrap(),
-        second.spec
-    );
+    let first: PreparedBinding = serde_json::from_slice(&requests[0].content).unwrap();
+    let second: PreparedBinding = serde_json::from_slice(&requests[1].content).unwrap();
+    assert_ne!(first.binding_id, second.binding_id);
+    assert_ne!(first.scope.scope_id, second.scope.scope_id);
+    assert_eq!(first.policy, second.policy);
     drop(requests);
-    service.queue.stop();
-    assert!(pap.delete_binding(&first.spec.binding_id).is_err());
-    assert_eq!(
-        pap.get_binding(&first.spec.binding_id).unwrap().status,
-        BindingStatus::Ready
-    );
+    assert!(repo.list_scopes(100, 0).unwrap().items.is_empty());
     service.shutdown().unwrap();
 }
 
@@ -619,7 +586,7 @@ fn timer_panic_closes_admission_and_shutdown_observes_failure() {
         }
     }
     // No candidates or enqueues: only the timer reads the failing clock.
-    let repo = Arc::new(ProcessLocalPapRepository::default());
+    let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let runtime = ReconciliationRuntime::start(
         repo.clone(),
         core(
@@ -643,7 +610,7 @@ fn timer_panic_closes_admission_and_shutdown_observes_failure() {
 #[test]
 fn pap_notification_observes_committed_state_and_failed_admission_never_notifies() {
     struct Observer {
-        repo: Arc<ProcessLocalPapRepository>,
+        repo: Arc<SqlitePolicyRepository>,
         seen: Mutex<Vec<BindingView>>,
     }
     impl BindingReconcileEnqueuer for Observer {
@@ -658,56 +625,45 @@ fn pap_notification_observes_committed_state_and_failed_admission_never_notifies
             Ok(())
         }
     }
-    let repo = Arc::new(ProcessLocalPapRepository::default());
-    let spec = record(1).binding.spec;
-    repo.put_policy(&spec.policy).unwrap();
-    let mut scope = spec.scope.clone();
-    scope.revision = asc_foundation_types::Revision::new(1).unwrap();
-    repo.put_scope(&scope).unwrap();
+    let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let observer = Arc::new(Observer {
         repo: repo.clone(),
         seen: Mutex::new(vec![]),
     });
-    let pap = PapService::new(repo, Arc::new(asc_policy_engine::PolicyTemplateCompiler))
-        .with_reconcile_enqueuer(observer.clone());
+    let pap = PapService::new(repo.clone())
+        .with_reconcile_enqueuer(observer.clone())
+        .with_scope_discovery(Arc::new(Discovery));
+    let spec = record(1).binding.spec;
+    let policy = pap.create_policy("test", &spec.policy.template).unwrap();
+    let refs = [asc_policy_types::scope::PolicyReference {
+        policy_id: policy.policy_id.clone(),
+        policy_revision: policy.revision,
+    }];
+    let scope = pap
+        .create_scope_assignment(&spec.scope.selector, &refs)
+        .unwrap();
     assert!(
-        pap.create_binding(
+        asc_pap::ScopeBindingSink::sync_instances(
+            &pap,
             &id(999),
-            spec.policy.revision,
-            &scope.scope_id,
-            scope.revision
+            std::slice::from_ref(&spec.scope.process)
         )
         .is_err()
     );
     assert!(observer.seen.lock().unwrap().is_empty());
-    let created = pap
-        .create_binding(
-            &spec.policy.policy_id,
-            spec.policy.revision,
-            &scope.scope_id,
-            scope.revision,
-        )
+    asc_pap::ScopeBindingSink::sync_instances(
+        &pap,
+        &scope.scope_id,
+        std::slice::from_ref(&spec.scope.process),
+    )
+    .unwrap();
+    let created = repo.list_bindings(10, 0).unwrap().items.remove(0);
+    asc_pap::ScopeBindingSink::sync_instances(&pap, &scope.scope_id, &[spec.scope.process])
         .unwrap();
-    let updated_scope = pap
-        .update_scope(
-            &scope.scope_id,
-            &asc_policy_types::scope::ScopeSelector::Pid { pid: 8765 },
-        )
-        .unwrap();
-    let updated = pap
-        .update_binding(
-            &created.spec.binding_id,
-            &spec.policy.policy_id,
-            spec.policy.revision,
-            &scope.scope_id,
-            updated_scope.revision,
-        )
-        .unwrap();
-    let deleted = pap.delete_binding(&created.spec.binding_id).unwrap();
-    assert_eq!(
-        *observer.seen.lock().unwrap(),
-        vec![created, updated, deleted]
-    );
+    pap.delete_scope(&scope.scope_id).unwrap();
+    let deleted = pap.get_binding(&created.spec.binding_id).unwrap();
+    pap.delete_scope(&scope.scope_id).unwrap();
+    assert_eq!(*observer.seen.lock().unwrap(), vec![created, deleted]);
 }
 
 #[test]
@@ -773,7 +729,6 @@ fn automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings() {
         // Even a deadline that passed during bookkeeping must yield to a timer.
         Ok(Disposition::RetryAt { at: 0 }),
         Err(StoreError::Contended),
-        Err(StoreError::Unavailable),
         Err(StoreError::Invalid),
     ] {
         let delay = if matches!(result, Ok(Disposition::RetryAt { .. })) {
@@ -782,7 +737,7 @@ fn automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings() {
             1000
         };
         let repo = Arc::new(
-            ProcessLocalPapRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
+            SqlitePolicyRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
         );
         let clock = Arc::new(TestClock::default());
         let attempt = Arc::new(RepeatedOutcome {
@@ -796,7 +751,9 @@ fn automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings() {
             RuntimeConfig {
                 workers: 1,
                 max_auto_retries: 2,
-                tick_interval: Duration::from_millis(1),
+                // Drive deadlines explicitly so compensation cannot race PAP's
+                // retry notification and add an unrelated scheduling series.
+                tick_interval: Duration::from_secs(60),
                 ..RuntimeConfig::default()
             },
         )
@@ -827,6 +784,7 @@ fn automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings() {
                 retry as usize
             );
             clock.0.store(deadline, Ordering::SeqCst);
+            q.tick(deadline);
         }
         wait_until(|| {
             status(&repo, 1) == Some(BindingStatus::ApplyFailed)
@@ -837,6 +795,7 @@ fn automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings() {
             vec![id(1), id(2), id(1), id(1)]
         );
         let mut expected = record(1);
+        expected.status_version += 1;
         expected.binding.status.phase = BindingStatus::ApplyFailed;
         expected.binding.status.error = Some(Failure::new(
             FailureKind::Rejected,
@@ -916,7 +875,7 @@ fn zero_retry_budget_stops_first_failure_and_submillisecond_delay_is_rejected() 
         q.state.lock().unwrap().entries.get(&id(1)),
         Some(&Entry::Exhausted)
     );
-    let repo = Arc::new(ProcessLocalPapRepository::default());
+    let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let clock = Arc::new(TestClock::default());
     assert!(matches!(
         ReconciliationRuntime::start(
@@ -964,7 +923,7 @@ fn binding_errors_retry_without_blocking_other_bindings_or_pap_writes() {
         StoreError::Contended,
     ] {
         let repo = Arc::new(
-            ProcessLocalPapRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
+            SqlitePolicyRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
         );
         let clock = Arc::new(TestClock::default());
         let client = Arc::new(Client::default());
@@ -988,7 +947,7 @@ fn binding_errors_retry_without_blocking_other_bindings_or_pap_writes() {
             q.state.lock().unwrap().entries.get(&id(1))
                 == Some(&Entry::WaitingRetry {
                     retry_at: 1000,
-                    retries: 1,
+                    retries: u32::from(error != StoreError::Unavailable),
                 })
                 && status(&repo, 2) == Some(BindingStatus::Ready)
         });
@@ -1004,7 +963,7 @@ fn binding_errors_retry_without_blocking_other_bindings_or_pap_writes() {
             q.state.lock().unwrap().entries[&id(1)],
             Entry::WaitingRetry {
                 retry_at: 1000,
-                retries: 1
+                retries: u32::from(error != StoreError::Unavailable)
             }
         );
         clock.0.store(1000, Ordering::SeqCst);
@@ -1023,77 +982,213 @@ fn binding_errors_retry_without_blocking_other_bindings_or_pap_writes() {
     }
 }
 
-fn exercise_independent_pap_crud(repo: &Arc<ProcessLocalPapRepository>, q: &Arc<WorkQueue>) {
-    let pap = PapService::new(
-        repo.clone(),
-        Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-    )
-    .with_reconcile_enqueuer(q.clone());
+fn exercise_independent_pap_crud(repo: &Arc<SqlitePolicyRepository>, q: &Arc<WorkQueue>) {
+    let pap = PapService::new(repo.clone())
+        .with_reconcile_enqueuer(q.clone())
+        .with_scope_discovery(Arc::new(Discovery));
     let policy = pap
         .create_policy("independent", &record(1).binding.spec.policy.template)
         .unwrap();
-    let scope = pap
-        .create_scope(&asc_policy_types::scope::ScopeSelector::Pid { pid: 99 })
-        .unwrap();
-    let binding = pap
-        .create_binding(
-            &policy.policy_id,
-            policy.revision,
-            &scope.scope_id,
-            scope.revision,
-        )
-        .unwrap();
-    wait_until(|| {
-        pap.get_binding(&binding.spec.binding_id).unwrap().status == BindingStatus::Ready
-    });
-    let scope = pap
-        .update_scope(
-            &scope.scope_id,
-            &asc_policy_types::scope::ScopeSelector::Pid { pid: 100 },
-        )
-        .unwrap();
-    pap.update_binding(
-        &binding.spec.binding_id,
-        &policy.policy_id,
-        policy.revision,
-        &scope.scope_id,
-        scope.revision,
-    )
-    .unwrap();
-    wait_until(|| {
-        pap.get_binding(&binding.spec.binding_id).unwrap().status == BindingStatus::Ready
-    });
-    pap.delete_binding(&binding.spec.binding_id).unwrap();
-    wait_until(|| {
-        repo.get_binding_state(&binding.spec.binding_id)
-            .unwrap()
-            .is_none()
-    });
+    let refs = [asc_policy_types::scope::PolicyReference {
+        policy_id: policy.policy_id.clone(),
+        policy_revision: policy.revision,
+    }];
+    let mut scopes = Vec::new();
+    for pid in [99, 100] {
+        let scope = pap
+            .create_scope_assignment(&asc_policy_types::scope::ScopeSelector::Pid { pid }, &refs)
+            .unwrap();
+        let mut instance = record(1).binding.spec.scope.process;
+        instance.pid = pid;
+        asc_pap::ScopeBindingSink::sync_instances(&pap, &scope.scope_id, &[instance]).unwrap();
+        wait_until(|| {
+            pap.list_bindings(100, 0).unwrap().items.iter().any(|b| {
+                b.spec.scope.scope_id == scope.scope_id && b.status == BindingStatus::Ready
+            })
+        });
+        scopes.push(scope);
+    }
     let policy = pap
         .update_policy(&policy.policy_id, "renamed", &policy.template)
         .unwrap();
     pap.delete_policy_revision(&policy.policy_id, policy.revision)
         .unwrap();
-    pap.delete_scope_revision(&scope.scope_id, scope.revision)
-        .unwrap();
+    for scope in scopes {
+        pap.delete_scope(&scope.scope_id).unwrap();
+        wait_until(|| {
+            matches!(
+                pap.get_scope(&scope.scope_id),
+                Err(asc_pap::PapError::NotFound)
+            )
+        });
+    }
 }
 
 #[path = "termination_tests.rs"]
 mod termination_tests;
 
-fn retry_failed_binding(repo: &Arc<ProcessLocalPapRepository>, queue: &Arc<WorkQueue>) {
-    let pap = PapService::new(
-        repo.clone(),
-        Arc::new(asc_policy_engine::PolicyTemplateCompiler),
-    )
-    .with_reconcile_enqueuer(queue.clone());
-    let spec = record(1).binding.spec;
-    pap.update_binding(
-        &id(1),
-        &spec.policy.policy_id,
-        spec.policy.revision,
-        &spec.scope.scope_id,
-        spec.scope.revision,
-    )
-    .unwrap();
+fn retry_failed_binding(repo: &Arc<SqlitePolicyRepository>, queue: &Arc<WorkQueue>) {
+    let pap = PapService::new(repo.clone())
+        .with_reconcile_enqueuer(queue.clone())
+        .with_scope_discovery(Arc::new(Discovery));
+    pap.retry_scope(&record(1).binding.spec.scope.scope_id)
+        .unwrap();
+}
+
+struct Discovery;
+impl asc_pap::ScopeDiscovery for Discovery {
+    fn start(&self, _: &asc_pap::ScopeDiscoverySeed) -> Result<(), asc_pap::PapError> {
+        Ok(())
+    }
+    fn stop(&self, _: &asc_foundation_types::ResourceId) -> Result<(), asc_pap::PapError> {
+        Ok(())
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fault matrix compares ownership, versions, budgets and remote effects across the same recovery sequence"
+)]
+fn storage_backoff_retains_original_write_and_does_not_spend_retry_budget() {
+    struct Fault {
+        inner: Arc<SqlitePolicyRepository>,
+        error: StoreError,
+        finish: bool,
+        repaired: AtomicBool,
+        writes: Mutex<Vec<String>>,
+    }
+    impl BindingStateRepository for Fault {
+        fn get_binding_state(
+            &self,
+            id: &ResourceId,
+        ) -> Result<Option<BindingStateSnapshot>, StoreError> {
+            self.inner.get_binding_state(id)
+        }
+        fn compare_exchange_binding_state(
+            &self,
+            expected: &BindingStateSnapshot,
+            write: &BindingStateWrite,
+        ) -> Result<WriteResult, StoreError> {
+            let selected = expected.binding.spec.binding_id == id(1)
+                && write.next.as_ref().is_some_and(|p| {
+                    p.status.as_ref().is_some_and(|s| {
+                        s.phase
+                            == if self.finish {
+                                BindingStatus::Ready
+                            } else {
+                                BindingStatus::Applying
+                            }
+                    })
+                });
+            if selected {
+                self.writes.lock().unwrap().push(write.write_id.to_string());
+                if !self.repaired.load(Ordering::SeqCst) {
+                    if self.error == StoreError::OutcomeUnknown {
+                        self.inner.compare_exchange_binding_state(expected, write)?;
+                    }
+                    return Err(self.error);
+                }
+            }
+            self.inner.compare_exchange_binding_state(expected, write)
+        }
+    }
+    for error in [
+        StoreError::Busy,
+        StoreError::Full,
+        StoreError::ReadOnly,
+        StoreError::Io,
+        StoreError::OutcomeUnknown,
+    ] {
+        for finish in [false, true] {
+            let inner = Arc::new(
+                SqlitePolicyRepository::with_binding_states(vec![record(1), record(2)]).unwrap(),
+            );
+            let repo = Arc::new(Fault {
+                inner: inner.clone(),
+                error,
+                finish,
+                repaired: AtomicBool::new(false),
+                writes: Mutex::new(Vec::new()),
+            });
+            let clock = Arc::new(TestClock::default());
+            let client = Arc::new(Client::default());
+            let core = core(repo.clone(), client.clone(), clock.clone());
+            let queue = WorkQueue::new(2, 0);
+            queue.enqueue(&id(1)).unwrap();
+            queue.enqueue(&id(2)).unwrap();
+            for expected in [id(1), id(2)] {
+                assert_eq!(queue.take(), Some(expected.clone()));
+                run_attempt(
+                    repo.as_ref(),
+                    core.as_ref(),
+                    clock.as_ref(),
+                    &queue,
+                    expected,
+                    Duration::from_millis(1000),
+                );
+            }
+            assert_eq!(status(&inner, 2), Some(BindingStatus::Ready));
+            for tick in 1..=8 {
+                let now = tick * 1000;
+                clock.0.store(now, Ordering::SeqCst);
+                queue.tick(now);
+                assert_eq!(queue.take(), Some(id(1)));
+                run_attempt(
+                    repo.as_ref(),
+                    core.as_ref(),
+                    clock.as_ref(),
+                    &queue,
+                    id(1),
+                    Duration::from_millis(1000),
+                );
+                let state = queue.state.lock().unwrap();
+                assert_eq!(
+                    state.entries.get(&id(1)),
+                    Some(&Entry::WaitingRetry {
+                        retry_at: now + 1000,
+                        retries: 0
+                    })
+                );
+                let schedule = &state.schedules[&id(1)];
+                assert!(schedule.has_pending_storage());
+                assert_eq!(schedule.attempts_started, u32::from(finish));
+            }
+            let writes = repo.writes.lock().unwrap().clone();
+            assert!(writes.iter().all(|id| *id == writes[0]));
+            repo.repaired.store(true, Ordering::SeqCst);
+            for _ in 0..3 {
+                let deadline = {
+                    let state = queue.state.lock().unwrap();
+                    match state.entries.get(&id(1)) {
+                        Some(Entry::WaitingRetry { retry_at, .. }) => *retry_at,
+                        None => break,
+                        other => panic!("unexpected queue state {other:?}"),
+                    }
+                };
+                clock.0.store(deadline, Ordering::SeqCst);
+                queue.tick(deadline);
+                assert_eq!(queue.take(), Some(id(1)));
+                run_attempt(
+                    repo.as_ref(),
+                    core.as_ref(),
+                    clock.as_ref(),
+                    &queue,
+                    id(1),
+                    Duration::from_millis(1000),
+                );
+            }
+            assert_eq!(status(&inner, 1), Some(BindingStatus::Ready));
+            assert_eq!(
+                client
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|s| **s == format!("apply:{}", id(1)))
+                    .count(),
+                1
+            );
+        }
+    }
 }

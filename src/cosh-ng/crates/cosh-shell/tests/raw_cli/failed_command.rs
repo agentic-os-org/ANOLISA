@@ -1005,14 +1005,12 @@ fn assert_failed_command_prompt_restore(
     );
     let home = fixture.to_string_lossy().into_owned();
     let isolated_value = if isolated { "1" } else { RAW_CLI_UNSET_ENV };
-    let mut input = vec![(b"make all\n".to_vec(), Duration::ZERO)];
+    let mut input = vec![(sentinel.as_str(), b"make all\n".as_slice())];
     if mode == "smart" {
-        input.push((b"\t\n".to_vec(), Duration::from_millis(2800)));
+        input.push(("Insight: The build or test command failed", b"\t\n"));
     }
-    input.push((
-        b"echo PROMPT_FLOW_OK\nexit\n".to_vec(),
-        Duration::from_millis(1800),
-    ));
+    input.push(("failed with exit code 2.", b""));
+    input.push((sentinel.as_str(), b"echo PROMPT_FLOW_OK\nexit\n"));
     let mut env = vec![
         ("HOME", home.as_str()),
         ("PATH", path.as_str()),
@@ -1023,8 +1021,13 @@ fn assert_failed_command_prompt_restore(
         ("COSH_POC_PS1", sentinel.as_str()),
     ];
     env.extend_from_slice(extra_env);
-    let output =
-        run_raw_cli_with_args_env_and_delayed_input("fake", &["--shell", shell], &env, input);
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", shell],
+        &env,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &input,
+    );
     let _ = fs::remove_dir_all(&fixture);
 
     let normalized = strip_ansi_escape(&output);

@@ -16,6 +16,62 @@ sandbox_guard = load_standalone_hook(
 )
 
 
+@pytest.mark.parametrize(
+    "files,executables,path_binary,expected",
+    [
+        (
+            {
+                "/usr/bin/linux-sandbox",
+                "/custom/linux-sandbox",
+                "/usr/local/bin/linux-sandbox",
+            },
+            {
+                "/usr/bin/linux-sandbox",
+                "/custom/linux-sandbox",
+                "/usr/local/bin/linux-sandbox",
+            },
+            "/custom/linux-sandbox",
+            "/custom/linux-sandbox",
+        ),
+        (
+            {"/custom/linux-sandbox", "/usr/local/bin/linux-sandbox"},
+            {"/custom/linux-sandbox", "/usr/local/bin/linux-sandbox"},
+            "/custom/linux-sandbox",
+            "/custom/linux-sandbox",
+        ),
+        (
+            {"/usr/bin/linux-sandbox", "/usr/local/bin/linux-sandbox"},
+            {"/usr/bin/linux-sandbox", "/usr/local/bin/linux-sandbox"},
+            None,
+            "/usr/bin/linux-sandbox",
+        ),
+        (
+            {"/usr/local/bin/linux-sandbox"},
+            {"/usr/local/bin/linux-sandbox"},
+            None,
+            "/usr/local/bin/linux-sandbox",
+        ),
+        (
+            {"/usr/bin/linux-sandbox", "/usr/local/bin/linux-sandbox"},
+            {"/usr/local/bin/linux-sandbox"},
+            None,
+            "/usr/local/bin/linux-sandbox",
+        ),
+        (set(), set(), None, "/usr/bin/linux-sandbox"),
+    ],
+)
+def test_sandbox_binary_discovery_respects_path_and_retains_fallbacks(
+    monkeypatch, files, executables, path_binary, expected
+):
+    with monkeypatch.context() as context:
+        context.setattr(sandbox_guard.os.path, "isfile", lambda value: value in files)
+        context.setattr(
+            sandbox_guard.os, "access", lambda value, mode: value in executables
+        )
+        context.setattr(sandbox_guard.shutil, "which", lambda name: path_binary)
+        assert sandbox_guard._find_linux_sandbox() == expected
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 日志追踪上下文测试
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
