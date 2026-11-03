@@ -918,7 +918,7 @@ fn collect_tool_responses(
         }
         matched[idx] = true;
         results.push(ObservationResult {
-            source_call_id: Some(tc_id.to_string()),
+            source_call_id: owner.map(str::to_string),
             content: Some(serde_json::Value::String(content_str.clone())),
             subagent_trajectory_ref: None,
             extra: extra.clone(),
