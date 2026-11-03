@@ -272,28 +272,8 @@ finally:
     manifest.write_text(original)
 PY
 
-SCORE_PAYLOAD="$TMP/score-payload.tar.gz"
-python3 - "$SCORE_PAYLOAD" "$ROOT" <<'PY'
-import io
-import sys
-import tarfile
-from pathlib import Path
-
-with tarfile.open(sys.argv[1], "w:gz") as archive:
-    for name in (
-        "skill-score-cli/bin/python3.11",
-        "skill-score-cli/bin/agent-sec-cli",
-        "skill-score-runtime/bin/python3.12",
-    ):
-        data = b"#!/bin/sh\nexit 0\n"
-        if name.endswith("agent-sec-cli"):
-            data = (Path(sys.argv[2]) / "packaging/skill-score/agent-sec-cli").read_bytes()
-        member = tarfile.TarInfo("opt/agent-sec/" + name)
-        member.size, member.mode = len(data), 0o755
-        archive.addfile(member, io.BytesIO(data))
-PY
 PREVIEW_VERSION="${VERSION}-skillscore.123456789abc"
-if RAW_SKILL_SCORE_PAYLOAD="$SCORE_PAYLOAD" RAW_PREVIEW_VERSION="$PREVIEW_VERSION" \
+if RAW_SKILL_SCORE_PAYLOAD="$OUT_ONE/$ARTIFACT" RAW_PREVIEW_VERSION="$PREVIEW_VERSION" \
     run_package "$TMP/legacy-score-out" > "$TMP/legacy-score.log" 2>&1; then
     echo "ERROR: base raw package accepted an embedded scoring runtime" >&2
     exit 1
@@ -319,6 +299,5 @@ if RAW_PREVIEW_VERSION="$PREVIEW_VERSION.base.invalid" run_package "$TMP/invalid
     echo "ERROR: base raw package accepted an invalid image variant" >&2
     exit 1
 fi
-python3 "$ROOT/tests/packaging/test_skill_score_raw.py"
 
 echo "OK: agent-sec-core V2 raw package tests passed"

@@ -122,7 +122,7 @@ jobs:
           for field in ("skipped", "failures", "errors"):
               assert all(int(suite.get(field, "0")) == 0 for suite in suites), field
           PY
-      - name: Build the standard raw preview and separate image archive
+      - name: Build the standard raw preview and independent delivery bundles
         run: |
           bash src/agent-sec-core/packaging/skill-score/build-preview.sh "$RUNNER_TEMP/score-release"
           mkdir -p "$RUNNER_TEMP/score-evidence"
@@ -148,17 +148,18 @@ jobs:
       - name: Install base without optional dependencies, then explicitly install and repair worker
         run: |
           version="$(jq -r .version "$RUNNER_TEMP/score-release/release-manifest.json")"
-          mkdir -p "$RUNNER_TEMP/score-repo/v1"
-          for file in index.toml index-v2.toml components-v2.toml $(jq -r '.raw_packages[]' "$RUNNER_TEMP/score-release/release-manifest.json"); do
-            ln "$RUNNER_TEMP/score-release/$file" "$RUNNER_TEMP/score-repo/v1/$file"
-          done
+          mkdir -p "$RUNNER_TEMP/score-repo"
+          (cd "$RUNNER_TEMP/score-release/bundles" && sha256sum --check *.sha256)
+          tar -xzf "$RUNNER_TEMP/score-release/bundles/sec-core-bundle-$version-linux-x86_64.tar.gz" \
+            -C "$RUNNER_TEMP/score-repo"
           sudo mkdir -p /etc/anolisa
           printf 'schema_version = 1\ndefault_backend = "raw"\n[backends.raw]\nbase_url = "file://%s/score-repo/v1"\n' "$RUNNER_TEMP" | sudo tee /etc/anolisa/repo.toml >/dev/null
           sudo /usr/local/bin/anolisa --install-mode system install sec-core --backend raw \
             --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
           python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
-            "$RUNNER_TEMP/score-release" --base-only --output "$RUNNER_TEMP/score-evidence/base-install.json"
-          docker image rm "agent-sec-skill-score:$version" "agent-sec-skill-score-egress:$version"
+            "$RUNNER_TEMP/score-repo/v1" --base-only --output "$RUNNER_TEMP/score-evidence/base-install.json"
+          tar -xzf "$RUNNER_TEMP/score-release/bundles/skill-score-bundle-$version-linux-x86_64.tar.gz" \
+            -C "$RUNNER_TEMP/score-repo"
           sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
             /usr/local/bin/anolisa --install-mode system install sec-core-skill-score --backend raw \
             --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
@@ -252,8 +253,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(jq -r .source_commit release/release-manifest.json)" = "$EXPECTED_SHA"
-          jq -r '.artifacts[] | "\(.sha256)  \(.file)"' release/release-manifest.json > release/SHA256SUMS
-          (cd release && sha256sum --check SHA256SUMS)
+          (cd release/bundles && sha256sum --check *.sha256)
           version="$(jq -r .version release/release-manifest.json)"
           tag="sec-core-v$version"
           if gh release view "$tag" >/dev/null 2>&1; then
@@ -263,22 +263,27 @@ jobs:
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           Fork preview of sec-core with optional skill scoring, built from $EXPECTED_SHA.
 
-          Download the release assets into an absolute local directory ending in \`/v1\`,
-          then verify \`SHA256SUMS\` there. The installed ANOLISA CLI expects that repository layout;
-          the flat GitHub Release asset URL is not a direct raw repository URL.
-          \`gh release download $tag --repo $GH_REPO --dir /absolute/path/to/asc-preview/v1\`
-          \`sudo anolisa --install-mode system install sec-core --backend raw --repo file:///absolute/path/to/asc-preview/v1 --version $version\`
+          This release has two independent bundles, each with a companion \`.sha256\` file.
+          Download only \`sec-core-bundle-$version-linux-x86_64.tar.gz\` and its checksum
+          for a lightweight installation. Verify with \`sha256sum --check <archive>.sha256\`,
+          then extract into an empty local directory. Its \`v1/\` contains the base raw
+          package, indexes and release-bound ANOLISA 0.3.20 installer; no scoring runtime
+          or container images are included. Use that installer with system mode, raw backend,
+          \`--repo file:///absolute/path/to/asc-preview/v1 --version $version\`.
 
-          Use the release-bound ANOLISA 0.3.20 installer, then explicitly install
-          \`sec-core-skill-score\` at the same version. Its verified candidate helper obtains
-          locked Python/uv/Harbor dependencies and the separately hashed image archive.
-          Set \`ANOLISA_SKILL_SCORE_SOURCE_DIR\` to the release asset directory to reuse the local archive.
+          For dynamic execution, also download and verify
+          \`skill-score-bundle-$version-linux-x86_64.tar.gz\`, then extract it into the same
+          directory. Use that local \`v1/\` repository when
+          explicitly installing \`sec-core-skill-score\` at the same version. The helper
+          builds the work and sidecar images from checksum-bound sources and records their
+          immutable IDs locally. Locked Python/uv/Harbor dependencies
+          still come from upstream or a separately provisioned offline dependency cache.
           The native Rust score entrypoint is \`agent-sec-cli skillsec score plan/run\`;
           plan needs only the base component, while run also needs the optional worker.
 
           Validation: Ubuntu 22.04 separate base/optional raw installation, explicit worker repair,
-          native CLI contracts, dependency and image identities, worker protocol and Docker network controls. No model-backed scoring or FC template restore is claimed.
+          native CLI contracts, dependency, source-build receipt and image identities, worker protocol and Docker network controls. No model-backed scoring or FC template restore is claimed.
           This is a fork prerelease, not an official AgentSecCore release.
           EOF
-          gh release create "$tag" release/* --target "$EXPECTED_SHA" --prerelease \
+          gh release create "$tag" release/bundles/* --target "$EXPECTED_SHA" --prerelease \
             --title "sec-core $version" --notes-file "$RUNNER_TEMP/notes.md"

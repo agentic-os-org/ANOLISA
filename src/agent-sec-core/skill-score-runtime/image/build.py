@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import posixpath
 import re
 import shutil
 import subprocess
@@ -173,7 +174,9 @@ def build_base_reference(base: dict) -> Iterator[str]:
                 )
 
 
-def archive_image_identities(archive_path: Path, names: tuple[str, ...]) -> list[dict]:
+def archive_image_identities(
+    archive_path: Path, names: tuple[str, ...], *, allow_legacy: bool = False
+) -> list[dict]:
     """Bind classic config IDs and containerd manifest IDs to the same saved images."""
     with tarfile.open(archive_path) as archive:
         members = {member.name: member for member in archive.getmembers()}
@@ -200,8 +203,97 @@ def archive_image_identities(archive_path: Path, names: tuple[str, ...]) -> list
                 raise ValueError("image archive descriptor must use SHA256")
             return "blobs/sha256/" + identity.removeprefix("sha256:")
 
-        index = read_json("index.json")
+        def legacy_layer(path: str) -> tarfile.TarInfo:
+            # Docker 24 deduplicates shared layers with relative symlinks.
+            visited = set()
+            for _ in range(16):
+                if (
+                    not isinstance(path, str)
+                    or path.startswith("/")
+                    or path in {".", ".."}
+                    or path.startswith("../")
+                    or posixpath.normpath(path) != path
+                    or path in visited
+                ):
+                    raise ValueError("legacy image layer link escapes or cycles")
+                visited.add(path)
+                member = members.get(path)
+                if member is None:
+                    break
+                if member.isfile():
+                    return member
+                if not (member.issym() or member.islnk()) or member.linkname.startswith(
+                    "/"
+                ):
+                    break
+                path = posixpath.normpath(
+                    posixpath.join(
+                        posixpath.dirname(path) if member.issym() else "",
+                        member.linkname,
+                    )
+                )
+            raise ValueError("legacy image layer is missing or invalid")
+
         legacy = read_json("manifest.json")
+        if allow_legacy and "index.json" not in members and "oci-layout" not in members:
+            if not isinstance(legacy, list) or len(legacy) != len(names):
+                raise ValueError("image archive must contain exactly the built images")
+            records = {}
+            for item in legacy:
+                tags = item.get("RepoTags", [])
+                if (
+                    not isinstance(tags, list)
+                    or len(tags) != 1
+                    or tags[0] not in names
+                    or tags[0] in records
+                ):
+                    raise ValueError("image archive tag is unexpected or ambiguous")
+                config_path = item.get("Config", "")
+                if not re.fullmatch(r"[a-f0-9]{64}\.json", config_path):
+                    raise ValueError("legacy image config must have a SHA256 filename")
+                config_id = "sha256:" + config_path.removesuffix(".json")
+                config = read_json(
+                    config_path,
+                    {
+                        "digest": config_id,
+                        "size": (
+                            members[config_path].size if config_path in members else -1
+                        ),
+                    },
+                )
+                if (config.get("os"), config.get("architecture")) != ("linux", "amd64"):
+                    raise ValueError("image archive platform must be linux/amd64")
+                rootfs = config.get("rootfs", {})
+                layers = item.get("Layers")
+                diff_ids = rootfs.get("diff_ids")
+                if (
+                    rootfs.get("type") != "layers"
+                    or not isinstance(layers, list)
+                    or not isinstance(diff_ids, list)
+                    or len(layers) != len(diff_ids)
+                ):
+                    raise ValueError("legacy image layers differ from its config")
+                for path, diff_id in zip(layers, diff_ids, strict=True):
+                    member = legacy_layer(path)
+                    if not isinstance(diff_id, str) or not re.fullmatch(
+                        r"sha256:[a-f0-9]{64}", diff_id
+                    ):
+                        raise ValueError("legacy image layer is missing or invalid")
+                    checksum = hashlib.sha256()
+                    with archive.extractfile(member) as stream:
+                        for block in iter(lambda: stream.read(1024 * 1024), b""):
+                            checksum.update(block)
+                    if "sha256:" + checksum.hexdigest() != diff_id:
+                        raise ValueError(
+                            "legacy image layer checksum differs from config"
+                        )
+                records[tags[0]] = {
+                    "name": tags[0],
+                    "id": config_id,
+                    "platform": "linux/amd64",
+                }
+            return [records[name] for name in names]
+        index = read_json("index.json")
         if (
             index.get("schemaVersion") != 2
             or len(index.get("manifests", [])) != len(names)
@@ -270,11 +362,17 @@ def main() -> None:
         type=Path,
         help="JSON source recipe required for a locally prepared business image",
     )
+    parser.add_argument(
+        "--local-build",
+        action="store_true",
+        help="Bind installation-local outputs instead of a prebuilt release",
+    )
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", args.version):
         parser.error("version is not a Docker tag")
     base = work_base_image(args.base_image, args.base_image_recipe)
-    validate_base_version(args.version, base)
+    if not args.local_build:
+        validate_base_version(args.version, base)
     component = Path(__file__).resolve().parents[2]
     image = f"agent-sec-skill-score:{args.version}"
     args.output.mkdir(parents=True, exist_ok=True)
@@ -379,13 +477,14 @@ def main() -> None:
         ).stdout
     )
     identities = archive_image_identities(
-        args.output / "skill-score-images.tar", (image, sidecar)
+        args.output / "skill-score-images.tar",
+        (image, sidecar),
+        allow_legacy=args.local_build,
     )
     for identity, detail in zip(identities, details, strict=True):
-        if detail["Id"] not in (identity["id"], identity["manifest_id"]) or (
-            detail["Os"],
-            detail["Architecture"],
-        ) != ("linux", "amd64"):
+        if detail["Id"] not in (
+            identity[key] for key in ("id", "manifest_id") if key in identity
+        ) or (detail["Os"], detail["Architecture"],) != ("linux", "amd64"):
             raise ValueError("built image differs from its saved immutable identities")
         identity["repo_digests"] = detail.get("RepoDigests", [])
     claude = subprocess.run(
