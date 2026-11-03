@@ -84,6 +84,23 @@ impl TelemetryChannel {
         Ok(())
     }
 
+    /// Materialize the ops channel for an image or integration build.
+    ///
+    /// Creates the ops directory, its component `.jsonl` files, and the
+    /// logrotate policy, but deliberately skips the `instance.jsonl` snapshot.
+    /// That probe must run on the target system's first boot: a snapshot baked
+    /// into an image would pin every clone to the build host's vCPU count,
+    /// image id, and distro, and `write_snapshot_if_empty` never rewrites a
+    /// non-empty file. Also leaves the opt-out marker alone and does not start
+    /// the uploader.
+    pub fn prepare_ops_channel(&self) -> Result<(), TelemetryError> {
+        let ops = OpsLayout::new(&self.config);
+        ops.create_ops_dir()?;
+        ops.create_ops_jsonl_files()?;
+        ops.setup_logrotate()?;
+        Ok(())
+    }
+
     /// Append an instance snapshot for the current authorization state without
     /// touching the collection sentinel.
     ///
@@ -206,6 +223,43 @@ mod tests {
             assert!(!content.contains("owner_account_id"));
             assert!(ch.is_enabled());
         });
+    }
+
+    #[test]
+    fn test_prepare_ops_channel_leaves_no_instance_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let ch = channel(&dir);
+
+        ch.prepare_ops_channel().unwrap();
+
+        assert!(dir.path().join("ops").is_dir());
+        for name in [
+            "instance",
+            "agentsight",
+            "agent-sec-core",
+            "cosh",
+            "tokenless",
+            "ws-ckpt",
+            "skillfs",
+        ] {
+            assert!(
+                dir.path()
+                    .join("ops")
+                    .join(format!("{name}.jsonl"))
+                    .exists(),
+                "expected {name}.jsonl"
+            );
+        }
+        // The snapshot is the one thing an image build must NOT bake in: it is
+        // written by the first boot's `telemetry init` instead.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ops/instance.jsonl")).unwrap(),
+            ""
+        );
+        assert!(!dir.path().join("identity.json").exists());
+        assert!(dir.path().join("logrotate-anolisa").exists());
+        // Preparing an image never touches consent.
+        assert!(ch.is_enabled());
     }
 
     #[test]

@@ -63,6 +63,13 @@ pub enum TelemetryCommands {
     /// Self-heal the ops channel without touching consent (internal, boot)
     #[command(hide = true)]
     Init,
+    /// Prepare the channel and resident unit for an image build (internal)
+    #[command(hide = true)]
+    Prepare {
+        /// Skip writing and enabling the resident systemd unit
+        #[arg(long)]
+        no_service: bool,
+    },
 }
 
 /// Dispatch `telemetry` subcommands.
@@ -92,6 +99,9 @@ fn mutation_request(command: TelemetryCommands, intent: ExecutionIntent) -> Tele
         TelemetryCommands::Unlink => TelemetryRequest::Unlink { intent },
         TelemetryCommands::Upload { loop_flag } => TelemetryRequest::Upload { loop_flag, intent },
         TelemetryCommands::Init => TelemetryRequest::Init { intent },
+        TelemetryCommands::Prepare { no_service } => {
+            TelemetryRequest::Prepare { no_service, intent }
+        }
         TelemetryCommands::Status { .. } => {
             unreachable!("status is dispatched through the read-only handler")
         }
@@ -186,6 +196,12 @@ fn render_mutation(result: TelemetryApplicationOutcome, ctx: &CliContext) -> Res
                     }
                     // initialized confirms ops-channel setup, without changing consent.
                     TelemetryApplied::Initialized => serde_json::json!({"initialized": true}),
+                    // prepared reports an image-build setup; service_enabled says whether
+                    // the resident unit was written and enabled for future boots.
+                    TelemetryApplied::Prepared { service_enabled } => serde_json::json!({
+                        "prepared": true,
+                        "service_enabled": service_enabled,
+                    }),
                 };
                 for warning in outcome.warnings() {
                     eprintln!("warn: {warning}");
@@ -249,6 +265,17 @@ fn applied_output(result: &TelemetryApplied, warnings: &[String]) -> Vec<Telemet
             )])
             .collect(),
         TelemetryApplied::Uploaded { .. } | TelemetryApplied::Initialized => warning_lines(),
+        TelemetryApplied::Prepared { service_enabled } => warning_lines()
+            .into_iter()
+            .chain([TelemetryOutput::Stdout(format!(
+                "Telemetry channel prepared for image build (resident unit {}).",
+                if *service_enabled {
+                    "enabled, not started"
+                } else {
+                    "not enabled"
+                }
+            ))])
+            .collect(),
     }
 }
 
@@ -806,6 +833,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_prepare_no_service() {
+        assert!(matches!(
+            parse(&["t", "prepare"]),
+            TelemetryCommands::Prepare { no_service: false }
+        ));
+        assert!(matches!(
+            parse(&["t", "prepare", "--no-service"]),
+            TelemetryCommands::Prepare { no_service: true }
+        ));
+    }
+
+    #[test]
     fn test_parse_upload_loop_flag() {
         assert!(matches!(
             parse(&["t", "upload", "--loop"]),
@@ -838,6 +877,16 @@ mod tests {
             ),
             TelemetryRequest::Upload {
                 loop_flag: true,
+                intent: ExecutionIntent::Apply
+            }
+        ));
+        assert!(matches!(
+            mutation_request(
+                TelemetryCommands::Prepare { no_service: true },
+                ExecutionIntent::Apply
+            ),
+            TelemetryRequest::Prepare {
+                no_service: true,
                 intent: ExecutionIntent::Apply
             }
         ));
@@ -891,6 +940,38 @@ mod tests {
                 TelemetryOutput::Stderr("warn: second warning".to_string()),
                 TelemetryOutput::Stdout("Unlinked from named reporting.".to_string()),
             ]
+        );
+        assert_eq!(
+            applied_output(
+                &TelemetryApplied::Prepared {
+                    service_enabled: false,
+                },
+                &warnings,
+            ),
+            vec![
+                TelemetryOutput::Stderr("warn: first warning".to_string()),
+                TelemetryOutput::Stderr("warn: second warning".to_string()),
+                TelemetryOutput::Stdout(
+                    "Telemetry channel prepared for image build (resident unit not enabled)."
+                        .to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn prepared_output_states_the_unit_is_enabled_but_not_started() {
+        assert_eq!(
+            applied_output(
+                &TelemetryApplied::Prepared {
+                    service_enabled: true,
+                },
+                &[],
+            ),
+            vec![TelemetryOutput::Stdout(
+                "Telemetry channel prepared for image build (resident unit enabled, not started)."
+                    .to_string()
+            )]
         );
     }
 
