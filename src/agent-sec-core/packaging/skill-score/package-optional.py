@@ -50,7 +50,7 @@ def write_archive(stage: Path, output: Path, epoch: int) -> None:
                     archive.addfile(member)
 
 
-def package(output: Path, version: str, commit: str, assets: str, epoch: int) -> Path:
+def package(output: Path, version: str, commit: str, epoch: int) -> Path:
     if not re.fullmatch(r"[a-f0-9]{40}", commit):
         raise ValueError("full source commit is required")
     if not re.fullmatch(
@@ -58,56 +58,6 @@ def package(output: Path, version: str, commit: str, assets: str, epoch: int) ->
         version,
     ):
         raise ValueError("preview version must bind the exact source commit")
-    if not assets.startswith("https://") or "?" in assets or "#" in assets:
-        raise ValueError("release asset base must use HTTPS without a query")
-    image_metadata = json.loads((output / "images.json").read_text())
-    base = image_metadata["work_base_image"]
-    if (
-        not re.fullmatch(r"sha256:[a-f0-9]{64}", base.get("image_id", ""))
-        or base.get("platform") != "linux/amd64"
-        or json.loads((output / "tool-inventory.json").read_text()).get(
-            "work_base_image"
-        )
-        != base
-    ):
-        raise ValueError("work base image identity differs from inventory")
-    default_base = (
-        "ghcr.io/protectskills/claude-skill-sandbox:lite@sha256:"
-        "f6f993df6f9c3f8b608c50548da598f4be862e020f204afa3d653701e95e07bc"
-    )
-    if (
-        base.get("reference") != default_base
-        and not version.endswith(".base." + base["image_id"][7:19])
-        or base.get("reference") == default_base
-        and ".base." in version
-    ):
-        raise ValueError("custom base version differs from work base image ID")
-    images = image_metadata["image_details"]
-    expected = {
-        "work": f"agent-sec-skill-score:{version}",
-        "egress": f"agent-sec-skill-score-egress:{version}",
-    }
-    if len(images) != 2 or {item["name"] for item in images} != set(expected.values()):
-        raise ValueError("images must be tagged with this component release")
-    image_records = []
-    for role, name in expected.items():
-        item = next(item for item in images if item["name"] == name)
-        if any(
-            not re.fullmatch(r"sha256:[a-f0-9]{64}", item.get(key, ""))
-            for key in ("id", "manifest_id")
-        ):
-            raise ValueError("image is missing its immutable identity")
-        if item.get("platform") != "linux/amd64":
-            raise ValueError("image has an unsupported platform")
-        image_records.append(
-            {
-                "role": role,
-                "name": name,
-                "id": item["id"],
-                "manifest_id": item["manifest_id"],
-                "platform": item["platform"],
-            }
-        )
     with tempfile.TemporaryDirectory(prefix="asc-optional-package-") as directory:
         stage = Path(directory)
         payload = stage / PAYLOAD
@@ -146,13 +96,27 @@ def package(output: Path, version: str, commit: str, assets: str, epoch: int) ->
             (ROOT / "skill-score-runtime/python-provenance.json").read_text()
         )
         python["file"] = "python-3.12.11-20250902.tar.gz"
-        archive = file_record(output / "skill-score-images.tar.gz")
-        archive["url"] = assets.rstrip("/") + "/" + archive["file"]
+        image_source = payload / "image-source"
+        for relative in ("skill-score-runtime/image", "skill-score-runtime/egress"):
+            shutil.copytree(
+                ROOT / relative,
+                image_source / relative,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        scanner = image_source / "agent-sec-cli/src/agent_sec_cli"
+        scanner.mkdir(parents=True)
+        shutil.copyfile(source / "__init__.py", scanner / "__init__.py")
+        for name in ("code_scanner", "model_service"):
+            shutil.copytree(
+                source / name,
+                scanner / name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
         worker = tomllib.loads(
             (ROOT / "skill-score-runtime/pyproject.toml").read_text()
         )
         manifest = {
-            "schema": "agent-sec-skill-score/runtime-v1",
+            "schema": "agent-sec-skill-score/runtime-v2",
             "component": "sec-core-skill-score",
             "version": version,
             "source_commit": commit,
@@ -163,9 +127,11 @@ def package(output: Path, version: str, commit: str, assets: str, epoch: int) ->
             "uv": UV,
             "harbor_version": "0.22.0",
             "pypi_index": "https://pypi.org/simple",
-            "image_archive": archive,
-            "images": image_records,
-            "work_base_image": base,
+            "image_build": {
+                "entry": "image-source/skill-score-runtime/image/build.py",
+                "default_base": "ghcr.io/protectskills/claude-skill-sandbox:lite@sha256:"
+                "f6f993df6f9c3f8b608c50548da598f4be862e020f204afa3d653701e95e07bc",
+            },
             "files": [
                 file_record(path, str(path.relative_to(payload)))
                 for path in sorted(payload.rglob("*"))
@@ -192,14 +158,9 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-commit", required=True)
-    parser.add_argument("--asset-base", required=True)
     parser.add_argument("--epoch", type=int, required=True)
     args = parser.parse_args()
-    print(
-        package(
-            args.output, args.version, args.source_commit, args.asset_base, args.epoch
-        )
-    )
+    print(package(args.output, args.version, args.source_commit, args.epoch))
 
 
 if __name__ == "__main__":

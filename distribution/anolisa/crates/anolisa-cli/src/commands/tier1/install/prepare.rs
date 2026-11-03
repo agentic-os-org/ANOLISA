@@ -141,6 +141,10 @@ pub(super) fn run_candidate_prepare(
         "ANOLISA_SKILL_SCORE_SOURCE_DIR",
         "ANOLISA_SKILL_SCORE_OFFLINE",
         "ANOLISA_SKILL_SCORE_PYPI_INDEX",
+        "ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE",
+        "ANOLISA_SKILL_SCORE_BASE_IMAGE",
+        "ANOLISA_SKILL_SCORE_BASE_RECIPE",
+        "ANOLISA_SKILL_SCORE_BUILD_NETWORK",
     ] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);

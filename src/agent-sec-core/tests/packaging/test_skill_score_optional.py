@@ -50,13 +50,130 @@ class OptionalInstallTests(unittest.TestCase):
             ]
         }
 
+    def built_receipt(self) -> dict:
+        base = {
+            "reference": "registry.example/base@sha256:" + "e" * 64,
+            "image_id": "sha256:" + "f" * 64,
+            "platform": "linux/amd64",
+        }
+        return dict(
+            self.image_manifest(),
+            schema=INSTALL.image_build.SCHEMA,
+            manifest_sha256="c" * 64,
+            source_commit="a" * 40,
+            version="test",
+            work_base_image=base,
+            inventory={"work_base_image": base},
+        )
+
+    def fake_build(self, _payload, candidate, manifest, identity, _cancelled, _logs):
+        receipt = self.built_receipt()
+        receipt["manifest_sha256"] = identity
+        (candidate / "image-build.json").write_text(json.dumps(receipt))
+        return receipt
+
+    def test_fresh_offline_build_fails_before_starting_any_process(self) -> None:
+        with (
+            patch.dict(os.environ, {"ANOLISA_SKILL_SCORE_OFFLINE": "1"}),
+            patch.object(INSTALL.image_build.subprocess, "Popen") as process,
+        ):
+            with self.assertRaisesRegex(ValueError, "network access"):
+                INSTALL.image_build.build(
+                    self.root, self.root, {}, "a" * 64, lambda: None, self.cache
+                )
+            process.assert_not_called()
+
+    def test_build_diagnostics_are_private_and_not_copied_into_errors(self) -> None:
+        for failure in (
+            RuntimeError("build failed"),
+            TimeoutError("build timed out"),
+            InterruptedError("build cancelled"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with self.assertRaisesRegex(
+                    RuntimeError, "private image build log"
+                ) as raised:
+                    with INSTALL.image_build.build_log(self.cache) as stream:
+                        path = Path(stream.name)
+                        stream.write(b"private registry diagnostic")
+                        raise failure
+                self.assertIn(str(path), str(raised.exception))
+                self.assertNotIn("private registry diagnostic", str(raised.exception))
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.read_bytes(), b"private registry diagnostic")
+        with INSTALL.image_build.build_log(self.cache) as stream:
+            path = Path(stream.name)
+            stream.write(b"successful build")
+        self.assertFalse(path.exists())
+
+    def test_failed_builder_captures_stdout_and_stderr_in_private_log(self) -> None:
+        script = self.root / "builder.py"
+        script.write_text(
+            "import sys\nprint('build output')\nprint('private failure', file=sys.stderr)\nsys.exit(1)\n"
+        )
+        manifest = {
+            "version": "test",
+            "image_build": {"entry": script.name, "default_base": "unused"},
+        }
+        with self.assertRaisesRegex(
+            RuntimeError, "image build failed.*private image build log"
+        ) as raised:
+            INSTALL.image_build.build(
+                self.root, self.root, manifest, "a" * 64, lambda: None, self.cache
+            )
+        logs = list(self.cache.glob("image-build-*.log"))
+        self.assertEqual(len(logs), 1)
+        self.assertIn(str(logs[0]), str(raised.exception))
+        self.assertNotIn("private failure", str(raised.exception))
+        self.assertEqual(
+            set(logs[0].read_text().splitlines()), {"build output", "private failure"}
+        )
+
+    def test_explicit_base_change_does_not_reuse_previous_build(self) -> None:
+        receipt = self.built_receipt()
+        with patch.dict(
+            os.environ, {"ANOLISA_SKILL_SCORE_BASE_IMAGE": "sha256:" + "0" * 64}
+        ):
+            self.assertFalse(INSTALL.image_build.matches_override(receipt))
+        with patch.dict(
+            os.environ,
+            {"ANOLISA_SKILL_SCORE_BASE_IMAGE": receipt["work_base_image"]["reference"]},
+        ):
+            self.assertTrue(INSTALL.image_build.matches_override(receipt))
+
+    def test_receipt_binds_source_and_base_inventory(self) -> None:
+        manifest = {"version": "test", "source_commit": "a" * 40}
+        receipt = self.built_receipt()
+        INSTALL.image_build.validate(receipt, manifest, "c" * 64)
+        for key in (
+            "schema",
+            "source_commit",
+            "manifest_sha256",
+            "version",
+            "work_base_image",
+        ):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                INSTALL.image_build.validate(
+                    dict(
+                        receipt, **{key: {} if key == "work_base_image" else "changed"}
+                    ),
+                    manifest,
+                    "c" * 64,
+                )
+
     def test_image_resolution_accepts_only_the_bound_id_of_each_store(
         self,
     ) -> None:
         manifest = self.image_manifest()
-        for store in ("id", "manifest_id"):
+        for store in ("id", "manifest_id", "legacy"):
             with self.subTest(store=store):
-                expected = {item["role"]: item[store] for item in manifest["images"]}
+                if store == "legacy":
+                    for item in manifest["images"]:
+                        del item["manifest_id"]
+                expected = {
+                    item["role"]: item["id" if store == "legacy" else store]
+                    for item in manifest["images"]
+                }
 
                 def inspect(arguments: list[str], **kwargs: object) -> str:
                     self.assertEqual(arguments[:3], ["docker", "image", "inspect"])
@@ -145,29 +262,19 @@ class OptionalInstallTests(unittest.TestCase):
             )
         self.assertEqual(list((self.root / "recovery").iterdir()), [])
 
-    def test_manifest_requires_both_immutable_identities(self) -> None:
-        prefix = self.root / "prefix"
-        contract = prefix / "share/anolisa/components/sec-core/component.toml"
-        contract.parent.mkdir(parents=True)
-        contract.write_text('[component]\nversion = "test"\n')
-        for malformed in (None, "mutable:tag"):
+    def test_build_receipt_allows_absent_but_rejects_malformed_manifest_id(
+        self,
+    ) -> None:
+        receipt = self.built_receipt()
+        for image in receipt["images"]:
+            del image["manifest_id"]
+        INSTALL.image_build.validate(receipt, receipt, "c" * 64)
+        for malformed in (None, "", "mutable:tag"):
             with self.subTest(manifest_id=malformed):
-                manifest = self.image_manifest()
-                manifest.update(
-                    schema="agent-sec-skill-score/runtime-v1",
-                    component="sec-core-skill-score",
-                    protocol_version="agent-sec-skill-score/worker-v1",
-                    platform="linux/amd64",
-                    harbor_version="0.22.0",
-                    version="test",
-                    files=[],
-                )
-                if malformed is None:
-                    del manifest["images"][0]["manifest_id"]
-                else:
-                    manifest["images"][0]["manifest_id"] = malformed
+                receipt = self.built_receipt()
+                receipt["images"][0]["manifest_id"] = malformed
                 with self.assertRaisesRegex(ValueError, "immutable"):
-                    INSTALL.validate_manifest(manifest, self.root, prefix)
+                    INSTALL.image_build.validate(receipt, receipt, "c" * 64)
 
     def archive(self, name: str, link: str | None = None) -> Path:
         path = self.root / "archive.tar.gz"
@@ -345,6 +452,7 @@ class OptionalInstallTests(unittest.TestCase):
             patch.object(INSTALL, "images_ready", return_value={}),
             patch.object(INSTALL, "ready_matches", return_value=False),
             patch.object(INSTALL, "build_environment"),
+            patch.object(INSTALL.image_build, "build", side_effect=self.fake_build),
             patch.object(INSTALL, "network_check"),
             patch.object(INSTALL, "environment_check", side_effect=check_candidate),
         ):
@@ -354,10 +462,15 @@ class OptionalInstallTests(unittest.TestCase):
             inventory,
             [
                 {
+                    "file": "image-build.json",
+                    "bytes": (result / "image-build.json").stat().st_size,
+                    "sha256": INSTALL.digest(result / "image-build.json"),
+                },
+                {
                     "file": "runtime-manifest.json",
                     "bytes": manifest_path.stat().st_size,
                     "sha256": identity,
-                }
+                },
             ],
         )
         self.assertEqual(list(result.parent.iterdir()), [result])
@@ -382,6 +495,7 @@ class OptionalInstallTests(unittest.TestCase):
             patch.object(INSTALL, "require_local_docker"),
             patch.object(INSTALL, "images_ready", return_value={}),
             patch.object(INSTALL, "ready_matches", return_value=False),
+            patch.object(INSTALL.image_build, "build", side_effect=self.fake_build),
             patch.object(
                 INSTALL,
                 "build_environment",

@@ -22,6 +22,12 @@ OPTIONAL_SPEC = importlib.util.spec_from_file_location(
 assert OPTIONAL_SPEC and OPTIONAL_SPEC.loader
 OPTIONAL = importlib.util.module_from_spec(OPTIONAL_SPEC)
 OPTIONAL_SPEC.loader.exec_module(OPTIONAL)
+BUNDLE_SPEC = importlib.util.spec_from_file_location(
+    "bundle_preview", ROOT / "packaging/skill-score/bundle-preview.py"
+)
+assert BUNDLE_SPEC and BUNDLE_SPEC.loader
+BUNDLE = importlib.util.module_from_spec(BUNDLE_SPEC)
+BUNDLE_SPEC.loader.exec_module(BUNDLE)
 SOURCE = "1234567890abcdef" * 2 + "12345678"
 VERSION = "1.1.0-skillscore." + SOURCE[:12]
 
@@ -35,42 +41,9 @@ class PreviewTest(unittest.TestCase):
         self.components.write_text(
             'schema_version = 2\n[[components]]\nname = "sec-core"\n'
         )
-        images = {
-            "work_base_image": {
-                "reference": "ghcr.io/protectskills/claude-skill-sandbox:lite@sha256:f6f993df6f9c3f8b608c50548da598f4be862e020f204afa3d653701e95e07bc",
-                "image_id": "sha256:" + "c" * 64,
-                "platform": "linux/amd64",
-            },
-            "images": [
-                f"agent-sec-skill-score:{VERSION}",
-                f"agent-sec-skill-score-egress:{VERSION}",
-            ],
-            "image_details": [
-                {
-                    "name": name,
-                    "id": "sha256:" + "a" * 64,
-                    "manifest_id": "sha256:" + "b" * 64,
-                    "platform": "linux/amd64",
-                }
-                for name in (
-                    f"agent-sec-skill-score:{VERSION}",
-                    f"agent-sec-skill-score-egress:{VERSION}",
-                )
-            ],
-        }
-        (self.directory / "images.json").write_text(json.dumps(images))
-        (self.directory / "tool-inventory.json").write_text(
-            json.dumps({"work_base_image": images["work_base_image"]})
-        )
-        for name in (
-            "skill-score-images.tar.gz",
-            "source.tar.gz",
-        ):
-            (self.directory / name).write_text("fixture")
+        (self.directory / "source.tar.gz").write_text("fixture")
         (self.directory / PREVIEW.INSTALLER).write_text("installer fixture")
-        OPTIONAL.package(
-            self.directory, VERSION, SOURCE, "https://example.org/immutable", 1
-        )
+        OPTIONAL.package(self.directory, VERSION, SOURCE, 1)
         self.package()
 
     def package(
@@ -106,6 +79,63 @@ class PreviewTest(unittest.TestCase):
     def prepare(self) -> dict:
         return PREVIEW.prepare(self.directory, SOURCE, VERSION, self.components)
 
+    def test_delivery_keeps_base_independent_and_has_only_four_assets(self) -> None:
+        manifest = self.prepare()
+        output = self.directory / "bundles"
+        paths = BUNDLE.bundle(self.directory, output, 1)
+        self.assertEqual(len(paths), 4)
+        payloads = {}
+        for component in ("sec-core", "skill-score"):
+            path = output / f"{component}-bundle-{VERSION}-linux-x86_64.tar.gz"
+            self.assertEqual(
+                path.with_name(path.name + ".sha256").read_text(),
+                BUNDLE.digest(path) + "  " + path.name + "\n",
+            )
+            with tarfile.open(path) as archive:
+                self.assertTrue(all(item.isfile() for item in archive))
+                payloads[component] = set(archive.getnames())
+        self.assertEqual(
+            payloads["sec-core"],
+            {
+                "v1/" + name
+                for name in (
+                    manifest["raw_packages"]["sec-core"],
+                    manifest["installer"]["file"],
+                    "index.toml",
+                    "index-v2.toml",
+                    "components-v2.toml",
+                    "release-manifest.json",
+                )
+            },
+        )
+        self.assertIn("v1/runtime-manifest.json", payloads["skill-score"])
+        self.assertNotIn("v1/skill-score-images.tar.gz", payloads["skill-score"])
+        self.assertFalse(payloads["sec-core"] & payloads["skill-score"])
+        self.assertEqual(
+            payloads["sec-core"] | payloads["skill-score"],
+            {"v1/" + item["file"] for item in manifest["artifacts"]}
+            | {"v1/release-manifest.json"},
+        )
+        runtime = json.loads((self.directory / "runtime-manifest.json").read_text())
+        self.assertNotIn("image_archive", runtime)
+        self.assertIn("image_build", runtime)
+        second = self.directory / "second"
+        BUNDLE.bundle(self.directory, second, 1)
+        for path in paths:
+            self.assertEqual(path.read_bytes(), (second / path.name).read_bytes())
+
+    def test_delivery_rejects_tampering_and_unsafe_members(self) -> None:
+        manifest = self.prepare()
+        target = self.directory / "bundles"
+        (self.directory / "source.tar.gz").write_text("tampered")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            BUNDLE.bundle(self.directory, target, 1)
+        self.assertFalse(target.exists())
+        manifest["artifacts"][0]["file"] = "../outside"
+        (self.directory / "release-manifest.json").write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            BUNDLE.bundle(self.directory, target, 1)
+
     def test_index_and_manifest_bind_raw_payload(self) -> None:
         manifest = self.prepare()
         index = tomllib.loads((self.directory / "index-v2.toml").read_text())
@@ -117,7 +147,7 @@ class PreviewTest(unittest.TestCase):
         self.assertEqual(index["entries"][0]["sha256"], raw["sha256"])
         self.assertEqual(index["entries"][0]["version"], VERSION)
         self.assertEqual(len(index["entries"]), 2)
-        self.assertEqual(manifest["schema_version"], "agent-sec-skill-score/release-v3")
+        self.assertEqual(manifest["schema_version"], "agent-sec-skill-score/release-v4")
         self.assertEqual(manifest["installer"]["version"], "0.3.20")
         self.assertNotIn("python_cli", manifest)
         self.assertEqual(manifest["source_commit"], SOURCE)
@@ -222,60 +252,41 @@ class PreviewTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unified"):
             self.prepare()
 
-    def test_rejects_missing_image(self) -> None:
-        (self.directory / "skill-score-images.tar.gz").unlink()
+    def test_rejects_missing_optional_raw(self) -> None:
+        (
+            self.directory / f"sec-core-skill-score-{VERSION}-linux-x86_64.tar.gz"
+        ).unlink()
         with self.assertRaisesRegex(ValueError, "release asset"):
             self.prepare()
 
-    def test_custom_base_recipe_survives_optional_and_release_packaging(self) -> None:
-        version = VERSION + ".base." + "d" * 12
-        images = json.loads((self.directory / "images.json").read_text())
-        base = {
-            "reference": "sha256:" + "d" * 64,
-            "image_id": "sha256:" + "d" * 64,
-            "platform": "linux/amd64",
-            "recipe": {
-                "source_repository": "https://example.org/business",
-                "source_commit": "e" * 40,
-                "dockerfile_path": "deploy/Dockerfile",
-                "dockerfile_sha256": "f" * 64,
-                "upstream_base_image": images["work_base_image"],
-            },
-        }
-        images["work_base_image"] = base
-        images["images"] = [name.replace(VERSION, version) for name in images["images"]]
-        for item in images["image_details"]:
-            item["name"] = item["name"].replace(VERSION, version)
-        (self.directory / "images.json").write_text(json.dumps(images))
-        (self.directory / "tool-inventory.json").write_text(
-            json.dumps({"work_base_image": base})
-        )
-        archive = OPTIONAL.package(
-            self.directory, version, SOURCE, "https://example.org/custom", 1
-        )
-        runtime = json.loads((self.directory / "runtime-manifest.json").read_text())
-        self.assertEqual(runtime["work_base_image"], base)
-        with tarfile.open(archive) as package:
-            with package.extractfile(
-                str(OPTIONAL.PAYLOAD / "runtime-manifest.json")
-            ) as stream:
-                self.assertEqual(json.load(stream)["work_base_image"], base)
-        self.package(version, filename_version=version)
-        release = PREVIEW.prepare(self.directory, SOURCE, version, self.components)
-        self.assertEqual(release["images"]["work_base_image"], base)
-        for invalid in (VERSION + ".base." + "e" * 12, VERSION):
-            with self.assertRaises(ValueError):
-                OPTIONAL.package(
-                    self.directory, invalid, SOURCE, "https://example.org/custom", 1
-                )
-
-    def test_rejects_base_identity_disagreement_between_metadata_files(self) -> None:
-        (self.directory / "tool-inventory.json").write_text("{}")
-        with self.assertRaisesRegex(ValueError, "base image identity"):
-            OPTIONAL.package(
-                self.directory, VERSION, SOURCE, "https://example.org/immutable", 1
+    def test_optional_contains_bound_build_sources_without_image_payload(self) -> None:
+        manifest = self.prepare()
+        path = self.directory / manifest["raw_packages"]["sec-core-skill-score"]
+        with tarfile.open(path) as archive:
+            names = set(archive.getnames())
+            prefix = "lib/anolisa/sec-core-skill-score/"
+            self.assertIn(
+                prefix + "image-source/skill-score-runtime/image/build.py", names
             )
-        with self.assertRaisesRegex(ValueError, "base image identity"):
+            self.assertIn(
+                prefix + "image-source/skill-score-runtime/egress/Dockerfile", names
+            )
+            self.assertIn(
+                prefix
+                + "image-source/agent-sec-cli/src/agent_sec_cli/code_scanner/__init__.py",
+                names,
+            )
+            self.assertFalse(
+                any(name.endswith("skill-score-images.tar.gz") for name in names)
+            )
+        self.assertLess(path.stat().st_size, 2 * 1024**2)
+
+    def test_rejects_prebuilt_outputs_in_source_release(self) -> None:
+        path = self.directory / "runtime-manifest.json"
+        runtime = json.loads(path.read_text())
+        runtime["images"] = []
+        path.write_text(json.dumps(runtime))
+        with self.assertRaisesRegex(ValueError, "build inputs"):
             self.prepare()
 
 
