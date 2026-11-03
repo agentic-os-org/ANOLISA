@@ -141,6 +141,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-agentsight-protocol"
+version = "1.1.2"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "asc-capability-code-scan"
 version = "1.1.2"
 dependencies = [
@@ -529,7 +536,10 @@ dependencies = [
 name = "asc-policy-adapter-agentsight"
 version = "1.1.2"
 dependencies = [
+ "asc-agentsight-protocol",
+ "asc-policy-cedar",
  "asc-policy-types",
+ "cedar-policy",
  "serde",
  "serde_json",
 ]
