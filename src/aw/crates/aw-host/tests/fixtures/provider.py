@@ -41,13 +41,15 @@ if preparation_mode == "slow-preparation":
     time.sleep(0.5 if method == "describe" else 3.0)
 
 if method == "describe":
+    names = os.environ.get("AW_HOST_OPERATIONS", "check,second,record").split(",")
     reply["operations"] = [
         {
             "name": name,
             "events": ["tool.before", "tool.after"],
             "effects": ["observe", "block"],
         }
-        for name in ["check", "second", "record"]
+        for name in names
+        if name
     ]
     reply["operations"].append({"name":"submit", "events":["input.submit"], "effects":["observe", "block"]})
     reply["operations"].append({

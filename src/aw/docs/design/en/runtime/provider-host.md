@@ -15,9 +15,10 @@ embedding application.
 | Layer | Responsibility |
 | --- | --- |
 | `aw-config` | Parse desired configuration and validate static references |
+| `aw-core::admission` | Produce immutable `PolicyCandidate` and `AdmittedPolicy` snapshots |
 | `aw-provider` | Check protocol messages, offline preflight and capability admission |
 | `aw-exec` | Execute literal commands with bounded byte transport and owned cleanup |
-| `aw-host` | Retain execution context, prepare Providers and invoke admitted event steps |
+| `aw-host` | Retain execution context, discover Providers and invoke admitted event steps |
 | Embedding Adapter | Supply trusted capabilities, normalize events, schedule steps and apply native effects |
 
 The Host reuses these libraries without making offline admission execute
@@ -29,7 +30,24 @@ create Core receipts or change Core's final-dispatch requirements.
 
 ## Prepare a fixed context
 
-Call `Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`.
+Preparation separates pure Core admission from Provider process discovery:
+
+1. `AdmissionEngine::preflight(bytes, target, capabilities)` validates the
+   configuration document, computes the exact-byte SHA-256 revision, and
+   returns a `PolicyCandidate` with static step requirements.
+2. `Host::discover(&candidate, context, deadline, cancelled)` acquires managed
+   package leases and runs `describe` and `validate_config` for referenced
+   structured Providers without re-parsing configuration bytes, returning
+   `PreparedProviders`.
+3. `AdmissionEngine::admit(candidate, prepared.evidence())` validates the
+   discovered Provider evidence and produces an immutable `AdmittedPolicy`.
+4. `Host::from_admitted(policy, prepared)` verifies that revision, target,
+   Adapter capabilities, discovered Provider evidence, and prepared Provider
+   commands match before constructing the `Host`.
+
+Standalone callers can also call
+`Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`,
+which delegates to the same four steps.
 `bytes` is the complete configuration document; its exact bytes determine the
 SHA-256 revision retained in every call. `target` selects a configured Agent.
 The caller supplies `AdapterCapabilities` for the actual version and entrypoint;

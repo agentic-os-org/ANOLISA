@@ -61,7 +61,9 @@ def structure(metadata: dict, root: Path) -> None:
         "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
         "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-exec": {"libc", "thiserror"},
-        "aw-host": {"aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"},
+        "aw-host": {
+            "aw-config", "aw-core", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror",
+        },
         "aw-service": {
             "aw-adapter",
             "aw-contracts",

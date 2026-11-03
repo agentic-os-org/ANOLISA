@@ -9,11 +9,11 @@
 的 Hook 步骤绑定为不可变 Core 类型，同时保留 `aw_provider::admission` 作为唯一
 规则实现。
 
-在 `agentic-os-org/ANOLISA` `main` 基线上，`crates/aw-service/src/runtime.rs`
-与 `crates/aw-host/src/lib.rs` 的生产 Hook 准备路径仍直接调用
-`aw_config::Validator` 和 `aw_provider::admission::{preflight, admit}`。本模块
-先行建立 Core 准入接口与类型边界，`aw-service` 与 `aw-host` 的生产调用切换留待
-下一阶段完成。
+`crates/aw-service/src/runtime.rs` 与 `crates/aw-host/src/lib.rs` 的生产 Hook
+准备路径通过该接口执行，完整顺序为
+`AdmissionEngine::preflight → Host::discover → AdmissionEngine::admit → Host::from_admitted`。
+`Host::prepare` 兼容入口内部委托同一流程，原生 Hook 事件执行路径继续保持
+`Adapter → Service → Host → aw-exec → Provider`。
 
 ## 准入阶段与类型
 
@@ -43,9 +43,10 @@
 
 `PolicyCandidate` 与 `AdmittedPolicy` 的内部字段全部私有，不实现 `Deserialize`
 或公开结构体构造器，仅暴露只读访问器（`configuration`、`revision`、`target`、
-`capabilities`、`requirements` 与 `steps`）。调用方无法注入未校验的
-`AdmittedStep`，也无法在预检与证据准入之间替换配置快照。`Debug` 输出省略配置文档
-内容，避免泄露 Provider 私有配置值。
+`capabilities`、`providers`、`requirements` 与 `steps`）。调用方无法注入未校验的
+`AdmittedStep`，也无法在预检、Provider 发现与 Host 构建之间替换配置快照或
+Provider 证据。`Debug` 输出省略配置文档与 Provider 证据内容，避免泄露 Provider
+私有配置值。
 
 `AdmittedPolicy` 仅表示所供快照通过能力准入：
 
