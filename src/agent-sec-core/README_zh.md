@@ -61,6 +61,8 @@ CLI 命令与集成 capability surface。
 
 `agent-sec-cli skillsec score plan/run` 提供 Rust 原生规划和评分。基础 `sec-core` 安装保持轻量，需要 Harbor 动态执行时显式安装匹配的 `sec-core-skill-score` 组件；安装阶段获取锁定的第三方依赖和单独校验的镜像归档。单机 Linux 与 SkillEval FC 复用同一 CLI、worker 和 ASC 网络侧车。共享模型服务通过密钥引用配置，已有本地扫描器默认行为保持不变。详见[安装、接口与验证指南](../../docs/user-guide/zh/agent-sec-core/skill-score.md)。
 
+共享模型配置也支持显式选择 `anthropic-compatible` 代理。ASC 在评分和 Agent 执行时使用代理地址及不透明凭据；身份归属和计量由调用平台与代理负责，已有百炼配置仍可使用。
+
 运行时安装器要求宿主机提供 Python 3.10 或更高版本。激活和评分需要访问本机系统 Docker 套接字。要将业务依赖装入工作镜像，可将 `ANOLISA_SKILL_SCORE_BASE_IMAGE` 设为固定的基础镜像引用，并按需通过 `ANOLISA_SKILL_SCORE_BASE_RECIPE` 指定其 JSON 配方路径。构建记录会保存所选基础镜像的身份。
 
 ## V2 SkillSec 与 Policy CLI

@@ -48,7 +48,13 @@ sudo anolisa --install-mode system install sec-core-skill-score --backend raw \
 
 通过调用进程环境或平台密钥管理注入 `AGENT_SEC_MODEL_API_KEY`。不要把实际值放入参数、任务 JSON、模板或发布清单。Judge 和被测 Agent 复用解析后的 provider 配置，worker 只获得 Agent 必需的模型凭据。已有本地/Ollama 扫描器默认行为保持不变。
 
-配置文件存在但无效时直接失败。文件不存在时，迁移期接受旧的 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_BASE_URL` 成对配置，并输出弃用提示；两个旧变量都必须提供。
+接入运维方管理的 Anthropic Messages 代理时，将 `provider` 设为 `anthropic-compatible`，`baseUrl` 设为可信代理前缀，例如 `https://models.example.invalid/anthropic`。ASC 会追加 `/v1/messages`，前缀不要包含这个后缀，其余字段不变。URL 必须使用 HTTP(S) 和 DNS 主机名或 IPv4 地址，不包含内嵌凭据、查询参数、片段、空白或反斜线；支持显式端口。HTTP 用于可信内网，跨不可信网络使用 HTTPS。动态执行要求能解析到 IPv4，继续由现有网络侧车放行配置的主机；这是主机策略，不是 URL 路径策略。
+
+ASC 通过已有 Anthropic 凭据通道原样传递引用的值，其中 Rust 请求使用 `x-api-key`。ASC 不生成或解析用户／任务身份，也不上报账单。调用平台负责授权代理地址并生成访问上下文，代理负责鉴权与计量。同一配置用于规划、判分和 Claude Code 动态执行。代理支持时应限制凭据的作用范围与有效期：被测 Agent 会获得该值，允许访问模型端点不构成数据防泄漏边界。
+
+代理须支持现有 Messages 请求参数（包括 `thinking` 和 `output_config`）、token usage 字段及 Claude Code 流式／工具调用。不兼容时明确失败，不静默删除参数或切换服务。离线兼容测试不能证明模型质量、网络可达性或计费正确性。
+
+配置文件存在但无效时直接失败。文件不存在时，迁移期接受旧的 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_BASE_URL` 成对配置，并输出弃用提示；两个旧变量都必须提供且保留百炼端点约束，自定义代理必须显式使用配置文件。回滚代理路由时恢复上面的百炼配置。
 
 ## 生成计划并执行
 

@@ -106,7 +106,7 @@ agent-sec-cli skillsec score run /absolute/path/to/task.json \
 }
 ```
 
-配置只保存密钥引用；实际值由用户会话或平台秘密管理注入。沿用当前已支持的百炼 HTTPS endpoint 约束，首版不扩展成任意 Anthropic 兼容服务。Judge 与 Agent 是不同调用角色，默认共用 provider/model；内部保留角色字段，便于归因，不要求用户配置两套连接。
+配置只保存密钥引用；实际值由用户会话或平台秘密管理注入。`bailian-payg-anthropic` provider 保留 HTTPS endpoint 约束。显式选择的 `anthropic-compatible` provider 接受运维方授权的 HTTP(S) DNS/IPv4 前缀并追加 `/v1/messages`，拒绝 URL 凭据、查询参数、片段、空白和反斜线，不跟随重定向。Judge 与 Agent 共用解析后的 provider/model 和不透明凭据。平台身份生成、端点授权和计量由调用方／代理负责，不进入 ASC；平台专属 provider 名须在生成 ASC 配置前转换。Judge 向通用代理只发送 Messages 基础字段（`model`、`system`、`messages`、`max_tokens`）。百炼请求另外指定 temperature、thinking 和 effort。两者共用重试预算、usage 解析和脱敏逻辑，每个代理的真实推理仍需单独验收。
 
 在 `asc-model-client` 增加显式远程入口和百炼实现；现有 `create_client()`、Ollama 本地地址限制与原扫描器默认行为保持不变。评分调用远程入口，不能通过放宽现有本地 factory 的校验偷偷改变所有扫描器行为。
 
