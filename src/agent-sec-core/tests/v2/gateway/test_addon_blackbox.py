@@ -307,6 +307,7 @@ class MockUpstream:
         self.requests: list[dict[str, object]] = []
         self.progress: dict[str, tuple[int, int]] = {}
         self.finished: dict[str, threading.Event] = {}
+        self.upload_started: dict[str, threading.Event] = {}
         upstream = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -316,8 +317,35 @@ class MockUpstream:
                 pass
 
             def _handle(self) -> None:
+                if self.path == "/echo/early-upload":
+                    auth = self.headers.get("Authorization") or ""
+                    upstream.requests.append({"path": self.path, "authorization": auth})
+                    payload = json.dumps(
+                        {"auth": auth, "padding": "x" * 200000}
+                    ).encode()
+                    self.send_response(413)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return
                 length = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(length) if length else b""
+                if self.path in upstream.upload_started:
+                    body = bytearray()
+                    if self.headers.get("Transfer-Encoding") == "chunked":
+                        while size := int(self.rfile.readline().strip(), 16):
+                            body.extend(self.rfile.read(size))
+                            assert self.rfile.read(2) == b"\r\n"
+                            upstream.upload_started[self.path].set()
+                        assert self.rfile.readline() == b"\r\n"
+                    else:
+                        while len(body) < length:
+                            body.extend(self.rfile.read(min(4096, length - len(body))))
+                            upstream.upload_started[self.path].set()
+                    body = bytes(body)
+                else:
+                    body = self.rfile.read(length) if length else b""
                 auth = self.headers.get("Authorization") or ""
                 upstream.requests.append(
                     {
@@ -917,6 +945,82 @@ class InjectionTest(GatewayCase):
         self.assertEqual(response.status, 502)
         self.assertEqual(response.json()["error"], "response_encoding_unsupported")
 
+    def test_upload_streams_before_eof_and_preserves_body_bytes(self) -> None:
+        for label, authorization, encoding, chunked in [
+            ("plain", "", "", False),
+            ("managed", f"Bearer {FAKE}", "", True),
+            ("encoded", f"Bearer {FAKE}", "gzip", False),
+        ]:
+            with self.subTest(label=label):
+                path = f"/echo/upload-{label}"
+                body = REAL.encode() + b"x" * (10 * 1024 * 1024)
+                if encoding:
+                    body = gzip.compress(body)
+                started = threading.Event()
+                self.mock.upload_started[path] = started
+                with self.connection("00000000-0000-4000-8000-000000000001") as stream:
+                    lines = [
+                        f"POST {path} HTTP/1.1",
+                        "Host: api.github.com",
+                        "Connection: close",
+                    ]
+                    if authorization:
+                        lines.append(f"Authorization: {authorization}")
+                    if encoding:
+                        lines.append(f"Content-Encoding: {encoding}")
+                    lines.append(
+                        "Transfer-Encoding: chunked"
+                        if chunked
+                        else f"Content-Length: {len(body)}"
+                    )
+                    stream.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+                    split = min(65536, len(body) // 2)
+                    prefix = body[:split]
+                    stream.sendall(
+                        f"{len(prefix):x}\r\n".encode() + prefix + b"\r\n"
+                        if chunked
+                        else prefix
+                    )
+                    self.assertTrue(
+                        started.wait(3), "upstream must receive bytes before upload EOF"
+                    )
+                    tail = body[split:]
+                    stream.sendall(
+                        f"{len(tail):x}\r\n".encode() + tail + b"\r\n0\r\n\r\n"
+                        if chunked
+                        else tail
+                    )
+                    response = http.client.HTTPResponse(stream)
+                    response.begin()
+                    payload = response.read()
+                    self.assertEqual(response.status, 200)
+                    if authorization:
+                        self.assertNotIn(REAL.encode(), payload)
+                        self.assertIn(FAKE.encode(), payload)
+                [record] = self.recorded(path)
+                self.assertEqual(record["body"], body)
+                self.assertEqual(
+                    record["authorization"], f"Bearer {REAL}" if authorization else ""
+                )
+
+    def test_early_response_finishes_without_upload_eof_and_still_rewrites(
+        self,
+    ) -> None:
+        with self.connection("00000000-0000-4000-8000-000000000001") as stream:
+            stream.sendall(
+                f"POST /echo/early-upload HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: Bearer {FAKE}\r\nContent-Length: 10485760\r\n\r\n".encode()
+            )
+            stream.settimeout(3)
+            response = http.client.HTTPResponse(stream)
+            response.begin()
+            body = response.read()
+            self.assertEqual(response.status, 413)
+            self.assertEqual(json.loads(body)["auth"], f"Bearer {FAKE}")
+            self.assertNotIn(REAL.encode(), body)
+        self.assertEqual(
+            self.recorded("/echo/early-upload")[0]["authorization"], f"Bearer {REAL}"
+        )
+
     def test_request_without_managed_credential_passes_through(self) -> None:
         for host, authorization in [
             ("api.github.com", ""),
@@ -966,6 +1070,18 @@ class RejectionTest(GatewayCase):
             "/x2",
         )
 
+    def test_rejected_upload_closes_before_receiving_body(self) -> None:
+        with self.connection("00000000-0000-4000-8000-000000000001") as stream:
+            stream.sendall(
+                f"POST /x-upload HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: Bearer {VALUES['retiredFake']}\r\nContent-Length: 10485760\r\n\r\n".encode()
+            )
+            stream.settimeout(3)
+            try:
+                self.assertEqual(stream.recv(4096), b"")
+            except (ConnectionResetError, ssl.SSLEOFError):
+                pass
+        self.assertEqual(self.recorded("/x-upload"), [])
+
     def test_other_domain_fake(self) -> None:
         response = self.send(
             "00000000-0000-4000-8000-000000000002",
@@ -975,12 +1091,12 @@ class RejectionTest(GatewayCase):
         )
         self.assert_rejected(response, "subject_mismatch", "/x3")
 
-    def test_real_value_is_never_forwarded(self) -> None:
+    def test_real_header_is_never_forwarded(self) -> None:
         response = self.send(
             "00000000-0000-4000-8000-000000000001",
             "POST",
             "/x4",
-            body=json.dumps({"t": REAL}).encode(),
+            headers=[("Authorization", f"Bearer {REAL}")],
         )
         self.assert_rejected(response, "real_credential_exposed", "/x4")
 
@@ -1039,15 +1155,25 @@ class Http2InjectionTest(GatewayCase):
         return super().start_mitmdump("--set", "connection_strategy=lazy", *extra)
 
     def test_http2_buffered_body_is_withheld_and_rewritten(self) -> None:
-        path = "/echo/h2-buffered"
+        for path, upload in [
+            ("/echo/h2-buffered", False),
+            ("/echo/early-upload", True),
+        ]:
+            with self.subTest(path=path):
+                self._buffered_response(path, upload)
+
+    def _buffered_response(self, path: str, upload: bool) -> None:
         block = bytearray()
-        for name, value in (
-            (":method", "GET"),
+        headers = [
+            (":method", "POST" if upload else "GET"),
             (":scheme", "https"),
             (":authority", "api.github.com"),
             (":path", path),
             ("authorization", f"Bearer {FAKE}"),
-        ):
+        ]
+        if upload:
+            headers.append(("content-length", "10485760"))
+        for name, value in headers:
             key, raw = name.encode(), value.encode()
             block.extend(bytes((0, len(key))) + key + bytes((len(raw),)) + raw)
         received = bytearray()
@@ -1061,9 +1187,11 @@ class Http2InjectionTest(GatewayCase):
                 b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
                 + b"\x00\x00\x00\x04\x00\x00\x00\x00\x00"
                 + len(block).to_bytes(3, "big")
-                + b"\x01\x05\x00\x00\x00\x01"
+                + bytes((1, 4 if upload else 5))
+                + b"\x00\x00\x00\x01"
                 + block
             )
+            stream.settimeout(3)
             while not ended:
                 chunk = stream.recv(4096)
                 self.assertTrue(chunk, "HTTP/2 response ended before END_STREAM")
@@ -1075,12 +1203,50 @@ class Http2InjectionTest(GatewayCase):
                     kind, flags = received[3], received[4]
                     if kind == 0:
                         body.extend(received[9 : 9 + length])
+                        if length:
+                            increment = length.to_bytes(4, "big")
+                            stream.sendall(
+                                b"\x00\x00\x04\x08\x00\x00\x00\x00\x00"
+                                + increment
+                                + b"\x00\x00\x04\x08\x00\x00\x00\x00\x01"
+                                + increment
+                            )
                     if kind in (0, 1) and flags & 1:
                         ended = True
                     del received[: 9 + length]
         self.assertEqual(json.loads(body)["auth"], f"Bearer {FAKE}")
         self.assertNotIn(REAL.encode(), body)
         self.assertEqual(self.recorded(path)[0]["authorization"], f"Bearer {REAL}")
+
+    def test_http2_rejected_upload_without_length_closes_before_data(self) -> None:
+        block = bytearray()
+        for name, value in (
+            (":method", "POST"),
+            (":scheme", "https"),
+            (":authority", "api.github.com"),
+            (":path", "/h2-rejected-upload"),
+            ("authorization", f"Bearer {VALUES['retiredFake']}"),
+        ):
+            key, raw = name.encode(), value.encode()
+            block.extend(bytes((0, len(key))) + key + bytes((len(raw),)) + raw)
+        with self.connection(
+            "00000000-0000-4000-8000-000000000001", alpn="h2"
+        ) as stream:
+            stream.sendall(
+                b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+                + b"\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+                + len(block).to_bytes(3, "big")
+                + b"\x01\x04\x00\x00\x00\x01"
+                + block
+            )
+            stream.settimeout(3)
+            while True:
+                try:
+                    if not stream.recv(4096):
+                        break
+                except (ConnectionResetError, ssl.SSLEOFError):
+                    break
+        self.assertEqual(self.recorded("/h2-rejected-upload"), [])
 
     def test_http2_validation_errors_do_not_deliver_credentials(self) -> None:
         basic = base64.b64encode(f"x-access-token:{FAKE}".encode()).decode()
@@ -1365,6 +1531,7 @@ class StartupTest(unittest.TestCase):
         unsafe = [
             ("ssl_insecure=true", b"ssl_insecure=false"),
             ("stream_large_bodies=1m", b"stream_large_bodies"),
+            ("store_streamed_bodies=true", b"store_streamed_bodies"),
             ("save_stream_file=flows.out", b"save_stream_file"),
             ("flow_detail=2", b"flow_detail=0"),
         ]

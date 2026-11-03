@@ -101,7 +101,6 @@ class RequestFacts:
     method: str
     path: str
     headers: tuple[tuple[str, str], ...]
-    body: bytes = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -481,7 +480,7 @@ def _contains_real(
     texts = [facts.path, unquote(facts.path), *extra]
     texts.extend(value for _, value in facts.headers)
     for real in snapshot.reals:
-        if any(real in text for text in texts) or real.encode() in facts.body:
+        if any(real in text for text in texts):
             return True
     return False
 

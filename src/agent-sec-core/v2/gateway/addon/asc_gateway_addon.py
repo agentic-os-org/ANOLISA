@@ -23,8 +23,8 @@ from mitmproxy import ctx, exceptions, http
 from mitmproxy.addons.termlog import TermLogHandler
 from mitmproxy.log import LegacyLogEvents
 from mitmproxy.net.http.http1 import expected_http_body_size
-from mitmproxy.proxy import events, layer
-from mitmproxy.proxy.layers.http import HttpLayer, ResponseData
+from mitmproxy.proxy import commands, events, layer
+from mitmproxy.proxy.layers.http import HttpLayer, HttpStream, ResponseData
 
 POLL_SECONDS = 0.5
 RETRY_SECONDS = 5.0
@@ -138,7 +138,30 @@ def _abort_flow(flow: http.HTTPFlow) -> None:
             handler.close_connection(connection)
 
 
+class _GatewayHttpStream(HttpStream):
+    def send_response(
+        self, already_streamed: bool = False
+    ) -> layer.CommandGenerator[None]:
+        yield from super().send_response(already_streamed)
+        if (
+            _injected(self.flow) is not None
+            and self.flow.live
+            and self.server_state == self.state_done
+            and self.client_state != self.state_done
+        ):
+            # Fence queued upload events before finishing; HTTP/2 may still await WINDOW_UPDATE.
+            self.client_state = self.state_errored
+            yield from self.flow_done()
+            if not self.flow.request.is_http2:
+                yield commands.CloseConnection(self.context.client)
+            yield commands.CloseConnection(self.context.server)
+
+
 class _GatewayHttpLayer(HttpLayer):
+    def make_stream(self, stream_id: int) -> layer.CommandGenerator[None]:
+        self.streams[stream_id] = _GatewayHttpStream(self.context.fork(), stream_id)
+        yield from self.event_to_child(self.streams[stream_id], events.Start())
+
     def event_to_child(
         self, child: layer.Layer, event: events.Event
     ) -> layer.CommandGenerator[None]:
@@ -251,6 +274,10 @@ class SecretGateway:
             raise exceptions.OptionsError(
                 "agent-sec-gateway forbids stream_large_bodies"
             )
+        if options.store_streamed_bodies:
+            raise exceptions.OptionsError(
+                "agent-sec-gateway forbids store_streamed_bodies"
+            )
         if options.save_stream_file:
             raise exceptions.OptionsError("agent-sec-gateway forbids save_stream_file")
         if options.flow_detail != 0:
@@ -361,15 +388,23 @@ class SecretGateway:
             certificate = handle.read()
         _write_atomic(os.path.join(self._runtime, STATUS_DIR), CA_NAME, certificate)
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    def requestheaders(self, flow: http.HTTPFlow) -> None:
         if flow.response is not None:
             return
         try:
             self._decide(flow)
+            flow.request.stream = flow.response is None
         except Exception:  # noqa: BLE001 - an undecided request must not be forwarded
             logger.error("agent-sec-gateway request hook failed")
             flow.metadata.pop(METADATA_KEY, None)
             flow.response = _reject_response("gateway_error", 500)
+        if flow.response is not None and (
+            flow.request.is_http2
+            or flow.request.is_http3
+            or expected_http_body_size(flow.request) != 0
+        ):
+            # Header rejection must not wait for or buffer an untrusted upload.
+            _abort_flow(flow)
 
     def _decide(self, flow: http.HTTPFlow) -> None:
         request = flow.request
@@ -382,7 +417,6 @@ class SecretGateway:
             method=request.method,
             path=request.path,
             headers=tuple((k, v) for k, v in request.headers.items(multi=True)),
-            body=request.get_content(strict=False) or b"",
         )
         decision = policy.decide_request(self.snapshot, facts)
         if decision.action == policy.ACTION_REJECT:

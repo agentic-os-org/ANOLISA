@@ -2176,6 +2176,75 @@ fn nonroot_import_and_disable_order_preserve_security_boundaries() {
     );
 }
 #[test]
+fn failed_enable_persists_disabled_intent_before_restart_and_explicit_retry() {
+    for fault in ["runtime", "readiness", "ca", "owner"] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let scope = fixture.scope("enable-retry", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        let binding = fixture.instance(&scope, 77, &[]).remove(0);
+        let client = GatewayBindingClient::new(service.clone());
+        assert!(
+            client
+                .create(&Fixture::prepared(&client, &binding))
+                .error
+                .is_none()
+        );
+        service.disable().unwrap();
+        let runtime = &fixture.config.runtime_dir;
+        let retained = fixture.root.path().join("retained-runtime");
+        match fault {
+            "runtime" => {
+                fs::rename(runtime, &retained).unwrap();
+                symlink(&retained, runtime).unwrap();
+            }
+            "readiness" => fixture.plane.reject.store(true, Ordering::SeqCst),
+            "ca" => {
+                fs::set_permissions(
+                    &fixture.config.system_ca_bundles[0],
+                    fs::Permissions::from_mode(0o664),
+                )
+                .unwrap();
+            }
+            "owner" => fixture.host.log().owner_sensitive_on_start = true,
+            _ => unreachable!(),
+        }
+        service.enable().unwrap_err();
+        assert!(!service.status(0).enabled, "{fault}");
+        assert_eq!(fixture.service().status(0), service.status(0), "{fault}");
+        assert!(!fixture.host.log().active, "{fault}");
+        assert!(!fixture.rules().contains("counter redirect"), "{fault}");
+        if fault == "runtime" {
+            assert!(!runtime.exists());
+            fs::rename(&retained, runtime).unwrap();
+        }
+        fixture.plane.reject.store(false, Ordering::SeqCst);
+        fixture.host.log().owner_sensitive_on_start = false;
+        fs::set_permissions(
+            &fixture.config.system_ca_bundles[0],
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        drop(client);
+        drop(service);
+        let restarted = fixture.service();
+        restarted.recover().unwrap();
+        assert!(!restarted.status(0).enabled, "{fault}");
+        assert!(!fixture.host.log().active, "{fault}");
+        assert!(!fixture.rules().contains("counter redirect"), "{fault}");
+        assert!(restarted.credentials(UID, "enable-retry").is_err());
+        restarted.enable().unwrap();
+        assert!(restarted.status(0).ready, "{fault}");
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            1,
+            "{fault}"
+        );
+    }
+}
+#[test]
 fn disable_failures_preserve_host_fences_and_persist_disabled_after_runtime_cleanup_failure() {
     for fault in ["unroute", "stop", "runtime"] {
         let fixture = Fixture::new();
