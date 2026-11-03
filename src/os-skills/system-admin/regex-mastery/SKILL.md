@@ -53,9 +53,10 @@ Do NOT trigger this skill for:
    a slightly longer explicit approach. Break complex patterns into commented steps
    or use the verbose (`x`) flag where supported. A named group costs nothing but
    pays dividends every time someone reads the pattern.
-2. **Use named capture groups** - `(?<year>\d{4})` is self-documenting and immune
-   to positional breakage when the pattern changes. Always prefer named groups over
-   numbered groups for any regex that will be read or maintained by humans.
+2. **Use named capture groups** - `(?<year>\d{4})` (Python `re`:
+   `(?P<year>\d{4})`) is self-documenting and immune to positional breakage when
+   the pattern changes. Always prefer named groups over numbered groups for any
+   regex that will be read or maintained by humans.
 3. **Test edge cases relentlessly** - Empty string, Unicode characters, very long
    input, malformed-but-close input (e.g., `foo@bar` for email), and adversarial
    input designed to trigger backtracking. A regex that passes your happy path but
@@ -98,10 +99,11 @@ pattern can match anywhere in the string, which is often not what you want.
 
 **Groups and alternation** - `(abc)` is a capturing group; `(?:abc)` is
 non-capturing (slightly faster, doesn't pollute `$1`/match.groups). Named groups:
-`(?<name>abc)` in JS/Python/PCRE. Alternation `a|b` is left-to-right and short-circuits
-
-- put the most common or most specific branch first. Backreferences `\1` or `\k<name>`
-  match the same text captured by a group.
+`(?<name>abc)` in JS/PCRE; Python's standard-library `re` uses `(?P<name>abc)`.
+Alternation `a|b` is left-to-right and short-circuits - put the most common or
+most specific branch first. Backreferences `\1` match the same text captured by
+a group. Named backreferences use `\k<name>` in JS/PCRE and `(?P=name)` in
+Python's `re`.
 
 ---
 
