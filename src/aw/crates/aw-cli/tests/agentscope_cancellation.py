@@ -314,7 +314,12 @@ async def worker() -> None:
 
         async def finalizing_spawn(*args: Any, **kwargs: Any) -> Any:
             nonlocal close_child
-            if "--close-event" not in args and args[args.index("--step") + 1] == "after-middle":
+            # Scope ledger commands (register/finish) carry no hook route.
+            if (
+                "--step" in args
+                and "--close-event" not in args
+                and args[args.index("--step") + 1] == "after-middle"
+            ):
                 injected.append("after-middle")
                 raise OSError(errno.EMFILE, "fixture finalization gap")
             child = await create(*args, **kwargs)

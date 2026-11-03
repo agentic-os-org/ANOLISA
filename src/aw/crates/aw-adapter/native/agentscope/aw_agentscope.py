@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import io
 import json
 import os
@@ -41,17 +42,71 @@ def _withheld_response() -> ToolResponse:
     )
 
 
+from aw_scope_ledger import (  # noqa: E402
+    AwTaskScope,
+    CallbackFailure,
+    _ensure_task_scope,
+)
+
+_invocation_scope: ContextVar[AwTaskScope | None] = ContextVar(
+    "aw_agentscope_invocation_scope", default=None
+)
+
+
 class AwInvocationMiddleware(MiddlewareBase):
     """Share a fresh correlation across this invocation's before/after wrappers."""
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = config
+
+    @staticmethod
+    def _effective_input(raw_input: Any) -> Any | None:
+        """Decode the SDK-effective arguments, or None to skip registration.
+
+        Uses the same bound and parser as the tool middleware's evaluation so
+        the registered digest and the normalized hook input always agree; an
+        undecodable or out-of-domain call stays unregistered and keeps the
+        existing parser failure policy instead of minting a ledger identity.
+        """
+        try:
+            _encode_payload({"input": raw_input})
+            effective = _json_loads_with_repair(raw_input)
+            # Bound the decoded object exactly like the hook payload: a
+            # registration must stay inside the wire domain its invoke uses.
+            _encode_payload({"input": effective})
+            json.dumps(effective, allow_nan=False)
+            return effective
+        except (AgentOrientedException, RecursionError, ValueError, TypeError,
+                CallbackFailure):
+            return None
 
     async def on_acting(
         self, agent: Any, input_kwargs: dict[str, Any], next_handler: Any
     ) -> AsyncGenerator[Any, None]:
         token = _invocation_id.set(uuid4().hex)
+        invocation = _invocation_id.get()
         pending: dict[str, tuple[AwToolMiddleware, dict[str, Any], float]] = {}
         cleanup_token = _pending_closes.set(pending)
         withheld_token = _withheld.set(False)
+        scope_token = _invocation_scope.set(None)
+        registered = False
+        call = input_kwargs.get("tool_call")
         try:
+            # Enable the ledger before the first OpenHookEvent. The process
+            # scope is keyed by the same invocation id the native payload
+            # normalizes into tool.call_id.
+            if self.config is not None:
+                scope = await _ensure_task_scope(self.config)
+                _invocation_scope.set(scope)
+                if call is not None:
+                    effective_input = self._effective_input(call.input)
+                    if effective_input is not None:
+                        # The ledger digests the SDK-effective arguments the
+                        # hook payload normalizes, not the raw model string.
+                        # A cancelled registration is booked as committed in
+                        # the scope; the drain retires whatever is booked.
+                        await scope.register(invocation, call.name, effective_input)
+                        registered = True
             async for item in next_handler():
                 # This wrapper is the outermost AW middleware, so strict
                 # withholding lands here after every after hook has observed
@@ -61,16 +116,38 @@ class AwInvocationMiddleware(MiddlewareBase):
                 yield item
         finally:
             try:
-                if pending:
 
-                    async def close_pending() -> None:
-                        for middleware, payload, _ in pending.values():
-                            await middleware._close_event(payload)
+                async def drain() -> None:
+                    # Pending phases close first, while the ledger still holds
+                    # the invocation identity; finish then retires both phases
+                    # and the identity server-side. A call booked in the scope
+                    # — committed or cancelled-during-registration — always
+                    # retires; an unregistered call under a usable scope never
+                    # opened a correlated event, so its cleanup stays inert.
+                    scope = _invocation_scope.get()
+                    booked = scope is not None and invocation in scope.invocations
+                    if (
+                        scope is not None
+                        and not scope.closed
+                        and not scope.failed
+                        and not registered
+                        and not booked
+                    ):
+                        return
+                    for middleware, payload, _ in pending.values():
+                        await middleware._close_event(payload)
+                    if booked and scope is not None:
+                        await scope.finish(invocation)
 
-                    cleanup = asyncio.create_task(close_pending())
+                # A cancelled registration is booked in the scope and must
+                # retire even with no pending phase and registered unset.
+                scope_now = _invocation_scope.get()
+                booked_now = scope_now is not None and invocation in scope_now.invocations
+                if registered or pending or booked_now:
+                    cleanup = asyncio.create_task(drain())
                     interrupted = None
-                    # Each phase close is bounded; cancellation must not abandon
-                    # the owned task or skip a remaining correlation.
+                    # Retirement and phase closes are bounded; cancellation
+                    # must not abandon the owned task or skip a correlation.
                     while not cleanup.done():
                         try:
                             await asyncio.shield(cleanup)
@@ -83,11 +160,8 @@ class AwInvocationMiddleware(MiddlewareBase):
             finally:
                 _withheld.reset(withheld_token)
                 _pending_closes.reset(cleanup_token)
+                _invocation_scope.reset(scope_token)
                 _invocation_id.reset(token)
-
-
-class CallbackFailure(RuntimeError):
-    """A fixed adapter failure code, separate from a native policy denial."""
 
 
 def _encode_payload(payload: dict[str, Any]) -> bytearray:
@@ -164,6 +238,17 @@ class AwToolMiddleware(MiddlewareBase):
             raise CallbackFailure("native_input_too_deep") from error
         if asyncio.get_running_loop().time() >= deadline:
             raise TimeoutError
+        # Keep every phase on the scope that registered this invocation. A
+        # failed owner fails this call explicitly instead of rerouting its old
+        # identity to a root binding or a replacement scope.
+        scope = _invocation_scope.get()
+        if scope is not None:
+            return await scope.invoke(
+                self.hook,
+                payload,
+                deadline - asyncio.get_running_loop().time(),
+                close_event=close_event,
+            )
         proc = None
         try:
             async with asyncio.timeout_at(deadline):
@@ -199,6 +284,9 @@ class AwToolMiddleware(MiddlewareBase):
         return proc.returncode, stdout, stderr
 
     async def _close_event(self, payload: dict[str, Any]) -> None:
+        # An early phase close retires the event on the scope's own instance
+        # while the ledger keeps the invocation identity until finish; the
+        # legacy root-binding path is only used without a usable scope.
         try:
             code, _, diagnostic = await self._transport(
                 payload, deadline=asyncio.get_running_loop().time() + 3, close_event=True
@@ -406,7 +494,7 @@ class AwBridge:
         ]
         agent = Agent(
             *args,
-            middlewares=[*(middlewares or []), AwInvocationMiddleware(), *additions],
+            middlewares=[*(middlewares or []), AwInvocationMiddleware(self.config), *additions],
             **kwargs,
         )
         if not self._ready:

@@ -116,16 +116,36 @@ impl PreparedLaunch for Prepared {
             .trim()
             .to_owned();
         let ready = context.files.directory().join("agentscope-ready.json");
+        // Providers spawned by the task scope inherit this environment; the
+        // bridge process itself runs with bridge import paths appended, which
+        // must not leak into Provider processes.
+        // JSON carries text; non-UTF-8 environment bytes cannot survive the
+        // round trip, so reject them instead of corrupting Provider context.
+        let mut provider_environment = BTreeMap::new();
+        for (key, value) in &self.input.command.environment {
+            let key = key
+                .to_str()
+                .ok_or("Provider environment keys must be valid UTF-8")?;
+            let value = value
+                .to_str()
+                .ok_or("Provider environment values must be valid UTF-8")?;
+            provider_environment.insert(key.to_owned(), value.to_owned());
+        }
         let native = context.files.write(
             "agentscope-hooks.json",
             &serde_json::to_vec(&json!({
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
+                "provider_environment": provider_environment,
             }))?,
         )?;
         context.files.write(
             "aw_agentscope.py",
             include_bytes!("../../native/agentscope/aw_agentscope.py"),
+        )?;
+        context.files.write(
+            "aw_scope_ledger.py",
+            include_bytes!("../../native/agentscope/aw_scope_ledger.py"),
         )?;
         let mut command = self.input.command.clone();
         let inherited = command.environment.get(std::ffi::OsStr::new("PYTHONPATH"));

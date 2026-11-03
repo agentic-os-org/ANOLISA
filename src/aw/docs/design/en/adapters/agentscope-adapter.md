@@ -179,9 +179,22 @@ success is separate from business failure encoded in returned content.
 This first contract supports one foreground Python worker, not a forking
 Gunicorn supervisor, automatic attachment in child workers or remote sandboxes.
 A long-lived business service needs explicit per-worker/session launch and
-binding ownership. The local service retains at most 1024 event correlations per
-instance (roughly 512 before/after pairs) until release; session IDs alone do not
-reset that budget. No remote command cancellation, hot reload or OS isolation
+binding ownership. The bridge opens one task scope and enables the
+invocation ledger before its first hook event, closing it at process exit:
+each tool call registers under its invocation id with a strictly increasing
+sequence and finishes when its phases complete, so correlation capacity is
+recycled per call and long histories no longer accumulate toward the
+1024-event instance limit. Registration decodes the SDK-effective arguments
+with the same pinned parser as hook evaluation, so the registered digest and
+the normalized hook input always agree; scope opening and ledger deliveries
+are serialized within the process, so concurrent first calls share one scope
+and one sequence. Replayed registrations are rejected by sequence. Hook
+transport and cleanup retain the invocation's registration scope; a failed
+owner reports a Hook failure under the configured policy and is never rerouted
+to the legacy root binding or a replacement scope. Only calls without a
+registered scope owner use the legacy root-binding path. Subsequent calls may
+open a fresh scope after pending cleanup succeeds. Session IDs alone never
+reset any budget. No remote command cancellation, hot reload or OS isolation
 is implied.
 
 The existing `native-hook/v1alpha1`, structured Provider and default Boolean Hook

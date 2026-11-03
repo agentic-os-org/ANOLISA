@@ -198,7 +198,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         };
         instance = Some(binding.instance_id.clone());
         let reloadable = args.flags.contains_key("--reloadable");
-        if matches!(name, "pi" | "claude-sdk")
+        if matches!(name, "pi" | "claude-sdk" | "agentscope")
             || (matches!(name, "qoder-sdk" | "qwenpaw") && !reloadable)
         {
             service.client.call(
