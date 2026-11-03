@@ -147,20 +147,27 @@ def analyze_trace_files(
         output_tokens = _safe_int(trace_data.get("total_output_tokens"))
         total_steps = _safe_int(trace_data.get("total_steps"))
 
+        def _metric_cell(converted: int | None, raw: object) -> str | int:
+            # 无效测量保留原始值落表（诊断可见），有效测量按 int 参与
+            # 后续统计（统计层按 isinstance(int) 过滤排除无效值）。
+            if converted is None:
+                return raw if isinstance(raw, str) else str(raw)
+            return converted
+
         row: dict[str, str | int] = {
             "instance_id": instance_id,
             "task_id": str(task_id),
             "model": model_value,
-            "total_input_tokens": input_tokens,
-            "total_output_tokens": output_tokens,
-            "total_steps": total_steps,
+            "total_input_tokens": _metric_cell(input_tokens, trace_data.get("total_input_tokens")),
+            "total_output_tokens": _metric_cell(output_tokens, trace_data.get("total_output_tokens")),
+            "total_steps": _metric_cell(total_steps, trace_data.get("total_steps")),
         }
         if include_metrics:
             if instance_id not in grouped_counters:
                 grouped_counters[instance_id] = {field: Counter() for field in _TRACE_COUNTER_FIELDS}
             counters = grouped_counters[instance_id]
             for field in _TRACE_NUMERIC_FIELDS:
-                row[field] = _safe_int(trace_data.get(field))
+                row[field] = _metric_cell(_safe_int(trace_data.get(field)), trace_data.get(field))
             for field in _TRACE_COUNTER_FIELDS:
                 value = trace_data.get(field)
                 row[field] = _json_counter_value(value)
@@ -171,28 +178,34 @@ def analyze_trace_files(
     per_instance_rows: list[dict[str, str | int]] = []
     for instance_id in sorted(grouped_rows):
         rows = grouped_rows[instance_id]
-        step_counts = [int(row["total_steps"]) for row in rows]
-        input_tokens_list = [int(row["total_input_tokens"]) for row in rows]
-        output_tokens_list = [int(row["total_output_tokens"]) for row in rows]
-        total_tokens_list = [inp + out for inp, out in zip(input_tokens_list, output_tokens_list, strict=False)]
+        # 无效测量（row 值非 int，保留为原始字符串）排除出对应统计，
+        # 不得与测得的 0 混同：{"n/a", "30"} 的均值应为 30 而非 15。
+        step_counts = [row["total_steps"] for row in rows if isinstance(row["total_steps"], int)]
+        input_tokens_list = [row["total_input_tokens"] for row in rows if isinstance(row["total_input_tokens"], int)]
+        output_tokens_list = [row["total_output_tokens"] for row in rows if isinstance(row["total_output_tokens"], int)]
+        total_tokens_list = [
+            row["total_input_tokens"] + row["total_output_tokens"]
+            for row in rows
+            if isinstance(row["total_input_tokens"], int) and isinstance(row["total_output_tokens"], int)
+        ]
         summary_row: dict[str, str | int] = {
             "instance_id": instance_id,
             "execution_count": len(rows),
             "avg_steps": _format_metric(_mean(step_counts)),
-            "min_steps": min(step_counts),
-            "max_steps": max(step_counts),
+            "min_steps": min(step_counts) if step_counts else 0,
+            "max_steps": max(step_counts) if step_counts else 0,
             "avg_input_tokens": _format_metric(_mean(input_tokens_list)),
             "avg_output_tokens": _format_metric(_mean(output_tokens_list)),
             "avg_total_tokens": _format_metric(_mean(total_tokens_list)),
             "trimmed_avg_input_tokens": _format_metric(_trimmed_mean(input_tokens_list, trim_ratio)),
             "trimmed_avg_output_tokens": _format_metric(_trimmed_mean(output_tokens_list, trim_ratio)),
             "trimmed_avg_total_tokens": _format_metric(_trimmed_mean(total_tokens_list, trim_ratio)),
-            "min_total_tokens": min(total_tokens_list),
-            "max_total_tokens": max(total_tokens_list),
+            "min_total_tokens": min(total_tokens_list) if total_tokens_list else 0,
+            "max_total_tokens": max(total_tokens_list) if total_tokens_list else 0,
         }
         if include_metrics:
             for field in _TRACE_NUMERIC_FIELDS:
-                values = [int(row[field]) for row in rows]
+                values = [row[field] for row in rows if isinstance(row[field], int)]
                 summary_row[f"avg_{field}"] = _format_metric(_mean(values))
             for field in _TRACE_COUNTER_FIELDS:
                 counter = grouped_counters[instance_id][field]

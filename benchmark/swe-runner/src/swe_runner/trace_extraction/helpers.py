@@ -141,8 +141,13 @@ def sanitize_path_component(value: str | None) -> str:
     return sanitized
 
 
-def _safe_int(value: object) -> int:
-    """Convert optional numeric values to int, defaulting to 0."""
+def _safe_int(value: object) -> int | None:
+    """Convert a measurement to int; None when the value is unreadable."""
+    """
+    A missing key (None input) keeps the historical default of 0, but a
+    present, non-numeric string returns None so the analysis layer can
+    exclude it from statistics instead of conflating it with a measured
+    zero ({"n/a", "30"} must not average to 15) or crashing on int()."""
     if value is None:
         return 0
     if isinstance(value, int):
@@ -150,7 +155,12 @@ def _safe_int(value: object) -> int:
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str) and value.strip():
-        return int(value)
+        # Trace JSON 来自手工编辑或第三方目录：非数字字符串是无效测量，
+        # 不是测得的 0——返回 None 让调用方排除出统计并保留原始值诊断。
+        try:
+            return int(value)
+        except ValueError:
+            return None
     return 0
 
 
