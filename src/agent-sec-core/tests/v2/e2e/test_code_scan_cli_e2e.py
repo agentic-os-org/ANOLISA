@@ -164,7 +164,9 @@ def test_python_and_shell_findings_are_both_preserved(daemon, code, language):
         ),
     ],
 )
-def test_inline_interpreters_preserve_outer_cli_findings(daemon, code, language, command):
+def test_inline_interpreters_preserve_outer_cli_findings(
+    daemon, code, language, command
+):
     native = daemon.request("scan-code", "--code", command, "--language", "bash")
     result = daemon.request("scan-code", "--code", code, "--language", "bash")
 
@@ -173,7 +175,9 @@ def test_inline_interpreters_preserve_outer_cli_findings(daemon, code, language,
     assert result["language"] == language
     assert result["verdict"] == native["verdict"]
     assert result["findings"] == native["findings"]
-    assert result["summary"] == native["summary"].replace("bash code", f"{language} code")
+    assert result["summary"] == native["summary"].replace(
+        "bash code", f"{language} code"
+    )
 
 
 @pytest.mark.parametrize(
@@ -221,7 +225,10 @@ def test_scan_code_error_results_remain_parseable_on_stdout(daemon) -> None:
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert payload["verdict"] == "error"
-    assert payload["summary"] == "scan error: model 'agent-sec-core-e2e-unavailable' not available"
+    assert (
+        payload["summary"]
+        == "scan error: model 'agent-sec-core-e2e-unavailable' not available"
+    )
 
 
 def test_scan_code_rejects_empty_input_before_contacting_the_daemon(cli) -> None:
