@@ -51,6 +51,13 @@ pub(super) enum TelemetryRequest {
         /// Selects read-only preview or state-changing application.
         intent: ExecutionIntent,
     },
+    /// Prepares the channel and resident unit for an image or integration build.
+    Prepare {
+        /// Whether to skip writing and enabling the resident systemd unit.
+        no_service: bool,
+        /// Selects read-only preview or state-changing application.
+        intent: ExecutionIntent,
+    },
 }
 
 impl TelemetryRequest {
@@ -61,7 +68,8 @@ impl TelemetryRequest {
             | Self::Link { intent }
             | Self::Unlink { intent }
             | Self::Upload { intent, .. }
-            | Self::Init { intent } => *intent,
+            | Self::Init { intent }
+            | Self::Prepare { intent, .. } => *intent,
         }
     }
 
@@ -73,6 +81,7 @@ impl TelemetryRequest {
             Self::Unlink { .. } => "telemetry unlink",
             Self::Upload { .. } => "telemetry upload",
             Self::Init { .. } => "telemetry init",
+            Self::Prepare { .. } => "telemetry prepare",
         }
     }
 
@@ -89,6 +98,14 @@ impl TelemetryRequest {
                 loop_flag: false, ..
             } => "would upload buffered telemetry once",
             Self::Init { .. } => "would initialize the telemetry operations channel",
+            Self::Prepare {
+                no_service: false, ..
+            } => {
+                "would prepare the telemetry ops channel and enable the resident unit without starting collection"
+            }
+            Self::Prepare {
+                no_service: true, ..
+            } => "would prepare the telemetry ops channel without enabling the resident unit",
         }
     }
 }
@@ -114,6 +131,11 @@ pub(super) enum TelemetryChange {
     },
     /// The telemetry operations channel is initialized.
     OpsChannelInitialized,
+    /// The channel is prepared for an image build without starting collection.
+    ImagePrepared {
+        /// Whether the resident systemd unit was written and enabled.
+        service_enabled: bool,
+    },
 }
 
 /// Read-only telemetry result rendered by the command layer.
@@ -148,6 +170,11 @@ pub(super) enum TelemetryApplied {
     },
     /// The telemetry operations channel was initialized.
     Initialized,
+    /// The channel is prepared for an image build; collection is not started.
+    Prepared {
+        /// Whether the resident systemd unit was written and enabled.
+        service_enabled: bool,
+    },
 }
 
 impl TelemetryApplied {
@@ -160,6 +187,7 @@ impl TelemetryApplied {
             Self::Unlinked => "telemetry unlink",
             Self::Uploaded { .. } => "telemetry upload",
             Self::Initialized => "telemetry init",
+            Self::Prepared { .. } => "telemetry prepare",
         }
     }
 }
@@ -201,6 +229,8 @@ trait TelemetryEffects {
     fn forget_identity(&self) -> Result<(), String>;
     fn upload(&self, loop_flag: bool) -> Result<(), String>;
     fn init_ops_channel(&self, linked: bool) -> Result<(), String>;
+    fn prepare_ops_channel(&self) -> Result<(), String>;
+    fn enable_service_offline(&self, ctx: &CliContext) -> Result<(), String>;
 }
 
 struct SystemTelemetryEffects;
@@ -291,6 +321,17 @@ impl TelemetryEffects for SystemTelemetryEffects {
             .ensure_ops_channel(linked)
             .map_err(|error| error.to_string())
     }
+
+    fn prepare_ops_channel(&self) -> Result<(), String> {
+        TelemetryChannel::new()
+            .prepare_ops_channel()
+            .map_err(|error| error.to_string())
+    }
+
+    fn enable_service_offline(&self, ctx: &CliContext) -> Result<(), String> {
+        install_and_enable_service_offline_with(ctx, &Systemd::system(), std::env::current_exe)
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// Runs one telemetry mutation against production system boundaries.
@@ -350,6 +391,7 @@ fn execute_with_effects(
         TelemetryRequest::Unlink { .. } => execute_unlink(effects),
         TelemetryRequest::Upload { loop_flag, .. } => execute_upload(loop_flag, effects),
         TelemetryRequest::Init { .. } => execute_init(effects),
+        TelemetryRequest::Prepare { no_service, .. } => execute_prepare(ctx, no_service, effects),
     }
 }
 
@@ -509,6 +551,55 @@ fn execute_init(effects: &dyn TelemetryEffects) -> Result<TelemetryExecution, Cl
     })
 }
 
+/// Prepares the channel and resident unit for an image or integration build.
+///
+/// Unlike [`execute_enable`] this never starts collection: it writes no
+/// instance snapshot, never falls back to a lazy uploader spawn, and enables
+/// the unit without contacting a running manager. Failures therefore surface
+/// to the build script instead of degrading into warnings.
+fn execute_prepare(
+    ctx: &CliContext,
+    no_service: bool,
+    effects: &dyn TelemetryEffects,
+) -> Result<TelemetryExecution, CliError> {
+    const COMMAND: &str = "telemetry prepare";
+    effects
+        .require_root()
+        .map_err(|error| runtime(COMMAND, error))?;
+    // The unit starts on the clone's first boot, so a marker baked into the
+    // image would look like a finished setup that never collects anything.
+    if !effects.collection_enabled() {
+        return Err(runtime(
+            COMMAND,
+            "collection is disabled by /etc/anolisa/.telemetry_disabled; remove the opt-out marker before preparing an image",
+        ));
+    }
+    effects
+        .prepare_ops_channel()
+        .map_err(|error| runtime(COMMAND, error))?;
+
+    let mut warnings = Vec::new();
+    if no_service {
+        // `upload` never writes the instance snapshot, so a boot script that only
+        // starts the loop leaves `instance.jsonl` empty for the image's lifetime.
+        // The resident unit hides this behind its `telemetry init` pre-start.
+        warnings.push(format!(
+            "{UNIT_FILENAME} not written; run `anolisa telemetry init` at boot for this host's instance snapshot, then `anolisa telemetry upload --loop`"
+        ));
+    } else {
+        effects
+            .enable_service_offline(ctx)
+            .map_err(|error| runtime(COMMAND, error))?;
+    }
+
+    let service_enabled = !no_service;
+    Ok(TelemetryExecution {
+        result: TelemetryApplied::Prepared { service_enabled },
+        changes: vec![TelemetryChange::ImagePrepared { service_enabled }],
+        warnings,
+    })
+}
+
 fn runtime(command: &str, error: impl std::fmt::Display) -> CliError {
     CliError::Runtime {
         command: command.to_string(),
@@ -529,17 +620,8 @@ where
     R: CommandRunner,
     F: FnOnce() -> io::Result<PathBuf>,
 {
-    const UNIT_TEMPLATE: &str = include_str!("../../../../../systemd/anolisa-telemetry.service.in");
-
     const COMMAND: &str = "telemetry enable";
-    let executable = current_exe().map_err(|error| runtime(COMMAND, error))?;
-    let unit_content = UNIT_TEMPLATE.replace("@@ANOLISA_BIN@@", &executable.display().to_string());
-    let layout = FsLayout::system(ctx.prefix.clone());
-    let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
-    if let Some(parent) = unit_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| runtime(COMMAND, error))?;
-    }
-    fs::write(&unit_path, unit_content).map_err(|error| runtime(COMMAND, error))?;
+    write_unit_file(COMMAND, ctx, current_exe)?;
 
     systemd.daemon_reload().map_err(|error| match error {
         SystemdError::Spawn { source, .. } => runtime(COMMAND, source),
@@ -555,6 +637,44 @@ where
     systemd
         .enable_unit(SERVICE_NAME)
         .map_err(|error| runtime(COMMAND, error))
+}
+
+/// Writes the resident unit and enables it for the next boot, without
+/// reloading or starting anything.
+///
+/// Used by `telemetry prepare`: a build environment has no running manager, so
+/// the implicit reload is suppressed and the unit is left stopped for the
+/// target system's first boot to start.
+fn install_and_enable_service_offline_with<R, F>(
+    ctx: &CliContext,
+    systemd: &Systemd<R>,
+    current_exe: F,
+) -> Result<(), CliError>
+where
+    R: CommandRunner,
+    F: FnOnce() -> io::Result<PathBuf>,
+{
+    const COMMAND: &str = "telemetry prepare";
+    write_unit_file(COMMAND, ctx, current_exe)?;
+    systemd
+        .enable_unit_offline(SERVICE_NAME)
+        .map_err(|error| runtime(COMMAND, error))
+}
+
+fn write_unit_file<F>(command: &str, ctx: &CliContext, current_exe: F) -> Result<(), CliError>
+where
+    F: FnOnce() -> io::Result<PathBuf>,
+{
+    const UNIT_TEMPLATE: &str = include_str!("../../../../../systemd/anolisa-telemetry.service.in");
+
+    let executable = current_exe().map_err(|error| runtime(command, error))?;
+    let unit_content = UNIT_TEMPLATE.replace("@@ANOLISA_BIN@@", &executable.display().to_string());
+    let layout = FsLayout::system(ctx.prefix.clone());
+    let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
+    if let Some(parent) = unit_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| runtime(command, error))?;
+    }
+    fs::write(&unit_path, unit_content).map_err(|error| runtime(command, error))
 }
 
 fn disable_service_with<R: CommandRunner>(systemd: &Systemd<R>) -> Result<(), String> {
@@ -651,6 +771,7 @@ mod tests {
         forget_error: Option<&'static str>,
         upload_error: Option<&'static str>,
         init_error: Option<&'static str>,
+        prepare_error: Option<&'static str>,
     }
 
     impl FakeEffects {
@@ -773,6 +894,24 @@ mod tests {
             });
             Self::result(self.init_error)
         }
+
+        fn prepare_ops_channel(&self) -> Result<(), String> {
+            self.record("prepare_ops_channel");
+            Self::result(self.prepare_error)
+        }
+
+        fn enable_service_offline(&self, ctx: &CliContext) -> Result<(), String> {
+            self.record("enable_service_offline");
+            if let Some(systemd) = &self.service {
+                install_and_enable_service_offline_with(ctx, systemd, || {
+                    self.record("current_exe");
+                    Ok(ctx.layout().bin_dir.join("anolisa"))
+                })
+                .map_err(|error| error.to_string())
+            } else {
+                Self::result(self.install_error)
+            }
+        }
     }
 
     fn ctx(mode: InstallMode) -> CliContext {
@@ -836,6 +975,22 @@ mod tests {
                 },
                 "telemetry init",
                 "would initialize the telemetry operations channel",
+            ),
+            (
+                TelemetryRequest::Prepare {
+                    no_service: false,
+                    intent: ExecutionIntent::Plan,
+                },
+                "telemetry prepare",
+                "would prepare the telemetry ops channel and enable the resident unit without starting collection",
+            ),
+            (
+                TelemetryRequest::Prepare {
+                    no_service: true,
+                    intent: ExecutionIntent::Plan,
+                },
+                "telemetry prepare",
+                "would prepare the telemetry ops channel without enabling the resident unit",
             ),
         ]
     }
@@ -1119,6 +1274,143 @@ mod tests {
         assert_eq!(
             effects.calls(),
             vec!["require_root", "read_link_id", "init_ops_channel_linked"]
+        );
+    }
+
+    #[test]
+    fn prepare_writes_the_channel_then_enables_the_unit() {
+        let effects = FakeEffects {
+            collection_enabled: true,
+            ..Default::default()
+        };
+        let outcome = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: false,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx(InstallMode::System),
+            &effects,
+        )
+        .expect("prepare apply");
+        assert_eq!(
+            effects.calls(),
+            vec![
+                "require_root",
+                "collection_enabled",
+                "prepare_ops_channel",
+                "enable_service_offline",
+            ]
+        );
+        let TelemetryApplicationOutcome::Applied { result, outcome } = outcome else {
+            panic!("expected applied outcome");
+        };
+        assert_eq!(
+            result,
+            TelemetryApplied::Prepared {
+                service_enabled: true
+            }
+        );
+        assert_eq!(
+            outcome.changes(),
+            &[TelemetryChange::ImagePrepared {
+                service_enabled: true,
+            }]
+        );
+        assert!(outcome.warnings().is_empty());
+    }
+
+    #[test]
+    fn prepare_rejects_a_baked_in_opt_out_marker() {
+        let effects = FakeEffects::default();
+        let error = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: false,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx(InstallMode::System),
+            &effects,
+        )
+        .expect_err("a disabled image must not be prepared silently");
+        assert_eq!(error.command(), "telemetry prepare");
+        assert_eq!(error.code(), "EXECUTION_FAILED");
+        assert!(error.reason().contains(".telemetry_disabled"));
+        // The channel is left untouched so the build fails before any write.
+        assert_eq!(effects.calls(), vec!["require_root", "collection_enabled"]);
+    }
+
+    #[test]
+    fn prepare_without_service_still_writes_the_channel() {
+        let effects = FakeEffects {
+            collection_enabled: true,
+            ..Default::default()
+        };
+        let outcome = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: true,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx(InstallMode::System),
+            &effects,
+        )
+        .expect("prepare apply");
+        assert_eq!(
+            effects.calls(),
+            vec!["require_root", "collection_enabled", "prepare_ops_channel"]
+        );
+        let TelemetryApplicationOutcome::Applied { result, outcome } = outcome else {
+            panic!("expected applied outcome");
+        };
+        assert_eq!(
+            result,
+            TelemetryApplied::Prepared {
+                service_enabled: false
+            }
+        );
+        assert_eq!(
+            outcome.warnings(),
+            &["anolisa-telemetry.service not written; run `anolisa telemetry init` at boot for this host's instance snapshot, then `anolisa telemetry upload --loop`".to_string()]
+        );
+    }
+
+    #[test]
+    fn prepare_service_failure_is_terminal_without_lazy_start() {
+        let effects = FakeEffects {
+            collection_enabled: true,
+            install_error: Some("no systemd in the build root"),
+            ..Default::default()
+        };
+        let error = run_with_effects(
+            TelemetryRequest::Prepare {
+                no_service: false,
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx(InstallMode::System),
+            &effects,
+        )
+        .expect_err("a build must not degrade into a lazy start");
+        assert_eq!(error.code(), "EXECUTION_FAILED");
+        assert_eq!(error.reason(), "no systemd in the build root");
+        assert!(!effects.calls().contains(&"spawn_uploader"));
+    }
+
+    #[test]
+    fn prepare_unit_is_enabled_offline_without_reload_or_start() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let unit_path = ctx.layout().systemd_unit_dir.join(UNIT_FILENAME);
+        let executable = sandbox.root().join("bin with spaces/anolisa");
+        let expected = include_str!("../../../../../systemd/anolisa-telemetry.service.in")
+            .replace("@@ANOLISA_BIN@@", &executable.display().to_string());
+        let runner = ScriptedRunner::new(vec![output(Some(0), "", "")]);
+        let calls = runner.calls.clone();
+        install_and_enable_service_offline_with(&ctx, &Systemd::with_runner(runner), || {
+            Ok(executable)
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(&unit_path).unwrap(), expected);
+        assert_eq!(
+            *calls.borrow(),
+            vec![vec!["--no-reload", "enable", SERVICE_NAME]]
         );
     }
 
