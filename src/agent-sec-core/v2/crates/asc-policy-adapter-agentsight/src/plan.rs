@@ -3,6 +3,8 @@
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use serde::{Deserialize, Serialize};
 
+pub use asc_agentsight_protocol::FILE_PROTECTION_POLICY_MEDIA_TYPE;
+
 /// Versioned format of the `AgentSight` Binding plan passed through PCP.
 pub const AGENTSIGHT_BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v2";
 
@@ -42,13 +44,13 @@ pub struct AgentSightSourceBinding {
     pub scope_id: ResourceId,
 }
 
-/// `ActPlane` policy payload nested in the `AgentSight` plan.
+/// Target policy payload nested in the `AgentSight` plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSightPolicyPlan {
-    /// Text media type of `content`.
+    /// Selects legacy DSL or structured file-protection JSON.
     pub media_type: String,
-    /// Deterministically generated `ActPlane` DSL.
+    /// Deterministic text encoded according to `media_type`.
     pub content: String,
 }
 

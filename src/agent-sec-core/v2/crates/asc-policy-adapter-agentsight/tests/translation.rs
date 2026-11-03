@@ -306,7 +306,7 @@ fn rule_order_is_preserved_and_changed_rules_change_the_plan() {
 }
 
 #[test]
-fn cedar_sources_are_explicitly_rejected_until_the_cedar_translator_is_connected() {
+fn cedar_unconstrained_operations_are_rejected_without_a_partial_plan() {
     let mut binding = complete_binding_fixture();
     binding.policy.template = serde_json::from_value(serde_json::json!({
         "language":"cedar", "content":{
@@ -317,9 +317,9 @@ fn cedar_sources_are_explicitly_rejected_until_the_cedar_translator_is_connected
     .unwrap();
     let TranslationOutcome::Rejected(rejection) = AgentSightAdapter.translate(&binding).unwrap()
     else {
-        panic!("Cedar must not produce a partial native plan");
+        panic!("unconstrained operations must not produce a partial plan");
     };
-    assert_eq!(rejection.code, "UNSUPPORTED_POLICY_LANGUAGE");
+    assert_eq!(rejection.code, "CEDAR_RULE_0_UNSUPPORTED_OPERATION");
 }
 
 #[test]

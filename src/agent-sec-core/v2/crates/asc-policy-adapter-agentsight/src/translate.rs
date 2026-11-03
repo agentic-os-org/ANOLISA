@@ -1,4 +1,4 @@
-//! Deterministic Policy template to `ActPlane` DSL translation.
+//! Deterministic Binding translation with native DSL and Cedar file-protection paths.
 
 use std::fmt::Write as _;
 
@@ -16,7 +16,7 @@ use asc_policy_types::target::{
 use crate::plan::{
     ACTPLANE_POLICY_MEDIA_TYPE, AGENTSIGHT_BINDING_PLAN_FORMAT,
     AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AgentSightBindingPlan, AgentSightPolicyPlan,
-    AgentSightScopePlan, AgentSightSourceBinding,
+    AgentSightScopePlan, AgentSightSourceBinding, FILE_PROTECTION_POLICY_MEDIA_TYPE,
 };
 
 // ActPlane's PAT=64 kernel ABI reserves one byte for the trailing NUL.
@@ -24,7 +24,7 @@ const ACTPLANE_MAX_LOWERED_PATTERN_BYTES: usize = 63;
 const ACTPLANE_MAX_RULES: usize = 128;
 const DSL_REASON: &str = "AgentSecCore file deletion policy";
 
-/// Pure AgentSight/ActPlane Adapter for file-deletion policies and PID Scopes.
+/// Pure `AgentSight` Adapter for native deletion and Cedar deletion/write constraints.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentSightAdapter;
 
@@ -43,7 +43,7 @@ impl AgentSightAdapter {
             Ok(scope) => scope,
             Err(rejection) => return Ok(TranslationOutcome::Rejected(rejection)),
         };
-        let policy_dsl = match compile_policy(binding) {
+        let policy = match compile_policy(binding) {
             Ok(policy_dsl) => policy_dsl,
             Err(rejection) => return Ok(TranslationOutcome::Rejected(rejection)),
         };
@@ -57,10 +57,7 @@ impl AgentSightAdapter {
                 policy_revision: binding.policy.revision,
                 scope_id: binding.scope.scope_id.clone(),
             },
-            policy: AgentSightPolicyPlan {
-                media_type: ACTPLANE_POLICY_MEDIA_TYPE.to_owned(),
-                content: policy_dsl,
-            },
+            policy,
             scope,
         };
         let content =
@@ -85,10 +82,27 @@ fn translate_scope(scope: &BindingScope) -> Result<AgentSightScopePlan, Translat
     })
 }
 
-fn compile_policy(binding: &PreparedBinding) -> Result<String, TranslationRejection> {
-    let PolicySource::SecCore(template) = &binding.policy.template else {
-        return Err(rejection("UNSUPPORTED_POLICY_LANGUAGE"));
-    };
+fn compile_policy(binding: &PreparedBinding) -> Result<AgentSightPolicyPlan, TranslationRejection> {
+    match &binding.policy.template {
+        PolicySource::Cedar(source) => {
+            let policy = crate::cedar::translate(source)?;
+            let content = serde_json::to_string(&policy)
+                .map_err(|_| rejection("POLICY_SERIALIZATION_FAILED"))?;
+            Ok(AgentSightPolicyPlan {
+                media_type: FILE_PROTECTION_POLICY_MEDIA_TYPE.into(),
+                content,
+            })
+        }
+        PolicySource::SecCore(template) => Ok(AgentSightPolicyPlan {
+            media_type: ACTPLANE_POLICY_MEDIA_TYPE.into(),
+            content: compile_native(template)?,
+        }),
+    }
+}
+
+fn compile_native(
+    template: &asc_policy_types::authoring::PolicyTemplate,
+) -> Result<String, TranslationRejection> {
     let rules = &template.rules;
     if rules.len() > ACTPLANE_MAX_RULES {
         return Err(rejection("ACTPLANE_RULE_LIMIT_EXCEEDED"));

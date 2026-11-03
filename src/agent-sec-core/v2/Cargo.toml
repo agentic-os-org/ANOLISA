@@ -27,6 +27,7 @@ members = [
     "crates/asc-foundation-types",
     "crates/asc-model-client",
     "crates/asc-agentsight-client",
+    "crates/asc-agentsight-protocol",
     "crates/asc-policy-adapter-agentsight",
     "crates/asc-pep-runtime",
     "crates/asc-policy-cedar",
@@ -53,6 +54,7 @@ asc-policy-runtime = { path = "crates/asc-policy-runtime" }
 asc-action-runtime = { path = "crates/asc-action-runtime" }
 asc-action-types = { path = "crates/asc-action-types" }
 asc-agentsight-client = { path = "crates/asc-agentsight-client" }
+asc-agentsight-protocol = { path = "crates/asc-agentsight-protocol" }
 asc-capability-code-scan = { path = "crates/asc-capability-code-scan" }
 asc-capability-prompt-scan = { path = "crates/asc-capability-prompt-scan" }
 asc-capability-skill-sec = { path = "crates/asc-capability-skill-sec" }
