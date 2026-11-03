@@ -1,4 +1,4 @@
-//! Shared, explicitly selected Bailian access; the local scanner factory remains unchanged.
+//! Shared, explicitly selected Anthropic access; the local scanner factory remains unchanged.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -44,13 +44,20 @@ struct RemoteConfig {
     api_key_env: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provider {
+    Bailian,
+    LegacyBailian,
+    AnthropicCompatible,
+}
+
 /// Resolved shared configuration. Debug output never includes the secret.
 #[derive(Clone)]
 pub struct RemoteModel {
     base_url: String,
     model: String,
     api_key: String,
-    legacy: bool,
+    provider: Provider,
 }
 
 impl std::fmt::Debug for RemoteModel {
@@ -118,6 +125,40 @@ pub fn validate_bailian_url(value: &str) -> Result<String, RemoteError> {
     Ok(format!("https://{host}/apps/anthropic"))
 }
 
+// The operator owns this configuration. Platform callers must authorize the endpoint
+// before passing it to ASC; provider-specific routing and billing stay outside ASC.
+fn validate_compatible_url(value: &str) -> Result<String, RemoteError> {
+    let url = Url::parse(value).map_err(|_| config_error("malformed Anthropic endpoint"))?;
+    let authority = value.split('/').nth(2).unwrap_or_default();
+    if !value.starts_with("http://") && !value.starts_with("https://")
+        || value.chars().any(|c| c.is_control() || c.is_whitespace())
+        || value.contains('\\')
+        || url.host_str().is_none_or(|host| {
+            host.len() > 253
+                || host.split('.').any(|label| {
+                    label.is_empty()
+                        || label.len() > 63
+                        || !label.as_bytes()[0].is_ascii_alphanumeric()
+                        || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                        || !label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                })
+        })
+        || matches!(url.host(), Some(url::Host::Ipv6(_)))
+        || authority.contains('@')
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(config_error(
+            "Anthropic endpoint requires an explicit HTTP(S) DNS/IPv4 URL without credentials, query or fragment",
+        ));
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
 impl RemoteModel {
     /// Resolve the shared file once, falling back to a legacy key/base pair only when absent.
     ///
@@ -146,7 +187,7 @@ impl RemoteModel {
         path: &Path,
         environment: &BTreeMap<String, String>,
     ) -> Result<Self, RemoteError> {
-        let (base, model, key, legacy) = match std::fs::File::open(path) {
+        let (base, model, key, provider) = match std::fs::File::open(path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
                 file.take(65_537)
@@ -157,10 +198,20 @@ impl RemoteModel {
                 }
                 let config: FileConfig = serde_json::from_slice(&bytes)
                     .map_err(|_| config_error("shared model file has invalid fields or JSON"))?;
-                if config.schema_version != 1 || config.remote.provider != "bailian-payg-anthropic"
-                {
-                    return Err(config_error("unsupported shared model schema or provider"));
+                if config.schema_version != 1 {
+                    return Err(config_error("unsupported shared model schema"));
                 }
+                let (base, provider) = match config.remote.provider.as_str() {
+                    "bailian-payg-anthropic" => (
+                        validate_bailian_url(&config.remote.base_url)?,
+                        Provider::Bailian,
+                    ),
+                    "anthropic-compatible" => (
+                        validate_compatible_url(&config.remote.base_url)?,
+                        Provider::AnthropicCompatible,
+                    ),
+                    _ => return Err(config_error("unsupported shared model provider")),
+                };
                 let name = &config.remote.api_key_env;
                 if name.is_empty()
                     || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
@@ -172,18 +223,18 @@ impl RemoteModel {
                     .get(name)
                     .cloned()
                     .ok_or_else(|| config_error("referenced model key is missing"))?;
-                (
-                    config.remote.base_url,
-                    config.remote.default_model,
-                    key,
-                    false,
-                )
+                (base, config.remote.default_model, key, provider)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let key = environment.get("ANTHROPIC_API_KEY").cloned();
                 let base = environment.get("ANTHROPIC_BASE_URL").cloned();
                 match (key, base) {
-                    (Some(key), Some(base)) => (base, "qwen3.8-max".into(), key, true),
+                    (Some(key), Some(base)) => (
+                        validate_bailian_url(&base)?,
+                        "qwen3.8-max".into(),
+                        key,
+                        Provider::LegacyBailian,
+                    ),
                     _ => {
                         return Err(config_error(
                             "configure model-service.json or both ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL",
@@ -208,16 +259,16 @@ impl RemoteModel {
             return Err(config_error("model contains unsupported characters"));
         }
         Ok(Self {
-            base_url: validate_bailian_url(&base)?,
+            base_url: base,
             model,
             api_key: key,
-            legacy,
+            provider,
         })
     }
 
     /// Whether the deprecated environment pair supplied this configuration.
     pub fn uses_legacy_configuration(&self) -> bool {
-        self.legacy
+        self.provider == Provider::LegacyBailian
     }
     /// Model shared by the Judge and evaluated Agent.
     pub fn model(&self) -> &str {
@@ -301,10 +352,13 @@ impl RemoteModel {
             .timeout(timeout)
             .redirects(0)
             .build();
-        let body = json!({"model": self.model, "max_tokens": max_tokens,
-            "messages": [{"role":"user", "content": user}], "system": system,
-            "temperature": 0, "thinking":{"type":"enabled"},
-            "output_config":{"effort": if high_effort { "high" } else { "medium" }}});
+        let mut body = json!({"model": self.model, "max_tokens": max_tokens,
+            "messages": [{"role":"user", "content": user}], "system": system});
+        if self.provider != Provider::AnthropicCompatible {
+            body["temperature"] = json!(0);
+            body["thinking"] = json!({"type": "enabled"});
+            body["output_config"] = json!({"effort": if high_effort { "high" } else { "medium" }});
+        }
         let response = agent
             .post(&format!("{}/v1/messages", self.base_url))
             .set("x-api-key", &self.api_key)
@@ -404,6 +458,258 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use std::net::TcpListener;
+
+    fn configured_model(provider: &str, base_url: &str) -> Result<RemoteModel, RemoteError> {
+        let mut file = tempfile::NamedTempFile::new().expect("create private model fixture");
+        serde_json::to_writer(
+            &mut file,
+            &json!({"schemaVersion":1,"remote":{
+                "provider":provider,"baseUrl":base_url,"defaultModel":"fixture-model",
+                "apiKeyEnv":"AGENT_SEC_MODEL_API_KEY"
+            }}),
+        )
+        .expect("write shared config");
+        RemoteModel::resolve(
+            file.path(),
+            &BTreeMap::from([(
+                "AGENT_SEC_MODEL_API_KEY".into(),
+                "opaque-test-context".into(),
+            )]),
+        )
+    }
+
+    fn mock_response(
+        status: &str,
+        body: &str,
+        headers: &str,
+    ) -> (String, std::thread::JoinHandle<(String, Value)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept proxy request");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("bound request read");
+            let mut reader = std::io::BufReader::new(&socket);
+            let mut head = String::new();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(
+                    std::io::BufRead::read_line(&mut reader, &mut line).expect("read header"),
+                    0
+                );
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse::<usize>().expect("body length");
+                }
+                assert!(head.len() < 16_384);
+            }
+            assert!(length < 16_384);
+            let mut payload = vec![0; length];
+            reader.read_exact(&mut payload).expect("read request body");
+            drop(reader);
+            socket
+                .write_all(response.as_bytes())
+                .expect("write response");
+            (
+                head,
+                serde_json::from_slice(&payload).expect("JSON request"),
+            )
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[test]
+    fn compatible_endpoints_are_explicit_and_do_not_expand_bailian() {
+        for base in [
+            "https://gateway.example.invalid/anthropic",
+            "https://gateway.example.invalid:8443/prefix/anthropic/",
+            "http://gateway.svc.cluster.local:8080/proxy",
+            "http://127.0.0.1:8080/",
+        ] {
+            assert!(
+                configured_model("anthropic-compatible", base).is_ok(),
+                "{base}"
+            );
+            assert!(configured_model("bailian-payg-anthropic", base).is_err());
+        }
+        for base in [
+            "https://user:secret@gateway.example.invalid/proxy",
+            "https://@gateway.example.invalid/proxy",
+            "https://gateway.example.invalid/proxy?key=secret",
+            "https://gateway.example.invalid/proxy#fragment",
+            " https://gateway.example.invalid/proxy",
+            "https://gateway.example.invalid/white space",
+            "https://gateway.example.invalid/proxy\n",
+            "https:gateway.example.invalid/proxy",
+            "https://gateway.example.invalid\\proxy",
+            "file:///proxy",
+            "ftp://gateway.example.invalid/proxy",
+            "http://[::1]/proxy",
+            "https://gateway.example.invalid./proxy",
+            "https://bad_host.example.invalid/proxy",
+            "https://-gateway.example.invalid/proxy",
+        ] {
+            let error = configured_model("anthropic-compatible", base).expect_err("unsafe URL");
+            assert!(!error.to_string().contains("secret"));
+        }
+        assert!(configured_model("unknown-provider", "https://gateway.example.invalid").is_err());
+        assert!(
+            configured_model(
+                "bailian-payg-anthropic",
+                "https://dashscope.aliyuncs.com/apps/anthropic"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compatible_messages_and_worker_share_opaque_credentials_and_model() {
+        let body = r#"{"content":[{"type":"text","text":"result opaque-test-context"}],"usage":{"input_tokens":7,"output_tokens":3},"stop_reason":"end_turn"}"#;
+        let (base, server) = mock_response("200 OK", body, "");
+        let model = configured_model("anthropic-compatible", &format!("{base}/proxy/anthropic/"))
+            .expect("compatible model");
+        assert!(!model.uses_legacy_configuration());
+        let env = model.worker_environment();
+        assert_eq!(env["ANTHROPIC_BASE_URL"], format!("{base}/proxy/anthropic"));
+        assert_eq!(env["ANTHROPIC_API_KEY"], "opaque-test-context");
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "opaque-test-context");
+        assert_eq!(env["ANTHROPIC_MODEL"], "fixture-model");
+        assert_eq!(env["ANTHROPIC_SMALL_FAST_MODEL"], "fixture-model");
+        assert_eq!(env.len(), 5);
+        let result = model
+            .messages("system", "user", 123, true, Duration::from_secs(2))
+            .expect("Messages response");
+        let (head, payload) = server.join().expect("fixture completed");
+        assert!(head.starts_with("POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"));
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("x-api-key: opaque-test-context\r\n")
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("anthropic-version: 2023-06-01\r\n")
+        );
+        assert_eq!(
+            payload,
+            json!({"model":"fixture-model","max_tokens":123,
+            "messages":[{"role":"user","content":"user"}],"system":"system"})
+        );
+        assert_eq!(result["text"], "result [REDACTED]");
+        assert_eq!(result["usage"], json!({"input_tokens":7,"output_tokens":3}));
+        assert!(!format!("{model:?}").contains("opaque-test-context"));
+    }
+
+    #[test]
+    fn explicit_and_legacy_bailian_preserve_reasoning_options() {
+        let base = "https://dashscope.aliyuncs.com/apps/anthropic";
+        let env = BTreeMap::from([
+            ("ANTHROPIC_BASE_URL".into(), base.into()),
+            ("ANTHROPIC_API_KEY".into(), "test-key".into()),
+        ]);
+        let directory = tempfile::tempdir().unwrap();
+        let explicit = configured_model("bailian-payg-anthropic", base).unwrap();
+        let legacy = RemoteModel::resolve(&directory.path().join("absent.json"), &env).unwrap();
+        for (mut model, high_effort) in [(explicit, false), (legacy, true)] {
+            let (address, server) = mock_response(
+                "200 OK",
+                r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+                "",
+            );
+            model.base_url = address;
+            model
+                .messages("system", "user", 256, high_effort, Duration::from_secs(2))
+                .unwrap();
+            let (_, body) = server.join().unwrap();
+            assert_eq!(body["temperature"], 0);
+            assert_eq!(body["thinking"], json!({"type":"enabled"}));
+            assert_eq!(
+                body["output_config"]["effort"],
+                if high_effort { "high" } else { "medium" }
+            );
+        }
+    }
+
+    #[test]
+    fn compatible_errors_preserve_retry_and_usage_boundaries() {
+        for (status, body, code, retryable) in [
+            (
+                "401 Unauthorized",
+                "opaque-test-context",
+                "authentication_failed",
+                false,
+            ),
+            (
+                "403 Forbidden",
+                "opaque-test-context",
+                "authentication_failed",
+                false,
+            ),
+            (
+                "429 Too Many Requests",
+                "opaque-test-context",
+                "rate_limited",
+                true,
+            ),
+            (
+                "503 Unavailable",
+                "opaque-test-context",
+                "server_error",
+                true,
+            ),
+            (
+                "200 OK",
+                r#"{"content":[{"type":"text","text":"ok"}]}"#,
+                "invalid_response",
+                false,
+            ),
+        ] {
+            let (base, server) = mock_response(status, body, "Retry-After: 2\r\n");
+            let model = configured_model("anthropic-compatible", &base).expect("model");
+            let error = model
+                .messages("system", "user", 10, false, Duration::from_secs(2))
+                .expect_err("provider failure");
+            server.join().expect("fixture completed");
+            assert!(matches!(&error, RemoteError::Provider {
+                code: actual, retryable: retry, ..
+            } if *actual == code && *retry == retryable));
+            if retryable {
+                assert!(matches!(&error, RemoteError::Provider {
+                    retry_after: Some(delay), ..
+                } if *delay == Duration::from_secs(2)));
+            }
+            assert!(!error.to_string().contains("opaque-test-context"));
+        }
+    }
+
+    #[test]
+    fn compatible_credentials_are_not_forwarded_on_redirect() {
+        let forbidden = TcpListener::bind("127.0.0.1:0").expect("redirect target");
+        forbidden.set_nonblocking(true).expect("nonblocking target");
+        let address = forbidden.local_addr().expect("target address");
+        let (base, server) =
+            mock_response("302 Found", "", &format!("Location: http://{address}/\r\n"));
+        let model = configured_model("anthropic-compatible", &base).expect("model");
+        assert!(
+            model
+                .messages("system", "user", 10, false, Duration::from_secs(1))
+                .is_err()
+        );
+        server.join().expect("fixture completed");
+        assert!(
+            matches!(forbidden.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
 
     #[test]
     fn typed_transport_timeouts_do_not_expose_or_parse_error_text() {
@@ -540,7 +846,7 @@ mod tests {
                 base_url: format!("http://{address}"),
                 model: "fixture".into(),
                 api_key: "fixture-secret".into(),
-                legacy: false,
+                provider: Provider::AnthropicCompatible,
             };
             let result = model.messages("system", "user", 10, true, Duration::from_millis(100));
             server.join().expect("HTTP fixture completed");
@@ -613,7 +919,7 @@ mod tests {
             base_url: String::new(),
             model: String::new(),
             api_key: "secret-value".into(),
-            legacy: false,
+            provider: Provider::AnthropicCompatible,
         };
         let mut bytes = b"\xffsecret-value\0secret-value/path/read_text()".to_vec();
         let size = bytes.len();
