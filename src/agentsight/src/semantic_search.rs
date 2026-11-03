@@ -196,7 +196,7 @@ pub async fn rank_sessions(
     match parsed {
         Ok(Ok(items)) => normalize_results(anchor_to_candidates(items, candidates)),
         Ok(Err(error)) => {
-            log::warn!("semantic_search: LLM ranking failed, returning empty results: {error}");
+            log::warn!("semantic_search: LLM ranking failed, returning empty results: {error:#}");
             vec![]
         }
         Err(_) => {
@@ -679,11 +679,13 @@ mod tests {
         ));
         assert!(results.is_empty());
         let lines = captured.lock().unwrap_or_else(|e| e.into_inner());
+        let warning = lines
+            .iter()
+            .find(|line| line.contains("semantic_search: LLM ranking failed"))
+            .expect("expected degradation WARN");
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("semantic_search: LLM ranking failed")),
-            "expected degradation WARN, got: {lines:?}"
+            warning.contains("Http client error"),
+            "the provider source must survive in the WARN: {warning}"
         );
     }
 

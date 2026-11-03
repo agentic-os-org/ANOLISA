@@ -133,7 +133,7 @@ impl Detector for RequirementCheckStrategy {
             }
             Err(e) => {
                 ctx.judgments.record_failure(&e);
-                tracing::warn!("[requirement_check] Coverage comparison failed: {e}");
+                tracing::warn!("[requirement_check] Coverage comparison failed: {e:#}");
                 return vec![];
             }
         };

@@ -125,7 +125,11 @@ pub async fn identify_issues(
                 continue;
             }
             Err(err) => {
-                tracing::warn!("Perf: strategy '{}' LLM call failed: {}", strategy_id, err);
+                tracing::warn!(
+                    "Perf: strategy '{}' LLM call failed: {:#}",
+                    strategy_id,
+                    err
+                );
                 failed += 1;
                 last_err = Some(err);
                 continue;

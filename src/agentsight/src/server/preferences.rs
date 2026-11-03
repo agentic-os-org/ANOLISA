@@ -221,7 +221,7 @@ async fn llm_findings(
     let turns = llm_input_turns(rows.iter());
     analyze_user_turns(&client, &turns)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// GET /api/preferences/export?window_days=7&source=auto

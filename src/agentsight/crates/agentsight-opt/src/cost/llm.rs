@@ -132,7 +132,7 @@ pub async fn identify_waste(
                 continue;
             }
             Err(err) => {
-                tracing::warn!("Cost: strategy '{}' LLM call failed: {}", cand.id, err);
+                tracing::warn!("Cost: strategy '{}' LLM call failed: {:#}", cand.id, err);
                 failed += 1;
                 last_err = Some(err);
                 continue;

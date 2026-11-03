@@ -113,7 +113,7 @@ pub async fn shared_extract(
         }
         Err(e) => {
             judgments.record_failure(&e);
-            tracing::warn!("[accuracy] Shared extraction failed, degrading to empty: {e}");
+            tracing::warn!("[accuracy] Shared extraction failed, degrading to empty: {e:#}");
             SharedExtraction::default()
         }
     }

@@ -289,7 +289,7 @@ pub async fn judge_last_round(
     let response: JudgeResponse = client
         .chat_json_parsed(build_messages(doc, round.clone()))
         .await
-        .map_err(|error| JudgeError::Call(error.to_string()))?;
+        .map_err(|error| JudgeError::Call(format!("{error:#}")))?;
     interpret_in_round(&response, doc, round)
 }
 
