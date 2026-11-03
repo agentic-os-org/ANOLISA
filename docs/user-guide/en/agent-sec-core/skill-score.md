@@ -48,7 +48,13 @@ Place this secret-free configuration in `/etc/agent-sec/model-service.json`, or 
 
 Inject `AGENT_SEC_MODEL_API_KEY` through the invoking environment or platform secret management. Never put its value in arguments, task JSON, templates or release manifests. The Judge and evaluated Agent share the resolved provider configuration; the worker receives only the necessary Agent model credentials. Existing local/Ollama scanner defaults are unchanged.
 
-An existing but invalid configuration fails. If no configuration file exists, the migration path accepts the legacy `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` pair and emits a deprecation notice. Both legacy variables are required.
+For an operator-managed Anthropic Messages proxy, set `provider` to `anthropic-compatible` and `baseUrl` to its trusted prefix, for example `https://models.example.invalid/anthropic`. ASC appends `/v1/messages`; do not include that suffix in the prefix. The remaining fields are unchanged. URLs must use HTTP(S), a DNS hostname or IPv4 address, and contain no embedded credentials, query, fragment, whitespace or backslash. Explicit ports are supported. HTTP is for a trusted private network; use HTTPS across untrusted networks. Dynamic execution requires IPv4 resolution and permits the configured host through the existing network sidecar; this is a host policy, not a URL-path policy.
+
+ASC passes the referenced value through the existing Anthropic credential channel, including `x-api-key` for its Rust calls. It does not generate or parse user/task identities or submit billing records. The calling platform must authorize the proxy and generate its access context; the proxy owns authentication and metering. The same configuration supplies planning, judging and Claude Code execution. Keep credentials scoped and short-lived where the proxy supports it: the evaluated Agent receives the value, and an allowed model endpoint is not a data-loss prevention boundary.
+
+The proxy must support the existing Messages request parameters (`thinking` and `output_config` included), token usage fields, and Claude Code streaming/tool calls. Unsupported behavior fails explicitly, without dropping parameters or falling back to a different service. Offline compatibility tests do not establish model quality, network reachability or billing correctness.
+
+An existing but invalid configuration fails. If no configuration file exists, the migration path accepts the legacy `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` pair and emits a deprecation notice. Both legacy variables are required and retain Bailian endpoint restrictions; a custom proxy requires the explicit configuration file. To roll back proxy routing, restore the Bailian configuration above.
 
 ## Plan and execute
 
