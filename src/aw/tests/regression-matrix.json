@@ -14,6 +14,7 @@
     "aw-contracts/test/contracts",
     "aw-contracts/test/orchestration",
     "aw-contracts/test/schemas",
+    "aw-core/test/admission",
     "aw-core/test/execution",
     "aw-core/test/journal",
     "aw-exec/test/execution",
