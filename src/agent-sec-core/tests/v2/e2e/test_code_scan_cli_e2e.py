@@ -58,6 +58,21 @@ import pytest
             "python",
             "rm -rf /; rm -r /tmp/demo",
         ),
+        (
+            "python3 -c \"subprocess.Popen('rm -rf /tmp/test')\"",
+            "bash",
+            "rm -rf /tmp/test",
+        ),
+        (
+            "python3 -c 'subprocess.Popen(args=\"rm -rf /tmp/test\", shell=True)'",
+            "bash",
+            "rm -rf /tmp/test",
+        ),
+        (
+            "wipefs -a /dev/sda; python3 -c \"subprocess.Popen('wipefs -a /dev/sda'); subprocess.run('shred /dev/sdb')\"",
+            "bash",
+            "wipefs -a /dev/sda; shred /dev/sdb",
+        ),
     ],
 )
 def test_python_commands_reuse_native_shell_findings(daemon, code, language, command):
@@ -112,15 +127,70 @@ def test_python_non_commands_do_not_gain_shell_findings(daemon, code):
     assert result["findings"] == []
 
 
-def test_python_and_shell_findings_are_both_preserved(daemon):
-    code = 'pickle.loads(data); os.system("rm -rf /")'
-    result = daemon.request("scan-code", "--code", code, "--language", "python")
+@pytest.mark.parametrize(
+    "code, language",
+    [
+        ('pickle.loads(data); os.system("rm -rf /")', "python"),
+        ("python3 -c 'pickle.loads(data); os.system(\"rm -rf /\")'", "bash"),
+        ('rm -rf /tmp/test; python3 -c "pickle.loads(data)"', "bash"),
+    ],
+)
+def test_python_and_shell_findings_are_both_preserved(daemon, code, language):
+    result = daemon.request("scan-code", "--code", code, "--language", language)
     assert result["verdict"] == "warn"
     assert result["language"] == "python"
     assert [finding["rule_id"] for finding in result["findings"]] == [
         "py-unsafe-deserialization",
         "shell-recursive-delete",
     ]
+
+
+@pytest.mark.parametrize(
+    "code, language, command",
+    [
+        ('cat /etc/shadow; python3 -c "print(1)"', "python", "cat /etc/shadow"),
+        ('python3 -c "print(1)" && cat /etc/shadow', "python", "cat /etc/shadow"),
+        ('rm -rf /tmp/test; bash -c "echo hi"', "bash", "rm -rf /tmp/test"),
+        ('bash -c "echo hi" && rm -rf /tmp/test', "bash", "rm -rf /tmp/test"),
+        (
+            'dd if=/dev/zero of=/dev/sda; python3 -c "print(1)"',
+            "python",
+            "dd if=/dev/zero of=/dev/sda",
+        ),
+        (
+            'python3 -c "print(1)" && dd if=/dev/zero of=/dev/sda',
+            "python",
+            "dd if=/dev/zero of=/dev/sda",
+        ),
+    ],
+)
+def test_inline_interpreters_preserve_outer_cli_findings(daemon, code, language, command):
+    native = daemon.request("scan-code", "--code", command, "--language", "bash")
+    result = daemon.request("scan-code", "--code", code, "--language", "bash")
+
+    assert native["verdict"] == "warn"
+    assert result["ok"] is True
+    assert result["language"] == language
+    assert result["verdict"] == native["verdict"]
+    assert result["findings"] == native["findings"]
+    assert result["summary"] == native["summary"].replace("bash code", f"{language} code")
+
+
+@pytest.mark.parametrize(
+    "code, language",
+    [
+        ('python3 -c "print(1)"', "python"),
+        ('echo hello; python3 -c "print(1)"', "python"),
+        ('bash -c "echo hi" && echo done', "bash"),
+    ],
+)
+def test_harmless_inline_interpreters_pass_through_cli(daemon, code, language):
+    result = daemon.request("scan-code", "--code", code, "--language", "bash")
+
+    assert result["ok"] is True
+    assert result["language"] == language
+    assert result["verdict"] == "pass"
+    assert result["findings"] == []
 
 
 def test_scan_code_returns_the_daemon_result_with_v1_exit_semantics(daemon) -> None:
@@ -151,10 +221,7 @@ def test_scan_code_error_results_remain_parseable_on_stdout(daemon) -> None:
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert payload["verdict"] == "error"
-    assert (
-        payload["summary"]
-        == "scan error: model 'agent-sec-core-e2e-unavailable' not available"
-    )
+    assert payload["summary"] == "scan error: model 'agent-sec-core-e2e-unavailable' not available"
 
 
 def test_scan_code_rejects_empty_input_before_contacting_the_daemon(cli) -> None:
