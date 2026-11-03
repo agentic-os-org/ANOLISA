@@ -556,7 +556,12 @@ where
                         .strip_prefix("/api/token-savings/session/")
                         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
             });
-        if tokenless_query || path.matches(|value| is_credential_required_path(req.method(), value))
+        let llm_preferences = *req.method() == actix_web::http::Method::GET
+            && path.matches(|value| value == "/api/preferences")
+            && extract_query_param(req.query_string(), "llm").is_some_and(|value| value == "true");
+        if tokenless_query
+            || llm_preferences
+            || path.matches(|value| is_credential_required_path(req.method(), value))
         {
             let authenticated = self.auth.enabled && is_authenticated(&self.auth, &req);
             if authenticated {
@@ -670,16 +675,18 @@ fn is_authenticated(auth: &DashboardAuth, req: &ServiceRequest) -> bool {
 
 /// Extract a query parameter value from a query string without full parsing.
 fn extract_query_param(query: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
     for part in query.split('&') {
-        if let Some(value) = part.strip_prefix(&prefix) {
-            return Some(percent_decode(value));
+        let Some((raw_key, raw_value)) = part.split_once('=') else {
+            continue;
+        };
+        if percent_decode(raw_key) == key {
+            return Some(percent_decode(raw_value));
         }
     }
     None
 }
 
-/// Minimal percent-decoding for query values (handles `%XX` sequences).
+/// Minimal percent-decoding for query components (handles `%XX` sequences).
 fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -807,6 +814,14 @@ mod tests {
         assert_eq!(
             extract_query_param("token=hello", "token"),
             Some("hello".to_string())
+        );
+        assert_eq!(
+            extract_query_param("%6clm=true", "llm"),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            extract_query_param("%6C%6Cm=true", "llm"),
+            Some("true".to_string())
         );
         assert_eq!(extract_query_param("foo=bar", "token"), None);
     }
