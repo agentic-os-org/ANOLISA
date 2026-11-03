@@ -23,6 +23,9 @@ def merge(json_str, config_path):
         sys.exit(1)
 
     servers = new.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        print("ERROR: mcpServers must be a JSON object", file=sys.stderr)
+        sys.exit(1)
     if not servers:
         print("ERROR: No mcpServers found in input", file=sys.stderr)
         sys.exit(1)
@@ -39,8 +42,12 @@ def merge(json_str, config_path):
     if not isinstance(existing, dict):
         existing = {}
 
-    # Merge
-    if "mcpServers" not in existing:
+    # Merge. A non-object mcpServers in the existing config follows the same
+    # lenient policy as an unparseable config file: warn and start fresh.
+    if not isinstance(existing.get("mcpServers"), dict):
+        if "mcpServers" in existing:
+            print(f"WARNING: mcpServers in {config_path} is not an object; resetting it",
+                  file=sys.stderr)
         existing["mcpServers"] = {}
     existing["mcpServers"].update(servers)
 
@@ -73,6 +80,9 @@ def check(config_path):
         sys.exit(1)
 
     servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        print(f"ERROR: mcpServers in {config_path} is not a JSON object", file=sys.stderr)
+        sys.exit(1)
     if not servers:
         print(f"No mcpServers in {config_path}")
         return
@@ -88,6 +98,10 @@ def check(config_path):
         has = [f for f in ("command", "httpUrl", "url") if f in cfg]
         if not has:
             print(f"ERROR: [{name}] missing transport field (command/httpUrl/url)", file=sys.stderr)
+            ok = False
+        elif len(has) > 1:
+            print(f"ERROR: [{name}] has multiple transport fields ({', '.join(has)}); "
+                  f"use exactly one of command/httpUrl/url", file=sys.stderr)
             ok = False
 
         # No forbidden fields
