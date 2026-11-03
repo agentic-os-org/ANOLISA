@@ -78,6 +78,7 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
             "--event",
             "--step",
             "--on-error",
+            "--close-event",
         ],
         false,
     )?;
@@ -85,7 +86,7 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
     if root.adapter != args.required("--adapter")?
         || !matches!(
             root.adapter.as_str(),
-            "pi" | "claude-sdk" | "qoder-sdk" | "qwenpaw"
+            "pi" | "claude-sdk" | "qoder-sdk" | "qwenpaw" | "agentscope"
         )
         || root.reloadable
     {
@@ -96,7 +97,7 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
     // SAFETY: getppid only reads the live parent identity.
     let owner_pid = unsafe { libc::getppid() } as u32;
     if action != "invoke"
-        && ["--event", "--step", "--on-error"]
+        && ["--event", "--step", "--on-error", "--close-event"]
             .iter()
             .any(|flag| args.flags.contains_key(*flag))
     {

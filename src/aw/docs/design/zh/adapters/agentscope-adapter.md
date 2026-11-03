@@ -131,8 +131,16 @@ dispatch 旁路不经过这里，需要独立接点。框架终态成功与内�
 
 首版支持一个前台 Python worker，不支持 fork 型 Gunicorn supervisor、子 worker
 自动接线或远端沙箱。常驻业务服务需要显式处理每个 worker/会话的 launch 与 binding
-归属。本地服务每实例最多保留 1024 个事件关联（约 512 对 before/after），release
-之前不会因为 session ID 改变而重置预算。不隐含远端命令取消、热加载或 OS 隔离能力。
+归属。Bridge 在首个 hook 事件前打开一个 task scope 并启用 invocation
+ledger，进程退出时关闭：每次工具调用以 invocation id 按严格递增序列
+register、各 phase 完成后 finish，关联容量按调用回收，长调用历史不再向
+1024 事件实例上限累积。注册使用与 hook 求值相同的解码后 SDK 生效参数，
+注册摘要与归一化 hook 输入始终一致；进程内 scope 打开与 ledger 交付
+串行化，并发首调用共享同一 scope 与同一序列。重放注册按序列拒绝。Hook 传输与清理
+固定使用调用注册时的 scope；owner 失败时按配置的 Hook 策略报告失败，不会把现有调用
+重路由到 legacy root binding 或替代 scope。只有没有注册 scope owner 的调用才使用
+legacy root binding 路径；后续调用必须等待待清理 scope 成功关闭后才能打开新 scope。
+session ID 改变本身不重置任何预算。不隐含远端命令取消、热加载或 OS 隔离能力。
 
 已有 `native-hook/v1alpha1`、结构化 Provider 和默认布尔 Hook 均可使用。布尔 Hook
 返回 `true` 时产生配置的 effects；before 的 `effects: [observe, block]` 匹配 true 即
