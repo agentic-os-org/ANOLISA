@@ -297,6 +297,101 @@ class WorkBaseImageTests(unittest.TestCase):
 
 
 class ImageArchiveTests(unittest.TestCase):
+    def legacy_archive(self, root: Path, failure: str = "") -> tuple[Path, list[dict]]:
+        layer = b"fixture uncompressed layer"
+        members = {"shared/layer.tar": layer}
+        expected, legacy = [], []
+        for index, name in enumerate(NAMES):
+            config = json.dumps(
+                {
+                    "os": "linux",
+                    "architecture": "arm64" if failure == "platform" else "amd64",
+                    "fixture": name,
+                    "rootfs": {
+                        "type": "layers",
+                        "diff_ids": ["sha256:" + hashlib.sha256(layer).hexdigest()],
+                    },
+                }
+            ).encode()
+            identity = hashlib.sha256(config).hexdigest()
+            config_path = identity + ".json"
+            members[config_path] = config
+            legacy.append(
+                {
+                    "Config": config_path,
+                    "RepoTags": [name],
+                    "Layers": [f"layer{index}/layer.tar"],
+                }
+            )
+            expected.append(
+                {"name": name, "id": "sha256:" + identity, "platform": "linux/amd64"}
+            )
+        if failure == "config-sha":
+            members[legacy[0]["Config"]] += b" "
+        elif failure == "layer-sha":
+            members["shared/layer.tar"] += b"changed"
+        elif failure == "layer-count":
+            legacy[0]["Layers"] = []
+        elif failure == "tag":
+            legacy[1]["RepoTags"] = legacy[0]["RepoTags"]
+        elif failure == "oversize":
+            members[legacy[0]["Config"]] = b" " * (1024 * 1024 + 1)
+        elif failure == "oci-index":
+            members["index.json"] = b"{}"
+        elif failure == "oci-layout":
+            members["oci-layout"] = b'{"imageLayoutVersion":"1.0.0"}'
+        members["manifest.json"] = json.dumps(legacy).encode()
+        target = root / "legacy.tar"
+        with tarfile.open(target, "w") as archive:
+            for name, data in members.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+            for index in range(2):
+                member = tarfile.TarInfo(f"layer{index}/layer.tar")
+                member.type = tarfile.SYMTYPE
+                member.linkname = {
+                    "escape": "../../outside",
+                    "absolute": "/shared/layer.tar",
+                    "cycle": "layer.tar",
+                    "missing": "../absent/layer.tar",
+                }.get(failure, "../shared/layer.tar")
+                archive.addfile(member)
+        return target, expected
+
+    def test_local_legacy_export_binds_config_and_shared_layer_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, expected = self.legacy_archive(Path(directory))
+            self.assertEqual(
+                BUILD.archive_image_identities(archive, NAMES, allow_legacy=True),
+                expected,
+            )
+            with self.assertRaises(ValueError):
+                BUILD.archive_image_identities(archive, NAMES)
+
+    def test_legacy_rejects_unbound_content_and_incomplete_oci(self):
+        for failure in (
+            "platform",
+            "config-sha",
+            "layer-sha",
+            "layer-count",
+            "tag",
+            "oversize",
+            "oci-index",
+            "oci-layout",
+            "escape",
+            "absolute",
+            "cycle",
+            "missing",
+        ):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                archive, _ = self.legacy_archive(Path(directory), failure)
+                with self.assertRaises(ValueError):
+                    BUILD.archive_image_identities(archive, NAMES, allow_legacy=True)
+
     def archive(
         self,
         root: Path,
@@ -420,6 +515,8 @@ class ImageArchiveTests(unittest.TestCase):
                 archive, _ = self.archive(Path(directory), failure)
                 with self.assertRaises(ValueError):
                     BUILD.archive_image_identities(archive, NAMES)
+                with self.assertRaises(ValueError):
+                    BUILD.archive_image_identities(archive, NAMES, allow_legacy=True)
 
 
 if __name__ == "__main__":

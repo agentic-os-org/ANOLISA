@@ -22,7 +22,7 @@ def installed(tmp_path, monkeypatch):
     component = tmp_path / "component"
     component.mkdir()
     manifest = {
-        "schema": "agent-sec-skill-score/runtime-v1",
+        "schema": "agent-sec-skill-score/runtime-v2",
         "protocol_version": worker.SCHEMA,
         "images": [
             {
@@ -37,6 +37,8 @@ def installed(tmp_path, monkeypatch):
             },
         ],
     }
+    entries = manifest.pop("images")
+    manifest.update(version="test", source_commit="a" * 40)
     raw = json.dumps(manifest).encode()
     (component / "runtime-manifest.json").write_bytes(raw)
     digest = hashlib.sha256(raw).hexdigest()
@@ -44,11 +46,21 @@ def installed(tmp_path, monkeypatch):
     environment.mkdir(parents=True)
     (environment / "runtime-manifest.json").write_bytes(raw)
     atomic_json(
+        environment / "image-build.json",
+        {
+            "schema": "agent-sec-skill-score/image-build-v1",
+            "manifest_sha256": digest,
+            "source_commit": manifest["source_commit"],
+            "version": manifest["version"],
+            "images": entries,
+        },
+    )
+    atomic_json(
         environment / "ready.json",
         {
             "schema": "agent-sec-skill-score/ready-v1",
             "manifest_sha256": digest,
-            "images": manifest["images"],
+            "images": entries,
         },
     )
     monkeypatch.setattr(worker.sys, "argv", [str(environment / "worker-entry.py")])
@@ -120,7 +132,9 @@ def test_resource_ownership_precedes_execution_and_cleanup_always_runs(
     assert ("error" in response) == fails
 
 
-def test_manifest_mismatch_never_runs_environment(tmp_path, monkeypatch, installed):
+def test_build_receipt_mismatch_never_runs_environment(
+    tmp_path, monkeypatch, installed
+):
     calls = []
     fake_runtime(monkeypatch, calls)
     root = tmp_path / "request"
@@ -129,7 +143,10 @@ def test_manifest_mismatch_never_runs_environment(tmp_path, monkeypatch, install
     damaged["image_ids"]["work"] = "sha256:" + "e" * 64
     response, code = worker.execute(damaged, root / "input.json")
     assert code == 1 and not calls
-    assert "manifest" in response["error"]["message"]
+    assert (
+        response["error"]["message"]
+        == "worker image IDs differ from the installed build receipt"
+    )
 
 
 def test_cleanup_pending_is_not_success(tmp_path, monkeypatch, installed):

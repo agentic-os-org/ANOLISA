@@ -36,7 +36,7 @@ class LifecycleTests(unittest.TestCase):
 
     def environment(self, *, retained: bool = False, receipt: bool = True) -> Path:
         manifest = {
-            "schema": "agent-sec-skill-score/runtime-v1",
+            "schema": "agent-sec-skill-score/runtime-v2",
             "component": "sec-core-skill-score",
             "version": "test",
             "source_commit": "a" * 40,

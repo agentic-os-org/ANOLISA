@@ -138,7 +138,8 @@ def owned_environment(path: Path) -> None:
     )
     if (
         hashlib.sha256(content).hexdigest() != name[1]
-        or manifest.get("schema") != "agent-sec-skill-score/runtime-v1"
+        or manifest.get("schema")
+        not in {"agent-sec-skill-score/runtime-v1", "agent-sec-skill-score/runtime-v2"}
         or manifest.get("component") != COMPONENT
         or not re.fullmatch(r"[a-f0-9]{40}", manifest.get("source_commit", ""))
         or not isinstance(manifest.get("version"), str)
