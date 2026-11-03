@@ -6,25 +6,27 @@ Skill Score 为一个 Skill 规划任务，在受控 Docker 环境中执行，�
 
 ## 安装
 
-首个原生预览版使用配套的 fork release：两个 raw 组件、一个独立镜像归档，以及支持候选版本准备的安装器。正式默认渠道可能尚未包含此预览版。使用可信 release 附带的安装器（0.3.20 或更高版本），执行前按 release-v3 清单校验所有制品。SkillEval 的 bundle 脚本会自动准备本地仓库。
+fork 预览版包含两个独立交付归档，各附一个 `.sha256` 文件。基础归档 `sec-core-bundle-<version>-linux-x86_64.tar.gz` 包含标准基础 raw 包、索引、发布清单及配套 ANOLISA 安装器；下载和安装基础归档不需要可选 bundle。按可信发布渠道提供的摘要校验后解压到空目录，再解压其中的 `v1/anolisa-cli-0.3.20-linux-x86_64.tar.gz` 取得安装器。正式默认渠道可能尚未包含此预览版。
 
-将校验后的 raw 包和索引组织到本地 `v1/` 仓库后，安装基础组件：
+从解压后的仓库安装基础组件：
 
 ```sh
 sudo anolisa --install-mode system install sec-core --backend raw \
   --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
 ```
 
-基础 install、update、repair 不下载评分所需的 Python、Harbor、Docker 或镜像。`plan` 只需要基础 CLI 和模型配置。ASC 其他适配器已有的 Python 依赖另行管理。
+基础 install、update、repair 不获取评分所需的 Python/Harbor 环境，也不构建容器镜像。`plan` 只需要基础 CLI 和模型配置；其他 ASC 适配器保留已有依赖。
 
-动态执行需要 Linux x86_64、可用的本地 Docker daemon、Compose、网络 namespace、防火墙/conntrack 能力及 ptrace/strace。除工作容器申请的 4096 MiB 外，还需为控制器和侧车预留内存。准备好宿主后，显式安装相同版本的可选组件：
+动态执行时，再下载并校验 `skill-score-bundle-<version>-linux-x86_64.tar.gz`，解压到同一目录。它包含小型可选 raw 包、源码归档和运行时清单，其中有 Dockerfile、构建脚本、worker 代码和依赖锁；不包含预构建容器镜像或第三方 Python 环境。准备 Linux x86_64、本地 Docker 与 BuildKit/Compose、可用的网络 namespace、防火墙/conntrack 及 ptrace/strace，然后显式安装：
 
 ```sh
 sudo anolisa --install-mode system install sec-core-skill-score --backend raw \
   --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
 ```
 
-这个小 raw 包包含 ASC 自有 worker、共享契约、依赖锁文件和安装 helper。安装时从上游分发源获取锁定的 Python 3.12/Harbor 依赖，校验独立的 `skill-score-images.tar.gz` 后加载，再核对两个镜像的不可变 image ID 和平台。两个 raw 包均不包含容器镜像。工作镜像与 ASC 网络侧车缺一不可；单机 Linux 与 FC 使用同一网络实现。
+安装阶段从已校验的源码构建工作镜像和 ASC 网络侧车，获取锁定的 Python 3.12/Harbor 依赖，并验证生成的运行环境。基础镜像固定 digest；Dockerfile 内的包管理器仍需要联网。系统包和部分传递依赖并未全部锁定，因此不同构建可能得到不同 image ID。安装侧生成 `image-build.json`，绑定发布清单摘要、实际基础镜像、工具清单和两个镜像的不可变 config ID，以及 OCI 导出中存在的 manifest ID；就绪检查和执行都核验该回执，不承诺预先知道输出 digest。经典 Docker 导出只绑定已核验的 config ID，不生成虚假的 manifest ID。构建失败、超时或取消时提示受限诊断日志路径；成功后删除日志。
+
+当前执行后端需要这两个镜像。组件准备最多 30 分钟（镜像构建子进程上限 25 分钟），磁盘需容纳镜像层及临时本地导出；除工作容器的 4096 MiB 外，还需为控制器和侧车预留内存。构建或网络失败会中止安装，不激活不完整环境。`ANOLISA_SKILL_SCORE_SOURCE_DIR` 可提供已校验的 Python/uv 归档与 wheel；`ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` 禁止依赖下载回退，但镜像构建仍需可联网的构建环境；`ANOLISA_SKILL_SCORE_OFFLINE=1` 则拒绝全新镜像构建。已经准备完成的 FC 模板恢复时不下载、不重建。
 
 `run` 先检查就绪状态，依赖缺失或不一致时中止并给出安装/修复建议，不在执行中下载、构建或拉取。没有 `prepare` 命令。更新基础组件不会自动更新或安装可选组件，需要显式把两者安装/更新至兼容版本。`install --all` 是明确安装索引中全部组件的操作，也包含可选组件。
 
@@ -91,16 +93,16 @@ Report-v1 通过 `content_hash` 绑定任务，将 `decision`/`score` 与 `execu
 
 ASC 通过公开任务 Compose API 使用未修改的 Harbor 0.22.0。工作容器共享 ASC 侧车的网络 namespace，不持有 Docker socket 或网络管理权限。侧车采用固定模型主机 TCP 策略，保留本地目标/ICMP 直连，拒绝其他流量；它不是通用域名防火墙。独立只读的域名映射保证工作容器修改 hosts 文件不会重定向代理。IPv6 需要单独验收。
 
-SkillEval 负责 FC 模板、外层实例生命周期、凭据注入、传输、取消和运维。模板构建时显式安装匹配的基础/可选组件，加载一次校验过的归档。恢复后的实例执行与单机相同的 ASC CLI。ASC 只管理本请求的内层 Docker 资源，其回收状态与 SkillEval 的外层 FC 回收分别记录。
+SkillEval 负责 FC 模板、外层实例生命周期、凭据注入、传输、取消和运维。模板构建时显式安装匹配的基础/可选组件，构建并校验两个镜像，保存构建回执。恢复后的实例执行与单机相同的 ASC CLI。ASC 只管理本请求的内层 Docker 资源，其回收状态与 SkillEval 的外层 FC 回收分别记录。
 
-Skill 的业务依赖必须位于 ASC 工作镜像内。仅在外层 FC 模板安装文档库或 Office 工具，被测 Skill 无法使用。部署方可复用固定版本的功能镜像 Dockerfile 构建业务依赖，再叠加 ASC 的 Agent 与采证层。记录配方提交与校验和、上游基础镜像 digest、实际安装版本及最终镜像身份。按同一配方重新构建，不代表结果与已有发布镜像完全相同。生成的 ASC 镜像仍通过同一套校验后的归档交付，供单机与 FC 执行复用。
+Skill 的业务依赖必须位于 ASC 工作镜像内。仅在外层 FC 模板安装文档库或 Office 工具，被测 Skill 无法使用。部署方可复用固定版本的功能镜像 Dockerfile 构建业务依赖，再叠加 ASC 的 Agent 与采证层。记录配方提交与校验和、上游基础镜像 digest、实际安装版本及最终镜像身份。按同一配方重新构建，不代表结果与已有发布镜像完全相同。单机或 FC 安装各自记录已验证的镜像构建回执。
 
 能力合入主线并通过相同验收后，把可信 release/index 来源从 fork 切到正式发布渠道，保留 CLI、组件名称、模型配置与 task/report 契约。OCI 分发是未来优化，不是首版或正式发布前置条件。
 
 ## 构建与验证
 
-在 Linux 上使用固定 Rust toolchain 与 Docker/Compose 开发。`packaging/skill-score/build-preview.sh` 构建原生基础包、可选 raw 组件、镜像归档、配套安装器及 release-v3 元数据，绑定源码和制品身份。旧 `RAW_SKILL_SCORE_PAYLOAD` 路径被拒绝，不再包含评分 Python 3.11 环境；保留的 Python 评分器仅用作差分测试 oracle。
+在 Linux 上使用固定 Rust toolchain 与 Docker/Compose 开发。`packaging/skill-score/build-preview.sh` 构建原生基础包、可选源码组件、配套安装器及 release-v4 元数据，再输出两个独立归档，绑定源码和制品身份。旧 `RAW_SKILL_SCORE_PAYLOAD` 路径被拒绝，不再包含评分 Python 3.11 环境；保留的 Python 评分器仅用作差分测试 oracle。
 
-使用预装业务依赖的基础镜像时，将 `ASC_WORK_BASE_IMAGE` 设为按 digest 固定的仓库引用或本地不可变 Docker image ID。本地镜像还需通过 `ASC_WORK_BASE_RECIPE` 指向 JSON，包含 `source_repository`、`source_commit`、`dockerfile_path`、`dockerfile_sha256` 和 `upstream_base_image`（`reference`、`image_id`、`platform`）。构建程序通过 Docker 核对上游引用和平台，将配方记入工作基础镜像元数据，并给预览版本追加 `.base.<12位image-ID>`。自定义基础镜像的包名与 release tag 因而区别于自动发布的默认预览版。这些是维护者的构建输入，终端用户运行 Skill 不需要选择。Docker image ID 可能随存储后端表示配置或 manifest 身份，不能混同于归档校验和，也不能据此虚构仓库 digest。
+使用预装业务依赖的基础镜像时，在显式安装阶段设置 `ANOLISA_SKILL_SCORE_BASE_IMAGE`，使用按 digest 固定的仓库引用或本地不可变 Docker image ID。本地镜像还需通过 `ANOLISA_SKILL_SCORE_BASE_RECIPE` 指向 JSON，包含 `source_repository`、`source_commit`、`dockerfile_path`、`dockerfile_sha256` 和 `upstream_base_image`（`reference`、`image_id`、`platform`）。构建器验证来源/上游身份，并将实际输出 ID 记录到本次安装回执。这些是可信部署输入，不是每任务可配置项。不能混同 Docker ID 与归档校验和，也不能为未推送镜像虚构仓库 digest。
 
 预览工作流在发布前检查已安装包行为和网络控制。独立 Linux CLI 与 FC SkillEval 的真实模型运行分别验收。先冻结标签，分别报告正常/违规样本、激活情况、不完整执行和清理；小样本零误报不代表总体误报率。回滚与验收要求见[原生设计](../../../../src/agent-sec-core/docs/design/skill-score-native-design_zh.md)。

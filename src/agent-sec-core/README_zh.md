@@ -47,7 +47,7 @@ CLI 命令与集成 capability surface。
 
 ## 可选 Skill 安全评测
 
-`agent-sec-cli skillsec score plan/run` 提供 Rust 原生规划和评分。基础 `sec-core` 安装保持轻量，需要 Harbor 动态执行时显式安装匹配的 `sec-core-skill-score` 组件；安装阶段获取锁定的第三方依赖和单独校验的镜像归档。单机 Linux 与 SkillEval FC 复用同一 CLI、worker 和 ASC 网络侧车。共享模型服务通过密钥引用配置，已有本地扫描器默认行为保持不变。详见[安装、接口与验证指南](../../docs/user-guide/zh/agent-sec-core/skill-score.md)。
+`agent-sec-cli skillsec score plan/run` 提供 Rust 原生规划和评分。基础 `sec-core` 安装保持轻量，需要 Harbor 动态执行时显式安装匹配的 `sec-core-skill-score` 组件；小型可选构建包不含预构建镜像；显式安装时构建两个镜像、记录其身份，并获取锁定的第三方依赖。单机 Linux 与 SkillEval FC 复用同一 CLI、worker 和 ASC 网络侧车。共享模型服务通过密钥引用配置，已有本地扫描器默认行为保持不变。详见[安装、接口与验证指南](../../docs/user-guide/zh/agent-sec-core/skill-score.md)。
 
 共享模型配置也支持显式选择 `anthropic-compatible` 代理。ASC 在评分和 Agent 执行时使用代理地址及不透明凭据；身份归属和计量由调用平台与代理负责，已有百炼配置仍可使用。
 

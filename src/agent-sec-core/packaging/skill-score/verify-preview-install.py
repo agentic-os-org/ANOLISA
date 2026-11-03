@@ -25,8 +25,17 @@ def main() -> None:
     parser.add_argument("--base-only", action="store_true")
     args = parser.parse_args()
     release = json.loads((args.release / "release-manifest.json").read_text())
-    assert release["schema_version"] == "agent-sec-skill-score/release-v3"
+    assert release["schema_version"] == "agent-sec-skill-score/release-v4"
+    base_files = {
+        release["raw_packages"]["sec-core"],
+        release["installer"]["file"],
+        "index.toml",
+        "index-v2.toml",
+        "components-v2.toml",
+    }
     for artifact in release["artifacts"]:
+        if args.base_only and artifact["file"] not in base_files:
+            continue
         path = args.release / artifact["file"]
         with path.open("rb") as stream:
             assert (
@@ -93,7 +102,18 @@ def main() -> None:
         )
         assert ready["manifest_sha256"] == identity
         assert ready["version"] == release["version"]
-        assert ready["images"] == runtime["images"]
+        receipt = json.loads(
+            (root / "environments" / identity / "image-build.json").read_text()
+        )
+        assert receipt["manifest_sha256"] == identity
+        assert receipt["source_commit"] == release["source_commit"]
+        assert ready["images"] == receipt["images"]
+        assert (
+            ready["image_build_sha256"]
+            == hashlib.sha256(
+                (root / "environments" / identity / "image-build.json").read_bytes()
+            ).hexdigest()
+        )
         lock = root / ".lifecycle.lock"
         assert lock.is_file() and not lock.is_symlink() and lock.stat().st_nlink == 1
         requests = root / "requests"
@@ -123,8 +143,9 @@ def main() -> None:
         actual = readiness["actual_image_ids"]
         assert set(actual) == {"work", "egress"}
         assert all(
-            actual[item["role"]] in (item["id"], item["manifest_id"])
-            for item in runtime["images"]
+            actual[item["role"]]
+            in (item[key] for key in ("id", "manifest_id") if key in item)
+            for item in receipt["images"]
         )
         checks["actual_image_ids"] = actual
         checks["optional_readiness_and_cleanup"] = True

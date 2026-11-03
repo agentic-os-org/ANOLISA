@@ -76,7 +76,8 @@ def package_contract(
                     "base raw package cannot contain the optional scoring runtime"
                 )
             if component == "sec-core-skill-score" and (
-                "/python/" in name or "/site-packages/" in name
+                name.startswith("lib/anolisa/sec-core-skill-score/python/")
+                or "/site-packages/" in name
             ):
                 raise ValueError(
                     "optional raw package cannot bundle third-party runtime contents"
@@ -108,9 +109,6 @@ def prepare(
         raise ValueError("preview version must bind the source commit")
     required = [
         "runtime-manifest.json",
-        "skill-score-images.tar.gz",
-        "images.json",
-        "tool-inventory.json",
         "source.tar.gz",
         INSTALLER,
     ]
@@ -133,25 +131,15 @@ def prepare(
     runtime = json.loads(runtime_bytes)
     if runtime["version"] != version or runtime["source_commit"] != source_commit:
         raise ValueError("runtime manifest identity differs from release")
-    base = runtime["work_base_image"]
     if (
-        json.loads((directory / "images.json").read_text()).get("work_base_image")
-        != base
-        or json.loads((directory / "tool-inventory.json").read_text()).get(
-            "work_base_image"
+        runtime.get("schema") != "agent-sec-skill-score/runtime-v2"
+        or runtime.get("image_build", {}).get("entry")
+        != "image-source/skill-score-runtime/image/build.py"
+        or any(
+            name in runtime for name in ("images", "image_archive", "work_base_image")
         )
-        != base
-        or ".base." in version
-        and not version.endswith(".base." + base["image_id"][7:19])
     ):
-        raise ValueError("work base image identity differs across release metadata")
-    archive = runtime["image_archive"]
-    image_path = directory / archive["file"]
-    if (
-        archive["sha256"] != digest(image_path)
-        or archive["bytes"] != image_path.stat().st_size
-    ):
-        raise ValueError("runtime image archive differs from release")
+        raise ValueError("source release must bind build inputs, not prebuilt images")
     index = 'schema_version = 1\nchannel = "stable"\npublisher = "asc-fork-preview"\n'
     for component, name in packages.items():
         contract = package_contract(directory / name, component, version, runtime_bytes)
@@ -173,7 +161,7 @@ manifest_digest = "sha256:{hashlib.sha256(contract).hexdigest()}"
     shutil.copyfile(components, directory / "components-v2.toml")
     required.extend(("index-v2.toml", "index.toml", "components-v2.toml"))
     manifest = {
-        "schema_version": "agent-sec-skill-score/release-v3",
+        "schema_version": "agent-sec-skill-score/release-v4",
         "source_commit": source_commit,
         "development_build": False,
         "component": "sec-core",
@@ -191,7 +179,7 @@ manifest_digest = "sha256:{hashlib.sha256(contract).hexdigest()}"
         "python_worker": runtime["python"]["version"],
         "harbor": runtime["harbor_version"],
         "build_libc": dict(zip(("name", "version"), platform.libc_ver())),
-        "images": json.loads((directory / "images.json").read_text()),
+        "image_build": runtime["image_build"],
         "artifacts": [
             {
                 "file": name,

@@ -63,7 +63,7 @@ impl Runtime {
                     .map(|s| s.trim().trim_matches('"'))
             })
             .ok_or_else(|| Error::Runtime("installed base component version is missing".into()))?;
-        if text(&manifest, "schema") != "agent-sec-skill-score/runtime-v1"
+        if text(&manifest, "schema") != "agent-sec-skill-score/runtime-v2"
             || text(&manifest, "component") != "sec-core-skill-score"
             || text(&manifest, "protocol_version") != PROTOCOL
             || text(&manifest, "version") != base_version
@@ -78,7 +78,6 @@ impl Runtime {
             "protocol_version",
             "worker_version",
             "harbor_version",
-            "images",
         ] {
             if ready[field] != manifest[field] {
                 return Err(Error::Runtime(format!(
@@ -91,6 +90,11 @@ impl Runtime {
                 "scoring interpreter version mismatch".into(),
             ));
         }
+        let mut receipt_bytes = Vec::new();
+        File::open(environment.join("image-build.json"))?
+            .take(1_048_577)
+            .read_to_end(&mut receipt_bytes)?;
+        let receipt = verify_image_build(&manifest, &ready, &digest, &receipt_bytes)?;
         let python = environment.join("python/bin/python3.12");
         let entry = environment.join("worker-entry.py");
         if !python.is_file() || !entry.is_file() {
@@ -100,7 +104,7 @@ impl Runtime {
         }
         require_system_docker()?;
         let deadline = Instant::now() + Duration::from_secs(45);
-        let image_ids = resolve_image_ids(&manifest, |id| {
+        let image_ids = resolve_image_ids(&receipt, |id| {
             docker_until(&["image".into(), "inspect".into(), id.into()], deadline)
         })?;
         Ok(Self {
@@ -254,6 +258,33 @@ fn immutable_image_id(value: &str) -> bool {
     })
 }
 
+fn verify_image_build(
+    manifest: &Value,
+    ready: &Value,
+    digest: &str,
+    bytes: &[u8],
+) -> Result<Value> {
+    if bytes.len() > 1_048_576
+        || text(ready, "image_build_sha256") != format!("{:x}", Sha256::digest(bytes))
+    {
+        return Err(Error::Runtime(
+            "image build receipt checksum mismatch; repair sec-core-skill-score".into(),
+        ));
+    }
+    let receipt: Value = serde_json::from_slice(bytes)?;
+    if text(&receipt, "schema") != "agent-sec-skill-score/image-build-v1"
+        || text(&receipt, "manifest_sha256") != digest
+        || receipt["source_commit"] != manifest["source_commit"]
+        || receipt["version"] != manifest["version"]
+        || receipt["images"] != ready["images"]
+    {
+        return Err(Error::Runtime(
+            "image build receipt differs from installed source release".into(),
+        ));
+    }
+    Ok(receipt)
+}
+
 fn resolve_image_ids(
     manifest: &Value,
     mut inspect: impl FnMut(&str) -> Option<String>,
@@ -266,20 +297,25 @@ fn resolve_image_ids(
                 .filter(|image| {
                     text(image, "role") == *role
                         && immutable_image_id(text(image, "id"))
-                        && immutable_image_id(text(image, "manifest_id"))
+                        && image.get("manifest_id").is_none_or(|identity| {
+                            identity.as_str().is_some_and(immutable_image_id)
+                        })
                         && text(image, "platform") == "linux/amd64"
                 })
                 .count()
                 != 1
         })
     {
-        return Err(Error::Runtime("manifest needs exactly two Linux amd64 images with fixed config and manifest identities".into()));
+        return Err(Error::Runtime("manifest needs exactly two Linux amd64 images with fixed config and optional manifest identities".into()));
     }
     let mut actual = json!({});
     for image in images {
         let role = text(image, "role");
-        let allowed = [text(image, "id"), text(image, "manifest_id")];
-        for candidate in allowed {
+        let allowed: Vec<&str> = ["id", "manifest_id"]
+            .iter()
+            .filter_map(|key| image.get(key).and_then(Value::as_str))
+            .collect();
+        for candidate in &allowed {
             let Some(output) = inspect(candidate) else {
                 continue;
             };
@@ -297,7 +333,7 @@ fn resolve_image_ids(
                 || text(inspected, "Architecture") != "amd64"
             {
                 return Err(Error::Runtime(format!(
-                    "local {role} image identity or platform differs from its verified archive"
+                    "local {role} image identity or platform differs from its verified build receipt"
                 )));
             }
             actual[role] = inspected["Id"].clone();
@@ -305,7 +341,7 @@ fn resolve_image_ids(
         }
         if actual.get(role).is_none() {
             return Err(Error::Runtime(format!(
-                "required local {role} image is unavailable; repair sec-core-skill-score from its verified archive"
+                "required local {role} image is unavailable; repair sec-core-skill-score from its verified build sources"
             )));
         }
     }
@@ -905,6 +941,35 @@ mod tests {
     }
 
     #[test]
+    fn image_build_receipt_binds_source_ready_and_exact_bytes() {
+        let manifest = json!({"source_commit":"a".repeat(40),"version":"1.1.0"});
+        let receipt = json!({"schema":"agent-sec-skill-score/image-build-v1",
+            "manifest_sha256":"b".repeat(64),"source_commit":manifest["source_commit"],
+            "version":"1.1.0","images":[{"role":"work"},{"role":"egress"}]});
+        let bytes = serde_json::to_vec(&receipt).unwrap();
+        let ready = json!({"images":receipt["images"],
+            "image_build_sha256":format!("{:x}", Sha256::digest(&bytes))});
+        assert!(verify_image_build(&manifest, &ready, &"b".repeat(64), &bytes).is_ok());
+        for field in [
+            "schema",
+            "manifest_sha256",
+            "source_commit",
+            "version",
+            "images",
+        ] {
+            let mut changed = receipt.clone();
+            changed[field] = json!("changed");
+            let bytes = serde_json::to_vec(&changed).unwrap();
+            let mut matching_hash = ready.clone();
+            matching_hash["image_build_sha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+            assert!(
+                verify_image_build(&manifest, &matching_hash, &"b".repeat(64), &bytes).is_err()
+            );
+        }
+        assert!(verify_image_build(&manifest, &ready, &"b".repeat(64), b"{}").is_err());
+    }
+
+    #[test]
     fn evidence_symlinks_and_hardlinks_never_redirect_redaction() -> Result<()> {
         let root = tempfile::tempdir()?;
         let external = tempfile::tempdir()?;
@@ -1263,6 +1328,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_receipt_selects_only_config_ids() -> Result<()> {
+        let mut manifest = image_manifest();
+        for image in manifest["images"]
+            .as_array_mut()
+            .ok_or_else(|| Error::Runtime("missing images".into()))?
+        {
+            image
+                .as_object_mut()
+                .ok_or_else(|| Error::Runtime("missing image".into()))?
+                .remove("manifest_id");
+        }
+        let selected = resolve_image_ids(&manifest, |candidate| Some(inspected_image(candidate)))?;
+        assert_eq!(selected["work"], manifest["images"][0]["id"]);
+        assert_eq!(selected["egress"], manifest["images"][1]["id"]);
+        Ok(())
+    }
+
+    #[test]
     fn config_lookup_may_resolve_to_its_verified_manifest_id() -> Result<()> {
         let manifest = image_manifest();
         let selected = resolve_image_ids(&manifest, |candidate| {
@@ -1298,6 +1381,9 @@ mod tests {
             original["images"][0]
         ]);
         malformed.push(extra);
+        let mut null_identity = original.clone();
+        null_identity["images"][0]["manifest_id"] = Value::Null;
+        malformed.push(null_identity);
         for manifest in malformed {
             let mut calls = 0;
             assert!(

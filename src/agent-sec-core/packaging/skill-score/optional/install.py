@@ -25,6 +25,7 @@ from typing import Any
 
 # Helpers also support direct --check invocation without leaving unowned bytecode.
 sys.dont_write_bytecode = True
+import image_build  # noqa: E402
 from lifecycle import (  # noqa: E402
     exclusive,
     pending_cleanup,
@@ -275,10 +276,10 @@ def network_check(image_ids: dict[str, str]) -> None:
 
 
 def images_ready(manifest: dict[str, Any]) -> dict[str, str] | None:
-    """Resolve only archive-bound IDs, never mutable image names."""
+    """Resolve only build-bound IDs, never mutable image names."""
     resolved = {}
     for image in manifest["images"]:
-        for identity in (image["id"], image["manifest_id"]):
+        for identity in (image[key] for key in ("id", "manifest_id") if key in image):
             try:
                 values = json.loads(
                     run(["docker", "image", "inspect", identity], timeout=15)
@@ -300,7 +301,7 @@ def images_ready(manifest: dict[str, Any]) -> dict[str, str] | None:
 
 def validate_manifest(manifest: dict[str, Any], payload: Path, prefix: Path) -> None:
     if (
-        manifest.get("schema") != "agent-sec-skill-score/runtime-v1"
+        manifest.get("schema") != "agent-sec-skill-score/runtime-v2"
         or manifest.get("component") != "sec-core-skill-score"
         or manifest.get("protocol_version") != "agent-sec-skill-score/worker-v1"
         or manifest.get("platform") != "linux/amd64"
@@ -319,21 +320,19 @@ def validate_manifest(manifest: dict[str, Any], payload: Path, prefix: Path) -> 
         raise ValueError(
             "install the matching sec-core version before sec-core-skill-score"
         )
-    images = manifest["images"]
-    if len(images) != 2 or {item["role"] for item in images} != {
-        "work",
-        "egress",
-    }:
-        raise ValueError("runtime must bind exactly work and egress images")
-    for image in images:
-        if (
-            any(
-                not re.fullmatch(r"sha256:[a-f0-9]{64}", image.get(key, ""))
-                for key in ("id", "manifest_id")
-            )
-            or image["platform"] != "linux/amd64"
-        ):
-            raise ValueError("runtime image must have an immutable platform-bound ID")
+    build = manifest.get("image_build", {})
+    if (
+        build.get("entry") != "image-source/skill-score-runtime/image/build.py"
+        or not re.fullmatch(
+            r"[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}", build.get("default_base", "")
+        )
+        or any(
+            key in manifest for key in ("images", "image_archive", "work_base_image")
+        )
+    ):
+        raise ValueError(
+            "runtime must bind image build sources instead of prebuilt images"
+        )
     for item in manifest["files"]:
         if not check_file(payload / safe_relative(item["file"]), item):
             raise ValueError("first-party candidate file checksum mismatch")
@@ -505,9 +504,11 @@ def ready_matches(
 ) -> bool:
     try:
         ready = json.loads((environment / "ready.json").read_text())
+        receipt = image_build.load(environment, manifest, manifest_digest)
         if (
             ready["manifest_sha256"] != manifest_digest
-            or ready["images"] != manifest["images"]
+            or ready["images"] != receipt["images"]
+            or ready["image_build_sha256"] != digest(environment / "image-build.json")
         ):
             return False
         inventory_path = environment / "installed-files.json"
@@ -603,29 +604,36 @@ def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     source_value = os.environ.get("ANOLISA_SKILL_SCORE_SOURCE_DIR")
     source = Path(source_value).resolve() if source_value else None
-    offline = os.environ.get("ANOLISA_SKILL_SCORE_OFFLINE") == "1"
-    image_ids = images_ready(manifest)
-    if image_ids is None:
-        archive = fetch(manifest["image_archive"], cache, source, offline)
-        run(["docker", "load", "--input", str(archive)], timeout=300)
-        image_ids = images_ready(manifest)
-        if image_ids is None:
-            raise ValueError(
-                "loaded image IDs/platforms differ from the verified manifest"
-            )
+    offline = (
+        os.environ.get("ANOLISA_SKILL_SCORE_OFFLINE") == "1"
+        or os.environ.get("ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE") == "1"
+    )
     environments = prefix / "lib/anolisa/sec-core-skill-score/environments"
     environments.mkdir(parents=True, exist_ok=True)
     target = environments / manifest_digest
     if ready_matches(target, manifest_digest, manifest):
-        network_check(image_ids)
-        environment_check(target, manifest, environments.parent / "recovery", image_ids)
-        record_environment(target, manifest_digest)
-        return target
+        receipt = image_build.load(target, manifest, manifest_digest)
+        image_ids = images_ready(receipt)
+        if image_ids is not None and image_build.matches_override(receipt):
+            network_check(image_ids)
+            environment_check(
+                target, manifest, environments.parent / "recovery", image_ids
+            )
+            record_environment(target, manifest_digest)
+            return target
     staging = Path(tempfile.mkdtemp(prefix=".candidate-", dir=environments))
     candidate = staging / manifest_digest
     candidate.mkdir()
     shutil.copyfile(manifest_path, candidate / "runtime-manifest.json")
     try:
+        receipt = image_build.build(
+            payload, candidate, manifest, manifest_digest, check_cancelled, cache
+        )
+        image_ids = images_ready(receipt)
+        if image_ids is None:
+            raise ValueError(
+                "built images disappeared or changed platform before activation"
+            )
         build_environment(candidate, payload, manifest, cache, source, offline)
         network_check(image_ids)
         environment_check(
@@ -653,7 +661,8 @@ def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
             "worker_version": manifest["worker_version"],
             "python_version": manifest["python"]["version"],
             "harbor_version": manifest["harbor_version"],
-            "images": manifest["images"],
+            "images": receipt["images"],
+            "image_build_sha256": digest(candidate / "image-build.json"),
             "installed_files_sha256": digest(inventory),
         }
         (candidate / "ready.json").write_text(json.dumps(ready, indent=2) + "\n")
@@ -683,7 +692,7 @@ def main() -> None:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Verify only; never download, load images, or repair",
+        help="Verify only; never download, build images, or repair",
     )
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, interrupted)
@@ -701,7 +710,8 @@ def main() -> None:
                 require_local_docker()
                 identity = digest(manifest_path)
                 environment = root / "environments" / identity
-                image_ids = images_ready(manifest)
+                receipt = image_build.load(environment, manifest, identity)
+                image_ids = images_ready(receipt)
                 if image_ids is None or not ready_matches(
                     environment, identity, manifest
                 ):
@@ -710,7 +720,15 @@ def main() -> None:
                     )
                 network_check(image_ids)
                 environment_check(environment, manifest, root / "recovery", image_ids)
-            print(json.dumps({"status": "ready", "actual_image_ids": image_ids}))
+            print(
+                json.dumps(
+                    {
+                        "status": "ready",
+                        "actual_image_ids": image_ids,
+                        "image_build_sha256": digest(environment / "image-build.json"),
+                    }
+                )
+            )
             return
         else:
             if args.cache_dir is None:

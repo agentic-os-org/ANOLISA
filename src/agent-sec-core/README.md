@@ -50,7 +50,7 @@ CLI command and integration capability surface through Rust implementations.
 
 ## Optional Skill safety assessment
 
-`agent-sec-cli skillsec score plan/run` provides native Rust planning and scoring. The base `sec-core` install stays lightweight; explicitly install the matching `sec-core-skill-score` component for Harbor execution. Its installation fetches locked third-party dependencies and a separately verified image archive. Single-machine Linux and SkillEval FC use the same CLI, worker and ASC network sidecar. Configure the shared model service with a secret reference; existing local scanner defaults remain unchanged. See the [installation, contract and validation guide](../../docs/user-guide/en/agent-sec-core/skill-score.md).
+`agent-sec-cli skillsec score plan/run` provides native Rust planning and scoring. The base `sec-core` install stays lightweight; explicitly install the matching `sec-core-skill-score` component for Harbor execution. The optional source bundle contains no prebuilt images: explicit installation builds both images, records their identities, and obtains locked third-party dependencies. Single-machine Linux and SkillEval FC use the same CLI, worker and ASC network sidecar. Configure the shared model service with a secret reference; existing local scanner defaults remain unchanged. See the [installation, contract and validation guide](../../docs/user-guide/en/agent-sec-core/skill-score.md).
 
 The shared model configuration also accepts an explicitly selected `anthropic-compatible` proxy. ASC uses the proxy address and opaque credential for both scoring and Agent execution; identity attribution and metering remain with the calling platform and proxy. The existing Bailian configuration remains available.
 
