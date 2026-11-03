@@ -144,7 +144,7 @@ npm run build
 测试使用内存数据库，无需文件系统配置：
 
 ```bash
-npm test                              # 全部 64 个测试
+npm test                              # 运行全部测试套件
 npx vitest run test/assembler.test.ts # 运行单个测试套件
 ```
 
