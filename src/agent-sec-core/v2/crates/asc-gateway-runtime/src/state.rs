@@ -21,6 +21,15 @@ const MAX_STATE_BYTES: u64 = 1024 * 1024;
 pub(crate) struct Attachment {
     pub(crate) process: ProcessIdentity,
     pub(crate) cgroup: String,
+    /// Cleanup references preserve intersecting groups without moving their owned members.
+    #[serde(default)]
+    pub(crate) shared_cgroups: BTreeSet<String>,
+}
+
+impl Attachment {
+    pub(crate) fn cgroups(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.cgroup.as_str()).chain(self.shared_cgroups.iter().map(String::as_str))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +86,11 @@ impl State {
                 ));
             }
             for attachment in domain.bindings.values() {
-                if !crate::nft::is_safe_cgroup_path(&attachment.cgroup) {
+                if attachment.shared_cgroups.contains(&attachment.cgroup)
+                    || attachment
+                        .cgroups()
+                        .any(|path| !crate::nft::is_safe_cgroup_path(path))
+                {
                     return Err(GatewayError::internal(
                         "unsafe gateway attachment projection",
                     ));

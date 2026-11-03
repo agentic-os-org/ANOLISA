@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use asc_credential_store::{CredentialId, ScopeId};
+use asc_credential_store::{CredentialId, CredentialStore, ScopeId, Secret};
+use asc_gateway_plan::github_credential_spec;
 use asc_pap::PapRepository;
 use asc_policy_repository::{BindingStateRepository, BindingStateWrite, WriteResult};
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
@@ -71,6 +72,7 @@ struct HostLog {
     operations: Vec<&'static str>,
     failed_operation: Option<&'static str>,
     changed_on_attach: Option<u32>,
+    failed_attach: Option<u32>,
     fence: Option<(String, String)>,
     process_failure: Option<(u32, GatewayErrorKind)>,
     owner_sensitive_on_start: bool,
@@ -138,7 +140,7 @@ impl Host for FakeHost {
     fn stop_unit(&self, _: &str) -> Result<(), GatewayError> {
         let mut log = self.log();
         log.operations.push("stop");
-        if log.failed_operation == Some("stop") {
+        if matches!(log.failed_operation, Some("stop" | "all")) {
             return Err(GatewayError::unavailable("stop failed"));
         }
         log.active = false;
@@ -152,7 +154,7 @@ impl Host for FakeHost {
         log.rules.push(rules.into());
         if rules == crate::nft::render_delete() {
             log.operations.push("unroute");
-            if log.failed_operation == Some("unroute") {
+            if matches!(log.failed_operation, Some("unroute" | "all")) {
                 return Err(GatewayError::unavailable("unroute failed"));
             }
         }
@@ -166,6 +168,9 @@ impl Host for FakeHost {
     ) -> Result<(), GatewayError> {
         self.verify_process(pin)?;
         let mut log = self.log();
+        if log.failed_attach == Some(pin.pid) {
+            return Err(GatewayError::unavailable("attachment interrupted"));
+        }
         log.moves.push(pin.pid);
         let changed = log.changed_on_attach == Some(pin.pid);
         let process = log.processes.get_mut(&pin.pid).unwrap();
@@ -296,13 +301,16 @@ impl DataPlane {
             thread: Some(thread),
         }
     }
-}
-impl Drop for DataPlane {
-    fn drop(&mut self) {
+    fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
         }
+    }
+}
+impl Drop for DataPlane {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 struct Fixture {
@@ -345,21 +353,39 @@ impl Fixture {
             .unwrap(),
         )
     }
-    fn key(&self, service: &GatewayService, real: &str) {
-        let path = self.root.path().join("token");
-        fs::write(&path, real).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        let outcome = service
-            .add_key(&KeyRequest {
-                credential: "github".into(),
-                secret_file: path,
-                caller_uid: 0,
-            })
+    fn key(&self, real: &str) {
+        self.put_key(real).unwrap();
+    }
+    fn put_key(&self, real: &str) -> Result<(), GatewayError> {
+        // Seed through the real store API before a service takes its single-writer lock.
+        let mut store = if self.config.store_dir.exists() {
+            CredentialStore::open(&self.config.store_dir)?
+        } else {
+            CredentialStore::create(&self.config.store_dir)?
+        };
+        store.put(github_credential_spec(), Secret::new(real.to_owned())?)?;
+        Ok(())
+    }
+    fn old_publication(&mut self) {
+        self.key(REAL);
+        let service = self.service();
+        let scope = self.scope("old-publication", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        let id = ScopeId::new(scope.scope_id.as_str()).unwrap();
+        // Model an old route without depending on Binding attachment behavior.
+        self.host
+            .apply_nft(&crate::nft::render(&[crate::nft::Redirect {
+                scope_id: &id,
+                cgroup: "agentsec.slice/old.scope",
+                port: *self.config.ports.start(),
+            }]))
             .unwrap();
-        assert_eq!(
-            serde_json::to_value(outcome).unwrap(),
-            serde_json::json!({"credential": "github"})
-        );
+        assert!(service.status(UID).ready);
+        assert_eq!(self.rules().matches("counter redirect").count(), 1);
+        assert_eq!(self.secrets()["entries"].as_array().unwrap().len(), 1);
+        // Freeze the dummy writer before injecting filesystem faults or withdrawing publication.
+        self.plane.stop();
     }
     fn secrets(&self) -> serde_json::Value {
         let manifest: serde_json::Value =
@@ -491,6 +517,29 @@ fn process(pid: u32) -> CanonicalProcess {
     }
 }
 
+fn assert_cgroup_routes(
+    fixture: &Fixture,
+    paths: &std::collections::BTreeSet<String>,
+    count: usize,
+) {
+    let rules = fixture.rules();
+    for path in paths {
+        assert!(rules.contains(path.trim_start_matches('/')), "path={path}");
+    }
+    assert_eq!(rules.matches("counter redirect").count(), count);
+}
+
+fn assert_cgroups_preserved(host: &FakeHost, before: &BTreeMap<u32, String>, moves: usize) {
+    let log = host.log();
+    for (pid, path) in before {
+        assert_eq!(
+            &log.processes[pid].cgroup, path,
+            "cleanup never moves or kills members"
+        );
+    }
+    assert_eq!(log.moves.len(), moves);
+}
+
 #[test]
 fn initialization_and_empty_recovery_are_pure_and_import_does_not_authorize_or_issue_fake() {
     let fixture = Fixture::new();
@@ -499,7 +548,7 @@ fn initialization_and_empty_recovery_are_pure_and_import_does_not_authorize_or_i
     fixture.service().recover().unwrap();
     assert!(!fixture.config.state_dir.exists() && !fixture.config.store_dir.exists());
     assert!(!fixture.config.runtime_dir.exists());
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     service.recover().unwrap();
     assert!(!fixture.config.state_dir.exists());
     assert_eq!(
@@ -517,10 +566,187 @@ fn initialization_and_empty_recovery_are_pure_and_import_does_not_authorize_or_i
     assert!(fixture.host.log().moves.is_empty() && fixture.host.log().operations.is_empty());
 }
 #[test]
+fn initialization_failure_withdraws_old_publication_without_changing_state_or_store() {
+    for projection_fault in ["corrupt", "unsupported", "unreadable"] {
+        let mut fixture = Fixture::new();
+        fixture.old_publication();
+        let state_file = fixture.config.state_dir.join("state.json");
+        let state = fs::read(&state_file).unwrap();
+        let store_file = fixture.config.store_dir.join("store.json");
+        let store = fs::read(&store_file).unwrap();
+        let manifest_file = fixture.config.runtime_dir.join("active.json");
+        let manifest = fs::read(&manifest_file).unwrap();
+        // Loading a valid enabled projection must also remain side-effect free.
+        drop(fixture.service());
+        assert!(fixture.host.log().operations.is_empty());
+        assert_eq!(fs::read(&state_file).unwrap(), state);
+        assert_eq!(fs::read(&store_file).unwrap(), store);
+        assert_eq!(fs::read(&manifest_file).unwrap(), manifest);
+
+        match projection_fault {
+            "corrupt" => fs::write(&state_file, b"{corrupt").unwrap(),
+            "unsupported" => {
+                let mut projection: serde_json::Value = serde_json::from_slice(&state).unwrap();
+                projection["version"] = serde_json::json!(0);
+                fs::write(&state_file, serde_json::to_vec(&projection).unwrap()).unwrap();
+            }
+            "unreadable" => {
+                // NOFOLLOW fails regardless of EUID, unlike chmod-based read faults.
+                let retained = fixture.config.state_dir.join("retained-state.json");
+                fs::rename(&state_file, &retained).unwrap();
+                symlink(&retained, &state_file).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let retained_state = fs::read(&state_file).unwrap();
+        let load_error =
+            crate::state::State::load(&fixture.config.state_dir, &fixture.config.ports)
+                .unwrap_err();
+        let error = GatewayService::new(
+            fixture.config.clone(),
+            Box::new(fixture.host.clone()),
+            fixture.repository.clone(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), load_error.kind());
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(&load_error.to_string()));
+        assert!(diagnostic.contains("gateway stopped and traffic withdrawn"));
+        assert!(!fixture.host.log().active);
+        assert_eq!(fixture.host.log().operations, vec!["stop", "unroute"]);
+        assert_eq!(fixture.rules(), crate::nft::render_delete());
+        assert!(!fixture.config.runtime_dir.exists());
+        assert_eq!(fs::read(&state_file).unwrap(), retained_state);
+        if projection_fault == "unreadable" {
+            assert!(
+                fs::symlink_metadata(&state_file)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        assert_eq!(fs::read(&store_file).unwrap(), store);
+        assert!(!diagnostic.contains(REAL));
+    }
+}
+#[test]
+fn version_two_root_only_attachments_load_and_all_shared_paths_are_validated() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let scope = fixture.scope("shared-projection", 1);
+    service.prepare_scope(&scope).unwrap();
+    let binding = fixture.instance(&scope, 77, &[]).remove(0);
+    let client = GatewayBindingClient::new(service);
+    assert!(
+        client
+            .create(&Fixture::prepared(&client, &binding))
+            .error
+            .is_none()
+    );
+    let file = fixture.config.state_dir.join("state.json");
+    let mut projection: serde_json::Value =
+        serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let attachment =
+        &mut projection["scopes"][scope.scope_id.as_str()]["bindings"][binding.binding_id.as_str()];
+    let primary = attachment["cgroup"].as_str().unwrap().to_owned();
+    attachment.as_object_mut().unwrap().remove("sharedCgroups");
+    fs::write(&file, serde_json::to_vec(&projection).unwrap()).unwrap();
+    let state =
+        crate::state::State::load(&fixture.config.state_dir, &fixture.config.ports).unwrap();
+    let id = ScopeId::new(scope.scope_id.as_str()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&state.scopes[&id].bindings[&binding.binding_id]).unwrap(),
+        serde_json::json!({
+            "process": binding.scope.process,
+            "cgroup": primary,
+            "sharedCgroups": []
+        })
+    );
+    let shared = format!("{}/agent-sec-instance-shared.scope", fixture.config.slice);
+    for path in [shared.as_str(), "a/../b", "/absolute", primary.as_str()] {
+        projection["scopes"][scope.scope_id.as_str()]["bindings"][binding.binding_id.as_str()]["sharedCgroups"] =
+            serde_json::json!([path]);
+        fs::write(&file, serde_json::to_vec(&projection).unwrap()).unwrap();
+        let loaded = crate::state::State::load(&fixture.config.state_dir, &fixture.config.ports);
+        if path == shared {
+            let state = loaded.unwrap();
+            assert_eq!(
+                serde_json::to_value(&state.scopes[&id].bindings[&binding.binding_id]).unwrap(),
+                serde_json::json!({
+                    "process": binding.scope.process,
+                    "cgroup": primary,
+                    "sharedCgroups": [shared]
+                })
+            );
+        } else {
+            assert!(loaded.is_err(), "path={path}");
+        }
+    }
+}
+
+#[test]
+fn initialization_failure_attempts_all_fences_and_reports_each_cleanup_failure() {
+    for cleanup_fault in ["stop", "unroute", "runtime", "all"] {
+        let mut fixture = Fixture::new();
+        fixture.old_publication();
+        let state_file = fixture.config.state_dir.join("state.json");
+        fs::write(&state_file, b"{corrupt").unwrap();
+        let store_file = fixture.config.store_dir.join("store.json");
+        let store = fs::read(&store_file).unwrap();
+        let runtime_failure = matches!(cleanup_fault, "runtime" | "all");
+        let retained_runtime = fixture.root.path().join("retained-runtime");
+        if runtime_failure {
+            fs::rename(&fixture.config.runtime_dir, &retained_runtime).unwrap();
+            fs::write(&fixture.config.runtime_dir, b"blocked runtime directory").unwrap();
+        }
+        fixture.host.log().failed_operation = Some(cleanup_fault);
+        let error = GatewayService::new(
+            fixture.config.clone(),
+            Box::new(fixture.host.clone()),
+            fixture.repository.clone(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), GatewayErrorKind::Internal);
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("corrupt gateway execution projection"));
+        assert!(diagnostic.contains("operator must stop proxy and withdraw traffic"));
+        assert!(diagnostic.contains("cleanup responsibility retained"));
+        assert_eq!(fixture.host.log().operations, vec!["stop", "unroute"]);
+        assert_eq!(fixture.rules(), crate::nft::render_delete());
+        assert_eq!(
+            fixture.host.log().active,
+            matches!(cleanup_fault, "stop" | "all")
+        );
+        assert_eq!(fixture.config.runtime_dir.exists(), runtime_failure);
+        if runtime_failure {
+            assert_eq!(
+                fs::read(&fixture.config.runtime_dir).unwrap(),
+                b"blocked runtime directory"
+            );
+            assert!(retained_runtime.join("active.json").exists());
+            assert!(diagnostic.contains("remove runtime: cannot remove"));
+        }
+        for (fault, message) in [
+            ("stop", "stop proxy: stop failed"),
+            ("unroute", "withdraw routing: unroute failed"),
+        ] {
+            if cleanup_fault == fault || cleanup_fault == "all" {
+                assert!(diagnostic.contains(message));
+            }
+        }
+        assert_eq!(fs::read(&state_file).unwrap(), b"{corrupt");
+        assert_eq!(fs::read(&store_file).unwrap(), store);
+        assert!(!diagnostic.contains(REAL));
+    }
+}
+#[test]
 fn preparation_is_durable_without_pid_or_proxy_and_credentials_require_ready_generation_and_ca() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("prepared", 1);
     service.prepare_scope(&scope).unwrap();
     assert_eq!(
@@ -570,14 +796,13 @@ fn preparation_is_durable_without_pid_or_proxy_and_credentials_require_ready_gen
 fn ready_and_credentials_reject_unavailable_ca_generation_or_proxy() {
     let mut fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("prepared", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
     let grant = service.credentials(UID, "prepared").unwrap();
     // Stop the writer before injecting health/CA faults so observations cannot race a repair.
-    fixture.plane.stop.store(true, Ordering::SeqCst);
-    fixture.plane.thread.take().unwrap().join().unwrap();
+    fixture.plane.stop();
     let bundle = fixture.config.runtime_dir.join("ca-bundle.pem");
     let published = fs::read(&bundle).unwrap();
     let certificate = fixture.config.runtime_dir.join("status/ca-cert.pem");
@@ -669,7 +894,7 @@ fn unsupported_cgroup_v2_refuses_empty_enable_without_host_or_state_mutation() {
 fn readiness_and_credentials_recheck_cgroup_v2_and_recovery_fails_closed() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("cgroup-health", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
@@ -698,16 +923,16 @@ fn readiness_and_credentials_recheck_cgroup_v2_and_recovery_fails_closed() {
 fn readiness_validates_ca_owned_by_the_actual_gateway_account() {
     let mut fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("gateway-owner", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
-    fixture.plane.stop.store(true, Ordering::SeqCst);
-    fixture.plane.thread.take().unwrap().join().unwrap();
-    let certificate = fixture.config.runtime_dir.join("status/ca-cert.pem");
-    std::os::unix::fs::chown(&certificate, Some(65534), None).unwrap();
+    fixture.plane.stop();
+    let actual_uid = account().uid;
+    fixture.host.log().account_uid = Some(if actual_uid == 65534 { 65533 } else { 65534 });
     assert!(!service.status(UID).ready);
-    fixture.host.log().account_uid = Some(65534);
+    assert!(service.credentials(UID, "gateway-owner").is_err());
+    fixture.host.log().account_uid = Some(actual_uid);
     assert!(service.credentials(UID, "gateway-owner").is_ok());
     assert!(service.status(UID).ready);
     fixture.host.log().account = false;
@@ -730,7 +955,7 @@ fn admission_rejects_root_and_missing_owner_without_process_scan() {
 fn canonical_snapshot_and_applying_phase_fence_side_effects() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("fenced", 1);
     service.prepare_scope(&scope).unwrap();
     let binding = fixture.instance(&scope, 77, &[]).remove(0);
@@ -748,7 +973,7 @@ fn boot_namespace_start_uid_and_descendant_groups_are_verified_before_moves() {
     for fault in ["boot", "namespace", "start", "uid", "groups"] {
         let fixture = Fixture::new();
         let service = fixture.service();
-        fixture.key(&service, REAL);
+        fixture.key(REAL);
         let scope = fixture.scope("identity", 1);
         service.prepare_scope(&scope).unwrap();
         let binding = fixture.instance(&scope, 77, &[]).remove(0);
@@ -786,7 +1011,7 @@ fn boot_namespace_start_uid_and_descendant_groups_are_verified_before_moves() {
 fn shared_process_multi_policy_is_idempotent_and_cleanup_preserves_other_instances() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("shared", 2);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
@@ -817,13 +1042,562 @@ fn shared_process_multi_policy_is_idempotent_and_cleanup_preserves_other_instanc
     assert!(!fixture.rules().contains("counter redirect"));
 }
 #[test]
+fn overlapping_scope_instances_preserve_ownership_routes_and_shared_cleanup_in_both_orders() {
+    for order in [&[77, 78][..], &[78, 77][..], &[78, 79, 77][..]] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let scope = fixture.scope("overlap", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        {
+            let mut log = fixture.host.log();
+            log.processes.insert(77, TestProcess::new(0));
+            log.processes.insert(78, TestProcess::new(77));
+            log.processes.insert(79, TestProcess::new(77));
+        }
+        let client = GatewayBindingClient::new(service.clone());
+        let mut discovered = Vec::new();
+        let mut bindings = Vec::new();
+        let mut targets = Vec::new();
+        for &pid in order {
+            let binding = fixture.instance(&scope, pid, &discovered).remove(0);
+            let prepared = Fixture::prepared(&client, &binding);
+            let report = client.create(&prepared);
+            assert!(
+                report.error.is_none(),
+                "order={order:?}, pid={pid}: {:?}",
+                report.error
+            );
+            fixture.transition(&binding, BindingStatus::Ready);
+            discovered.push(pid);
+            targets.push(prepared.target);
+            bindings.push(binding);
+        }
+        let log = fixture.host.log();
+        let cgroups: BTreeMap<_, _> = [77, 78, 79]
+            .into_iter()
+            .map(|pid| (pid, log.processes[&pid].cgroup.clone()))
+            .collect();
+        let mut moved = log.moves.clone();
+        moved.sort_unstable();
+        assert_eq!(
+            moved,
+            vec![77, 78, 79],
+            "owned members must never move again"
+        );
+        let paths: std::collections::BTreeSet<_> = cgroups.values().cloned().collect();
+        drop(log);
+        assert_cgroup_routes(&fixture, &paths, paths.len());
+        let grant = service.credentials(UID, "overlap").unwrap();
+        let unrelated = fixture.instance(&scope, 99, &discovered).remove(0);
+        let prepared = Fixture::prepared(&client, &unrelated);
+        assert!(client.create(&prepared).error.is_none());
+        fixture.transition(&unrelated, BindingStatus::Ready);
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            paths.len() + 1
+        );
+        drop(client);
+        drop(service);
+        let service = fixture.service();
+        service.recover().unwrap();
+        assert!(service.credentials(UID, "overlap").unwrap() == grant);
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            paths.len() + 1
+        );
+        let client = GatewayBindingClient::new(service.clone());
+        let parent = order.iter().position(|&pid| pid == 77).unwrap();
+        fixture.transition(&bindings[parent], BindingStatus::Deleting);
+        assert!(client.delete(&targets[parent..=parent]).error.is_none());
+        fixture.remove_record(&bindings[parent]);
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            paths.len() + 1
+        );
+        service.recover().unwrap();
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            paths.len() + 1
+        );
+        assert_cgroup_routes(&fixture, &paths, paths.len() + 1);
+        for (position, target) in targets.iter().enumerate() {
+            if position != parent {
+                fixture.transition(&bindings[position], BindingStatus::Deleting);
+                assert!(client.delete(std::slice::from_ref(target)).error.is_none());
+                fixture.remove_record(&bindings[position]);
+            }
+        }
+        assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
+        assert!(service.credentials(UID, "overlap").unwrap() == grant);
+        assert!(fixture.secrets()["retired"].as_array().unwrap().is_empty());
+        assert_cgroups_preserved(&fixture.host, &cgroups, 4);
+    }
+}
+
+#[test]
+fn multiple_groups_survive_either_cleanup_order_and_restart_after_child_root_exit() {
+    for first in [79, 77] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let scope = fixture.scope("overlap-cleanup", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        {
+            let mut log = fixture.host.log();
+            for (pid, parent) in [(77, 0), (78, 77), (79, 77), (80, 79)] {
+                log.processes.insert(pid, TestProcess::new(parent));
+            }
+        }
+        let client = GatewayBindingClient::new(service.clone());
+        let mut discovered = Vec::new();
+        let mut bindings = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        for pid in [78, 79, 77] {
+            let binding = fixture.instance(&scope, pid, &discovered).remove(0);
+            let prepared = Fixture::prepared(&client, &binding);
+            assert!(client.create(&prepared).error.is_none());
+            fixture.transition(&binding, BindingStatus::Ready);
+            discovered.push(pid);
+            bindings.insert(pid, binding);
+            targets.insert(pid, prepared.target);
+        }
+        let before: BTreeMap<_, _> = fixture
+            .host
+            .log()
+            .processes
+            .iter()
+            .map(|(pid, process)| (*pid, process.cgroup.clone()))
+            .collect();
+        assert_ne!(before[&78], before[&79]);
+        let grant = service.credentials(UID, "overlap-cleanup").unwrap();
+        fixture.transition(&bindings[&first], BindingStatus::Deleting);
+        let report = client.delete(std::slice::from_ref(&targets[&first]));
+        assert!(report.error.is_none(), "first={first}: {:?}", report.error);
+        fixture.remove_record(&bindings[&first]);
+        assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
+        if first == 79 {
+            let mut log = fixture.host.log();
+            log.processes.remove(&79);
+            log.processes.get_mut(&80).unwrap().parent = 0;
+        }
+        drop(client);
+        drop(service);
+        let service = fixture.service();
+        service.recover().unwrap();
+        assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
+        assert!(service.credentials(UID, "overlap-cleanup").unwrap() == grant);
+        assert!(
+            fixture
+                .rules()
+                .contains(before[&80].trim_start_matches('/'))
+        );
+        if first == 79 {
+            // This member is absent from both recovered pins and the fresh tree.
+            fixture.host.log().processes.get_mut(&80).unwrap().uid = 4002;
+            service.recover().unwrap();
+            assert!(
+                !fixture
+                    .rules()
+                    .contains(before[&80].trim_start_matches('/'))
+            );
+            fixture.host.log().processes.get_mut(&80).unwrap().uid = UID;
+            service.recover().unwrap();
+            assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
+        }
+        let client = GatewayBindingClient::new(service.clone());
+        for pid in [78, 77, 79].into_iter().filter(|pid| *pid != first) {
+            fixture.transition(&bindings[&pid], BindingStatus::Deleting);
+            // Deleting references must not block another live canonical owner's group.
+            service.prepare_scope(&scope).unwrap();
+            assert!(
+                client
+                    .delete(std::slice::from_ref(&targets[&pid]))
+                    .error
+                    .is_none()
+            );
+            fixture.remove_record(&bindings[&pid]);
+        }
+        assert_eq!(fixture.rules().matches("counter redirect").count(), 0);
+        assert!(service.credentials(UID, "overlap-cleanup").unwrap() == grant);
+        let expected = before
+            .into_iter()
+            .filter(|(pid, _)| first != 79 || *pid != 79)
+            .collect();
+        assert_cgroups_preserved(&fixture.host, &expected, 4);
+        let log = fixture.host.log();
+        assert_eq!(log.processes.len(), if first == 79 { 3 } else { 4 });
+        let mut moves = log.moves.clone();
+        moves.sort_unstable();
+        assert_eq!(moves, vec![77, 78, 79, 80]);
+    }
+}
+
+#[test]
+fn retry_persists_new_shared_references_before_child_cleanup_and_restart() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let scope = fixture.scope("overlap-new-reference", 1);
+    service.prepare_scope(&scope).unwrap();
+    service.enable().unwrap();
+    let client = GatewayBindingClient::new(service.clone());
+    let parent = fixture.instance(&scope, 77, &[]).remove(0);
+    let prepared = Fixture::prepared(&client, &parent);
+    fixture.host.log().failed_attach = Some(77);
+    assert!(client.create(&prepared).error.is_some());
+    fixture.host.log().failed_attach = None;
+    service.recover().unwrap();
+    let child = fixture.instance(&scope, 99, &[77]).remove(0);
+    let child_target = Fixture::prepared(&client, &child);
+    assert!(client.create(&child_target).error.is_none());
+    fixture.transition(&child, BindingStatus::Ready);
+    let source = fixture.host.log().processes[&99].cgroup.clone();
+    fixture.host.log().processes.get_mut(&99).unwrap().parent = 77;
+    assert!(client.create(&prepared).error.is_none());
+    fixture.transition(&parent, BindingStatus::Ready);
+    fixture.transition(&child, BindingStatus::Deleting);
+    let deleted = client.delete(&[child_target.target]);
+    assert!(deleted.error.is_none(), "{:?}", deleted.error);
+    fixture.remove_record(&child);
+    assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
+    drop(client);
+    drop(service);
+    let service = fixture.service();
+    service.recover().unwrap();
+    assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
+    assert!(fixture.rules().contains(source.trim_start_matches('/')));
+    assert_eq!(fixture.host.log().processes[&99].cgroup, source);
+    assert_eq!(fixture.host.log().moves, vec![99, 77]);
+    let client = GatewayBindingClient::new(service);
+    fixture.transition(&parent, BindingStatus::Deleting);
+    assert!(client.delete(&[prepared.target]).error.is_none());
+    assert_eq!(fixture.rules().matches("counter redirect").count(), 0);
+}
+
+#[test]
+fn overlapping_new_binding_records_the_owned_root_not_another_intersection() {
+    let fixture = Fixture::new();
+    fixture.key(REAL);
+    let service = fixture.service();
+    let scope = fixture.scope("overlap-owned-root", 2);
+    service.prepare_scope(&scope).unwrap();
+    service.enable().unwrap();
+    let client = GatewayBindingClient::new(service.clone());
+    let child = fixture.instance(&scope, 78, &[]);
+    let parent = fixture.instance(&scope, 79, &[78]);
+    let parent_target = Fixture::prepared(&client, &parent[0]).target;
+    for binding in [&child[0], &parent[0]] {
+        assert!(
+            client
+                .create(&Fixture::prepared(&client, binding))
+                .error
+                .is_none()
+        );
+        fixture.transition(binding, BindingStatus::Ready);
+    }
+    let before: BTreeMap<_, _> = fixture
+        .host
+        .log()
+        .processes
+        .iter()
+        .map(|(pid, process)| (*pid, process.cgroup.clone()))
+        .collect();
+    assert!(before[&78] < before[&79]);
+    fixture.host.log().processes.get_mut(&78).unwrap().parent = 79;
+    let prepared = Fixture::prepared(&client, &parent[1]);
+    assert!(client.create(&prepared).error.is_none());
+    fixture.transition(&parent[1], BindingStatus::Ready);
+    drop(client);
+    drop(service);
+    let service = fixture.service();
+    service.recover().unwrap();
+    assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
+    let client = GatewayBindingClient::new(service);
+    fixture.transition(&parent[0], BindingStatus::Deleting);
+    assert!(client.delete(&[parent_target]).error.is_none());
+    fixture.remove_record(&parent[0]);
+    assert_eq!(fixture.rules().matches("counter redirect").count(), 2);
+    fixture.transition(&parent[1], BindingStatus::Deleting);
+    assert!(client.delete(&[prepared.target]).error.is_none());
+    fixture.remove_record(&parent[1]);
+    assert_eq!(fixture.rules().matches("counter redirect").count(), 1);
+    let after: BTreeMap<_, _> = fixture
+        .host
+        .log()
+        .processes
+        .iter()
+        .map(|(pid, process)| (*pid, process.cgroup.clone()))
+        .collect();
+    assert_eq!(after, before);
+    assert_eq!(fixture.host.log().moves, vec![78, 79]);
+}
+
+#[test]
+fn overlapping_attachment_faults_preserve_sources_across_restart_and_retry() {
+    for fault in ["persist", "before-root", "after-root"] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let scope = fixture.scope("overlap-retry", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        {
+            let mut log = fixture.host.log();
+            for (pid, parent) in [(77, 0), (78, 77), (79, 77), (80, 77)] {
+                log.processes.insert(pid, TestProcess::new(parent));
+            }
+        }
+        let client = GatewayBindingClient::new(service.clone());
+        let mut discovered = Vec::new();
+        let mut sources = BTreeMap::new();
+        for pid in [78, 79] {
+            let binding = fixture.instance(&scope, pid, &discovered).remove(0);
+            let prepared = Fixture::prepared(&client, &binding);
+            assert!(client.create(&prepared).error.is_none());
+            fixture.transition(&binding, BindingStatus::Ready);
+            discovered.push(pid);
+            sources.insert(pid, fixture.host.log().processes[&pid].cgroup.clone());
+        }
+        let binding = fixture.instance(&scope, 77, &discovered).remove(0);
+        let prepared = Fixture::prepared(&client, &binding);
+        let grant = service.credentials(UID, "overlap-retry").unwrap();
+        let state_file = fixture.config.state_dir.join("state.json");
+        let retained = fixture.root.path().join("retained-state.json");
+        if fault == "persist" {
+            fs::rename(&state_file, &retained).unwrap();
+            fs::create_dir(&state_file).unwrap();
+        } else {
+            fixture.host.log().failed_attach = Some(if fault == "before-root" { 77 } else { 80 });
+        }
+        assert!(client.create(&prepared).error.is_some(), "{fault}");
+        assert_eq!(fixture.rules(), crate::nft::render_delete(), "{fault}");
+        assert!(!fixture.host.log().active);
+        if fault == "persist" {
+            fs::remove_dir(&state_file).unwrap();
+            fs::rename(&retained, &state_file).unwrap();
+        }
+        fixture.host.log().failed_attach = None;
+        drop(client);
+        drop(service);
+        let service = fixture.service();
+        service.recover().unwrap();
+        for (pid, path) in &sources {
+            assert_eq!(&fixture.host.log().processes[pid].cgroup, path, "{fault}");
+            assert!(
+                fixture.rules().contains(path.trim_start_matches('/')),
+                "{fault}"
+            );
+        }
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            sources.len()
+        );
+        let client = GatewayBindingClient::new(service.clone());
+        assert!(client.create(&prepared).error.is_none(), "{fault}");
+        assert!(
+            client.create(&prepared).error.is_none(),
+            "retry must be idempotent: {fault}"
+        );
+        fixture.transition(&binding, BindingStatus::Ready);
+        let log = fixture.host.log();
+        let mut moves = log.moves.clone();
+        moves.sort_unstable();
+        assert_eq!(moves, vec![77, 78, 79, 80], "{fault}");
+        for (pid, path) in &sources {
+            assert_eq!(&log.processes[pid].cgroup, path, "{fault}");
+        }
+        assert_eq!(log.processes[&77].cgroup, log.processes[&80].cgroup);
+        assert!(
+            sources
+                .values()
+                .any(|path| path == &log.processes[&77].cgroup)
+        );
+        drop(log);
+        drop(client);
+        drop(service);
+        let service = fixture.service();
+        service.recover().unwrap();
+        assert!(service.credentials(UID, "overlap-retry").unwrap() == grant);
+        assert_eq!(
+            fixture.rules().matches("counter redirect").count(),
+            sources.len()
+        );
+        assert_eq!(fixture.host.log().moves.len(), 4);
+    }
+}
+
+#[test]
+fn overlapping_deployment_rejects_noncanonical_owned_cross_scope_and_orphan_members() {
+    for fault in ["cross-scope", "orphan", "noncanonical", "unpinned"] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let scope = fixture.scope("overlap-rejection", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        {
+            let mut log = fixture.host.log();
+            for (pid, parent) in [(77, 0), (78, 77), (79, 77)] {
+                log.processes.insert(pid, TestProcess::new(parent));
+            }
+        }
+        let client = GatewayBindingClient::new(service.clone());
+        let child = fixture.instance(&scope, 78, &[]).remove(0);
+        let child_target = Fixture::prepared(&client, &child);
+        assert!(client.create(&child_target).error.is_none());
+        fixture.transition(&child, BindingStatus::Ready);
+        let source = fixture.host.log().processes[&78].cgroup.clone();
+        match fault {
+            "cross-scope" => {
+                let other = fixture.scope("overlap-other", 1);
+                service.prepare_scope(&other).unwrap();
+                let binding = fixture.instance(&other, 79, &[]).remove(0);
+                assert!(
+                    client
+                        .create(&Fixture::prepared(&client, &binding))
+                        .error
+                        .is_none()
+                );
+                fixture.transition(&binding, BindingStatus::Ready);
+            }
+            "orphan" => {
+                fixture.host.log().processes.get_mut(&79).unwrap().cgroup =
+                    format!("/{}/agent-sec-instance-orphan.scope", fixture.config.slice);
+            }
+            "noncanonical" => fixture.transition(&child, BindingStatus::Deleting),
+            "unpinned" => fixture.host.log().processes.get_mut(&78).unwrap().start += 1,
+            _ => unreachable!(),
+        }
+        let binding = fixture.instance(&scope, 77, &[78]).remove(0);
+        let prepared = Fixture::prepared(&client, &binding);
+        let before = fixture.host.log().moves.clone();
+        let responsibilities = service.status(0).scopes;
+        assert!(client.create(&prepared).error.is_some(), "{fault}");
+        assert_eq!(fixture.host.log().moves, before, "{fault}");
+        assert_eq!(fixture.host.log().processes[&78].cgroup, source, "{fault}");
+        assert_eq!(service.status(0).scopes, responsibilities, "{fault}");
+        drop(client);
+        drop(service);
+        let service = fixture.service();
+        service.recover().unwrap();
+        if matches!(fault, "cross-scope" | "orphan") {
+            assert!(
+                fixture.rules().contains(source.trim_start_matches('/')),
+                "{fault}"
+            );
+        } else {
+            assert!(!fixture.rules().contains("counter redirect"), "{fault}");
+        }
+        assert_eq!(fixture.host.log().moves, before, "{fault}");
+    }
+}
+
+#[test]
+fn overlapping_recovery_and_retry_recheck_root_identity_and_descendant_ownership() {
+    for fault in [
+        "root-cgroup",
+        "root-start",
+        "uid",
+        "groups",
+        "cross-scope",
+        "orphan",
+    ] {
+        let fixture = Fixture::new();
+        fixture.key(REAL);
+        let service = fixture.service();
+        let scope = fixture.scope("overlap-fences", 1);
+        service.prepare_scope(&scope).unwrap();
+        service.enable().unwrap();
+        {
+            let mut log = fixture.host.log();
+            for (pid, parent) in [(77, 0), (78, 77), (79, 77), (80, 77)] {
+                log.processes.insert(pid, TestProcess::new(parent));
+            }
+        }
+        let client = GatewayBindingClient::new(service.clone());
+        let mut discovered = Vec::new();
+        for pid in [78, 79] {
+            let binding = fixture.instance(&scope, pid, &discovered).remove(0);
+            assert!(
+                client
+                    .create(&Fixture::prepared(&client, &binding))
+                    .error
+                    .is_none()
+            );
+            fixture.transition(&binding, BindingStatus::Ready);
+            discovered.push(pid);
+        }
+        let parent = fixture.instance(&scope, 77, &discovered).remove(0);
+        let prepared = Fixture::prepared(&client, &parent);
+        assert!(client.create(&prepared).error.is_none());
+        let original: BTreeMap<_, _> = fixture
+            .host
+            .log()
+            .processes
+            .iter()
+            .map(|(pid, process)| (*pid, process.cgroup.clone()))
+            .collect();
+        if fault == "cross-scope" {
+            let other = fixture.scope("overlap-fences-other", 1);
+            service.prepare_scope(&other).unwrap();
+            let binding = fixture.instance(&other, 99, &[]).remove(0);
+            assert!(
+                client
+                    .create(&Fixture::prepared(&client, &binding))
+                    .error
+                    .is_none()
+            );
+            fixture.transition(&binding, BindingStatus::Ready);
+            let cgroup = fixture.host.log().processes[&99].cgroup.clone();
+            fixture.host.log().processes.get_mut(&80).unwrap().cgroup = cgroup;
+        } else {
+            let mut log = fixture.host.log();
+            match fault {
+                "root-cgroup" => log.processes.get_mut(&77).unwrap().cgroup = original[&79].clone(),
+                "root-start" => log.processes.get_mut(&77).unwrap().start += 1,
+                "uid" => log.processes.get_mut(&80).unwrap().uid = 4002,
+                "groups" => log.processes.get_mut(&80).unwrap().groups.push(0),
+                "orphan" => {
+                    log.processes.get_mut(&80).unwrap().cgroup =
+                        format!("/{}/agent-sec-instance-orphan.scope", fixture.config.slice);
+                }
+                _ => unreachable!(),
+            }
+        }
+        let before = fixture.host.log().moves.clone();
+        assert!(client.create(&prepared).error.is_some(), "{fault}");
+        assert_eq!(fixture.host.log().moves, before, "{fault}");
+        drop(client);
+        drop(service);
+        let service = fixture.service();
+        service.recover().unwrap();
+        let client = GatewayBindingClient::new(service.clone());
+        assert!(
+            client.create(&prepared).error.is_some(),
+            "recovery must not authorize an escaped instance: {fault}"
+        );
+        assert_eq!(fixture.host.log().moves, before, "{fault}");
+        for pid in [78, 79] {
+            assert_eq!(
+                fixture.host.log().processes[&pid].cgroup,
+                original[&pid],
+                "{fault}"
+            );
+        }
+    }
+}
+
+#[test]
 fn recovery_isolates_invalid_ready_instances_but_unknown_host_failures_close_all_routes() {
     for fault in [
         "reused", "uid", "groups", "cgroup", "exited", "unknown", "internal",
     ] {
         let fixture = Fixture::new();
         let service = fixture.service();
-        fixture.key(&service, REAL);
+        fixture.key(REAL);
         let scope = fixture.scope("recovery-isolation", 1);
         service.prepare_scope(&scope).unwrap();
         service.enable().unwrap();
@@ -904,7 +1678,7 @@ fn recovery_isolates_invalid_ready_instances_but_unknown_host_failures_close_all
 fn failed_attachment_retains_cleanup_and_stops_proxy_without_killing_targets() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("failed", 1);
     service.prepare_scope(&scope).unwrap();
     let binding = fixture.instance(&scope, 77, &[]).remove(0);
@@ -925,7 +1699,7 @@ fn failed_attachment_retains_cleanup_and_stops_proxy_without_killing_targets() {
 fn publication_rechecks_owner_permissions_before_routing() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("owner-changed", 1);
     service.prepare_scope(&scope).unwrap();
     let responsibilities = service.status(0).scopes;
@@ -943,7 +1717,7 @@ fn publication_rechecks_owner_permissions_before_routing() {
 fn scope_deletion_retires_fakes_before_binding_cleanup_and_requires_explicit_release() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("retired", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
@@ -995,7 +1769,7 @@ fn scope_deletion_retires_fakes_before_binding_cleanup_and_requires_explicit_rel
 fn committed_deletion_with_failed_canonical_read_stops_proxy_and_withdraws_routes() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("deletion-read-failure", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
@@ -1040,7 +1814,7 @@ fn committed_deletion_with_failed_canonical_read_stops_proxy_and_withdraws_route
 fn empty_scope_and_rejected_revocation_retain_durable_retirement_fence() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("empty", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
@@ -1072,7 +1846,7 @@ fn ready_scope_release_isolates_unrelated_malformed_bindings_but_orphans_fail_cl
     for orphan in [false, true] {
         let fixture = Fixture::new();
         let service = fixture.service();
-        fixture.key(&service, REAL);
+        fixture.key(REAL);
         let scope = fixture.scope("release-isolation", 1);
         service.prepare_scope(&scope).unwrap();
         let unrelated = fixture.scope("unrelated", 1);
@@ -1134,7 +1908,7 @@ fn orphan_scope_release_requires_revocation_and_no_local_or_canonical_bindings()
     for fence in ["unrevoked", "attached", "canonical-binding", "empty"] {
         let fixture = Fixture::new();
         let service = fixture.service();
-        fixture.key(&service, REAL);
+        fixture.key(REAL);
         let scope = fixture.scope("orphan-release", 1);
         service.prepare_scope(&scope).unwrap();
         if matches!(fence, "attached" | "canonical-binding") {
@@ -1185,7 +1959,7 @@ fn orphan_scope_release_requires_revocation_and_no_local_or_canonical_bindings()
 fn conflicting_import_preserves_fake_and_real_and_reimport_never_restores_retired_scope() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("import", 1);
     service.prepare_scope(&scope).unwrap();
     service.enable().unwrap();
@@ -1197,25 +1971,21 @@ fn conflicting_import_preserves_fake_and_real_and_reimport_never_restores_retire
     assert_eq!(snapshot["entries"][0]["real"], REAL);
     assert_eq!(snapshot["retired"], serde_json::json!([]));
 
-    let path = fixture.root.path().join("token");
-    fs::write(&path, OTHER_REAL).unwrap();
-    let error = service
-        .add_key(&KeyRequest {
-            credential: "github".into(),
-            secret_file: path,
-            caller_uid: 0,
-        })
-        .unwrap_err();
+    drop(service);
+    let error = fixture.put_key(OTHER_REAL).unwrap_err();
     assert_eq!(error.kind(), GatewayErrorKind::Conflict);
     for secret in [REAL, OTHER_REAL, fake.as_str()] {
         assert!(!error.to_string().contains(secret));
     }
+    let service = fixture.service();
     assert!(service.credentials(UID, "import").unwrap() == grant);
     assert_eq!(fixture.secrets(), snapshot);
     assert!(fixture.host.log().active);
     assert!(service.status(UID).ready);
 
-    fixture.key(&service, REAL);
+    drop(service);
+    fixture.key(REAL);
+    let service = fixture.service();
     assert!(service.credentials(UID, "import").unwrap() == grant);
     let unchanged = fixture.secrets();
     assert_eq!(unchanged["entries"], snapshot["entries"]);
@@ -1240,7 +2010,9 @@ fn conflicting_import_preserves_fake_and_real_and_reimport_never_restores_retire
     assert_eq!(removed["entries"], serde_json::json!([]));
     assert_eq!(removed["retired"], retired);
 
-    fixture.key(&service, OTHER_REAL);
+    drop(service);
+    fixture.key(OTHER_REAL);
+    let service = fixture.service();
     service.prepare_scope(&scope).unwrap();
     drop(service);
     let restarted = fixture.service();
@@ -1261,7 +2033,7 @@ fn conflicting_import_preserves_fake_and_real_and_reimport_never_restores_retire
 fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_overlap() {
     let fixture = Fixture::new();
     let service = fixture.service();
-    fixture.key(&service, REAL);
+    fixture.key(REAL);
     let scope = fixture.scope("pinned", 1);
     service.prepare_scope(&scope).unwrap();
     let binding = fixture.instance(&scope, 77, &[]).remove(0);
@@ -1321,7 +2093,9 @@ fn recovery_uses_pinned_scope_not_latest_policy_and_rejects_cross_scope_process_
     assert_eq!(fixture.host.log().moves, before);
 }
 #[test]
-fn private_secret_file_and_disable_order_preserve_security_boundaries() {
+#[ignore = "root-only credential file import integration; run explicitly as root"]
+fn root_import_enforces_private_files_and_preserves_ready_grants_on_conflict() {
+    assert_eq!(rustix::process::geteuid().as_raw(), 0, "requires root");
     let fixture = Fixture::new();
     let service = fixture.service();
     let path = fixture.root.path().join("token");
@@ -1332,19 +2106,64 @@ fn private_secret_file_and_disable_order_preserve_security_boundaries() {
         secret_file: path.clone(),
         caller_uid: 0,
     };
-    assert!(service.add_key(&request).is_err());
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    request.caller_uid = UID;
     assert_eq!(
         service.add_key(&request).unwrap_err().kind(),
-        GatewayErrorKind::PermissionDenied
+        GatewayErrorKind::InvalidArgument
     );
-    request.caller_uid = 0;
+    assert!(!fixture.config.store_dir.exists());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     let link = fixture.root.path().join("link");
-    symlink(path, &link).unwrap();
+    symlink(&path, &link).unwrap();
     request.secret_file = link;
     assert!(service.add_key(&request).is_err());
-    fixture.key(&service, REAL);
+    request.secret_file = path.clone();
+    assert_eq!(
+        serde_json::to_value(service.add_key(&request).unwrap()).unwrap(),
+        serde_json::json!({"credential": "github"})
+    );
+    assert!(!fixture.config.state_dir.exists());
+    assert!(!fixture.config.runtime_dir.exists());
+    let scope = fixture.scope("root-import", 1);
+    service.prepare_scope(&scope).unwrap();
+    service.enable().unwrap();
+    let grant = service.credentials(UID, "root-import").unwrap();
+    let snapshot = fixture.secrets();
+    fs::write(&path, OTHER_REAL).unwrap();
+    let error = service.add_key(&request).unwrap_err();
+    assert_eq!(error.kind(), GatewayErrorKind::Conflict);
+    for secret in [REAL, OTHER_REAL, grant.environment["GH_TOKEN"].as_str()] {
+        assert!(!error.to_string().contains(secret));
+    }
+    assert_eq!(fixture.secrets(), snapshot);
+    assert!(service.credentials(UID, "root-import").unwrap() == grant);
+    assert!(service.status(UID).ready);
+    fs::write(&path, REAL).unwrap();
+    service.add_key(&request).unwrap();
+    assert!(service.credentials(UID, "root-import").unwrap() == grant);
+    let unchanged = fixture.secrets();
+    assert_eq!(unchanged["entries"], snapshot["entries"]);
+    assert_eq!(unchanged["retired"], snapshot["retired"]);
+}
+#[test]
+fn nonroot_import_and_disable_order_preserve_security_boundaries() {
+    let fixture = Fixture::new();
+    let service = fixture.service();
+    let path = fixture.root.path().join("token");
+    fs::write(&path, REAL).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        service
+            .add_key(&KeyRequest {
+                credential: "github".into(),
+                secret_file: path,
+                caller_uid: UID,
+            })
+            .unwrap_err()
+            .kind(),
+        GatewayErrorKind::PermissionDenied
+    );
+    assert!(!fixture.config.store_dir.exists());
+    fixture.key(REAL);
     service.enable().unwrap();
     let ca = fs::read(fixture.config.runtime_dir.join("ca-bundle.pem")).unwrap();
     fixture.host.log().operations.clear();
@@ -1360,7 +2179,7 @@ fn disable_failures_preserve_host_fences_and_persist_disabled_after_runtime_clea
     for fault in ["unroute", "stop", "runtime"] {
         let fixture = Fixture::new();
         let service = fixture.service();
-        fixture.key(&service, REAL);
+        fixture.key(REAL);
         let scope = fixture.scope("disable-retry", 1);
         service.prepare_scope(&scope).unwrap();
         service.enable().unwrap();

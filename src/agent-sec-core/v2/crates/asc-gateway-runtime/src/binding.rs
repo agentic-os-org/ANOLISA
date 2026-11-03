@@ -16,7 +16,7 @@ use asc_policy_types::target::{
 use serde::{Deserialize, Serialize};
 
 use crate::service::Inner;
-use crate::state::Attachment;
+use crate::state::{Attachment, State};
 use crate::{GatewayError, GatewayErrorKind, GatewayService, ProcessIdentity};
 
 /// Complete `PreparedBinding` wire format accepted by this deployment client.
@@ -29,6 +29,16 @@ struct Cleanup {
     scope_id: ScopeId,
     binding_id: ResourceId,
     process: asc_policy_types::process_discovery::ProcessIdentity,
+}
+
+struct AttachmentPlan {
+    scope_id: ScopeId,
+    uid: u32,
+    attachment: Attachment,
+    cgroups: BTreeSet<String>,
+    pins: Vec<ProcessIdentity>,
+    unowned: BTreeSet<u32>,
+    existing: Vec<(PreparedBinding, Attachment)>,
 }
 
 impl GatewayService {
@@ -107,6 +117,76 @@ impl GatewayService {
         }
         self.host.verify_process(process)
     }
+    fn verify_owned_attachment(
+        &self,
+        state: &State,
+        id: &ScopeId,
+        process: &ProcessIdentity,
+        uid: u32,
+    ) -> Result<(), GatewayError> {
+        let cgroup = self.check_overlap(state, id, process)?.ok_or_else(|| {
+            GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "process has no execution cgroup owner",
+            )
+        })?;
+        let domain = &state.scopes[id];
+        let resource = ResourceId::new(id.as_str())
+            .map_err(|_| GatewayError::internal("invalid Scope identity"))?;
+        let scope = self.repository.get_scope(&resource)?;
+        self.canonical(&scope)?;
+        if domain.revoked || scope.status != ScopeStatus::Active || scope.owner_uid != Some(uid) {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "execution Scope is not active",
+            ));
+        }
+        let mut live_owner = false;
+        for (binding_id, attachment) in &domain.bindings {
+            if !attachment.cgroups().any(|path| path == cgroup) {
+                continue;
+            }
+            let view = match self.repository.get_binding(binding_id) {
+                Ok(view) => view,
+                Err(PapError::NotFound) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !matches!(
+                view.status.phase,
+                BindingStatus::Applying | BindingStatus::Ready
+            ) || !Self::binding_matches(&view.spec, &scope, attachment)
+            {
+                // A stale reference cannot veto another live canonical owner's group.
+                continue;
+            }
+            let owner: Result<bool, GatewayError> = (|| {
+                let pins = self.host.process_tree(attachment.process.pid)?;
+                let root = pins
+                    .first()
+                    .ok_or_else(|| GatewayError::internal("empty process snapshot"))?;
+                self.verify_instance(root, &attachment.process)?;
+                self.check_process(root, uid)?;
+                Ok(self.host.process_cgroup(root.pid)? == format!("/{}", attachment.cgroup))
+            })();
+            match owner {
+                Ok(valid) => live_owner |= valid,
+                Err(error)
+                    if error.is_process_exited()
+                        || matches!(
+                            error.kind(),
+                            GatewayErrorKind::PermissionDenied | GatewayErrorKind::Conflict
+                        ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if !live_owner {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "execution cgroup has no live canonical root",
+            ));
+        }
+        self.verify_attachment(process, cgroup, uid)
+    }
     pub(crate) fn verify_pinned(
         &self,
         inner: &Inner,
@@ -114,6 +194,13 @@ impl GatewayService {
         attachment: &Attachment,
         uid: u32,
     ) -> Result<(), GatewayError> {
+        let scope_id = inner
+            .state
+            .scopes
+            .iter()
+            .find(|(_, domain)| domain.uid == uid && domain.bindings.get(id) == Some(attachment))
+            .map(|(id, _)| id)
+            .ok_or_else(|| GatewayError::internal("Binding has no cleanup ownership"))?;
         let pins = inner
             .pins
             .get(id)
@@ -122,12 +209,16 @@ impl GatewayService {
             .first()
             .ok_or_else(|| GatewayError::internal("empty execution pin"))?;
         self.verify_instance(root, &attachment.process)?;
+        if self.host.process_cgroup(root.pid)? != format!("/{}", attachment.cgroup) {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "Binding root left its exact cgroup",
+            ));
+        }
         for process in pins {
-            match self.verify_attachment(process, &attachment.cgroup, uid) {
+            match self.verify_owned_attachment(&inner.state, scope_id, process, uid) {
                 Ok(()) => {}
-                Err(error)
-                    if error.kind() == GatewayErrorKind::Unavailable && process.pid != root.pid => {
-                }
+                Err(error) if error.is_process_exited() && process.pid != root.pid => {}
                 Err(error) => return Err(error),
             }
         }
@@ -135,7 +226,13 @@ impl GatewayService {
         // UID/group/cgroup validation before any route is handed back to the data plane.
         let current = self.host.process_tree(root.pid)?;
         for process in &current {
-            self.verify_attachment(process, &attachment.cgroup, uid)?;
+            self.verify_owned_attachment(&inner.state, scope_id, process, uid)?;
+        }
+        // Shared groups retain siblings and reparented descendants after root cleanup.
+        for path in attachment.cgroups() {
+            for process in self.host.scope_processes(path)? {
+                self.verify_owned_attachment(&inner.state, scope_id, &process, uid)?;
+            }
         }
         self.verify_instance(root, &attachment.process)
     }
@@ -171,8 +268,19 @@ impl GatewayService {
                         .first()
                         .ok_or_else(|| GatewayError::internal("empty process snapshot"))?;
                     self.verify_instance(root, &attachment.process)?;
+                    if self.host.process_cgroup(root.pid)? != format!("/{}", attachment.cgroup) {
+                        return Err(GatewayError::new(
+                            GatewayErrorKind::Conflict,
+                            "Binding root left its exact cgroup",
+                        ));
+                    }
                     for process in &pins {
-                        self.verify_attachment(process, &attachment.cgroup, domain.uid)?;
+                        self.verify_owned_attachment(&inner.state, id, process, domain.uid)?;
+                    }
+                    for path in attachment.cgroups() {
+                        for process in self.host.scope_processes(path)? {
+                            self.verify_owned_attachment(&inner.state, id, &process, domain.uid)?;
+                        }
                     }
                     self.verify_instance(root, &attachment.process)?;
                     Ok(pins)
@@ -211,11 +319,27 @@ impl GatewayService {
         }
         let mut inner = self.lock();
         let scope = self.admitted_binding(&binding)?;
-        let id = cleanup.scope_id.clone();
+        let mut plan = self.gather_attachment(&inner, &scope, &cleanup)?;
+        self.gather_shared_attachments(&inner, &binding, &scope, &mut plan)
+            .map_err(|error| self.fail_closed(error))?;
+        self.validate_attachment_plan(&inner, &binding, &scope, &plan, &plan.pins[0])
+            .map_err(|error| self.fail_closed(error))?;
+        self.persist_attachment_plan(&mut inner, &binding, &plan)?;
+        self.attach_unowned(&inner, &binding, &scope, &plan)
+            .and_then(|()| self.verify_attachment_plan(&mut inner, &binding, &scope, plan))
+            .map_err(|error| self.fail_closed(error))
+    }
+    fn gather_attachment(
+        &self,
+        inner: &Inner,
+        scope: &PreparedScope,
+        cleanup: &Cleanup,
+    ) -> Result<AttachmentPlan, GatewayError> {
+        let id = &cleanup.scope_id;
         let domain = inner
             .state
             .scopes
-            .get(&id)
+            .get(id)
             .ok_or_else(|| GatewayError::unavailable("Scope has not been prepared"))?;
         if domain.revoked || scope.owner_uid != Some(domain.uid) {
             return Err(GatewayError::new(
@@ -224,120 +348,312 @@ impl GatewayService {
             ));
         }
         let uid = domain.uid;
-        let instance_scope = format!(
-            "agent-sec-instance-{}-{}-{}.scope",
-            domain.port, cleanup.process.pid, cleanup.process.start_time
+        let default_cgroup = format!(
+            "{}/agent-sec-instance-{}-{}-{}.scope",
+            self.config.slice, domain.port, cleanup.process.pid, cleanup.process.start_time
         );
-        let cgroup = format!("{}/{}", self.config.slice, instance_scope);
-        if !crate::nft::is_safe_cgroup_path(&cgroup) {
-            return Err(GatewayError::invalid("unsafe execution slice"));
-        }
-        let attachment = Attachment {
-            process: cleanup.process.clone(),
-            cgroup: cgroup.clone(),
-        };
-        if domain
-            .bindings
-            .get(&binding.binding_id)
-            .is_some_and(|old| old != &attachment)
-        {
-            return Err(GatewayError::new(
-                GatewayErrorKind::Conflict,
-                "Binding cleanup identity cannot change",
-            ));
+        let mut cgroups = BTreeSet::new();
+        if let Some(old) = domain.bindings.get(&cleanup.binding_id) {
+            if old.process != cleanup.process {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::Conflict,
+                    "Binding cleanup identity cannot change",
+                ));
+            }
+            cgroups.extend(old.cgroups().map(str::to_owned));
         }
         let pins = self.host.process_tree(cleanup.process.pid)?;
         let root = pins
             .first()
             .ok_or_else(|| GatewayError::internal("empty process snapshot"))?;
         self.verify_instance(root, &cleanup.process)?;
-        let members = self.host.scope_processes(&cgroup)?;
-        for process in pins.iter().chain(&members) {
+        let root_cgroup = self
+            .check_overlap(&inner.state, id, root)?
+            .map(str::to_owned);
+        let mut unowned = BTreeSet::new();
+        for process in &pins {
             self.check_process(process, uid)?;
-            self.check_overlap(&inner, &id, &attachment, process)?;
+            if let Some(cgroup) = self.check_overlap(&inner.state, id, process)? {
+                cgroups.insert(cgroup.to_owned());
+            } else {
+                unowned.insert(process.pid);
+            }
         }
-        // Store cleanup responsibility before the first move, even if attachment later fails.
-        inner
-            .state
-            .scopes
-            .get_mut(&id)
-            .ok_or_else(|| GatewayError::internal("Scope disappeared"))?
+        // Existing roots never move. Unowned members reuse an intersecting destination;
+        // retries retain the responsibility recorded before a possibly partial attachment.
+        let cgroup = root_cgroup
+            .or_else(|| {
+                domain
+                    .bindings
+                    .get(&cleanup.binding_id)
+                    .map(|old| old.cgroup.clone())
+            })
+            .or_else(|| cgroups.first().cloned())
+            .unwrap_or(default_cgroup);
+        if let Some(old) = domain.bindings.get(&cleanup.binding_id)
+            && old.cgroup != cgroup
+        {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "Binding root cgroup cannot change",
+            ));
+        }
+        cgroups.insert(cgroup.clone());
+        let mut attachment = domain
             .bindings
-            .insert(binding.binding_id.clone(), attachment.clone());
-        inner.state.save(&self.config.state_dir)?;
-        inner.pins.insert(binding.binding_id.clone(), pins);
-        let result = (|| {
-            let pins = &inner.pins[&binding.binding_id];
-            for process in pins {
-                self.admitted_binding(&binding)?;
-                self.check_process(process, uid)?;
-                self.check_overlap(&inner, &id, &attachment, process)?;
-                let actual = self.host.process_cgroup(process.pid)?;
-                let expected = format!("/{cgroup}");
-                if actual != expected
-                    && !actual
-                        .strip_prefix(&expected)
-                        .is_some_and(|tail| tail.starts_with('/'))
-                {
-                    self.host
-                        .attach_to_scope(&instance_scope, &self.config.slice, process)?;
-                }
-                self.verify_attachment(process, &cgroup, uid)?;
-            }
-            self.admitted_binding(&binding)?;
-            let current = self.host.process_tree(cleanup.process.pid)?;
-            for process in &current {
-                self.verify_attachment(process, &cgroup, uid)?;
-            }
-            self.verify_pinned(&inner, &binding.binding_id, &attachment, uid)?;
-            if inner.state.enabled {
-                let plans = self.active_plans(&mut inner)?;
-                self.route(&inner, &plans)?;
-            }
-            self.admitted_binding(&binding)?;
-            Ok(())
-        })();
-        result.map_err(|error| self.fail_closed(error))
+            .get(&cleanup.binding_id)
+            .cloned()
+            .unwrap_or_else(|| Attachment {
+                process: cleanup.process.clone(),
+                shared_cgroups: BTreeSet::new(),
+                cgroup,
+            });
+        attachment.shared_cgroups.extend(
+            cgroups
+                .iter()
+                .filter(|path| **path != attachment.cgroup)
+                .cloned(),
+        );
+        Ok(AttachmentPlan {
+            scope_id: id.clone(),
+            uid,
+            attachment,
+            cgroups,
+            pins,
+            unowned,
+            existing: Vec::new(),
+        })
     }
-    fn check_overlap(
+    fn gather_shared_attachments(
         &self,
         inner: &Inner,
-        id: &ScopeId,
-        attachment: &Attachment,
-        process: &ProcessIdentity,
+        binding: &PreparedBinding,
+        scope: &PreparedScope,
+        plan: &mut AttachmentPlan,
     ) -> Result<(), GatewayError> {
-        let actual = self.host.process_cgroup(process.pid)?;
-        for (other_id, domain) in &inner.state.scopes {
-            for other in domain.bindings.values() {
-                let same_instance = other_id == id && other.process == attachment.process;
-                let path = format!("/{}", other.cgroup);
-                if !same_instance
-                    && (actual == path
-                        || actual
-                            .strip_prefix(&path)
-                            .is_some_and(|tail| tail.starts_with('/')))
+        for path in &plan.cgroups {
+            // systemd unit types are case-sensitive; this is not a file extension check.
+            let unit_name = path
+                .strip_prefix(&format!("{}/", self.config.slice))
+                .and_then(|unit| unit.strip_suffix(".scope"));
+            if !crate::nft::is_safe_cgroup_path(path)
+                || !unit_name.is_some_and(|name| {
+                    name.starts_with("agent-sec-instance-") && !name.contains('/')
+                })
+            {
+                return Err(GatewayError::invalid("unsafe execution slice"));
+            }
+        }
+        if inner.state.scopes.iter().any(|(other_id, domain)| {
+            other_id != &plan.scope_id
+                && domain
+                    .bindings
+                    .values()
+                    .any(|other| other.cgroups().any(|path| plan.cgroups.contains(path)))
+        }) {
+            return Err(GatewayError::new(
+                GatewayErrorKind::Conflict,
+                "execution cgroup belongs to another Scope",
+            ));
+        }
+        for (binding_id, old) in &inner.state.scopes[&plan.scope_id].bindings {
+            // A complete pin cannot be reattached after escape; an interrupted Applying
+            // attempt may have only durable responsibility and still need attachment.
+            if binding_id == &binding.binding_id && inner.pins.contains_key(binding_id) {
+                self.verify_pinned(inner, binding_id, old, plan.uid)?;
+            }
+            if binding_id != &binding.binding_id
+                && old.cgroups().any(|path| plan.cgroups.contains(path))
+            {
+                let view = self.repository.get_binding(binding_id)?;
+                if !matches!(
+                    view.status.phase,
+                    BindingStatus::Applying | BindingStatus::Ready
+                ) || !Self::binding_matches(&view.spec, scope, old)
                 {
                     return Err(GatewayError::new(
                         GatewayErrorKind::Conflict,
-                        "process overlaps another execution instance",
+                        "overlapping Binding is not canonical or executable",
                     ));
+                }
+                self.verify_pinned(inner, binding_id, old, plan.uid)?;
+                plan.existing.push((view.spec, old.clone()));
+            }
+        }
+        for path in &plan.cgroups {
+            let processes = self.host.scope_processes(path)?;
+            for process in &processes {
+                self.verify_attachment(process, path, plan.uid)?;
+                self.check_overlap(&inner.state, &plan.scope_id, process)?;
+            }
+        }
+        Ok(())
+    }
+    fn validate_attachment_plan(
+        &self,
+        inner: &Inner,
+        binding: &PreparedBinding,
+        scope: &PreparedScope,
+        plan: &AttachmentPlan,
+        root: &ProcessIdentity,
+    ) -> Result<(), GatewayError> {
+        self.admitted_binding(binding)?;
+        for (spec, old) in &plan.existing {
+            let view = self.repository.get_binding(&spec.binding_id)?;
+            if view.spec != *spec
+                || !matches!(
+                    view.status.phase,
+                    BindingStatus::Applying | BindingStatus::Ready
+                )
+                || !Self::binding_matches(&view.spec, scope, old)
+            {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::Conflict,
+                    "overlapping Binding changed during deployment",
+                ));
+            }
+            let root = inner
+                .pins
+                .get(&spec.binding_id)
+                .and_then(|pins| pins.first())
+                .ok_or_else(|| GatewayError::unavailable("Binding has no live execution pin"))?;
+            self.verify_instance(root, &old.process)?;
+        }
+        self.verify_instance(root, &plan.attachment.process)?;
+        self.canonical(scope)
+    }
+    fn persist_attachment_plan(
+        &self,
+        inner: &mut Inner,
+        binding: &PreparedBinding,
+        plan: &AttachmentPlan,
+    ) -> Result<(), GatewayError> {
+        let bindings = &mut inner
+            .state
+            .scopes
+            .get_mut(&plan.scope_id)
+            .ok_or_else(|| GatewayError::internal("Scope disappeared"))?
+            .bindings;
+        bindings.insert(binding.binding_id.clone(), plan.attachment.clone());
+        // Retry adds validated shared references without releasing any earlier responsibility.
+        inner
+            .state
+            .save(&self.config.state_dir)
+            .map_err(|error| self.fail_closed(error))
+    }
+    fn attach_unowned(
+        &self,
+        inner: &Inner,
+        binding: &PreparedBinding,
+        scope: &PreparedScope,
+        plan: &AttachmentPlan,
+    ) -> Result<(), GatewayError> {
+        let root = plan
+            .pins
+            .first()
+            .ok_or_else(|| GatewayError::internal("empty process snapshot"))?;
+        let cgroup = &plan.attachment.cgroup;
+        // Never convert an initially owned member into an attachment candidate if it
+        // escapes while deployment is in flight; final verification rejects it instead.
+        for process in plan
+            .pins
+            .iter()
+            .filter(|process| plan.unowned.contains(&process.pid))
+        {
+            self.validate_attachment_plan(inner, binding, scope, plan, root)?;
+            match self.check_process(process, plan.uid) {
+                Ok(()) => {}
+                Err(error) if error.is_process_exited() && process.pid != root.pid => continue,
+                Err(error) => return Err(error),
+            }
+            if let Some(owned) = self.check_overlap(&inner.state, &plan.scope_id, process)? {
+                if !plan.cgroups.contains(owned) {
+                    return Err(GatewayError::new(
+                        GatewayErrorKind::Conflict,
+                        "process entered an unrelated execution cgroup",
+                    ));
+                }
+                self.verify_owned_attachment(&inner.state, &plan.scope_id, process, plan.uid)?;
+                continue;
+            }
+            let instance_scope = cgroup
+                .rsplit('/')
+                .next()
+                .ok_or_else(|| GatewayError::internal("empty execution slice"))?;
+            self.host
+                .attach_to_scope(instance_scope, &self.config.slice, process)?;
+            self.verify_attachment(process, cgroup, plan.uid)?;
+        }
+        self.validate_attachment_plan(inner, binding, scope, plan, root)
+    }
+    fn verify_attachment_plan(
+        &self,
+        inner: &mut Inner,
+        binding: &PreparedBinding,
+        scope: &PreparedScope,
+        mut plan: AttachmentPlan,
+    ) -> Result<(), GatewayError> {
+        // Keep existing pidfds, including descendants no longer in a fresh root snapshot.
+        inner
+            .pins
+            .entry(binding.binding_id.clone())
+            .or_insert(std::mem::take(&mut plan.pins));
+        for (spec, _) in &plan.existing {
+            self.verify_pinned(
+                inner,
+                &spec.binding_id,
+                &inner.state.scopes[&plan.scope_id].bindings[&spec.binding_id],
+                plan.uid,
+            )?;
+        }
+        self.verify_pinned(inner, &binding.binding_id, &plan.attachment, plan.uid)?;
+        if inner.state.enabled {
+            let plans = self.active_plans(inner)?;
+            self.route(inner, &plans)?;
+        }
+        self.validate_attachment_plan(
+            inner,
+            binding,
+            scope,
+            &plan,
+            &inner.pins[&binding.binding_id][0],
+        )
+    }
+    fn check_overlap<'a>(
+        &self,
+        state: &'a State,
+        id: &ScopeId,
+        process: &ProcessIdentity,
+    ) -> Result<Option<&'a str>, GatewayError> {
+        let actual = self.host.process_cgroup(process.pid)?;
+        let mut owned = None;
+        for (other_id, domain) in &state.scopes {
+            for cgroup in domain.bindings.values().flat_map(Attachment::cgroups) {
+                let path = format!("/{cgroup}");
+                if actual == path
+                    || actual
+                        .strip_prefix(&path)
+                        .is_some_and(|tail| tail.starts_with('/'))
+                {
+                    if other_id != id {
+                        return Err(GatewayError::new(
+                            GatewayErrorKind::Conflict,
+                            "process overlaps another Scope",
+                        ));
+                    }
+                    owned = Some(cgroup);
                 }
             }
         }
-        // Unowned old gateway cgroups must not silently become new authorization domains.
+        // Even a generated destination name is not ownership until a Binding is recorded.
         let prefix = format!("/{}/agent-sec-instance-", self.config.slice);
-        let expected = format!("/{}", attachment.cgroup);
-        let owned = actual == expected
-            || actual
-                .strip_prefix(&expected)
-                .is_some_and(|tail| tail.starts_with('/'));
-        if actual.starts_with(&prefix) && !owned {
+        if actual.starts_with(&prefix) && owned.is_none() {
             return Err(GatewayError::new(
                 GatewayErrorKind::Conflict,
                 "process remains in an unowned gateway cgroup",
             ));
         }
-        Ok(())
+        Ok(owned)
     }
     fn detach(&self, target: &TargetRef) -> Result<(), GatewayError> {
         let cleanup: Cleanup = serde_json::from_slice(&target.cleanup)
@@ -378,18 +694,20 @@ impl GatewayService {
         let cgroups: BTreeSet<_> = original
             .scopes
             .get(&cleanup.scope_id)
+            .and_then(|domain| domain.bindings.get(&cleanup.binding_id))
             .into_iter()
-            .flat_map(|domain| domain.bindings.values())
-            .filter(|attachment| attachment.process == cleanup.process)
-            .map(|attachment| attachment.cgroup.clone())
+            .flat_map(Attachment::cgroups)
+            .map(str::to_owned)
             .collect();
         for cgroup in cgroups {
+            // A shared path belongs to every remaining Binding, not just the original root.
             let retained = inner
                 .state
                 .scopes
                 .values()
                 .flat_map(|domain| domain.bindings.values())
-                .any(|attachment| attachment.cgroup == cgroup);
+                .flat_map(Attachment::cgroups)
+                .any(|path| path == cgroup);
             if !retained
                 && self.host.scope_processes(&cgroup)?.is_empty()
                 && let Some(scope) = cgroup.rsplit('/').next()

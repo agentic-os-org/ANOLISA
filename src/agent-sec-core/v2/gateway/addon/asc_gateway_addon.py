@@ -16,11 +16,15 @@ import logging
 import os
 import stat
 import time
+import zlib
 
 import asc_gateway_policy as policy
 from mitmproxy import ctx, exceptions, http
 from mitmproxy.addons.termlog import TermLogHandler
 from mitmproxy.log import LegacyLogEvents
+from mitmproxy.net.http.http1 import expected_http_body_size
+from mitmproxy.proxy import events, layer
+from mitmproxy.proxy.layers.http import HttpLayer, ResponseData
 
 POLL_SECONDS = 0.5
 RETRY_SECONDS = 5.0
@@ -71,9 +75,7 @@ def _read_runtime_file(directory: str, name: str, limit: int) -> bytes:
     with os.fdopen(os.open(os.path.join(directory, name), flags), "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-            raise policy.LoadError(
-                f"{name} is not a regular file within its size limit"
-            )
+            raise policy.LoadError(f"{name} is not a regular file within its size limit")
         data = handle.read(limit + 1)
     if len(data) > limit:
         raise policy.LoadError(f"{name} exceeds its size limit")
@@ -105,21 +107,94 @@ def _peek_generation(raw: bytes) -> int | None:
 
 def _injected(flow: http.HTTPFlow) -> policy.Decision | None:
     decision = flow.metadata.get(METADATA_KEY)
-    if (
-        isinstance(decision, policy.Decision)
-        and decision.action == policy.ACTION_INJECT
-    ):
+    if isinstance(decision, policy.Decision) and decision.action == policy.ACTION_INJECT:
         return decision
     return None
 
 
 def _rewrite_fields(headers: http.Headers, decision: policy.Decision) -> None:
     fields = tuple(
-        (name, policy.rewrite_bytes(value, decision.replacements))
-        for name, value in headers.fields
+        (name, policy.rewrite_bytes(value, decision.replacements)) for name, value in headers.fields
     )
     if fields != headers.fields:
         headers.fields = fields
+
+
+def _abort_flow(flow: http.HTTPFlow) -> None:
+    if flow.killable:
+        flow.kill()
+    handler = ctx.master.addons.get("proxyserver").connections.get(flow.client_conn.id)
+    if handler is not None:
+        for connection in (flow.client_conn, flow.server_conn):
+            transport = handler.transports.get(connection)
+            if transport is not None and transport.writer is not None:
+                transport.writer.close()
+            handler.close_connection(connection)
+
+
+class _GatewayHttpLayer(HttpLayer):
+    def event_to_child(
+        self, child: layer.Layer, event: events.Event
+    ) -> layer.CommandGenerator[None]:
+        # The stream callback reserves b"" for EOF, but HTTP/2 allows empty nonterminal DATA.
+        if isinstance(event, ResponseData) and not event.data:
+            return
+        yield from super().event_to_child(child, event)
+
+
+class _BufferedResponse:
+    def __init__(
+        self,
+        flow: http.HTTPFlow,
+        decision: policy.Decision,
+        encoding: str,
+        rejection: bytes | None = None,
+    ) -> None:
+        self.flow = flow
+        self.decision = decision
+        self.body = bytearray()
+        self.received = 0
+        self.failed = False
+        self.rejection = rejection
+        self.decoder = zlib.decompressobj(31) if encoding == "gzip" else None
+
+    def __call__(self, chunk: bytes) -> bytes | list[bytes]:
+        if self.failed:
+            return []
+        try:
+            if chunk:
+                self.received += len(chunk)
+                if self.received > RESPONSE_BUFFER_LIMIT:
+                    raise ValueError("encoded response exceeds limit")
+                if self.rejection is not None:
+                    return []
+                decoded = (
+                    self.decoder.decompress(chunk, RESPONSE_BUFFER_LIMIT + 1 - len(self.body))
+                    if self.decoder is not None
+                    else chunk
+                )
+                if len(self.body) + len(decoded) > RESPONSE_BUFFER_LIMIT:
+                    raise ValueError("decoded response exceeds limit")
+                self.body.extend(decoded)
+                if self.decoder is not None and self.decoder.unused_data:
+                    raise ValueError("trailing compressed response data")
+                return []
+            if self.rejection is not None:
+                return self.rejection
+            if self.decoder is not None and not self.decoder.eof:
+                raise ValueError("incomplete compressed response")
+            body = policy.rewrite_bytes(bytes(self.body), self.decision.replacements)
+            self.body.clear()
+            if self.decoder is not None:
+                encoder = zlib.compressobj(wbits=31)
+                body = encoder.compress(body) + encoder.flush()
+            return body
+        except Exception:  # noqa: BLE001 - unchecked bodies must never reach clients
+            self.failed = True
+            self.body.clear()
+            logger.error("agent-sec-gateway response hook failed")
+            _abort_flow(self.flow)
+            return []
 
 
 class SecretGateway:
@@ -139,28 +214,37 @@ class SecretGateway:
             "agent_sec_runtime_dir", str, "", "Runtime directory holding active.json"
         )
 
+    def next_layer(self, nextlayer: layer.NextLayer) -> None:
+        # Script hooks run before the default selector; retain its protocol and TLS decisions.
+        ctx.master.addons.get("nextlayer").next_layer(nextlayer)
+        parent = None
+        current = nextlayer.layer
+        while current is not None and not isinstance(current, HttpLayer):
+            parent, current = current, getattr(current, "child_layer", None)
+        if isinstance(current, HttpLayer):
+            current.context.layers.remove(current)
+            wrapped = _GatewayHttpLayer(current.context, current.mode)
+            if parent is None:
+                nextlayer.layer = wrapped
+            else:
+                parent.child_layer = wrapped
+
     def configure(self, updated: set[str]) -> None:
         options = ctx.options
         # Transparent mode connects to the original destination IP; upstream
         # certificate verification is the only defense against a forged Host.
         if options.ssl_insecure:
-            raise exceptions.OptionsError(
-                "agent-sec-gateway requires ssl_insecure=false"
-            )
+            raise exceptions.OptionsError("agent-sec-gateway requires ssl_insecure=false")
         # Streamed bodies skip inspection; dumps and verbose output would
         # record injected credentials.
         if options.stream_large_bodies:
-            raise exceptions.OptionsError(
-                "agent-sec-gateway forbids stream_large_bodies"
-            )
+            raise exceptions.OptionsError("agent-sec-gateway forbids stream_large_bodies")
         if options.save_stream_file:
             raise exceptions.OptionsError("agent-sec-gateway forbids save_stream_file")
         if options.flow_detail != 0:
             raise exceptions.OptionsError("agent-sec-gateway requires flow_detail=0")
         if not options.agent_sec_runtime_dir:
-            raise exceptions.OptionsError(
-                "agent-sec-gateway requires agent_sec_runtime_dir"
-            )
+            raise exceptions.OptionsError("agent-sec-gateway requires agent_sec_runtime_dir")
         if options.termlog_verbosity not in ("warn", "error"):
             options.update(termlog_verbosity="warn")
         # Handler filters cover propagated logs, including pre-flow parser logs and ERROR tracebacks.
@@ -208,16 +292,10 @@ class SecretGateway:
         now = time.monotonic()
         if key == self._loaded_key:
             return
-        if (
-            self._failed
-            and self._failed[0] == key
-            and now - self._failed[1] < RETRY_SECONDS
-        ):
+        if self._failed and self._failed[0] == key and now - self._failed[1] < RETRY_SECONDS:
             return
         try:
-            raw = _read_runtime_file(
-                self._runtime, MANIFEST_NAME, policy.MAX_MANIFEST_BYTES
-            )
+            raw = _read_runtime_file(self._runtime, MANIFEST_NAME, policy.MAX_MANIFEST_BYTES)
             self._attempted = _peek_generation(raw)
             snapshot = policy.build_snapshot(
                 raw, lambda name, limit: _read_runtime_file(self._runtime, name, limit)
@@ -314,11 +392,30 @@ class SecretGateway:
             if decision.response_rewrite != policy.REWRITE_BUFFERED:
                 response.stream = True
                 return
-            response.stream = False
+            response.headers.pop("ETag", None)
+            response.headers.pop("Content-MD5", None)
+            if expected_http_body_size(flow.request, response) == 0:
+                response.headers.pop("Transfer-Encoding", None)
+                response.stream = True
+                return
             length = response.headers.get("Content-Length", "")
             if length.isdigit() and int(length) > RESPONSE_BUFFER_LIMIT:
-                # The body could echo the real value; refusing beats delivering it unchecked.
                 flow.kill()
+                return
+            encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+            if encoding not in ("identity", "gzip", ""):
+                rejected = _reject_response("response_encoding_unsupported", 502)
+                flow.response = rejected
+                rejected.stream = _BufferedResponse(
+                    flow, decision, "identity", rejected.raw_content
+                )
+                return
+            response.headers.pop("Content-Length", None)
+            if flow.request.is_http2 or flow.request.is_http3:
+                response.headers.pop("Transfer-Encoding", None)
+            else:
+                response.headers["Transfer-Encoding"] = "chunked"
+            response.stream = _BufferedResponse(flow, decision, encoding)
         except Exception:  # noqa: BLE001 - an unchecked response must not be delivered
             logger.error("agent-sec-gateway responseheaders hook failed")
             flow.kill()
@@ -336,19 +433,8 @@ class SecretGateway:
     def error(self, flow: http.HTTPFlow) -> None:
         if _injected(flow) is None:
             return
-        # The protocol event retains its original message; kill before it reaches the client.
-        if flow.killable:
-            flow.kill()
-        # Validation errors ignore kill; closing the writer synchronously blocks the
-        # retained error page on HTTP/1 and HTTP/2 before the hook resumes.
-        handler = ctx.master.addons.get("proxyserver").connections.get(
-            flow.client_conn.id
-        )
-        if handler is not None:
-            transport = handler.transports.get(flow.client_conn)
-            if transport is not None and transport.writer is not None:
-                transport.writer.close()
-            handler.close_connection(flow.client_conn)
+        # Validation errors ignore kill; close transports before their error page resumes.
+        _abort_flow(flow)
         logger.warning("agent-sec-gateway upstream error; injected flow killed")
 
     def _inspect_response(self, flow: http.HTTPFlow, decision: policy.Decision) -> None:
@@ -356,29 +442,12 @@ class SecretGateway:
         assert response is not None
         if response.trailers is not None:
             _rewrite_fields(response.trailers, decision)
-        if decision.response_rewrite != policy.REWRITE_BUFFERED:
-            return
-        if response.stream:
+        if (
+            decision.response_rewrite == policy.REWRITE_BUFFERED
+            and not isinstance(response.stream, _BufferedResponse)
+            and expected_http_body_size(flow.request, response) != 0
+        ):
             flow.kill()
-            return
-        encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
-        if encoding not in ("identity", "gzip", ""):
-            flow.response = _reject_response("response_encoding_unsupported", 502)
-            return
-        try:
-            body = response.get_content(strict=True) or b""
-        except ValueError:
-            flow.response = _reject_response("response_encoding_invalid", 502)
-            return
-        if len(body) > RESPONSE_BUFFER_LIMIT:
-            flow.response = _reject_response("response_too_large", 502)
-            return
-        _rewrite_fields(response.headers, decision)
-        rewritten = policy.rewrite_bytes(body, decision.replacements)
-        if rewritten != body:
-            response.set_content(rewritten)
-            response.headers.pop("ETag", None)
-            response.headers.pop("Content-MD5", None)
 
 
 addons = [SecretGateway()]

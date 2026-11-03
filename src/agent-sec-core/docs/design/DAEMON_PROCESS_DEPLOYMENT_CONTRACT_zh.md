@@ -849,8 +849,10 @@ TLS 透传或不受影响，generation 未就绪仍拒绝。撤销失败的停�
 当前 daemon 在启动 Binding worker 前恢复 file Scope 删除屏障并同步执行
 `GatewayService.recover()`，开放 UDS 请求前再执行 `PapService.recover_scopes()`；不设置
 独立 gateway 恢复 Job。Apply claim 的 SQLite 事务核对 canonical Scope 仍为 `Active`，
-防止删除中的 assignment 重新部署策略。网关构造或恢复失败单独记录错误；Active 凭据 Scope
-恢复失败保留 `Active`，不转入删除，不阻塞原有 file-policy daemon readiness。
+防止删除中的 assignment 重新部署策略。网关构造读取投影失败时，先停止旧代理、撤流并
+删除运行时快照，再返回错误；持久投影和凭据不删除，清理失败显式报告且不跳过其它清理。
+网关构造或恢复失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，
+不阻塞原有 file-policy daemon readiness。
 file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
 管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
 generation 在每次尝试前持久化且不复用；网关恢复、撤销或首次 enable 失败时停止 unit、
@@ -858,7 +860,10 @@ generation 在每次尝试前持久化且不复用；网关恢复、撤销或首
 `status/health.json` 的 loadedGeneration 等于当前 generation 后才更新引流。
 unit 在启动前和停止后都删除 `status/health.json`，避免上一个进程的报告在新进程绑定监听端口前被当作已加载。
 恢复重新读取 canonical Scope/Binding 与固定 Policy 快照，并核验 boot ID、PID namespace、
-PID/start time 和执行 cgroup；不能仅凭保存的 PID 接管新进程。多实例共享 Scope fake；实例
+PID/start time 和执行 cgroup；不能仅凭保存的 PID 接管新进程。多实例共享 Scope fake；同
+Scope 的重叠父子树复用已拥有的 cgroup，不迁移已受保护成员，非重叠实例仍独立。Binding
+在接入未受保护成员前持久保存根路径及共享路径引用；重试只增加经过核验的引用，不丢弃
+已有责任。保留跨 Scope 拒绝；先删父或先删子都不撤除其它 Binding 仍引用的路径，实例
 退出只清理自身 Binding，不撤销共享 grant。Scope 删除关闭 admission、撤销其 fake，保留
 清理责任直到完成。Policy Runtime 拥有单一 Scope 清理 worker，调用 `sweep_deleting_scopes()`，
 在 Binding 清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；shutdown
