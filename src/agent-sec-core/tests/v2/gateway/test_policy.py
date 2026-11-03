@@ -71,7 +71,6 @@ def facts(document: dict[str, object]) -> policy.RequestFacts:
         method=document["method"],
         path=document["path"],
         headers=tuple((name, value) for name, value in document["headers"]),
-        body=document["body"].encode(),
     )
 
 

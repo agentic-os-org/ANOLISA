@@ -412,11 +412,19 @@ impl GatewayService {
         let mut inner = self.lock();
         self.host.check_cgroup_v2()?;
         inner.state.enabled = true;
-        if let Err(error) = self.recover_locked(&mut inner) {
+        let result = self
+            .recover_locked(&mut inner)
+            .and_then(|()| inner.state.save(&self.config.state_dir));
+        if let Err(error) = result {
             inner.state.enabled = false;
+            let error = match inner.state.save(&self.config.state_dir) {
+                Ok(()) => error,
+                Err(persist) => error.context(&format!(
+                    "disabled intent was not persisted ({persist}); retry gateway disable before restart"
+                )),
+            };
             return Err(self.fail_closed(error));
         }
-        inner.state.save(&self.config.state_dir)?;
         Ok(())
     }
     /// Withdraws routing before stopping the proxy, retaining credentials and public CA.

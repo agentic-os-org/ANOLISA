@@ -9,8 +9,10 @@
 ## 1. 目标与授权对象
 
 Secret Gateway 让 Agent 只持有与真实 GitHub Token 同形的 fake。网关只在 Policy 允许的 HTTPS
-请求中把 fake 换成真实值，回显的真实值改回 fake。打印环境变量、写入文件或向其他主机发送
-Agent 凭据只能泄露 fake，不能直接用于 GitHub 鉴权。
+请求头中把 fake 换成真实值，并按响应模式处理真实值回显。设计前提是 Agent 仅持有 fake，
+无法从环境变量、文件、工具或其他渠道取得真实凭据；在此前提下，打印、保存或外发 Agent
+凭据只能泄露 fake，不能直接用于 GitHub 鉴权。这不是一般 DLP：请求正文不检查或改写，
+若 Agent 已从其他渠道取得真实凭据，本设计不保证阻止其通过正文外泄。
 
 授权由 PAP 中的 Policy、Scope 和 Binding 负责：Policy 描述允许的请求，Scope 固定 Policy
 revision 与 owner UID 并持续选择进程，Binding 固定一次发现的进程实例。Credential Store 保存
@@ -210,24 +212,35 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 
 ### 4.2 请求判定与响应
 
-请求校验顺序保持：generation/listener → Authorization 重复与 Basic 格式 → 请求中真实值
-泄露 → fake 的 carrier、Scope 与 tombstone → 明文 → Host/SNI/authority → Upgrade → HTTPS
-端口与规范 path、Policy allow。常见拒绝码为 `gateway_not_ready`、`duplicate_authorization`、
+请求在 `requestheaders` 阶段完成授权与 fake→真实值替换，不等待正文。请求正文原样流式
+传输，不解压、不缓存、不检查或改写；不再执行请求正文真实凭据检查。URL（含 query 的原始
+及 URL 解码形式）、header 值以及解析后的 Basic 用户名/密码中既有真实凭据拒绝仍保留。
+query 不作为凭据替换 carrier，Policy path 匹配不含 query。
+
+请求校验顺序保持：generation/listener → Authorization 重复与 Basic 格式 → URL/header 中
+真实值泄露 → fake 的 carrier、Scope 与 tombstone → 明文 → Host/SNI/authority → Upgrade →
+HTTPS 端口与规范 path、method、Policy allow。常见拒绝码为 `gateway_not_ready`、`duplicate_authorization`、
 `malformed_authorization`、`real_credential_exposed`、`fake_in_username`、`retired_credential`、
 `subject_mismatch`、`carrier_not_allowed`、`plaintext_credential`、`invalid_host`、
 `sni_host_mismatch`、`authority_mismatch`、`sni_missing`、`upgrade_not_allowed`、
 `credential_not_allowed`。不携带托管凭据仍需通过有关校验，不是 TLS 透传。
 
-拒绝响应为 `{"error":"<code>","source":"agent-sec-gateway"}`，通常 403；SNI/Host 不符为 421，
-内部异常 `gateway_error` 为 500。输出日志只允许 addon 的固定安全诊断，不输出请求字段、
-依赖解析消息或异常堆栈；客户端错误码和内部 readiness 报告保留，底层故障日志细节减少。
+在请求头阶段拒绝有正文的 HTTP/1 请求或 HTTP/2 请求时，立即关闭连接，不继续接收或
+缓冲正文，不承诺结构化 HTTP 拒绝响应；HTTP/1 空正文请求保留
+`{"error":"<code>","source":"agent-sec-gateway"}`，通常 403；
+SNI/Host 不符为 421，内部异常 `gateway_error` 为 500。输出日志只允许 addon 的固定安全诊断，
+不输出请求字段、依赖解析消息或异常堆栈；内部 readiness 报告保留，底层故障日志细节减少。
 
 命中 allow 后只替换 Authorization token/Basic 密码，保留 Basic 用户名。仅注入后的响应需
 反向改写：header/trailer 中实际注入的 Authorization（含 Basic 编码）和裸真实值均改回 fake；
-`buffered` body 的接收字节与解压字节分别限 8 MiB，只接受 identity/gzip，并使用相同替换表。
-正文通过流式回调有界接收、增量解压，完整检查后才交付；改写后的安全响应头可能先发送。
+响应防泄漏行为不因请求正文流式传输而改变。`buffered` 响应正文的累计 encoded 接收字节与
+累计 decoded 解压字节分别限 8 MiB，只接受 identity/gzip，并使用相同替换表。
+响应正文通过流式回调有界接收、增量解压，完整检查后才交付；改写后的安全响应头可能先发送。
 协议层过滤非终止空 DATA，只有 EndOfMessage 才触发最终改写，避免把 HTTP/2 的合法空帧
-误当作 EOF。超限或解压失败立即关闭两端连接，不交付部分正文；不支持的编码返回 502 或断开。
+误当作 EOF。上传未结束时上游已返回完整响应，先完成响应改写并停止上传，不等待请求 EOF；HTTP/1
+响应结束后关闭连接，HTTP/2 下游连接保留以便窗口更新后发送排队正文与 END_STREAM。
+此时上游连接关闭，复用该上游 HTTP/2 连接的其他流也可能受影响。超限或解压失败立即关闭两端
+连接，不交付部分正文；不支持的编码返回 502 或断开。
 移除 ETag 和 Content-MD5；有正文时移除 Content-Length，HTTP/1 使用 chunked framing，
 HTTP/2 使用原生 DATA framing。HEAD、204、304 等无正文响应保持无正文，保留表示长度，
 不添加 chunked framing。固定依赖不支持 HTTP/1 trailers，遇到此类响应直接断开，不交付
@@ -282,9 +295,17 @@ Scope 删除先永久关闭 admission 并撤销 fake，再清理 Binding 和执�
 
 主动 disable 的成功顺序为 nft 撤流 → unit 停止 → 删除除公开 CA 外的运行文件 → 持久化
 `enabled=false`，保留 key 和 canonical assignment。撤流失败不停止 unit、不删文件、不改
-期望 enabled；停止失败保留运行文件与期望 enabled，但已撤流。清理与保存失败明确报错。
-首次 enable 失败与失败撤销均删除整个 runtime，不适用成功 disable 的 CA 保留。保留 CA
-位于 `/run`，主机重启仍丢失；直连 fake 不被替换，已有连接需重连。
+期望 enabled；停止失败保留运行文件与期望 enabled，但已撤流。撤流与停止均成功后，即使
+运行文件清理失败也持久化 `enabled=false`，明确报告清理失败并要求 retry disable；保存失败
+明确报错。
+
+`GatewayService.enable()` 通过 cgroup v2 预检后，若恢复、发布或保存失败，将内存 enabled
+改为 false 并尝试持久化 `enabled=false`，随后执行 fail-closed 清理：停止代理、撤流、删除
+整个 runtime，不适用成功 disable 的 CA 保留；key 和 canonical assignment 保留。
+禁用意图保存失败时，诊断必须明确指出 disabled intent 未持久化，并要求管理员在重启 daemon
+前重试 `agent-sec-cli gateway disable`，否则磁盘中此前保存的 enabled 状态可能在重启后恢复。
+cgroup v2 预检失败发生在 enabled 状态改变之前。失败撤销同样删除整个 runtime。
+成功 disable 保留的 CA 位于 `/run`，主机重启仍丢失；直连 fake 不被替换，已有连接需重连。
 
 ## 6. 交付与验证边界
 
