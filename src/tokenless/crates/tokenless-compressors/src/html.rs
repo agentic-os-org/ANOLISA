@@ -118,6 +118,10 @@ const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
 /// Real cells beyond it are still emitted, only never aligned.
 const MAX_TABLE_COLUMNS: usize = 64;
 
+/// CommonMark ordered-list markers are 1–9 digits followed by `.` or `)`,
+/// so a start number above this cannot be written as a marker at all.
+const MAX_ORDERED_START: i64 = 999_999_999;
+
 /// One Markdown view of a complete HTML document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HtmlView {
@@ -150,8 +154,10 @@ impl HtmlExtractor {
     /// Renders the page as Markdown. Text after the `</html>` end tag is not
     /// part of the page and follows the end marker as written, except that
     /// lines imitating the view's wrapper are escaped like page text. Returns
-    /// `None` when the rendered body is too short to be a page or the markup
-    /// nests deeper than the parse limit; callers keep the original then.
+    /// `None` when the rendered body is too short to be a page, the markup
+    /// nests deeper than the parse limit, or an ordered list in the rendered
+    /// root cannot be written in CommonMark ordered-list syntax; callers keep
+    /// the original then.
     #[must_use]
     pub fn render(&self, input: &str) -> Option<HtmlView> {
         let (document, trailer) = split_trailer(input);
@@ -233,6 +239,7 @@ impl HtmlExtractor {
             nodes: &nodes,
             removed: [0; REMOVED_CATEGORIES],
             depth: 0,
+            unsupported: false,
         };
         if let Some(head) = head {
             renderer.count_removals(head, false);
@@ -242,6 +249,10 @@ impl HtmlExtractor {
         // renderer.
         let body_markdown =
             escape_wrapper_lines(&renderer.blocks(root, is_sectioning(&nodes[root])));
+        if renderer.unsupported {
+            // The view would renumber the list, so the caller keeps the original.
+            return None;
+        }
         if body_markdown.chars().count() < MIN_BODY_CHARS {
             return None;
         }
@@ -802,6 +813,10 @@ struct Renderer<'a> {
     nodes: &'a [Node],
     removed: [usize; REMOVED_CATEGORIES],
     depth: usize,
+    /// Set while rendering an ordered list whose numbering CommonMark cannot
+    /// express; [`HtmlExtractor::render`] then returns `None` and the caller
+    /// keeps the original page instead of a renumbered view.
+    unsupported: bool,
 }
 
 impl Renderer<'_> {
@@ -972,12 +987,34 @@ impl Renderer<'_> {
 
     fn list(&mut self, id: usize, in_sectioning: bool) -> String {
         let ordered = self.nodes[id].is_element("ol");
-        let start = self.nodes[id]
-            .attr("start")
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(1);
+        // The next ordinal an `<li>` would take, or the bounds of the start
+        // attribute. Parsed as `i64` so a huge `start` cannot overflow the
+        // old `usize` parse before the fallback below rejects it.
+        let mut number: i64 = 1;
+        if ordered {
+            let node = &self.nodes[id];
+            // CommonMark has no descending markers, no roman or lettered
+            // markers, and no marker beyond nine digits; any of these would
+            // be silently rewritten by the old sequential numbering.
+            if node.attr("reversed").is_some()
+                || node
+                    .attr("type")
+                    .is_some_and(|ty| !ty.trim().eq_ignore_ascii_case("1"))
+            {
+                self.unsupported = true;
+                return String::new();
+            }
+            number = node
+                .attr("start")
+                .map(str::trim)
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(1);
+            if !(0..=MAX_ORDERED_START).contains(&number) {
+                self.unsupported = true;
+                return String::new();
+            }
+        }
         let mut items = Vec::new();
-        let mut number = start;
         for &child in &self.nodes[id].children {
             let node = &self.nodes[child];
             if let Some(category) = self.removal(node, in_sectioning) {
@@ -992,6 +1029,29 @@ impl Renderer<'_> {
                 self.inline(child, &mut text, in_sectioning);
                 text.trim().to_owned()
             };
+            if ordered {
+                if node.is_element("li") {
+                    // An explicit `value` fixes this item's ordinal; an
+                    // unparsable one is 0 per the HTML standard. Anything
+                    // but the expected number, or an item that renders away,
+                    // leaves a gap CommonMark cannot mark.
+                    let ordinal = node
+                        .attr("value")
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .and_then(|value| value.parse::<i64>().ok())
+                        .unwrap_or(number);
+                    if ordinal != number || body.is_empty() {
+                        self.unsupported = true;
+                        return String::new();
+                    }
+                } else if !body.is_empty() {
+                    // A stray block or non-blank inline child takes its own
+                    // marker in the current view, renumbering what follows.
+                    self.unsupported = true;
+                    return String::new();
+                }
+            }
             if body.is_empty() {
                 continue;
             }

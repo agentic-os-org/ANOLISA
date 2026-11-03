@@ -912,6 +912,87 @@ fn spanned_table_cells_leave_placeholders_and_are_clipped() {
     assert!(view.output.len() < html.len(), "{} vs {}", view.output.len(), html.len());
 }
 
+/// A numbered list the view cannot mark up is dropped whole: `render`
+/// returns `None` and the caller keeps the original page, rather than
+/// renumbering it. Every shape below was silently rewritten before.
+#[test]
+fn ordered_lists_commonmark_cannot_represent_fall_back_to_original() {
+    for body in [
+        // Descending markers have no CommonMark form.
+        "<ol reversed><li>three</li><li>two</li><li>one</li></ol>",
+        // Lettered and roman markers.
+        "<ol type=\"a\"><li>one</li><li>two</li></ol>",
+        "<ol type=\"I\"><li>one</li><li>two</li></ol>",
+        // Negative starts and starts past the nine-digit marker limit.
+        "<ol start=\"-2\"><li>minus two</li><li>minus one</li></ol>",
+        "<ol start=\"1000000000\"><li>a</li></ol>",
+        // A li fixed to an ordinal the sequential numbering would not reach.
+        "<ol><li value=\"5\">fifth</li><li>sixth</li></ol>",
+        // An item that renders away still occupies its HTML ordinal.
+        "<ol><li>one</li><li></li><li>three</li></ol>",
+        // Stray content between items used to take its own marker.
+        "<ol><li>one</li> stray words <li>two</li></ol>",
+        "<ol><li>one</li><p>stray paragraph</p><li>two</li></ol>",
+        // The gap matters wherever the list renders, nested in another list
+        // or inside a table cell.
+        "<ol><li>one<ol reversed><li>x</li><li>y</li></ol></li><li>two</li></ol>",
+        "<table><tr><td><ol reversed><li>x</li><li>y</li></ol></td><td>note</td></tr></table>",
+    ] {
+        let html = page(&format!("<p>{PARAGRAPH}</p>{body}"));
+        assert!(HtmlExtractor.render(&html).is_none(), "{body}");
+    }
+}
+
+#[test]
+fn representable_ordered_lists_still_render() {
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p>\
+         <ol start=\"0\"><li>zero</li><li>one</li></ol>\
+         <ol start=\"999999999\"><li>last</li></ol>\
+         <ol type=\"1\"><li>letterless</li><li>two</li></ol>\
+         <ol><li value=\"1\">first</li><li>second</li></ol>\
+         <ol start=\"3\"><li value=\"3\">three</li><li>four</li></ol>\
+         <ol start=\"soon\"><li>unparsable start defaults to 1</li></ol>\
+         <ol><li>blank</li>
+
+         <li>whitespace</li></ol>\
+         <ul reversed><li>unordered lists ignore numbering attrs</li></ul>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(
+        body_of(&view),
+        format!(
+            "{PARAGRAPH}\n\n\
+             0. zero\n1. one\n\n\
+             999999999. last\n\n\
+             1. letterless\n2. two\n\n\
+             1. first\n2. second\n\n\
+             3. three\n4. four\n\n\
+             1. unparsable start defaults to 1\n\n\
+             1. blank\n2. whitespace\n\n\
+             - unordered lists ignore numbering attrs"
+        )
+    );
+}
+
+/// Lists the view never reaches must not trigger the fallback: one inside a
+/// removed element, or outside the rendered root, is not part of the view.
+#[test]
+fn problem_lists_outside_the_view_are_ignored() {
+    let html = page(&format!(
+        "<nav><ol reversed><li>nav three</li><li>nav two</li></ol></nav>\
+         <aside><ol type=\"a\"><li>side</li></ol></aside>\
+         <div>outside <ol start=\"-1\"><li>x</li></ol></div>\
+         <main><p>{PARAGRAPH}</p><ol><li>main one</li><li>main two</li></ol></main>"
+    ));
+    let view = HtmlExtractor.render(&html).unwrap();
+    assert_eq!(view.root, "main");
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH}\n\n1. main one\n2. main two")
+    );
+}
+
 #[test]
 fn mathml_renders_its_tex_annotation_or_alttext() {
     let html = page(&format!(

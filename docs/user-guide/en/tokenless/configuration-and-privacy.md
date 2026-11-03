@@ -140,6 +140,15 @@ category. Pages whose
 rendered body is shorter than 64 characters, such as application shells, pass through,
 and so do pages whose markup nests deeper than 512 elements: HTML parsing time grows
 quadratically with nesting depth, so such pages are not parsed at all.
+Ordered lists render as CommonMark ordered lists with decimal `1.` markers. When an
+`<ol>` in the rendered root cannot be represented that way — it carries `reversed`, a
+non-decimal `type`, a negative `start` or one longer than nine digits, an `<li>` whose
+explicit `value` disagrees with the running number, an item that renders away, or stray
+block or non-blank inline content between items — the page is not rendered at all and
+passes through verbatim, giving up compression. The trade-off is deliberate: a renumbered
+list (say 1, 5, 6 rewritten as 1, 2, 3) changes the list's meaning, so keeping the
+original costs tokens but stays truthful. Lists inside removed elements (such as `nav`
+or `aside`) or outside the rendered root are never part of the view and are ignored.
 It only adopts output when both characters decrease and the heuristic token estimate
 saves at least 16 tokens, including the notice and recovery instruction.
 
