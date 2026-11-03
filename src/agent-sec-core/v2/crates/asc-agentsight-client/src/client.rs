@@ -2,6 +2,10 @@
 
 use std::path::Path;
 
+use asc_agentsight_protocol::{
+    FILE_PROTECTION_POLICY_MEDIA_TYPE, FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy,
+    FileProtectionTargetKind,
+};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use asc_policy_types::target::TargetBindingPlan;
 use serde::{Deserialize, Serialize};
@@ -179,7 +183,10 @@ impl<T, R> AgentSightClient<T, R>
 where
     T: AgentSightTransport,
 {
-    fn require_file_delete_capability(&self) -> Result<(), AgentSightClientError> {
+    fn require_capabilities(
+        &self,
+        request: &ApplyBindingRequest,
+    ) -> Result<(), AgentSightClientError> {
         let response = self.send(&AgentSightHttpRequest {
             method: AgentSightHttpMethod::Get,
             path: ENFORCEMENT_HEALTH_PATH.to_owned(),
@@ -196,7 +203,28 @@ where
         if health.backend != "actplane" {
             return Err(rejected("AGENTSIGHT_UNSUPPORTED_BACKEND"));
         }
-        if !health.capabilities.file_delete_guard {
+        let caps = health.capabilities;
+        if let Some(policy) = &request.file_protection_policy {
+            if !caps.static_mount_topology {
+                return Err(rejected("AGENTSIGHT_STATIC_MOUNT_TOPOLOGY_UNAVAILABLE"));
+            }
+            for target in &policy.targets {
+                if target.protections.delete {
+                    let available = match target.kind {
+                        FileProtectionTargetKind::ExactFile => caps.file_entry_delete_protection,
+                        FileProtectionTargetKind::DirectoryTree => {
+                            caps.directory_tree_delete_protection
+                        }
+                    };
+                    if !available {
+                        return Err(rejected("AGENTSIGHT_DELETE_PROTECTION_UNAVAILABLE"));
+                    }
+                }
+                if target.protections.ordinary_write && !caps.ordinary_write_protection {
+                    return Err(rejected("AGENTSIGHT_ORDINARY_WRITE_PROTECTION_UNAVAILABLE"));
+                }
+            }
+        } else if !caps.file_delete_guard {
             return Err(rejected("AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE"));
         }
         Ok(())
@@ -228,8 +256,18 @@ struct EnforcementHealth {
 }
 
 #[derive(Debug, Deserialize)]
+// Independent feature flags mirror the target's health wire contract.
+#[allow(clippy::struct_excessive_bools)]
 struct EnforcementCapabilities {
     file_delete_guard: bool,
+    #[serde(default)]
+    file_entry_delete_protection: bool,
+    #[serde(default)]
+    directory_tree_delete_protection: bool,
+    #[serde(default)]
+    ordinary_write_protection: bool,
+    #[serde(default)]
+    static_mount_topology: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,8 +280,34 @@ struct ApplyBindingRequest {
     process_start_time: u64,
     policy_id: String,
     policy_revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     policy_dsl: String,
     policy_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_protection_policy: Option<FileProtectionPolicy>,
+}
+
+impl ApplyBindingRequest {
+    fn valid_policy(&self) -> bool {
+        match (
+            &self.file_protection_policy,
+            self.policy_dsl.trim().is_empty(),
+        ) {
+            (None, false) => true,
+            (Some(policy), true) => valid_file_protection(policy),
+            _ => false,
+        }
+    }
+}
+
+fn valid_file_protection(policy: &FileProtectionPolicy) -> bool {
+    policy.version == FILE_PROTECTION_POLICY_VERSION
+        && !policy.targets.is_empty()
+        && policy.targets.len() <= 64
+        && policy
+            .targets
+            .iter()
+            .all(|target| target.protections.delete || target.protections.ordinary_write)
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,6 +388,7 @@ struct DecodedPlan {
     policy_revision: Revision,
     root_pid: i32,
     policy_dsl: String,
+    file_protection_policy: Option<FileProtectionPolicy>,
     process: asc_policy_types::process_discovery::ProcessIdentity,
 }
 
@@ -341,6 +406,7 @@ impl DecodedPlan {
             policy_revision: self.policy_revision.get().to_string(),
             policy_dsl: self.policy_dsl.clone(),
             policy_mode: "enforce".to_owned(),
+            file_protection_policy: self.file_protection_policy.clone(),
         }
     }
 }
@@ -364,9 +430,20 @@ fn decode_plan(plan: &TargetBindingPlan) -> Result<DecodedPlan, AgentSightClient
         policy_revision,
         scope_id: _scope_id,
     } = plan.source;
-    if plan.policy.media_type != ACTPLANE_POLICY_MEDIA_TYPE || plan.policy.content.is_empty() {
-        return Err(rejected("AGENTSIGHT_UNSUPPORTED_POLICY_ARTIFACT"));
-    }
+    let (policy_dsl, file_protection_policy) = match plan.policy.media_type.as_str() {
+        ACTPLANE_POLICY_MEDIA_TYPE if !plan.policy.content.trim().is_empty() => {
+            (plan.policy.content, None)
+        }
+        FILE_PROTECTION_POLICY_MEDIA_TYPE => {
+            let policy: FileProtectionPolicy = serde_json::from_str(&plan.policy.content)
+                .map_err(|_| rejected("AGENTSIGHT_INVALID_FILE_PROTECTION_POLICY"))?;
+            if !valid_file_protection(&policy) {
+                return Err(rejected("AGENTSIGHT_INVALID_FILE_PROTECTION_POLICY"));
+            }
+            (String::new(), Some(policy))
+        }
+        _ => return Err(rejected("AGENTSIGHT_UNSUPPORTED_POLICY_ARTIFACT")),
+    };
     let AgentSightScopePlan::ProcessTree { root_pid, process } = plan.scope;
     if root_pid <= 0
         || u32::try_from(root_pid).ok() != Some(process.pid)
@@ -382,7 +459,8 @@ fn decode_plan(plan: &TargetBindingPlan) -> Result<DecodedPlan, AgentSightClient
         policy_id,
         policy_revision,
         root_pid,
-        policy_dsl: plan.policy.content,
+        policy_dsl,
+        file_protection_policy,
         process,
     })
 }

@@ -6,9 +6,10 @@
 第 5–7 节保留早期 Cedar/Dogwood 导入评估，第 8 节记录当前选定的架构、数据结构、
 版本与持久化约定。选定方案采用双前端，不实施 Cedar 与原有 JSON 策略之间的转换器。
 
-设计更新日期：2026-10-30。Cedar 准入与 PAP/RPC 源码持久化已接入；
+设计更新日期：2026-11-03。Cedar 准入与 PAP/RPC 源码持久化已接入；
 测试通过已有 `pst` 接口重新解析保存的源码。
-目标翻译与运行时授权服务仍待实现。下文分别标明现状与后续设计。
+Cedar 删除/普通写保护已接入现有 PEP Adapter 的翻译与部署；运行时授权服务仍待实现。
+具体能力边界及流程见 [专属 Adapter 契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)。
 
 原有 JSON 链路与早期导入评估的核查基线：
 `51c781fce6352fb7ff12c4d4e1d3cf3484d05cf6`。Cedar 库接口本次核对基于
@@ -89,8 +90,8 @@ Cedar 的 `(principal, action, resource)` scope 因而不等同于 SecCore 的 S
 }
 ```
 
-该条件可以表示并通过校验，但当前 AgentSight Adapter 会拒绝：Adapter 只接受单独的
-`operation == delete` 条件。
+该条件可以表示并通过校验。部署还要求目标 PEP Adapter 同时支持 operation 和 program
+条件，不能为了生成目标计划而丢弃其中任意一个条件。
 
 `Scalar` 可以反序列化字符串、整数和布尔值，但当前属性目录没有布尔属性，不能因为
 存在这个枚举分支就使用通用布尔 context 字段。比较是“属性对字面量”，不是任意表达式
@@ -100,8 +101,8 @@ Cedar 的 `(principal, action, resource)` scope 因而不等同于 SecCore 的 S
 
 `HistoryEvent` 描述文件动作、目标及该事件自身的可选条件，不能递归携带 `previous`。
 历史 `and` 是逻辑合取，不表示事件顺序。源码注释为事实缺失、历史不完整保留了 unknown
-语义，但当前路径尚无通用历史求值器，也没有已落地的策略历史持久化域。AgentSight
-当前不会翻译任何历史规则。
+语义，但当前路径尚无通用历史求值器，也没有已落地的策略历史持久化域。部署这类规则
+还需要明确支持历史求值的 PEP 集成。
 
 `specVersion` 必须是 `0.1`，规则数为 1–1024。条件/历史最大深度为 16，全策略共享
 4096 个节点预算。路径必须绝对、最多 4096 bytes，拒绝 `.`/`..` 段、重复分隔符、
@@ -113,29 +114,17 @@ Cedar 的 `(principal, action, resource)` scope 因而不等同于 SecCore 的 S
 [属性校验](../../v2/crates/asc-policy-types/src/authoring/condition.rs)、
 [authoring 回归测试](../../v2/crates/asc-policy-types/tests/authoring.rs)。
 
-## 3. 当前 AST 到 DSL 的翻译
+## 3. 从策略表示到 PEP 策略的翻译
 
-`AgentSightAdapter::translate` 读取完整 Binding 快照，校验全部输入，将规则降低为
-ActPlane DSL，再包装为目标计划。它不查询最新模板，不执行请求求值，也不进行目标 I/O。
+`TargetBindingAdapter::translate` 接收完整 Binding 快照。Translator 根据策略前端读取
+原生 `PolicyTemplate`，或调用 `asc_policy_cedar::pst` 取得 Cedar PST，然后检查目标 PEP
+能否表达策略语义，生成该目标接受的 DSL、规则或配置。
+它不查询最新模板，不执行请求授权，也不进行部署 I/O。
 
-| AST 要素 | Adapter 接受范围 | 超出范围时 |
-|---|---|---|
-| 效果 | `block` | `RULE_<index>_UNSUPPORTED_EFFECT` |
-| category/action | `file` / `write` | `RULE_<index>_UNSUPPORTED_ACTION` |
-| 条件 | 精确为 `{"operation":{"eq":"delete"}}` | `RULE_<index>_UNSUPPORTED_CONDITION` |
-| 历史 | 不携带 | `RULE_<index>_UNSUPPORTED_HISTORY` |
-| 路径模式 | 字面路径，或字面前缀后接 `/**` | 拒绝不支持的 glob |
-| 规模 | 最多 128 条；降低后的路径模式最多 63 bytes | 明确的上限错误 |
-| DSL 字面量 | 路径/理由不含引号、反斜杠或控制字符 | 明确的路径/理由错误 |
-| 挂载范围 | 以 Binding 固定实例为根的进程树 | 拒绝 cgroup selector |
+`TargetBindingPlan` 包含目标格式及不透明内容；具体格式、容量、路径匹配与效果支持范围
+由对应 Adapter 定义。合法但不受支持的语句使整个 Binding 翻译失败，不允许静默下发部分规则。
 
-任意一条合法规则不受支持，整个 Binding 转换失败，不会静默下发其中一部分。规则顺序
-决定稳定生成的名称，不表示通用 first-match/last-match 判定。多条受支持的 block 规则
-覆盖其匹配范围的并集。当前不做复杂条件化简。
-
-以下模板取自
-[prepared-Binding fixture](../../v2/crates/asc-policy-types/tests/fixtures/prepared-binding.json)
-中的第一条规则：
+例如，以下原生策略描述对指定文件的删除限制：
 
 ```json
 {
@@ -152,90 +141,67 @@ ActPlane DSL，再包装为目标计划。它不查询最新模板，不执行�
 }
 ```
 
-生成的 DSL 为：
+Translator 必须同时保留目标路径、删除操作和阻断效果。能否生成可下发配置，取决于目标 PEP
+的能力；具体映射、生成结果和拒绝规则见[专属 Adapter 契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)。
 
-```text
-source AGENT = exec "**"
-rule agentseccore-unlink-0000:
-  block unlink file "/etc/agent/config.yaml" if AGENT
-  because "AgentSecCore file deletion policy"
-```
-
-显式 `because` 会替换默认理由。SecCore 生成格式为 `agentsight.actplane.binding.v2`
-的 `TargetBindingPlan`，其中携带来源 ID/revision、DSL 和固定实例的进程树挂载信息。
-
-源码：[翻译器](../../v2/crates/asc-policy-adapter-agentsight/src/translate.rs)、
-[计划结构](../../v2/crates/asc-policy-adapter-agentsight/src/plan.rs)、
-[翻译测试](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs)。
+源码：[目标接口](../../v2/crates/asc-policy-target-contracts/src/lib.rs)、
+[目标计划](../../v2/crates/asc-policy-types/src/target.rs)。
 
 ## 4. 分配、下发与执行
 
 ```mermaid
 flowchart TD
-    A[JSON policy AST] --> B[PAP validation and SQLite]
-    B --> C[Scope snapshots and process discovery]
-    C --> D[System-created Binding]
-    D --> E[WorkQueue and BindingReconciler]
-    E --> F[AgentSightAdapter: AST to DSL and plan]
-    F --> G[AgentSightClient: prepare and capability checks]
-    G -->|HTTP| H[AgentSight Coordinator]
-    H -->|UDS| I[Enforcer: DSL to compiled configuration]
-    I --> J[ActPlane process domain and BPF]
+    A[策略源码：JSON / Cedar] --> B[PAP 校验与 SQLite 存储]
+    B --> C[Scope 快照与进程发现]
+    C --> D[系统生成 Binding]
+    D --> E[WorkQueue 与 BindingReconciler]
+    E --> F[Translator：策略表示转目标规则或配置]
+    F --> G[Deployment Client：请求准备与能力检查]
+    G --> H[PEP 后端管理接口]
+    H --> I[PEP 安装策略并实施防护]
+    H -->|部署回执| G
 ```
 
-1. 创建模板只保存规则，不触发下发。创建 Scope 时解析指定的 Policy current revision，
-   保存完整快照。通过 PID 或精确进程名/executable selector 发现实例；当前拒绝 cgroup
-   assignment。模板更新/删除不改变已有快照。
+1. 创建 Policy 只保存策略，不触发下发。创建 Scope 时解析指定的 Policy revision，保存
+   完整快照；模板更新或删除不改变已有快照。进程实例由 Scope selector 和 Discovery 确定。
 2. Discovery 为每个 Scope/策略/实例准入一个 Binding，固定 PID、start time、boot ID
-   及 PID namespace。队列通知只携带 ID，Reconciler 重读权威状态，通过 Runtime 队列
-   串行处理同一 Binding。
-3. Adapter 编译快照；Client 准备固定请求字节与目标引用。执行修改性目标 I/O 前，
+   及 PID namespace。队列通知只携带 ID，Reconciler 重读权威状态并协调部署。
+3. Translator 转换快照；Client 准备部署请求及目标引用。执行修改性目标 I/O 前，
    Reconciler 先持久化可能存在的目标责任，记为 `UNKNOWN`。
-4. Client 重查进程身份，并要求健康接口 `ready=true`、backend 为 `actplane`、
-   `capabilities.file_delete_guard=true`。随后携带认证 POST 到
-   `/api/enforcement/bindings`，请求包含 DSL、Policy ID/revision、root PID、start time
-   和 `policy_mode=enforce`。默认 API 根为 `http://127.0.0.1:7396/api`。产品 Binding
-   当前不提供 Agent 身份，`agent_id` 为空，省略 `session_id`。
-5. AgentSight 经 Coordinator、UDS 调用本地 Enforcer；Enforcer 编译 DSL，为目标进程
-   建立执行域/标签，并向 ActPlane 提交编译后的策略字节。Client 只接受内容匹配且状态为
-   `Enforced`、带 domain ID 的响应；随后通过 Repository 条件写保存观测和 `READY`。
-   暂时性失败进入有界重试。
+4. Client 按目标契约检查身份和运行能力，向 PEP 后端管理接口下发策略。
+   后端需要时再编译或解析目标策略，然后安装相应防护。
+5. Client 按目标契约核对回执，Reconciler 保存部署观测与 `READY` 状态；暂时性失败进入
+   有界重试。删除 Scope 会异步清理目标，确认目标不存在后才能回收责任。
 
-删除 Scope 会异步清理远端目标，确认目标不存在后才能回收责任。Client 的替换操作先删除
-旧目标、再创建新目标，不提供原子切换。
-
-这里有两次不同的编译：SecCore AST → DSL，以及 Enforcer DSL → 执行配置。当前
-ActPlane 编译器将 `write` 与 `unlink` 都降低为 `OP_WRITE`；生成 DSL 或收到部署响应
-不证明真实内核只阻止删除。真实 deny 测试仍是独立证据。
+具体请求协议、成功回执和替换顺序由目标 Client 约定，见[专属 Adapter 契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)。
+目标规则生成、部署成功和实际 PEP 防护分别验证；真实拦截仍需要相应运行环境中的操作测试。
 
 源码：[PAP](../../v2/crates/asc-pap/src/service.rs)、
 [实例准入](../../v2/crates/asc-policy-repository-sqlite/src/pap.rs)、
 [Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs)、
-[Client](../../v2/crates/asc-agentsight-client/src/client.rs)、
-[请求准备](../../v2/crates/asc-agentsight-client/src/client/reconciliation.rs)、
-[Enforcer](../../../agentsight/crates/agentsight-enforcer/src/actplane.rs)、
-[操作降低](../../../agentsight/crates/actplane-ifc-compiler/src/dsl/lower.rs)。
+[部署接口](../../v2/crates/asc-policy-target-contracts/src/lib.rs)。
 
 ## 5. Cedar 导入能力边界
 
-评估区分两个问题：能否生成当前合法 AST，以及生成的 AST 能否通过当前 Adapter。
-下表针对拟议的导入器；当前 checkout 尚未实现 Cedar 或 Dogwood 导入。
+评估区分两个问题：能否生成合法的原生 AST，以及选定的 PEP Adapter 能否翻译该 AST。
+下表只列 AST 表达能力，具体翻译范围由各 Adapter 声明。这里评估的 Cedar/Dogwood
+到原生 AST 的导入器尚未实现。
 
 Cedar 的授权规则包括默认拒绝、forbid 优先及错误策略跳过；导入语句不会自动引入这些
 策略集求值规则。参阅 [Cedar 授权过程](https://docs.cedarpolicy.com/auth/authorization.html)。
 
-| Cedar 结构 | 能否生成当前合法 AST | 能否通过当前 AgentSight Adapter |
-|---|---|---|
-| 文件 `forbid`，字面目标及 delete 动作/条件 | 可以，需要显式动作/资源映射 | 可以，前提是结果精确落在受支持的删除规则内 |
-| `permit` | 效果可以映射为 `allow` | 不可以 |
-| 已支持属性与字面量比较的 `when` | 可以，需要映射已知属性 | 仅接受单独的删除条件 |
-| `&&`、`||`、`!`、多个 `when`、`unless` | 可用 `And`/`Or`/`Not`，多个子句用 `And` 组合 | 不接受通用逻辑条件 |
-| principal 相等、类型、分组、属性条件 | Rule 内没有对应字段 | 需要外部主体分配解析；不支持任意 principal 逻辑 |
-| 实体层级 `in` 或跨实体属性比较 | 没有实体图和属性对属性操作数 | 不可以 |
-| 固定标量集合的 `.contains(...)` 成员判断 | 可用 `Comparison::In`，需满足属性操作数限制 | 不接受通用成员条件 |
-| 通用 `context`、record、set、算术、扩展函数、`has` | 没有承载这些结构的通用表达式/值模型 | 不可以 |
-| `like` | 只能另行检查并约定支持的模式子集 | 不能直接复用 Cedar 字符串通配语法 |
-| annotation、template slot | 没有规则 annotation/slot 字段，需外部保留或先实例化 | 仅接受最终落入支持范围的具体规则 |
+| Cedar 结构 | 能否生成当前合法 AST |
+|---|---|
+| 文件 `forbid`，字面目标及 delete 动作/条件 | 可以，需要显式动作/资源映射 |
+| `permit` | 效果可以映射为 `allow` |
+| 已支持属性与字面量比较的 `when` | 可以，需要映射已知属性 |
+| `&&`、`\|\|`、`!`、多个 `when`、`unless` | 可用 `And`/`Or`/`Not`，多个子句用 `And` 组合 |
+| principal 相等、类型、分组、属性条件 | Rule 内没有对应字段 |
+| 实体层级 `in` 或跨实体属性比较 | 没有实体图和属性对属性操作数 |
+| 固定标量集合的 `.contains(...)` 成员判断 | 可用 `Comparison::In`，需满足属性操作数限制 |
+| 通用 `context`、record、set、算术、扩展函数、`has` | 没有承载这些结构的通用表达式/值模型 |
+| `like` | 只能另行检查并约定支持的模式子集 |
+| annotation、template slot | 没有规则 annotation/slot 字段，需外部保留或先实例化 |
 
 导入 profile 必须声明实体/动作 namespace、哪个资源字段表示规范化文件路径，以及主体
 如何绑定到可信进程分配。principal 与进程身份之间需要显式映射。Cedar 的实体 `in`
@@ -272,17 +238,17 @@ Dogwood 核心语法来自 Cedar，因此普通核心语句可采用第 5 节的
 information provider 需要额外能力；JSON AST 编码本身不提供这些运行时输入。
 参阅 [Dogwood 核心语言](https://dogwood-policy.github.io/dogwood/guide/02-policy-language.html)。
 
-| Dogwood 结构 | 当前 AST 边界 | 当前 Adapter 边界 |
-|---|---|---|
-| 普通 Cedar 风格文件规则 | 同第 5 节 | 仅支持删除阻断规则 |
-| 宏 | 用 Dogwood parser/schema 环境展开后再检查结果 | 展开后仍须落在受支持子集内 |
-| 固定字面量的简单历史文件事件谓词 | `HistoryEvent` 可描述事件形状，但不提供 Dogwood 时序语义 | 拒绝所有 `previous` |
-| `formerly within ...` | 没有窗口/时长节点 | 不支持 |
-| `previous within ...` | 没有“紧邻前一个事件”的运算符；SecCore 的同名字段不是该运算符 | 不支持 |
-| `since`、事件顺序、`exists`、`tp`、`count`、`sum` | 没有对应时序、绑定或聚合节点 | 不支持 |
-| 历史与当前请求之间的同用户/资源关联 | 没有绑定变量及当前/历史字段引用操作数 | 不支持 |
-| provider 调用及其输出字段 | 没有 provider-call 节点或通用动态属性 namespace | 不支持 |
-| `guardrails { E }` | 可以去除语法包装，但 `E` 仍须落在允许的核心子集内 | 不会自动获得 provider 执行能力 |
+| Dogwood 结构 | 当前 AST 边界 |
+|---|---|
+| 普通 Cedar 风格文件规则 | 同第 5 节 |
+| 宏 | 用 Dogwood parser/schema 环境展开后再检查结果 |
+| 固定字面量的简单历史文件事件谓词 | `HistoryEvent` 可描述事件形状，但不提供 Dogwood 时序语义 |
+| `formerly within ...` | 没有窗口/时长节点 |
+| `previous within ...` | 没有“紧邻前一个事件”的运算符；SecCore 的同名字段不是该运算符 |
+| `since`、事件顺序、`exists`、`tp`、`count`、`sum` | 没有对应时序、绑定或聚合节点 |
+| 历史与当前请求之间的同用户/资源关联 | 没有绑定变量及当前/历史字段引用操作数 |
+| provider 调用及其输出字段 | 没有 provider-call 节点或通用动态属性 namespace |
+| `guardrails { E }` | 可以去除语法包装，但 `E` 仍须落在允许的核心子集内 |
 
 例如，Dogwood 可以要求用户在读取前一小时内登录。把该条件换成 SecCore 历史事件会丢失
 时间窗口及与当前用户的关联；应报告不支持，而不是因为都有 `previous` 字样就导入。
@@ -310,8 +276,8 @@ AST 外，不需要为本次评估引入第二套策略模型。通用 Cedar 授
 属于额外的运行时功能，超出语句导入范围。
 
 第 5–7 节评估的候选导入器尚未实现，也不属于第 8 节选定的架构。现有
-[authoring 测试](../../v2/crates/asc-policy-types/tests/authoring.rs)及
-[翻译测试](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs)覆盖当前本地边界。
+[authoring 测试](../../v2/crates/asc-policy-types/tests/authoring.rs)覆盖原生 AST 边界；
+目标翻译测试见[专属 Adapter 契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)。
 后续导入器只需针对接受语句检查输出 AST，并检查不支持结构被明确拒绝；完整语言语义
 等价不属于这里的验收目标。
 
@@ -335,8 +301,8 @@ Cedar 原生授权结果是 Allow/Deny 与诊断信息；策略部署和业务�
 | PAP 策略管理 | 保存源码及 revision，关联 Scope，保留分配和 Binding 快照 | `asc-pap`、repository 管理双前端源码；策略组合待设计 |
 | PDP 请求决策 | 加载适用策略，接收具体请求，按需组织 PIP 信息并执行授权 | 目标设计；可以与 PAP 同处 SecCore daemon，逻辑职责独立 |
 | 部署编排 | 生成或更新 Binding、选择目标，由 Reconciler 驱动安装、更新、撤销与恢复 | 现有 Scope/Binding 与 `asc-pcp`；从授权结果生成部署输入仍待接入 |
-| 后端适配 | Translator 负责目标能力检查与翻译；Deployment Client 负责后端协议和部署调用 | 现有目标接口与 AgentSight 实现；Cedar 翻译尚未接入 |
-| PEP 与后端 PDP | PEP 捕获请求并落实决策；部分后端还包含自己的 PDP，持续判断系统操作 | 按 Hook、sandbox、ActPlane 等具体场景确定；不能由 schema 推断支持情况 |
+| 后端适配 | Translator 负责目标能力检查与翻译；Deployment Client 负责后端协议和部署调用 | 原生 DSL 与 Cedar 删除/普通写结构化翻译已接入；Client 检查目标运行能力 |
+| PEP 与后端 PDP | PEP 捕获请求并落实决策；部分后端还包含自己的 PDP，持续判断系统操作 | 按 Hook、sandbox、系统调用拦截等具体场景确定；不能由 schema 推断支持情况 |
 
 ![AgentSecCore 策略管理、请求决策与部署](diagrams/CEDAR_ARCHITECTURE_zh.png)
 
@@ -364,7 +330,7 @@ PEP 实施结果。普通工具或内容请求通常不需要逐次生成持久�
 
 | 组件 | 输入与输出 | 当前实现对应 |
 |---|---|---|
-| Policy Translator（策略翻译器） | 输入内存策略表示、Cedar schema 引用（如适用）、绑定信息及目标能力；输出目标规则与执行配置；不承担部署 I/O | `TargetBindingAdapter::translate`；当前 AgentSight 实现为 `AgentSightAdapter`，仅消费原有 AST |
+| Policy Translator（策略翻译器） | 输入内存策略表示、Cedar schema 引用（如适用）、绑定信息及目标能力；输出目标规则与执行配置；不承担部署 I/O | `TargetBindingAdapter::translate`；各 PEP Adapter 声明支持的原有 AST 与 Cedar PST 子集 |
 | Deployment Client（部署客户端） | 输入目标计划，封装协议，执行安装、更新和撤销，返回回执 | `TargetDeploymentClient` 的 `prepare_apply`、`create`、`update`、`delete` |
 | Reconciler（部署协调） | 调用 Translator 取得计划，再调用 Client；跟踪状态、重试与恢复 | `asc-pcp` 中的 Reconciler |
 
@@ -378,14 +344,14 @@ SecCore 以该接口的成功回执记录部署成功，具体生效保证由后
 
 本节用 Translator 表示翻译组件。第 1–7 节中的 Adapter 沿用源码名称。
 职责对应参见[目标接口](../../v2/crates/asc-policy-target-contracts/src/lib.rs)和
-[Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs)。目标接口目前尚未接受 Cedar 表示。
+[Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs)。目标接口携带源码快照；PEP Translator 在翻译时调用 `pst`。
 
 ### 8.3 表示选择与剩余设计问题
 
 原有 JSON 反序列化为 `PolicyTemplate`。Cedar 的 `validate` 接口校验源码，`pst` 在相同
 校验通过后返回用于翻译的 SDK PST。接入方案让两个前端共用 PAP、Scope/Binding 与
-部署生命周期。各 Translator 需要声明接受的表示；当前 AgentSight Adapter 只接受
-`PolicyTemplate`。
+部署生命周期。各 Translator 需要声明接受的表示；现有 PEP Adapter 处理
+`PolicyTemplate` 和 Cedar PST；[目标契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)列明支持范围。
 不新增旧 JSON 转 Cedar、Cedar 转旧 AST 的公共转换层。第 5–7 节仅保留早期方案评估。
 
 前端检查语法、schema 和公共支持子集；Translator 检查后端能否表达条件、效果、匹配方式
@@ -393,10 +359,10 @@ SecCore 以该接口的成功回执记录部署成功，具体生效保证由后
 
 | 设计问题 | 对应阶段 | 已确定与待定边界 |
 |---|---|---|
-| D1：系统防护语义映射 | 前端 schema、运行时请求构造、Translator | 文件/程序调用/整体网络字段已定义；字段可信来源、请求映射、后端翻译和授权结果到约束的接口待实现；Hook 契约另议 |
+| D1：系统防护语义映射 | 前端 schema、运行时请求构造、Translator | 文件/程序调用/整体网络字段已定义；删除/普通写翻译已接入现有 PEP Adapter；运行时字段可信来源、请求映射和授权结果到约束的接口待实现；Hook 契约另议 |
 | D2：多 PEP 选择与协同 | 目标规划、部署编排、PEP 实施 | 按 Scope 与策略要求匹配能力；替代/协同关系、必需目标集合及回执汇总待定 |
 | D3：基础与运行时策略叠加 | PAP 组织策略、PDP 加载与决策 | 权限上限、组合方式、冲突、有效期、撤销后的恢复仍需单独设计；动态策略不能默认扩权 |
-| D4：AST 与检查位置 | 前端准入、加载、Translator | 原生 `PolicyTemplate` 与 Cedar PST；PAP 校验并保存源码，`pst` 重新解析保存的 Cedar 源码；Cedar Translator 接入待实现 |
+| D4：AST 与检查位置 | 前端准入、加载、Translator | 原生 `PolicyTemplate` 与 Cedar PST；PAP 校验并保存源码，`pst` 重新解析保存的 Cedar 源码；Cedar 文件翻译已接入现有 PEP Adapter |
 
 作用对象继续由 Scope/Binding 管理。Cedar 语法仍有 principal 位置，但用户策略不填写
 具体主体条件；当前前端拒绝 principal 约束与引用。直接求值时，由接入层提供符合 schema
@@ -439,7 +405,7 @@ pub struct PreparedPolicy {
 `PreparedPolicy`、创建/更新 RPC、PAP 服务及存储快照均接收 `PolicySource`。
 保存的 Cedar 源码可直接传给已有 `asc-policy-cedar::pst` 接口；
 该接口按保存的精确 schema 引用重新校验源码并生成官方 PST。
-Translator 调用链仍待接通。
+PEP Translator 已在既有 Binding 翻译调用链中调用该接口。
 
 RPC 的 Cedar `template` 形状如下：
 
@@ -602,8 +568,8 @@ schema 插件加载器。Hook 扩展仅在测试中定义，当前内置 schema 
 校验策略，尤其注意未限制 action 或 resource 的策略可能覆盖新领域。
 
 这是 V2 前端与策略管理契约。PAP/RPC 与源码快照已接入，测试将恢复的源码传给 `pst`；
-Cedar 目标翻译和
-运行时请求映射尚未接入。AgentSight 对 Cedar 返回 `UNSUPPORTED_POLICY_LANGUAGE`。
+现有 PEP Adapter 已翻译受支持的 Cedar forbid 删除/普通写条件，Client 下发目标防护策略。
+完整边界见[目标契约](AGENTSIGHT_CEDAR_TRANSLATION_zh.md)；运行时请求映射尚未接入。
 校验成功只证明前端接受该策略。SDK 的深层嵌套输入栈溢出限制仍未解决，
 当前应使用管理员审阅的策略，接入不可信生成输入前需补齐防护。
 
@@ -698,11 +664,11 @@ Binding，必须保留其版本支持，或先完成显式迁移和目标重新�
 |---|---|---|
 | 类型与 Cedar 前端 | 源码联合类型；内置 revision 1；`validate` 返回非阻断 warnings，`pst` 校验并返回 SDK PST | schema 文件元数据及读取；保持公共子集诊断 |
 | Policy/PAP/RPC/SQLite | `template: PolicySource`；Cedar 准入和源码持久化；旧请求与三处快照兼容 | 保持版本与快照契约 |
-| 策略加载与目标翻译 | 保存的 Cedar 源码可通过 `pst` 按精确 schema 重新解析；AgentSight 仅支持原有 AST | 将源码到 PST 的加载接入 Cedar Translator 和部署链路；逐目标实现并声明支持范围 |
+| 策略加载与目标翻译 | 保存的 Cedar 源码经 `pst` 加载；删除/普通写翻译和 Client 部署已接入现有 PEP Adapter | 按声明边界验证真实后端防护；逐目标扩展支持范围 |
 | PDP 与部署衔接 | 现有链路负责异步部署，无通用 Cedar 请求授权入口 | 独立定义请求/决策契约、策略组合、约束到 Binding 的接口及启动时序 |
 | Agent Hook/PIP | 内置 schema 尚未支持 | 另定资源、动作、请求字段与检测契约，再发布对应 schema 版本 |
 
-先接通已有策略生命周期中的 Cedar 源码保存、加载与单个目标翻译，再依据具体运行时场景
+Cedar 源码保存、加载与面向现有 PEP 的文件策略翻译已接入既有策略生命周期。后续依据具体运行时场景
 实现 PDP/PEP 请求路径。版本支持检查贯穿接入、加载与翻译；不先引入外部 schema 注册服务、
 持久化 AST 缓存或通用旧模型转换器。
 

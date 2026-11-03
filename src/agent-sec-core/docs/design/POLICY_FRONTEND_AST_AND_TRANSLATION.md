@@ -8,10 +8,10 @@ sections 5–7 retain the earlier Cedar/Dogwood import assessment. Section 8 rec
 the selected architecture, data structures, versioning and persistence contracts.
 The selected design has two frontends and no Cedar/native JSON policy converter.
 
-Design updated: 2026-10-30. Cedar admission and PAP/RPC source persistence
+Design updated: 2026-11-03. Cedar admission and PAP/RPC source persistence
 are connected; tests reparse saved source through the existing `pst` interface.
-Target translation and runtime authorization
-remain open; the following sections distinguish implementation from design.
+Cedar deletion/ordinary-write translation and deployment are connected through the existing PEP Adapter;
+runtime authorization remains open. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
 
 Original native-policy and import-assessment baseline:
 `51c781fce6352fb7ff12c4d4e1d3cf3484d05cf6`. Cedar library interfaces were checked
@@ -99,8 +99,9 @@ For example, this is a `Condition` fragment accepted inside a file-write rule:
 }
 ```
 
-It can be represented and validated, but the current AgentSight Adapter rejects
-it: that adapter accepts only the single `operation == delete` condition.
+It can be represented and validated. Deployment additionally requires a PEP
+Adapter that supports both the operation and program conditions; neither
+condition may be dropped to obtain a target plan.
 
 `Scalar` can deserialize strings, integers and booleans, but the current attribute
 catalog has no boolean-valued attribute. A generic boolean context field is not
@@ -113,8 +114,8 @@ not arbitrary expression-to-expression comparisons.
 event. Events cannot recursively contain `previous`. Historical `and` means a
 logical conjunction, not a sequence. The comments reserve unknown handling for
 missing facts/incomplete history; the current path supplies no general history
-evaluator or persisted policy-history domain. No historical rule is currently
-translated by AgentSight.
+evaluator or persisted policy-history domain. Deploying such rules requires a
+PEP integration with explicit historical evaluation support.
 
 `specVersion` must be `0.1`; there must be 1–1024 rules. Conditions/history have a
 maximum depth of 16 and a shared 4096-node budget. Paths are absolute, at most
@@ -127,30 +128,20 @@ Sources: [validation code](../../v2/crates/asc-policy-types/src/authoring.rs),
 [attribute checks](../../v2/crates/asc-policy-types/src/authoring/condition.rs),
 [authoring regression tests](../../v2/crates/asc-policy-types/tests/authoring.rs).
 
-## 3. Current AST-to-DSL translation
+## 3. Translating policy representations into PEP policies
 
-`AgentSightAdapter::translate` reads the complete Binding snapshot. It validates
-the whole input, lowers its rules to ActPlane DSL and packages a target plan.
-It does not query the latest template, evaluate a request or perform target I/O.
+`TargetBindingAdapter::translate` accepts the complete Binding snapshot. Translator
+reads native `PolicyTemplate` or calls `asc_policy_cedar::pst` for Cedar PST,
+checks whether the target PEP can express the policy semantics, and produces
+that target's DSL, rules or configuration. It does not fetch the latest template,
+authorize a request or perform deployment I/O.
 
-| AST property | Adapter accepts | Otherwise |
-|---|---|---|
-| Effect | `block` | `RULE_<index>_UNSUPPORTED_EFFECT` |
-| Category/action | `file` / `write` | `RULE_<index>_UNSUPPORTED_ACTION` |
-| Condition | Exactly `{"operation":{"eq":"delete"}}` | `RULE_<index>_UNSUPPORTED_CONDITION` |
-| History | Absent | `RULE_<index>_UNSUPPORTED_HISTORY` |
-| Pattern | Literal or literal prefix followed by `/**` | Unsupported-glob rejection |
-| Size | At most 128 rules; lowered pattern at most 63 bytes | Explicit limit rejection |
-| DSL literals | No quotes, backslashes or control characters in path/reason | Explicit pattern/reason rejection |
-| Attachment | Process tree rooted at the Binding's pinned instance | cgroup selector rejected |
+`TargetBindingPlan` carries a target format and opaque content. Each Adapter
+defines its format, capacity, path matching and supported effects. A valid but
+unsupported statement rejects the entire Binding translation; no partial rule
+set may be silently deployed.
 
-A valid but unsupported rule rejects the entire Binding translation; no supported
-subset is silently sent. Rule order determines stable generated names, not a
-general first-match/last-match decision algorithm. Multiple supported block rules
-cover the union of their matches. No complex-condition simplification occurs.
-
-This template uses the first rule from the
-[prepared-Binding fixture](../../v2/crates/asc-policy-types/tests/fixtures/prepared-binding.json):
+For example, this native policy restricts deletion of a specific file:
 
 ```json
 {
@@ -167,100 +158,81 @@ This template uses the first rule from the
 }
 ```
 
-Its DSL is:
+Translator must preserve the path, deletion operation and blocking effect.
+Whether it can produce a deployable artifact depends on the target PEP.
+See the [specific Adapter contract](AGENTSIGHT_CEDAR_TRANSLATION.md) for mappings,
+output and rejection rules.
 
-```text
-source AGENT = exec "**"
-rule agentseccore-unlink-0000:
-  block unlink file "/etc/agent/config.yaml" if AGENT
-  because "AgentSecCore file deletion policy"
-```
-
-An explicit `because` replaces the fallback reason. SecCore emits a
-`TargetBindingPlan` with format `agentsight.actplane.binding.v2`, containing source
-IDs/revisions, the DSL and the pinned process-tree attachment.
-
-Sources: [translator](../../v2/crates/asc-policy-adapter-agentsight/src/translate.rs),
-[plan](../../v2/crates/asc-policy-adapter-agentsight/src/plan.rs),
-[translation tests](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs).
+Sources: [target interfaces](../../v2/crates/asc-policy-target-contracts/src/lib.rs),
+[target plan](../../v2/crates/asc-policy-types/src/target.rs).
 
 ## 4. Assignment, delivery and execution
 
 ```mermaid
 flowchart TD
-    A[JSON policy AST] --> B[PAP validation and SQLite]
+    A[Policy source: JSON / Cedar] --> B[PAP validation and SQLite]
     B --> C[Scope snapshots and process discovery]
     C --> D[System-created Binding]
     D --> E[WorkQueue and BindingReconciler]
-    E --> F[AgentSightAdapter: AST to DSL and plan]
-    F --> G[AgentSightClient: prepare and capability checks]
-    G -->|HTTP| H[AgentSight Coordinator]
-    H -->|UDS| I[Enforcer: DSL to compiled configuration]
-    I --> J[ActPlane process domain and BPF]
+    E --> F[Translator: representation to target rules or configuration]
+    F --> G[Deployment Client: preparation and capability checks]
+    G --> H[PEP backend management API]
+    H --> I[PEP policy installation and enforcement]
+    H -->|Deployment receipt| G
 ```
 
-1. Creating a template stores authored rules; it does not deploy them. Creating a
-   Scope resolves exact current policy revisions and saves complete snapshots.
-   PID or exact process-name/executable selectors find instances; cgroup assignment
-   is currently rejected. Template changes/deletion do not mutate saved snapshots.
-2. Discovery admits one Binding per Scope/policy/instance, with PID, start time,
-   boot ID and PID namespace. Queue notifications carry IDs; the Reconciler reads
-   authoritative state and serializes attempts through the runtime queue.
-3. The Adapter compiles the snapshot. The Client prepares fixed request bytes and
-   a target reference. Before modifying target I/O, the Reconciler persists
+1. Creating a Policy stores source without deploying it. Scope creation resolves
+   the selected Policy revision and saves a complete snapshot. Later Policy updates
+   or deletion do not change existing snapshots. Scope selectors and Discovery
+   determine process instances.
+2. Discovery admits one Binding per Scope/policy/instance, pinning PID, start time,
+   boot ID and PID namespace. Queue notifications carry IDs; Reconciler reads
+   authoritative state and coordinates deployment.
+3. Translator converts the snapshot. Client prepares the deployment request and
+   target reference. Before modifying target I/O, Reconciler persists
    possibly-present target responsibility as `UNKNOWN`.
-4. The Client rechecks process identity and requires health `ready=true`, backend
-   `actplane` and `capabilities.file_delete_guard=true`. It sends an authenticated
-   `POST /api/enforcement/bindings` with the DSL, policy ID/revision, root PID,
-   start time and `policy_mode=enforce`. The default API root is
-   `http://127.0.0.1:7396/api`. Product Bindings currently supply no Agent identity;
-   `agent_id` is empty and `session_id` is omitted.
-5. AgentSight forwards through its Coordinator to the local Enforcer over UDS.
-   The Enforcer compiles DSL, seeds the target domain/label and submits compiled
-   policy bytes to ActPlane. The Client accepts a matching response only when it
-   reports `Enforced` and a domain ID. Conditional repository writes then record
-   observations and `READY`; transient failures use bounded retries.
+4. Client checks identity and live capabilities according to the target contract,
+   then sends the policy to the PEP backend management API. The backend compiles
+   or interprets the artifact as needed and installs the protection.
+5. Client verifies the receipt according to the target contract; Reconciler records
+   observations and `READY`, with bounded retries for transient failures. Scope
+   deletion triggers asynchronous cleanup. Responsibility is removed only after
+   target absence is confirmed.
 
-Scope deletion triggers asynchronous target cleanup. Only confirmed target
-absence permits responsibility removal. The Client's replacement operation
-deletes old targets before creating the new one; it is not an atomic switch.
-
-There are two different compilations: SecCore AST → DSL, then Enforcer DSL →
-execution configuration. The current ActPlane compiler lowers both `write` and
-`unlink` to `OP_WRITE`; generated DSL or a deployment response does not prove
-delete-only behavior on a real kernel. Live deny tests remain separate evidence.
+Request protocols, success receipts and replacement order belong to each Client's
+[specific Adapter contract](AGENTSIGHT_CEDAR_TRANSLATION.md). Rule generation,
+deployment success and actual PEP protection require separate validation; live
+interception requires operation tests in the corresponding runtime environment.
 
 Sources: [PAP](../../v2/crates/asc-pap/src/service.rs),
 [instance admission](../../v2/crates/asc-policy-repository-sqlite/src/pap.rs),
 [Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs),
-[Client](../../v2/crates/asc-agentsight-client/src/client.rs),
-[prepared requests](../../v2/crates/asc-agentsight-client/src/client/reconciliation.rs),
-[Enforcer](../../../agentsight/crates/agentsight-enforcer/src/actplane.rs),
-[operation lowering](../../../agentsight/crates/actplane-ifc-compiler/src/dsl/lower.rs).
+[deployment interfaces](../../v2/crates/asc-policy-target-contracts/src/lib.rs).
 
 ## 5. Cedar import capability boundary
 
-Assessment has two separate questions: can a construct produce a valid current
-AST, and can that AST pass the current Adapter? The table evaluates a prospective
-importer; neither Cedar nor Dogwood import is implemented in this checkout.
+Assessment has two separate questions: can a construct produce a valid native
+AST, and can the selected PEP Adapter translate it? The table addresses AST
+representability; each Adapter declares its translation boundary separately.
+This prospective Cedar/Dogwood-to-native-AST importer is not implemented.
 
 Cedar's authorization rules include default deny, forbid-overrides and
 skip-on-error. Importing statements does not automatically import those
 policy-set evaluation rules.
 Reference: [Cedar authorization](https://docs.cedarpolicy.com/auth/authorization.html).
 
-| Cedar construct | Valid current SecCore AST? | Current AgentSight Adapter? |
-|---|---|---|
-| File `forbid` with literal target and delete action/condition | Yes, with an explicit action/resource mapping | Yes, if it produces exactly the supported deletion rule |
-| `permit` | Effect maps to `allow` | No |
-| `when` with supported attribute-to-literal comparisons | Yes, after mapping known attributes | Only the single deletion condition |
-| `&&`, `||`, `!`; multiple `when`; `unless` | `And`/`Or`/`Not`; clauses can be combined with `And` | No general logical conditions |
-| Principal equality/type/group/attributes | No corresponding field inside Rule | External subject assignment must resolve it; arbitrary principal logic unsupported |
-| Entity `in` hierarchy or cross-entity attribute comparison | No entity graph or attribute-to-attribute operands | No |
-| Scalar membership via a fixed set's `.contains(...)` | `Comparison::In`, if operands fit the registered attribute | No general membership condition |
-| General `context`, records, sets, arithmetic, extension calls or `has` | No generic expression/value model for these constructs | No |
-| `like` | Only a separately checked, explicitly supported pattern subset | No direct reuse of Cedar string wildcard syntax |
-| Policy annotations and template slots | No rule annotation/slot field; resolve or retain externally | Only the resulting supported concrete rule |
+| Cedar construct | Valid current SecCore AST? |
+|---|---|
+| File `forbid` with literal target and delete action/condition | Yes, with an explicit action/resource mapping |
+| `permit` | Effect maps to `allow` |
+| `when` with supported attribute-to-literal comparisons | Yes, after mapping known attributes |
+| `&&`, `\|\|`, `!`; multiple `when`; `unless` | `And`/`Or`/`Not`; clauses can be combined with `And` |
+| Principal equality/type/group/attributes | No corresponding field inside Rule |
+| Entity `in` hierarchy or cross-entity attribute comparison | No entity graph or attribute-to-attribute operands |
+| Scalar membership via a fixed set's `.contains(...)` | `Comparison::In`, if operands fit the registered attribute |
+| General `context`, records, sets, arithmetic, extension calls or `has` | No generic expression/value model for these constructs |
+| `like` | Only a separately checked, explicitly supported pattern subset |
+| Policy annotations and template slots | No rule annotation/slot field; resolve or retain externally |
 
 An import profile must declare the entity/action namespace, which resource field
 means a normalized file path, and how subjects become authenticated process
@@ -303,17 +275,17 @@ mapping above. Its temporal language and information providers need additional
 capabilities; a JSON AST encoding alone does not supply their runtime inputs.
 Reference: [Dogwood core language](https://dogwood-policy.github.io/dogwood/guide/02-policy-language.html).
 
-| Dogwood construct | Current AST boundary | Current Adapter boundary |
-|---|---|---|
-| Plain Cedar-style file rule | Same as §5 | Supported deletion rule only |
-| Macro | Expand with Dogwood's parser/schema environment, then inspect the result | Only if the expanded result fits the supported subset |
-| Simple historical file-event predicate with fixed literals | `HistoryEvent` can describe the event shape, but supplies no Dogwood temporal semantics | Every `previous` is rejected |
-| `formerly within ...` | No window/duration node | Unsupported |
-| `previous within ...` | No immediate-predecessor operator; SecCore's field named `previous` is not this operator | Unsupported |
-| `since`, event ordering, `exists`, `tp`, `count`, `sum` | No corresponding temporal, binding or aggregation nodes | Unsupported |
-| Same-user/resource correlation between history and current request | No bound variables or current/history field-reference operands | Unsupported |
-| Provider calls or provider output fields | No provider-call node or general dynamic attribute namespace | Unsupported |
-| `guardrails { E }` | Syntax wrapper can be removed; `E` must still fit the allowed core subset | No implicit provider execution |
+| Dogwood construct | Current AST boundary |
+|---|---|
+| Plain Cedar-style file rule | Same as §5 |
+| Macro | Expand with Dogwood's parser/schema environment, then inspect the result |
+| Simple historical file-event predicate with fixed literals | `HistoryEvent` can describe the event shape, but supplies no Dogwood temporal semantics |
+| `formerly within ...` | No window/duration node |
+| `previous within ...` | No immediate-predecessor operator; SecCore's field named `previous` is not this operator |
+| `since`, event ordering, `exists`, `tp`, `count`, `sum` | No corresponding temporal, binding or aggregation nodes |
+| Same-user/resource correlation between history and current request | No bound variables or current/history field-reference operands |
+| Provider calls or provider output fields | No provider-call node or general dynamic attribute namespace |
+| `guardrails { E }` | Syntax wrapper can be removed; `E` must still fit the allowed core subset |
 
 For example, Dogwood can require a login in the last hour before a read. Replacing
 that condition with a SecCore historical event would discard its window and
@@ -351,9 +323,9 @@ feature, beyond statement import.
 
 The possible importer assessed in sections 5–7 is neither implemented nor part
 of the architecture selected in section 8.
-Existing [authoring tests](../../v2/crates/asc-policy-types/tests/authoring.rs) and
-[translation tests](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs)
-cover the current local boundaries. Future importer tests should check accepted
+Existing [authoring tests](../../v2/crates/asc-policy-types/tests/authoring.rs)
+cover the native AST boundary. Target translation tests are described in the
+[specific Adapter contract](AGENTSIGHT_CEDAR_TRANSLATION.md). Future importer tests should check accepted
 output ASTs and explicit rejection of unsupported constructs; full-language
 semantic equivalence is not an acceptance goal here.
 
@@ -380,8 +352,8 @@ application workflows belong to the integration. See
 | PAP policy management | Store source and revision, associate Scope and retain assignment/Binding snapshots | `asc-pap` and repository manage both source formats; composition remains open |
 | PDP request decisions | Load applicable policies, receive concrete requests, obtain PIP information as needed and authorize | Target design; may share the SecCore daemon with PAP while remaining a separate logical responsibility |
 | Deployment orchestration | Create/update Bindings, select targets and use Reconciler for installation, update, revocation and recovery | Existing Scope/Binding and `asc-pcp`; mapping authorization results to deployment inputs remains open |
-| Backend adaptation | Translator checks capabilities and translates; Deployment Client handles backend protocols and deployment calls | Existing target contracts and AgentSight implementation; no Cedar translation yet |
-| PEP and backend PDP | PEP intercepts requests and enforces decisions; some backends also contain a PDP for continuous system-operation checks | Depends on Hook, sandbox, ActPlane or other scenarios; schema support does not establish backend support |
+| Backend adaptation | Translator checks capabilities and translates; Deployment Client handles backend protocols and deployment calls | Native DSL and Cedar structured deletion/ordinary-write translation; target capabilities checked by Client |
+| PEP and backend PDP | PEP intercepts requests and enforces decisions; some backends also contain a PDP for continuous system-operation checks | Depends on Hook, sandbox, system-call interception or other scenarios; schema support does not establish backend support |
 
 ![AgentSecCore policy management, request decisions and deployment](diagrams/CEDAR_ARCHITECTURE.png)
 
@@ -416,7 +388,7 @@ Detailed PIP/Agent Hook detection facts are deferred.
 
 | Component | Inputs and outputs | Current implementation counterpart |
 |---|---|---|
-| Policy Translator | Accept an in-memory representation, Cedar schema reference where applicable, binding information and target capabilities; produce target rules/configuration without deployment I/O | `TargetBindingAdapter::translate`; `AgentSightAdapter` currently consumes only the native AST |
+| Policy Translator | Accept an in-memory representation, Cedar schema reference where applicable, binding information and target capabilities; produce target rules/configuration without deployment I/O | `TargetBindingAdapter::translate`; PEP Adapters declare the supported native AST and Cedar PST subsets |
 | Deployment Client | Accept a target plan, encode protocols, install/update/revoke and return receipts | `TargetDeploymentClient`: `prepare_apply`, `create`, `update`, `delete` |
 | Reconciler | Invoke Translator for a plan, then Client; track state, retry and recover | Reconciler in `asc-pcp` |
 
@@ -434,7 +406,7 @@ the backend contract defines what taking effect guarantees.
 This section uses Translator for translation. Adapter in sections 1–7 follows
 source names. See the [target contracts](../../v2/crates/asc-policy-target-contracts/src/lib.rs)
 and [Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs).
-The target interface does not yet accept Cedar representations.
+The target interface carries a source snapshot; the PEP Translator calls `pst` for Cedar translation.
 
 ### 8.3 Representation choice and remaining design questions
 
@@ -442,7 +414,8 @@ Native JSON deserializes into `PolicyTemplate`. The Cedar `validate` interface
 checks source; `pst` returns the SDK's PST for translation after the same checks.
 The integration design reuses PAP, Scope/Binding and deployment lifecycle for both
 frontends. Each Translator will declare which representation it accepts; the
-current AgentSight Adapter accepts only `PolicyTemplate`.
+existing PEP Adapter handles `PolicyTemplate` and a Cedar PST subset; see
+[its supported subset](AGENTSIGHT_CEDAR_TRANSLATION.md).
 There is no common native-JSON-to-Cedar or Cedar-to-native-AST conversion layer.
 Sections 5–7 retain the earlier alternative assessment only.
 
@@ -452,10 +425,10 @@ Unsupported semantics must reject the unit as a whole, not disappear during depl
 
 | Design question | Processing stages | Decisions and remaining boundaries |
 |---|---|---|
-| D1: System protection semantics | Frontend schema, runtime request construction, Translator | File/invocation/coarse-network fields exist; trusted field sources, request mapping, backend translation and approved-constraint mapping remain to be implemented; Hook contracts are deferred |
+| D1: System protection semantics | Frontend schema, runtime request construction, Translator | File/invocation/coarse-network fields exist; file deletion/ordinary-write translation is connected to the existing PEP Adapter; trusted runtime field sources, request mapping and approved-constraint mapping remain open; Hook contracts are deferred |
 | D2: Multiple PEP selection and cooperation | Target planning, deployment orchestration, PEP enforcement | Match capabilities to Scope and policy needs; alternatives/cooperation, required targets and receipt aggregation remain open |
 | D3: Base and runtime composition | PAP policy assembly, PDP loading and decisions | Permission ceiling, composition, conflicts, lifetime and recovery after revocation need separate design; dynamic policies must not implicitly expand permissions |
-| D4: AST and validation placement | Frontend admission, loading, Translator | Native `PolicyTemplate` and Cedar PST; PAP validates and saves source, `pst` reparses saved Cedar source; Cedar Translator integration remains open |
+| D4: AST and validation placement | Frontend admission, loading, Translator | Native `PolicyTemplate` and Cedar PST; PAP validates and saves source, `pst` reparses saved Cedar source; Cedar file translation is connected to the existing PEP Adapter |
 
 Scope/Binding continues to select execution subjects. Cedar retains the principal
 syntax position, but users do not supply identity constraints; the frontend rejects
@@ -500,7 +473,7 @@ Cedar SDK. The `pst` interface returns `cedar_policy::pst::PolicySet`.
 `PreparedPolicy`, create/update RPC, PAP and saved snapshots accept `PolicySource`.
 Saved Cedar source can be passed directly to the existing `asc-policy-cedar::pst`
 interface. It returns official PST after resolving the saved exact schema and
-validating the source. The Translator call path remains to be connected.
+validating the source. The PEP Translator invokes it from the existing Binding translation path.
 
 The Cedar `template` RPC shape is:
 
@@ -526,7 +499,7 @@ Dependency management and regression tests cover SDK upgrades. Define an AST
 exchange protocol when a cross-process consumer needs one. The source contract
 carries the `PolicySource` `language/content` input and exact schema reference.
 
-The planned Cedar Translator consumes the public syntax tree (PST). Its typed
+The Cedar Translator for a target PEP consumes the public syntax tree (PST). Its typed
 Rust nodes describe policy expressions. The source envelope carries a reference
 to a shared schema definition; the frontend resolves that reference separately.
 
@@ -694,8 +667,9 @@ the pinned schema contract and revalidate policies, including policies whose
 unconstrained actions or resources could include new domains.
 
 This is a V2 frontend and policy-management contract. PAP/RPC and source snapshots
-are connected; tests pass restored source to `pst`. Cedar target translation and runtime request
-mapping remain open; AgentSight returns `UNSUPPORTED_POLICY_LANGUAGE` for Cedar.
+are connected. The existing PEP Adapter translates a Cedar forbid subset for deletion and ordinary
+writes; the Client submits structured protection rules. See [the target contract](AGENTSIGHT_CEDAR_TRANSLATION.md).
+Runtime request mapping remains open.
 Validation establishes frontend acceptance only. The SDK stack-overflow limit
 for deeply nested input remains unresolved; use administrator-reviewed policies
 and add protection before admitting untrusted generated input.
@@ -809,12 +783,12 @@ need semantic and deployment validation for the selected backends.
 |---|---|---|
 | Types and Cedar frontend | Source union; embedded revision 1; `validate` returns non-blocking warnings, `pst` validates and returns SDK PST | Schema-file metadata and loading; retain common-subset diagnostics |
 | Policy/PAP/RPC/SQLite | `template: PolicySource`; Cedar admission and source persistence; old requests and three snapshot locations remain compatible | Preserve version and snapshot contracts |
-| Policy loading and translation | Saved Cedar source can be reparsed through `pst` under its exact schema; AgentSight supports only native AST | Connect source-to-PST loading to Cedar Translator and deployment; implement/declare support per target |
+| Policy loading and translation | Saved Cedar source is loaded through `pst`; deletion/ordinary-write translation and Client deployment are connected for the existing PEP Adapter | Validate live backend enforcement within the documented limits; declare support for other targets |
 | PDP and deployment connection | Existing pipeline is asynchronous deployment, without general Cedar request authorization | Define request/decision contracts, composition, approved-constraint-to-Binding mapping and launch ordering separately |
 | Agent Hook/PIP | Not supported by the embedded schema | Define resources, actions, request fields and detection contracts separately, then publish a corresponding schema revision |
 
-First connect Cedar source persistence, loading and one target Translator through
-the existing lifecycle. Add PDP/PEP request handling for concrete runtime scenarios.
+Cedar source persistence, loading and file-policy translation for the existing PEP use the shared
+lifecycle. PDP/PEP request handling for runtime scenarios remains separate work.
 Version checks apply at admission, loading and translation. Do not introduce an
 external schema registry, persistent AST cache or generic legacy-model converter first.
 
