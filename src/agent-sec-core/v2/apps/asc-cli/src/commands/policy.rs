@@ -12,7 +12,6 @@ use asc_daemon_protocol::{CreatePolicyParams, DaemonRequest, RevisionParams, Upd
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::authoring::{PolicySource, source_serde};
 use clap::{Args, Subcommand};
-use serde::Deserialize;
 
 use super::common::{Page, encode, resource_id, revision};
 use crate::InputError;
@@ -90,10 +89,6 @@ impl PolicyCommand {
 
 impl PolicyInput {
     fn template(&self) -> Result<PolicySource, InputError> {
-        #[derive(Deserialize)]
-        #[serde(transparent)]
-        struct SourceFile(#[serde(with = "source_serde")] PolicySource);
-
         let mut bytes = Vec::new();
         File::open(&self.file)?
             .take(4 * 1024 * 1024 + 1)
@@ -103,7 +98,7 @@ impl PolicyInput {
         }
         // Decode the typed template before conversion to Value, so duplicate
         // fields cannot be silently collapsed by an untyped JSON map.
-        Ok(serde_json::from_slice::<SourceFile>(&bytes)?.0)
+        Ok(source_serde::from_slice(&bytes)?)
     }
 }
 

@@ -77,11 +77,13 @@ The current crates are:
   `OsPermissionSet` and standalone execution contracts.
 - `asc-pep-runtime`: command and path preparation, strict sandbox execution and
   installation-handshake supervision for caller-supplied permissions.
-- `asc-policy-cedar`: library-only Cedar frontend with a pinned file/process and
+- `asc-policy-cedar`: Cedar frontend library with a pinned file/process and
   whole-network permission schema, strict SDK validation, common-subset checks
   through `validate` and official typed PST output through `pst`. Agent Hook
   actions can add separate typed contexts.
-  It is not yet connected to PAP, RPC, persistence or target translation. See the
+  PAP uses it to validate Cedar sources submitted through CLI/RPC before saving
+  the original text and exact schema reference in SQLite. Cedar target translation
+  and deployment remain follow-up work. See the
   [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
 - `asc-policy-adapter-agentsight`: deterministic file-deletion and pinned-process
   translation directly from the Binding's template into an AgentSight/ActPlane

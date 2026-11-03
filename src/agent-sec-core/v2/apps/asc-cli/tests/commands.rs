@@ -282,6 +282,46 @@ fn file_errors_duplicate_keys_and_oversized_inputs_are_local_failures() {
 }
 
 #[test]
+fn policy_file_errors_retain_original_line_and_column() {
+    let directory = common::Directory::new();
+    let path = directory.0.join("template.json");
+    for (source, message, line, column) in [
+        ("{}", "missing field `specVersion`", 1, 2),
+        ("\n  {\n}\n", "missing field `specVersion`", 3, 1),
+        (
+            "\n{\n\"language\":\"cedar\"\n}\n",
+            "missing field `content`",
+            4,
+            1,
+        ),
+    ] {
+        std::fs::write(&path, source).unwrap();
+        for command in ["create", "update"] {
+            let mut args = vec![
+                "agent-sec-cli",
+                "policy",
+                command,
+                "--name",
+                "test",
+                "--file",
+                path.to_str().unwrap(),
+            ];
+            if command == "update" {
+                args.extend(["--policy-id", "policy-one"]);
+            }
+            let Err(InputError::Json(error)) = Cli::parse_from(args).unwrap().request() else {
+                panic!("invalid policy file must fail JSON decoding");
+            };
+            assert_eq!((error.line(), error.column()), (line, column));
+            assert_eq!(
+                error.to_string(),
+                format!("{message} at line {line} column {column}")
+            );
+        }
+    }
+}
+
+#[test]
 fn result_rendering_keeps_domains_and_errors_separate() {
     let response = DaemonResponse::success(
         RequestId::new("r1").unwrap(),

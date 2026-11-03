@@ -22,15 +22,21 @@ pub fn serialize<S: Serializer>(source: &PolicySource, serializer: S) -> Result<
 /// Rejects unknown languages, extra or duplicate fields and malformed source values.
 pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PolicySource, D::Error> {
     let raw = Box::<RawValue>::deserialize(deserializer)?;
+    from_slice(raw.get().as_bytes()).map_err(|error| data_error(&error))
+}
+
+/// Reads a source envelope or native template, retaining original JSON error positions.
+///
+/// # Errors
+/// Rejects unknown languages, extra or duplicate fields and malformed source values.
+pub fn from_slice(bytes: &[u8]) -> Result<PolicySource, serde_json::Error> {
     // Inspect only the tag; typed parsing below uses the original bytes, including duplicates.
-    let tagged = serde_json::from_str::<std::collections::BTreeMap<String, &RawValue>>(raw.get())
+    let tagged = serde_json::from_slice::<std::collections::BTreeMap<String, &RawValue>>(bytes)
         .is_ok_and(|fields| fields.contains_key("language"));
     if tagged {
-        serde_json::from_str(raw.get()).map_err(|error| data_error(&error))
+        serde_json::from_slice(bytes)
     } else {
-        serde_json::from_str(raw.get())
-            .map(PolicySource::SecCore)
-            .map_err(|error| data_error(&error))
+        serde_json::from_slice(bytes).map(PolicySource::SecCore)
     }
 }
 
