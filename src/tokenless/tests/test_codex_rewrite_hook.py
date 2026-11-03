@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 TESTS_DIR = Path(__file__).resolve().parent
 REWRITE_HOOK = (
@@ -83,6 +85,20 @@ class CodexRewriteHookTest(unittest.TestCase):
             timeout=15,
             check=False,
         )
+
+    def test_standalone_rtk_fallbacks(self) -> None:
+        hook = runpy.run_path(str(REWRITE_HOOK))
+        self.assertTrue(hook["_RTK_USER_STANDALONE"].endswith("/.local/libexec/tokenless/rtk"))
+        for candidate in (
+            hook["_RTK_USER_STANDALONE"],
+            "/usr/local/libexec/tokenless/rtk",
+            "/usr/libexec/tokenless/rtk",
+        ):
+            with self.subTest(candidate=candidate):
+                with patch("shutil.which", return_value=None), \
+                     patch("os.path.isfile", side_effect=lambda path: path == candidate), \
+                     patch("os.access", return_value=True):
+                    self.assertEqual(hook["_find_rtk"](), candidate)
 
     def test_non_object_tool_input_passes_through_silently(self) -> None:
         # Every shape decodes to a value without a "command" field: a bare

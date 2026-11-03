@@ -35,7 +35,7 @@ import sys
 
 # 沙箱命令的特征前缀/模式
 # sandbox-guard.py 生成的格式:
-#   /usr/local/bin/linux-sandbox --sandbox-policy-cwd "..." ... -- bash -c 'ORIGINAL_CMD'
+#   /usr/bin/linux-sandbox --sandbox-policy-cwd "..." ... -- bash -c 'ORIGINAL_CMD'
 # 若原始命令含 sudo，则格式为:
 #   ... -- bash -c 'COSH_RC=<base64> STRIPPED_CMD'
 _SANDBOX_CMD_RE = re.compile(

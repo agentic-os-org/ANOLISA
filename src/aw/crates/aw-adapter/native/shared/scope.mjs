@@ -21,6 +21,8 @@ export class Scope {
     this.execution = 0;
     this.running = false;
     this.closing = false;
+    this.probe = undefined;
+    this.onFailure = undefined;
   }
 
   async command(action, value, timeout, hook, signal) {
@@ -32,6 +34,8 @@ export class Scope {
   check() {
     if (!this.handle || this.closed || this.failed || this.pid !== process.pid)
       throw new Error("AW task is closed, unbound or inherited across fork");
+    try { this.probe?.(); }
+    catch (error) { this.invalidate(error); throw error; }
   }
 
   checkExecution(execution = this.execution) {
@@ -74,12 +78,16 @@ export class Scope {
   }
 
   async open(cwd, environment, { deferAcknowledgement = false } = {}) {
-    if (this.handle || this.closed || this.pid !== process.pid)
+    if (this.opening || this.handle || this.closed || this.failed || this.pid !== process.pid)
       throw new Error("AW task cannot be reopened");
     this.environment = { ...environment };
-    const result = await this.command("open", { pid: this.pid, cwd: realpathSync(cwd), environment }, 33000);
-    if (result.code !== 0) throw new Error("AW task admission failed");
-    this.handle = JSON.parse(result.stdout);
+    this.opening = (async () => {
+      const result = await this.command("open", { pid: this.pid, cwd: realpathSync(cwd), environment }, 33000);
+      if (result.code !== 0) throw new Error("AW task admission failed");
+      this.handle = JSON.parse(result.stdout);
+    })();
+    await this.opening;
+    this.check();
     if (!deferAcknowledgement) await this.acknowledge();
   }
 
@@ -95,17 +103,62 @@ export class Scope {
     try {
       const reply = await this.command("acknowledge", this.handle, 6000);
       if (reply.code !== 0) throw new Error("AW task handoff acknowledgement failed");
+      this.check();
       const enabled = await this.command("enable", this.handle, 6000);
       if (enabled.code !== 0) throw new Error("AW invocation protocol admission failed");
       this.invocationLimit = JSON.parse(enabled.stdout).invocations_per_binding;
+      await this.watch();
     } catch (error) {
       await this.close();
       throw error;
     }
   }
 
-  async invoke(hook, payload, signal) {
+  invalidate(error) {
+    if (this.failed) return;
+    this.failed = true;
+    this.onFailure?.(error);
+  }
+
+  async watch() {
     this.check();
+    const reply = await this.command("watch", this.handle, 6000);
+    if (reply.code !== 0) throw new Error("AW scope watch admission failed");
+    const watch = JSON.parse(reply.stdout);
+    if (typeof watch.policy_revision !== "string" || !/^[a-f0-9]{64}$/.test(watch.policy_revision) ||
+        watch.interval_ms !== 2000)
+      throw new Error("AW scope watch response is invalid");
+    this.check();
+    this.policyRevision = watch.policy_revision;
+    this.monitorAbort = new AbortController();
+    const tick = () => {
+      this.monitor = this.validate().catch(() => {}).finally(() => {
+        if (!this.closed && !this.failed)
+          this.monitorTimer = setTimeout(tick, watch.interval_ms);
+      });
+    };
+    this.monitorTimer = setTimeout(tick, watch.interval_ms);
+  }
+
+  async validate() {
+    if (!this.policyRevision) { this.check(); return; }
+    let failure;
+    try { this.check(); } catch (error) { failure = error; }
+    try {
+      const reply = await this.command("check", {
+        scope: this.handle, policy_revision: this.policyRevision, valid: !failure,
+      }, 6000, undefined, this.monitorAbort.signal);
+      if (reply.code !== 0) throw new Error("AW scope bridge validity failed");
+      if (failure) throw failure;
+      this.check();
+    } catch (error) {
+      if (!this.closed) this.invalidate(error);
+      throw error;
+    }
+  }
+
+  async invoke(hook, payload, signal) {
+    await this.validate();
     return await this.command("invoke", {
       scope: this.handle, native_input: JSON.stringify(payload),
     }, hook.budget_ms + 3000, hook, signal);
@@ -114,6 +167,8 @@ export class Scope {
   async register(callId, name, input) {
     const execution = this.execution;
     const registration = this.issuing.then(async () => {
+      this.checkExecution(execution);
+      await this.validate();
       this.checkExecution(execution);
       if (this.invocations.size >= this.invocationLimit || this.sequence >= Number.MAX_SAFE_INTEGER)
         throw new Error("AW invocation admission capacity exceeded");
@@ -147,13 +202,23 @@ export class Scope {
     finally { this.running = false; this.closing = false; }
   }
 
-  async close() {
+  close() {
+    this.closePromise ??= this.closeOwned();
+    return this.closePromise;
+  }
+
+  async closeOwned() {
     if (this.closed) {
       if (this.releaseError) throw this.releaseError;
       return;
     }
     if (this.pid !== process.pid) throw new Error("Cannot close an inherited AW task");
     this.closed = true;
+    clearTimeout(this.monitorTimer);
+    this.monitorAbort?.abort();
+    await this.monitor;
+    // A late successful open still belongs to this close, never to a new task.
+    await this.opening?.catch(() => {});
     if (this.handle) {
       try {
         const reply = await this.command("close", this.handle, 6000);

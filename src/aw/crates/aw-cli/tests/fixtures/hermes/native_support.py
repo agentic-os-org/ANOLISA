@@ -56,11 +56,14 @@ class NativeFixture(unittest.TestCase):
         spec.loader.exec_module(self.plugin)
 
     def launch(self, steps: list[tuple[str, str]]) -> Path:
+        from hermes_cli.version_info import get_version_info
+
         launch = self.root / "launch.json"
         launch.write_text(
             json.dumps(
                 {
                     "schema": "aw-hermes/v1alpha1",
+                    "revision": get_version_info().commit,
                     "profile": str(self.home),
                     "cwd": str(Path.cwd()),
                     "binary": str(self.command),

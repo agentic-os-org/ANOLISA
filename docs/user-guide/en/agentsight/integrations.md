@@ -31,9 +31,13 @@ Anything else works too — add a rule, as described in
   bounded nested discovery labels those sessions as `claude-code` rather than Qoder.
 - **OpenClaw** is observed through its `openclaw-gateway` daemon, not the client. If Token data is
   missing, check that the client actually reaches the gateway.
-- **Codex CLI** statically links its TLS library, so AgentSight falls back to byte-pattern matching
-  and a per-version offset table. A brand-new Codex release may need a refreshed entry in
-  `codex_offsets`.
+- **Codex CLI** statically links its TLS library. The embedded offset table includes the official
+  Linux x86_64 musl builds of 0.147.0 and 0.162.1, validated for OpenSSL-based HTTPS Responses calls.
+  Entries match the executable size and fingerprint, not just its version string. Updating
+  `codex_offsets` in a deployed config alone has no effect: the table is compiled into AgentSight,
+  so use a binary rebuilt with the new entries. Requests sent before the probe attaches may still
+  be missed. Custom CA settings such as `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE` can select rustls;
+  these OpenSSL offsets do not cover that transport or WebSocket TLS.
 - **Gemini CLI** trajectories are collected from the session files under
   `~/.gemini/tmp/<project>/chats/session-*.jsonl`, no configuration needed. Project names come from
   each project directory's `.project_root` marker. The collector replays the CLI's correction records
@@ -123,8 +127,8 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 ```
 
 Capture and analysis are unaffected; only the Risk Enforcement page and the
-`/api/enforcement/*` endpoints disappear. Start the unit, or build with `make build-all` if you
-built from source.
+`/api/enforcement/*` endpoints disappear. Start the enforcer daemon separately.
+For source builds, see [Source build](deployment.md#source-build).
 
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:
@@ -136,6 +140,12 @@ $ sudo journalctl -u agentsight-enforcer
 
 The default level is `info`; add `Environment=RUST_LOG=debug` to the unit for verbose output.
 
+System-level file deletion protection is not available out of the box with the default
+profile. Even when `ready=true`, check `capabilities.file_delete_guard`; the default
+`credential-exfiltration` profile does not provide it. See
+[Enable system-level file deletion protection](deployment.md#enable-system-level-file-deletion-protection)
+for prerequisites, the mutually exclusive capability, maintenance window, and re-apply steps.
+
 Blocking also depends on the engine's hook budget: a `block` rule can only deny an operation when
 the matching BPF LSM hook was reserved at engine start and BPF LSM is active on the kernel
 (`bpf` listed in `/sys/kernel/security/lsm`). When a `block` rule matches on a backend that cannot
@@ -145,10 +155,41 @@ not attached — the engine still reports the match as a violation with `effect=
 check the engine profile (`ACTPLANE_HOOK_PROFILE` / `ACTPLANE_PINNED_PROFILE`) and the kernel's LSM
 configuration.
 
-Protocol v5 adds a versioned `file_protection_policy` payload, mutually exclusive with `policy_dsl`.
-Current backends reject structured policies without changing bindings; the new file-protection
-capabilities remain false. Existing DSL semantics are retained, but v4 clients must upgrade with
-the enforcer because protocol v4 frames are rejected.
+Protocol v5 adds a versioned `file_protection_policy` payload, mutually exclusive with
+`policy_dsl`. The mock backend still rejects structured policies. Existing DSL semantics are
+retained, but v4 clients must upgrade with the enforcer because protocol v4 frames are rejected.
+
+### Structured file protection: phase-one boundaries
+
+The `file_protection_policy` payload protects exact file entries or directory trees, including
+future children, with per-target exact-entry and directory-subtree exclusions. `delete` and
+`ordinary_write` are independent protections. Check `/api/enforcement/health` for
+`file_entry_delete_protection`, `directory_tree_delete_protection`, `ordinary_write_protection`,
+and `static_mount_topology` before applying the corresponding policy. The ActPlane backend
+requires explicit `policy_mode: "enforce"` for structured policies; omitted mode, `audit`, and
+`observe` are rejected before topology preparation or kernel changes. This restriction does not
+change legacy DSL handling.
+
+- Ordinary-write protection blocks `write` and `pwrite` through protected paths, including
+  descriptors opened before activation. Reads and opening a writable descriptor remain allowed.
+- Ancestry walks are bounded to 256 steps each, including mount transitions. If no protection
+  can be established within that budget, classification is UNKNOWN: ordinary writes are allowed,
+  while deletion and rename fail closed only when the active domain requests delete protection.
+  Deep descendants can therefore be writable; an explicit file target or a nearby directory-tree
+  root can still establish protection at the same depth.
+- An otherwise unprotected hardlink outside the policy scope can still write the same inode and
+  change the protected file's content. Protect that alias explicitly when needed. Removing the
+  outside hardlink is allowed because it does not remove the protected directory entry.
+- `truncate`, `ftruncate`, `O_TRUNC`, shared writable `mmap`/`mprotect`, and `fallocate` hole punching
+  are outside this protection contract, even for protected files. io_uring/AIO and chmod/chown are
+  also outside the phase-one coverage guarantee; `complete_content_protection` remains false.
+- Mount topology is fixed at apply time. Existing supported bind aliases/submounts are resolved,
+  but later mount/bind/unmount changes and dynamic overlay changes are not supported.
+- Preparation and pre-activation checks re-resolve path identities, but do not atomically lock
+  pathnames through activation. Keep targets, exclusions, ancestors and the process root stable
+  until Apply returns; concurrent rename/exchange or root changes during Apply are unsupported.
+
+This is bounded operation protection, not a guarantee that protected content is immutable.
 
 ## cosh: ask in natural language
 

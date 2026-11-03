@@ -8,7 +8,7 @@ TEMPORARY="$(mktemp -d)"
 trap 'rm -rf "$TEMPORARY"' EXIT
 VERSION="$(python3 "$REPO_ROOT/src/agent-sec-core/packaging/raw/verify_release.py" \
     "$REPO_ROOT/src/agent-sec-core" \
-    "$REPO_ROOT/src/agent-sec-core/.anolisa/component.toml")"
+    "$REPO_ROOT/src/agent-sec-core/packaging/anolisa/component.toml")"
 
 if "$ACTION_DIR/build.sh" --source-repo "$REPO_ROOT" \
     --output-dir "$TEMPORARY/profile" --version "$VERSION" \

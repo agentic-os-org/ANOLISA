@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - Unreleased
+
+### Changed
+
+- Install the runtime and bundled skill through separate RPMs.
+- Place the bundled skill in the shared ANOLISA skills directory.
+
 ## [0.5.4] - 2026-10-28
 
 ### Fixed

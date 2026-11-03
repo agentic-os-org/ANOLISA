@@ -214,7 +214,7 @@ OpenClaw replacement/completion 视图保留原始事件身份、deadline 与候
 本次不引入 eBPF 探针、进程发现、特权 worker、安装包或 AgentSight 生命周期操作。
 无 eBPF 时，可用的用户态轨迹仍能补充 AW 候选。服务/存储缺失、认证/版本失败和
 来源限额都产生显式缺口；AW Hook 和本地审计保持既有行为。合法空轨迹为
-`available`，覆盖仍未知；404 为 `unknown`，不能证明没有活动。上文的最小 `auto`/`off` 行为已实现；完整分能力 `required` 准入及 all-in-one 打包
+`available`，覆盖仍未知；404 为 `unknown`，不能证明没有活动。上文的最小 `auto`/`off` 行为已实现；完整分能力 `required` 准入
 仍属后续工作。
 
 ## 验证

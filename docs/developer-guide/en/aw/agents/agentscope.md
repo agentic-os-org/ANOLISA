@@ -6,11 +6,12 @@ Run source examples from `src/aw`; build AW with the [integration tutorial](../i
 
 ## Start AgentScope SDK
 
-Use a Python environment with `agentscope==2.0.6`; the SDK is separate from
-QwenPaw's verified AgentScope 2.0.10 runtime. `argv` selects the SDK environment's
-Python and a `.py` application or `-m MODULE`. AW verifies that exact SDK version,
-supplies `aw_agentscope` and a protected runtime configuration, and awaits a
-receipt after the real public factory has installed middleware.
+The verified standalone baseline is AgentScope 2.0.6; QwenPaw's verified runtime
+uses AgentScope 2.0.10. Other releases can use the same public factory and middleware
+contract. `argv` selects the SDK environment's Python and a `.py` application or
+`-m MODULE`. AW records the installed version, supplies `aw_agentscope` and a
+protected runtime configuration, and awaits a receipt after the real public
+factory has installed middleware.
 
 From `src/aw`, with that environment's `python3` on PATH:
 

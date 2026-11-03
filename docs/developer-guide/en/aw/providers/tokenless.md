@@ -13,27 +13,31 @@ compression. Schema compression and authorized retrieval remain separate.
 
 ## Install and enable
 
-Use the [AW Preview packages](../../../../user-guide/en/aw/installation.md). `aw-provider-tokenless` contains
-its bridge and Tokenless CLI from the same source commit, plus RTK v0.49.0 pinned
-at `b1c0dc00649c50fbe8930f849c800d4d6ca12091` with Tokenless's statistics and pytest
-patches. It requires matching `aw-core`; `aw-all-in-one` combines the same component
-payload and receipts with core and sec-core. Python wheels and Tokenless native
-plugins are not needed. Agent installations and runtime dependencies remain external.
+Use the [AW delivery archives](../../../../user-guide/en/aw/installation.md).
+The Provider archive contains the bridge, examples and template only.
+Install the Tokenless backend CLI and patched RTK 0.49.0 separately through the
+backend owner. The Provider prefix does not contain backend executables or RTK
+source/provenance receipts.
 
-The bundle records managed RTK provenance and hashes; the generator writes verified paths and digests. The prefix cannot contain `:`. Missing or invalid RTK follows `on_error`.
+Supply an absolute regular RTK executable and its SHA-256 through `RTK_BINARY`
+and `RTK_SHA256`; these values do not transfer backend ownership to AW. Its
+parent directory cannot contain `:`. PreTool validates the executable, digest
+and trusted parent; failure follows `on_error` without falling back to user RTK.
+PostTool and the read-only view work independently of RTK.
 
-After installing core, install the matching Tokenless extension into the same
-prefix, or install all-in-one into a new prefix. For Qoder/OpenClaw, initialize
-with `aw config init --provider tokenless` and the usual Agent flags.
-Choose `--provider sec-core+tokenless --socket ABS_FILE` to generate sec-core
-checks before execution, append PreTool, retain its completion observer, and append
-compression after the existing after steps. Installing a component
-does not enable it. The existing plain `sec-core` selection retains its behavior.
+Install the AW CLI through its ordinary Makefile and optional Provider bridge
+through the Provider API into a separate extension prefix. Initialize with the
+explicit Tokenless template and `PROVIDERS_DIR`, `TOKENLESS_CLI`, `RTK_BINARY`,
+`RTK_SHA256` values.
+The combined template additionally requires `SEC_CORE_CLI` and `SOCKET`.
+Templates contain no package requirements; a native Provider prefix works without
+AW records. See the [complete user commands](../../../../user-guide/en/aw/tokenless.md).
+Installing files does not enable the Provider.
 
 For supported targets, copy the
 [shared example](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml),
-replace its executable paths and `RTK_SHA256_FROM_RECEIPT` with the RTK entry's
-`sha256` from the Tokenless package file inventory returned by `aw list --installed --prefix "$AW_PREFIX" --json`, and keep both state
+replace its executable paths and `RTK_SHA256_OF_EXECUTABLE` with the SHA-256 of
+the actual separately installed RTK executable, and keep both state
 directories outside the immutable installation prefix. Use the framework-specific profile and launch flags from the
 [AW guide](../validation.md).
 
@@ -47,8 +51,8 @@ combines sec-core checks/observation with both Tokenless operations. Follow the
 
 The Provider accepts only private configuration `{version: 1}`. Its fixed argv is
 `aw-provider-tokenless --cli ABS_FILE --data-dir ABS_DIR`, optionally followed by
-`--rtk ABS_FILE --rtk-sha256 HEX`. The package generator adds both managed arguments
-using the verified installed payload; hand-written configurations without them
+`--rtk ABS_FILE --rtk-sha256 HEX`. The distribution template fills both managed arguments
+from the explicit backend path and checksum; hand-written configurations without them
 retain native Tokenless dependency discovery. The view command omits them.
 The bridge calls `tokenless compress` using Protocol v2 and sets
 `TOKENLESS_DATA_DIR` for that child.
@@ -89,7 +93,7 @@ PreTool does not provide those capabilities or Schema compression.
 
 | Framework | Model-visible replacement entry |
 | --- | --- |
-| Qoder | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` string |
+| Qoder | `PostToolUse` → `hookSpecificOutput.updatedToolOutput` string in AW's adapter |
 | OpenClaw | `registerAgentToolResultMiddleware` before the next model request |
 | QwenPaw | Final AgentScope `ToolResponse` returned by acting middleware |
 | Hermes | `transform_tool_result` final string callback |
@@ -103,8 +107,11 @@ return value cannot replace model-visible content.
 
 Only a supported single text slot is projected. Media, multiple content blocks,
 intermediate streaming chunks and unsuccessful tool results remain unchanged.
-Replacement preserves native metadata and envelope fields. Qoder requires a
-string replacement, so a structured envelope is serialized into that string.
+Replacement preserves native metadata and envelope fields. AW's Qoder adapter
+currently serializes structured envelopes into a string replacement. The standalone
+Tokenless Qoder plugin preserves an object only when rewrapping native Bash `stdout`;
+other result shapes retain their JSON string replacement. The Bash object keeps all
+other fields unchanged, and Qoder controls their rendering in model context.
 AW infers `content_origin` using heuristic rules. An extracted command gives
 `command_output`; without a command, tool names classify known shell tools as
 `command_output`, known file-read tools as `file_content`, and other tools as
@@ -173,7 +180,7 @@ PreTool step still references it. Then stop
 and restart AW using the updated configuration. Existing sessions are not reloaded.
 Keep or remove the external Tokenless state directory according to your data needs.
 
-Claude SDK uses the explicit worker factory described in the [AW guide](../agents/claude-sdk.md). Its single AW callback already awaits steps in order. Only native Bash stdout is replaceable; MCP status is not reliably exposed and its results remain unchanged. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
+Claude SDK uses the explicit worker factory described in the [AW guide](../agents/claude-sdk.md). Its single AW callback already awaits steps in order. Native Bash stdout and native HTTP MCP model-visible strings (structuredContent serialization or a single text block) are replaceable; managed SDK MCP keeps its own single-text replacement. The native callback does not expose reliable MCP business-error status. Existing native output-rewrite callbacks are rejected when AW replacement is configured.
 
 ## Read-only Panel queries
 
@@ -184,7 +191,7 @@ or calling generic service RPC:
 aw inspect --config /absolute/path/to/aw.yaml --json
 ```
 
-Use matching AW binaries. New `aw config init` Tokenless selections register
+Use matching AW binaries. The distribution's Tokenless configuration template registers
 the optional view automatically. For existing configurations, stop Agents and the
 original service before editing offline. Add this alongside the Tokenless
 Provider's existing `transport`, not inside its private `config`:
@@ -252,7 +259,8 @@ cargo build --locked --manifest-path src/tokenless/Cargo.toml -p tokenless-cli
 ```
 
 Use the resulting `providers/tokenless/target/debug/aw-provider-tokenless` and
-`src/tokenless/target/debug/tokenless` paths in the shared example. The clean-source
-Preview builder accepts `--component tokenless` or `--component all`.
+`src/tokenless/target/debug/tokenless` paths in the shared example. To build an independent
+bridge archive, select `COMPONENTS=tokenless` with the distribution `aw-packages` target.
+The Tokenless backend and RTK remain independently delivered core components.
 
 Resident Claude clients can use `aw_claude.create_sdk_mcp_server` for in-process MCP results. The public handler seam supplies reliable `is_error`; successful single text blocks can be compressed, while error, multi-block, media and structured results retain their envelope. See the [managed MCP contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-mcp.md). Schema/BeforeModel and Retrieve remain separate admitted-capability work.

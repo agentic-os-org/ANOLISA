@@ -185,8 +185,8 @@ cd src/agentsight
 # 构建前端并输出到 frontend-dist/（cargo build 前必须先执行）
 make build-frontend
 
-# 再构建包含嵌入 UI 的 Rust 二进制
-make build
+# 再单独构建包含嵌入 UI 的 Rust 二进制
+make build-binary
 
 # 或一步完成
 make build-all
@@ -324,17 +324,18 @@ sudo yum install agentsight
 ```
 
 安装内容：
-- `/usr/local/bin/agentsight` — CLI 可执行文件
-- `/usr/local/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight` — CLI 可执行文件
+- `/usr/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight-start` — trace/serve 监督脚本
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight systemd 单元
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — 强制执行 systemd 单元
 
-RPM 是 Linux system 包。两个单元会随包安装，但默认不会启用；当两个单元都运行时，
+RPM 是 Linux system 包。两个单元会随包安装；当两个单元都运行时，
 AgentSight 会排在 enforcer 之后启动。
 
 ### 启动服务
 
-两种包安装都会让单元保持停止且不启用。准备开始采集时，再启动主服务。
+准备开始采集时，再启动主服务。
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -377,8 +378,9 @@ ActPlane enforcer，输出到每次新建的独立目录。脚本打印其绝对
 Linux 交叉构建通过 `scripts/build-enforcer.sh --target
 <aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` 显式选择目标；不传参数时
 保持宿主构建。`CARGO` 可指定准备好的 Cross 包装入口，但必须遵守指定目标。
-两种 Linux 架构使用相同 raw 包布局及源码自有的 `.anolisa/component.toml`。
-macOS ARM64 使用 `.anolisa/component.macos.toml`，仅包含主程序。
+两种 Linux 架构使用相同 raw 包布局及源码自有的
+`packaging/anolisa/raw/component.toml`。macOS ARM64 使用
+`packaging/anolisa/raw/component.macos.toml`，仅包含主程序。
 从 Linux 交叉构建 macOS 时使用 `--no-default-features --features server`，
 以跳过可选的 `bpf-build` 宿主依赖。
 打包器消费凭据并完成打包后，才可清理本次 enforcer 独立目录。

@@ -112,7 +112,7 @@ release environment 审批流程。
 ### 构建
 
 ```bash
-cargo build --release
+make build
 ```
 
 ### 常用命令
@@ -251,11 +251,17 @@ FUSE 读取 `SKILL.md` 时，SkillFS 会执行 `compiler::compile`，支持：
 - `<!-- @else -->`
 - `<!-- @endif -->`
 
+Linux 上直接检查 `PATH` 中的可执行文件，无需额外安装 `which`。
+固定命令白名单和挂载启动时的环境快照保持不变；更改 `PATH` 或安装命令后，
+需重新挂载以刷新快照。
+
 没有条件块时，SkillFS 也会执行少量启发式命令归一化，例如：
 
 - 独立调用的 `pip install` / `pip3 install` -> `uv pip install`；保留指定解释器的
-  `python -m pip` 调用。独立调用使用保守的命令位置启发式判断，
-  不是完整的 shell 语法解析。
+  `python -m pip` 调用以及带 `--user` 的安装命令，因为 uv 不支持用户目录安装。
+  独立调用使用保守的命令位置启发式判断，不是完整的 shell 语法解析；未结束的
+  参数（包括续行和命令替换）保持原样。文件描述符重定向不会终止参数检查。
+  列表或散文中的行内代码片段单独处理；命令后的括号说明不会阻止改写。
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 

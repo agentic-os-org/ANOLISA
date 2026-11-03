@@ -13,16 +13,17 @@
 变量。包安装用户也可使用这两个文件，将 `AW_BIN` 指向已安装的二进制；Python 3
 是该示例脚本的依赖。
 
-先准备各 Agent 的受支持版本与原生模型配置。运行时只需安装所选目标。各框架使用
+先准备各 Agent 与原生模型配置。下表版本为已验证基线，其他版本沿用相同的
+[接入合同](native-agents.md)。运行时只需安装所选目标。各框架使用
 独立原生 profile，显式选择工具工作目录，并从 `$AW_DEMO/workspace` 启动。
 共用 YAML 不修改模型凭据或原生权限，起步时逐个测试目标。
 
 | 目标 | 原生前置条件 | 启动差异 |
 | --- | --- | --- |
-| Qoder | 支持原生命令 Hook 的 CLI >=1.1.64，已登录 | 交互或 print 入口；可选 `--native-settings` |
+| Qoder | 支持原生命令 Hook 的 CLI（已验证基线 1.1.64），已登录 | 交互或 print 入口；可选 `--native-settings` |
 | OpenClaw | 2026.9.6，已配置的 JSON 和现有状态目录；先停止使用该 profile 的 Gateway | AW 新启 `gateway run`，须传入两个原生路径 |
 | QwenPaw | 2.2.2.post1 / AgentScope 2.0.10，已初始化 App 工作目录与模型 | 设置 `QWENPAW_WORKING_DIR`，使用 App/API，不使用 ACP/TUI |
-| Hermes | 干净的官方提交 `952c941e`、已安装的 Python console script 和已初始化的本地 chat profile | 在该 profile 中安装一次 AW 插件，运行时使用同一 profile |
+| Hermes | 干净的源码检出（已验证基线 `952c941e`）、已安装的 Python console script 和已初始化的本地 chat profile | 在该 profile 中安装一次 AW 插件，运行时使用同一 profile |
 
 启动 Qoder：
 

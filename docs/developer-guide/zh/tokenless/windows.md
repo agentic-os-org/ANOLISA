@@ -64,8 +64,8 @@ Linux CI 构建入口见下文。
 
 ```powershell
 cd src/tokenless
-./scripts/build-windows.ps1
-node npm/scripts/package-npm.js --target win32-x64
+./packaging/build/build-windows.ps1
+node packaging/npm/package-npm.js --target win32-x64
 $packages = Get-ChildItem npm/dist/tokenless-win32-x64/*.tgz, npm/dist/tokenless/*.tgz
 npm install -g $packages.FullName
 ```
@@ -133,7 +133,7 @@ TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
     --source-repo "$root" \
     --output-dir /tmp/tokenless-windows-release/artifacts \
     --wheel-output-dir /tmp/tokenless-windows-release/wheels \
-    --version 0.9.0 --target-os windows --target-arch x86_64 \
+    --version 0.9.1 --target-os windows --target-arch x86_64 \
     --profile windows-msvc-x86_64
 ```
 

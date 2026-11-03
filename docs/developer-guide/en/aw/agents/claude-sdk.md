@@ -6,7 +6,9 @@ Run source examples from `src/aw`; build AW with the [integration tutorial](../i
 
 ## Start a Claude SDK worker
 
-Use Claude Agent SDK 0.2.88 with its bundled CLI 2.1.161. The Adapter launches one
+The verified baseline is Claude Agent SDK 0.2.88 with bundled CLI 2.1.161.
+Other releases are admitted through the same native client, Hook, identity and
+transport lifecycle checks. The Adapter records the installed SDK version and launches one
 foreground Python script or `-m` module and requires the worker's public factory
 to use `aw_claude.create_client(options)`. Model credentials remain SDK settings.
 AW supplies this module on `PYTHONPATH` for the launched worker; it does not
@@ -50,9 +52,13 @@ The worker's options cwd must equal the launch cwd. Readiness is published after
 the real SDK initialization handshake accepts callbacks. AW observes or denies
 `PreToolUse`; `PostToolUse` and `PostToolUseFailure` both supply after observations.
 Denied tools do not produce a synthetic after. Existing hook vetoes and native
-permissions remain effective. Existing pre-hook `updatedInput` and permission
-`updated_input` changes are denied, because concurrent callbacks cannot establish
-that AW inspected the final arguments. When `tool.before` is active, nonempty
+permissions remain effective. Existing Python SDK pre-hook `updatedInput` and
+wrapped permission `updated_input` changes are denied. CLI-loaded settings and
+plugin Hooks run independently: they can rewrite ordinary tool arguments after
+AW's public `PreToolUse` check, and those final arguments are not checked again
+before execution. Before policies cover the input observed at that Hook only;
+applications requiring final-argument enforcement need another verified boundary.
+When `tool.before` is active, nonempty
 `PermissionRequest` matchers are rejected before initialization; use supported
 `PreToolUse` or `can_use_tool` callbacks instead. Caller-specified
 `permission_prompt_tool_name` is also rejected with `tool.before`; SDK-owned stdio
@@ -61,17 +67,37 @@ bundled binaries are rejected. The worker must not detach or start multiple
 SDK clients/tasks within one launcher binding; Gunicorn and business deployments
 need their own task lifecycle integration.
 
-CLI 2.1.161 emits `PostToolUse` for SDK MCP `isError: true` responses and omits that
-flag from callback data. After observation therefore does not classify every
-business failure. Native Bash execution failure does use `PostToolUseFailure`.
+Measured with SDK 0.2.88 and CLI 2.1.161, MCP tool failures (the SDK handler
+contract's `is_error`, mapped to the wire-level `isError`) reach hooks as
+`PostToolUseFailure`, like native Bash execution failures; after observation
+still does not classify every business failure.
 See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-sdk-adapter.md)
 for identity, cancellation and validation limits.
 
-The options factory requires `setting_sources=[]`, no `settings` override and no
-CLI plugins. `extra_args` allows only `strict-mcp-config: None`; the SDK native
-`strict_mcp_config` option is also preserved. Model/authentication options are
-unchanged. Applications which discover project skills through settings sources
-need an explicit integration design before using this restricted first bridge.
+The factory preserves `setting_sources` (including native default discovery), inline or
+file-based `settings`, local `plugins`, and SDK/HTTP/stdio `mcp_servers`. The SDK
+loads the original sources in their native order and discovers project Skills;
+AW does not parse, copy or translate these configuration files. Existing callback
+composition and runtime restrictions above still apply. `extra_args` continues
+to allow only `strict-mcp-config: None`; use the SDK options for settings and MCP.
+Model/authentication options are unchanged. Native configuration compatibility
+does not expand the Hook effects or certify commands executed inside Skills/plugins.
+Resident clients resolve the CLI's effective settings before accepting queries.
+Their Anthropic Messages relay uses the merged model endpoint, proxy and TLS
+environment; native credentials stay with the CLI. A session-only settings overlay
+routes model responses through AW without changing configuration files. Connect
+fails if native settings controls or relay-route confirmation fail. This requires
+the verified SDK 0.2.88 / bundled CLI 2.1.161 settings-control interface.
+The relay snapshots its upstream environment at connect; create a new client to
+apply endpoint, proxy or TLS changes.
+The current sec-core Provider exposes submission, tool PII and Skill operations.
+Provider operations and Adapter capabilities are admitted separately: `scan_code`
+and `scan_tool_input` check the Claude callback input, while `input.submit` and
+required output `on_error: withhold_result` are rejected before the worker starts.
+Native Skill discovery remains available; sec-core `check_skill` resolution is
+currently verified for Qoder SDK and QwenPaw, with no Claude resolution contract.
+See the [Provider guide](../providers/sec-core.md) before sharing its configuration.
+
 The direct task-worker mode permits one client per worker. Use the [resident entrypoint](../deployment/resident.md) for multiple task clients.
 
 The `claude-sdk` adapter supports this restricted foreground worker factory;
@@ -92,8 +118,12 @@ the new call passes all policies and native permissions again. PostTool replaces
 only completed, non-image, non-interrupted Bash stdout. Put completion observers
 and custom steps before the single final `replace_result` step. They see the
 original result; stderr and other native fields are retained. Failure/report keeps
-the original result. MCP tools on this native callback path remain observable but are not compressed because
-the native callback does not expose reliable business-error status.
+the original result. Native HTTP MCP tools project the model-visible string
+(the serialized structuredContent, or the single text block for plain-text
+results) and a replacement returns that string for the next model request;
+multi-block and media results stay unchanged. The native callback does not
+expose reliable business-error status, so MCP error classification still needs
+the [managed MCP factory](../deployment/resident.md).
 
 Run pinned native tests through [contributing](../../../../../src/aw/CONTRIBUTING.md).
 See [resident deployment](../deployment/resident.md) for resident clients and managed MCP.

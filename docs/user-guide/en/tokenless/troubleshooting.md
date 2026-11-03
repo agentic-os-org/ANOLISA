@@ -454,7 +454,7 @@ Where the previous npm prefix and the install directory overlap — `npm install
 
 Ownership is checked, not just content. A newer anolisa or npm install of the same version reproduces byte-identical binaries and manifests, so the receipt also records this install's id, the link target each launcher resolves to, and an ownership marker (`.tokenless-owner`) inside the adapter tree and the npm module directory. The uninstaller keeps anything whose recorded identity or marker no longer matches — files, adapter resources, framework registrations and the npm package alike.
 
-The source-build fallback is Linux-only. On macOS the installer either takes the npm path or exits with an error; it never runs `cargo`. Intel macOS has no published npm package either, so it currently has no supported route — see the platform table in the [Quick Start](index.md#platform-support).
+The source-build fallback is Linux-only. On macOS the installer either takes the npm path or exits with an error; it never runs `cargo`. Intel macOS uses the published npm package — see the platform table in the [Quick Start](index.md#platform-support).
 
 `~/.local/share/anolisa/adapters/tokenless` is shared with the anolisa CLI and with a direct `npm install -g`. When that directory already belongs to one of them, the npm postinstall leaves it untouched, the installer compares it against the snapshot it took beforehand and only puts the snapshot back if something really did replace it, records no adapter directory, and says so. The uninstaller then leaves those resources and the framework registrations pointing at them alone. A snapshot that cannot be taken at all stops the run before `npm install -g` replaces anything.
 

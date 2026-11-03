@@ -14,14 +14,14 @@ use std::{
     },
 };
 
-struct Fixture {
-    runtime: Arc<Runtime>,
-    id: String,
+pub(super) struct Fixture {
+    pub(super) runtime: Arc<Runtime>,
+    pub(super) id: String,
     _directory: tempfile::TempDir,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let directory = tempfile::Builder::new()
             .prefix("invocation-races-")
             .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
@@ -74,7 +74,7 @@ impl Drop for Fixture {
     }
 }
 
-fn deadline() -> Instant {
+pub(super) fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
 

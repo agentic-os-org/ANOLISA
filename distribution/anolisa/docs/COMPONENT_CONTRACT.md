@@ -1,41 +1,41 @@
 # ANOLISA Component Contract
 
-This document defines where a packaged component exposes its ANOLISA
-component contract and how ANOLISA should consume that contract across RPM and
-raw backends.
+This document defines ANOLISA's integration contracts for installed components.
+Standalone component RPMs contain their core, plugin and skill payloads; ANOLISA
+supplies the discovery metadata used by its own installer and adapter manager.
 
 ## Package Location
 
-RPM packages that expose ANOLISA component metadata MUST install the component
-contract at:
+The ANOLISA distribution installs its component contracts at:
 
 ```text
 /usr/share/anolisa/components/<component>/component.toml
 ```
 
-In RPM spec files, use the datadir macro rather than hard-coding
-`/usr/share`:
+The existing ANOLISA RPM owns these files. Component core, plugins, skills and
+legacy aggregate RPMs do not install or own them. Native components remain
+independently installable. A source or URL installation places the same data
+under its selected ANOLISA datadir; npm and prebuilt packages carry a sibling
+`share/anolisa/components/` tree beside their `bin/anolisa` executable.
+
+In the ANOLISA spec, the installation and file list refer to the distribution
+inputs rather than a component's native package inputs:
 
 ```spec
-%global anolisa_component sec-core
-
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/%{anolisa_component}
-install -m 0644 .anolisa/component.toml \
-  %{buildroot}%{_datadir}/anolisa/components/%{anolisa_component}/component.toml
+for component in cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory; do
+    install -d %{buildroot}%{_datadir_anolisa}/components/$component
+    install -m 0644 manifests/components/$component/component.toml \
+        %{buildroot}%{_datadir_anolisa}/components/$component/component.toml
+done
 
 %files
-%dir %{_datadir}/anolisa/components
-%dir %{_datadir}/anolisa/components/%{anolisa_component}
-%{_datadir}/anolisa/components/%{anolisa_component}/component.toml
+%{_datadir_anolisa}/components/
 ```
 
-Examples:
-
-```text
-/usr/share/anolisa/components/sec-core/component.toml
-/usr/share/anolisa/components/tokenless/component.toml
-/usr/share/anolisa/components/os-skills/component.toml
-```
+An ANOLISA RPM upgrade rejects versions of former component owners that still
+carry the same registry paths. Those owners must be upgraded in the same RPM
+transaction. Source and URL installers perform a read-only ownership check and
+refuse to overwrite registry files still owned by component RPMs.
 
 ## Rationale
 
@@ -61,6 +61,19 @@ The component contract is component-level metadata. It may describe adapters,
 services, health checks, files, backend compatibility, and future lifecycle
 behavior, so it should not live inside the adapter namespace.
 
+## Source Location
+
+RPM integration contracts are authoritative under
+`distribution/anolisa/manifests/components/<component>/component.toml`. Their
+versions are checked against component versions, and adapter declarations name
+the actual RPM payload owners. RPM resource roots and health commands describe
+native package paths independently of the ANOLISA CLI's install prefix.
+
+Component `packaging/anolisa/` inputs continue to support raw archives and
+explicit legacy integration targets. They are not installed by native component
+RPMs. Raw archives retain `.anolisa/component.toml`; a raw installation's own
+snapshot remains separate from the distribution's RPM integration metadata.
+
 ## User And Raw Installs
 
 For user-mode or raw installs, the same logical datadir layout applies.
@@ -85,8 +98,36 @@ Raw archives may also carry the source contract at:
 .anolisa/component.toml
 ```
 
-ANOLISA should normalize that source contract into the installed datadir layout
-or directly into the installed-state snapshot described below.
+ANOLISA stores the archive's source contract in the installed-state snapshot
+below. For the seven distribution registry components (`cosh-ng`, `sec-core`,
+`agentsight`, `tokenless`, `skillfs`, `ws-ckpt`, and `agent-memory`), component
+raw installation, repair, update, rollback, and uninstall leave the discovery
+contract under `{datadir}/components/` to ANOLISA's own delivery. This also
+applies to older archives and installed records that still claim that path;
+archive digest verification and installed-state snapshot integrity checks remain
+in use.
+
+Raw contracts that omit this discovery path require ANOLISA 0.3.21 or later,
+the first distribution version that supplies the registry. Set this minimum in
+the embedded raw contract and distribution mirror before publishing a new
+component archive, so older CLIs reject it through their version gate. Publish
+the ANOLISA delivery, including its registry data, before promoting those
+component archives to a shared channel.
+
+For raw installations, `anolisa repair <component>` repairs component-owned
+payloads and snapshots. Restore a missing or corrupt discovery registry through
+ANOLISA's delivery: verify/reinstall the ANOLISA RPM for RPM deployments, or
+rerun the matching source, URL, or npm installer for those deployments. A raw
+component repair does not restore distribution-owned registry files.
+
+Obsolete ownership claims are removed in memory during scoped state loading,
+including quarantined records; read-only commands leave the state file intact.
+A later state save persists that cleanup. Downgrading to ANOLISA 0.3.20 or
+earlier while the state still contains an old claim re-enables that version's
+registry removal behavior. Keep the newer CLI for component lifecycle actions;
+if a downgrade is required, restore the registry through ANOLISA's delivery
+after any affected uninstall and use component archives compatible with the
+older CLI.
 
 ## Installed-State Snapshot
 
@@ -105,7 +146,8 @@ Typical paths:
 ~/.local/state/anolisa/component-manifests/<component>/component.toml
 ```
 
-The package-owned contract is the source provided by RPM or raw artifacts. The
+The contract source is supplied by ANOLISA for RPM integration, or by the raw
+artifact for a raw installation. The
 state snapshot is ANOLISA's runtime record and may be used by commands such as
 `anolisa adapter enable <component> <framework>` after the component has been
 installed or adopted.
@@ -357,7 +399,7 @@ dest = "{datadir}/adapters/{component}/openclaw/"
 
 [adapters.backends.rpm]
 resource_root = "/opt/agent-sec/openclaw-plugin/"
-managed_packages = ["agent-sec-openclaw-hook", "agent-sec-skills"]
+managed_packages = ["agent-sec-plugins", "agent-sec-skills"]
 ```
 
 `managed_packages` lists additional RPMs whose file inventories own the
@@ -367,6 +409,11 @@ implicitly. ANOLISA merges these inventories before it verifies or copies
 adapter inputs; duplicate paths and unavailable packages remain fail-closed.
 This is required for metapackages whose own `%files` list is empty while their
 adapter payload is split across subpackages.
+
+List the actual payload-owning packages. Compatibility packages that only
+depend on a new plugins package do not contribute that package's file
+inventory. Contracts relying on `managed_packages` require ANOLISA 0.3.15
+or newer.
 
 Selection follows the component's installed provenance recorded in
 state:

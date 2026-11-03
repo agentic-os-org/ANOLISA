@@ -13,7 +13,7 @@ struct State {
     slots: HashSet<(FileProtectionSlot, u32, u32)>,
     targets: HashSet<(u32, u32, u32)>,
     active: HashMap<u32, u32>,
-    fail_once: Option<&'static str>,
+    fail_once: Vec<&'static str>,
     capacities: HashMap<&'static str, (usize, usize)>,
 }
 
@@ -22,15 +22,18 @@ struct FakeWriter(Arc<Mutex<State>>);
 
 impl FakeWriter {
     fn fail_once(&self, operation: &'static str) {
-        self.0.lock().expect("state lock").fail_once = Some(operation);
+        self.0.lock().expect("state lock").fail_once.push(operation);
     }
 
     fn run(&self, operation: &'static str) -> io::Result<()> {
         let mut state = self.0.lock().expect("state lock");
         state.operations.push(operation);
-        if state.fail_once == Some(operation) {
-            state.fail_once = None;
-            Err(io::Error::other(format!("{operation} failed")))
+        if let Some(index) = state.fail_once.iter().position(|op| *op == operation) {
+            state.fail_once.remove(index);
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{operation} failed"),
+            ))
         } else {
             Ok(())
         }
@@ -332,6 +335,120 @@ fn staging_failure_rolls_back_only_the_staged_generation() {
     let state = writer.0.lock().expect("state lock");
     assert!(state.roots.contains(&(identity(99), 9, 8)));
     assert!(!state.roots.contains(&(identity(1), 9, 2)));
+}
+
+#[test]
+fn malformed_public_slot_keys_are_rejected_before_insertion() {
+    let writer = FakeWriter::default();
+    let mut staging =
+        FileProtectionStaging::begin(writer.clone(), 9, generation(2), counts()).expect("begin");
+    let mut nul = slot();
+    nul.name[1] = 0;
+    let mut dirty_tail = slot();
+    dirty_tail.name[255] = b'x';
+    let mut slash = slot();
+    slash.name[1] = b'/';
+    let mut dot = slot();
+    dot.name = [0; 256];
+    dot.name[0] = b'.';
+    dot.name_len = 1;
+    let mut dotdot = dot;
+    dotdot.name[1] = b'.';
+    dotdot.name_len = 2;
+    for forged in [
+        FileProtectionSlot {
+            name_len: 256,
+            ..slot()
+        },
+        FileProtectionSlot {
+            name_len: 0,
+            ..slot()
+        },
+        nul,
+        dirty_tail,
+        slash,
+        dot,
+        dotdot,
+    ] {
+        let error = staging
+            .stage_slot(
+                forged,
+                FileProtectionSlotValue {
+                    direct_mask: 1,
+                    ..Default::default()
+                },
+            )
+            .expect_err("malformed slot must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+    assert!(writer.0.lock().expect("state lock").operations.is_empty());
+}
+
+#[test]
+fn staging_drop_removes_keys_in_reverse_order_without_activation() {
+    let writer = FakeWriter::default();
+    writer
+        .0
+        .lock()
+        .expect("state lock")
+        .roots
+        .insert((identity(99), 9, 8));
+    drop(stage_all(writer.clone(), 2));
+    let state = writer.0.lock().expect("state lock");
+    assert_eq!(
+        state.operations,
+        vec![
+            "insert_root",
+            "insert_directory",
+            "insert_stable",
+            "insert_slot",
+            "insert_target",
+            "remove_target",
+            "remove_slot",
+            "remove_stable",
+            "remove_directory",
+            "remove_root",
+        ]
+    );
+    assert_eq!(state.roots, HashSet::from([(identity(99), 9, 8)]));
+    assert!(state.directories.is_empty() && state.stable.is_empty());
+    assert!(state.slots.is_empty() && state.targets.is_empty() && state.active.is_empty());
+}
+
+#[test]
+fn staging_rollback_failure_preserves_error_kind_and_retries_on_drop() {
+    let writer = FakeWriter::default();
+    let mut staging =
+        FileProtectionStaging::begin(writer.clone(), 9, generation(2), counts()).expect("begin");
+    staging.stage_root(identity(1), 1).expect("stage root");
+    writer.fail_once("insert_slot");
+    writer.fail_once("remove_root");
+    let error = staging
+        .stage_slot(
+            slot(),
+            FileProtectionSlotValue {
+                direct_mask: 1,
+                ..Default::default()
+            },
+        )
+        .expect_err("insert and rollback must fail");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error
+        .to_string()
+        .contains("insert_slot failed; rollback failed: remove_root failed"));
+    assert!(writer
+        .0
+        .lock()
+        .expect("state lock")
+        .roots
+        .contains(&(identity(1), 9, 2)));
+    drop(staging);
+    let state = writer.0.lock().expect("state lock");
+    assert!(state.roots.is_empty() && state.active.is_empty());
+    assert_eq!(
+        state.operations,
+        vec!["insert_root", "insert_slot", "remove_root", "remove_root"]
+    );
 }
 
 #[test]

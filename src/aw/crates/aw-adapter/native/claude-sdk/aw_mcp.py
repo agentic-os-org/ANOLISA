@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
+import logging
 import re
 from typing import Any
 import weakref
@@ -27,6 +28,19 @@ def identifier(value: str) -> str:
 class _Claim:
     key: str
     bridge: Any
+
+
+def _reportable_fault(hook: dict[str, Any], payload: dict[str, Any], scope: Any) -> bool:
+    """Report-configured tool.after faults keep the checked result and continue.
+
+    A latched scope validity failure already stopped this task; identity and
+    lifecycle faults must not be downgraded to a skipped observation step.
+    """
+    return (
+        payload["event"] == "tool.after"
+        and hook.get("on_error") == "report"
+        and not scope.failed
+    )
 
 
 class ManagedServer(dict):
@@ -87,14 +101,35 @@ class ManagedServer(dict):
             for hook in bridge.config["hooks"]:
                 if hook["event"] != payload["event"]:
                     continue
-                code, output = await bridge.scope.invoke(hook, payload)
+                try:
+                    code, output = await bridge.scope.invoke(hook, payload)
+                except Exception as error:
+                    if not _reportable_fault(hook, payload, bridge.scope):
+                        raise
+                    logging.getLogger(__name__).error(
+                        "AW %s/%s failed: %s; on_error=%s",
+                        payload["event"],
+                        hook["step"],
+                        type(error).__name__,
+                        hook["on_error"],
+                    )
+                    continue
                 if code == 2 and payload["event"] == "tool.before":
                     reason = json.loads(output or b'"Blocked by AW policy"')
                     if not isinstance(reason, str):
                         raise CallbackFailure("MCP denial reason is invalid")
                     return {"content": [{"type": "text", "text": reason}], "is_error": True}
                 if code != 0:
-                    raise CallbackFailure("MCP Hook execution failed")
+                    if not _reportable_fault(hook, payload, bridge.scope):
+                        raise CallbackFailure("MCP Hook execution failed")
+                    logging.getLogger(__name__).error(
+                        "AW %s/%s failed: exit %d; on_error=%s",
+                        payload["event"],
+                        hook["step"],
+                        code,
+                        hook["on_error"],
+                    )
+                    continue
                 directive = json.loads(output or b"{}")
                 if directive == {}:
                     continue
@@ -159,6 +194,7 @@ class ManagedServer(dict):
         if denial is not None:
             await bridge.invocations.finish(entry)
             return denial
+        await bridge.scope.validate()
         entry.phase = "allowed"
         try:
             result = await tool.handler(_copy_json(arguments))

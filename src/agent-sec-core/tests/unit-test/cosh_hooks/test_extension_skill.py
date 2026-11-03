@@ -6,7 +6,9 @@ from pathlib import Path
 _AGENT_SEC_CORE_DIR = Path(__file__).resolve().parents[3]
 _AGENTS_PATH = _AGENT_SEC_CORE_DIR / "AGENTS.md"
 _MANIFEST_PATH = _AGENT_SEC_CORE_DIR / "cosh-extension" / "cosh-extension.json"
-_COMPONENT_MANIFEST_PATH = _AGENT_SEC_CORE_DIR / ".anolisa" / "component.toml"
+_COMPONENT_MANIFEST_PATH = (
+    _AGENT_SEC_CORE_DIR / "packaging" / "anolisa" / "component.toml"
+)
 _SKILL_PATH = _AGENT_SEC_CORE_DIR / "skills" / "security-observability" / "SKILL.md"
 
 

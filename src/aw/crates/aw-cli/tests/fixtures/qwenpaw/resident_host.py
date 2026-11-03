@@ -22,7 +22,7 @@ if sys.argv[1:] == ["--version"]:
     raise SystemExit(0)
 
 ROOT = Path(os.environ["FAKE_ROOT"])
-PLUGIN = Path(os.environ["QWENPAW_WORKING_DIR"]) / "plugins/aw-native/plugin.py"
+PLUGIN = Path(os.environ["QWENPAW_WORKING_DIR"]) / "plugins" / json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())["plugin_id"] / "plugin.py"
 FACTORIES, STARTUP = [], []
 
 
@@ -41,6 +41,14 @@ class Model:
         return deepcopy(self)
 
 
+class Message(Model):
+    pass
+
+
+class Resume(Model):
+    pass
+
+
 class Response(Model):
     def __init__(self, state="success", content=None, **values):
         super().__init__(state=state, content=[
@@ -49,8 +57,12 @@ class Response(Model):
         ], **values)
 
 
-class Chunk(Response):
-    pass
+class Chunk(Model):
+    def __init__(self, state="running", content=None, **values):
+        super().__init__(state=state, content=[
+            value.model_dump() if isinstance(value, Model) else value
+            for value in (content or [])
+        ], **values)
 
 
 class Stream:
@@ -100,6 +112,9 @@ class Coordinator:
                 await entry.stream.append(value)
             else:
                 entry.final_response = value
+                if os.environ.get("FAKE_QWENPAW_EARLY_TERMINAL"):
+                    assert (ROOT / (tool_call.id + "-finalized")).exists()
+                    return
 
     async def _finalize_completed(self, entry):
         pass
@@ -129,7 +144,11 @@ class Toolkit:
         with (ROOT / "tool-executed").open("a") as output:
             output.write(tool_call.id + "\n")
         yield Chunk(content=[Model(text="protected tool output")])
-        yield Response(content=[Model(text="protected tool output")])
+        try:
+            yield Response(content=[Model(text="protected tool output")])
+        finally:
+            await asyncio.sleep(0)
+            (ROOT / (tool_call.id + "-finalized")).write_text("done")
 
     async def check_tool_available(self, name, groups):
         return SimpleNamespace(input_schema={})
@@ -161,14 +180,17 @@ class Agent:
             yield value
 
     async def reply_stream(self):
-        async def dispatch():
+        async def dispatch(**kwargs):
+            if os.environ.get("FAKE_QWENPAW_SUBMIT"):
+                (ROOT / "model-request").write_text("yes")
             for index in range(2):
                 call = Model(id=f"call-{index}", name="arbitrary-tool", input=json.dumps({
                     "deny": os.environ.get("FAKE_QWENPAW_DENY") == "1",
                 }))
                 async for value in self._acting(call):
                     yield value
-        async for value in self._reply_middlewares[0].on_reply(self, {}, dispatch):
+        inputs = {"inputs": Message(role="user", content=[Model(text="fresh user input")])} if os.environ.get("FAKE_QWENPAW_SUBMIT") else {}
+        async for value in self._reply_middlewares[0].on_reply(self, inputs, dispatch):
             yield value
 
     async def reply(self):
@@ -180,14 +202,17 @@ class Agent:
 
 class AgentBuilder:
     @staticmethod
-    def _build_middlewares(ctx, config):
+    def _build_middlewares(ctx, config, native_extension=None):
         installed = [factory(ctx, config) for factory in FACTORIES]
         if os.environ.get("FAKE_QWENPAW_DROP_FACTORY"):
             installed = []
         return [CoordinatorMiddleware(), *installed]
 
     async def build(self):
-        return Agent(self._build_middlewares(SimpleNamespace(workspace_dir=ROOT), None))
+        args = [SimpleNamespace(workspace_dir=ROOT), None]
+        if os.environ.get("FAKE_QWENPAW_EARLY_TERMINAL"):
+            args.append("native-extension")
+        return Agent(self._build_middlewares(*args))
 
 
 def parse_input(raw, schema=None):
@@ -197,7 +222,8 @@ def parse_input(raw, schema=None):
 # These doubles expose only the installed native seam; no AW transport is mocked.
 for name, values in {
     "agentscope": {},
-    "agentscope.message": {"TextBlock": Model, "ToolResultState": SimpleNamespace(DENIED="denied")},
+    "agentscope.message": {"Msg": Message, "TextBlock": Model, "ToolResultState": SimpleNamespace(DENIED="denied", ERROR="error", INTERRUPTED="interrupted")},
+    "agentscope.event": {"UserConfirmResultEvent": Resume, "UserInterruptEvent": Resume, "ExternalExecutionResultEvent": Resume},
     "agentscope.middleware": {"MiddlewareBase": object},
     "agentscope.tool": {"ToolResponse": Response, "ToolChunk": Chunk},
     "agentscope.tool._toolkit": {"_json_loads_with_repair": parse_input},
@@ -217,7 +243,6 @@ spec = importlib.util.spec_from_file_location("resident_fixture", PLUGIN, submod
 plugin = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
-plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
 plugin.plugin.register(SimpleNamespace(
     config={"enabled": not bool(os.environ.get("FAKE_QWENPAW_DISABLED"))},
     register_middleware=lambda factory, **kw: FACTORIES.append(factory),

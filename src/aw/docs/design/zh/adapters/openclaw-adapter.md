@@ -2,9 +2,10 @@
 
 [English](../../en/adapters/openclaw-adapter.md)
 
-适配器以新的前台 Gateway 启动 OpenClaw 2026.9.6，将 AW 步骤注册到
+适配器以新的前台 Gateway 启动 OpenClaw，将 AW 步骤注册到
 `before_tool_call` 和 `after_tool_call`。同一份 `aw.yaml` 选择 Provider 和工具事件策略；
-模型配置、凭据、原生插件及会话状态仍由 OpenClaw 管理。
+模型配置、凭据、原生插件及会话状态仍由 OpenClaw 管理。已验证基线为 2026.9.6，
+其他版本需保留原生插件与 Gateway 生命周期接口。
 
 ## 启动与进程归属
 
@@ -15,7 +16,7 @@ aw run --config aw.yaml --agent openclaw \
 ```
 
 Agent 的 `argv` 必须选择 `openclaw gateway run`，也支持 Node 可执行文件后接官方
-`openclaw.mjs` 入口。适配器先核实 OpenClaw 版本，再把此次启动接入服务。
+`openclaw.mjs` 入口。适配器先记录 OpenClaw 版本，再把此次启动接入服务。
 `--force`、重置和切换 profile 的选项会被拒绝。AW 不接管已有 Gateway，也不会为了
 获取端口而停止已有进程。
 

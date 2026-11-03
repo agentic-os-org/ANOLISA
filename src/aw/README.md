@@ -5,7 +5,7 @@
 AW provides unified Hook orchestration, managed MCP integration and hot policy updates for Agents and SDK applications.
 One configuration composes security checks before tool execution, output compression afterward and custom rules.
 Supported resident entrypoints can update policy after tasks drain while keeping the host process running.
-Agents retain their models, interfaces and permissions. AW is available as a Linux Preview.
+Agents retain their models, interfaces and permissions. AW runs on Linux.
 
 ## Shared capabilities
 
@@ -16,6 +16,8 @@ Agents retain their models, interfaces and permissions. AW is available as a Lin
 | Policy updates | Explicitly apply a new policy to a supported idle instance so subsequent tasks use the new revision. |
 
 Adapters connect native events and adopt supported effects; Providers implement policies.
+The sec-core Provider can check locally resolved Skills before Qoder SDK and QwenPaw load their instructions; see [security setup](../../docs/user-guide/en/aw/security.md#check-skills-before-loading).
+
 Core works independently. Install and enable the corresponding Providers for security checks and compression.
 Tool result replacement is limited to authorized slots, and native Agent permission checks retain precedence.
 
@@ -24,23 +26,29 @@ Tool result replacement is limited to authorized slots, and native Agent permiss
 ✓ Declared with contract coverage; × unsupported. Generated from the [regression manifest](tests/regression-matrix.json). See [capability support](../../docs/user-guide/en/aw/capabilities.md) for native replacement limits, MCP and policy updates.
 
 <!-- aw-regression-matrix:start -->
-| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` |
-| --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ |
-| `openclaw` | ✓ | ✓ | ✓ | ✓ |
-| `pi` | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ |
-| `qoder-sdk` | ✓ | ✓ | ✓ | × |
-| `qwenpaw` | ✓ | ✓ | ✓ | ✓ |
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Ordinary resident Qoder SDK and QwenPaw can check submitted text before model
+requests through `input.submit`. The sec-core Provider supports fast prompt
+injection scanning with separate risk and failure policies; see
+[user submission checks](../../docs/user-guide/en/aw/security.md#check-user-submissions).
+
 
 <a id="install-and-use"></a>
 
 ## Installation and first run
 
-Get and install a Preview package using the [installation guide](../../docs/user-guide/en/aw/installation.md).
+Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
 AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
 Install and sign in to your Agent first, then generate configuration with `aw config init`.
 
@@ -73,10 +81,17 @@ aw stop --config "$AW_HOME/aw.yaml"
 
 AW currently integrates Qoder CLI, Qoder SDK, OpenClaw, Hermes, QwenPaw, Pi SDK,
 Claude SDK and AgentScope SDK. CLI integrations use native Hooks or plugins;
-SDK applications explicitly use managed factories.
-[Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers pinned Bash consumers, Worker imports and declarative role assets.
+SDK applications explicitly use managed factories. Runtime admission checks the required
+native interfaces; [verified baselines](../../docs/developer-guide/en/aw/native-agents.md)
+record the tested framework versions.
+[Qoder SDK integration](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) also covers prewarming, native configuration with unmodified SDK/Worker files, Pilot runtime launcher grants, pinned Bash consumers and declarative role assets.
 The [capability matrix](../../docs/user-guide/en/aw/capabilities.md) compares result handling,
-MCP and policy updates by Adapter and launch mode, with links to supported versions and setup.
+MCP and policy updates by Adapter and launch mode, with links to verified baselines and setup.
+
+
+Resident tasks recheck service and owner validity during idle periods and before
+covered dispatch. Status separates live workers from failed AW bridges; see
+[operations](../../docs/user-guide/en/aw/operations.md) for recovery.
 
 ## Documentation
 
@@ -94,3 +109,7 @@ MCP and policy updates by Adapter and launch mode, with links to supported versi
 
 The [architecture overview](docs/design/en/architecture.md) describes framework and Provider ownership and call paths.
 See [Contributing](CONTRIBUTING.md) for source builds, tests and CI entrypoints.
+
+`aw config add-native-source` records native source references without opening or
+rewriting their files. The shared loader API retains native configuration and
+reports admission separately from activation; see [configuration](../../docs/user-guide/en/aw/configuration.md#record-native-configuration-sources).

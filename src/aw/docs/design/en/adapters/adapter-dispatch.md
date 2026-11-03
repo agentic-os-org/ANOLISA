@@ -69,7 +69,7 @@ registration path and does not require a plugin startup receipt.
 
 ## Delivery boundary
 
-Qoder requires a semantic CLI version >=1.1.64 and records the probed value; its
+Qoder records the installed semantic CLI version; its
 command-Hook configuration and callback contracts remain enforced.
 OpenClaw, Hermes and QwenPaw supply separate native implementations and acceptance
 evidence. The daemon still retains at most 1024 correlated events per instance;

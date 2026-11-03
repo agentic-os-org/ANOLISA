@@ -109,10 +109,18 @@ is_trusted_file() {
 # --- Resolve paths ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+USER_DATA="${XDG_DATA_HOME:-${USER_HOME:+$USER_HOME/.local/share}}"
+case "$USER_DATA" in /*) ;; *) USER_DATA="" ;; esac
+case "/$USER_DATA/" in */../*|*/./*) USER_DATA="" ;; esac
+
 SPEC_FILE=""
 for candidate in \
     "${TOKENLESS_TOOL_READY_SPEC:-}" \
     "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tool-ready-spec.json}" \
+    "${USER_DATA:+$USER_DATA/tokenless/adapters/common/tool-ready-spec.json}" \
+    "${USER_DATA:+$USER_DATA/anolisa/adapters/tokenless/common/tool-ready-spec.json}" \
+    "/usr/local/share/tokenless/adapters/common/tool-ready-spec.json" \
+    "/usr/share/tokenless/adapters/common/tool-ready-spec.json" \
     "${USER_HOME:+$USER_HOME/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json}" \
     "/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
     "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
@@ -130,6 +138,10 @@ FIX_SCRIPT=""
 for candidate in \
     "${TOKENLESS_ENV_FIX_SCRIPT:-}" \
     "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tokenless-env-fix.sh}" \
+    "${USER_DATA:+$USER_DATA/tokenless/adapters/common/tokenless-env-fix.sh}" \
+    "${USER_DATA:+$USER_DATA/anolisa/adapters/tokenless/common/tokenless-env-fix.sh}" \
+    "/usr/local/share/tokenless/adapters/common/tokenless-env-fix.sh" \
+    "/usr/share/tokenless/adapters/common/tokenless-env-fix.sh" \
     "${USER_HOME:+$USER_HOME/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh}" \
     "/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
     "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
@@ -298,6 +310,7 @@ resolve_binary() {
     rtk)
       if [ -n "$USER_HOME" ]; then
         candidates+=(
+          "$USER_HOME/.local/libexec/tokenless/$name"
           "$USER_HOME/.local/lib/anolisa/libexec/tokenless/$name"
           "$USER_HOME/.local/libexec/anolisa/tokenless/$name"
         )
@@ -307,13 +320,14 @@ resolve_binary() {
   candidates+=("/usr/local/bin/$name")
   case "$name" in
     rtk)
-      candidates+=("/usr/local/libexec/anolisa/tokenless/$name")
+      candidates+=("/usr/local/libexec/tokenless/$name" "/usr/local/libexec/anolisa/tokenless/$name")
       ;;
   esac
   candidates+=("/usr/bin/$name")
   case "$name" in
     rtk)
       candidates+=(
+        "/usr/libexec/tokenless/$name"
         "/usr/libexec/anolisa/tokenless/$name"
         "/usr/lib/anolisa/tokenless/$name"
       )

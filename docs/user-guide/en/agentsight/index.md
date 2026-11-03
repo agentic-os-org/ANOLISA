@@ -39,11 +39,13 @@ sudo yum install agentsight
 cd src/agentsight && make build-all
 ```
 
-> Use `make build-all` for source builds. It builds the Dashboard frontend, the main binary, and
-> `agentsight-enforcer` in that order. Plain `make build` skips the enforcer, and `serve` then logs
-> `AgentSight enforcement unavailable` on every start.
+For RPM installations, `agentsight` selects `agentsight-core`, which includes the tracer,
+Dashboard, enforcer and services. Add `agentsight-plugins` only for DSH integration; it requires
+Node.js 22 or later and registration with the target user's DSH profile.
 
 ### 3. Start the service
+
+For package installations:
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -52,7 +54,10 @@ systemctl is-active agentsight.service
 
 The packaged unit starts a supervisor that runs both workers: `agentsight trace` (eBPF capture)
 and `agentsight serve --host 0.0.0.0` (API + Dashboard). It also pulls in
-`agentsight-enforcer.service` when that package is installed.
+`agentsight-enforcer.service`, which is included in the core package.
+
+For a source build, run `trace` and `serve` directly as shown in
+[Source build](deployment.md#source-build).
 
 Data is written to `/var/log/sysak/.agentsight` with a private umask, so CLI queries against
 service-owned data need `sudo`.

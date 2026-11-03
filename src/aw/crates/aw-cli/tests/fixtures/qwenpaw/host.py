@@ -17,7 +17,7 @@ if sys.argv[1:] == ["--version"]:
 
 root = Path(os.environ["FAKE_ROOT"])
 working = Path(os.environ["QWENPAW_WORKING_DIR"])
-plugin_path = working / "plugins/aw-native/plugin.py"
+plugin_path = working / "plugins" / json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())["plugin_id"] / "plugin.py"
 if os.environ.get("FAKE_QWENPAW_PROFILE"):
     os.environ["PROFILE_SECRET"] = "qwenpaw-callback-profile-secret"
     os.environ.pop("REMOVED_BY_NATIVE_HOST", None)
@@ -54,7 +54,6 @@ spec = importlib.util.spec_from_file_location("fixture_plugin", plugin_path, sub
 plugin = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
-plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
 # This fixture covers legacy callback transport. Real resident construction and
 # Coordinator dispatch are exercised by native_resident.py with the pinned SDK.
 config_path = Path(os.environ["AW_NATIVE_CONFIG"])

@@ -49,6 +49,7 @@ if method == "describe":
         }
         for name in ["check", "second", "record"]
     ]
+    reply["operations"].append({"name":"submit", "events":["input.submit"], "effects":["observe", "block"]})
     reply["operations"].append({
         "name": "replace", "events": ["tool.after"], "effects": ["replace_result"]
     })

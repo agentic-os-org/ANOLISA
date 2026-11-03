@@ -97,8 +97,8 @@ def tokenless_input(path: str) -> bool:
         "src/tokenless/crates/tokenless-runtime/src/", "src/tokenless/crates/tokenless-stats/src/",
         "src/tokenless/third_party/patches/", "src/aw/crates/aw-provider/src/",
         "src/aw/crates/aw-provider/schemas/", "src/aw/crates/aw-exec/src/",
-        "src/aw/crates/aw-package/src/package/", "src/aw/crates/aw-package/src/manifest/",
-        "src/aw/crates/aw-package/src/bin/support/",
+        "distribution/packaging/aw/templates/", "distribution/packaging/aw/tests/",
+        "providers/tokenless/packaging/", "src/tokenless/packaging/build/",
     )) or path in {
         "providers/tokenless/Cargo.toml", "providers/tokenless/Cargo.lock",
         "providers/tokenless/rust-toolchain.toml", "src/tokenless/rust-toolchain.toml",
@@ -107,11 +107,14 @@ def tokenless_input(path: str) -> bool:
         "src/tokenless/crates/tokenless-protocol/Cargo.toml",
         "src/tokenless/crates/tokenless-runtime/Cargo.toml",
         "src/tokenless/crates/tokenless-stats/Cargo.toml",
-        "src/tokenless/scripts/setup-rtk.sh", "src/aw/Cargo.toml", "src/aw/Cargo.lock",
+        "src/tokenless/Makefile", "src/aw/Cargo.toml", "src/aw/Cargo.lock",
         "src/aw/rust-toolchain.toml", "src/aw/crates/aw-provider/Cargo.toml",
         "src/aw/crates/aw-exec/Cargo.toml", "src/aw/crates/aw-package/Cargo.toml",
-        "src/aw/crates/aw-package/src/lib.rs", "src/aw/crates/aw-package/src/package.rs",
-        "src/aw/crates/aw-package/src/manifest.rs", "src/aw/crates/aw-package/src/bin/aw-build.rs",
+        "distribution/Makefile", "providers/tokenless/Makefile",
+        "distribution/packaging/aw/build.py", "distribution/packaging/aw/build.sh",
+        "distribution/packaging/aw/build-integration.sh", "distribution/packaging/aw/integration.py",
+        "distribution/packaging/aw/common.py", "distribution/packaging/aw/package.py",
+        "distribution/packaging/aw/core.Makefile",
         "src/aw/scripts/check_tokenless.py", "src/aw/scripts/check.py",
         "src/aw/tests/test_ci_tokenless.py", "src/aw/tests/test_ci_daily_workflow.py",
         ".github/workflows/aw-ci.yml",
@@ -155,8 +158,9 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO,
         )
     return any(
         tokenless_input(path) if compatibility else
-        (path.startswith(("src/aw/", "providers/")) or tokenless_input(path)
-         or path == ".github/workflows/aw-preview.yml")
+        (path.startswith(("src/aw/", "providers/", "distribution/packaging/aw/"))
+         or tokenless_input(path) or path == "distribution/Makefile"
+         or path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-integration.yml"})
         for path in changed
     )
 
@@ -205,12 +209,11 @@ sys.exit(not result.wasSuccessful())
 def package_permissions() -> None:
     """Exercise package readers, transactions and leases under child-local umasks."""
     commands = [
-        ["cargo", "test", "--locked", "-p", "aw-package", "--test", "database"],
         ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "inventory"],
         ["cargo", "test", "--locked", "-p", "aw-package", "--lib"],
-        ["cargo", "test", "--locked", "-p", "aw-package", "--test", "management"],
         ["cargo", "test", "--locked", "-p", "aw-host", "--test", "host", "package_leases"],
         ["cargo", "test", "--locked", "-p", "aw-service", "--lib", "inspect::package_leases"],
+        ["cargo", "test", "--locked", "-p", "aw-exec", "--lib"],
         ["cargo", "test", "--locked", "-p", "aw-exec", "--test", "packages"],
         ["cargo", "test", "--locked", "-p", "aw-cli", "--test", "packages"],
     ]
@@ -223,6 +226,8 @@ def check() -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
     selftest()
+    run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
+         "distribution/packaging/aw/tests"], REPO, timeout=120)
     run(["cargo", "fmt", "--all", "--", "--check"], AW)
     from check_native import load
 
@@ -245,9 +250,6 @@ def check() -> None:
     structure(metadata, AW)
     for root in [AW, *provider_roots]:
         run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], root)
-    from check_legacy_cli import prepare_legacy_cli
-
-    os.environ["AW_LEGACY_PACKAGE_CLI"] = str(prepare_legacy_cli(AW, REPO, run))
     check_inventory(metadata)
     for root in [AW, *provider_roots]:
         run(["cargo", "test", "--workspace", "--locked", "--no-fail-fast"], root)

@@ -33,7 +33,7 @@ Stop dispatch, drain tasks and close SDK clients, then exit the Agent and run `a
 Wait for the recorded daemon PID to exit and its socket to disappear. After forced termination, remove only its stale `aw.sock` once exit is confirmed; retain journal.
 
 CLI and daemon use `aw-service/v1alpha7`. Stop old services with the old binary before upgrading or rolling both binaries back together.
-Configuration and Provider protocols remain `aw/v1alpha1` and `aw-provider/v1alpha1`. Use new state directories for Preview cross-version upgrades; retain old configuration and data for rollback.
+Configuration and Provider protocols remain `aw/v1alpha1` and `aw-provider/v1alpha1`. Use new state directories for cross-version upgrades; retain old configuration and data for rollback.
 
 ## Set the Agent shutdown grace period
 

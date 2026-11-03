@@ -1,8 +1,46 @@
-//! Installed-package acceptance without Python, Agent accounts or source helpers.
+//! Installed Provider acceptance with separately supplied AW and backend executables.
 //! Native framework adoption is validated separately through the documented user flow.
 
+use aw_package::digest;
+use aw_package::Policy;
 use aw_service::{Client, Operation};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+
+fn external(name: &str) -> PathBuf {
+    PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("missing {name}")))
+}
+
+fn policy(name: &str, socket: &Path) -> Policy<'static> {
+    let template = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../distribution/packaging/aw/templates")
+        .join(format!("{name}.json"));
+    let rtk = external("AW_TOKENLESS_TEST_RTK");
+    Policy::Template {
+        definition: serde_json::from_slice(&fs::read(template).unwrap()).unwrap(),
+        variables: BTreeMap::from([
+            ("SOCKET".into(), socket.display().to_string()),
+            (
+                "PROVIDERS_DIR".into(),
+                external("AW_TEST_PREFIX")
+                    .join("libexec/aw/providers")
+                    .display()
+                    .to_string(),
+            ),
+            (
+                "SEC_CORE_CLI".into(),
+                external("AW_TEST_SEC_CLI").display().to_string(),
+            ),
+            (
+                "TOKENLESS_CLI".into(),
+                external("AW_TOKENLESS_TEST_CLI").display().to_string(),
+            ),
+            ("RTK_BINARY".into(), rtk.display().to_string()),
+            ("RTK_SHA256".into(), digest(&rtk).unwrap()),
+        ]),
+    }
+}
+
 use std::{
     fs::{self, File, Permissions},
     io::Write,
@@ -92,7 +130,7 @@ fn rpc(client: &Client, value: Value) -> Value {
 }
 
 #[test]
-#[ignore = "requires installed all-in-one Preview binaries; package CI runs this"]
+#[ignore = "requires installed Providers and explicit backend executables; package CI runs this"]
 fn installed_inspect_reads_tokenless_without_starting_security_or_agent_services() {
     let prefix = PathBuf::from(std::env::var_os("AW_TEST_PREFIX").expect("AW_TEST_PREFIX"));
     let work = PathBuf::from(std::env::var_os("AW_TEST_WORK_DIR").expect("AW_TEST_WORK_DIR"));
@@ -102,11 +140,8 @@ fn installed_inspect_reads_tokenless_without_starting_security_or_agent_services
     let state = root.join("state");
     let socket = root.join("not-started-sec.sock");
     for (name, policy) in [
-        ("tokenless", aw_package::Policy::Tokenless),
-        (
-            "combined",
-            aw_package::Policy::SecCoreTokenless { socket: &socket },
-        ),
+        ("tokenless", policy("tokenless", &socket)),
+        ("combined", policy("sec-core-tokenless", &socket)),
     ] {
         let config = root.join(format!("{name}.yaml"));
         aw_package::configure(&aw_package::Settings {
@@ -121,7 +156,7 @@ fn installed_inspect_reads_tokenless_without_starting_security_or_agent_services
         .unwrap();
         let output = aw_exec::run(
             &aw_exec::CommandSpec {
-                program: prefix.join("bin/aw"),
+                program: external("AW_TEST_AW"),
                 args: vec![
                     "inspect".into(),
                     "--config".into(),
@@ -166,7 +201,7 @@ fn installed_inspect_reads_tokenless_without_starting_security_or_agent_services
 }
 
 #[test]
-#[ignore = "requires installed Preview binaries and root or AW_TEST_SEC_SOCKET"]
+#[ignore = "requires installed Provider binaries and root or AW_TEST_SEC_SOCKET"]
 fn installed_binaries_scan_and_recover_audit() {
     let prefix = PathBuf::from(std::env::var_os("AW_TEST_PREFIX").expect("AW_TEST_PREFIX"));
     let work = PathBuf::from(std::env::var_os("AW_TEST_WORK_DIR").expect("AW_TEST_WORK_DIR"));
@@ -181,13 +216,12 @@ fn installed_binaries_scan_and_recover_audit() {
         prefix: &prefix,
         config: &config,
         state: &state,
-        policy: aw_package::Policy::SecCore { socket: &socket },
+        policy: policy("sec-core", &socket),
         qoder: Some(Path::new("/bin/true")),
         node: Some(Path::new("/bin/true")),
         openclaw: Some(Path::new("/bin/true")),
     })
     .unwrap();
-    let provider = prefix.join("libexec/aw/providers/sec-core");
     let sec_config = work.join("skillsec.json");
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -210,7 +244,7 @@ fn installed_binaries_scan_and_recover_audit() {
             "use root or an existing AW_TEST_SEC_SOCKET"
         );
         Some(Process::start(
-            &provider.join("agent-sec-daemon"),
+            &external("AW_TEST_SEC_DAEMON"),
             &[
                 "serve".as_ref(),
                 "--socket".as_ref(),
@@ -227,7 +261,7 @@ fn installed_binaries_scan_and_recover_audit() {
     if let Some(process) = sec.as_mut() {
         wait_socket(&socket, process);
     }
-    let aw = prefix.join("bin/aw");
+    let aw = external("AW_TEST_AW");
     let args = [
         "serve".as_ref(),
         "--config".as_ref(),
@@ -248,17 +282,17 @@ fn installed_binaries_scan_and_recover_audit() {
         );
         let instance = &binding["instance_id"];
         for (event, code, expected) in [
-            ("tool.before", "printf AW_PREVIEW_SAFE", "observe"),
+            ("tool.before", "printf AW_INSTALLED_SAFE", "observe"),
             (
                 "tool.before",
                 "git -c http.sslVerify=false --version",
                 "block",
             ),
-            ("tool.after", "printf AW_PREVIEW_SAFE", "observe"),
+            ("tool.after", "printf AW_INSTALLED_SAFE", "observe"),
         ] {
             let handle = rpc(
                 &client,
-                json!({"method":"open_event","instance_id":instance,"event":{"name":event,"agent":{"adapter":target,"binding_id":target,"instance_id":instance},"session_id":"installed-test","tool":{"name":tool,"native_name":tool,"call_id":null,"input":{"command":code},"result":if event=="tool.after" { json!({"text":"AW_PREVIEW_SAFE"}) } else { Value::Null }},"native":{}}}),
+                json!({"method":"open_event","instance_id":instance,"event":{"name":event,"agent":{"adapter":target,"binding_id":target,"instance_id":instance},"session_id":"installed-test","tool":{"name":tool,"native_name":tool,"call_id":null,"input":{"command":code},"result":if event=="tool.after" { json!({"text":"AW_INSTALLED_SAFE"}) } else { Value::Null }},"native":{}}}),
             );
             for step in handle["steps"].as_array().unwrap() {
                 let output = rpc(

@@ -1,10 +1,11 @@
-"""Lock Preview selection; command stubs do not certify Python-free execution."""
+"""Keep independent delivery in maintainer Make targets and test its CI command wiring."""
 
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import textwrap
 import unittest
 
@@ -12,20 +13,15 @@ from test_ci_checks import AW, GateFixture
 
 
 class PackageSelectionTests(GateFixture):
-    def test_preview_keeps_exact_python_free_package_targets(self) -> None:
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+    def test_delivery_uses_maintainer_make_targets(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         step = workflow.split(
-            "      - name: Test installer and build the four artifacts\n", 1
+            "      - name: Test installer and build independent artifacts\n", 1
         )[1]
         step = step.split("      - name: Stage the same build for native acceptance\n", 1)[0]
         script = textwrap.dedent(step.split("        run: |\n", 1)[1])
         binary = self.root / "bin"
         binary.mkdir()
-        for name in ("bash", "mkdir", "date", "uname", "getconf", "cat", "df", "timeout", "tee"):
-            (binary / name).symlink_to(shutil.which(name))
-        helper = self.root / "src/aw/scripts/check_packages.sh"
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(AW / "scripts/check_packages.sh", helper)
         git = binary / "git"
         git.write_text("#!/bin/sh\nexit 0\n")
         git.chmod(0o700)
@@ -36,16 +32,23 @@ class PackageSelectionTests(GateFixture):
             'printf \'\\000\' >> "$AW_PACKAGE_COMMANDS"\n'
         )
         cargo.chmod(0o700)
-        self.assertIsNone(shutil.which("python3", path=str(binary)))
+        make = binary / "make"
+        make.write_text(
+            "#!/bin/sh\n"
+            "printf 'make\\000' >> \"$AW_PACKAGE_COMMANDS\"\n"
+            "printf '%s\\000' \"$@\" >> \"$AW_PACKAGE_COMMANDS\"\n"
+            "printf '\\000' >> \"$AW_PACKAGE_COMMANDS\"\n"
+        )
+        make.chmod(0o700)
         capture = self.root / "commands"
-        preview = self.root / "preview output"
+        output = self.root / "package output"
         subprocess.run(
             ["/bin/sh", "-eu", "-c", script],
             cwd=self.root,
             env={
                 "PATH": str(binary),
                 "GITHUB_WORKSPACE": str(self.root / "container workspace"),
-                "AW_PREVIEW_DIR": str(preview),
+                "AW_PACKAGE_DIR": str(output),
                 "AW_PACKAGE_COMMANDS": str(capture),
             },
             check=True,
@@ -59,25 +62,54 @@ class PackageSelectionTests(GateFixture):
         self.assertEqual(
             commands,
             [
+                ["make", "-C", "distribution", "test-aw-packages"],
                 [
-                    "test", "--locked", "--manifest-path", "src/aw/Cargo.toml",
-                    "-p", "aw-package", "--", "--test-threads=2",
+                    "make", "-C", "distribution", "aw-packages", "VERSION=0.1.0",
+                    "OUTPUT=" + str(output / "packages"), "COMPONENTS=core sec-core tokenless",
                 ],
-                [
-                    "test", "--locked", "--manifest-path", "src/aw/Cargo.toml",
-                    "-p", "aw-cli", "--test", "installation", "--test",
-                    "config_edit_cli", "--test", "standalone", "--test", "packages",
-                    "--", "--test-threads=2", "--show-output",
-                ],
-                [
-                    "run", "--locked", "--release", "--manifest-path",
-                    "src/aw/Cargo.toml", "-p", "aw-package", "--bin", "aw-build",
-                    "--", "--version", "0.1.0-preview.1", "--output",
-                    str(preview / "packages"), "--component", "all",
-                ],
+                ["make", "-C", "distribution", "aw-integration-backends",
+                 "BACKENDS=sec-core tokenless"],
             ],
         )
         self.assertFalse(any("packages_pty" in command for command in commands))
+
+    def test_python_free_installer_precedes_python_enabled_make_builds(self) -> None:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
+        name = "      - name: Test installer without Python\n"
+        stage = workflow.split(name, 1)[1].split("      - name:", 1)[0]
+        script = textwrap.dedent(stage.split("        run: |\n", 1)[1])
+        self.assertLess(workflow.index(name), workflow.index("- name: Install packaging prerequisite"))
+        self.assertLess(
+            workflow.index("- name: Install packaging prerequisite"),
+            workflow.index("- name: Test installer and build independent artifacts"),
+        )
+        prerequisites = workflow.split("- name: Install build prerequisites", 1)[1]
+        self.assertNotIn("python3", prerequisites.split("- uses:", 1)[0])
+        binary = self.root / "bin"
+        binary.mkdir()
+        (binary / "bash").symlink_to(shutil.which("bash"))
+        capture = self.root / "commands"
+        for command in ("git", "cargo"):
+            executable = binary / command
+            executable.write_text(
+                "#!/bin/sh\nexit 0\n" if command == "git" else
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AW_PACKAGE_COMMANDS"\n'
+            )
+            executable.chmod(0o700)
+        helper = self.root / "src/aw/scripts/check_packages.sh"
+        helper.parent.mkdir(parents=True)
+        # The real bounded helper is exercised by PackageEvidenceTests on Linux.
+        helper.write_text('#!/bin/sh\ncargo fixture-installer-gate "$1"\n')
+        output = self.root / "package output"
+        environment = {
+            "PATH": str(binary), "GITHUB_WORKSPACE": str(self.root),
+            "AW_PACKAGE_DIR": str(output), "AW_PACKAGE_COMMANDS": str(capture),
+        }
+        subprocess.run(
+            ["/bin/sh", "-eu", "-c", script], cwd=self.root, env=environment,
+            check=True, timeout=10,
+        )
+        self.assertIn("fixture-installer-gate " + str(output / "test-evidence"), capture.read_text())
         # Installing Python before this stage must fail before Cargo can run.
         python = binary / "python3"
         python.write_text("#!/bin/sh\nexit 0\n")
@@ -86,10 +118,7 @@ class PackageSelectionTests(GateFixture):
         result = subprocess.run(
             ["/bin/sh", "-eu", "-c", script],
             cwd=self.root,
-            env={
-                "PATH": str(binary), "GITHUB_WORKSPACE": str(self.root),
-                "AW_PREVIEW_DIR": str(preview), "AW_PACKAGE_COMMANDS": str(capture),
-            },
+            env=environment,
             capture_output=True, text=True, timeout=10,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -103,6 +132,7 @@ class PackageSelectionTests(GateFixture):
         self.assertNotIn(target, matrix["opt_in_targets"])
 
 
+@unittest.skipUnless(sys.platform == "linux", "cgroup and GNU timeout evidence requires Linux")
 class PackageEvidenceTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()

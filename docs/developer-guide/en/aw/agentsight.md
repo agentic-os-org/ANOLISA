@@ -15,7 +15,7 @@ and trusted source association for Pi require a separate Adapter contract.
 
 ## Prerequisites and configuration
 
-Install AW using the [Preview installation guide](../../../user-guide/en/aw/installation.md). Client, callbacks
+Install AW using the [installation guide](../../../user-guide/en/aw/installation.md). Client, callbacks
 and daemon must come from the same build supporting `aw-service/v1alpha7`. Before
 upgrading, exit owned sessions and stop old daemons with the old binary; keep their
 Journal history. Provider stdio remains `aw-provider/v1alpha1`.

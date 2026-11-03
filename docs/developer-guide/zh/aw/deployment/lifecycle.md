@@ -33,7 +33,7 @@ aw service serve --config /absolute/aw.yaml --state-dir /absolute/private/state
 等待记录的 daemon PID 退出和 socket 消失。强制终止后，仅在确认旧服务退出后删除它的遗留 `aw.sock`，保留 journal。
 
 CLI 与 daemon 使用 `aw-service/v1alpha7`。升级或回退前用旧二进制停止旧服务，再一起更换二者。
-配置和 Provider 协议分别为 `aw/v1alpha1`、`aw-provider/v1alpha1`。Preview 跨版本升级使用新状态目录，保留旧配置与数据供回退。
+配置和 Provider 协议分别为 `aw/v1alpha1`、`aw-provider/v1alpha1`。跨版本升级使用新状态目录，保留旧配置与数据供回退。
 
 ## 设置 Agent 退出宽限期
 

@@ -10,7 +10,9 @@ import { isDeepStrictEqual } from "node:util";
 import { ExecutionOwner, checkExecutionCleanup } from "./private.mjs";
 import { postTools } from "./post.mjs";
 import { NativeCommands, supportsWrapperMode } from "./command-wrapper.mjs";
+import { bindSkillQuery } from "./skills.mjs";
 import { prepareNativeOptions, sdkEntry, verifyNativeSettings } from "./native-options.mjs";
+import { nativeConfiguration, policyCallback, isPolicyCallback } from "./native-configuration.mjs";
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
@@ -20,11 +22,12 @@ const stopped = () => ({ continue: false, stopReason: "AW required Hook failed" 
 export function validateHooks(config) {
   if (!Array.isArray(config.hooks)) throw new Error("Missing AW hooks");
   for (const hook of config.hooks)
-    if (!hook || typeof hook !== "object" || !["tool.before", "tool.after"].includes(hook.event) ||
+    if (!hook || typeof hook !== "object" || !["input.submit", "tool.before", "tool.after"].includes(hook.event) ||
         typeof hook.step !== "string" || !hook.step ||
         !(["block", "report"].includes(hook.on_error) ||
           (config.resident && hook.event === "tool.after" && hook.on_error === "withhold_result")) ||
-        hook.replace_result !== false ||
+        !(typeof hook.replace_result === "boolean" &&
+          (!hook.replace_result || hook.event === "tool.after")) ||
         !Number.isInteger(hook.budget_ms) || hook.budget_ms < 1 || hook.budget_ms > 55000)
       throw new Error("Invalid AW Qoder SDK hook route");
 }
@@ -50,7 +53,8 @@ export class Resident {
     this.config = config;
     this.id = randomUUID();
     this.scope = new Scope(config, "qoder-sdk");
-    this.identities = new Identities(this.scope, error => this.fail(error));
+    this.scope.onFailure = error => this.fail(error);
+    this.identities = new Identities(this.scope, error => this.fail(error), nativeConfiguration(config));
     this.identities.beforeRetire = entry => this.nativeCommands?.complete(entry);
     this.callbacks = new Set();
     this.work = new Set();
@@ -127,7 +131,7 @@ export class Resident {
         this.cleanupDeadline ??= Date.now() + 60000;
         const failures = [];
         if (this.query && !this.nativeClose)
-          throw new Error("Pinned Qoder Query lacks native close; shutdown cannot be confirmed");
+          throw new Error("Qoder Query lacks native close; shutdown cannot be confirmed");
         if (this.nativeClose) {
           const tasks = [...this.background].filter(id => !this.nativeCommands?.acknowledgedTask(id));
           try { await bounded(Promise.all(tasks.map(id => this.query.stopTask(id))),
@@ -159,9 +163,10 @@ export class Resident {
       hooks[event] = groups.map((group, groupIndex) => ({ ...group,
         hooks: group.hooks.map((callback, callbackIndex) => {
           const key = `${event}:${groupIndex}:${callbackIndex}`;
+          const policy = event === "PreToolUse" && isPolicyCallback(callback);
           return (input, id, context) => this.track(async () => {
             const tool = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event);
-            const entry = tool ? await this.identities.claim(input, id, key, context.signal) : undefined;
+            const entry = tool ? await this.identities.claim(input, id, key, context.signal, policy) : undefined;
             // The native envelope was verified above. Application observers retain
             // native IDs while the Post tool_input retains the logical command.
             const payload = entry?.nativeInput && event !== "PreToolUse" ?
@@ -169,12 +174,13 @@ export class Resident {
             const result = await callback(payload, id, context);
             checkExecutionCleanup();
             if (entry && event === "PreToolUse") {
+              await this.scope.validate();
               this.identities.check(entry, true);
               if (result?.hookSpecificOutput?.permissionDecision === "deny") {
                 entry.phase = "denied";
                 await this.nativeCommands?.denied(entry);
               }
-              else if (entry.phase !== "denied") entry.phase = "allowed";
+              else if (entry.phase !== "denied" && (!this.identities.nativeConfiguration || policy)) entry.phase = "allowed";
             }
             return result;
           }, this.identities.dispatch.getStore()?.entry).catch(error => {
@@ -194,6 +200,15 @@ export class Resident {
         throw new Error("AW rejected repeated native permission callback");
       ticket.entry.callbacks.add("can_use_tool");
       await this.identities.ready(ticket.entry, args[2].signal, true);
+      if (this.identities.nativeConfiguration) {
+        if (ticket.entry.phase === "denied") return { behavior: "deny", message: "AW policy denied the tool" };
+        const result = await options.canUseTool(...args);
+        checkExecutionCleanup();
+        await this.scope.validate();
+        this.identities.check(ticket.entry, true);
+        if (result.behavior === "deny") ticket.entry.phase = "denied";
+        return result;
+      }
       const nativeInput = ticket.entry.nativeInput ?? ticket.entry.input;
       if (ticket.entry.phase === "denied" || !isDeepStrictEqual(args[1], nativeInput)) {
         ticket.entry.phase = "denied";
@@ -203,6 +218,7 @@ export class Resident {
       // a wrapper in PreTool would hide command-specific native deny rules.
       const result = await options.canUseTool(args[0], structuredClone(ticket.entry.input), args[2]);
       checkExecutionCleanup();
+      await this.scope.validate();
       this.identities.check(ticket.entry, true);
       if (result.behavior === "deny") {
         ticket.entry.phase = "denied";
@@ -250,12 +266,12 @@ export class Resident {
     if (typeof query.close === "function") this.nativeClose = query.close.bind(query);
     for (const method of ["close", "recordInboundSessionMessage", "handleControlRequest", "interrupt", "getContextUsage"])
       if (typeof query[method] !== "function")
-        throw new Error(`Pinned Qoder Query is missing native seam ${method}`);
+        throw new Error(`Qoder Query is missing native seam ${method}`);
     if (typeof query.transport?.write !== "function")
-      throw new Error("Pinned Qoder Query lacks native control response transport");
+      throw new Error("Qoder Query lacks native control response transport");
     if (this.nativeCommands) {
       if (typeof query.transport.endInput !== "function")
-        throw new Error("Pinned Qoder Query lacks native input EOF seam");
+        throw new Error("Qoder Query lacks native input EOF seam");
       const endInput = query.transport.endInput.bind(query.transport);
       query.transport.endInput = () => {
         if (this.nativeShutdownReady) return endInput();
@@ -326,16 +342,21 @@ export class Resident {
         query.transport.write(JSON.stringify({ type: "control_response", response: result }) + "\n");
         return Promise.resolve();
       }
-      return this.identities.dispatch.run(ticket, () => this.track(() => dispatch(frame), ticket.entry))
+      return this.identities.dispatch.run(ticket, () => {
+        // The SDK must register cancellation ownership before any validity RPC.
+        const pending = dispatch(frame);
+        return this.track(() => pending, ticket.entry);
+      })
         .finally(() => this.identities.pending.delete(ticket.id));
     };
-    if (this.mcp.size) {
-      if (typeof query.processControlRequest !== "function")
-        throw new Error("Pinned Qoder Query lacks native MCP dispatch seam");
-      const process = query.processControlRequest.bind(query);
-      query.processControlRequest = (frame, signal) =>
-        this.track(() => dispatchMcp(this, frame, signal, process));
-    }
+    if (typeof query.processControlRequest !== "function")
+      throw new Error("Qoder Query lacks native control dispatch seam");
+    const process = query.processControlRequest.bind(query);
+    query.processControlRequest = (frame, signal) => this.track(async () => {
+      await this.scope.validate();
+      if (signal?.aborted) throw new Error("AW native control request was cancelled before dispatch");
+      return this.mcp.size ? dispatchMcp(this, frame, signal, process) : process(frame, signal);
+    });
     query.close = () => this.close();
     query.return = async () => { await this.close(); return { done: true }; };
     const next = query.next.bind(query);
@@ -377,8 +398,16 @@ export class Resident {
         return this.track(() => send(...args));
       };
     }
-    for (const name of ["setMcpServers"])
-      query[name] = () => { throw new Error(`${name} bypasses AW resident admission`); };
+    if (!this.identities.nativeConfiguration)
+      query.setMcpServers = () => { throw new Error("setMcpServers bypasses AW resident admission"); };
+    const seams = ["recordInboundSessionMessage", "handleControlRequest", "processControlRequest", "next", "streamInput"];
+    const installed = seams.map(name => [name, query[name]]);
+    const transport = query.transport, write = transport.write;
+    this.scope.probe = () => {
+      if (query.transport !== transport || transport.write !== write ||
+          installed.some(([name, callback]) => query[name] !== callback))
+        throw new Error("AW required Query dispatch seam was removed");
+    };
     if (query.readLoopPromise) {
       // Transport loss must reclaim the scope even when the application stops reading.
       query.readLoopPromise.then(() => this.close(), error => {
@@ -401,7 +430,7 @@ export class Resident {
       "getContextUsage", "getUsageInfo", "reloadSkills", "listPlugins", "accountInfo",
       "rewindFiles", "rewind", "seedReadState", "flushMemory", "flushSkillEvolution",
       "refreshMemory", "mcpAuthenticate", "mcpSubmitOAuthCallbackUrl", "toggleMcpServer",
-      "reconnectMcpServer", "mcpClearAuth", "injectMcpToken", "sendHostAction"])
+      "reconnectMcpServer", "mcpClearAuth", "injectMcpToken", "sendHostAction", "setMcpServers"])
       if (typeof this.query[name] === "function") facade[name] = this.query[name].bind(this.query);
     facade.throw = async error => {
       try { await this.close(); }
@@ -432,7 +461,7 @@ export class Resident {
       hook.on_error === "withhold_result");
   }
 
-  async create(prompt, options, compose, ready) {
+  async create(prompt, options, compose, ready, initializationOptions = {}) {
     checkExecutionCleanup();
     const startupConfig = this.config;
     const { awExecutionFactory, awNativeExecutionFactory, awSite, ...nativeOptions } = options;
@@ -456,7 +485,10 @@ export class Resident {
     const sdk = sdkEntry(this.config, site);
     if (this.owner && this.owner.sdk !== sdk)
       throw new Error("AW Query site differs from its managed daemon");
-    if (sdk !== this.config.sdk) this.config = { ...this.config, sdk, active_site: site };
+    if (sdk !== this.config.sdk || site !== (this.config.active_site ?? this.config.default_site ?? "global"))
+      this.config = { ...this.config, sdk, active_site: site };
+    if (this.nativeCommands) this.config = { ...this.config, legacy_command_consumer: true };
+    this.identities.nativeConfiguration = nativeConfiguration(this.config);
     if (this.owner && (options.env !== undefined || options.auth !== undefined))
       throw new Error("Qoder daemon owns its credential environment; Query overrides are unsupported");
     const environment = { ...(this.owner?.environment ?? process.env), ...(options.env ?? {}) };
@@ -467,11 +499,12 @@ export class Resident {
       ...(options.auth ? { auth: credentialOptions(options.auth) } : {}) };
     const cwd = realpathSync(options.cwd ?? process.cwd());
     this.cwd = cwd;
-    this.mcp = admitMcp(options);
+    this.mcp = admitMcp(options, this.identities.nativeConfiguration);
     this.ownerClose = () => this.close();
     try {
       await this.preparePolicy(cwd, environment);
-      const scoped = { ...this.config, cwd, scope: this.scope };
+      this.config.skillState ??= {};
+      const scoped = { ...this.config, cwd, scope: this.scope, skillEnvironment: environment };
       this.nativeAssets = await prepareNativeOptions(scoped, { ...options, cwd });
       const composed = compose(scoped, this.nativeAssets.options);
       for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
@@ -482,16 +515,15 @@ export class Resident {
         if (!["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event)) continue;
         const originalCount = options.hooks?.[event]?.length ?? 0;
         for (const group of groups.slice(originalCount)) {
-          group.hooks = group.hooks.map(callback => async (input, id, context) => {
+          group.hooks = group.hooks.map(callback => policyCallback(async (input, id, context) => {
             const entry = this.identities.dispatch.getStore()?.entry;
             if (!entry) throw new Error("AW policy callback lacks native dispatch identity");
             if (delegatesMcp(this, this.identities.dispatch.getStore().request.input)) return {};
             if (event !== "PreToolUse") {
-              await postTools(this, this.identities.payload(entry, input), context.signal);
-              return {};
+              return await postTools(this, this.identities.payload(entry, input), context.signal);
             }
             return await callback(this.identities.payload(entry, input), entry.id, context);
-          });
+          }));
         }
       }
       if (this.nativeCommands) {
@@ -546,9 +578,11 @@ export class Resident {
         this.detachAbort = () => signal.removeEventListener("abort", abort);
       }
       const query = sdk.query({ prompt: input(), options: decorated });
+      this.config.skillState.query = bindSkillQuery(query, this.config.hooks.some(hook => hook.skill_check === true));
       this.install(query);
       this.owner?.queries.add(this.ownerClose);
-      const initialization = await query.initializationResult();
+      const initialization = await (initializationOptions.initializeTimeoutMs === undefined ? query.initializationResult() :
+        bounded(query.initializationResult(), initializationOptions.initializeTimeoutMs));
       await verifyNativeSettings(this.config, query, bounded);
       checkExecutionCleanup();
       if (this.failure) throw this.failure;
@@ -558,9 +592,14 @@ export class Resident {
         throw new Error("AW resident Query requires msg_lifecycle_v1");
       // Launcher readiness attests the launch; task routes may already be newer.
       ready(startupConfig);
+      initializationOptions.check = () => {
+        this.scope.checkExecution();
+        if (this.closing) throw new Error("AW prewarmed Query is closed");
+      };
       this.releaseInput();
       return this.facade();
     } catch (error) {
+      initializationOptions.discard?.();
       const primary = this.failure ??= error;
       try { await this.close(); }
       catch (cleanup) { throw new AggregateError([primary, cleanup], "AW native initialization and cleanup failed"); }

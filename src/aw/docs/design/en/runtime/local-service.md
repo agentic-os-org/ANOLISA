@@ -105,7 +105,7 @@ and never enters event input, correlation digests or audit. An invalid snapshot
 consumes the step claim and produces a visible execution failure without extending
 the event deadline. It is an RPC field, not a new `aw.yaml` option.
 
-The current service admits structured `tool.before` with `observe`/`block`,
+The current service admits structured `input.submit` and `tool.before` with `observe`/`block`,
 `tool.after` with `observe`, and explicit native steps at those tool points. It
 rejects enabled unsupported events, structured `ask`, input replacement,
 final guards and stronger execution guarantees. A successful empty effect list
@@ -170,6 +170,36 @@ Upgrade CLI and daemon together to `aw-service/v1alpha7` after draining old
 sessions and stopping the old daemon. The configuration and Provider protocols
 retain their versions. Rollback requires the same drain/stop procedure.
 
+### Continuous bridge validity
+
+Shared JS/Python consumers start `watch_scope` after task acknowledgement and
+invocation admission. `check_scope` binds the original worker PID and immutable
+policy revision to the existing task owner; the outer binding pins service and
+task generations. Covered registrations and Hook dispatch recheck validity.
+Qoder verifies installed producer, control-dispatch and transport functions;
+QwenPaw verifies its existing middleware, parser and Toolkit dispatch seams.
+
+Idle checks run two seconds after the previous check completes, with a six-second
+CLI timeout. The service rejects a scope after fifteen seconds without a
+successful check, even if its worker remains alive. Explicit probe failure or a
+revision mismatch permanently fences that scope. Reconnecting cannot revive it.
+These checks preserve the declared coverage boundary: native capabilities outside
+AW coverage retain their original authorization behavior.
+
+Failure cancels active Provider work while retaining the live task's ownership
+until native callbacks, work and credentials finish cleanup. Invocation retirement
+remains available; independent sibling scopes retain their own validity.
+Concurrent closes join one cleanup. A late open response is closed without
+acknowledgement. Recovery requires a fresh scope after cleanup and never replays
+side-effecting calls.
+
+`status.instances[].scope_validity` separates `native_alive` from `covered_bridge`
+(`pending`, `ready`, `failed`, `unavailable`, `unmonitored`).
+`inspect.service.resident_scopes` summarizes task counts; older-service data is
+`null`. Startup `ready` cannot establish continuing validity. New consumers reject
+services without watch operations at task admission; drain existing tasks and
+upgrade CLI, adapters and service together.
+
 ## Shared event lifetime
 
 An Adapter opens an event once, then sends individual `invoke_step` requests in
@@ -202,6 +232,20 @@ Adapters continue requiring their original immutable bytes.
 It retains closed and failed-open claims until instance release; they cannot
 create a new budget. Opening an independent event per step is not valid shared
 event scheduling. The current per-instance correlation limit is 1,024 events.
+
+Submission events correlate `(input.submit, session_id, turn_id)` within the
+prepared instance, independently of the tool invocation ledger. They carry
+`input.text` and no `tool` object. Repeated step callbacks retain the first input,
+native bytes and deadline; changed text or identities are rejected. Completed,
+closed and failed-open submission claims remain until instance release, with
+an explicit 1,024-claim bound. Ordinary QwenPaw scopes end with each reply;
+Qoder releases its scope when the Query closes.
+
+`close_input_event` takes `instance_id`, `session_id` and `turn_id` and uses the
+same cancellation/drain path as tool events. It can cancel before the open wins
+and forbids reopening that turn. Instance release cancels pending submissions
+and waits for their Provider processes to exit. Metadata audit records the
+session/turn and decision, without user text.
 
 `close_hook_event` identifies a correlation by the owning `instance_id`,
 `event` (`tool.before` or `tool.after`), nonempty `session_id` and nonempty

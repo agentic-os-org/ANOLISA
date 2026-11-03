@@ -365,7 +365,9 @@ runner 工作目录的 owner、权限和 umask。
 
 **[TARGET V2][IMPLEMENTED] DPROC-UDS-002 服务端身份认证**：
 `asc-daemon-client` 在 connect 成功后、首次 write 前，对同一连接 fd 读取 Linux
-`SO_PEERCRED`，要求服务端 UID 为 0。凭据读取失败或 UID 不符返回独立的
+`SO_PEERCRED`，要求服务端 UID 为 0。跨 PID namespace 时内核可返回 PID=0，
+凭据读取必须允许该值，认证仅判断 UID，不要求共享 PID namespace。
+凭据读取失败或 UID 不符返回独立的
 `ServerIdentity` 错误，关闭连接，不发送请求、不重试、不回退本地实现；非 Linux
 返回不支持认证的错误。期望 UID 不从 socket 文件属主、客户端 UID 或响应 JSON 推导。
 服务 UID 是信任域；该检查不区分其它 root 进程，也不能保护同 UID 的不可信 Agent。
@@ -380,6 +382,8 @@ runner 工作目录的 owner、权限和 umask。
 可执行 fixture：`tests/v2/e2e/test_daemon_process_e2e.py::test_dproc_uds_002_rejects_fake_peer_even_with_root_owned_socket`
 验证 socket 文件属主改为 root 的非 root 伪服务仍被真实 Rust CLI 和 native health probe 拒绝，
 服务端不得收到请求字节；该用例需要 root 的跨 UID 进程环境，编译或单元测试不替代该验收。
+同文件的 `test_dproc_uds_002_authenticates_uid_with_zero_peer_pid` 使用 user/PID namespace
+确认内核实际返回 PID=0，并验证 CLI 和 health probe 接受 UID=0、拒绝非 root UID 且不发送请求。
 普通 workspace CI 统一启用默认关闭的 `asc-daemon-client/testing` feature，并设置
 `AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1`，允许非 root 模拟服务执行协议和业务测试，
 普通测试无需修改。身份认证回归单独使用默认配置执行；RPM 构建和 E2E 不启用该 feature
@@ -645,6 +649,9 @@ CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；�
 领域状态默认 `/var/lib/agent-sec/skillsec`，root 所有、0700，当前 signing-key.pk8 为 0600。
 `/etc/agent-sec/skillsec.json` 或 --skillsec-config 可注入 stateDir、精确 managedSkillDirs、
 scanners 和 parsers，以及默认开启的 enableDefaultSkillDirs；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+公开 file-only `make install` / `make install-core` 生成的 system unit 使用
+`--skillsec-config CONFIGDIR/skillsec.json`，读取本次安装的配置；`DESTDIR` 只用于暂存，
+不进入服务参数。RPM/raw 原有 unit 继续使用 native 配置默认值，配置和状态的安全校验不变。
 默认授权包含系统目录及本地 `/etc/passwd` 的所有有效账户 HOME 下标准 Skill 目录，不按 UID 或
 登录 shell 排除账户，不采信客户端环境。禁用默认目录不影响显式配置或 SkillFS；账户变化重启后生效。
 DPROC-SG-007 的可执行边界为 `apps/asc-daemon/src/skill_sec/defaults.rs` 及 capability 的 `tests/scope.rs`。

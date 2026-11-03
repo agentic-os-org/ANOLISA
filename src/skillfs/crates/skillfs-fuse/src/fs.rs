@@ -504,7 +504,7 @@ impl SkillFs {
     ///
     /// Enabling it detects the runtime [`EnvironmentProfile`] and binds a fresh
     /// [`DirectiveStage`]; disabling it clears the stage. Environment detection
-    /// (which probes the command whitelist via `which`) therefore happens
+    /// (which probes the command whitelist on `PATH`) therefore happens
     /// **only** when the directive stage is enabled — an adapter-only or fully
     /// raw pipeline never probes the environment. Idempotent — the stage can
     /// never be present twice.

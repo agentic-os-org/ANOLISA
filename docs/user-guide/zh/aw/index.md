@@ -18,7 +18,7 @@ Agent 的界面、模型账号和权限设置继续由原框架管理。
 | 关联 AgentSight 运行记录 | [接入 AgentSight](observability.md) |
 | 查看状态、停止服务、升级或排错 | [运行维护](operations.md) |
 
-当前 AW 为 Linux Preview，使用独立安装包，尚未提供 `anolisa install aw`
+当前 AW 为 Linux 组件，使用独立安装包，尚未提供 `anolisa install aw`
 或 RPM 安装入口。先安装并登录所选 Agent；AW 不代为安装框架或配置模型账号。
 
 ## 一次运行
@@ -41,7 +41,7 @@ aw stop --config "$HOME/aw/aw.yaml"
 
 ## 选择需要的能力
 
-core 可独立启动 Agent。安全检查和压缩需安装对应 Provider，或直接安装 all-in-one，
+core 可独立启动 Agent。安全检查和压缩需安装对应 Provider 与后端 core 组件，
 再通过配置启用。
 
 工具执行前可以检查或阻断调用，执行后可以压缩受支持的文本结果。

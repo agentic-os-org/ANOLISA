@@ -493,3 +493,44 @@ fn replacement_requires_one_text_payload_and_a_projected_after_result() {
         .bind_invocation(invoke("tool.before", json!(["replace_result"])))
         .is_err());
 }
+
+#[test]
+fn submission_binds_text_and_turn_without_tool_fields() {
+    let protocol = Protocol::new().unwrap();
+    let mut value = invoke("input.submit", json!(["observe", "block"]));
+    value["event"].as_object_mut().unwrap().remove("tool");
+    value["event"]["session_id"] = json!("session");
+    value["event"]["turn_id"] = json!("turn");
+    value["event"]["input"] = json!({"text":"untrusted text\nsecond line"});
+    let request = protocol.bind_invocation(value.clone()).unwrap();
+    let mut changed = request.as_value().clone();
+    changed["event"]["input"]["text"] = json!("different");
+    assert!(protocol.parse_request(&bytes(&changed)).is_err());
+    let mut changed = request.as_value().clone();
+    changed["event"]["turn_id"] = json!("other");
+    assert!(protocol.parse_request(&bytes(&changed)).is_err());
+    for (pointer, replacement) in [
+        ("/event/tool", json!({})),
+        ("/event/turn_id", json!(null)),
+        ("/event/turn_id", json!("")),
+        ("/event/session_id", json!(null)),
+        ("/event/input", json!({"text":42})),
+        ("/allowed_effects", json!(["replace_result"])),
+        ("/allowed_effects", json!(["ask"])),
+    ] {
+        let mut invalid = value.clone();
+        if pointer == "/event/tool" {
+            invalid["event"]["tool"] = replacement;
+        } else {
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+        }
+        assert!(protocol.bind_invocation(invalid).is_err(), "{pointer}");
+    }
+    let mut reply = response();
+    reply["input_digest"] = request.as_value()["input_digest"].clone();
+    reply["effects"] = json!([{"type":"block","reason_code":"input_risk"}]);
+    assert!(matches!(
+        protocol.check_response(&request, &bytes(&reply)),
+        Ok(Reply::Invocation(_))
+    ));
+}

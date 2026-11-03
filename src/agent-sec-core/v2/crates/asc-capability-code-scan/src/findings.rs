@@ -5,6 +5,8 @@
 //! goldens. Serialization to the wire is added by the scanner slice, against
 //! V1's actual JSON, rather than guessed here.
 
+use std::collections::HashSet;
+
 use crate::rules::{Language, Severity};
 
 /// One rule that matched, with every substring that triggered it.
@@ -53,6 +55,24 @@ impl Verdict {
             Self::Deny => "deny",
             Self::Error => "error",
         }
+    }
+}
+
+pub(crate) fn merge_findings(findings: &mut Vec<Finding>, additional: Vec<Finding>) {
+    for finding in additional {
+        if let Some(existing) = findings
+            .iter_mut()
+            .find(|item| item.rule_id == finding.rule_id)
+        {
+            existing.evidence.extend(finding.evidence);
+        } else {
+            findings.push(finding);
+        }
+    }
+    for finding in findings {
+        let mut seen = HashSet::new();
+        // Evidence has no source offsets, so identical text at distinct locations also collapses.
+        finding.evidence.retain(|text| seen.insert(text.clone()));
     }
 }
 

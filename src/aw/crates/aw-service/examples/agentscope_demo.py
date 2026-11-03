@@ -49,7 +49,9 @@ class Echo(ToolBase):
     async def check_permissions(
         self, tool_input: dict[str, Any], context: Any
     ) -> PermissionDecision:
-        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+        return PermissionDecision(
+            behavior=PermissionBehavior.ALLOW, message="Offline demo allows the echo tool"
+        )
 
     async def call(self, text: str) -> ToolChunk:
         return ToolChunk(content=[TextBlock(text=text)])

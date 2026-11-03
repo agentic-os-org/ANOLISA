@@ -40,7 +40,12 @@ container=(docker run --rm --init --user "$(id -u):$(id -g)"
 mkdir -p "$SOURCE/target/npm-prebuilt/win32-x64"
 cp "$WORK/out/build/x86_64-pc-windows-msvc/release/"{tokenless,rtk}.exe \
     "$SOURCE/target/npm-prebuilt/win32-x64/"
-node "$SOURCE/npm/scripts/package-npm.js" --target win32-x64
+if [[ -f "$SOURCE/packaging/npm/package-npm.js" ]]; then
+    npm_packer="$SOURCE/packaging/npm/package-npm.js"
+else
+    npm_packer="$SOURCE/npm/scripts/package-npm.js"
+fi
+node "$npm_packer" --target win32-x64
 python3 "$ACTION_DIR/package-windows.py" "$SOURCE" "$OUTPUT" "$VERSION"
 python3 "$ACTION_DIR/verify-wheels.py" --directory "$WHEELS" --version "$VERSION" \
     --layout flat --os windows --arch x86_64

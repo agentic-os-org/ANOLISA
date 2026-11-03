@@ -9,3 +9,4 @@ pub(super) mod pi;
 pub(super) mod qoder_sdk;
 pub(super) mod qwenpaw;
 pub(super) mod sdk_tools;
+mod submission;

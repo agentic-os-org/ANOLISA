@@ -34,12 +34,12 @@ fn launch(fixture: &Fixture) -> Command {
 }
 
 #[test]
-fn unsupported_sdk_version_and_interpreter_modes_fail_before_creating_service() {
+fn invalid_sdk_metadata_and_interpreter_modes_fail_before_creating_service() {
     let fixture = Fixture::new();
-    fixture.save(&setup(&fixture, "2.0.8"));
+    fixture.save(&setup(&fixture, "invalid version"));
     let output = fixture.run(launch(&fixture));
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("2.0.6 is required"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must report a version"));
     assert!(!fixture.root.join("state").exists());
     for args in [
         json!(["-I", "worker.py"]),
@@ -63,11 +63,15 @@ fn unsupported_sdk_version_and_interpreter_modes_fail_before_creating_service() 
 
 #[test]
 fn no_factory_attachment_never_reports_ready_and_releases_binding_files() {
-    let fixture = Fixture::new();
-    let document = setup(&fixture, "2.0.6");
-    let service = Service::start(&fixture, &document);
-    let output = fixture.run(launch(&fixture));
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("before native hooks became ready"));
-    service.released(&fixture);
+    for version in ["2.0.5", "2.0.6", "2.0.8", "3.0.0rc1"] {
+        let fixture = Fixture::new();
+        let document = setup(&fixture, version);
+        let service = Service::start(&fixture, &document);
+        let output = fixture.run(launch(&fixture));
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("before native hooks became ready")
+        );
+        service.released(&fixture);
+    }
 }

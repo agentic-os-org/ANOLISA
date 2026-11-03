@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Native Windows lifecycle and registered PowerShell hook smoke tests.
 
-Run after scripts/build-windows.ps1 and npm/scripts/package-npm.js --target win32-x64.
+Run after packaging/build/build-windows.ps1 and packaging/npm/package-npm.js --target win32-x64.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -233,14 +234,23 @@ class WindowsPackagingTests(unittest.TestCase):
         self.root = Path(sandbox.name)
         self.component = self.root / "tokenless"
         self.rtk = self.component / "third_party/rtk"
-        scripts = self.component / "scripts"
+        scripts = self.component / "packaging/build"
         scripts.mkdir(parents=True)
         self.rtk.mkdir(parents=True)
         for name in ("build-windows.ps1", "setup-rtk.sh"):
-            shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+            shutil.copyfile(ROOT / "packaging/build" / name, scripts / name)
+        shutil.copytree(ROOT / "third_party/patches", self.component / "third_party/patches")
         setup = (scripts / "setup-rtk.sh").read_text(encoding="utf-8")
         self.revision = re.search(r'^RTK_COMMIT="([0-9a-f]{40})"', setup, re.M).group(1)
         (self.rtk / ".anolisa-rtk-commit").write_text(self.revision, encoding="utf-8")
+        # The `sha256sum` marker setup-rtk.sh writes; the build must accept it.
+        patches = re.search(r"^PATCHES=\((.*?)^\)", setup, re.M | re.S).group(1).split()
+        self.assertTrue(patches)
+        (self.rtk / ".anolisa-rtk-patches").write_bytes(b"".join(
+            hashlib.sha256((self.component / "third_party/patches" / name).read_bytes())
+            .hexdigest().encode() + b"  " + name.encode() + b"\n"
+            for name in patches
+        ))
         self.metadata = self.root / "metadata.py"
         self.metadata.write_text(
             "import json, sys\n"
@@ -293,7 +303,7 @@ function cargo {
         [IO.File]::WriteAllText((Join-Path $directory "$binary.exe"), "fresh $binary $profile")
     } else { throw "Unexpected Cargo command: $($args[0])" }
 }
-$build = Join-Path $env:TOKENLESS_TEST_COMPONENT 'scripts/build-windows.ps1'
+$build = Join-Path $env:TOKENLESS_TEST_COMPONENT 'packaging/build/build-windows.ps1'
 [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
 try {
     & $build -Debug:($env:TOKENLESS_TEST_DEBUG -eq '1')
@@ -370,6 +380,23 @@ try {
             self.run_build(TOKENLESS_TEST_DISTINCT_TARGETS="1", TOKENLESS_TEST_DEBUG="1"), "debug"
         )
 
+    def test_checkout_from_another_patch_set_does_not_publish_binaries(self) -> None:
+        marker = self.rtk / ".anolisa-rtk-patches"
+        marker.write_bytes(
+            marker.read_bytes().replace(b"rtk-pytest-error-report.patch", b"rtk-older.patch")
+        )
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different patch set", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+
+    def test_checkout_without_patch_marker_does_not_publish_binaries(self) -> None:
+        (self.rtk / ".anolisa-rtk-patches").unlink()
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("patch-set marker is missing", result.stderr)
+        self.assertFalse((self.component / "target/npm-prebuilt/win32-x64").exists())
+
     def test_metadata_failure_does_not_publish_binaries(self) -> None:
         for binary in ("tokenless", "rtk"):
             with self.subTest(binary=binary):
@@ -401,7 +428,7 @@ try {
                 path.write_text("# excluded packaging fixture\n", encoding="utf-8")
             (fixture / "keep.py").write_text("# retained packaging fixture\n", encoding="utf-8")
             result = subprocess.run(
-                ["node", "npm/scripts/package-npm.js", "--target", "win32-x64"], cwd=ROOT,
+                ["node", "packaging/npm/package-npm.js", "--target", "win32-x64"], cwd=ROOT,
                 capture_output=True, text=True, encoding="utf-8", timeout=180,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

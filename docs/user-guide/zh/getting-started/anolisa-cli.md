@@ -273,6 +273,25 @@ enable 会接管指向同一插件源的已有符号链接，包括 Tokenless �
 `unknown`；链接存在不代表运行中的 OpenCode 已加载插件。`--dry-run` 仅预览操作，
 不修改插件文件或 receipt。
 
+#### Cosh
+
+```bash
+anolisa adapter enable sec-core cosh
+anolisa adapter status sec-core
+anolisa adapter disable sec-core cosh
+```
+
+enable 通过 cosh 原生 registry 选择并启用 ANOLISA 交付的用户扩展，兼容 RPM
+同时提供系统副本的情况。cosh 需支持按身份清理 adapter 来源选择；旧版本会在修改文件前
+报错，提示更新 cosh-ng。`COSH_CORE_PATH` 可指定原生程序，`COSH_HOME` 可指定扩展和状态根目录。
+
+status 核对所选来源身份、catalog 启用状态和 receipt 文件。来源冲突或扩展禁用时报告
+`degraded`；已有会话的加载情况报告为 `unknown`。enable 或 disable 后重启已有 cosh 会话。
+disable 仅移除 ANOLISA 拥有的用户副本，并清除与该副本身份匹配的用户来源选择；包管理器
+拥有的系统文件和用户后续选择会保留。组件升级改变扩展身份时，重新启用会先移除旧受管副本并清理匹配的来源选择，再替换
+receipt。清理失败保留旧 receipt，激活失败保留新 receipt，供 disable 或重新启用时重试。
+重新启用或禁用前，需先处理受管文件被修改的情况。
+
 #### 千问办公 QwenWorkCN（macOS）
 
 ```bash

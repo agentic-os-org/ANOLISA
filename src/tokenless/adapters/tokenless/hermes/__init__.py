@@ -241,10 +241,14 @@ def _resolve_hook_utils() -> tuple[str, list[str]]:
     # still pass the full ownership/permission validation above.
     xdg_data = os.environ.get("XDG_DATA_HOME", "")
     if xdg_data and os.path.isabs(xdg_data):
+        candidates.append(os.path.join(xdg_data, "tokenless", "adapters", "common", "hooks"))
         candidates.append(
             os.path.join(xdg_data, "anolisa", "adapters", "tokenless", "common", "hooks")
         )
     if real_home:
+        candidates.append(
+            os.path.join(real_home, ".local", "share", "tokenless", "adapters", "common", "hooks")
+        )
         candidates.append(
             os.path.join(
                 real_home, ".local", "share", "anolisa", "adapters", "tokenless", "common", "hooks"

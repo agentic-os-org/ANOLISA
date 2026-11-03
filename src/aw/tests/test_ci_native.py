@@ -87,7 +87,7 @@ class NativeTests(GateFixture):
                 )
 
     def test_native_secret_gate_rejects_unmerged_candidates_and_workflow_refs(self) -> None:
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         step = workflow.split(
             "      - name: Require a trusted candidate before executing repository code\n", 1
         )[1].split("      - name: Validate native coverage", 1)[0]

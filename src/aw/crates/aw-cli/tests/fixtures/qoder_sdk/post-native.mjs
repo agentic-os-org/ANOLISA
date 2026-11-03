@@ -55,7 +55,10 @@ try {
     assert.ifError(failure);
     assert(delivered, "successful Post did not publish the native result");
     assert.equal(!!delivered.is_error, toolFailure);
-    assert(JSON.stringify(delivered.content).includes(sentinel), "native result content was changed");
+    if (mode === "replace") {
+      assert(JSON.stringify(delivered.content).includes("AW_SAFE_POST_RESULT"), "replacement was not adopted");
+      assert(!JSON.stringify(delivered.content).includes(sentinel), "original result escaped replacement");
+    } else assert(JSON.stringify(delivered.content).includes(sentinel), "native result content was changed");
     assert(fs.existsSync(marker), "report/success prevented later tool execution");
   }
   fs.writeFileSync(path.join(root, "results.json"), JSON.stringify({ case: mode, status: "passed",

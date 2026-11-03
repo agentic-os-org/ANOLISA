@@ -1,10 +1,8 @@
 //! End-to-end coverage for adapter operation notices across human, `--json`,
 //! `--quiet`, and `--dry-run` output.
 //!
-//! Uses the `cosh` extension driver because it needs no external CLI:
-//! detection succeeds when the cosh home directory exists, and enable/disable
-//! are pure filesystem operations. That keeps this test hermetic while still
-//! driving the real binary through the full enable/disable path.
+//! The cosh fixture supplies a bounded native registry stand-in while the
+//! real ANOLISA binary drives receipt ownership and notice formatting.
 
 use std::path::PathBuf;
 use std::process::Output;
@@ -86,10 +84,28 @@ impl NoticeFixture {
             .join(COMPONENT)
             .join("cosh");
         std::fs::create_dir_all(&resource_root).expect("resource root");
-        let extension_manifest = format!(r#"{{"id":"{COMPONENT}","name":"Notice Demo"}}"#);
+        let extension_manifest = format!(r#"{{"name":"{COMPONENT}"}}"#);
         let extension_manifest_path = resource_root.join("cosh-extension.json");
         std::fs::write(&extension_manifest_path, extension_manifest.as_bytes())
             .expect("cosh extension manifest");
+
+        let core = home.join("cosh-core-fixture");
+        std::fs::write(&core, r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+r = json.loads(sys.stdin.readline())
+name = r["params"].get("name", "notice-demo")
+path = str(Path(os.environ["COSH_HOME"]) / "extensions" / name)
+data = {"conditional_clear_user_source": True} if r["action"] == "adapter-capabilities" else {
+    "name": name, "available_source_identities": {"user": path}, "path": path,
+    "source_identity": path, "desired_state": "enabled", "health": "degraded"}
+print(json.dumps({"type": "registry_response", "request_id": r["request_id"], "success": True, "data": data}))
+"#).expect("registry fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&core, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         // Component contract snapshot carrying the notices.
         let manifest_path = user_layout.snapshot_path(COMPONENT);
@@ -139,6 +155,11 @@ impl NoticeFixture {
             &args,
             &[
                 ("HOME", self.home.as_path()),
+                ("COSH_HOME", self.home.join(".copilot-shell").as_path()),
+                (
+                    "COSH_CORE_PATH",
+                    self.home.join("cosh-core-fixture").as_path(),
+                ),
                 ("XDG_DATA_HOME", self.data_home.as_path()),
                 ("XDG_CONFIG_HOME", self.config_home.as_path()),
                 ("XDG_STATE_HOME", self.state_home.as_path()),

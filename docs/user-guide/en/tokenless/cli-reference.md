@@ -158,14 +158,22 @@ Exit codes are part of the transport contract:
 
 The `pre_tool` operation resolves the separately packaged `rtk` executable from `PATH` and supported
 install layouts, skipping candidates older than 0.35.0 before trying the next packaged location.
-Recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands, plus entire commands containing
-a recognized native `find` invocation, stay native so their output has a single PostTool owner.
-The `find` protection covers direct calls and RTK's built-in prefixes: `env`, `command`, `exec`,
+Recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands stay native so their output has
+a single PostTool owner. Entire commands containing a recognized native `find`, `head`, or `tail`
+invocation also stay native. The protection covers direct calls and RTK's built-in prefixes:
+`env`, `command`, `exec`,
 `noglob`, `nocorrect`, `builtin`, `timeout`, `time`, `nice`, `nohup`, and `uv run`, including nesting
 and shell backslash-newline continuations. Process-wrapper options follow the bundled RTK grammar;
 unknown options stop recognition. This remains true when `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`.
-Custom `hooks.transparent_prefixes` are not inspected and may still let RTK rewrite wrapped `find`;
+Custom `hooks.transparent_prefixes` are not inspected and may still let RTK rewrite wrapped calls;
 other supported commands may also be rewritten.
+
+`head` and `tail` retain their native execution semantics for all arguments, including byte windows
+and follow mode. If a recognized call appears in a pipeline or compound command, the entire command
+bypasses rewriting. This avoids RTK's `head` → `read --max-lines` structural truncation, which can
+omit function bodies inside the requested line window. Explicit `rtk` commands remain explicit.
+This PreTool rule does not disable eligible PostTool compression; file-read policy is unchanged.
+
 Agent-facing `retrieve` authorizes the requested hash against `visible_markers` before reading Stash.
 The standalone `tokenless retrieve` command below is a separate trusted local operations path and
 does not require model-visibility context.
@@ -202,7 +210,7 @@ is not guaranteed for every shell expression. `sudo` commands pass through uncha
 so automatic rewriting does not insert RTK into a privileged command.
 
 Use `rtk rewrite 'COMMAND'` to inspect a proposed rewrite without executing the
-command. Tokenless keeps its recognized build/test commands and recognized native `find` invocations,
+command. Tokenless keeps its recognized build/test commands and native `find`, `head`, and `tail` calls,
 including whole compound commands containing such a call, outside RTK rewriting as described above. PostTool can
 share profitable pure path lists; mixed output and unsupported `find` formats remain native.
 

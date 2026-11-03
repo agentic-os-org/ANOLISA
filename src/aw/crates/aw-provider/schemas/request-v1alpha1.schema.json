@@ -141,12 +141,12 @@
             "name",
             "agent",
             "session_id",
-            "tool",
             "native"
           ],
           "properties": {
             "name": {
               "enum": [
+                "input.submit",
                 "tool.before",
                 "tool.after"
               ]
@@ -262,8 +262,57 @@
             },
             "native": {
               "type": "object"
+            },
+            "turn_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              }
             }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "name": {
+                    "const": "input.submit"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "turn_id",
+                  "input"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "tool": false
+                }
+              },
+              "else": {
+                "required": [
+                  "tool"
+                ],
+                "properties": {
+                  "turn_id": false,
+                  "input": false
+                }
+              }
+            }
+          ]
         }
       }
     }

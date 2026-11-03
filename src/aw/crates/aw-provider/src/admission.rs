@@ -48,7 +48,7 @@ pub struct AdapterCapabilities {
 /// binding, budgets, process ownership and adoption remain Host concerns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdmittedStep {
-    /// The tool event that selects this step.
+    /// The event that selects this step.
     pub event: String,
     /// The step identifier within its event.
     pub step_id: String,
@@ -116,7 +116,7 @@ impl StepExecution {
     }
 }
 
-/// Admits enabled tool steps using explicit Provider and trusted Adapter evidence.
+/// Admits enabled event steps using explicit Provider and trusted Adapter evidence.
 ///
 /// Native commands, disabled steps and steps that cannot select this Adapter
 /// require no Provider discovery. Applicable enabled events must be supported
@@ -314,7 +314,7 @@ fn preflight_step(
     let on_error = string(&step["on_error"])?;
     require(
         on_error == "report"
-            || (event == "tool.before"
+            || (matches!(event, "input.submit" | "tool.before")
                 && on_error == "block"
                 && adapter_effects.iter().any(|effect| effect == "block"))
             || (event == "tool.after"
@@ -379,13 +379,14 @@ fn check_provider(
 }
 
 fn supported_event(event: &str) -> bool {
-    matches!(event, "tool.before" | "tool.after")
+    matches!(event, "input.submit" | "tool.before" | "tool.after")
 }
 
 fn supported_effect(event: &str, effect: &str) -> bool {
     matches!(
         (event, effect),
-        ("tool.before", "observe" | "block") | ("tool.after", "observe" | "replace_result")
+        ("input.submit" | "tool.before", "observe" | "block")
+            | ("tool.after", "observe" | "replace_result")
     )
 }
 

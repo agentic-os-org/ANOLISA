@@ -70,7 +70,7 @@ export async function fixture(t, callback = async () => ({}), extra = {}, policy
   async function* prompt() { await input.promise; }
   const options = { transport: { create: () => transport },
     auth: { type: "accessToken", accessToken: "fixture-local-only" }, ...extra,
-    hooks: { PreToolUse: [{ hooks: [callback] }], PostToolUse: [{ hooks: [callback] }] } };
+    hooks: extra.hooks ?? { PreToolUse: [{ hooks: [callback] }], PostToolUse: [{ hooks: [callback] }] } };
   let composedOptions;
   if (policyHooks) {
     await resident.create(source ?? prompt(), options, (config, native) => {
@@ -86,7 +86,7 @@ export async function fixture(t, callback = async () => ({}), extra = {}, policy
       return { ...native, hooks };
     }, () => {});
   } else {
-    resident.mcp = admitMcp(extra);
+    resident.mcp = admitMcp(extra, resident.identities.nativeConfiguration);
     resident.cwd = process.cwd();
     await scope.open();
     scope.begin();

@@ -378,15 +378,31 @@ impl RepoConfig {
 
     /// Local discovery helper used before the provisioning fallback.
     fn load_local_with_sources(sources: RepoConfigSources) -> Result<Self, RepoConfigError> {
-        for candidate in [&sources.etc, &sources.packaged, &sources.dev_tree] {
-            if let Some(path) = candidate.as_deref()
-                && path.is_file()
-            {
-                let mut config = Self::from_path(path)?;
-                config.emit_deprecation_warnings(path);
-                config.source_path = Some(path.to_path_buf());
-                return Ok(config);
-            }
+        for candidate in [
+            &sources.etc,
+            &sources.packaged,
+            &sources.layout_datadir,
+            &sources.dev_tree,
+        ] {
+            let Some(path) = candidate.as_deref() else {
+                continue;
+            };
+            let mut config = match Self::from_path(path) {
+                Ok(config) => config,
+                Err(RepoConfigError::Io { source, .. })
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    // Bootstrap can still return config when a parent blocks persistence.
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            config.emit_deprecation_warnings(path);
+            config.source_path = Some(path.to_path_buf());
+            return Ok(config);
         }
         Err(RepoConfigError::NotFound)
     }
@@ -822,6 +838,8 @@ pub(crate) struct RepoConfigSources {
     pub etc: Option<PathBuf>,
     /// Packaged copy under the datadir.
     pub packaged: Option<PathBuf>,
+    /// Active layout's data copy, after a partial packaged tree.
+    pub layout_datadir: Option<PathBuf>,
     /// Dev-tree copy resolved from `CARGO_MANIFEST_DIR`.
     pub dev_tree: Option<PathBuf>,
 }
@@ -833,6 +851,7 @@ impl RepoConfigSources {
         Self {
             etc: Some(layout.etc_dir.join(REPO_FILE)),
             packaged: Some(packaged_root.join(REPO_SUBDIR).join(REPO_FILE)),
+            layout_datadir: Some(layout.datadir.join(REPO_SUBDIR).join(REPO_FILE)),
             dev_tree: Some(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("..")
@@ -1129,6 +1148,7 @@ mod tests {
         RepoConfigSources {
             etc: Some(dest),
             packaged: None,
+            layout_datadir: None,
             dev_tree: None,
         }
     }
@@ -1205,10 +1225,48 @@ offline_fallback = true
         let sources = RepoConfigSources {
             etc: Some(tmp.path().join("nope.toml")),
             packaged: Some(tmp.path().join("nope2.toml")),
+            layout_datadir: None,
             dev_tree: Some(tmp.path().join("nope3.toml")),
         };
         let err = RepoConfig::load_local_with_sources(sources).expect_err("no fallback");
         assert!(matches!(err, RepoConfigError::NotFound));
+    }
+
+    #[test]
+    fn registry_only_native_tree_preserves_layout_repo_config_and_errors() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let layout = FsLayout::system(Some(tmp.path().join("layout")));
+        let packaged_root = tmp.path().join("native/share/anolisa");
+        std::fs::create_dir_all(packaged_root.join("components")).expect("mkdir registry");
+        let local = layout.datadir.join(REPO_SUBDIR).join(REPO_FILE);
+        std::fs::create_dir_all(local.parent().expect("config parent")).expect("mkdir config");
+        std::fs::write(
+            &local,
+            "schema_version = 1\ndefault_backend = \"raw\"\n[backends.raw]\nbase_url = \"file:///srv/site\"\n",
+        )
+        .expect("write layout config");
+        let probe = packaged::PackagedDataProbe::from_inputs(Some(packaged_root.clone()), None);
+        let config =
+            RepoConfig::load_local_with_sources(RepoConfigSources::for_layout(&layout, &probe))
+                .expect("layout config remains discoverable");
+        assert_eq!(config.source_path(), Some(local.as_path()));
+        assert_eq!(config.backends["raw"].base_url, "file:///srv/site");
+
+        let preferred = packaged_root.join(REPO_SUBDIR).join(REPO_FILE);
+        std::fs::create_dir_all(preferred.parent().expect("packaged parent"))
+            .expect("mkdir packaged");
+        std::fs::write(&preferred, "this is not TOML [").expect("write invalid config");
+        let error =
+            RepoConfig::load_local_with_sources(RepoConfigSources::for_layout(&layout, &probe))
+                .expect_err("invalid packaged config cannot fall back");
+        assert!(matches!(error, RepoConfigError::Parse { .. }));
+
+        std::fs::remove_file(&preferred).expect("remove invalid file");
+        std::fs::create_dir(&preferred).expect("directory blocks config");
+        let error =
+            RepoConfig::load_local_with_sources(RepoConfigSources::for_layout(&layout, &probe))
+                .expect_err("unreadable packaged config cannot fall back");
+        assert!(matches!(error, RepoConfigError::Io { .. }));
     }
 
     #[test]
@@ -1309,6 +1367,7 @@ base_url = "file:///srv/local-repo"
         let sources = RepoConfigSources {
             etc: Some(path),
             packaged: None,
+            layout_datadir: None,
             dev_tree: None,
         };
         let cfg = RepoConfig::load_local_with_sources(sources).expect("load");

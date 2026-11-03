@@ -3114,6 +3114,62 @@ fn html_extraction_is_env_gated_and_recovers_the_original_page() {
 }
 
 #[test]
+fn html_long_code_block_is_compressed_and_recovers_the_original_page() {
+    let fixture = TempDataDir::new().expect("isolated data directory");
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(run.len() + 1);
+    // Removing the script must save enough to accept the complete code block,
+    // including its long fences, rather than merely returning a no-savings view.
+    let html = format!(
+        "<!DOCTYPE html><html><head><title>Code reference</title></head><body>\
+         <p>This reference preserves code examples and their exact delimiters \
+         so they can be used without changing their meaning.</p>\
+         <pre><code class=\"language-sh\">a{run}b</code></pre>\
+         <script>{}</script></body></html>",
+        "var padding = 12345;".repeat(32 * 1024)
+    );
+    let mut request: serde_json::Value =
+        serde_json::from_str(&build_log_request(&html, "success", "html-long-code")).unwrap();
+    request["input"]["tool_name"] = "WebFetch".into();
+    request["input"]["content_origin"] = "api_response".into();
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request.to_string(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "html");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["html_extraction"])
+    );
+    assert_eq!(result["recoverability"], "retrievable");
+    let rendered = result["output"].as_str().unwrap();
+    assert!(rendered.contains(&format!("\n{fence}sh\na{run}b\n{fence}\n")));
+    assert!(!rendered.contains("var padding"));
+    assert!(rendered.len() < html.len());
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let hash = result["stash_keys"][0].as_str().unwrap();
+    let retrieved = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["retrieve", hash])
+        .output()
+        .unwrap();
+    assert!(retrieved.status.success(), "{retrieved:?}");
+    assert_eq!(retrieved.stdout, html.as_bytes());
+}
+
+#[test]
 fn html_zero_rowspan_preserves_columns_and_recovers_the_page() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("data");

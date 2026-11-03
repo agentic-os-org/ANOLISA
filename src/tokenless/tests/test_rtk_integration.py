@@ -110,6 +110,54 @@ class RtkIntegrationTest(unittest.TestCase):
             "capabilities": {"replace_output": True, "replace_with_text": True, "recovery": {"kind": recovery}},
         })
 
+    def test_source_previews_keep_native_line_windows(self) -> None:
+        source = "".join(
+            f"# Function {index}\n@decorator\ndef function_{index}():\n    return {index}\n\n"
+            for index in range(30)
+        )
+        (self.root / "source.py").write_text(source)
+        # Positive control: RTK is available and ordinary commands still rewrite.
+        self.assertIn("git status", self.rewrite_command("git status"))
+        lines = source.splitlines(keepends=True)
+        head = "".join(lines[:40])
+        tail = "".join(lines[-40:])
+        for command, expected in (
+            ("head -40 source.py", head),
+            ("head -n 40 source.py", head),
+            ("tail -40 source.py", tail),
+            ("wc -l source.py; head -40 source.py", f"{len(lines)} source.py\n" + head),
+            ("cat source.py | head -40", head),
+            ("env LANG=C timeout 10 head -40 source.py", head),
+        ):
+            with self.subTest(command=command):
+                result = self.protocol(
+                    "pre_tool",
+                    {
+                        "tool_name": "Bash",
+                        "arguments": {"command": command},
+                        "command_field": "command",
+                        "capabilities": {"replace_arguments": True},
+                    },
+                )
+                self.assertEqual(result["action"], "passthrough")
+                self.assertEqual(result["output_optimization"], "none")
+                self.assertEqual(result["arguments"]["command"], command)
+                self.assertEqual(self.execute(result["arguments"]["command"]), expected)
+
+        # Counterfactual: the pinned RTK rewrites this spelling of head, and
+        # smart_truncate in --max-lines loses bodies inside the requested window.
+        rewritten = self.run_rtk("rewrite", "head -40 source.py")
+        self.assertEqual(rewritten.returncode, 3, rewritten.stderr)
+        self.assertIn("--max-lines 40", rewritten.stdout)
+        output = self.execute(rewritten.stdout.strip())
+        self.assertNotEqual(output, head)
+        self.assertIn("    return 7\n", head)
+        self.assertNotIn("    return 7\n", output)
+        # tail shares the native-execution policy; it need not share head's bug.
+        rewritten_tail = self.run_rtk("rewrite", "tail -40 source.py")
+        self.assertEqual(rewritten_tail.returncode, 3, rewritten_tail.stderr)
+        self.assertEqual(self.execute(rewritten_tail.stdout.strip()), tail)
+
     def test_unchanged_local_html_keeps_file_origin_after_rewrite(self) -> None:
         content = "<html><body><main>" + "<p>Editable source markup.</p>" * 100 + "</main></body></html>"
         (self.root / "page.html").write_text(content)

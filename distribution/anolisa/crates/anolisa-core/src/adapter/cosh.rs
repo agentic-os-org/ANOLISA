@@ -1,25 +1,17 @@
 //! Cosh (copilot-shell) framework driver.
 //!
-//! Cosh discovers extensions by scanning well-known directories, so its
-//! adapter is *extension*-typed (`adapter_type = "extension"`), not a
-//! CLI-registered plugin: `enable` copies the component's extension tree
-//! into `<cosh_home>/extensions/<plugin_id>/` and `disable` removes only
-//! that directory. No framework CLI is spawned — enable/disable/status are
-//! pure filesystem operations mediated by the Manager's
-//! [`AdapterOps`](super::driver::AdapterOps).
+//! ANOLISA owns the receipt-bound user copy; cosh owns source selection and
+//! activation. Native transactions select the delivered identity and release
+//! only its selection during cleanup. System extensions remain package-owned.
 //!
-//! The per-user extension dir ANOLISA takes over is distinct from the
-//! system-level auto-discovery tree an RPM may ship under
-//! `/usr/share/anolisa/extensions/<component>/`; `disable` never touches
-//! the latter, which is package-owned, not receipt-owned.
-//!
-//! Env contract (used by detection and home resolution, and by tests to
-//! point at a scratch home): `COSH_BIN` overrides the detected binary name;
-//! `COSH_HOME` overrides the cosh home directory (default
-//! `<user_home>/.copilot-shell`).
+//! `COSH_HOME` overrides the extension/state root; `COSH_CORE_PATH` selects the native
+//! registry executable, while `COSH_BIN` overrides CLI detection.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde_json::{Value, json};
 
 use super::AdapterError;
 use super::claim::{
@@ -29,9 +21,11 @@ use super::claim::{
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
-    FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
+    FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::managed_files::{MaterializedMapping, copy_materialized_resource};
+use super::managed_files::{
+    ManagedMatch, MaterializedMapping, copy_materialized_resource, verify_materialized_bundle,
+};
 use super::util::{bool_status, now_iso8601};
 
 /// Candidate binary names that indicate cosh is installed. `co` and
@@ -89,10 +83,8 @@ impl FrameworkDriver for CoshDriver {
     }
 
     fn detect(&self, env: &HostEnv) -> DetectResult {
-        // A cosh CLI on PATH is the strong signal. Because the extension
-        // model only drops files (no CLI needed to enable), an existing
-        // cosh home is accepted as a weaker signal so a user who installed
-        // cosh without leaving its launcher on PATH can still enable.
+        // A home is a discovery hint; prepare_enable separately requires the
+        // native registry before changing any delivered files.
         if let Some(path) = detect_cosh_binary() {
             return DetectResult {
                 detected: true,
@@ -146,6 +138,23 @@ impl FrameworkDriver for CoshDriver {
                 .filter(|id| !id.is_empty())
                 .unwrap_or_else(|| ctx.component.clone()),
         );
+        let manifest_path = root.join(manifest);
+        let manifest_bytes = std::fs::read(&manifest_path).map_err(|source| AdapterError::Io {
+            path: manifest_path,
+            source,
+        })?;
+        let native: Value = serde_json::from_slice(&manifest_bytes).map_err(|error| {
+            AdapterError::BundleInvalid {
+                root: root.clone(),
+                reason: format!("invalid cosh extension manifest: {error}"),
+            }
+        })?;
+        if native.get("name").and_then(Value::as_str) != plugin_id.as_deref() {
+            return Err(AdapterError::BundleInvalid {
+                root: root.clone(),
+                reason: "cosh extension name does not match adapter plugin id".to_string(),
+            });
+        }
         Ok(AdapterBundle {
             resource_root: root.clone(),
             plugin_id,
@@ -176,6 +185,7 @@ impl FrameworkDriver for CoshDriver {
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
+        require_native_lifecycle(ctx)?;
         let dst = extension_dir(bundle, ctx)?;
         let resources = vec![ClaimResource {
             id: RES_EXTENSION_DIR.to_string(),
@@ -204,6 +214,61 @@ impl FrameworkDriver for CoshDriver {
             },
             PreparedEnable::None,
         ))
+    }
+
+    fn preserve_reenable_facts(
+        &self,
+        prior: &AdapterClaim,
+        _next: &mut AdapterClaim,
+    ) -> Result<(), AdapterError> {
+        if !prior.materialized_files.is_empty() {
+            match verify_existing_files(prior) {
+                ManagedMatch::Matched => {}
+                ManagedMatch::Changed(reason) | ManagedMatch::Unknown(reason) => {
+                    return Err(native_error(format!(
+                        "refusing to replace edited cosh extension: {reason}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn plan_reenable_cleanup(
+        &self,
+        prior: &AdapterClaim,
+        ctx: &DriverCtx,
+    ) -> Result<Vec<String>, AdapterError> {
+        let next = self.read_bundle(ctx)?;
+        if prior.plugin_id.as_deref().unwrap_or(&prior.component)
+            == next.plugin_id.as_deref().unwrap_or(&ctx.component)
+            && claim_extension_dir(prior).as_ref() == Some(&extension_dir(&next, ctx)?)
+        {
+            return Ok(Vec::new());
+        }
+        Ok(vec![format!(
+            "remove prior managed cosh extension '{}' and release its matching source selection",
+            prior.plugin_id.as_deref().unwrap_or(&prior.component),
+        )])
+    }
+
+    fn cleanup_replaced_claim(
+        &self,
+        prior: &AdapterClaim,
+        next: &AdapterClaim,
+        ctx: &DriverCtx,
+    ) -> Result<DisableReport, AdapterError> {
+        if prior.plugin_id.as_deref().unwrap_or(&prior.component)
+            == next.plugin_id.as_deref().unwrap_or(&next.component)
+            && claim_extension_dir(prior) == claim_extension_dir(next)
+        {
+            return Ok(DisableReport {
+                cleanup_complete: true,
+                messages: Vec::new(),
+            });
+        }
+        // Release the old native selection while its receipt is still durable.
+        self.disable(prior, ctx)
     }
 
     fn materialized_mappings(
@@ -274,6 +339,30 @@ impl FrameworkDriver for CoshDriver {
             b"ANOLISA-managed cosh extension\n",
         )?;
         copy_materialized_resource(claim, RES_EXTENSION_DIR, &claim.resource_root, ctx.ops)?;
+        let name = claim.plugin_id.as_deref().unwrap_or(&claim.component);
+        let identity = canonical_identity(&dst)?;
+        let detail = registry(ctx, "detail", json!({"name": name}))?;
+        if detail
+            .pointer("/available_source_identities/user")
+            .and_then(Value::as_str)
+            != Some(identity.as_str())
+        {
+            return Err(native_error(
+                "cosh did not discover the delivered user identity",
+            ));
+        }
+        registry(
+            ctx,
+            "select-source",
+            json!({"name": name, "source": "user"}),
+        )?;
+        registry(ctx, "enable", json!({"name": name}))?;
+        let detail = registry(ctx, "detail", json!({"name": name}))?;
+        if !configured(&detail, &identity) {
+            return Err(native_error(
+                "cosh did not enable the delivered extension; inspect extensions detail",
+            ));
+        }
         Ok(())
     }
 
@@ -333,7 +422,35 @@ impl FrameworkDriver for CoshDriver {
             resource: None,
         });
 
-        let summary = summarize(claim.status, detect.detected, tree_present);
+        let native = claim_extension_dir(claim).map(|dir| {
+            let identity = canonical_identity(&dir)?;
+            let name = claim.plugin_id.as_deref().unwrap_or(&claim.component);
+            registry(ctx, "detail", json!({"name": name}))
+                .map(|detail| configured(&detail, &identity))
+        });
+        let (configured_status, reason) = match native {
+            Some(Ok(true)) => (ConditionStatus::True, Some("cosh catalog enables this user identity; restart existing cosh sessions to load it".to_string())),
+            Some(Ok(false)) => (ConditionStatus::False, Some("cosh reports another source, disabled state, or unhealthy extension".to_string())),
+            Some(Err(error)) => (ConditionStatus::Unknown, Some(error.to_string())),
+            None => (ConditionStatus::False, Some("receipt has no extension directory".to_string())),
+        };
+        conditions.push(AdapterCondition {
+            kind: AdapterConditionKind::ActivationEnabled,
+            status: configured_status,
+            reason,
+            resource: None,
+        });
+        conditions.push(AdapterCondition { kind: AdapterConditionKind::PluginResourcesLoaded,
+            status: ConditionStatus::Unknown,
+            reason: Some("standalone registry verifies catalog state; resident cosh session activation is not observable; restart existing sessions".to_string()), resource: None });
+        let mut summary = summarize(claim.status, detect.detected, tree_present);
+        if summary == AdapterSummary::Healthy {
+            summary = if configured_status == ConditionStatus::False {
+                AdapterSummary::Degraded
+            } else {
+                AdapterSummary::Unknown
+            };
+        }
         Ok(AdapterStatusReport {
             summary,
             conditions,
@@ -347,8 +464,15 @@ impl FrameworkDriver for CoshDriver {
     ) -> Result<DisableReport, AdapterError> {
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
+        // Probe before deletion: older cosh cannot release the persisted choice.
+        require_native_lifecycle(ctx)?;
+        let owned_dir = claim_extension_dir(claim);
+        let identity = owned_dir
+            .as_ref()
+            .map(|dir| canonical_identity(dir))
+            .transpose()?;
 
-        match claim_extension_dir(claim) {
+        match owned_dir {
             Some(dir) if !dir.exists() => {
                 messages.push(format!(
                     "cosh extension dir {} already absent",
@@ -369,6 +493,16 @@ impl FrameworkDriver for CoshDriver {
                     dir.display()
                 ));
             }
+            Some(dir)
+                if !claim.materialized_files.is_empty()
+                    && verify_existing_files(claim) != ManagedMatch::Matched =>
+            {
+                cleanup_complete = false;
+                messages.push(format!(
+                    "cosh extension {} contains changed managed files; left in place",
+                    dir.display()
+                ));
+            }
             Some(dir) => match ctx.ops.remove_tree(&dir) {
                 Ok(true) => messages.push(format!("removed cosh extension dir {}", dir.display())),
                 Ok(false) => messages.push(format!(
@@ -386,11 +520,165 @@ impl FrameworkDriver for CoshDriver {
             None => messages.push("receipt records no cosh extension directory".to_string()),
         }
 
+        if cleanup_complete && let Some(identity) = identity {
+            let name = claim.plugin_id.as_deref().unwrap_or(&claim.component);
+            if let Err(error) = registry(
+                ctx,
+                "clear-user-source",
+                json!({"name": name, "source_identity": identity}),
+            ) {
+                cleanup_complete = false;
+                messages.push(format!(
+                    "extension files removed; source selection cleanup requires retry: {error}"
+                ));
+            }
+        }
         Ok(DisableReport {
             cleanup_complete,
             messages,
         })
     }
+}
+
+fn verify_existing_files(claim: &AdapterClaim) -> ManagedMatch {
+    // Partial delivery/removal may omit files; existing user edits remain protected on retries.
+    let mut existing = claim.clone();
+    existing.materialized_files.retain(|file| {
+        let Some(resource) = claim.resource(&file.resource_id) else {
+            return true;
+        };
+        let root = match &resource.kind {
+            ClaimResourceKind::ExternalPath { path } => path,
+            _ => return true,
+        };
+        !std::fs::symlink_metadata(root.join(&file.relative_path))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    });
+    verify_materialized_bundle(&existing)
+}
+
+fn native_error(reason: impl Into<String>) -> AdapterError {
+    AdapterError::FrameworkCli {
+        program: "cosh-core".to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn require_native_lifecycle(ctx: &DriverCtx) -> Result<(), AdapterError> {
+    let capabilities = registry(ctx, "adapter-capabilities", json!({}))?;
+    if capabilities
+        .get("conditional_clear_user_source")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(native_error(
+            "cosh lacks conditional source cleanup; update cosh-ng before enabling or disabling adapters",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_identity(path: &Path) -> Result<String, AdapterError> {
+    if path.exists() {
+        return path
+            .canonicalize()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(|source| AdapterError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| native_error("cosh extension path has no existing ancestor"))?;
+    Ok(PathBuf::from(canonical_identity(parent)?)
+        .join(path.file_name().unwrap_or_default())
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn configured(detail: &Value, identity: &str) -> bool {
+    detail.get("source_identity").and_then(Value::as_str) == Some(identity)
+        && detail
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| {
+                canonical_identity(Path::new(path)).is_ok_and(|actual| actual == identity)
+            })
+        && detail.get("desired_state").and_then(Value::as_str) == Some("enabled")
+        && matches!(
+            detail.get("health").and_then(Value::as_str),
+            Some("healthy" | "degraded")
+        )
+}
+
+fn registry(ctx: &DriverCtx, action: &str, params: Value) -> Result<Value, AdapterError> {
+    let request = json!({"type": "registry_request", "request_id": "anolisa-adapter", "domain": "extensions", "action": action, "params": params});
+    let mut env_set = Vec::new();
+    if let Some(home) = cosh_home(ctx.user_home.as_deref()) {
+        env_set.push(("COSH_HOME".to_string(), home.to_string_lossy().into_owned()));
+    }
+    if let Some(home) = &ctx.user_home {
+        env_set.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
+    }
+    let output = ctx.ops.run_framework_cli_json(FrameworkCommand {
+        program: resolve_core(ctx),
+        args: vec!["--registry".to_string()],
+        stdin: Some(format!("{request}\n").into_bytes()),
+        env_set,
+        env_remove: Vec::new(),
+        path_prepend: Vec::new(),
+        timeout: Duration::from_secs(30),
+    })?;
+    if !output.success() {
+        return Err(native_error(format!(
+            "cosh registry {action} failed: {}",
+            super::util::cli_failure_reason(action, &output)
+        )));
+    }
+    let response: Value = serde_json::from_str(output.stdout.trim()).map_err(|error| {
+        native_error(format!("invalid cosh registry {action} response: {error}"))
+    })?;
+    if response.get("type").and_then(Value::as_str) != Some("registry_response")
+        || response.get("request_id").and_then(Value::as_str) != Some("anolisa-adapter")
+        || response.get("success").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(native_error(format!(
+            "cosh registry {action}: {}; update cosh-ng if this action is unsupported",
+            response.get("error").unwrap_or(&Value::Null)
+        )));
+    }
+    response
+        .get("data")
+        .cloned()
+        .ok_or_else(|| native_error(format!("cosh registry {action} omitted data")))
+}
+
+fn resolve_core(ctx: &DriverCtx) -> String {
+    if let Some(program) = std::env::var_os("COSH_CORE_PATH").filter(|value| !value.is_empty()) {
+        return program.to_string_lossy().into_owned();
+    }
+    let mut candidates = vec![ctx.layout.libexec_dir.join("cosh-ng/cosh-core")];
+    if let Some(bin) = detect_cosh_binary().and_then(|bin| bin.canonicalize().ok())
+        && let Some(parent) = bin.parent()
+    {
+        candidates.push(parent.join("cosh-core"));
+        if let Some(prefix) = parent.parent() {
+            candidates.push(prefix.join("libexec/anolisa/cosh-ng/cosh-core"));
+            candidates.push(prefix.join("lib/anolisa/libexec/cosh-ng/cosh-core"));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("/usr/local/libexec/anolisa/cosh-ng/cosh-core"),
+        PathBuf::from("/usr/libexec/anolisa/cosh-ng/cosh-core"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|path| super::driver::is_executable(path))
+        .or_else(|| find_binary_in_path("cosh-core"))
+        .unwrap_or_else(|| PathBuf::from("cosh-core"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -423,17 +711,12 @@ fn dir_is_empty(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the cosh home directory: `COSH_HOME`, else
-/// `<user_home>/.copilot-shell`. Trailing slashes are trimmed.
+/// Resolve the cosh home directory from `COSH_HOME` or the caller's home.
 fn cosh_home(user_home: Option<&Path>) -> Option<PathBuf> {
-    if let Some(h) = std::env::var_os("COSH_HOME") {
-        let s = h.to_string_lossy();
-        let trimmed = s.trim_end_matches('/');
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-    user_home.map(|h| h.join(".copilot-shell"))
+    std::env::var_os("COSH_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| user_home.map(|home| home.join(".copilot-shell")))
 }
 
 /// Destination extension directory `<cosh_home>/extensions/<plugin_id>`.
@@ -543,13 +826,38 @@ mod tests {
         }
     }
 
-    /// Recording ops that apply real filesystem effects for copy/remove
-    /// (so status/disable behavior can be asserted) but reject CLI/symlink
-    /// calls the cosh driver must never make.
-    struct FsOps;
+    /// Filesystem effects plus a deterministic native registry fixture.
+    #[derive(Default)]
+    struct FsOps {
+        fail_action: Option<&'static str>,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
     impl AdapterOps for FsOps {
-        fn run_framework_cli(&self, _: FrameworkCommand) -> Result<CliOutput, AdapterError> {
-            panic!("cosh driver must not spawn a framework CLI");
+        fn run_framework_cli(&self, cmd: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+            let request: Value = serde_json::from_slice(cmd.stdin.as_deref().unwrap()).unwrap();
+            let action = request["action"].as_str().unwrap();
+            self.calls.borrow_mut().push(action.to_string());
+            if self.fail_action == Some(action) {
+                return Ok(CliOutput { status: Some(0), timed_out: false, stderr: String::new(),
+                    stdout: json!({"type":"registry_response", "request_id":"anolisa-adapter", "success":false,"error":"injected registry failure"}).to_string() });
+            }
+            let name = request["params"]["name"].as_str().unwrap_or("tokenless");
+            let home = cmd
+                .env_set
+                .iter()
+                .find(|(name, _)| name == "COSH_HOME")
+                .unwrap()
+                .1
+                .clone();
+            let path = PathBuf::from(home).join("extensions").join(name);
+            let data = if request["action"] == "adapter-capabilities" {
+                json!({"conditional_clear_user_source": true})
+            } else {
+                json!({"name": name, "available_source_identities": {"user": path}, "source_identity": path,
+                    "path": path, "desired_state": "enabled", "health": "healthy"})
+            };
+            Ok(CliOutput { status: Some(0), timed_out: false, stderr: String::new(),
+                stdout: json!({"type":"registry_response", "request_id":"anolisa-adapter", "success":true,"data":data}).to_string() })
         }
         fn copy_tree(&self, src: &Path, dst: &Path) -> Result<(), AdapterError> {
             copy_dir(src, dst).map_err(|source| AdapterError::Io {
@@ -676,6 +984,71 @@ mod tests {
     }
 
     #[test]
+    fn native_failure_prevents_delivery_and_activation_failure_is_retryable() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let user_home = tmp.path().join("home");
+        let cosh = tmp.path().join("cosh-home");
+        guard.set_home(&cosh);
+        let resource_root = staged_resource_root(tmp.path());
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let old_core = FsOps {
+            fail_action: Some("adapter-capabilities"),
+            ..FsOps::default()
+        };
+        let context = ctx(&resource_root, &user_home, &old_core, &layout);
+        let driver = CoshDriver::new();
+        let bundle = driver.read_bundle(&context).unwrap();
+        assert!(driver.prepare_enable(&bundle, &context).is_err());
+        assert!(!cosh.exists(), "unsupported core must fail before delivery");
+
+        let ops = FsOps {
+            fail_action: Some("select-source"),
+            ..FsOps::default()
+        };
+        let context = ctx(&resource_root, &user_home, &ops, &layout);
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, &context).unwrap();
+        attach_materialized_inventory(&mut claim, &resource_root);
+        assert!(
+            driver
+                .apply_enable(&mut claim, &prepared, &context, &mut ())
+                .is_err()
+        );
+        assert!(!ops.calls.borrow().iter().any(|action| action == "enable"));
+        claim.status = ClaimStatus::CleanupFailed;
+        let recovered = driver.disable(&claim, &context).unwrap();
+        assert!(recovered.cleanup_complete);
+        assert!(!cosh.join("extensions/tokenless").exists());
+        assert_eq!(ops.calls.borrow().last().unwrap(), "clear-user-source");
+        std::fs::remove_dir_all(cosh.join("extensions")).unwrap();
+        assert!(driver.disable(&claim, &context).unwrap().cleanup_complete);
+    }
+
+    #[test]
+    fn canonical_identity_survives_symlink_home_and_missing_parents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let extension = alias.join("extensions/example");
+        let expected = real
+            .join("extensions/example")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(canonical_identity(&extension).unwrap(), expected);
+        std::fs::create_dir_all(&extension).unwrap();
+        assert!(configured(
+            &json!({"source_identity":expected, "path":extension, "desired_state":"enabled", "health":"degraded"}),
+            &expected
+        ));
+        assert!(!configured(
+            &json!({"source_identity":expected, "path":extension, "desired_state":"enabled", "health":"conflict"}),
+            &expected
+        ));
+    }
+
+    #[test]
     fn enable_status_disable_copies_and_removes_only_extension_dir() {
         let guard = EnvGuard::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -689,7 +1062,7 @@ mod tests {
         std::fs::write(sibling.join("keep.txt"), b"keep").expect("keep");
 
         let resource_root = staged_resource_root(tmp.path());
-        let ops = FsOps;
+        let ops = FsOps::default();
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource_root, &user_home, &ops, &layout);
         let driver = CoshDriver::new();
@@ -707,8 +1080,33 @@ mod tests {
         assert!(ext_dir.join(COSH_MANIFEST).is_file(), "manifest copied");
         assert!(ext_dir.join("hooks/run-hook.sh").is_file(), "tree copied");
 
+        let mut legacy_claim = claim.clone();
+        legacy_claim.plugin_id = None;
+        assert!(
+            driver
+                .plan_reenable_cleanup(&legacy_claim, &ctx)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            driver
+                .cleanup_replaced_claim(&legacy_claim, &claim, &ctx)
+                .unwrap()
+                .cleanup_complete
+        );
+        assert!(
+            ext_dir.is_dir(),
+            "equivalent legacy identity must not be removed"
+        );
+        assert!(
+            !ops.calls
+                .borrow()
+                .iter()
+                .any(|action| action == "clear-user-source")
+        );
+
         let report = driver.status(&claim, &ctx).expect("status");
-        assert_eq!(report.summary, AdapterSummary::Healthy);
+        assert_eq!(report.summary, AdapterSummary::Unknown);
         assert!(
             report
                 .conditions
@@ -740,7 +1138,7 @@ mod tests {
         std::fs::write(ext_dir.join("user-file"), b"precious user data").expect("user file");
 
         let resource_root = staged_resource_root(tmp.path());
-        let ops = FsOps;
+        let ops = FsOps::default();
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource_root, &user_home, &ops, &layout);
         let driver = CoshDriver::new();
@@ -769,7 +1167,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("mkdir");
         std::fs::write(root.join("stray.txt"), b"x").expect("write");
         let user_home = tmp.path().join("home");
-        let ops = FsOps;
+        let ops = FsOps::default();
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&root, &user_home, &ops, &layout);
         let err = CoshDriver::new()

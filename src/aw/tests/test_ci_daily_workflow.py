@@ -56,8 +56,15 @@ class DailyWorkflowTests(GateFixture):
         self.assertIn("ref: ${{ github.sha }}", required)
         self.assertIn("run: python3 src/aw/scripts/check.py required", required)
         self.assertNotIn("continue-on-error:", required)
-        # The full AW gate archives a pinned historical migration fixture.
+        # Scope checks compare the complete candidate history.
         self.assertIn("fetch-depth: 0", self.jobs["checks"])
+
+    def test_contract_checks_use_a_compatible_trusted_system_python(self) -> None:
+        checks = self.jobs["checks"]
+        self.assertIn("    runs-on: ubuntu-24.04\n", checks)
+        self.assertIn('ln -s /usr/bin/python3 "$aw_native_tools_dir/python3"', checks)
+        self.assertIn("assert sys.version_info >= (3, 11)", checks)
+        self.assertIn('"${pythonLocation}/bin/python3" src/aw/scripts/check.py', checks)
 
     def test_required_accepts_only_selected_success_and_explicit_noop(self) -> None:
         for selected, tokenless in (("true", "true"), ("true", "false"), ("false", "false")):

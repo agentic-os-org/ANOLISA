@@ -81,3 +81,50 @@ aw run --config "$AW_DEMO/aw-core.yaml" --agent qoder
 aw stop --config "$AW_DEMO/aw-core.yaml"
 rm -r -- "$AW_DEMO"
 ```
+
+## 原生配置来源
+
+`spec.agents.<target>.native_config.sources` 为嵌入式 Adapter 记录有序来源引用。
+每项必填 `id`、`kind`、`scope`、`reference`；可选 `base_dir` 保留原生相对路径语境。
+`kind` 支持 `file`、`environment`、`argument`、`discovery`。引用保存路径或查找键，
+凭据值继续保存在原生来源中。ID 在同一目标内唯一，与原生 Hook、MCP、插件名称独立。
+
+| 命令 | 行为 |
+| --- | --- |
+| `aw config add-native-source --config ABS_FILE --agent TARGET --definition FILE` | 追加 AW 来源描述 |
+| `aw config remove-native-source --config ABS_FILE --agent TARGET --id ID` | 移除描述，保留原生来源 |
+| `aw config native-sources --config ABS_FILE --agent TARGET` | 输出脱敏的来源类别和顺序，不加载来源 |
+
+编辑器不打开来源引用。它严格校验 AW 描述结构，保持已有顺序，拒绝同 ID 的不同定义，
+复用原有原子发布流程。移除描述不卸载原生对象。移除最后一项会删除可选的 `native_config` 段；
+降级到旧 AW 构建前，应从所有目标移除此段。编辑会重写 AW YAML 文件；原生文件的
+字节、注释和未知字段完整保留。来源描述属于启动设置，`validate --against` 会拒绝在
+AW 策略更新中修改它们。原生文件监听和动态配置继续由原生 loader 管理。
+
+`native-sources` 输出 `native: declared_not_loaded`、`aw: not_admitted`，仅展示来源
+序号和类别，自定义 scope 等字符串也被省略。`show` 继续提供明确的原始值输出。
+保存描述不会改变现有 `aw run` 的来源选择；内置 Adapter 仍使用其文档中的原生参数、
+环境变量和 settings 选项。使用新 API 的应用须按下节接入原生 loader。
+
+## 接入原生 loader
+
+`aw_adapter::configuration::NativeConfiguration::new(&config, target)?.load(loader)`
+将有序引用直接交给调用者的原生 loader。调用者沿用原有 cwd、环境、argv、认证、权限和
+选项。loader 负责解析、默认发现、优先级、相对路径、Hook 顺序及动态更新，返回值可以是
+存活的配置句柄。原生错误原样传播。此 API 不执行 Hook 来发现能力，也不要求完整工具清单。
+
+loader 返回 `NativeLoad { value, sources }`：原生值或存活句柄，以及按原生优先级排列的
+实际已消费来源。应包含隐式发现的来源，省略缺失或被忽略的声明。运行期来源报告使用
+Adapter 提供的实际证据，离线 CLI 报告只展示声明。
+
+返回的 `LoadedConfiguration<T>` 保留原生结果，报告 `loaded` / `not_admitted`。
+其 `admit(capabilities, provider_evidence)` 方法复用现有 Provider 准入。不可变结果保留
+准确的 AW 配置、目标和已准入步骤，包括事件与步骤 selector 的交集。报告为
+`admitted_not_active`，激活仍须经过 service 的接点确认和策略代次门禁。消费者将结果与
+对应运行代次一起保留；回调、Provider 或桥接故障不得修改该范围。步骤范围外沿用原生
+决策，覆盖内失败遵循已准入的错误动作。
+
+必跑的 `native_configuration` 消费者测试分别执行无 AW 和有 AW 的原生 loader，再运行
+实际 Host 策略调用。测试覆盖未知字段、来源顺序、动态更新、原生错误、Provider 失败、
+编辑冲突和脱敏，证明通用 API 在确定性框架 fixture 中的行为。Qoder SDK、QwenPaw 业务
+接入及其现有原生配置限制由后续集成处理。

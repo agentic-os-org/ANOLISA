@@ -46,6 +46,52 @@ pub(super) fn record(connection: &Connection, trajectory: &TrajectoryRecord) -> 
 }
 
 impl TrajectoryStore {
+    /// Remove a successfully read empty source session and its old fingerprint
+    /// together, without affecting siblings in the same source database.
+    pub(crate) fn clear_source_session(
+        &self,
+        session_id: &str,
+        source: &str,
+        file_path: &str,
+    ) -> Result<()> {
+        let mut connection = self.lock_conn()?;
+        let transaction = connection.transaction()?;
+        for table in ["collected_trajectories", "source_session_states"] {
+            transaction.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE session_id = ?1 AND source = ?2 AND file_path = ?3"
+                ),
+                params![session_id, source, file_path],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Remove a superseded file snapshot and remember its empty replay atomically.
+    pub(crate) fn clear_replayed_file(
+        &self,
+        file_path: &str,
+        file_size: i64,
+        file_mtime_ns: i64,
+    ) -> Result<()> {
+        let mut connection = self.lock_conn()?;
+        let transaction = connection.transaction()?;
+        // Match the owning path: a second copy of a session may own the row.
+        transaction.execute(
+            "DELETE FROM collected_trajectories WHERE file_path = ?1",
+            params![file_path],
+        )?;
+        transaction.execute(
+            "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(file_path) DO UPDATE SET file_size = ?2, file_mtime_ns = ?3",
+            params![file_path, file_size, file_mtime_ns],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// 按会话及来源定位指纹，容量裁剪后的会话仍保留状态。
     pub(crate) fn get_source_session_state(
         &self,

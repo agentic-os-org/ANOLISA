@@ -4,7 +4,9 @@
 
 ## 准备
 
-使用官方提交 `952c941e741e922a9be8fc403c8944c6e96318bb`，已跟踪文件保持干净。安装 Python console script，使用绝对 Python shebang；入口为本地 `chat`。
+已验证基线为提交 `952c941e741e922a9be8fc403c8944c6e96318bb`。AW 记录实际检出的修订，
+其他具备原生 profile、插件和 shell-hook 接口的修订也可接入。已跟踪文件保持干净，
+保留安装路径与加载环境检查。安装 Python console script，使用绝对 Python shebang；入口为本地 `chat`。
 按[教程](../integration.md)构建 AW，复制[Hermes 配置](../../../../../src/aw/crates/aw-service/examples/aw.hermes.yaml)，把 argv 改为该安装的绝对路径。
 先用 Hermes 初始化 profile 和模型账号。
 

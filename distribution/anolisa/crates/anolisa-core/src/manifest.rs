@@ -24,6 +24,32 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// so contract authors, the install resolver, and docs cannot drift.
 pub const RENDER_ANOLISA_PATHS_V1: &str = "anolisa-paths-v1";
 
+/// Render layout placeholders in the command field of a JSON document.
+pub const RENDER_ANOLISA_JSON_COMMAND_V1: &str = "anolisa-json-command-v1";
+
+/// Components whose discovery contracts ship with ANOLISA's distribution.
+pub const DISTRIBUTION_REGISTRY_COMPONENTS: [&str; 7] = [
+    "cosh-ng",
+    "sec-core",
+    "agentsight",
+    "tokenless",
+    "skillfs",
+    "ws-ckpt",
+    "agent-memory",
+];
+
+/// Whether a path is a discovery contract shipped by ANOLISA itself.
+///
+/// Old component archives and ownership records may still claim this path;
+/// component lifecycle operations must leave the distribution registry intact.
+pub fn is_distribution_discovery_contract(
+    layout: &anolisa_platform::fs_layout::FsLayout,
+    component: &str,
+    path: &Path,
+) -> bool {
+    DISTRIBUTION_REGISTRY_COMPONENTS.contains(&component) && path == layout.contract_path(component)
+}
+
 // ---------------------------------------------------------------------------
 // ComponentManifest
 // ---------------------------------------------------------------------------

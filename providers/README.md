@@ -9,7 +9,7 @@ and protocol libraries remain in `../src/aw/crates/`.
 | Provider | Capability | Source |
 | --- | --- | --- |
 | [sec-core](agent-sec-core/README.md) | Command security checks | First-party sec-core CLI/backend |
-| [Tokenless](tokenless/README.md) | Tool output compression and command suggestions | First-party Tokenless CLI and packaged RTK |
+| [Tokenless](tokenless/README.md) | Tool output compression and command suggestions | Separately installed Tokenless CLI and compatible RTK |
 
 ## Contribute or distribute
 
@@ -39,13 +39,22 @@ repository using pinned public AW libraries.
 The bundled Rust Providers currently use repository-local AW libraries; Tokenless
 composition tests also use the sec-core bridge, so builds outside the repository
 are not yet supported. Standalone SDK publication and artifact-based composition
-are future work. Preview delivers a single build set, with installation checking
-matching versions and source commits for core and Providers.
+are future work. Integration builds select and test compatible framework, Provider
+and backend versions together; extension packages have independent IDs and versions.
 
-The existing package builder supports core, sec-core, and Tokenless. A new folder
+The distribution target `make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` builds
+independent core, sec-core Provider and Tokenless Provider archives through scripts in
+`distribution/packaging/aw/`. A new folder
 is not automatically bundled or installed; independent Providers supply their
 own installer. Bundling a new Provider also requires package manifest, build,
 installation, and lifecycle test support.
+
+AW's local raw extension installer accepts new `package.json` bundles only when
+they declare `aw-provider/v1alpha1`; `manifest.json`, core and ordinary backend
+bundles are rejected. Provider runtime use does not require that installer or its
+database: configure the installed executable through `transport.argv`. When
+delivering a Provider as RPM, declare its backend core dependency and retain
+native ownership. Backend owners deliver their binaries and services.
 
 See [Provider development and distribution](../docs/developer-guide/en/aw/providers/index.md)
 for the protocol, sample implementation, and validation entrypoints.

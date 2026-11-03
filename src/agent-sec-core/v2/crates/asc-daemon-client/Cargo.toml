@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 socket2 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix.workspace = true
+nix.workspace = true
 
 [dev-dependencies]
 opentelemetry.workspace = true

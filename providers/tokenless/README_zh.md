@@ -14,9 +14,14 @@
 从仓库根目录构建和测试。
 
 ```bash
-cargo build --locked --manifest-path providers/tokenless/Cargo.toml
+make -C providers/tokenless build
+make -C providers/tokenless install PREFIX=/usr/local DESTDIR="$PWD/target/aw-root"
 cargo test --locked --manifest-path providers/tokenless/Cargo.toml
 ```
 
-Cargo 包名与二进制名保留为 `aw-provider-tokenless`。随 AW Preview 分发时使用
+Cargo 包名与二进制名保留为 `aw-provider-tokenless`。独立归档分发使用
 [构建指南](../../contribute/zh/aw/building.md)生成匹配的包。
+
+安装只复制预构建桥接程序、示例、已有私有 schema 和文档，不安装或启动后端。
+省略 `DESTDIR` 后，按调用者权限直接安装；`AWPRJ` 可为私有路径增加命名空间。
+运行配置使用最终程序的绝对 `transport.argv`。

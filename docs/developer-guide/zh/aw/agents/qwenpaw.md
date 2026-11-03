@@ -6,7 +6,9 @@
 
 ## 启动 QwenPaw
 
-安装 QwenPaw 2.2.2.post1 与 AgentScope 2.0.10，通过 QwenPaw 初始化模型配置。示例
+已验证基线为 QwenPaw 2.2.2.post1 与 AgentScope 2.0.10。安装 QwenPaw 及其兼容依赖，
+通过 QwenPaw 初始化模型配置。其他版本沿用插件、middleware 与原生任务生命周期接口检查，
+AW 记录已安装版本。示例
 使用 `argv: [qwenpaw, app]`。将 `QWENPAW_WORKING_DIR` 指向已初始化的绝对目录。
 AW 只添加自身临时插件，保留已有插件和原生配置，App 退出后删除自身插件。
 
@@ -38,6 +40,10 @@ Hook 就绪信息后使用 App/API；ACP/TUI、多 worker 启动继续被拒绝�
 App startup 在首个 reply 前确认更新就绪；启动策略持续生效，直到更新成功。共享
 子作用域尚无原生证据采集合同，普通 resident 启动会拒绝该配置。
 
+每次安装使用独立的 `aw-native-<uuid>` 目录与 manifest ID，保留用户已有的
+`aw-native` 插件及配置。`config.json` 加载和 MCP 动态更新由 QwenPaw 负责。
+AW 原样转发原生工厂参数，工具生成器完成清理后再向 Coordinator 交付终态结果。
+
 ```bash
 QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
   --config crates/aw-service/examples/aw.qwenpaw.yaml --agent qwenpaw \
@@ -49,3 +55,5 @@ QWENPAW_WORKING_DIR=/absolute/qwenpaw-home target/debug/aw run \
 `aw-provider/v1alpha1` 策略配置；原生 Hook 的输出格式与事件覆盖仍按框架分别说明。
 
 零 Provider、零事件步骤的普通配置也会安装 resident 准入与清理 middleware。
+
+共用的 sec-core Provider 还提供[加载前 Skill 校验](../providers/sec-core.md#加载前校验-skill)。在 `tool.before` 为原生 `Skill` 工具配置 `check_skill`，并在 daemon 授权实际规范化来源目录。

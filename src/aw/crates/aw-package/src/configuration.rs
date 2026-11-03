@@ -2,6 +2,7 @@
 
 use crate::{filesystem as paths, require, Result};
 mod installed;
+mod template;
 mod templates;
 
 use serde_json::Value;
@@ -20,11 +21,11 @@ pub struct Settings<'a> {
     pub state: &'a Path,
     /// Explicit policy selection; installed Providers are never enabled implicitly.
     pub policy: Policy<'a>,
-    /// Qoder CLI >=1.1.64 executable with compatible native command Hooks.
+    /// Qoder CLI executable with compatible native command Hooks.
     pub qoder: Option<&'a Path>,
-    /// Node executable used by the pinned OpenClaw installation.
+    /// Node executable used by the selected OpenClaw installation.
     pub node: Option<&'a Path>,
-    /// OpenClaw 2026.9.6 openclaw.mjs entrypoint.
+    /// OpenClaw openclaw.mjs entrypoint.
     pub openclaw: Option<&'a Path>,
 }
 
@@ -32,17 +33,12 @@ pub struct Settings<'a> {
 pub enum Policy<'a> {
     /// No business policy or Provider calls.
     None,
-    /// PostTool compression using the installed Tokenless Provider.
-    Tokenless,
-    /// sec-core tool-before checks followed by Tokenless PostTool compression.
-    SecCoreTokenless {
-        /// Existing daemon socket; configuration generation never starts it.
-        socket: &'a Path,
-    },
-    /// Optional installed sec-core Provider using an existing system daemon.
-    SecCore {
-        /// Existing daemon socket; configuration generation never starts it.
-        socket: &'a Path,
+    /// Explicit distributor or Provider document; AW never selects a business preset.
+    Template {
+        /// Generic template with package requirements, Providers and events.
+        definition: Value,
+        /// Literal values used for named template placeholders.
+        variables: std::collections::BTreeMap<String, String>,
     },
     /// A command returning a JSON boolean; AW constructs protocol replies.
     Command {
@@ -57,7 +53,7 @@ pub enum Policy<'a> {
 
 /// Exclusively create a private, schema-validated configuration.
 /// No template executes user commands or starts a Provider during generation.
-/// Agent versions are checked by `aw run`; configuration creation never invokes a model.
+/// Native compatibility is checked by `aw run`; configuration creation never invokes a model.
 pub fn configure(settings: &Settings<'_>) -> Result<()> {
     configure_using(settings, paths::write_private)
 }
@@ -76,39 +72,17 @@ pub(crate) fn configure_using(
         node,
         openclaw,
     } = settings;
-    let mut names = vec!["aw-core"];
-    if matches!(policy, Policy::Tokenless | Policy::SecCoreTokenless { .. }) {
-        names.push("aw-provider-tokenless");
-    }
-    if matches!(
-        policy,
-        Policy::SecCore { .. } | Policy::SecCoreTokenless { .. }
-    ) {
-        names.push("aw-provider-sec-core");
-    }
-
+    let requirements = template::required_packages(policy)?;
+    let names: Vec<_> = requirements.iter().map(String::as_str).collect();
     let selection = installed::Selection::read(prefix, &names)?;
-    let installed = &selection.packages;
-    require(
-        installed.contains_key("aw-core"),
-        "install AW core before configuring",
-    )?;
-    if matches!(
-        policy,
-        Policy::SecCore { .. } | Policy::SecCoreTokenless { .. }
-    ) {
+    for name in &requirements {
         require(
-            installed.contains_key("aw-provider-sec-core"),
-            "install the sec-core Provider before selecting its template",
-        )?;
-    }
-    if matches!(policy, Policy::Tokenless | Policy::SecCoreTokenless { .. }) {
-        require(
-            installed.contains_key("aw-provider-tokenless"),
-            "install the Tokenless Provider before selecting its template",
+            selection.packages.contains_key(name),
+            format!("install required template package: {name}"),
         )?;
     }
     selection.verify(prefix)?;
+    template::verify_files(policy, &selection.packages)?;
     for path in [*config, *state] {
         paths::absolute(path)?;
     }
@@ -129,14 +103,10 @@ pub(crate) fn configure_using(
         )?;
     }
     require(
-        !config.starts_with(prefix) && !state.starts_with(prefix),
-        "configuration and state must be outside the immutable prefix",
+        !config.starts_with(prefix) && !overlaps_reserved_prefix_path(state, prefix),
+        "configuration must be outside the prefix, and state must not overlap installed payloads or registration metadata",
     )?;
     socket_length("AW state", &state.join("aw.sock"))?;
-    if let Policy::SecCore { socket } | Policy::SecCoreTokenless { socket } = policy {
-        paths::absolute(socket)?;
-        socket_length("sec-core", socket)?;
-    }
     require(
         qoder.is_some() || openclaw.is_some(),
         "select at least one Agent entrypoint",
@@ -158,32 +128,41 @@ pub(crate) fn configure_using(
             entrypoint(Path::new(program), libc::X_OK, "executable")?;
         }
     }
-    let mut value = document(settings)?;
-    if let Some(component) = installed.get("aw-provider-tokenless") {
-        let name = "libexec/aw/providers/tokenless/rtk";
-        require(
-            std::env::join_paths([prefix.join("libexec/aw/providers/tokenless")]).is_ok(),
-            "managed RTK directory cannot be represented in PATH",
-        )?;
-        let payload = component.files.get(name).ok_or_else(|| {
-            crate::Error::Invalid("installed Tokenless package record lacks managed RTK".into())
-        })?;
-        value["spec"]["providers"]["tokenless"]["transport"]["argv"]
-            .as_array_mut()
-            .ok_or_else(|| crate::Error::Invalid("Tokenless argv must be an array".into()))?
-            .extend([
-                serde_json::json!("--rtk"),
-                serde_json::json!(prefix.join(name)),
-                serde_json::json!("--rtk-sha256"),
-                serde_json::json!(payload.sha256),
-            ]);
-    }
+    let value = templates::document(settings, Some(&selection.packages))?;
     let yaml = serde_yaml_ng::to_string(&value)?;
     aw_config::Validator::new()
         .and_then(|validator| validator.parse(yaml.as_bytes()))
         .map_err(|error| crate::Error::Invalid(error.to_string()))?;
     selection.verify(prefix)?;
     publish(config, yaml.as_bytes())
+}
+
+/// Prefix-relative paths `aw` itself owns: the payload roots `aw install`
+/// and the distribution Makefile write (`store::filesystem::relative`
+/// admits exactly `bin`, `libexec` and `share`), and the reserved
+/// metadata names — the registration metadata directory (`RegistrationPointer`
+/// requires it to hold only the locator) and the installation lock, which
+/// the installer requires to be a regular file. Runtime state dropped on
+/// any of these breaks `config init`, `aw list --installed` or the next
+/// installation, so configuration and state must not overlap them, but
+/// may live elsewhere under the prefix — the documented `~/.local` install
+/// with XDG state at `~/.local/state/aw` is a sibling, not one of them.
+fn overlaps_reserved_prefix_path(candidate: &Path, prefix: &Path) -> bool {
+    const RESERVED: [&str; 6] = [
+        "bin",
+        "libexec",
+        "share",
+        ".local-packages",
+        ".aw-packages",
+        ".local-install.lock",
+    ];
+    let Ok(relative) = candidate.strip_prefix(prefix) else {
+        return false;
+    };
+    relative
+        .components()
+        .next()
+        .is_some_and(|first| RESERVED.iter().any(|root| first.as_os_str() == *root))
 }
 
 fn socket_length(name: &str, path: &Path) -> Result<()> {
@@ -199,7 +178,7 @@ fn socket_length(name: &str, path: &Path) -> Result<()> {
 /// # Errors
 /// Rejects inconsistent Agent inputs or invalid command template parameters.
 pub fn document(settings: &Settings<'_>) -> Result<Value> {
-    templates::document(settings)
+    templates::document(settings, None)
 }
 
 fn entrypoint(path: &Path, access: i32, permission: &str) -> Result<()> {
@@ -221,4 +200,57 @@ fn entrypoint(path: &Path, access: i32, permission: &str) -> Result<()> {
         ),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    #[test]
+    fn state_may_be_an_xdg_sibling_of_the_payloads_but_not_inside_them() {
+        let prefix = Path::new("/home/user/.local");
+        // XDG state under the supported prefix: accepted.
+        assert!(!overlaps_reserved_prefix_path(
+            &prefix.join("state/aw"),
+            prefix
+        ));
+        // The immutable payload roots themselves, and anything inside them.
+        for root in ["bin", "libexec", "share"] {
+            assert!(overlaps_reserved_prefix_path(&prefix.join(root), prefix));
+            assert!(overlaps_reserved_prefix_path(
+                &prefix.join(root).join("aw"),
+                prefix
+            ));
+        }
+        // The installer's reserved registration metadata directory, and
+        // anything inside it: startup would write state beside
+        // `installation.json` and corrupt the locator.
+        assert!(overlaps_reserved_prefix_path(
+            &prefix.join(".local-packages"),
+            prefix
+        ));
+        assert!(overlaps_reserved_prefix_path(
+            &prefix.join(".local-packages/s"),
+            prefix
+        ));
+        // The legacy metadata name and the installation lock: runtime state
+        // created there breaks registration reading and later installs.
+        for reserved in [".aw-packages", ".local-install.lock"] {
+            assert!(overlaps_reserved_prefix_path(
+                &prefix.join(reserved),
+                prefix
+            ));
+            assert!(overlaps_reserved_prefix_path(
+                &prefix.join(reserved).join("s"),
+                prefix
+            ));
+        }
+        // Not under the prefix at all: outside this helper's scope (the
+        // separate starts_with gate on the configuration path covers the
+        // caller's needs), so it reports no overlap.
+        assert!(!overlaps_reserved_prefix_path(
+            Path::new("/elsewhere/state/aw"),
+            prefix
+        ));
+    }
 }

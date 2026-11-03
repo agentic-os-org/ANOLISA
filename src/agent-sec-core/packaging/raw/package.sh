@@ -136,10 +136,17 @@ COMMAND="${1:-}"
 [ "$COMMAND" = "stage" ] || [ "$COMMAND" = "package" ] || \
     die "usage: $0 {stage|package}"
 
+# The shipped manifest and adapter launcher still describe the legacy raw tree.
+[ "${RAW_LAYOUT_PROFILE:-anolisa}" = "anolisa" ] || \
+    die "raw packaging supports only RAW_LAYOUT_PROFILE=anolisa; use make install DESTDIR=... for component-owned installation"
+AWPRJ="${AWPRJ-anolisa}"
+[ "$AWPRJ" = anolisa ] || \
+    die "raw packages require AWPRJ=anolisa; cannot remap AWPRJ without updating the raw manifest and adapter runtime layout"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/target}"
-CONTRACT="${RAW_CONTRACT:-$ROOT/.anolisa/component.toml}"
+CONTRACT="${RAW_CONTRACT:-$ROOT/packaging/anolisa/component.toml}"
 TARGET_OS="${TARGET_OS:-linux}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 

@@ -207,3 +207,78 @@ fn native_denial_text_survives_resident_scope_transport() {
     preserved(&fixture);
     service.released(&fixture);
 }
+
+#[test]
+fn native_early_terminal_consumer_observes_completed_finalizers() {
+    let fixture = Fixture::new();
+    let document = resident(&fixture, "withhold_result");
+    let service = Service::start(&fixture, &document);
+    let mut command = launch(&fixture);
+    command.env("FAKE_QWENPAW_EARLY_TERMINAL", "1");
+    let result = fixture.successful(command);
+    assert_eq!(result["failure"], Value::Null);
+    assert_eq!(result["results"].as_array().unwrap().len(), 2);
+    for index in 0..2 {
+        assert_eq!(
+            fs::read_to_string(fixture.root.join(format!("call-{index}-finalized"))).unwrap(),
+            "done"
+        );
+    }
+    assert_eq!(events(&fixture).len(), 4);
+    preserved(&fixture);
+    service.released(&fixture);
+}
+
+#[test]
+fn submit_policy_blocks_before_native_reply_and_preserves_configuration() {
+    for (deny, failure, policy, blocked) in [
+        (false, false, "block", false),
+        (true, false, "report", true),
+        (false, true, "block", true),
+        (false, true, "report", false),
+    ] {
+        let fixture = Fixture::new();
+        let mut document = resident(&fixture, "report");
+        document["spec"]["events"]["input.submit"] =
+            document["spec"]["events"]["tool.before"].clone();
+        document["spec"]["events"]["input.submit"]["steps"][0]["on_error"] = json!(policy);
+        let mut second = document["spec"]["events"]["input.submit"]["steps"][0].clone();
+        second["id"] = json!("second-submit-check");
+        document["spec"]["events"]["input.submit"]["steps"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        let service = Service::start(&fixture, &document);
+        let mut command = launch(&fixture);
+        command.env("FAKE_QWENPAW_SUBMIT", "1");
+        if deny {
+            command.env("FAKE_QWENPAW_SUBMIT_DENY", "1");
+        }
+        if failure {
+            command.env("FAKE_QWENPAW_SUBMIT_FAILURE", "1");
+        }
+        let result = fixture.successful(command);
+        assert_eq!(
+            result["failure"],
+            if blocked {
+                json!("SubmissionDenied")
+            } else {
+                Value::Null
+            }
+        );
+        assert_eq!(fixture.root.join("model-request").exists(), !blocked);
+        assert_eq!(fixture.root.join("tool-executed").exists(), !blocked);
+        let callbacks = events(&fixture);
+        assert_eq!(
+            callbacks
+                .iter()
+                .filter(|event| event["name"] == "input.submit")
+                .count(),
+            if blocked { 1 } else { 2 }
+        );
+        assert_eq!(callbacks[0]["input"]["text"], "fresh user input");
+        assert!(callbacks[0].get("tool").is_none());
+        preserved(&fixture);
+        service.released(&fixture);
+    }
+}

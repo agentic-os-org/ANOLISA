@@ -58,6 +58,21 @@ fn mount_relations_derive_underlying_and_visible_paths() {
 }
 
 #[test]
+fn visible_candidates_deduplicate_nonadjacent_equal_length_paths() {
+    let mounted = mount(4, 1, "/sub", "/mounted", "ext4");
+    let mounts = [
+        mount(1, 0, "/", "/alias", "ext4"),
+        mount(2, 1, "/", "/aliaz", "ext4"),
+        mount(3, 1, "/", "/alias", "ext4"),
+        mounted.clone(),
+    ];
+    assert_eq!(
+        visible_paths_for_mount_root(&mounts, &mounted),
+        vec!["/alias/sub", "/aliaz/sub"]
+    );
+}
+
+#[test]
 fn reading_mountinfo_reports_current_process_mounts() {
     let pid = i32::try_from(std::process::id()).expect("PID fits i32");
     let (mounts, digest) = read_mountinfo(pid).expect("read own mountinfo");

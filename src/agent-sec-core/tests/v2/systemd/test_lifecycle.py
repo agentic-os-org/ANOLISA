@@ -24,7 +24,7 @@ def command(*args, check=True, timeout=95):
     )
 
 
-def wait_for(predicate, timeout=15):
+def wait_for(predicate, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():

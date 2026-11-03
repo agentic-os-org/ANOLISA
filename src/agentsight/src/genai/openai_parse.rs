@@ -303,10 +303,12 @@ impl GenAIBuilder {
             top_k: param("top_k").and_then(|v| v.as_f64()),
             seed: param("seed").and_then(|v| v.as_i64()),
             stop_sequences: param("stop").and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str().map(String::from))
-                        .collect()
+                v.as_str().map(|stop| vec![stop.to_string()]).or_else(|| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(String::from))
+                            .collect()
+                    })
                 })
             }),
             stream: obj.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),

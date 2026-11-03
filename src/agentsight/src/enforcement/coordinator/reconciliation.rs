@@ -434,6 +434,8 @@ pub(super) fn is_binding_rejection(code: &str) -> bool {
             | "stale_process"
             | "compile_failure"
             | "kernel_failure"
+            | "preexisting_writable_map"
+            | "preexisting_writable_fd"
     )
 }
 
@@ -455,6 +457,9 @@ pub(super) fn remote_rejection_message(code: &str, _message: &str) -> String {
         "stale_process" => "enforcer rejected desired binding: process identity is stale",
         "compile_failure" => "enforcer rejected desired binding: policy compilation failed",
         "kernel_failure" => "enforcer rejected desired binding: kernel attachment failed",
+        "preexisting_writable_map" | "preexisting_writable_fd" => {
+            "enforcer rejected desired binding: target tree holds pre-existing write access"
+        }
         _ => REJECTION_FALLBACK,
     };
     sanitize_operator_message(operator_message)

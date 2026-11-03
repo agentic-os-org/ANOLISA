@@ -267,7 +267,7 @@ authentication/version failure and source limits produce explicit gaps; AW Hooks
 and local audit retain their existing behavior. An empty valid trajectory is
 `available` with unknown coverage; a 404 is `unknown`, not proof of no activity.
 The minimum `auto`/`off` behavior above is implemented; full per-capability
-`required` admission and all-in-one packaging remain separate work.
+`required` admission remains separate work.
 
 ## Validation
 

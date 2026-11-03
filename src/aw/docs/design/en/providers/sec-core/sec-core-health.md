@@ -6,10 +6,10 @@ The explicit `aw-provider-sec-core --health --helper ABS --socket ABS` entry
 supports installation checks without invoking a security operation. It calls
 only the public `agent-sec-daemon-health` helper, which authenticates the root
 Unix-socket peer and validates `daemon.health`. The caller selects a trusted,
-receipt-verified helper; the diagnostic is not an executable sandbox.
+owner-verified helper; the diagnostic is not an executable sandbox.
 
 The independent `aw-sec-core-health/v1alpha1` schema lives in
-`../../providers/sec-core/schemas/health-v1alpha1.schema.json`.
+`providers/agent-sec-core/schemas/health-v1alpha1.schema.json` in the repository.
 `helper_installed` is file presence and `socket_configured` is an absolute input
 path, not verification of the AW configuration. Only a successful helper yields
 `authenticated_reachable`; missing components, helper errors, output limits and
@@ -25,9 +25,9 @@ existing Provider event and view protocols. It is not registered in `aw inspect`
 and does not change that command's output. A later unified read surface needs
 its own reviewed compatibility contract.
 
-The Provider package includes the helper and official systemd/configuration
-reference assets, covered by its existing receipt. Assets are not installed as
-system services. An existing root backend remains owned by its system package;
+The backend core package owns the helper, daemon, systemd unit and backend
+configuration. The Provider package owns only its bridge, private health schema
+and examples; it does not install backend programs or system services. An existing root backend remains owned by its system package;
 AW install/uninstall does not change `/etc`, stop shared services or migrate
 backend data. Automatic system installation/upgrade/removal remains outside
 this change. Runtime `scan_code` keeps its per-call authentication and failure

@@ -15,6 +15,12 @@ from hermes.cron import (
 )
 
 
+@pytest.fixture(autouse=True)
+def installed_ws_ckpt_binary():
+    with patch("hermes.cron.shutil.which", return_value="/usr/bin/ws-ckpt"):
+        yield
+
+
 class TestValidateCronExpr:
     def test_valid(self):
         assert validate_cron_expr("0 * * * *") is True
@@ -97,14 +103,20 @@ class TestParseSchedulesUpdate:
 
 class TestBuildCronLine:
     def test_basic(self):
-        line = _build_cron_line("/my/ws", "0 * * * *")
+        line = _build_cron_line("/my/ws", "0 * * * *", "/usr/bin/ws-ckpt")
         assert line.startswith("0 * * * *")
         assert "ws-ckpt checkpoint" in line
         assert "-w '/my/ws'" in line
 
     def test_workspace_with_quote(self):
-        line = _build_cron_line("/my/ws's", "0 * * * *")
+        line = _build_cron_line("/my/ws's", "0 * * * *", "/usr/bin/ws-ckpt")
         assert "'\\''" in line
+
+    def test_quoted_binary_keeps_workspace_ownership_matching(self):
+        binary = "/opt/owner package/bin/ws-ckpt"
+        line = _build_cron_line("/my/ws", "0 * * * *", binary)
+        assert "'/opt/owner package/bin/ws-ckpt' checkpoint" in line
+        assert _match_workspace(line, "/my/ws") is True
 
 
 class TestExtractWorkspace:
@@ -171,13 +183,54 @@ class TestWriteCrontab:
 
 
 class TestCrontabManagerSync:
+    @pytest.mark.parametrize(
+        "binary", ["/usr/bin/ws-ckpt", "/usr/local/bin/ws-ckpt", "/opt/owner/bin/ws-ckpt"]
+    )
+    def test_records_discovered_binary_without_resolving_its_launcher(self, binary):
+        with (
+            patch.object(CrontabManager, "_with_lock", side_effect=lambda action: action()),
+            patch("hermes.cron.shutil.which", return_value=binary) as which,
+            patch("hermes.cron._read_crontab", return_value=[]),
+            patch("hermes.cron._write_crontab", return_value=True) as write,
+        ):
+            assert CrontabManager.sync("/ws", ["0 * * * *"]) is True
+            which.assert_called_once_with("ws-ckpt")
+            assert f" {binary} checkpoint " in write.call_args[0][0][0]
+
+    @pytest.mark.parametrize(
+        "binary",
+        [None, "/opt/bad\nname/ws-ckpt", "/opt/bad\rname/ws-ckpt", "/opt/bad%name/ws-ckpt"],
+    )
+    def test_missing_or_unsupported_binary_does_not_touch_existing_crontab(self, binary):
+        with (
+            patch.object(CrontabManager, "_with_lock", side_effect=lambda action: action()),
+            patch("hermes.cron.shutil.which", return_value=binary),
+            patch("hermes.cron._read_crontab") as read,
+            patch("hermes.cron._write_crontab") as write,
+        ):
+            assert CrontabManager.sync("/ws", ["0 * * * *"]) is False
+            read.assert_not_called()
+            write.assert_not_called()
+
+    def test_removal_does_not_require_an_installed_binary(self):
+        old = _build_cron_line("/ws", "0 * * * *", "/old/bin/ws-ckpt")
+        with (
+            patch.object(CrontabManager, "_with_lock", side_effect=lambda action: action()),
+            patch("hermes.cron.shutil.which", return_value=None) as which,
+            patch("hermes.cron._read_crontab", return_value=[old, "# keep"]),
+            patch("hermes.cron._write_crontab", return_value=True) as write,
+        ):
+            assert CrontabManager.remove("/ws") is True
+            which.assert_not_called()
+            write.assert_called_once_with(["# keep"])
+
     @patch("hermes.cron.os.close")
     @patch("hermes.cron.os.open", return_value=99)
     @patch("hermes.cron.fcntl.flock")
     @patch("hermes.cron._write_crontab", return_value=True)
     @patch("hermes.cron._read_crontab")
     def test_replaces_old_entries(self, mock_read, mock_write, _flock, _open, _close):
-        old_line = _build_cron_line("/ws", "0 * * * *")
+        old_line = _build_cron_line("/ws", "0 * * * *", "/usr/bin/ws-ckpt")
         mock_read.return_value = ["# comment", old_line]
         result = CrontabManager.sync("/ws", ["5 4 * * *"])
         assert result is True
@@ -201,7 +254,7 @@ class TestCrontabManagerRemove:
     @patch("hermes.cron._write_crontab", return_value=True)
     @patch("hermes.cron._read_crontab")
     def test_removes_entries(self, mock_read, mock_write, _flock, _open, _close):
-        old_line = _build_cron_line("/ws", "0 * * * *")
+        old_line = _build_cron_line("/ws", "0 * * * *", "/usr/bin/ws-ckpt")
         mock_read.return_value = [old_line, "other line"]
         CrontabManager.remove("/ws")
         written = mock_write.call_args[0][0]
@@ -264,7 +317,7 @@ class TestListInstalled:
     @patch("hermes.cron._write_crontab", return_value=True)
     @patch("hermes.cron._read_crontab")
     def _sync_then_list(self, ws, schedules, mock_read, mock_write, *_):
-        lines = [_build_cron_line(ws, s) for s in schedules]
+        lines = [_build_cron_line(ws, s, "/usr/bin/ws-ckpt") for s in schedules]
         lines.append("# unrelated")
         mock_read.return_value = lines
         return CrontabManager.list_installed(ws)

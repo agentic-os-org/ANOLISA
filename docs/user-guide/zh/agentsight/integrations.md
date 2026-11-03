@@ -29,8 +29,12 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
   `features.trajectory_collection.scan_dirs`。有界递归发现会将这些会话正确标为 `claude-code`，不会误标为 Qoder。
 - **OpenClaw** 观测的是它的 `openclaw-gateway` 守护进程，而不是客户端。缺 Token 数据时，先确认客户端
   确实连上了 gateway。
-- **Codex CLI** 静态链接 TLS 库，AgentSight 会退化到字节模式匹配加逐版本 offset 表。刚发布的 Codex
-  版本可能需要更新 `codex_offsets` 条目。
+- **Codex CLI** 静态链接 TLS 库，内嵌 offset 表已包含官方 Linux x86_64 musl 构建的 0.147.0 和
+  0.162.1，并验证了 OpenSSL 路径的 HTTPS Responses 采集。条目按可执行文件大小和指纹匹配，
+  不仅依赖版本号。只修改部署配置中的 `codex_offsets` 无效：该表在编译期嵌入 AgentSight，
+  需要使用包含新条目的重编译二进制。探针挂载前已发出的请求仍可能漏采。
+  `CODEX_CA_CERTIFICATE` 或 `SSL_CERT_FILE` 等自定义 CA 设置可能切换到 rustls；
+  这些 OpenSSL offset 不覆盖该路径或 WebSocket TLS。
 - **Gemini CLI** 轨迹直接从 `~/.gemini/tmp/<project>/chats/session-*.jsonl` 会话文件采集，无需配置。
   项目名取自各项目目录下的 `.project_root` 标记文件。采集器在转换前会重放 CLI 的修正记录
   （`$rewindTo`、`$patch`、`$set`），因此采集到的轨迹与 CLI 恢复会话时看到的对话一致；嵌套在父
@@ -103,8 +107,8 @@ sudo agentsight audit --last 1 --exclude agent-sec-cli --exclude observability_h
 AgentSight enforcement unavailable: enforcer I/O failed: No such file or directory (os error 2)
 ```
 
-采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。启动对应 unit 即可；源码构建
-请使用 `make build-all`。
+采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。需要单独启动 enforcer 守护进程。
+源码运行见[源码构建](deployment.md#源码构建)。
 
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：
@@ -116,6 +120,11 @@ $ sudo journalctl -u agentsight-enforcer
 
 默认级别为 `info`；在 unit 中添加 `Environment=RUST_LOG=debug` 可获得更详细的输出。
 
+系统层文件防误删不是默认 profile 的开箱能力。即使 `ready=true`，也必须检查
+`capabilities.file_delete_guard`；默认 `credential-exfiltration` 不支持该能力。
+切换 `agent-file-guard` 的前置条件、互斥能力、维护窗口及重新 Apply 步骤，见
+[启用系统层文件防误删](deployment.md#启用系统层文件防误删)。
+
 拦截能力还取决于引擎的 hook 预算：只有当引擎启动时预留了对应的 BPF LSM hook、且内核启用了
 BPF LSM（`/sys/kernel/security/lsm` 中包含 `bpf`）时，`block` 规则才能真正拒绝操作。当 `block`
 规则命中在一个无法拒绝该操作的后端上——例如 `block connect` 规则命中时 `enforce_socket_connect`
@@ -123,9 +132,34 @@ hook 并未挂载——引擎仍会以 `effect=block` 且 `blocked=false` 的 vi
 报告，说明该策略实际无法拒绝；请检查引擎 profile（`ACTPLANE_HOOK_PROFILE` /
 `ACTPLANE_PINNED_PROFILE`）与内核 LSM 配置。
 
-协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。当前后端会拒绝
-结构化策略且不改变已有绑定，新增文件保护能力保持 false。旧 DSL 语义不变，但协议 v4 帧会
-被拒绝，因此客户端需与 enforcer 一起升级。
+协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。mock 后端仍然拒绝
+结构化策略。旧 DSL 语义不变，但协议 v4 帧会被拒绝，因此客户端需与 enforcer 一起升级。
+
+### 结构化文件保护：一期边界
+
+`file_protection_policy` 支持保护精确文件目录项或整个目录树（含未来子项），并按目标排除精确目录项
+或子目录树。`delete` 与 `ordinary_write` 独立选择。下发前通过 `/api/enforcement/health` 检查
+`file_entry_delete_protection`、`directory_tree_delete_protection`、`ordinary_write_protection`
+和 `static_mount_topology` 是否支持相应能力。ActPlane 后端要求结构化策略显式设置
+`policy_mode: "enforce"`；省略模式或设置 `audit/observe` 会在拓扑准备和内核修改前被拒绝，
+不改变旧 DSL 的处理方式。
+
+- 普通写保护阻止通过受保护路径执行的 `write/pwrite`，包括策略生效前已打开的 FD；读取和打开
+  可写 FD 仍允许。
+- 每次祖先遍历最多 256 步，挂载切换也占用步数；预算内无法确定保护时分类为 UNKNOWN，
+  普通写放行；仅当当前策略域请求删除保护时，删除和重命名才会保守拒绝。因此过深的子项
+  可能可写；同样深度下的显式文件目标或附近的目录树保护根仍可命中，并非所有深路径都会放行。
+- 策略范围外、未被其他目标保护的硬链接仍可写入同一 inode，从而改变受保护文件内容；需要保护
+  该别名时应显式加入目标。删除外部硬链接仍允许，因为它不会删除受保护的目录项。
+- 即使文件受保护，`truncate/ftruncate`、`O_TRUNC`、共享可写 `mmap/mprotect` 和 `fallocate` 打洞
+  也不在该保护契约内。io_uring/AIO 与 chmod/chown 同样不在一期覆盖保证内；
+  `complete_content_protection` 保持 false。
+- 挂载拓扑固定在 Apply 时；已有受支持的 bind 别名与子挂载会被解析，生效后的
+  mount/bind/unmount 及动态 overlay 变化不支持。
+- 准备结束和激活前会重新解析路径身份，但不会原子锁定路径直到激活完成。Apply 返回前需保持
+  目标、排除项、祖先与进程根目录稳定；Apply 期间并发 rename/exchange 或根目录变化不支持。
+
+这是限定操作范围的保护，并不保证受保护文件内容不可变。
 
 ## cosh：用自然语言提问
 

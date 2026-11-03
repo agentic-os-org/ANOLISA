@@ -501,6 +501,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adopt_memory_records_the_installed_aggregate_or_core() {
+        for include_aggregate in [false, true] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+            let layout =
+                anolisa_platform::fs_layout::FsLayout::system(Some(tmp.path().to_path_buf()));
+            let env = anolisa_env::EnvService::detect();
+            let index = format!(
+                "schema_version = 2\n\n[[components]]\nname = \"agent-memory\"\ntargets = [{{ os = \"{}\", arch = \"{}\" }}]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"agent-memory\"\nlegacy_adopt = true\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"agent-memory-core\"\n",
+                env.os, env.arch
+            );
+            std::fs::write(
+                layout.etc_dir.join("test-index-repo/v1/components-v2.toml"),
+                index,
+            )
+            .expect("component index");
+            let mut query = FakeQuery {
+                installed: vec![(
+                    "agent-memory-core".to_string(),
+                    pkg_info("agent-memory-core", "0.2.13", Some("1"), "x86_64"),
+                )],
+                provides: vec![],
+                ..Default::default()
+            };
+            if include_aggregate {
+                query
+                    .provides
+                    .push(component_provider("agent-memory", "agent-memory"));
+                query.installed.push((
+                    "agent-memory".to_string(),
+                    pkg_info("agent-memory", "0.2.13", Some("1"), "x86_64"),
+                ));
+            }
+            adopt_with_query("agent-memory", None, &c, &query).expect("adopt");
+            let (package, relation, _) = delegated_parts(&load_store(&c), "agent-memory");
+            assert_eq!(
+                package,
+                if include_aggregate {
+                    "agent-memory"
+                } else {
+                    "agent-memory-core"
+                }
+            );
+            assert!(matches!(relation, ManagementRelation::Adopted { .. }));
+        }
+    }
+
+    #[test]
+    fn adopt_memory_rejects_multiple_aggregate_versions_when_core_provides_identity() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = anolisa_platform::fs_layout::FsLayout::system(Some(tmp.path().to_path_buf()));
+        let env = anolisa_env::EnvService::detect();
+        let index = format!(
+            "schema_version = 2\n\n[[components]]\nname = \"agent-memory\"\ntargets = [{{ os = \"{}\", arch = \"{}\" }}]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"agent-memory\"\nlegacy_adopt = true\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"agent-memory-core\"\n",
+            env.os, env.arch
+        );
+        std::fs::write(
+            layout.etc_dir.join("test-index-repo/v1/components-v2.toml"),
+            index,
+        )
+        .expect("component index");
+        let query = FakeQuery {
+            provides: vec![],
+            multi_version: vec!["agent-memory".to_string()],
+            ..Default::default()
+        };
+        let err = adopt_with_query("agent-memory", None, &c, &query)
+            .expect_err("ambiguous installed aggregate must not be adopted");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("multiple installed versions"));
+    }
+
     /// Re-adopting an observed component upgrades the management relation in
     /// place (A6) without refreshing the cached observation — install/adopt
     /// never refresh EVR implicitly; that is repair's job.

@@ -4,7 +4,7 @@
 #[path = "launcher/support.rs"]
 mod support;
 use serde_json::{json, Value};
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command, time::Duration};
 use support::{Fixture, Service};
 
 #[path = "qoder_sdk/tool_scope.rs"]
@@ -18,6 +18,9 @@ mod resident_reload;
 
 #[path = "qoder_sdk/shutdown.rs"]
 mod shutdown;
+
+#[path = "qoder_sdk/submission.rs"]
+mod submission;
 
 fn setup(f: &Fixture) -> Value {
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -109,17 +112,16 @@ fn denial_and_failed_initialization_never_execute_tools() {
     }
 }
 #[test]
-fn unsupported_versions_overrides_and_replacement_are_rejected() {
+fn invalid_metadata_and_launch_overrides_are_rejected() {
     for mode in [
-        "version",
-        "replacement",
+        "metadata",
         "override",
         "reloadable-plugins",
         "reloadable-wrappers",
     ] {
         let f = Fixture::new();
         let mut document = setup(&f);
-        if mode == "version" {
+        if mode == "metadata" {
             let path = f
                 .root
                 .join("node_modules/@qoder-ai/qoder-agent-sdk/package.json");
@@ -127,13 +129,9 @@ fn unsupported_versions_overrides_and_replacement_are_rejected() {
                 &path,
                 fs::read_to_string(&path)
                     .unwrap()
-                    .replace("1.0.56", "1.0.55"),
+                    .replace("1.0.56", "invalid version"),
             )
             .unwrap();
-        }
-        if mode == "replacement" {
-            document["spec"]["events"]["tool.after"]["steps"][0]["effects"] =
-                json!(["replace_result"]);
         }
         if mode.starts_with("reloadable-") {
             document["spec"]["agents"]["sdk"]["qoder_sdk"] = if mode == "reloadable-plugins" {
@@ -171,14 +169,15 @@ fn callback_composition_preserves_vetoes_isolation_and_cancellation() {
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk/bridge.test.mjs"),
         );
-    let output = f.run(command);
+    // The bridge suite includes deliberate deadline waits.
+    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(45));
     assert!(
         output.status.success(),
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 120"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 132"));
 }
 
 #[test]
@@ -252,4 +251,76 @@ fn installed_bridge_fences_queries_after_private_cleanup_failure() {
     assert_eq!(fixture.successful(launch(&fixture))["fenced"], true);
     assert!(!fixture.root.join("executed").exists());
     service.released(&fixture);
+}
+
+#[test]
+fn sdk_and_worker_releases_share_hooks_without_a_version_allowlist() {
+    for (sdk, worker) in [
+        ("1.0.55", "1.1.77"),
+        ("1.0.57", "1.1.79"),
+        ("2.0.0-preview.1", "2.0.0"),
+    ] {
+        for blocked in [false, true] {
+            let f = Fixture::new();
+            let document = setup(&f);
+            let package = f
+                .root
+                .join("node_modules/@qoder-ai/qoder-agent-sdk/package.json");
+            let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
+            metadata["version"] = json!(sdk);
+            metadata["qoderCliVersion"] = json!(worker);
+            fs::write(package, metadata.to_string()).unwrap();
+            let service = Service::start(&f, &document);
+            let mut command = launch(&f);
+            if blocked {
+                command.env("QODER_SCENARIO", "block");
+            }
+            assert_eq!(f.successful(command)["denied"], blocked);
+            assert_eq!(f.root.join("executed").exists(), !blocked);
+            assert!(f.root.join("query-closed").exists());
+            service.released(&f);
+        }
+    }
+}
+
+#[test]
+fn missing_native_query_interface_rejects_other_releases_before_execution() {
+    let f = Fixture::new();
+    let document = setup(&f);
+    let entry = f
+        .root
+        .join("node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js");
+    let source = fs::read_to_string(&entry).unwrap();
+    fs::write(
+        &entry,
+        source.replace(
+            "recordInboundSessionMessage() {}",
+            "unsupportedInboundMessage() {}",
+        ),
+    )
+    .unwrap();
+    let service = Service::start(&f, &document);
+    let output = f.run(launch(&f));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("missing native seam recordInboundSessionMessage"));
+    assert!(!f.root.join("executed").exists());
+    service.released(&f);
+}
+
+#[test]
+fn skill_catalog_resolution_matches_native_names_and_rejects_ambiguity() {
+    let f = Fixture::new();
+    let mut command = Command::new("node");
+    command.args(["--test", "--test-reporter=tap"]).arg(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk/skills.test.mjs"),
+    );
+    let output = support::Process::spawn(&f, command).finish_with_timeout(Duration::from_secs(15));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# pass 17"));
 }

@@ -109,9 +109,12 @@ git -C "$SOURCE_REPO" worktree lock --reason 'skillfs prebuilt package build' \
     "$FIXED_WORKTREE"
 
 COMPONENT_ROOT="$FIXED_WORKTREE/src/skillfs"
+CONTRACT_DIR="$COMPONENT_ROOT/packaging/anolisa/raw"
+# Historical tagged sources retain their original contract directory.
+[ -d "$CONTRACT_DIR" ] || CONTRACT_DIR="$COMPONENT_ROOT/.anolisa"
 COMPONENT_VERSION="$(
     python3 "$COMPONENT_ROOT/packaging/raw/verify-release.py" \
-        "$COMPONENT_ROOT" "$COMPONENT_ROOT/.anolisa/component.toml" \
+        "$COMPONENT_ROOT" "$CONTRACT_DIR/component.toml" \
         --os "$TARGET_OS" --arch "$TARGET_ARCH"
 )"
 [ "$VERSION" = "$COMPONENT_VERSION" ] || \
@@ -164,7 +167,7 @@ METADATA="$BIN_DIR/skillfs-build.toml"
     printf 'skillfs = "%s"\n' "$(sha256sum "$BIN_DIR/skillfs" | awk '{print $1}')"
 } > "$METADATA"
 
-CONTRACT="$COMPONENT_ROOT/.anolisa/component.toml"
+CONTRACT="$CONTRACT_DIR/component.toml"
 SKILLFS_SOURCE_DIR="$COMPONENT_ROOT" \
 RAW_CONTRACT="$CONTRACT" \
 BIN_DIR="$BIN_DIR" \

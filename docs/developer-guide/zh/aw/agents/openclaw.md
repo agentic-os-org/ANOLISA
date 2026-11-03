@@ -6,7 +6,8 @@
 
 ## 启动 OpenClaw
 
-另行安装 OpenClaw 2026.9.6。示例使用 `argv: [openclaw, gateway, run]`，必要时
+单独安装 OpenClaw，已验证基线为 2026.9.6。其他版本接入时，AW 记录已安装版本，
+要求原生插件完成注册并收到 Gateway 就绪回执。示例使用 `argv: [openclaw, gateway, run]`，必要时
 改为可执行文件的绝对路径。显式传入已有原生 JSON 配置和已存在的绝对 state 目录。
 AW 生成私有配置 overlay，保留该目录中的认证和会话；发现 Gateway 所有权冲突时
 拒绝启动，不接管正在运行的实例。

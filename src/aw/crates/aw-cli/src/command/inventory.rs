@@ -15,7 +15,7 @@ pub(super) struct List {
 
 #[derive(Args, Debug, PartialEq)]
 pub(super) struct Query {
-    /// Select an absolute installation directory, including an older .aw-packages layout
+    /// Select an absolute registered AW Provider installation directory
     #[arg(long, value_name = "ABS_DIR")]
     prefix: Option<PathBuf>,
     /// Package database scope (default: user)
@@ -53,4 +53,29 @@ pub(super) fn run(command: &'static str, query: Query) -> crate::cli::Result<cra
         }
     });
     crate::output::complete(command, query.output, result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aw_package::database::{DatabasePaths, RegistrationPointer};
+
+    #[test]
+    fn explicit_user_scope_still_rejects_a_recorded_system_prefix_before_reading_its_database() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path().canonicalize().unwrap();
+        let records = prefix.join(".local-packages");
+        std::fs::create_dir(&records).unwrap();
+        let pointer =
+            RegistrationPointer::new(&DatabasePaths::system(), "system-installation".into())
+                .unwrap();
+        std::fs::write(
+            records.join("installation.json"),
+            serde_json::to_vec(&pointer).unwrap(),
+        )
+        .unwrap();
+        let error = read(Some(&prefix), Some(super::super::scope::Scope::User)).unwrap_err();
+        assert!(matches!(error, aw_package::Error::Invalid(message)
+            if message == "explicit --scope conflicts with the prefix registration"));
+    }
 }

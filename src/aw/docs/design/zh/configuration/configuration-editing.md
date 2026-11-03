@@ -106,3 +106,11 @@ Provider 私有值；选择器可选 Provider、事件或事件下的步骤，�
 CLI 编辑不修改 Schema、Registry 或 Service 合同，
 也不重载当前服务。选项、回滚及使用新 revision 重启的说明见
 [CLI 参考](../../../../../../docs/developer-guide/zh/aw/reference/configuration-editor.md)。
+
+## 原生来源归属
+
+原生配置保留在 AW 解析器和发布事务之外。Agent 的可选 `native_config.sources` 序列
+只保存引用，其 ID 与原生对象名称独立。编辑或移除引用不读取、覆盖或卸载原生文件。
+完整 AW 候选仍须通过严格 schema 和引用校验，再原子发布。原生加载与 AW 能力准入
+分别返回结果，运行期激活状态继续由 service 管理。API、消费者责任与可执行证据见
+[loader 参考](../../../../../../docs/developer-guide/zh/aw/reference/configuration-editor.md#接入原生-loader)。

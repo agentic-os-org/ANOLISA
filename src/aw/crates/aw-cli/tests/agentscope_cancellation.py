@@ -66,7 +66,9 @@ async def worker() -> None:
         async def check_permissions(
             self, tool_input: dict[str, Any], context: Any
         ) -> PermissionDecision:
-            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+            return PermissionDecision(
+                behavior=PermissionBehavior.ALLOW, message="Cancellation fixture allows the tool"
+            )
 
         async def call(self, mode: str) -> Any:
             if mode.startswith("rpc-before-"):

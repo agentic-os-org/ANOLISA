@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.15.3
+
+### Fixes
+- Preserve final token usage in cost analysis and scope final answers to the latest turn.
+- Preserve ATIF developer instructions and recorded tool completion times.
+- Decode stacked HTTP content codings and keep missing throughput measurements unknown.
+- Preserve Hermes fallback call identity and clear empty Hermes histories.
+- Cover legacy guards in write-access preflight and close file-guard content-loss entries.
+- Validate resource capture quality before accepting benchmark results.
+
+### Changed
+- Keep ANOLISA discovery contract ownership in the distribution.
+
+## 0.15.2
+
+### Features
+- Enforce structured file-protection policies: classify policy paths, lower them into map entries, apply them, and enforce structured kernel deletion, rename/exchange, and ordinary file writes.
+- Advertise structured file protection as a capability.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs: `agentsight-core` owns programs, configuration and services; `agentsight-plugins` holds the DSH integration; `agentsight` remains as a compatibility package that depends on the exact-version core.
+- Programs install to the system binary directory, and `make install` consumes prebuilt files without activating services. (BREAKING)
+
+### Tests
+- Cover structured policies end to end and assert matched file guard audit rules.
+
+## 0.15.1
+
+### Breaking changes
+- Unify file installation: `make install` now installs prebuilt files without activation, `make install-core` and `make install-plugins` select programs, configuration and services or native host integration resources, local installation defaults to `PREFIX=/usr/local` with an empty `AWPRJ`, and `DESTDIR` only prepends the packaging root. `make build` still compiles components through the root Makefile.
+
+### Features
+- Enforce structured file protection: activated policies deny `unlink`, `rmdir`, boundary-crossing rename and exchange, and ordinary `write`/`pwrite` on protected regular files, with denial events naming the operation. Truncate, `O_TRUNC`, shared writable mmap and dynamic mounts stay out of scope, and no content-immutability guarantee is claimed.
+- Accept structured policies through ActPlane in enforce mode and report four supported structured capabilities in the health response; the integration guide now documents ordinary-write and Apply stability limits instead of blanket rejection.
+- Add the structured file-protection policy contract behind the above: normalized protections, static and re-resolved protected topology, race-safe path resolution, legacy `path_rename` hook support, self-owned policy activation and detach, transactional policy map staging, policy generations in pinned maps, and a structured policy map ABI.
+- Add resource limit checks.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs.
+- Split RPM file ownership into `agentsight-core` and `agentsight-plugins`; core owns service resources and installs independently.
+
+### Performance
+- Cache GenAI identifier hashes, vectorize SSL executable scans, and stream capture database queries.
+
+### Fixes
+- Explain file guard activation, report file guard capability, and validate file protection boundaries.
+- Ship per-architecture BPF objects so the enforcer payload follows the build target.
+- Attach SSL uprobes earlier to catch the first TLS connections, add verified Codex TLS offsets, and bound unknown process registration.
+- Preserve partial Qoder batch usage, usage-only batch records, bare JSON SSE usage, and the last usable batch usage.
+- Honor successful Gemini tool calls, retain Gemini function responses, and replay Gemini session previews.
+- Retain local session identity, attach local replies to their calls, disambiguate echoed tool call IDs, and compare complete repeated turns.
+- Preserve user config on schema migration and make session controls accessible.
+- Report cleanup errors from a failed activation without losing the original compile or kernel failure classification.
+- Keep partial campaign reports and worker results, lock resource build publication, reject impossible benchmark metrics, preserve missing drop counters, bound recovery evidence by phase, and verify executed regression commands.
+
+### Upgrade notes
+- The enforcer control protocol moves from v4 to v5 and is not backward compatible: a 0.15.0 client paired with a 0.15.1 enforcer has every request rejected as `UnsupportedVersion`, including health checks. Upgrade the client and the enforcer together.
+- Full and agent-file-guard upgrades replace stale v4 hook layouts instead of silently accepting unenforced ordinary-write policies.
+- Review the installation targets above before rollout: `make install` no longer activates what it installs, and deployments relying on the previous single-target behavior must call `make install-core` and `make install-plugins` explicitly.
+
 ## 0.15.0
 
 ### Features
@@ -22,6 +82,8 @@
 - Preserve literal capture-database paths containing URI punctuation and valid JSONL records around damaged lines, with warnings for discarded records.
 - Treat missing or invalid recovery observations as gaps, reject invalid final drop counters, and report unproven recovery gates instead of claiming an improvement.
 - Read modern h2load request-latency summaries correctly, preserving mean, median, p95 and p99 without borrowing fields from adjacent rows.
+- Restore the macOS release builds so the published 0.15.0 artifacts include the macOS package.
+- Publish benchmark campaign artifacts atomically so an interrupted run cannot leave a partially written manifest.
 
 ### Performance
 - Compute benchmark latency percentiles from one sorted snapshot and release unused fallback samples to reduce long-run work and memory use. (#8888)

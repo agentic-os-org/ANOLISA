@@ -2,6 +2,13 @@
 
 [English](CHANGELOG.md)
 
+## [0.6.1] - 未发布
+
+### 变更
+
+- 可通过独立 RPM 安装运行时、宿主集成与 Skill。
+- Skill 和宿主插件迁至 ANOLISA 的共享资源目录。
+
 ## 0.6.0
 
 ### Added

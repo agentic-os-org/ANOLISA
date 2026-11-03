@@ -253,7 +253,10 @@ fn resolve_remote(
 
 #[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> Result<u32, SkillFsError> {
-    Ok(rustix::net::sockopt::socket_peercred(stream)?.uid.as_raw())
+    // PID may be 0 across namespaces.
+    nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+        .map(|credentials| credentials.uid())
+        .map_err(|error| SkillFsError::Io(error.into()))
 }
 
 #[cfg(not(target_os = "linux"))]

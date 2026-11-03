@@ -35,6 +35,7 @@ export function query({ prompt, options }) {
     transport: { write() {} },
     async interrupt() {},
     async getContextUsage() {},
+    async request() { return { effective: { hooksConfig: { enabled: true } } }; },
     async next() { return { done: true }; },
     async streamInput() {},
     async initializationResult() {

@@ -48,6 +48,15 @@ _SENSITIVE_KEY_SUFFIXES = (
     "secret",
     "token",
 )
+# A credential mapping or list is routinely named in the plural ("tokens",
+# "secrets"); only whole words are generalised, so a numeric limit such as
+# "max_tokens" keeps its value.
+_SENSITIVE_KEY_FORMS = _SENSITIVE_EXACT_KEYS | frozenset(
+    key + "s" for key in _SENSITIVE_EXACT_KEYS
+)
+# Split camelCase and acronym runs, so "APIKey" and "authToken" keep their
+# word boundaries instead of turning into one letter per underscore.
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -72,6 +81,17 @@ def text_record(text: str) -> dict[str, int | str]:
     }
 
 
+def _file_digest_and_size(path: Path) -> tuple[str, int]:
+    """Hash raw file bytes with bounded buffers and explicit handle ownership."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(128 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
 def file_record(path: Path | str | None) -> dict[str, Any]:
     if path is None:
         return {"path": None, "exists": False}
@@ -84,11 +104,11 @@ def file_record(path: Path | str | None) -> dict[str, Any]:
     if not file_path.is_file():
         return record
 
-    data = file_path.read_bytes()
+    digest, size = _file_digest_and_size(file_path)
     record.update(
         {
-            "sha256": sha256_bytes(data),
-            "bytes": len(data),
+            "sha256": digest,
+            "bytes": size,
         }
     )
     return record
@@ -111,12 +131,12 @@ def directory_tree_record(path: Path | str | None) -> dict[str, Any]:
         if not child.is_file():
             continue
         relative_path = child.relative_to(root).as_posix()
-        file_data = child.read_bytes()
+        digest, size = _file_digest_and_size(child)
         entries.append(
             {
                 "path": relative_path,
-                "sha256": sha256_bytes(file_data),
-                "bytes": len(file_data),
+                "sha256": digest,
+                "bytes": size,
             }
         )
 
@@ -131,9 +151,19 @@ def directory_tree_record(path: Path | str | None) -> dict[str, Any]:
 
 
 def _is_sensitive_key(key: str) -> bool:
-    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", key)
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", snake).strip("_").lower()
-    return normalized in _SENSITIVE_EXACT_KEYS or normalized.endswith(_SENSITIVE_KEY_SUFFIXES)
+    """Return whether *key* names a credential that must never be recorded.
+
+    Separators are folded alike, so ``apiKey``, ``APIKey``, ``X-API-Key`` and
+    ``OPENAI_API_KEY`` all normalise to ``api_key``. The previous splitter
+    inserted an underscore before *every* capital, so all-caps and hyphenated
+    keys reached the matcher as one letter per underscore
+    (``o_p_e_n_a_i__a_p_i__k_e_y``) and were recorded verbatim.
+    """
+    snake = _CAMEL_BOUNDARY_RE.sub("_", key)
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake.lower()).strip("_")
+    return normalized in _SENSITIVE_KEY_FORMS or normalized.endswith(
+        _SENSITIVE_KEY_SUFFIXES
+    )
 
 
 def _redact_sensitive(value: Any, *, key: str = "") -> Any:

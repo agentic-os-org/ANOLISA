@@ -148,9 +148,12 @@ _MIN_RTK_VERSION = (0, 35, 0)
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
 _RTK_FALLBACK_DEBIAN = "/usr/lib/anolisa/tokenless/rtk"
 _RTK_SYSTEM_BIN = "/usr/local/bin/rtk"
+_RTK_SYSTEM_STANDALONE = "/usr/local/libexec/tokenless/rtk"
 _RTK_SYSTEM_LIBEXEC = "/usr/local/libexec/anolisa/tokenless/rtk"
 _RTK_RPM_BIN = "/usr/bin/rtk"
+_RTK_RPM_STANDALONE = "/usr/libexec/tokenless/rtk"
 _RTK_LOCAL_BIN = _user_path(".local", "bin", "rtk")
+_RTK_USER_STANDALONE = _user_path(".local", "libexec", "tokenless", "rtk")
 _RTK_ANOLISA_USER = _user_path(
     ".local",
     "lib",
@@ -175,11 +178,14 @@ def _find_rtk() -> Optional[str]:
         return path
     for fp in (
         _RTK_LOCAL_BIN,
+        _RTK_USER_STANDALONE,
         _RTK_ANOLISA_USER,
         _RTK_MAKE_USER,
         _RTK_SYSTEM_BIN,
+        _RTK_SYSTEM_STANDALONE,
         _RTK_SYSTEM_LIBEXEC,
         _RTK_RPM_BIN,
+        _RTK_RPM_STANDALONE,
         _RTK_FALLBACK,
         _RTK_FALLBACK_DEBIAN,
         _RTK_LOCAL_SHARE,

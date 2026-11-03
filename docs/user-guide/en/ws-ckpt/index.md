@@ -37,10 +37,32 @@ sudo anolisa --install-mode system install ws-ckpt
 sudo yum install ws-ckpt
 ```
 
+| RPM | Contents |
+|---|---|
+| `ws-ckpt` | Compatibility aggregate: exact version/release dependencies on all three packages below |
+| `ws-ckpt-core` | CLI, daemon, configuration, service unit and lifecycle, license, and documentation |
+| `ws-ckpt-plugins` | OpenClaw/Hermes bundles and detection, registration, and removal scripts; requires matching core |
+| `ws-ckpt-skills` | Bundled checkpoint skill; requires matching core |
+
+Select `sudo yum install ws-ckpt-core` for the service and CLI alone; add
+plugins or skills when needed. Core installation enables/restarts the service;
+check `systemctl status ws-ckpt.service`. Register host plugins separately as
+the Agent user. Install or upgrade local RPMs as one matching version/release
+set with `yum install /absolute/path/to/matching-rpms/*.rpm`.
+
 ### Option 3: Source build (developers)
 
+From the repository root on Linux:
+
 ```bash
-cd src/ws-ckpt && make build
+make -C src/ws-ckpt build
+```
+
+The executable is `src/ws-ckpt/src/target/release/ws-ckpt`. To install it
+system-wide after building:
+
+```bash
+sudo make -C src/ws-ckpt install
 ```
 
 ---
@@ -290,6 +312,12 @@ There is no user-side global config file. Auto-checkpoint and cleanup behavior a
 
 ### Hermes Plugin Configuration
 
+Hermes resolves `ws-ckpt` from the Agent's `PATH` when synchronizing
+schedules and saves the absolute executable path in crontab. For a custom
+installation prefix, add its `bin` directory to that `PATH` first. If the CLI
+is unavailable, synchronization fails and retains the existing crontab;
+removing schedules does not require the binary to remain installed.
+
 ```bash
 hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
 ```
@@ -376,6 +404,13 @@ nor plugin configuration. OpenClaw's list tool is unchanged.
 ### CLI-Based Configuration
 
 Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (per-workspace `policy.toml` overrides). Running `ws-ckpt config` without a scope prints a read-only overview; `-g` views/edits the global config; `-w` can only override `auto_cleanup` and `auto_cleanup_keep` — the remaining fields (interval / image / health check) are daemon-wide and can only be set via `-g`; `-w <workspace> --reset` removes the workspace override and falls back to the global config.
+
+Setting `ws-ckpt config -g --health-check-interval 0` disables periodic health
+diagnostics. The daemon still refreshes the advisory cache at the default
+300-second interval and after workspace or global configuration changes. CLI
+warnings are best effort: they are omitted until a
+complete sample is available and if the last successful sample is over 600
+seconds old.
 
 ```bash
 # Enable auto-cleanup, keep checkpoints for 7 days

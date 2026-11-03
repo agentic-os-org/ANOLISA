@@ -24,7 +24,15 @@ if opened.returncode == 0:
     scope = json.loads(opened.stdout)
     try:
         result["acknowledge"] = cli("acknowledge", scope).returncode
-        result["invoke"] = cli("invoke", {"scope": scope, "native_input": json.dumps(config["native"])}).returncode
+        watch = cli("watch", scope)
+        result["watch"] = watch.returncode
+        validity = {"scope": scope, "policy_revision": json.loads(watch.stdout)["policy_revision"], "valid": True}
+        result["check"] = cli("check", validity).returncode
+        invocation = {"scope": scope, "native_input": json.dumps(config["native"])}
+        result["invoke"] = cli("invoke", invocation).returncode
+        result["invalid"] = cli("check", {**validity, "valid": False}).returncode
+        result["renew"] = cli("check", validity).returncode
+        result["blocked"] = cli("invoke", invocation).returncode
     finally:
         result["close"] = cli("close", scope).returncode
 print(json.dumps(result))

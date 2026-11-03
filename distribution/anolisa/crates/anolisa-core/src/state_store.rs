@@ -2,7 +2,7 @@
 //! model, with the one-time legacy migration wired in at the load boundary.
 //!
 //! The v5 file stores [`Installation`] records directly plus quarantined
-//! legacy records verbatim. A schema ≤ 4 file is parsed through the legacy
+//! legacy records. A schema ≤ 4 file is parsed through the legacy
 //! [`InstalledState`] wire type and pushed through
 //! [`migrate_state`] exactly once —
 //! the domain types never learn to read the old field soup.
@@ -23,7 +23,7 @@ use crate::adapter::claim::AdapterClaim;
 use crate::domain::{Installation, InstallationScope};
 use crate::planner::RecordFacts;
 use crate::state::{
-    BackupRecord, InstallMode, InstalledState, ObjectKind, OperationRecord, StateError,
+    BackupRecord, InstallMode, InstalledState, ObjectKind, OperationRecord, OwnedFile, StateError,
     now_iso8601, write_atomic,
 };
 use crate::state_identity::repair_known_installation_identities;
@@ -166,6 +166,10 @@ impl StateStore {
     /// adopt the selected layout. Otherwise file metadata and every
     /// installation scope must already match; conflicting state is rejected
     /// before planning or save.
+    ///
+    /// After scope validation, retire obsolete distribution discovery claims
+    /// from active and quarantined component records in memory. Loading never
+    /// writes state or registry files; a later save persists that retirement.
     pub fn load_for_layout(path: &Path, uid: u32, layout: &FsLayout) -> Result<Self, StateError> {
         let mut store = Self::load(path, uid)?;
         if store.installations.is_empty()
@@ -215,6 +219,24 @@ impl StateStore {
                     installation_scope_label(installation.scope),
                 ),
             });
+        }
+        let retire_discovery_claims = |component: &str, files: &mut Vec<OwnedFile>| {
+            files.retain(|file| {
+                !crate::manifest::is_distribution_discovery_contract(layout, component, &file.path)
+            });
+        };
+        for installation in &mut store.installations {
+            if installation.kind == ObjectKind::Component
+                && let crate::domain::ProviderBinding::Owned { artifact } =
+                    &mut installation.binding
+            {
+                retire_discovery_claims(&installation.name, &mut artifact.files);
+            }
+        }
+        for quarantined in &mut store.quarantined {
+            if quarantined.record.kind == ObjectKind::Component {
+                retire_discovery_claims(&quarantined.record.name, &mut quarantined.record.files);
+            }
         }
         Ok(store)
     }
@@ -676,6 +698,78 @@ source_repo = "anolisa"
 
         assert_eq!(store.install_mode, InstallMode::System);
         assert_eq!(store.prefix, layout.prefix);
+    }
+
+    #[test]
+    fn scoped_load_retires_only_distribution_discovery_ownership() {
+        use crate::state::{FileOwner, OwnedFile, OwnedFileKind};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        for layout in [
+            FsLayout::system(Some(tmp.path().join("system"))),
+            FsLayout::user_with_overrides(tmp.path().join("home"), None, None, None, None, None),
+        ] {
+            let path = layout.state_dir.join("installed.toml");
+            let mut store = StateStore::empty_for_layout(&layout);
+            for name in crate::manifest::DISTRIBUTION_REGISTRY_COMPONENTS
+                .into_iter()
+                .chain(["cosh", "os-skills"])
+            {
+                let mut installation = owned_installation(name, "1.0.0");
+                installation.scope = match layout.mode {
+                    LayoutInstallMode::System => InstallationScope::System,
+                    LayoutInstallMode::User => InstallationScope::User { uid: 1000 },
+                };
+                let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+                    unreachable!("owned fixture");
+                };
+                for path in [
+                    layout.contract_path(name),
+                    layout.contract_path("other-component"),
+                    layout.snapshot_path(name),
+                ] {
+                    artifact.files.push(OwnedFile {
+                        path,
+                        owner: FileOwner::Anolisa,
+                        sha256: None,
+                        kind: OwnedFileKind::File,
+                        referent: None,
+                        mode: None,
+                        capabilities: Vec::new(),
+                    });
+                }
+                store.upsert(installation);
+            }
+            store.save(&path).expect("seed state");
+            let before = fs::read(&path).expect("state bytes");
+            let loaded = StateStore::load_for_layout(&path, 1000, &layout).expect("load state");
+            assert_eq!(fs::read(&path).expect("read-only load"), before);
+            for installation in &loaded.installations {
+                let ProviderBinding::Owned { artifact } = &installation.binding else {
+                    unreachable!("owned fixture");
+                };
+                assert_eq!(
+                    artifact.files.len(),
+                    if ["cosh", "os-skills"].contains(&installation.name.as_str()) {
+                        3
+                    } else {
+                        2
+                    }
+                );
+                assert!(
+                    artifact
+                        .files
+                        .iter()
+                        .any(|file| file.path == layout.snapshot_path(&installation.name))
+                );
+                assert!(
+                    artifact
+                        .files
+                        .iter()
+                        .any(|file| file.path == layout.contract_path("other-component"))
+                );
+            }
+        }
     }
 
     #[test]

@@ -377,3 +377,29 @@ fn qoder_sdk_reload_preserves_the_first_denial_reason() {
         reason
     );
 }
+
+#[test]
+fn policy_updates_use_native_entrypoints_across_framework_releases() {
+    for (adapter, entrypoint) in [
+        ("qoder", "tui"),
+        ("qwenpaw", "app"),
+        ("qoder-sdk", "sdk-worker"),
+    ] {
+        for version in ["1.0.55", "1.0.57", "3.0.0-preview", "2026.10.29"] {
+            let mut capabilities = AdapterCapabilities {
+                adapter: adapter.into(),
+                version: version.into(),
+                entrypoint: entrypoint.into(),
+                events: BTreeMap::new(),
+                failure_actions: BTreeMap::new(),
+            };
+            assert!(supported(&capabilities).is_ok());
+            assert_eq!(
+                resident_supported(&capabilities).is_ok(),
+                adapter != "qoder"
+            );
+            capabilities.entrypoint = "unsupported".into();
+            assert!(supported(&capabilities).is_err());
+        }
+    }
+}

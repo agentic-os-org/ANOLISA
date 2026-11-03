@@ -36,16 +36,16 @@ pub struct Plan {
     pub observe: bool,
 }
 
-/// Check the initially pinned version and reusable native entrypoint.
+/// Check the reusable native entrypoint; runtime bridges verify its protocol.
 pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
     match (
         capabilities.adapter.as_str(),
-        capabilities.version.as_str(),
         capabilities.entrypoint.as_str(),
     ) {
-        ("qoder", "1.1.73", "tui") | ("qwenpaw", "2.2.2.post1", "app")
-        | ("qoder-sdk", "1.0.56", "sdk-worker") => Ok(()),
-        _ => Err("runtime policy updates require Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 App or Qoder SDK 1.0.56".into()),
+        ("qoder", "tui") | ("qwenpaw", "app") | ("qoder-sdk", "sdk-worker") => Ok(()),
+        _ => {
+            Err("runtime policy updates require Qoder TUI, QwenPaw App or Qoder SDK worker".into())
+        }
     }
 }
 
@@ -89,7 +89,7 @@ pub fn scope_policy(
         return Err("resident policy scopes do not support native evidence capture".into());
     }
     let (events, hooks) = match capabilities.adapter.as_str() {
-        "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps)?,
+        "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
         "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, false)?,
         _ => return Err("unsupported resident policy adapter".into()),
     };
@@ -106,6 +106,12 @@ pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabiliti
         .map_err(|e| e.to_string())?;
     let steps = aw_provider::admission::preflight(&config, target, capabilities)
         .map_err(|e| e.to_string())?;
+    if steps
+        .iter()
+        .any(|step| crate::adapters::sdk_tools::checks_skill(step, &capabilities.adapter))
+    {
+        return Err("Skill checking requires ordinary resident mode".into());
+    }
     for event in ["tool.before", "tool.after"] {
         plan(document, target, &steps, event)?;
     }

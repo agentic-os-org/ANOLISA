@@ -7,7 +7,9 @@ Run source examples from `src/aw`; build AW with the [integration tutorial](../i
 ## Start a Pi SDK worker
 
 For a high-code Pi application, use `adapter: pi` with the public Coding Agent/Core
-SDKs 0.84.2 and Node.js >=22.19.0. AW owns a foreground SDK worker and connects
+SDKs and Node.js >=22.19.0. Both SDKs at 0.84.2 are the verified baseline.
+AW checks package identity, module layout and native Agent/AgentSession interfaces
+for other releases, and records the installed Coding Agent version. AW owns a foreground SDK worker and connects
 both tool Hook points. Install those SDK packages in your application using your
 normal dependency workflow, and retain your application's model/auth settings.
 The native Pi CLI is a separate entrypoint and is not launched by this adapter.

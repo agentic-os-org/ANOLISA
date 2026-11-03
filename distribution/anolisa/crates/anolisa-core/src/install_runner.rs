@@ -112,13 +112,19 @@ pub enum RenderMode {
     /// substitute layout placeholders (`{bindir}`, `{datadir}`, … plus
     /// `{component}`) inside UTF-8 file content against the final layout.
     AnolisaPathsV1,
+    /// Expand layout placeholders in the `command` field of a JSON object.
+    AnolisaJsonCommandV1,
 }
 
 impl RenderMode {
     /// Map a manifest `render` string to a supported mode. Returns `None`
     /// for values this CLI does not implement — callers must reject those.
     pub fn parse(value: &str) -> Option<Self> {
-        (value == crate::manifest::RENDER_ANOLISA_PATHS_V1).then_some(Self::AnolisaPathsV1)
+        match value {
+            crate::manifest::RENDER_ANOLISA_PATHS_V1 => Some(Self::AnolisaPathsV1),
+            crate::manifest::RENDER_ANOLISA_JSON_COMMAND_V1 => Some(Self::AnolisaJsonCommandV1),
+            _ => None,
+        }
     }
 }
 
@@ -654,6 +660,37 @@ impl<'a> InstallRunner<'a> {
                     }
                 })?;
                 Ok(rendered.into_bytes())
+            }
+            RenderMode::AnolisaJsonCommandV1 => {
+                let mut document: serde_json::Value =
+                    serde_json::from_slice(bytes).map_err(|err| InstallError::Render {
+                        path: file.dest.clone(),
+                        reason: format!("invalid JSON document: {err}"),
+                    })?;
+                let command = document
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| InstallError::Render {
+                        path: file.dest.clone(),
+                        reason: "JSON document must have a string command field".to_string(),
+                    })?;
+                let rendered = crate::adapter::expand_layout_placeholders_content(
+                    command,
+                    self.layout,
+                    &[("component", spec.component.as_str())],
+                )
+                .map_err(|err| InstallError::Render {
+                    path: file.dest.clone(),
+                    reason: err.to_string(),
+                })?;
+                document["command"] = serde_json::Value::String(rendered);
+                let mut result =
+                    serde_json::to_vec_pretty(&document).map_err(|err| InstallError::Render {
+                        path: file.dest.clone(),
+                        reason: format!("cannot encode rendered JSON: {err}"),
+                    })?;
+                result.push(b'\n');
+                Ok(result)
             }
         }
     }
@@ -2750,13 +2787,101 @@ mod tests {
     }
 
     #[test]
-    fn render_mode_parse_accepts_only_v1() {
+    fn render_mode_parse_accepts_supported_modes() {
         assert_eq!(
             RenderMode::parse("anolisa-paths-v1"),
             Some(RenderMode::AnolisaPathsV1)
         );
         assert_eq!(RenderMode::parse("anolisa-paths-v2"), None);
+        assert_eq!(
+            RenderMode::parse("anolisa-json-command-v1"),
+            Some(RenderMode::AnolisaJsonCommandV1)
+        );
         assert_eq!(RenderMode::parse(""), None);
+    }
+
+    #[test]
+    fn json_command_render_escapes_layout_and_preserves_other_fields() {
+        let home = tempdir().unwrap();
+        let mut special = layout_for(home.path());
+        special.bin_dir = home.path().join("quoted\" and \\slashes/bin");
+        let layouts = [
+            layout_for(home.path()),
+            FsLayout::system(Some(home.path().to_path_buf())),
+            special,
+        ];
+        for layout in layouts {
+            let runner = InstallRunner::new(&layout);
+            let dest = layout.datadir.join("mcp.json");
+            let mut file = render_entry("mcp.json", dest);
+            file.render = Some(RenderSpec {
+                mode: RenderMode::AnolisaJsonCommandV1,
+                component: "agent-memory".to_string(),
+            });
+            let template = br#"{"command":"{bindir}/agent-memory","description":"{literal}"}"#;
+            let rendered = runner
+                .render_bytes(&file, file.render.as_ref().unwrap(), template)
+                .expect("JSON command rendered");
+            let value: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+            assert_eq!(
+                value["command"].as_str().unwrap(),
+                format!("{}/agent-memory", layout.bin_dir.display())
+            );
+            assert_eq!(value["description"], "{literal}");
+        }
+    }
+
+    #[test]
+    fn json_command_install_records_rendered_digest() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let template = br#"{"command":"{bindir}/agent-memory"}"#;
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("mcp.json", template)]),
+        );
+        let dest = layout.datadir.join("mcp.json");
+        let mut file = render_entry("mcp.json", dest.clone());
+        file.render = Some(RenderSpec {
+            mode: RenderMode::AnolisaJsonCommandV1,
+            component: "agent-memory".to_string(),
+        });
+        let outcome = runner
+            .install_mapped_fixture("tar_gz", &cached, &[file])
+            .expect("JSON descriptor installed");
+        let installed = fs::read(&dest).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&installed).unwrap();
+        assert_eq!(
+            document["command"].as_str().unwrap(),
+            format!("{}/agent-memory", layout.bin_dir.display())
+        );
+        assert_eq!(outcome.files[0].sha256, sha256_of(&installed));
+    }
+
+    #[test]
+    fn json_command_render_rejects_invalid_input_and_unknown_placeholders() {
+        let home = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let file = render_entry("mcp.json", layout.datadir.join("mcp.json"));
+        let spec = RenderSpec {
+            mode: RenderMode::AnolisaJsonCommandV1,
+            component: "agent-memory".to_string(),
+        };
+        for template in [
+            &b"not JSON"[..],
+            &b"{}"[..],
+            &b"{\"command\":42}"[..],
+            &b"{\"command\":\"{unknown}/agent-memory\"}"[..],
+        ] {
+            assert!(matches!(
+                runner.render_bytes(&file, &spec, template),
+                Err(InstallError::Render { .. })
+            ));
+        }
     }
 
     // -- disk staging (no whole-archive payload in memory) -------------------

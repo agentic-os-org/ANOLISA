@@ -61,6 +61,11 @@ SQLite 为唯一活跃 sink 时也跳过 payload 延迟等待：完成的 captur
 调用，该调用可能带有 fallback session metadata；后续调用面对活跃的外部 sink 时继续使用原有解析
 等待窗口。
 
+GenAI session 与 conversation 解析每个调用只准备一次 lookup key，供 turn 驱逐与 crash drain 复用。
+相同的第一条及最后一条用户文本共享未完成的 SHA-256 状态。重复长文本通过完整字节比较复用前缀，
+缓存最多保留 2 MiB、64 个 entry；缓存驱逐不改变 anchor。Anchor 保存 domain-separated ID 与
+二进制 lookup digest，保持外部 ID 字节、进程及消息数量隔离和滑动 TTL 行为不变。
+
 SQLite completion 在获取连接锁前序列化 JSON。容量选择使用存储列的 `octet_length`，读取字节长度，
 避免持锁加载并逐字扫描整份 payload。投递仍为同步执行；这些修改缩短其临界区，不增加持久化队列。
 完成事件的 JSON 按保留 payload 的估算预留容量，并释放序列化产生的多余容量。SQLite 消息列需要完整

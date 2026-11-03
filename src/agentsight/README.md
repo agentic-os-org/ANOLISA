@@ -185,8 +185,8 @@ cd src/agentsight
 # Build frontend and embed into frontend-dist/ (required before cargo build)
 make build-frontend
 
-# Then build the Rust binary with the embedded UI
-make build
+# Then build only the Rust binary with the embedded UI
+make build-binary
 
 # Or do both in one step
 make build-all
@@ -326,18 +326,18 @@ sudo yum install agentsight
 ```
 
 Installs:
-- `/usr/local/bin/agentsight` — CLI binary
-- `/usr/local/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight` — CLI binary
+- `/usr/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight-start` — trace/serve supervisor
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight system unit
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — enforcement system unit
 
-The RPM is a Linux system package. Its units are installed but not enabled by
-default; when both units run, AgentSight is ordered after the enforcer.
+The RPM is a Linux system package. When both units run, AgentSight is ordered
+after the enforcer.
 
 ### Start the Service
 
-Both package routes leave the units stopped and disabled. Start the main unit
-when you are ready to begin collection:
+Start the main unit when you are ready to begin collection:
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -384,8 +384,9 @@ For Linux cross builds, `scripts/build-enforcer.sh --target
 <aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` selects the target explicitly;
 without arguments it builds for the host. `CARGO` may select a prepared Cross
 wrapper, but must honor the requested target. Both Linux architectures use the
-same raw payload layout and source-owned `.anolisa/component.toml`. macOS ARM64
-uses `.anolisa/component.macos.toml` and ships only the main executable. Cross
+same raw payload layout and source-owned
+`packaging/anolisa/raw/component.toml`. macOS ARM64 uses
+`packaging/anolisa/raw/component.macos.toml` and ships only the main executable. Cross
 compiling macOS from Linux requires `--no-default-features --features server` to
 skip the optional `bpf-build` host dependencies. Remove
 the private enforcer directory only after packaging has consumed its receipt.

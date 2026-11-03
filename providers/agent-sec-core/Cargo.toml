@@ -14,6 +14,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+serde_yaml_ng = { workspace = true }
+aw-host = { workspace = true }
+aw-adapter = { workspace = true }
+aw-package = { workspace = true }
 libc = { workspace = true }
 jsonschema = { workspace = true }
 
@@ -21,10 +25,14 @@ jsonschema = { workspace = true }
 resolver = "2"
 
 [workspace.dependencies]
+aw-host = { path = "../../src/aw/crates/aw-host" }
+aw-adapter = { path = "../../src/aw/crates/aw-adapter" }
+aw-package = { path = "../../src/aw/crates/aw-package" }
 aw-exec = { path = "../../src/aw/crates/aw-exec" }
 aw-provider = { path = "../../src/aw/crates/aw-provider" }
 jsonschema = { version = "0.53", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml_ng = "0.10"
 thiserror = "2"

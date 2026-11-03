@@ -20,6 +20,7 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 MARKER = ".tokenless-qwenwork-owned.json"
@@ -207,6 +208,32 @@ def _dependencies(root: Path) -> None:
             "(response hooks remain available).",
             file=sys.stderr,
         )
+    _data_directory_notice(utils.resolve_data_directory)
+
+
+def _data_directory_notice(resolve_directory: Callable[[], str]) -> None:
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    source = "TOKENLESS_DATA_DIR" if configured else "default"
+    try:
+        directory = resolve_directory()
+    except (OSError, ValueError, RuntimeError) as error:
+        directory = f"unavailable; configured value: {configured!r}"
+        print(
+            f"WARNING: {error}; workspace Shell "
+            "hooks pass through without creating a data directory.",
+            file=sys.stderr,
+        )
+    print(f"Tokenless data directory (current process): {directory} ({source})")
+    print(
+        "This reports the current process configuration only; it does not test "
+        "sandbox write access or verify the desktop process environment."
+    )
+    print(
+        "If the Shell sandbox cannot write to the data directory, RTK statistics "
+        "and execution receipts may be missing while commands can still run. "
+        "Hook-side compression statistics use the Hook process permissions."
+    )
+    print("RTK's native database uses its own path configuration, independently of Tokenless.")
 
 
 def _inventory(root: Path) -> dict:

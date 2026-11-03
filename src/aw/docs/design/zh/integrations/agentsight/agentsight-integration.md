@@ -17,7 +17,7 @@
 | AW Host 与 Core | 保留已准入动作、原始截止时间、原生效果合同和关键本地审计失败语义 |
 | AgentSight 连接器 | 有界 GET、明确的传输信任边界、兼容检查和显式错误，不接管探针或数据库 |
 | AgentSight runtime | 持有采集器、查询服务和存储，按证据报告能力 |
-| 部署 supervisor | 管理可选合包 worker 的权限、启动 profile 和退出 |
+| 部署 supervisor | 管理可选观测 worker 的权限、启动 profile 和退出 |
 
 现有同用户私有 socket 是 AW 的信任边界。核实回调字段不能隔离同 Unix 用户的
 恶意调用。
@@ -50,7 +50,7 @@ null 或显式缺口。
 
 `required` 模式需在启动前核实每项来源能力，分别检查查询兼容、轨迹采集与 eBPF 覆盖；必需能力未支持或未就绪时拒绝启动。可选来源故障继续采用[连接器](agentsight-readonly.md)的有界降级行为。
 
-合包按能力选择产物和 profile，允许只安装 AW，并区分已安装、已启用与已就绪。部署方管理特权探针及 worker 退出。Hook 不安装包、修改文件 capability 或启动 root worker；结束一次 AW 运行时保留共享服务。
+部署方按能力选择独立交付的产物和 profile，允许只安装 AW，并区分已安装、已启用与已就绪。部署方管理特权探针及 worker 退出。Hook 不安装包、修改文件 capability 或启动 root worker；结束一次 AW 运行时保留共享服务。
 
 ## 拟议的语义评估合同
 

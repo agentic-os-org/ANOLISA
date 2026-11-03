@@ -1,6 +1,7 @@
 //! Offline Provider and event-step editing with validated, atomic publication.
 //! No operation starts an Agent, discovers capabilities or executes a Hook.
 
+mod native;
 mod publication;
 
 use crate::{require, Error, Result};

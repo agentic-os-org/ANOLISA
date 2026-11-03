@@ -6,9 +6,11 @@ Explicit resident mode is described in [Resident SDK lifecycle](resident-sdk.md)
 The task-worker mode below retains its original one-worker lifecycle and failure policy.
 
 The Pi adapter supports the public Coding Agent/Core SDKs
-`@earendil-works/pi-coding-agent` and `@earendil-works/pi-agent-core` 0.84.2,
+`@earendil-works/pi-coding-agent` and `@earendil-works/pi-agent-core`,
 with Node.js >=22.19.0 on Linux. Its entrypoint is `sdk`: one AW-owned foreground
-worker imports an application factory. The native Pi CLI is outside this contract.
+worker imports an application factory. Both SDKs at 0.84.2 are the verified baseline;
+other releases must retain the Agent/AgentSession and tool lifecycle interfaces.
+The native Pi CLI is outside this contract.
 
 ## Factory and lifecycle
 
@@ -78,7 +80,12 @@ use model-produced identity, active-state reclamation and configurable concurren
 budgets; see [long sessions](resident-sdk.md). A denial before the final configured step explicitly
 closes the event without running remaining steps, including native invalid JSON,
 nonzero/signal exits and execution failures under `on_error:block`. A failure to
-close is reported and never changes a denial into an allow. SDK cancellation or a
+close is reported and never changes a denial into an allow. A managed
+`tool.after` step whose Provider invocation fails under `on_error: report`
+receives a neutral reply: the audit already records the fault, the unchecked
+original result is kept, and the same session continues with its next prompt.
+Before-tool faults, block/withhold faults, cancellation, identity and cleanup
+failures keep stopping the task. SDK cancellation or a
 local transport limit may terminate the helper before it can acknowledge close;
 any already opened event then reaches its original deadline or binding release,
 without extending its budget. This differs from an awaited policy denial.

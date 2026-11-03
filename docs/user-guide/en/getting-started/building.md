@@ -77,6 +77,20 @@ export UV_PYTHON_INSTALL_MIRROR="https://your-mirror.example/python-build-standa
 
 ## 4. Unified build script
 
+### Repository Makefile
+
+Prepare the selected components' dependencies and use their supported build
+platform. From the repository root, run:
+
+```bash
+make list-components
+make build COMPONENTS="cosh-ng tokenless"
+# Optionally install the build outputs
+make install COMPONENTS="cosh-ng tokenless"
+```
+
+### Dependency setup and installation script
+
 `scripts/build-all.sh` is a Linux convenience entry point, not a complete
 monorepo builder. Select the maintained components you need with repeated
 `--component` options: `skills`, `sec-core`, `tokenless`, `ws-ckpt`, `memory`,
@@ -85,8 +99,7 @@ monorepo builder. Select the maintained components you need with repeated
 Build `anolisa`, `skillfs`, and `ktuner` with their local commands in
 section 5; they are not handled by this script.
 
-The default install profile is user mode. Each component's install rules select
-paths within the user's home directory. Initial system dependency installation
+This script installs into user directories by default. Initial system dependency installation
 may still request `sudo`. Use `--system` (or
 `--install-mode system`) for system paths; the script stages files and may
 invoke `sudo`. `--no-install` builds and stages artifacts without installing
@@ -170,3 +183,17 @@ Component-specific build details, generated artifacts, and runtime setup belong
 in the component README or its linked developer guide. Keep this page focused
 on repository-wide entry points and update it when the component list or script
 interfaces change.
+
+## Select installed file groups
+
+Where provided, use `install-core` when you need only the backend programs. Add
+the component's `install-plugins` or `install-skills` target when you need framework integrations
+or skills:
+
+```bash
+make -C src/tokenless build
+make -C src/tokenless install-core
+```
+
+When using AW's Tokenless Provider, install Tokenless core and the separate
+Provider; native Tokenless plugins are optional.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from importlib.metadata import version
 import json
 import logging
 import os
@@ -18,6 +17,8 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
+from .aw_skill import metadata as skill_metadata, skill_context, verify as verify_skill
+
 
 
 def validate_hooks(config: dict[str, Any]) -> None:
@@ -27,7 +28,7 @@ def validate_hooks(config: dict[str, Any]) -> None:
     for hook in config["hooks"]:
         if not isinstance(hook, dict):
             raise ValueError("AW Hook route must be an object")
-        if hook.get("event") not in {"tool.before", "tool.after"}:
+        if hook.get("event") not in {"input.submit", "tool.before", "tool.after"}:
             raise ValueError("Unsupported AW native event")
         if not isinstance(hook.get("step"), str) or not hook["step"]:
             raise ValueError("AW step must be a nonempty string")
@@ -92,8 +93,12 @@ class AwToolMiddleware(MiddlewareBase):
         return proc.returncode, stdout, stderr
 
     async def _run(self, payload: dict[str, Any]) -> ToolResponse | None:
+        payload = {**payload, **skill_metadata()}
         try:
-            return await self._evaluate(payload)
+            result = await self._evaluate(payload)
+            if self.hook["event"] == "tool.before" and result is None:
+                verify_skill()
+            return result
         except (OSError, TimeoutError, CallbackFailure) as error:
             code = str(error) if isinstance(error, CallbackFailure) else type(error).__name__
             logging.getLogger(__name__).error(
@@ -138,6 +143,7 @@ class AwToolMiddleware(MiddlewareBase):
                 raise CallbackFailure("invalid_result_replacement") from error
         return None
 
+    @skill_context
     async def on_acting(
         self,
         agent: Any,
@@ -208,6 +214,7 @@ class AwReloadMiddleware(MiddlewareBase):
             if finished:
                 await self.lifecycle("request_end", key)
 
+    @skill_context
     async def on_acting(self, agent: Any, input_kwargs: dict[str, Any], next_handler: Callable[..., AsyncGenerator[Any, None]]) -> AsyncGenerator[Any, None]:
         import hashlib
         call = input_kwargs["tool_call"]
@@ -267,8 +274,6 @@ class AwPlugin:
     """Validate once, then register factories which perform no configuration I/O."""
 
     def register(self, api: Any) -> None:
-        if version("qwenpaw") != "2.2.2.post1" or version("agentscope") != "2.0.10":
-            raise RuntimeError("AW requires QwenPaw 2.2.2.post1 and AgentScope 2.0.10")
         if api.config.get("enabled") is False:
             raise RuntimeError("QwenPaw configuration disables the AW plugin")
         descriptor = Path(__file__).with_name("aw-attachment.json")

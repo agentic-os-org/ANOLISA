@@ -84,21 +84,34 @@ impl<'a> Text<'a> {
         &self.input[self.offsets[start]..self.offsets[end]]
     }
     fn score(&self, span: Span, base: f64, email: bool) -> f64 {
-        let context = self
-            .slice(
-                span.start.saturating_sub(64),
-                (span.end + 64).min(self.chars.len()),
-            )
-            .to_lowercase()
-            .replace('-', "_");
+        let start = span.start.saturating_sub(64);
+        let end = (span.end + 64).min(self.chars.len());
+        let context = self.slice(start, end).to_lowercase();
         let mut score = base;
-        if POSITIVE.iter().any(|s| context.contains(s)) {
+        let positive_context = context.replace('-', "_");
+        if POSITIVE.iter().any(|s| positive_context.contains(s)) {
             score += 0.12;
         }
         if !email
-            && ["example", "dummy", "test", "sample", ".invalid"]
-                .iter()
-                .any(|s| context.contains(s))
+            && (context.contains(".invalid")
+                || ["example", "dummy", "test", "sample"].iter().any(|marker| {
+                    self.chars[start..end]
+                        .windows(marker.len())
+                        .enumerate()
+                        .any(|(offset, candidate)| {
+                            let index = start + offset;
+                            // Clipping the context must not turn part of a word into a marker.
+                            candidate
+                                .iter()
+                                .zip(marker.chars())
+                                .all(|(actual, expected)| actual.eq_ignore_ascii_case(&expected))
+                                && (index == 0 || !word(self.chars[index - 1]))
+                                && self
+                                    .chars
+                                    .get(index + marker.len())
+                                    .is_none_or(|c| !word(*c))
+                        })
+                }))
         {
             score -= 0.35;
         }

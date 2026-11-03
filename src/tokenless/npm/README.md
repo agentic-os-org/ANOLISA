@@ -109,7 +109,7 @@ tokenless env-check --all
 ## Build from Source
 
 Source builds support **Linux and Windows x64**. Windows uses
-`./scripts/build-windows.ps1` from the component directory; see
+`./packaging/build/build-windows.ps1` from the component directory; see
 [Windows build instructions](../../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Windows ARM64 is unsupported. macOS users should install the prebuilt
 binaries via `npm install -g anolisa-tokenless`; the macOS CLI binaries are
@@ -131,6 +131,7 @@ make install
 - **Rust** toolchain >= 1.91 (required by rtk v0.49.0)
 - **just** — build runner for rtk setup
 - **Git** — for rtk source download
+- **Node.js 22+ and npm** — for the framework plugin build and validation
 
 ## Packaging for npm
 
@@ -151,7 +152,7 @@ baseline.
 Package one target:
 
 ```bash
-node npm/scripts/package-npm.js --target linux-arm64
+node packaging/npm/package-npm.js --target linux-arm64
 ```
 
 For the current host, the Make entry point can build the native executables
@@ -164,7 +165,7 @@ make npm-package
 Package the complete matrix:
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 # or
 make npm-package-all
 ```

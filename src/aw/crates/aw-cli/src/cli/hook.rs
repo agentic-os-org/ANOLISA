@@ -154,21 +154,28 @@ pub(super) fn invoke_bound(
         return Err("stale hook binding".into());
     }
     if close {
-        client.call(
+        let session_id = normalized["session_id"]
+            .as_str()
+            .ok_or("missing session")?
+            .into();
+        let operation = if event == "input.submit" {
+            Operation::CloseInputEvent {
+                instance_id: binding.binding.instance_id,
+                session_id,
+                turn_id: normalized["turn_id"].as_str().ok_or("missing turn")?.into(),
+            }
+        } else {
             Operation::CloseHookEvent {
                 instance_id: binding.binding.instance_id,
                 event: event.into(),
-                session_id: normalized["session_id"]
-                    .as_str()
-                    .ok_or("missing session")?
-                    .into(),
+                session_id,
                 call_id: normalized["tool"]["call_id"]
                     .as_str()
                     .ok_or("missing call")?
                     .into(),
-            },
-            deadline,
-        )?;
+            }
+        };
+        client.call(operation, deadline)?;
         return Ok(Exit::Code(0));
     }
     if step == adapter::OBSERVE_STEP {
@@ -214,7 +221,7 @@ pub(super) fn invoke_bound(
             .map_err(Into::into)
         });
     // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
-    if event == "tool.before"
+    if matches!(event, "input.submit" | "tool.before")
         && handle.steps.last().map(String::as_str) != Some(step)
         && aw_adapter::callback::stops_before(&binding.adapter, result.as_ref().ok(), on_error)
     {

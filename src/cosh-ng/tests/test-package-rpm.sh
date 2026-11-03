@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SPEC="$ROOT/cosh-ng.spec.in"
+SPEC="$ROOT/packaging/rpm/cosh-ng.spec.in"
 TMP="$(mktemp -d /tmp/cosh-ng-rpm-scriptlet-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -18,11 +18,10 @@ grep -Fxq \
     "$SPEC"
 grep -Fq "systemctl stop 'cosh-gateway@*.service' 'cosh-gateway-acp@*.service'" "$SPEC"
 grep -Fxq '%systemd_preun cosh-gateway@.service' "$SPEC"
-grep -Fq \
-    'skills/manage-task-checkpoints/SKILL.md' \
-    "$SPEC"
+grep -Fq 'bash packaging/payload.sh skills .' "$SPEC"
+grep -Fq 'skills/manage-task-checkpoints/SKILL.md' "$ROOT/packaging/payload.sh"
 grep -Fxq \
-    '%{_datadir}/anolisa/skills/manage-task-checkpoints/' \
+    '%{_skilldir_cosh}/manage-task-checkpoints/' \
     "$SPEC"
 if grep -Fxq '%systemd_preun cosh-gateway-acp@.service' "$SPEC"; then
     echo "ERROR: removed legacy ACP unit still has a lifecycle macro" >&2

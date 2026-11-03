@@ -162,6 +162,19 @@ harbor run \
 5. Feeds the results back to OpenClaw for the next iteration
 6. Stops when OpenClaw outputs `TASK_COMPLETE` or `OPENCLAW_MAX_ITERATIONS` is hit
 
+Output collection continues after the direct OpenClaw process exits until both
+stdout and stderr reach EOF, subject to the same timeout and stdout-size guards.
+This also bounds waiting when a descendant keeps a pipe open. Trailing output is
+retained while those limits permit it. The total-timeout guard is
+`max(OPENCLAW_TIMEOUT, 600)` seconds; the no-output guard applies only while no
+stdout has been received.
+
+When a guard fires, the runner stops collecting output, closes its pipe readers,
+and kills the direct process if it is still running. It does not terminate the
+whole descendant process group. The guard is reported in the runner log; a direct
+process that already exited retains its exit code, even if remaining output was
+cut short.
+
 ### Per-trial isolation
 
 Each trial gets its own `~/.openclaw-<profile>` directory (profile name derived from harbor session id), so concurrent trials don't collide.
@@ -174,6 +187,7 @@ Skill hints are loaded per-task (highest priority first):
 2. **`dataset/<task>/solution/solve.sh`** — auto-parsed into a step-by-step hint. **Disabled by default**; enable with `SKILL_FROM_SOLUTION=1`.
 
 The dataset directory is resolved via the `DATASET_DIR` env var (default `dataset`, relative to the `harbor run` working directory).
+When `SKILL_FROM_SOLUTION=1`, auto-parsing removes unquoted trailing shell comments while preserving `#` inside quoted or escaped command text.
 
 ---
 

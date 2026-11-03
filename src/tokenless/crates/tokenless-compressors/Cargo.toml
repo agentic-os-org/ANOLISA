@@ -3,6 +3,7 @@ name = "tokenless-compressors"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Compressor engines for tokenless content compression"
 
 [dependencies]

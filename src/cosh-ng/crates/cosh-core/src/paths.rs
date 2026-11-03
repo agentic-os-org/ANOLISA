@@ -9,6 +9,36 @@ pub(crate) fn system_data_dirs() -> Vec<PathBuf> {
     system_data_dirs_for_executable(std::env::current_exe().ok().as_deref())
 }
 
+/// Returns component-owned resource roots for standalone file installations.
+pub(crate) fn component_data_dirs() -> Vec<PathBuf> {
+    component_data_dirs_for_executable(std::env::current_exe().ok().as_deref())
+}
+
+fn component_data_dirs_for_executable(executable: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(directory) = executable.and_then(Path::parent) {
+        if directory.file_name().is_some_and(|name| name == "cosh-ng") {
+            if let Some(libexec) = directory
+                .parent()
+                .filter(|path| path.file_name().is_some_and(|name| name == "libexec"))
+            {
+                if let Some(prefix) = libexec.parent() {
+                    roots.push(prefix.join("share/cosh-ng"));
+                }
+            }
+        }
+    }
+    for root in [
+        PathBuf::from("/usr/local/share/cosh-ng"),
+        PathBuf::from("/usr/share/cosh-ng"),
+    ] {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
 fn system_data_dirs_for_executable(executable: Option<&Path>) -> Vec<PathBuf> {
     let prefix = executable
         .and_then(anolisa_prefix_from_executable)
@@ -47,6 +77,23 @@ fn anolisa_prefix_from_executable(executable: &Path) -> Option<&Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_resources_follow_the_installed_libexec_prefix() {
+        assert_eq!(
+            component_data_dirs_for_executable(Some(Path::new(
+                "/opt/owner/libexec/cosh-ng/cosh-core"
+            )))[0],
+            PathBuf::from("/opt/owner/share/cosh-ng")
+        );
+        assert_eq!(
+            component_data_dirs_for_executable(Some(Path::new(
+                "/usr/local/libexec/cosh-ng/cosh-core"
+            )))
+            .len(),
+            2
+        );
+    }
 
     #[test]
     fn system_data_roots_follow_installation_prefix() {

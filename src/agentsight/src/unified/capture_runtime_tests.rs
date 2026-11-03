@@ -11,6 +11,7 @@ pub(super) struct TestProbes {
     events: RefCell<VecDeque<Event>>,
     /// Pids handed to `attach_process` by the production handlers.
     attached_pids: RefCell<Vec<i32>>,
+    failed_registration_pid: Option<u32>,
 }
 
 impl Deref for TestProbes {
@@ -46,6 +47,7 @@ impl TestProbes {
             )?),
             events: RefCell::new(VecDeque::new()),
             attached_pids: RefCell::new(Vec::new()),
+            failed_registration_pid: None,
         })
     }
 
@@ -59,9 +61,26 @@ impl TestProbes {
         Ok(())
     }
 
-    /// Record pid registration without touching kernel maps.
-    pub(super) fn add_traced_pid(&mut self, _pid: u32) -> Result<()> {
+    /// Record a best-effort attach for an unclassified process.
+    ///
+    /// Shadows the live method for the same reason as `attach_process`; the
+    /// live one differs only in whether a filter-map slot is claimed, which
+    /// replay has no map to observe.
+    pub(super) fn attach_unclassified_process(&mut self, pid: i32) -> Result<()> {
+        self.attached_pids.borrow_mut().push(pid);
         Ok(())
+    }
+
+    /// Record pid registration without touching kernel maps.
+    pub(super) fn add_traced_pid(&mut self, pid: u32) -> Result<()> {
+        if self.failed_registration_pid == Some(pid) {
+            anyhow::bail!("injected registration failure for pid {pid}");
+        }
+        Ok(())
+    }
+
+    pub(super) fn fail_registration_for(&mut self, pid: u32) {
+        self.failed_registration_pid = Some(pid);
     }
 
     pub(super) fn attached_pids(&self) -> Vec<i32> {
@@ -148,6 +167,7 @@ impl RuntimeFixture {
                     live: None,
                     events: RefCell::new(VecDeque::new()),
                     attached_pids: RefCell::new(Vec::new()),
+                    failed_registration_pid: None,
                 },
                 core: PipelineCore::new(&config, Analyzer::new()),
                 genai_builder: GenAIBuilder::new(),
@@ -360,6 +380,42 @@ fn clean_process_exit_completes_captured_error_headers_once() {
     assert_eq!(fixture.aggregator().http().active_connections(), 0);
     fixture.handle_agent_crash_detection(pid, "fixture", 0);
     assert_eq!(fixture.rows().len(), 1);
+}
+
+#[test]
+fn process_exit_delivers_drained_response_without_deferring_its_session() {
+    let pid = std::process::id();
+    let response = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/event-stream\r\n",
+        "\r\n",
+        "data: {\"id\":\"exit-drained\",\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"reply\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20}}\n",
+        "\n"
+    )
+    .as_bytes();
+    let mut fixture = pending_runtime(pid, response);
+    let log_path = fixture.directory.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    std::fs::File::create(&log_path).unwrap();
+    fixture.genai_exporters.push(Box::new(logtail));
+
+    fixture.handle_procmon_event(&crate::probes::procmon::Event::Exit {
+        pid,
+        tid: pid,
+        uid: 0,
+        timestamp_ns: 10,
+        comm: "fixture".into(),
+        exit_code: 0,
+    });
+
+    assert_eq!(fixture.pending_genai.len(), 0);
+    assert_eq!(fixture.rows(), ["exit-drained"]);
 }
 
 #[test]

@@ -34,25 +34,30 @@ npm install
 npm run build:embed    # 产物输出到 frontend-dist/
 ```
 
-### 完整构建（前端 + Rust）
+### 完整构建（前端 + Rust + enforcer）
+
+在 `src/agentsight` 目录中构建并直接运行：
 
 ```bash
 make build-all
-# 等效于: make build-frontend && make build
+sudo ./target/release/agentsight trace &
+sudo ./target/release/agentsight serve --host 0.0.0.0
 ```
 
-### 安装到系统
+仅重新编译 Rust 时使用 `make build-binary`。风险拦截功能还需要单独启动 enforcer。
+
+### 安装到系统（可选）
 
 ```bash
-make install
-# 安装到 /usr/local/bin/agentsight 并设置 BPF capabilities
-# 可自定义: make install PREFIX=/opt/agentsight
+sudo make install-core
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentsight.service
 ```
 
 ### RPM 打包
 
 ```bash
-make rpm    # 或使用 scripts/rpm-build.sh
+make rpm    # 或使用 packaging/rpm/rpm-build.sh
 ```
 
 ## macOS 构建
@@ -128,8 +133,8 @@ npm run dev    # http://localhost:3004，代理 API 到 localhost:7396
 
 前端开发完成后重新构建嵌入：
 ```bash
-cd dashboard && npm run build:embed
-make build    # 重新编译 Rust 以嵌入更新后的前端
+(cd dashboard && npm run build:embed)
+make build-binary    # 重新编译 Rust 以嵌入更新后的前端
 ```
 
 ## Project Structure

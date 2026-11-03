@@ -21,7 +21,7 @@ target/debug/aw run --config crates/aw-service/examples/aw.qoder.yaml --agent qo
 `--agent qoder` 选择 `spec.agents` 下的命名对象；名称可以自定，
 `adapter: qoder` 才是框架类型。
 
-CLI 要求 SemVer ≥1.1.64，版本输出使用裸版本号。接线依赖 `--settings`、字面 `args` 命令 Hook、`PreToolUse`/`PostToolUse`、回调身份和退出码 2 阻断。
+已验证基线为 CLI 1.1.64。AW 记录已安装 CLI 输出的裸 SemVer 版本号。接线依赖 `--settings`、字面 `args` 命令 Hook、`PreToolUse`/`PostToolUse`、回调身份和退出码 2 阻断。
 
 例如，将目标命名为 `qodercli`，并选择已安装的可执行文件：
 

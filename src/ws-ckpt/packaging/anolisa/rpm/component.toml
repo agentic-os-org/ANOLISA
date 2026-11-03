@@ -1,0 +1,62 @@
+manifest_version = 2
+anolisa_min_version = "0.3.15"
+
+[component]
+name = "ws-ckpt"
+version = "0.6.1"
+layer = "runtime"
+description = "ws-ckpt adapters for OpenClaw and Hermes"
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.3.15"
+
+[install]
+modes = ["system"]
+
+[[adapters]]
+framework = "openclaw"
+name = "ws-ckpt-openclaw"
+display_name = "ws-ckpt for OpenClaw"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "ws-ckpt"
+source = "scripts/openclaw"
+dest = "{datadir}/plugins/ws-ckpt/openclaw/"
+detect = { binary = "openclaw" }
+
+[adapters.backends.rpm]
+managed_packages = ["ws-ckpt-plugins"]
+
+[adapters.compat]
+framework_version = ">=2026.2.13"
+
+[adapters.bundle]
+schema = 1
+entry = "openclaw.plugin.json"
+
+[adapters.openclaw.bundle]
+schema = 1
+entry = "openclaw.plugin.json"
+
+[[adapters]]
+framework = "hermes"
+name = "ws-ckpt-hermes"
+display_name = "ws-ckpt for Hermes"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "ws-ckpt"
+source = "scripts/hermes"
+dest = "{datadir}/plugins/ws-ckpt/hermes/"
+detect = { binary = "hermes" }
+
+[adapters.backends.rpm]
+managed_packages = ["ws-ckpt-plugins"]
+
+[adapters.bundle]
+schema = 1
+entry = "plugin.yaml"
+
+[adapters.hermes.bundle]
+schema = 1
+entry = "plugin.yaml"

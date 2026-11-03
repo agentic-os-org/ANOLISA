@@ -6,16 +6,21 @@
 
 ## 选择能力
 
-创建配置时，按需要给 `aw config init` 增加参数。先安装对应 Provider。
+先安装对应 Provider，将 `AW_TEMPLATE_DIR` 设为其解压归档中 `templates/`
+目录的绝对路径，再为 `aw config init` 选择模板。
 
 | 目标 | 参数 | 完整步骤 |
 | --- | --- | --- |
-| 启动 Agent | 不加 Provider 参数 | [安装](installation.md) |
-| 压缩工具输出 | `--provider tokenless` | [Tokenless](tokenless.md) |
-| 检查工具命令 | `--provider sec-core --socket ABS_SOCKET` | [安全检查](security.md) |
-| 同时启用两者 | `--provider sec-core+tokenless --socket ABS_SOCKET` | 先启动 sec-core 后台 |
+| 启动 Agent | 不加模板 | [安装](installation.md) |
+| 压缩工具输出 | `--template "$AW_TEMPLATE_DIR/tokenless.json"` | [Tokenless](tokenless.md) |
+| 检查工具命令 | `--template "$AW_TEMPLATE_DIR/sec-core.json"` | [安全检查](security.md) |
+| 同时启用两者 | `--template "$AW_TEMPLATE_DIR/sec-core-tokenless.json"` | [Tokenless](tokenless.md)和[安全检查](security.md) |
 
-`ABS_SOCKET` 换成实际后台的绝对 socket 路径。生成器目前支持 Qoder 和 OpenClaw；SDK 应用及其他 Agent 见[接入指南](../../../developer-guide/zh/aw/native-agents.md)。
+生成 Provider 配置时，`--prefix` 使用其实际安装前缀。按上述指南中的
+`--template-var` 参数提供后端路径、socket 和 RTK 校验和；`PROVIDERS_DIR` 选择
+实际安装的 Provider 程序，与 AW CLI 前缀独立。`--provider` 仅接受 `none` 或
+`command`。生成器目前支持 Qoder 和 OpenClaw；SDK 应用及其他 Agent
+见[接入指南](../../../developer-guide/zh/aw/native-agents.md)。
 
 ## 修改配置
 
@@ -60,7 +65,7 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder -- -p 'Read the current directo
 
 ### OpenClaw
 
-需要 OpenClaw 2026.9.6 和已初始化的 profile。先停止使用同一 profile 的 Gateway，将以下占位路径换成已有安装与配置的绝对路径。
+需要 OpenClaw 和已初始化的 profile；2026.9.6 为已验证基线，其他版本需提供相同的原生插件接口。先停止使用同一 profile 的 Gateway，将以下占位路径换成已有安装与配置的绝对路径。
 
 ```bash
 export AW_NODE=/absolute/path/to/node
@@ -74,9 +79,44 @@ aw run --config "$AW_HOME/openclaw.yaml" --agent openclaw \
   --native-settings "$AW_OPENCLAW_CONFIG" --native-state-dir "$AW_OPENCLAW_STATE"
 ```
 
-等待 `AW openclaw native hooks ready` 后，通过连接该 Gateway 的客户端使用。`agent --local` 会绕过它。启用安全或压缩时，在 `config init` 中增加上表参数。
+等待 `AW openclaw native hooks ready` 后，通过连接该 Gateway 的客户端使用。`agent --local` 会绕过它。启用安全或压缩时，选择上表中的对应模板。
+
+### QwenPaw
+
+按照 [QwenPaw 接入指南](../../../developer-guide/zh/aw/agents/qwenpaw.md) 配置 App/API
+目标，沿用已初始化的 `QWENPAW_WORKING_DIR`。每次 AW 启动使用独立临时插件，保留已有
+插件名称和配置。`config.json`、插件配置及 MCP 动态更新继续由 QwenPaw 管理。
+显式选择 AW 覆盖的工具，范围外工具继续遵循原生权限。
 
 ## 自定义规则与服务部署
 
 自定义规则可读取工具事件并返回 JSON 布尔值，见[Hook 教程](../../../developer-guide/zh/aw/providers/hooks.md)。
 常驻应用的[策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)、[外部进程接入](../../../developer-guide/zh/aw/deployment/process-attach.md)和[退出、并发设置](../../../developer-guide/zh/aw/deployment/lifecycle.md)由应用部署方配置。
+
+## 记录原生配置来源
+
+接入通用 native-loader API 的应用可以在 AW 策略旁记录来源引用。原生配置继续保存在
+原文件中。内置 `aw run` Adapter 仍通过既有选项选择来源，来源声明本身不会改变加载行为
+或激活覆盖范围。
+
+沿用安装步骤中的私有 `AW_HOME` 和 `qoder` 目标，为已经选定的原生项目来源建立记录：
+
+```bash
+cat > "$AW_HOME/native-source.json" <<'JSON'
+{"id":"project","kind":"file","scope":"project","reference":"./native.yaml"}
+JSON
+chmod 600 "$AW_HOME/native-source.json"
+aw config add-native-source --config "$AW_HOME/aw.yaml" --agent qoder \
+  --definition "$AW_HOME/native-source.json"
+aw config native-sources --config "$AW_HOME/aw.yaml" --agent qoder
+```
+
+预期输出 `declared_not_loaded` / `not_admitted` 以及来源序号和类别，不打印原生内容或
+凭据。Adapter 负责相对路径解析和实际来源优先级。移除引用使用：
+
+```bash
+aw config remove-native-source --config "$AW_HOME/aw.yaml" --agent qoder --id project
+```
+
+原生文件继续保留。来源字段、原子编辑、加载与准入状态及当前接入范围见
+[编辑器与 loader 参考](../../../developer-guide/zh/aw/reference/configuration-editor.md#原生配置来源)。

@@ -51,4 +51,4 @@ See [package management](packages.md) for `needs_recovery`, `package_in_use`, `p
 
 `aw commands --json` returns `format`, `name`, `version` and `commands`, with command paths and visible arguments.
 `required` marks unconditional requirements only. Completion uses the same declarations and supports bash, zsh, fish, powershell and elvish.
-Help and discovery run offline. `aw -V` reports the CLI crate version; installation records provide the Preview package identifier.
+Help and discovery run offline. `aw -V` reports the CLI crate version.

@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import sys
 import os
 from pathlib import Path
 import tempfile
@@ -16,8 +17,10 @@ from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
 ROOT = Path(__file__).resolve().parents[5]
-SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py")
+SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py",
+    submodule_search_locations=[str(ROOT / "crates/aw-adapter/native/qwenpaw")])
 MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
@@ -563,13 +566,7 @@ class RegistrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Unsafe"):
                     MODULE.AwPlugin().register(SimpleNamespace(config={}))
 
-    def test_wrong_runtime_or_disabled_plugin_never_registers(self):
-        incompatible = {"qwenpaw": "2.2.2.post1", "agentscope": "2.0.8"}
-        with patch.object(MODULE, "version", side_effect=incompatible.__getitem__):
-            with self.assertRaisesRegex(RuntimeError, "AgentScope 2.0.10"):
-                MODULE.AwPlugin().register(SimpleNamespace())
-        with patch.object(MODULE, "version", return_value="wrong"), self.assertRaisesRegex(RuntimeError, "requires"):
-            MODULE.AwPlugin().register(SimpleNamespace())
+    def test_disabled_plugin_never_registers(self):
         with self.assertRaisesRegex(RuntimeError, "disables"):
             MODULE.AwPlugin().register(SimpleNamespace(config={"enabled": False}))
 

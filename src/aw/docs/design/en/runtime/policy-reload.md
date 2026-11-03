@@ -4,9 +4,10 @@
 
 AW can explicitly update the policy of an idle instance launched with a stable
 bridge. The native host process stays alive; busy instances reject the update.
-The restricted bridge is opt-in through `aw run --reloadable`, pinned to
-Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App and Qoder SDK
-1.0.56 / bundled Worker 1.1.78. External attachment supports the TUI and App
+The restricted bridge is opt-in through `aw run --reloadable`. Verified baselines
+are Qoder 1.1.73 TUI, QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App and Qoder SDK
+1.0.56 / bundled Worker 1.1.78. Admission checks the supported entrypoint and native
+idle/update protocol for each installed release. External attachment supports the TUI and App
 through `aw agent connect --pid PID`; SDK daemon attachment and steer remain
 planned. For `qoder-sdk`, ordinary `aw run` opens a resident child scope for each
 managed Query. Ordinary QwenPaw App launches open a task scope for each managed

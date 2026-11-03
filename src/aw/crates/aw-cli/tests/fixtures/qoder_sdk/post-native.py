@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--npm", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
-parser.add_argument("--case", choices=["allow", "failure", "timeout", "report", "native-error", "failure-error"])
+parser.add_argument("--case", choices=["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace"])
 args = parser.parse_args()
 own_children()
 fixture = Path(__file__).resolve().parent
@@ -32,7 +32,7 @@ worker = sdk / "dist/_worker/qoder-worker-runtime.obf.mjs"
 assert subprocess.check_output(["node", str(worker), "--version"], text=True, timeout=15).strip() == "1.1.78"
 assert os.environ.get("QODER_PERSONAL_ACCESS_TOKEN"), "native Post acceptance requires a PAT"
 results = []
-for mode in [args.case] if args.case else ["allow", "failure", "timeout", "report", "native-error", "failure-error"]:
+for mode in [args.case] if args.case else ["allow", "failure", "timeout", "report", "native-error", "failure-error", "replace"]:
     output = evidence / mode
     output.mkdir()
     with tempfile.TemporaryDirectory(prefix="post-", dir=evidence.parent) as temporary:
@@ -56,6 +56,10 @@ for mode in [args.case] if args.case else ["allow", "failure", "timeout", "repor
                                  "operation": "check", "effects": ["observe"], "on_error": action}]}
                                  for event, label, action in [("tool.before", "before", "block"),
                                  ("tool.after", "after", "report" if mode == "report" else "withhold_result")]}}})
+        if mode == "replace":
+            document = json.loads(config.read_text())
+            document["spec"]["events"]["tool.after"]["steps"][0]["effects"] = ["observe", "replace_result"]
+            save(config, document)
         processes = Processes(case, output, environment)
         try:
             processes.start("service", [str(args.aw.resolve()), "serve", "--config", str(config), "--state-dir", str(case / "state")])

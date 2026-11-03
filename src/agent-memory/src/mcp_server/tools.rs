@@ -82,7 +82,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "Replace exactly one occurrence of old_str with new_str in a file. Errors if old_str matches zero or multiple times."
+        description = "Replace exactly one occurrence of old_str with new_str in a file. Errors if old_str matches zero or multiple times, including overlapping matches."
     )]
     async fn mem_edit(
         &self,
@@ -97,7 +97,7 @@ impl MemoryMcpServer {
     }
 
     #[tool(
-        description = "List entries under a directory. Empty dir means mount root. recursive=true walks the tree (max depth 16). glob filters by path pattern (e.g. **/*.md)."
+        description = "List entries under a directory. Empty dir means mount root. recursive=true walks the tree (max depth 16). glob filters by path pattern (e.g. **/*.md). Returns at most 5000 entries; narrow with a glob or a subdirectory when the result may be larger."
     )]
     async fn mem_list(
         &self,

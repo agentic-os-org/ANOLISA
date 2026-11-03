@@ -4,6 +4,7 @@ import { lstat, readFile, readdir, mkdir, writeFile, mkdtemp, rm, open } from "n
 import { openSync, fstatSync, readSync, closeSync, realpathSync, constants } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { nativeConfiguration } from "./native-configuration.mjs";
 
 const admitted = new WeakSet();
 const unsupported = () => new Error("AW rejected unadmitted runtime overrides or plugin assets");
@@ -57,12 +58,20 @@ function verified(grant) {
 
 /** Runtime replacement remains limited to the selected official Worker and pinned imports. */
 export function runtimeOptions(config, options, operation = "query") {
+  if (Object.keys(options.extraArgs ?? {}).some(key =>
+    ["headless-fast-hooks", "headlessFastHooks"].includes(key)))
+    throw new Error("AW requires native Hooks enabled; headless fast Hooks are unsupported");
   if (options.executable !== undefined || options.spawnQoderCLIProcess !== undefined)
     throw unsupported();
   if (options.pathToQoderCLIExecutable != null) {
     const declared = join(dirname(sdkEntry(config, options.awSite)), "_worker/qoder-worker-runtime.obf.mjs");
     try {
-      if (realpathSync(options.pathToQoderCLIExecutable) !== realpathSync(declared)) throw unsupported();
+      if (realpathSync(options.pathToQoderCLIExecutable) !== realpathSync(declared)) {
+        const grant = config.native_policy?.runtime_launchers?.find(item => item.path === options.pathToQoderCLIExecutable);
+        if (!nativeConfiguration({ ...config, active_site: options.awSite ?? config.active_site }) || !grant)
+          throw unsupported();
+        verified(grant);
+      }
     } catch { throw unsupported(); }
   }
   if (options.executableArgs !== undefined) {
@@ -142,6 +151,7 @@ async function openRoot(source) {
 
 /** Freeze role/skill assets; SDK plugin Hooks, MCP and settings use their managed factories. */
 export async function prepareNativeOptions(config, options) {
+  if (nativeConfiguration(config)) return { options, close: async () => {} };
   if (!options.plugins?.length) return { options, close: async () => {} };
   if (!config.native_policy?.declarative_plugins || !config.resident || !Array.isArray(options.plugins))
     throw unsupported();
@@ -213,8 +223,17 @@ export async function prepareNativeOptions(config, options) {
 }
 
 
-/** Native readiness must confirm the fixed profile before any prompt is released. */
+/** Native readiness verifies callback availability before any prompt is released. */
 export async function verifyNativeSettings(config, query, wait) {
+  if (nativeConfiguration(config)) {
+    if (typeof query.request !== "function") throw unsupported();
+    const settings = await wait(query.request({ type: "get_settings" }));
+    if (!settings?.effective || typeof settings.effective !== "object" || Array.isArray(settings.effective) ||
+        settings.effective.disableAllHooks === true || settings.effective.hooksConfig?.enabled === false ||
+        settings.effective.hooksConfig?.headlessFastMode === true)
+      throw new Error("AW requires native Hooks enabled for the Query lifetime");
+    return;
+  }
   if (!config.native_policy?.declarative_plugins) return;
   if (typeof query.request !== "function") throw unsupported();
   const settings = await wait(query.request({ type: "get_settings" }));

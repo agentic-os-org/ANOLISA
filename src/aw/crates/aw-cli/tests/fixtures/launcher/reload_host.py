@@ -13,7 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 adapter = os.environ["FAKE_RELOAD_ADAPTER"]
 if sys.argv[1:] == ["--version"]:
-    print("1.1.73" if adapter == "qoder" else "QwenPaw, version 2.2.2.post1")
+    print(os.environ.get("FAKE_RELOAD_VERSION", "1.1.73" if adapter == "qoder" else "QwenPaw, version 2.2.2.post1"))
     raise SystemExit(0)
 root = Path(os.environ["FAKE_ROOT"])
 deadline = time.monotonic() + 10
@@ -84,11 +84,11 @@ else:
         module = ModuleType(name)
         module.__dict__.update(values)
         sys.modules[name] = module
-    source = Path(os.environ["QWENPAW_WORKING_DIR"]) / "plugins/aw-native/plugin.py"
-    spec = importlib.util.spec_from_file_location("reload_plugin", source)
+    source = Path(os.environ["QWENPAW_WORKING_DIR"]) / "plugins" / json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())["plugin_id"] / "plugin.py"
+    spec = importlib.util.spec_from_file_location("reload_plugin", source, submodule_search_locations=[str(source.parent)])
     plugin = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = plugin
     spec.loader.exec_module(plugin)
-    plugin.version = lambda name: "2.2.2.post1" if name == "qwenpaw" else "2.0.10"
     factories, startup = [], []
     plugin.plugin.register(SimpleNamespace(config={}, register_middleware=lambda f, **kw: factories.append(f),
                                           register_startup_hook=lambda name, f: startup.append(f)))

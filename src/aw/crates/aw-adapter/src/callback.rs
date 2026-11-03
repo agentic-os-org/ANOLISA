@@ -138,6 +138,22 @@ pub fn response(
         return Err("invalid failure action".into());
     }
     if output["status"] != "ok" {
+        // A Pi report-configured failure is already recorded in the instance
+        // audit; the resident bridge continues with the unchecked native
+        // result instead of stopping the task, matching the legacy hook
+        // command. Other resident adapters keep failing the callback: their
+        // managed-MCP report exception is owned by the native bridge, not by
+        // this shared CLI path.
+        if adapter_id == "pi" && output["failure_action"] == "report" && event == "tool.after" {
+            let failure = output["failure"].as_str().unwrap_or("unknown");
+            writeln!(
+                diagnostics,
+                "aw step failed ({failure}); recorded as report in the instance audit"
+            )
+            .and_then(|_| std::io::Write::flush(diagnostics))
+            .ok();
+            return Ok(adapter.reply(false));
+        }
         return Err("step execution failed; query the instance audit for metadata".into());
     }
     if output["kind"] == "skipped" {
@@ -236,8 +252,8 @@ pub fn response(
     }
     let blocked = effects.iter().any(|effect| effect["type"] == "block");
     if blocked {
-        if event != "tool.before" {
-            return Err("block is unsupported after a tool".into());
+        if !matches!(event, "input.submit" | "tool.before") {
+            return Err("block requires a submission or pre-tool event".into());
         }
         let mut reply = adapter.reply(true);
         if let Some(text) = effects
@@ -316,6 +332,70 @@ mod tests {
             "failure":"provider", "failure_action":"withhold_result"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn report_faults_return_a_neutral_reply_only_for_pi() {
+        let adapter = adapter::select("pi").unwrap();
+        let fault = json!({"kind":"provider", "status":"error",
+            "failure":"provider", "failure_action":"report",
+            "effects":[], "call":{"process":null}});
+        let mut diagnostics = Vec::new();
+        let output = response(
+            adapter,
+            "tool.after",
+            "report",
+            fault,
+            "pi",
+            &json!({"tool_call":{"name":"read_file","input":"{}"},
+                "tool_response":{"content":[{"type":"text","text":"original"}]}}),
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert!(matches!(output.exit, Exit::Code(0)));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+        // Resident Claude SDK report faults keep stopping the callback; the
+        // managed-MCP report exception lives in the native Python bridge.
+        let claude = adapter::select("claude-sdk").unwrap();
+        let mut diagnostics = Vec::new();
+        assert!(response(
+            claude,
+            "tool.after",
+            "report",
+            json!({"kind":"provider", "status":"error",
+                "failure":"provider", "failure_action":"report",
+                "effects":[], "call":{"process":null}}),
+            "claude-sdk",
+            &json!({"tool_call":{"name":"read_file","input":"{}"},
+                "tool_response":{"content":[{"type":"text","text":"original"}]}}),
+            &mut diagnostics,
+        )
+        .is_err());
+        // Before-tool and block/withhold faults stay fail-closed.
+        let mut diagnostics = Vec::new();
+        assert!(response(
+            adapter,
+            "tool.before",
+            "report",
+            json!({"status":"error", "failure":"provider", "failure_action":"report"}),
+            "pi",
+            &json!({}),
+            &mut diagnostics,
+        )
+        .is_err());
+        for (event, on_error) in [("tool.after", "block"), ("tool.after", "withhold_result")] {
+            let mut diagnostics = Vec::new();
+            assert!(response(
+                adapter,
+                event,
+                on_error,
+                json!({"status":"error", "failure":"provider", "failure_action":on_error}),
+                "pi",
+                &json!({}),
+                &mut diagnostics,
+            )
+            .is_err());
+        }
     }
 
     #[test]

@@ -128,3 +128,34 @@ for (const invalidIdentity of [false, true]) {
     await f.resident.close();
   });
 }
+
+
+test("Post replacement returns the native directive after all observers", async () => {
+  const f = fixture();
+  f.resident.config.hooks[0].replace_result = false;
+  f.resident.config.hooks.push({ event: "tool.after", step: "pii", replace_result: true,
+    on_error: "withhold_result", budget_ms: 1000 });
+  const calls = [];
+  const replacement = { hookSpecificOutput: { hookEventName: "PostToolUse",
+    updatedToolOutput: "Sensitive data detected by AW; content withheld." } };
+  f.resident.scope.invoke = async (hook, payload) => {
+    calls.push(hook.step);
+    assert.equal(payload.tool_response.text, "original");
+    return { code: 0, stdout: Buffer.from(JSON.stringify(hook.replace_result ? replacement : {})) };
+  };
+  assert.deepEqual(await postTools(f.resident, f.payload), replacement);
+  assert.deepEqual(calls, ["post", "pii"]);
+  assert.equal(f.state.closes, 0);
+});
+
+test("failure callbacks reject a replacement instead of changing native error semantics", async () => {
+  const f = fixture();
+  f.resident.config.hooks[0].replace_result = true;
+  f.resident.scope.invoke = async () => ({ code: 0, stdout: Buffer.from(JSON.stringify({
+    hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput: "safe" } })) });
+  const pending = postTools(f.resident, { hook_event_name: "PostToolUseFailure", error: "original" })
+    .catch(error => error);
+  f.shutdown.resolve();
+  assert.match((await pending).message, /unsupported_qoder_sdk_directive/);
+  await f.resident.close();
+});

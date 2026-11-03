@@ -11,10 +11,12 @@ for (const site of sites) {
   const name = site === "cn" ? "@qodercn-ai/qodercn-agent-sdk" : "@qoder-ai/qoder-agent-sdk";
   const entry = require.resolve(name);
   const metadata = JSON.parse(readFileSync(join(dirname(entry), "../package.json"), "utf8"));
-  if (metadata.name !== name || metadata.version !== "1.0.56" ||
-      metadata.qoderCliVersion !== "1.1.78" || metadata.qoderSdkBrand !== site)
-    throw new Error("AW requires Qoder SDK 1.0.56 with bundled Worker 1.1.78 at the declared site");
-  resolved[site] = realpathSync(entry);
+  const version = value => typeof value === "string" && /^[0-9][0-9A-Za-z.+_!-]{0,127}$/.test(value);
+  if (metadata.name !== name || !version(metadata.version) ||
+      !version(metadata.qoderCliVersion) || metadata.qoderSdkBrand !== site)
+    throw new Error("AW requires Qoder SDK and bundled Worker version metadata at the declared site");
+  resolved[site] = { entry: realpathSync(entry), version: metadata.version,
+    worker_version: metadata.qoderCliVersion };
 }
 if (Number(process.versions.node.split(".")[0]) < 22) throw new Error("AW Qoder SDK requires Node 22+");
 process.stdout.write(JSON.stringify(resolved) + "\n");

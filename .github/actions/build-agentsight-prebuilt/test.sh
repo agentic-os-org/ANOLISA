@@ -53,7 +53,6 @@ grep -Fq 'profile gnu2.28-x86_64 does not match target linux/aarch64' "$TEMPORAR
 fixture="$TEMPORARY/source"
 install -d "$fixture/src/agentsight"
 cp "$REPO_ROOT/src/agentsight/Cargo.toml" "$fixture/src/agentsight/"
-cp -r "$REPO_ROOT/src/agentsight/.anolisa" "$fixture/src/agentsight/"
 cp -r "$REPO_ROOT/src/agentsight/packaging" "$fixture/src/agentsight/"
 cp -r "$REPO_ROOT/src/agentsight/scripts" "$fixture/src/agentsight/"
 git -C "$fixture" init -q

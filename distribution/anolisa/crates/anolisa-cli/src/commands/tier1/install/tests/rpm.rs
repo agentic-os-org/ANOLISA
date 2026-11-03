@@ -14,6 +14,162 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::commands::common;
 use crate::commands::tier1::rpm_install;
 
+fn memory_index() -> crate::resolution::ComponentIndex {
+    crate::resolution::ComponentIndex::from_toml_str(
+        "schema_version = 2\n\n[[components]]\nname = \"agent-memory\"\ntargets = [{ os = \"linux\", arch = \"x86_64\" }]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"agent-memory\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"agent-memory-core\"\n",
+        "test-components.toml",
+    )
+    .expect("index parses")
+}
+
+#[test]
+fn memory_core_alias_is_selectable_but_not_the_default() {
+    let index = memory_index();
+    let query = FakeQuery::default();
+    assert_eq!(
+        rpm_package_candidates_with_index(None, None, Some(&index), &query, "agent-memory")
+            .unwrap(),
+        vec![target("agent-memory", "agent-memory")]
+    );
+    assert_eq!(
+        rpm_package_candidates_with_index(
+            Some("agent-memory-core"),
+            None,
+            Some(&index),
+            &query,
+            "agent-memory",
+        )
+        .unwrap(),
+        vec![target("agent-memory", "agent-memory-core")]
+    );
+}
+
+#[test]
+fn installed_memory_core_is_detected_without_virtual_provide() {
+    let index = memory_index();
+    let mut query = FakeQuery {
+        installed: vec![(
+            "agent-memory-core".to_string(),
+            pkg_info("agent-memory-core", "0.2.13", Some("1"), "x86_64"),
+        )],
+        ..Default::default()
+    };
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), Some(&index))
+            .unwrap(),
+        ["agent-memory-core"]
+    );
+    query.installed.push((
+        "agent-memory".to_string(),
+        pkg_info("agent-memory", "0.2.13", Some("1"), "x86_64"),
+    ));
+    query
+        .provides
+        .push(available_component_provider("agent-memory", "agent-memory"));
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), Some(&index))
+            .unwrap(),
+        ["agent-memory"]
+    );
+}
+
+#[test]
+fn memory_core_capability_works_without_index() {
+    let mut query = FakeQuery {
+        installed: vec![(
+            "agent-memory-core".to_string(),
+            pkg_info("agent-memory-core", "0.2.13", Some("1"), "x86_64"),
+        )],
+        provides: vec![(
+            "anolisa-component-core(agent-memory)".to_string(),
+            vec!["agent-memory-core".to_string()],
+        )],
+        ..Default::default()
+    };
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), None).unwrap(),
+        ["agent-memory-core"]
+    );
+    assert_eq!(
+        rpm_package_candidates_with_index(None, None, None, &query, "agent-memory").unwrap(),
+        vec![target("agent-memory", "agent-memory-core")]
+    );
+    assert_eq!(
+        rpm_package_candidates_with_index(
+            Some("agent-memory-core"),
+            None,
+            None,
+            &query,
+            "agent-memory",
+        )
+        .unwrap(),
+        vec![target("agent-memory", "agent-memory-core")]
+    );
+    query.installed.push((
+        "agent-memory".to_string(),
+        pkg_info("agent-memory", "0.2.13", Some("1"), "x86_64"),
+    ));
+    query
+        .provides
+        .push(available_component_provider("agent-memory", "agent-memory"));
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), None).unwrap(),
+        ["agent-memory"]
+    );
+    query.provides[0].1.push("other-core".to_string());
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), None).unwrap(),
+        ["agent-memory-core", "other-core"]
+    );
+}
+
+#[test]
+fn available_core_capability_allows_explicit_package_without_index() {
+    let query = FakeQuery {
+        available_provides: vec![(
+            "anolisa-component-core(agent-memory)".to_string(),
+            vec!["agent-memory-core".to_string()],
+        )],
+        ..Default::default()
+    };
+    assert_eq!(
+        rpm_package_candidates_with_index(
+            Some("agent-memory-core"),
+            None,
+            None,
+            &query,
+            "agent-memory",
+        )
+        .unwrap(),
+        vec![target("agent-memory", "agent-memory-core")]
+    );
+}
+
+#[test]
+fn installed_aliases_remain_ambiguous_without_the_default_package() {
+    let index = crate::resolution::ComponentIndex::from_toml_str(
+        "schema_version = 2\n\n[[components]]\nname = \"example\"\ntargets = [{ os = \"linux\", arch = \"x86_64\" }]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"example\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"example-a\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"example-b\"\n",
+        "test-components.toml",
+    )
+    .expect("index parses");
+    let query = FakeQuery {
+        installed: ["example-a", "example-b"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    pkg_info(name, "1.0.0", Some("1"), "x86_64"),
+                )
+            })
+            .collect(),
+        ..Default::default()
+    };
+    assert_eq!(
+        installed_component_packages(&query, "example", Some("example"), Some(&index)).unwrap(),
+        ["example-a", "example-b"]
+    );
+}
+
 #[test]
 fn no_deps_rejects_recorded_rpm_before_observation() {
     for dry_run in [false, true] {
@@ -94,6 +250,75 @@ fn candidates_provides_multiple_is_ambiguous() {
 }
 
 #[test]
+fn installed_component_probe_prefers_installed_selection_or_falls_back_to_core() {
+    let mut query = FakeQuery {
+        installed: vec![(
+            "agent-memory-core".to_string(),
+            pkg_info("agent-memory-core", "0.2.13", Some("1"), "x86_64"),
+        )],
+        provides: vec![(
+            "anolisa-component(agent-memory)".to_string(),
+            vec!["agent-memory-core".to_string()],
+        )],
+        ..Default::default()
+    };
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), None).unwrap(),
+        ["agent-memory-core"]
+    );
+    query.installed.push((
+        "agent-memory".to_string(),
+        pkg_info("agent-memory", "0.2.13", Some("1"), "x86_64"),
+    ));
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), None).unwrap(),
+        ["agent-memory"]
+    );
+    query.provides[0].1.push("other-provider".to_string());
+    assert_eq!(
+        installed_component_packages(&query, "agent-memory", Some("agent-memory"), None).unwrap(),
+        ["agent-memory-core", "other-provider"]
+    );
+}
+
+#[test]
+fn installed_component_probe_preserves_the_package_with_multiple_versions() {
+    for providers in [
+        vec![],
+        vec!["agent-memory".to_string()],
+        vec!["agent-memory-core".to_string()],
+    ] {
+        let query = FakeQuery {
+            provides: vec![("anolisa-component(agent-memory)".to_string(), providers)],
+            multi_version: vec!["agent-memory".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            installed_component_packages(&query, "agent-memory", Some("agent-memory"), None)
+                .unwrap(),
+            ["agent-memory"]
+        );
+    }
+}
+
+#[test]
+fn installed_component_probe_propagates_other_query_errors() {
+    for detail in [
+        "0 installed versions",
+        "1 installed versions",
+        "malformed output",
+    ] {
+        let query = FakeQuery {
+            unexpected_installed: vec![("agent-memory".to_string(), detail.to_string())],
+            ..Default::default()
+        };
+        let err = installed_component_packages(&query, "agent-memory", Some("agent-memory"), None)
+            .expect_err("non-multiple-version query failure must propagate");
+        assert!(err.to_string().contains(detail));
+    }
+}
+
+#[test]
 fn candidates_package_name_own_provides_cannot_create_identity() {
     // A bare package name whose RPM declares `anolisa-component(cosh)` no
     // longer resolves at the package layer: identity comes from state or the
@@ -139,6 +364,37 @@ fn install_over_unmanaged_system_rpm_points_at_adopt() {
             .is_none(),
         "the refusal must not write any record"
     );
+}
+
+#[test]
+fn fresh_install_refuses_an_existing_split_core() {
+    for backend in ["raw", "rpm"] {
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let env = anolisa_env::EnvService::detect();
+        let index = format!(
+            "schema_version = 2\n\n[[components]]\nname = \"copilot-shell\"\ntargets = [{{ os = \"{}\", arch = \"{}\" }}]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"copilot-shell\"\nlegacy_adopt = true\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell-core\"\n",
+            env.os, env.arch
+        );
+        std::fs::write(
+            layout.etc_dir.join("test-index-repo/v1/components-v2.toml"),
+            index,
+        )
+        .expect("component index");
+        let q = FakeQuery {
+            installed: vec![(
+                "copilot-shell-core".to_string(),
+                pkg_info("copilot-shell-core", "2.3.0", Some("1"), "x86_64"),
+            )],
+            ..Default::default()
+        };
+        let mut install_args = args("copilot-shell");
+        install_args.backend = Some(backend.to_string());
+        let err = handle_one_with_query("copilot-shell".to_string(), install_args, &ctx, &q)
+            .expect_err("install must not cover an installed core package");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("adopt copilot-shell"));
+    }
 }
 
 #[test]
@@ -334,6 +590,24 @@ fn delegated_install_rechecks_native_absence_under_lock() {
             .is_none(),
         "a refused race must not claim a managed record"
     );
+}
+
+#[test]
+fn delegated_install_rechecks_core_capability_under_lock() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    )
+    .core_appears_under_lock("copilot-shell-core", layout.lock_file.clone());
+    let mut install_args = args("copilot-shell");
+    install_args.backend = Some("rpm".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &install_args, &ctx, &fake, &fake, true)
+        .expect_err("a core RPM appearing before locked execution must block dnf");
+    assert_eq!(fake.install_calls.get(), 0);
+    assert!(err.reason().contains("copilot-shell-core"));
 }
 
 #[test]

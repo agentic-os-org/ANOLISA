@@ -21,9 +21,10 @@ Output contract per agent:
     diagnostics (environment attribution). Older Claude Code versions fail
     open: compression is disabled instead of injecting a duplicate payload
     (issue #1645).
-  - qoder-cli: the compressed payload replaces the response via the string
-    field ``hookSpecificOutput.updatedToolOutput``. Structured responses are
-    serialized as compact JSON because Qoder rejects object and array values.
+  - qoder-cli: ``hookSpecificOutput.updatedToolOutput`` preserves an object
+    only when rewrapping native Bash ``stdout``. Qoder renders that field
+    without exposing the envelope. Other result shapes retain their JSON
+    string replacement. Qoder controls the rendering of preserved fields.
   - qwenwork: ``updatedToolOutput`` preserves structured response types.
   - opencode: the adapter translates ``updatedToolOutput`` to OpenCode's
     mutable ``tool.execute.after`` output.
@@ -154,7 +155,8 @@ def _shell_text_field(tool_name: str, envelope, agent_id: str) -> tuple | None:
     compressed text into a same-shaped envelope, so the host's tool protocol
     is untouched (adapters own envelope knowledge, §4.5). Only the single
     largest field is compressed — one Tokenless subprocess per invocation
-    (§5.6) — the other field stays byte-identical.
+    (§5.6) — the other field stays byte-identical in the envelope. The host
+    renderer determines which fields become model-visible content.
     """
     if tool_name not in SHELL_TOOLS or not isinstance(envelope, dict):
         return None
@@ -491,8 +493,8 @@ def main() -> None:
 
     # 11. Envelope construction — dispatch by agent runtime. An unwrapped
     # text field is re-injected into a same-shaped envelope: the compressed
-    # text replaces exactly the field that was sent, every other field stays
-    # byte-identical.
+    # text replaces exactly the field that was sent; every other field retains
+    # its original value for the host renderer.
     rewrapped = None
     if text_field is not None:
         rewrapped = dict(model_visible_before)
@@ -521,14 +523,19 @@ def main() -> None:
             warn("tokenless compress returned non-JSON for a structured slot.")
             _emit_attribution_or_skip(env_attribution)
 
-    # Qoder validates updatedToolOutput as a string even when the original
-    # tool response is structured. The entry point's compact serialization
-    # is exactly that string; a rewrapped shell envelope serializes here.
-    if agent_id == _QODER_AGENT_ID and not isinstance(updated_output, str):
-        if rewrapped is not None:
-            updated_output = json.dumps(rewrapped, separators=(",", ":"), ensure_ascii=False)
-        else:
-            updated_output = output_text
+    # Qoder's Bash object renderer reads stdout, not arbitrary result fields
+    # or a separately compressed stderr. Keep the existing string contract
+    # except for the native Bash stdout rewrap verified with Qoder CLI.
+    if (
+        agent_id == _QODER_AGENT_ID
+        and not isinstance(updated_output, str)
+        and not (tool_name == "Bash" and text_field is not None and text_field[0] == "stdout")
+    ):
+        updated_output = (
+            json.dumps(rewrapped, separators=(",", ":"), ensure_ascii=False)
+            if rewrapped is not None
+            else output_text
+        )
 
     hook_output = {
         "hookEventName": "PostToolUse",

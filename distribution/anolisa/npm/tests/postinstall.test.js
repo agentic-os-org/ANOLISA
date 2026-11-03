@@ -22,6 +22,7 @@ import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { platformPackageName } from '../scripts/platforms.js';
+import { COMPONENT_CONTRACTS, copyIntegrationContracts } from '../scripts/contracts.js';
 
 const npmRoot = fileURLToPath(new URL('..', import.meta.url));
 const packageName = platformPackageName(platform(), arch());
@@ -45,6 +46,7 @@ function check(name, callback) {
     );
     const dependency = join(root, 'node_modules', ...packageName.split('/'));
     mkdirSync(join(dependency, 'bin'), { recursive: true });
+    copyIntegrationContracts(dirname(npmRoot), dependency);
     writeFileSync(
       join(dependency, 'package.json'),
       readFileSync(
@@ -82,6 +84,13 @@ function assertInstalled(fixture, result) {
   assert.equal(result.status, 0, result.stderr);
   assert.ok(lstatSync(fixture.launcher).isSymbolicLink());
   assert.equal(realpathSync(fixture.launcher), realpathSync(fixture.native));
+  const dataRoot = join(dirname(dirname(realpathSync(fixture.launcher))), 'share', 'anolisa');
+  for (const component of COMPONENT_CONTRACTS) {
+    assert.equal(
+      readFileSync(join(dataRoot, 'components', component, 'component.toml'), 'utf8'),
+      readFileSync(join(dirname(npmRoot), 'manifests', 'components', component, 'component.toml'), 'utf8'),
+    );
+  }
   assert.equal(readFileSync(fixture.native, 'utf8'), nativeContent);
   const launched = spawnSync(fixture.launcher, [], {
     encoding: 'utf8',
@@ -153,6 +162,10 @@ check('launcher survives moving the installation tree', (fixture) => {
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, 'fixture-native\n');
+    const dataRoot = join(dirname(dirname(realpathSync(launcher))), 'share', 'anolisa');
+    for (const component of COMPONENT_CONTRACTS) {
+      assert.ok(lstatSync(join(dataRoot, 'components', component, 'component.toml')).isFile());
+    }
   } finally {
     renameSync(moved, fixture.root);
   }

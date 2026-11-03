@@ -39,6 +39,8 @@ _DEPRECATED_SKILL_DIRS_KEY = "skillDirs"
 DEFAULT_SYSTEM_SKILL_ROOTS = (
     Path("/usr/share/anolisa/skills"),
     Path("/usr/local/share/anolisa/skills"),
+    Path("/usr/share/agent-sec-core/skills"),
+    Path("/usr/local/share/agent-sec-core/skills"),
 )
 DEFAULT_SKILL_DIRS = [
     "~/.openclaw/skills/*",

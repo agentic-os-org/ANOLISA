@@ -49,9 +49,9 @@ impl Outcome {
         &self.0
     }
 
-    /// Whether the Provider requested blocking this tool attempt.
+    /// Whether the Provider requested blocking this submission or tool attempt.
     ///
-    /// False adds no restriction; it does not authorize the native tool.
+    /// False adds no restriction; it does not authorize the native submission or tool.
     pub fn requests_block(&self) -> bool {
         self.0["effects"]
             .as_array()
@@ -136,7 +136,10 @@ impl Protocol {
             return Err(Error::Invalid("request schema mismatch"));
         }
         if value["method"] == "invoke" {
-            let before = value["event"]["name"] == "tool.before";
+            let before = matches!(
+                value["event"]["name"].as_str(),
+                Some("input.submit" | "tool.before")
+            );
             for effect in array(&value["allowed_effects"])? {
                 if effect != "observe"
                     && !(before && effect == "block")

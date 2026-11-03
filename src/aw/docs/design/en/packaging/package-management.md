@@ -1,158 +1,91 @@
-# Local package management
+# Local Provider management
 
 [中文版](../../zh/packaging/package-management.md)
 
-`aw-cli` calls the `aw-package` library to
-plan and commit local package changes. The implementation is in `database.rs`,
-`open_bundle.rs`, `plan.rs` and `transaction.rs` and their matching directories.
-The CLI remains the only software-management executable; `aw-build` produces
-the existing Preview bundles.
+`aw-package` admits local Provider extensions and generates or edits AW
+configuration. File verification, inventories and durable transactions live in
+its private `store` module. Framework and backend builds use Makefiles and
+distribution scripts. AW's Provider API does not build sources or install core/backend software.
 
-## Files and authority
+## Inputs and admission
 
-User records live at `$XDG_STATE_HOME/aw/packages`, falling back to
-`$HOME/.local/state/aw/packages`. An explicit system scope uses
-`/var/lib/aw/packages`; it manages raw AW files and does not invoke RPM or dpkg.
-The process's effective UID never selects a scope implicitly. System writes
-require root. System record and lock files are readable by ordinary users;
-the `transactions/` root is enumerable while individual journal directories
-remain private to root. User databases and all recovery journals stay private.
+Every AW bundle has one bounded `package.json` and a `payload/` tree. Descriptions
+record independent IDs, SemVer versions, Linux architecture, exact dependencies,
+file SHA-256 values and modes. Every package must declare
+`aw-provider/v1alpha1`; `manifest.json`, `aw-core` and ordinary tools are rejected.
+Provider IDs and versions need not match AW core. Backends and their services
+remain separately installed components.
 
-| Path below the database | Purpose |
+The public `aw_package::plan::install` entrypoint applies
+that admission before returning an opaque `PackagePlan`. It serializes the plan's
+read-only decisions and blockers. `aw_package::plan::execute` accepts only this
+admitted type. Generic bundle inspection, descriptions and installation entrypoints
+remain private implementation details of `aw-package`.
+
+Planning never creates the target prefix, database, locks or journals. It verifies
+regular files without following symlinks, exact same-prefix dependencies,
+destination collisions and ownership. It does not download URLs, resolve product
+names or perform in-place replacement. Destructive plans verify reverse
+dependencies and the files selected for removal.
+
+## Database ownership
+
+User extension records live at `$XDG_STATE_HOME/aw/packages`, falling back to
+`$HOME/.local/state/aw/packages`. Explicit system scope uses `/var/lib/aw/packages`
+and requires root for writes; effective UID does not implicitly select scope.
+System inventories and their read locks can be read by ordinary users, while
+transaction journals remain private to the writer.
+
+| Database path | Purpose |
 | --- | --- |
-| `installed.json` | Versioned snapshot, commit generation, prefix IDs, packages, files and exact dependencies |
-| `lock` | Existing shared query/configuration lock or exclusive transaction lock |
-| `transactions/<transaction_id>/` | Durable journal and database publication evidence for interrupted operations |
-| `legacy/<installation_id>/<transaction_id>/` | Exact historical JSON bytes retained for each registration attempt |
+| `installed.json` | Versioned inventory, commit generation, installation IDs, Provider packages, files and exact dependencies |
+| `lock` | Shared query/configuration lock or exclusive transaction lock |
+| `transactions/<transaction_id>/` | Durable journal and publication evidence for an interrupted operation |
 
-The sole prefix-local `.aw-packages/aw-core.json` records a database path, scope
-and installation ID. It contains no second copy of the package facts. Its
-strict shape is rejected by the historical `Component` decoder before a legacy
-writer changes its payload. Queries cross-check this locator against the
-database and reject mixed locator/component records. Central listings retain
-records when a payload prefix is missing; `doctor` reports the file damage.
-An empty registration and locator survive complete removal to keep historical
-writers closed and allow later reinstall at that prefix.
+A prefix locator binds the extension installation to its selected database and
+manager without duplicating package facts. AW rejects ANOLISA-owned locators and
+does not import native RPM ownership. Explicit-prefix queries and configuration
+generation follow the verified locator, including readable system installations.
+No-prefix queries use only the selected AW database. File damage is reported by
+`doctor`; removing all extensions retains an empty registration for safe reuse.
 
-No-prefix queries use only the selected database. Explicit-prefix queries and
-configuration generation follow the locator, allowing an ordinary user's
-configuration to refer to a readable system installation without guessing root's
-XDG directory. Old prefixes remain readable without a locator. Querying them
-does not register them. Each migration attempt archives their raw bytes separately;
-only a committed mutation establishes the locator's database authority. Archives
-from rolled-back attempts remain readable without blocking a later migration of
-changed old records. Opaque old version
-and source labels remain recorded facts rather than being rewritten as SemVer
-or fabricated Git commits.
+The AW core binary installed by an ordinary Makefile has no extension record.
+Providers installed by RPM or another owner can run through explicit
+`transport.argv` without any AW database. Configuration with external paths does
+not adopt their file ownership.
 
-## Local inputs and plans
+## Transactions and recovery
 
-`open_bundle::inspect` accepts exactly one bounded `package.json` or historical
-`manifest.json`, then verifies every described payload under `payload/` using
-no-follow regular-file reads, modes and digests. Independent descriptions use
-SemVer, Linux architecture, exact requirements and optional source/protocol
-metadata. Ordinary tools require neither a Provider declaration nor AW core.
-Historical Preview bundles retain same-build dependency checks.
-Individual files are bounded at 1 GiB. Bundle inspection retains its actual
-verified byte count, and install planning combines that count with the actual
-verified bytes already in the selected prefix. The resulting installation must
-remain within 4 GiB, matching the complete-prefix verification budget used by
-future plans and removals. Separately bounded inputs cannot bypass that limit
-through repeated appends.
+Queries hold existing database read locks. Configuration takes database then
+prefix read locks through file verification and private output publication.
+Mutation execution takes database then prefix write locks, rechecks the planned
+snapshot and uses the private `store` transaction implementation. Private staging
+and no-follow identity checks prevent a path replacement from redirecting writes.
 
-Admission also caps the resulting prefix at 32,767 payload files, reserving one
-of the journal's 32,768 actions for its locator. Plans check the current operation's
-exact payload/legacy/locator actions and newly created directories against the
-same journal limits. A pre-existing oversized installation can remove selected
-packages to reduce its size; an oversized whole-prefix removal is blocked during
-planning rather than first failing during execution.
-
-Plans also enforce the journal's 96 MiB encoded-byte ceiling using the actual
-`Journal`/`Action` serializer and conservative identity and transaction-ID sizes.
-The budget includes every possible payload parent, including existing empty
-directories that might disappear later. Database snapshots remain exact UTF-8
-strings; they are not written as JSON byte arrays. Installation admission reserves
-whole-prefix removal space for two fully grown 16 MiB database snapshots and
-their string escaping, so later additions in other prefixes cannot exhaust that
-reserve. Preparation repeats the check under write locks before creating the
-journal or changing the prefix; a valid empty database may already exist.
-
-`plan::install` only adds packages. It checks exact dependencies in the selected
-prefix, existing package IDs, unknown destination files, and ownership collisions
-throughout the selected database. `plan::uninstall` accepts selected IDs or all
-packages, checks the remaining database's reverse dependencies and verifies the
-owned files before choosing removals. It never includes unknown files. Neither
-function creates the prefix, database, lock or journal. Plans retain private
-before/after evidence; caller-edited JSON cannot authorize execution. Replacement,
-upgrades, remote fetching and cross-prefix dependency selection are separate work.
-
-## Locks and commit
-
-Queries retain the existing database shared lock. Configuration generation takes
-the database shared lock before the prefix shared lock, then holds both through
-file verification and private configuration publication. It reads historical
-records only when no locator exists and rechecks that choice after taking the
-prefix lock. Configuration never enables a newly installed Provider implicitly.
-
-Execution takes database then prefix exclusive locks without waiting and checks
-that the planned generation, metadata bytes, source payloads, installed files
-and record directory still match. A missing database is initialized to a durable
-empty generation zero while locked; a failed first write can leave this valid
-empty database. Each successful operation advances the generation exactly once.
-Prefix metadata and package files are staged locally, with durable journal intent
-before publication. The historical-writer locator is published before changing
-legacy payloads and cannot disappear during its atomic replacement.
-
-The database and prefix filesystems must support Linux `O_TMPFILE`, hard links,
-directory fsync and `renameat2` with `RENAME_NOREPLACE` and `RENAME_EXCHANGE`.
-They may reside on different filesystems; each stages its own files locally.
-Unsupported staging reports the operation and directory. There is no named-file
-fallback: supporting one requires journaled temporary-file ownership and crash
-recovery for partially written files.
-
-Replacing `installed.json` durably is the commit point. Before it, recovery
-restores previous files and restores the old-writer locator last; after it,
-recovery completes cleanup rather than rolling back the committed database.
-Replay checks recorded inode, mode and content evidence. Conflicting or unknown
-bytes remain on disk with their backups and are reported for inspection. Queries
-and normal writes refuse any unfinished transaction; only explicit `aw recover`
-replays it. SIGINT/SIGTERM cancellation uses the same recovery path. SIGKILL
-can leave a journal that the next recovery replays.
-
-A visible rename does not establish durability when the directory fsync fails.
-That error leaves the journal and backups intact and reports incomplete recovery.
-Explicit recovery repeats the database publication durability barrier before
-treating visible after-bytes as a committed database and cleaning up.
+Durable replacement of `installed.json` commits the operation. An interrupted
+transaction blocks further mutation until explicit `aw recover` completes
+committed cleanup or rolls back uncommitted writes. Recovery retains conflicting
+bytes and reports blockers instead of overwriting them. The package engine's
+file, byte, action and journal limits apply before mutation and again under locks.
 
 ## Runtime file references
 
-`aw-exec::PackageLeases` holds existing prefix shared locks for managed
-executable paths and literal absolute argument paths. It reads path ancestors,
-not the package database. The CLI protects its executable and known Agent
-launch commands, the service protects its own executable, and each Host protects
-its Provider commands until its owned processes have stopped. This placement
-avoids a runtime-to-package-library dependency and keeps the Hook call path
-unchanged. An exclusive writer fails while one of those references remains.
+`aw-exec::PackageLeases` holds existing prefix read locks for known executables
+and literal absolute argv paths. The CLI, service and Host keep those leases
+through their owned process lifetime and cleanup. This `aw-exec` helper reads
+no central inventory and creates no package records. Ordinary or native
+executables without a managed locator remain usable.
 
-These locks coordinate this implementation. They cannot establish that arbitrary
-external processes, shell-generated paths, or older AW runtimes are absent.
-If the recorded AW executable's digest differs from the current command,
-destructive plans and first-write legacy registration report `runtime_unknown`.
-Rejecting the latter before writes keeps old installations manageable by their
-existing tools; install a different AW version in a new prefix. The CLI also
-holds package leases while registering native Agent Hooks through either
-`aw agent connect` or legacy native `aw install --config`.
-Complete instance discovery and lifecycle management remain outside this package
-database.
+These references do not discover arbitrary external processes or shell-generated
+paths. Package removal therefore checks only the evidence it can establish;
+backend lifecycle and native package removal remain their owners' responsibility.
+Native Hook registration uses `aw agent connect` and is separate from Provider
+bundle installation.
 
 ## Verification
 
-`tests/management.rs` covers independent tools, preview without writes, exact
-dependencies, reverse references, ownership, stale evidence, legacy archival,
-last-package removal/reinstall and configuration from registered packages.
-`tests/database.rs` covers bounded inventory/doctor reads and locator authority.
-Configuration unit tests verify both read locks remain held during publication;
-transaction unit tests exercise interruption and recovery. Runtime lease tests
-live with `aw-exec` and `aw-host`. Run the Linux checks in
-[CONTRIBUTING](../../../../CONTRIBUTING.md); unit fixtures do not certify native Agent
-adoption or general external-process discovery.
+AW admission tests cover rejection of non-Provider and manifest inputs, independent
+Provider IDs and versions, exact dependencies, stale plans, file ownership and
+recovery. The `store` unit tests cover the underlying bounded file transactions.
+Provider protocol and native Agent adoption tests remain separate; installing a
+bundle does not prove that a framework adopted its effects.

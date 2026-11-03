@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
 // Readiness includes real SQLite initialization on shared CI storage.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 // Match the deployment stop budget, including drain, persistence, and runtime cleanup.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(45);
 

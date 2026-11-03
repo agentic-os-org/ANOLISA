@@ -167,8 +167,28 @@ pub fn memory_import(
         errors: Vec::new(),
     };
 
+    // Pre-pass (own throwaway seen-set): the destructive overwrite wipe may
+    // only run for a fully well-formed archive — one whose every entry
+    // passes the path-shape and duplicate checks. A malformed archive
+    // (even partly) skips the wipe; per-entry reporting below still
+    // applies, so valid entries import and invalid ones are listed.
+    let archive_is_malformed = {
+        let mut prepass_seen = std::collections::HashSet::new();
+        archive
+            .memories
+            .iter()
+            .chain(archive.tasks.iter())
+            .any(|mem| check_and_record_entry_path(mem, &mut prepass_seen).is_err())
+    };
+    if archive_is_malformed {
+        tracing::warn!(
+            "overwrite strategy skipped the destructive wipe: \
+             the archive contains invalid entries (see the error list)"
+        );
+    }
+
     // Handle overwrite strategy: export backup, then remove all existing .md files
-    if strategy == ImportStrategy::Overwrite && !dry_run {
+    if strategy == ImportStrategy::Overwrite && !dry_run && !archive_is_malformed {
         // Best-effort backup: export current state before destructive overwrite.
         match crate::tools::memory_export::memory_export(
             svc,
@@ -188,30 +208,45 @@ pub fn memory_import(
         tracing::info!("overwrite strategy: removed {removed} existing memories");
     }
 
+    // One shared seen-set for memories and tasks: both write into the same
+    // mount namespace, so a task and a memory with the same path collide on
+    // disk and must be reported rather than double-written.
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Import memories
     for mem in &archive.memories {
-        match import_single(svc, mem, strategy, dry_run) {
+        match import_single(svc, mem, strategy, dry_run, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
                 ImportAction::Skipped => report.skipped += 1,
             },
             Err(e) => {
-                report.errors.push(format!("{}: {e}", mem.path));
+                let label = if mem.path.is_empty() {
+                    "<empty>"
+                } else {
+                    &mem.path
+                };
+                report.errors.push(format!("{label}: {e}"));
             }
         }
     }
 
     // Import tasks
     for task in &archive.tasks {
-        match import_single(svc, task, strategy, dry_run) {
+        match import_single(svc, task, strategy, dry_run, &mut seen_paths) {
             Ok(action) => match action {
                 ImportAction::Imported => report.imported += 1,
                 ImportAction::Overwritten => report.overwritten += 1,
                 ImportAction::Skipped => report.skipped += 1,
             },
             Err(e) => {
-                report.errors.push(format!("{}: {e}", task.path));
+                let label = if task.path.is_empty() {
+                    "<empty>"
+                } else {
+                    &task.path
+                };
+                report.errors.push(format!("{label}: {e}"));
             }
         }
     }
@@ -258,15 +293,62 @@ enum ImportAction {
     Skipped,
 }
 
+/// Validate one archive entry before it is written.
+///
+/// The AMA format only ever contains markdown memory paths: `mem_export`
+/// filters its walk to `.md` files and `ExportedMemory::path` is documented
+/// as e.g. "facts/lesson/01J5.md". Anything else — a non-`.md` path like
+/// "facts/facts.jsonl", an empty path, or a path repeated in the same
+/// archive — is malformed input, and writing it would clobber non-memory
+/// files (the append-only fact log, the generated index) with reconstructed
+/// markdown.
+fn check_and_record_entry_path(
+    mem: &ExportedMemory,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<String> {
+    if mem.path.is_empty() {
+        return Err(MemoryError::InvalidArgument(
+            "archive entry has an empty path".into(),
+        ));
+    }
+    if Path::new(&mem.path).extension().and_then(|e| e.to_str()) != Some("md") {
+        return Err(MemoryError::InvalidArgument(format!(
+            "archive entry '{}' is not a markdown (.md) memory path; \
+             AMA archives only contain .md files (as produced by mem_export)",
+            mem.path
+        )));
+    }
+    // Normalize once and key everything on the canonical form:
+    // `Path::components()` drops trailing slashes and empty segments, so
+    // "notes/a.md/", "notes//a.md" and "notes/a.md//" all collapse to
+    // "notes/a.md". The raw-string keyed set treated those spellings as
+    // distinct (the duplicate guard was bypassable), and the trailing
+    // slash additionally defeated the skip-existing `exists()` check
+    // with ENOTDIR once the file was there.
+    let normalized: std::path::PathBuf = Path::new(&mem.path).components().collect();
+    let normalized = normalized.to_string_lossy().into_owned();
+    if !seen.insert(normalized.clone()) {
+        return Err(MemoryError::InvalidArgument(format!(
+            "duplicate entry path '{}' in archive; each memory may appear once",
+            mem.path
+        )));
+    }
+    Ok(normalized)
+}
+
 fn import_single(
     svc: &MemoryService,
     mem: &ExportedMemory,
     strategy: ImportStrategy,
     dry_run: bool,
+    seen: &mut std::collections::HashSet<String>,
 ) -> Result<ImportAction> {
+    let path = check_and_record_entry_path(mem, seen)?;
+
     // Security: use ns::paths::resolve_for_create to prevent path traversal
-    // and enforce reserved-segment checks (.anolisa, .git*, etc.)
-    let target_path = crate::ns::paths::resolve_for_create(&svc.mount, &mem.path)?;
+    // and enforce reserved-segment checks (.anolisa, .git*, etc.) — on the
+    // normalized path, so trailing-slash spellings resolve to the file.
+    let target_path = crate::ns::paths::resolve_for_create(&svc.mount, &path)?;
 
     let exists = target_path.exists();
 

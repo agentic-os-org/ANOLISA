@@ -107,6 +107,31 @@ if ! cmp -s "$NOGIT_DIR/component.toml" "$NOGIT_BACKUP"; then
     exit 1
 fi
 
+# The os-skills extension metadata must follow the component's version.
+TEST_ROOT="$WORK_DIR" python3 - <<'PYEOF'
+import importlib.util
+import json
+import os
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("component_versions", "scripts/check-component-versions.py")
+checker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checker)
+source = "src/os-skills/component.toml"
+target = "src/os-skills/cosh-extension.json"
+assert (source, target) in checker.TOML_CONTRACTS
+checker.ROOT = Path(os.environ["TEST_ROOT"])
+(checker.ROOT / source).parent.mkdir(parents=True)
+(checker.ROOT / source).write_text('[component]\nversion = "1.2.3"\n')
+(checker.ROOT / target).write_text(json.dumps({"version": "1.2.3"}))
+errors = []
+checker.check_equal(errors, source, target)
+assert not errors, errors
+(checker.ROOT / target).write_text(json.dumps({"version": "1.2.2"}))
+checker.check_equal(errors, source, target)
+assert len(errors) == 1 and target in errors[0], errors
+PYEOF
+
 # The tree must be back in its pre-test state and synchronized.
 if ! cmp -s "$CATALOG" "$SNAPSHOT"; then
     echo "ERROR: catalog differs from its pre-test state" >&2

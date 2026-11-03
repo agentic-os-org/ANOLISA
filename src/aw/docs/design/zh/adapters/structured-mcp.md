@@ -43,6 +43,20 @@ client 调用；远端操作的取消及清理由远端 server 持有。
 
 ## Qoder SDK 1.0.56 / Worker 1.1.78
 
+普通常驻 Query 使用原样 SDK/Worker。公开 PreToolUse 检查捕获当时可见的输入，
+后续原生 Hook 与权限改写没有最终执行前再次检查；Post 策略记录保留已检查的快照。
+调用身份、取消和回调退休检查继续生效。
+
+原生 SDK 进程内 server 的模型策略回调委托到 SDK handler 边界。SDK 先解析输入
+schema，AW 随后捕获实际 handler 与解析后的参数，登记具有 Query 身份的子调用并
+执行 Pre 检查。handler 完成后先让 SDK 继续输出 schema 校验与异常转换，形成最终
+响应，AW 对此响应执行 Post 后才允许 dispatch 返回。受跟踪的 handler/响应屏障
+在取消和 finalizer 执行期间保留归属；严格 Post 在交付前关闭原生 transport。
+AW 在运行时包装 `executeToolHandler`，核验原生派发实际选中的注册对象，并在 Pre
+检查期间固定 callback。等待派发时注册对象被替换，本次调用在 handler 执行前拒绝；
+后续请求可使用新注册对象。handler 进入前的原生 schema 错误保留错误回执并执行 Post。
+Query 关闭后原生 server 可继续复用。
+
 使用 AW 受管 Qoder bridge 既有的 `createSdkMcpServer()` 导出。工厂接受
 `parentIdentity: "query"`（默认）或 `"required"`。固定 Worker 在 MCP 派发边界
 未传递父模型身份，因此 `required` 在创建原生 server 前拒绝。

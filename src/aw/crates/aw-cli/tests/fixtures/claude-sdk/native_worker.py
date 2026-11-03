@@ -38,6 +38,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/mcp":
+            assert self.headers.get("X-Inspection-Ctx-Token") == "fixture-tenant"
+            method = body["method"]
+            if "id" not in body:
+                self.send_response(202)
+                self.end_headers()
+                return
+            if method == "initialize":
+                result = {"protocolVersion": body["params"]["protocolVersion"],
+                          "capabilities": {"tools": {}}, "serverInfo": {"name": "fixture", "version": "1"}}
+            elif method == "tools/list":
+                result = {"tools": [{"name": "touch", "description": "Write a fixture marker",
+                                     "inputSchema": {"type": "object", "properties": {"value": {"type": "string"}},
+                                                     "required": ["value"]}}]}
+            else:
+                assert method == "tools/call", body
+                value = body["params"]["arguments"]["value"]
+                assert (ROOT / f"policy-{value}").exists()
+                (ROOT / "effect").write_text(value)
+                if MODE.startswith("http-mcp-compress"):
+                    result = {"content": [{"type": "text", "text": ORIGINAL}], "isError": False}
+                elif MODE.startswith("http-mcp-error-compress"):
+                    result = {"content": [{"type": "text", "text": ORIGINAL}], "isError": True}
+                else:
+                    result = {"content": [{"type": "text", "text": "native HTTP MCP result"}],
+                              "structuredContent": {"tenant": "fixture-tenant"}, "isError": False}
+            self.reply(json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result}).encode(),
+                       "application/json")
+            return
         REQUESTS.append(body)
         if self.path.endswith("count_tokens"):
             self.reply(json.dumps({"input_tokens": 1}).encode(), "application/json")
@@ -163,7 +192,10 @@ async def touch(args: dict[str, Any]) -> dict[str, Any]:
     assert (ROOT / f"policy-{args['value']}").exists(), "tool executed before policy completion"
     (ROOT / "effect").write_text(args["value"])
     if MODE in {"failure", "mcp-error-compress"}:
-        return {"content": [{"type": "text", "text": "fixture tool failure"}], "isError": True}
+        # The SDK handler contract uses is_error; create_sdk_mcp_server maps
+        # it to the wire-level isError flag. An isError key here is ignored
+        # and the result would be treated as a success.
+        return {"content": [{"type": "text", "text": "fixture tool failure"}], "is_error": True}
     return {"content": [{"type": "text", "text": "ok"}]}
 
 
@@ -263,18 +295,26 @@ async def run(server: ThreadingHTTPServer) -> None:
         opts = replace(opts, permission_prompt_tool_name="mcp__local__permission")
     if MODE == "unready":
         return
-    if MODE == "settings":
-        opts = replace(opts, setting_sources=["project"])
+    if MODE.startswith(("settings", "bash-native-rewrite-")) or MODE == "plugins":
+        from native_configuration import configure
+
+        opts = configure(opts, ROOT, MODE)
+    if MODE.startswith("http-mcp"):
+        opts = replace(opts, mcp_servers={"local": {
+            "type": "http", "url": f"http://127.0.0.1:{server.server_port}/mcp",
+            "headers": {"X-Inspection-Ctx-Token": "fixture-tenant"}}})
     if MODE == "cli-path":
         opts = replace(opts, cli_path="/not/bundled")
-    if MODE == "plugins":
-        opts = replace(opts, plugins=[{"type": "local", "path": "/fixture-plugin"}])
     if MODE == "extra-args":
         opts = replace(opts, extra_args={"settings": "/fixture-settings"})
     if MODE == "strict-mcp-config":
         opts = replace(opts, extra_args={"strict-mcp-config": None})
     messages = []
     async with create_client(opts) as client:
+        if MODE.startswith("settings") or MODE == "plugins":
+            info = await client.get_server_info()
+            name = "aw-native-fixture:fixture" if MODE == "plugins" else "aw-native-fixture"
+            assert any(command["name"] == name for command in info["commands"]), info
         transport = client._transport
         (ROOT / "sdk-cli-process.json").write_text(
             json.dumps(
@@ -312,6 +352,7 @@ async def run(server: ThreadingHTTPServer) -> None:
                 ],
                 "original": ORIGINAL,
                 "effect": (ROOT / "effect").exists(),
+                "rewritten_effect": (ROOT / "rewritten-effect").exists(),
             }
         )
     )

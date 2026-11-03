@@ -66,7 +66,20 @@ def _log_sandbox_event(
         pass
 
 
-LINUX_SANDBOX = shutil.which("linux-sandbox") or "/usr/local/bin/linux-sandbox"
+def _find_linux_sandbox() -> str:
+    """Respect PATH before falling back to system and legacy install locations."""
+    candidates = (
+        shutil.which("linux-sandbox"),
+        "/usr/bin/linux-sandbox",
+        "/usr/local/bin/linux-sandbox",
+    )
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "/usr/bin/linux-sandbox"
+
+
+LINUX_SANDBOX = _find_linux_sandbox()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 规则收敛设计说明

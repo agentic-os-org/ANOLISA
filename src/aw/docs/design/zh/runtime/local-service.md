@@ -50,7 +50,16 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
-| `close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
+| 提交事件在实例内按 `(input.submit, session_id, turn_id)` 关联，与工具调用账本独立。
+事件包含 `input.text`，不带 `tool`。同轮步骤回调保留首次输入、原生字节和截止时间；
+文本或身份变化会被拒绝。完成、关闭及打开失败的声明保留到实例释放，上限为 1,024。
+普通 QwenPaw scope 随 reply 结束，Qoder scope 随 Query 关闭释放。
+
+`close_input_event` 接收 `instance_id`、`session_id`、`turn_id`，复用工具事件的取消与
+清理链路；取消可先于打开生效，并阻止同轮重开。实例释放会取消未完成提交，等待
+Provider 进程退出。元数据审计保存会话、轮次和处置，不保存用户文本。
+
+`close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
 | `invoke_step` | `event_id`、`instance_id`、`step_id`、可选 `native_environment` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
 | `close_event` | `event_id`、`instance_id` | 取消未完成工作、等待子进程回收并确认关闭 |
 | `start_observation` | `instance_id` | 启动一个可选实例观测，进行有界来源兼容探测 |
@@ -137,6 +146,30 @@ worker，并针对迟到 close 原子回收身份与两阶段关联。未知/已
 
 升级时先排空旧会话并停止旧 daemon，再同时更新 CLI 和 daemon 到
 `aw-service/v1alpha7`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
+
+### 持续接管有效性
+
+JS/Python 共用消费者在任务确认和 invocation 准入后启动 `watch_scope`。
+`check_scope` 将原 worker PID、不可变策略 revision 绑定到已有任务 owner，
+外层 binding 固定服务与任务代次。覆盖内登记和 Hook 派发重新检查有效性。
+Qoder 核对已安装的生产、控制派发和传输函数；QwenPaw 核对已有 middleware、
+parser 和 Toolkit 派发接点。
+
+空闲检查在上次检查完成两秒后运行，每次 CLI 调用限时六秒。连续十五秒未成功检查时，
+服务拒绝该 scope 的执行，即使 worker 仍然存活。接点失败或策略代次不匹配会永久
+阻断该 scope，重新连接不能恢复它。这些检查保留声明的覆盖边界：AW 范围外原生
+能力继续沿用自身授权行为。
+
+故障取消活动 Provider 工作，同时保留存活任务的归属，直到原生回调、工作和凭据
+完成清理。已登记 invocation 仍可回收；独立兄弟 scope 分别保持自身有效性。
+并发关闭等待同一次清理，迟到的 open 响应被关闭且不再确认。
+恢复需先完成清理，再创建新 scope，有副作用的调用不会自动重放。
+
+`status.instances[].scope_validity` 分别报告 `native_alive` 和 `covered_bridge`，
+后者取值为 `pending`、`ready`、`failed`、`unavailable`、`unmonitored`。
+`inspect.service.resident_scopes` 汇总任务数量；旧服务未提供的数据为 `null`。
+启动 `ready` 不能证明持续有效。新消费者在任务准入时拒绝不支持 watch 操作的服务；
+升级需排空现有任务，再统一更新 CLI、Adapter 和服务。
 
 ## 共享事件生命周期
 

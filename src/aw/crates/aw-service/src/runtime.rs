@@ -505,6 +505,17 @@ impl Drop for CallGuard<'_> {
 }
 
 fn event_metadata(value: &Value) -> Result<Value> {
+    if value["name"] == "input.submit" {
+        let fields = [&value["session_id"], &value["turn_id"]];
+        if fields.iter().any(|field| {
+            !field
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 512)
+        }) {
+            return Err(rejected("event_metadata_limit"));
+        }
+        return Ok(json!({"name":"input.submit", "session_id":fields[0], "turn_id":fields[1]}));
+    }
     let fields = [
         &value["name"],
         &value["session_id"],

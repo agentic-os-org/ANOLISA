@@ -40,6 +40,9 @@ Extension 可以打包 Skills、Hooks、MCP server、设置、上下文或 Agent
 /extensions select-source <name> system
 ```
 
+设置 `COSH_HOME` 可统一指定用户扩展和状态根目录，默认值为 `~/.copilot-shell`。
+`COSH_STATES_DIR` 已设置时仅覆盖状态目录。adapter 与 cosh 命令应使用相同的目录设置。
+
 ## Extension 设置
 
 ```text

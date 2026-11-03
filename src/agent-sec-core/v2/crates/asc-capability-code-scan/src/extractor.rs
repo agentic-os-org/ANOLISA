@@ -97,8 +97,7 @@ fn inline_regex() -> &'static Regex {
 /// pattern can only capture the listed interpreters, so this is unreachable
 /// today and stays defensive rather than becoming an error.
 ///
-/// Nested interpreters (Python-in-Bash-in-Python) and multi-command strings
-/// where only one segment is an interpreter call are out of scope, matching V1.
+/// Returns the first matching payload; the scanner also scans the complete Bash input.
 pub fn extract_inline_code(command: &str) -> Option<(String, Language)> {
     // The pattern is a fixed literal; a backtracking failure here would be a
     // catastrophic-input problem, and returning `None` degrades to scanning the

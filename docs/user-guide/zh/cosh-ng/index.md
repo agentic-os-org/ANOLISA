@@ -56,6 +56,15 @@ Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和
 不可用。源码构建仅供贡献者使用，请参阅
 [开发者入门指南](../../../../contribute/zh/cosh-ng/getting-started.md)。
 
+在 `src/cosh-ng` 中为当前用户构建并安装：
+
+```bash
+make build
+make install
+```
+
+此源码安装不提供 `cosh` 终端命令；需要完整终端时，请使用上面的 RPM/raw 安装方式。
+
 ### 2. 启动终端
 
 在 Agent 要处理的项目或系统目录中启动 `cosh`：

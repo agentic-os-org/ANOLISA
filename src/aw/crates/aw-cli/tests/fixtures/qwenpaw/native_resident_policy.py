@@ -40,6 +40,8 @@ class ResidentPolicyTests:
         mw.root_config = dict(self.middleware.root_config)
         mw.config = dict(self.middleware.config)
         mw.scope = native.SCOPE.Scope(mw.root_config)
+        mw.scope.probe = mw.check_seams
+        mw.scope.on_failure = mw.bridge_failed
         return mw, agent, coordinator
 
     request = native.NativeFixture.request

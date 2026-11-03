@@ -32,13 +32,15 @@ class TokenlessTests(GateFixture):
             "src/tokenless/crates/tokenless-protocol/src/lib.rs",
             "src/tokenless/crates/tokenless-cli/src/main.rs",
             "src/tokenless/third_party/patches/rtk-tokenless-stats.patch",
-            "src/tokenless/scripts/setup-rtk.sh", "src/tokenless/Cargo.lock",
+            "src/tokenless/packaging/build/setup-rtk.sh", "src/tokenless/Cargo.lock",
             "providers/tokenless/src/pretool/retry.rs",
-            "src/aw/crates/aw-package/src/package/rtk.rs",
-            "src/aw/crates/aw-package/src/package.rs",
-            "src/aw/crates/aw-package/src/manifest.rs",
-            "src/aw/crates/aw-package/src/bin/aw-build.rs",
-            "src/aw/crates/aw-package/src/bin/support/arguments.rs",
+            "distribution/packaging/aw/integration.py",
+            "distribution/packaging/aw/build-integration.sh",
+            "distribution/packaging/aw/build.py", "distribution/packaging/aw/common.py",
+            "distribution/packaging/aw/package.py", "distribution/Makefile",
+            "distribution/packaging/aw/templates/tokenless.json",
+            "providers/tokenless/Makefile", "providers/tokenless/packaging/install.mk",
+            "src/tokenless/Makefile",
             "src/aw/crates/aw-provider/schemas/request-v1alpha1.schema.json",
             "src/aw/crates/aw-provider/src/protocol.rs",
             "src/aw/crates/aw-exec/src/linux/child.rs",
@@ -68,14 +70,14 @@ class TokenlessTests(GateFixture):
             "src/aw/crates/aw-service/src/runtime.rs",
             "src/aw/crates/aw-adapter/native/claude/sdk.py",
             "src/aw/crates/aw-cli/src/commands/inspect.rs",
-            "src/aw/crates/aw-package/src/install.rs",
-            "src/aw/crates/aw-package/src/transaction.rs",
-            "src/aw/crates/aw-package/tests/management.rs",
+            "src/aw/crates/aw-package/src/provider.rs",
+            "src/aw/crates/aw-package/src/store/transaction.rs",
+            "src/aw/crates/aw-package/src/store/tests/management.rs",
             "src/aw/crates/aw-provider/tests/protocol.rs",
             "src/aw/crates/aw-provider/examples/policy.rs",
             "src/aw/crates/aw-exec/tests/execution.rs",
             "src/aw/CONTRIBUTING.md", "src/aw/scripts/check_native.py",
-            "providers/tokenless/README.md", ".github/workflows/aw-preview.yml",
+            "providers/tokenless/README.md", ".github/workflows/aw-integration.yml",
         ):
             event = {"pull_request": {"base": {"sha": "a" * 40}, "head": {"sha": "b" * 40}}}
             with self.subTest(path=path), patch.object(gate, "git", return_value=path):
@@ -87,7 +89,7 @@ class TokenlessTests(GateFixture):
                 self.assertFalse(gate.scope("pull_request", event, "c" * 40, compatibility=True))
 
     def test_real_backend_selection_keeps_mixed_changes_and_forced_acceptance(self):
-        paths = "src/aw/README.md\0src/aw/crates/aw-package/src/package/rtk.rs\0"
+        paths = "src/aw/README.md\0distribution/packaging/aw/integration.py\0"
         event = {"pull_request": {"base": {"sha": "a" * 40}, "head": {"sha": "b" * 40}}}
         with patch.object(gate, "git", return_value=paths):
             self.assertTrue(gate.scope("pull_request", event, "c" * 40, compatibility=True))
@@ -123,15 +125,19 @@ class TokenlessTests(GateFixture):
         for file in (self.root / "src/tokenless/target/release/tokenless", aw / "target/release/rtk"):
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b"fixture binary")
-        for mode in ("pass", "empty", "failure"):
+        for mode in ("pass", "empty", "failure", "build-failure"):
             calls = []
 
             def run(commands, argv, cwd, timeout):
                 calls.append(argv)
                 self.assertEqual(commands.environment["TOKENLESS_STATS_ENABLED"], "0")
                 self.assertEqual(commands.environment["TOKENLESS_SLS_ENABLED"], "0")
-                if argv[1] == "run":
-                    self.assertIn("tokenless", argv)
+                if argv[0] == "make":
+                    self.assertEqual(argv, ["make", "-C", str(self.root / "distribution"),
+                                            "aw-integration-backends", "BACKENDS=tokenless"])
+                    self.assertEqual(cwd, self.root)
+                    if mode == "build-failure":
+                        raise RuntimeError("backend build failed")
                     return ""
                 if mode == "failure":
                     raise RuntimeError("backend test failed")

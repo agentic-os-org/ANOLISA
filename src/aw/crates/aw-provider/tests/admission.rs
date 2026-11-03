@@ -603,17 +603,23 @@ fn withholding_requires_explicit_event_scoped_adapter_evidence() {
     let mut document = document();
     document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
     let config = configuration(&document);
-    for adapter in [
-        "qoder",
-        "openclaw",
-        "hermes",
-        "qwenpaw",
-        "pi",
-        "claude-sdk",
-        "agentscope",
-    ] {
+    for adapter in ["qoder", "openclaw", "hermes", "qwenpaw", "pi", "claude-sdk"] {
         assert!(preflight(&config, adapter, &capabilities(adapter)).is_err());
     }
+    // AgentScope declares the failure action from 2.0.6 with the withholding bridge.
+    let mut agentscope = capabilities("agentscope");
+    agentscope
+        .failure_actions
+        .insert("tool.after".into(), vec!["withhold_result".into()]);
+    let steps = preflight(&config, "agentscope", &agentscope).unwrap();
+    assert_eq!(
+        steps
+            .iter()
+            .find(|step| step.event == "tool.after")
+            .unwrap()
+            .on_error,
+        "withhold_result"
+    );
     let mut caps = capabilities("qwenpaw");
     caps.failure_actions
         .insert("tool.after".into(), vec!["withhold_result".into()]);

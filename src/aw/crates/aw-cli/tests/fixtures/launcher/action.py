@@ -44,10 +44,16 @@ if args.protocol == "provider":
     reply = {"api_version": "aw-provider/v1alpha1", "request_id": request["request_id"], "status": "ok"}
     if request["method"] == "describe":
         reply["operations"] = [
-            {"name": "check", "events": ["tool.before"], "effects": ["observe", "block"]},
+            {"name": "check", "events": ["input.submit", "tool.before"], "effects": ["observe", "block"]},
             {"name": "record", "events": ["tool.after"], "effects": ["observe", "replace_result"]}]
     elif request["method"] == "invoke":
         reply["input_digest"] = request["input_digest"]
+        if request["event"]["name"] == "input.submit" and request["event"]["native"].get("scenario") == "error":
+            print(json.dumps({"api_version":reply["api_version"], "request_id":reply["request_id"],
+                              "status":"error", "error_code":"scanner_unavailable"}))
+            sys.exit(0)
+        if request["event"]["name"] == "input.submit" and request["event"]["native"].get("scenario") == "timeout":
+            time.sleep(2)
         if request["event"]["name"] == "tool.after":
             reply["effects"] = ([{"type": "replace_result", "text": "compact"}]
                 if args.behavior == "replace" else [{"type": "observe", "reason_code": "after_recorded"}])

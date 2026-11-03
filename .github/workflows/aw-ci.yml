@@ -7,15 +7,19 @@ on:
       - 'src/aw/**'
       - 'providers/**'
       - 'src/tokenless/**'
-      - '.github/workflows/aw-preview.yml'
+      - 'distribution/packaging/**'
+      - 'distribution/Makefile'
       - '.github/workflows/aw-ci.yml'
+      - '.github/workflows/aw-integration.yml'
   pull_request:
     paths:
       - '.github/workflows/aw-ci.yml'
       - 'src/aw/**'
       - 'providers/**'
       - 'src/tokenless/**'
-      - '.github/workflows/aw-preview.yml'
+      - 'distribution/packaging/**'
+      - 'distribution/Makefile'
+      - '.github/workflows/aw-integration.yml'
   merge_group:
   workflow_dispatch:
     inputs:
@@ -43,7 +47,7 @@ env:
 jobs:
   integration:
     if: github.event_name == 'workflow_dispatch' && inputs.integration
-    uses: ./.github/workflows/aw-preview.yml
+    uses: ./.github/workflows/aw-integration.yml
     with:
       candidate_sha: ${{ github.sha }}
       credential_free: ${{ inputs.credential_free }}
@@ -76,9 +80,7 @@ jobs:
     name: AW / contract checks
     needs: scope
     if: needs.scope.outputs.selected == 'true'
-    runs-on: >-
-      ${{ github.repository == 'agentic-os-org/ANOLISA' &&
-      'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     outputs:
       tested_sha: ${{ steps.checks.outputs.tested_sha }}
@@ -86,7 +88,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-          # Migration acceptance builds the pinned historical installer.
+          # Scope checks compare the complete candidate history.
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -95,6 +97,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.15.0'
+      - name: Select trusted Python for native fixtures
+        run: |
+          # The hosted setup-python cache is writable by other users. Keep it
+          # for gate control, and let native trust fixtures use the OS runtime.
+          aw_native_tools_dir=$(mktemp -d /tmp/aw-native-tools.XXXXXX)
+          ln -s /usr/bin/python3 "$aw_native_tools_dir/python3"
+          "$aw_native_tools_dir/python3" -I -S -c 'import sys; assert sys.version_info >= (3, 11)'
+          echo "$aw_native_tools_dir" >> "$GITHUB_PATH"
       - name: Prepare the pinned Rust toolchain
         working-directory: src/aw
         run: rustup show active-toolchain
@@ -109,7 +119,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run AW checks
         id: checks
-        run: python3 src/aw/scripts/check.py
+        run: '"${pythonLocation}/bin/python3" src/aw/scripts/check.py'
 
   tokenless:
     name: AW / Tokenless compatibility

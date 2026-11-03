@@ -19,7 +19,7 @@ the same CLI/data directory for both entries.
 
 `aw-provider-view/v1alpha1` is independent of `aw-provider/v1alpha1` and
 `aw-service/v1alpha7`. The event request/response schemas remain unchanged.
-Use matching Preview binaries/configuration; older binaries can reject the new
+Use matching binaries/configuration; older binaries can reject the new
 registration. Missing/unsupported presentation capabilities do not change
 sec-core enforcement, after observers or custom Hook scheduling.
 

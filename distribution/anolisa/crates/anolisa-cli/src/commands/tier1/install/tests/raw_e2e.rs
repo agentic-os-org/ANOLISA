@@ -815,6 +815,131 @@ type = "config"
 }
 
 #[test]
+fn raw_install_preserves_distribution_registry_and_refuses_other_collisions() {
+    use sha2::{Digest, Sha256};
+
+    for (occupied_binary, bad_digest, contract_only) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let tmp = tempdir().expect("tmpdir");
+        let repo = tmp.path().join("repo");
+        let repo_url = write_local_repo(&repo);
+        let component = component_manifest_toml("agentsight", "0.2.0", &["system"]);
+        let component = if contract_only {
+            component
+                .split_once("[[component.layout.files]]")
+                .unwrap()
+                .0
+        } else {
+            &component
+        };
+        let manifest = format!(
+            "{component}\n[[component.layout.files]]\nsource = \".anolisa/component.toml\"\ntarget = \"{{datadir}}/components/agentsight/component.toml\"\nmode = \"0644\"\n",
+        );
+        let artifact = build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"#!/bin/sh\necho installed\n"),
+        ]);
+        replace_repo_artifact(&repo, "agentsight", &artifact);
+        let digest = if bad_digest {
+            "0".repeat(64)
+        } else {
+            format!("{:x}", Sha256::digest(manifest.as_bytes()))
+        };
+        let index_path = repo.join("v1/index.toml");
+        let index = std::fs::read_to_string(&index_path).unwrap();
+        std::fs::write(
+            &index_path,
+            format!("{index}\nmanifest_digest = \"sha256:{digest}\"\n"),
+        )
+        .unwrap();
+        let ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+        let layout = common::resolve_layout(&ctx);
+        let registry = layout.contract_path("agentsight");
+        std::fs::create_dir_all(registry.parent().expect("parent")).expect("registry directory");
+        let registry_content = component_manifest_toml("agentsight", "9.0.0", &["system"]);
+        std::fs::write(&registry, &registry_content).expect("preinstalled registry");
+        let binary = layout.bin_dir.join("agentsight");
+        if occupied_binary {
+            std::fs::create_dir_all(&layout.bin_dir).expect("bin directory");
+            std::fs::write(&binary, b"user file").expect("occupied binary");
+        }
+        let mut request = args("agentsight");
+        request.backend = Some("raw".into());
+        request.repo = Some(repo_url);
+        let result = handle_with_fake_rpm(request, &ctx);
+        assert_eq!(
+            std::fs::read_to_string(&registry).unwrap(),
+            registry_content
+        );
+        if bad_digest {
+            assert!(
+                result
+                    .unwrap_err()
+                    .reason()
+                    .contains("does not match the distribution index")
+            );
+            assert!(!binary.exists());
+        } else if contract_only {
+            assert!(
+                result
+                    .unwrap_err()
+                    .reason()
+                    .contains("only declares the ANOLISA-owned discovery contract")
+            );
+            assert!(!binary.exists());
+        } else if occupied_binary {
+            assert!(result.unwrap_err().reason().contains("already exists"));
+            assert_eq!(std::fs::read(&binary).unwrap(), b"user file");
+        } else {
+            result.expect("old artifact installs alongside the registry");
+            let store = load_v5_store(&layout);
+            let artifact = owned_artifact(store.find(ObjectKind::Component, "agentsight").unwrap());
+            assert!(!artifact.files.iter().any(|file| file.path == registry));
+            assert_eq!(
+                std::fs::read_to_string(layout.snapshot_path("agentsight")).unwrap(),
+                manifest
+            );
+            assert!(artifact.files.iter().any(|file| {
+                file.path == layout.snapshot_path("agentsight") && file.sha256.is_some()
+            }));
+        }
+    }
+}
+
+#[test]
+fn raw_install_empty_layout_reports_the_original_missing_files_error() {
+    let tmp = tempdir().expect("tmpdir");
+    let repo = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo);
+    let manifest = component_manifest_toml("agentsight", "0.2.0", &["system"]);
+    let header = manifest.split_once("[[component.layout.files]]").unwrap().0;
+    replace_repo_artifact(
+        &repo,
+        "agentsight",
+        &build_tar_gz(&[(".anolisa/component.toml", header.as_bytes())]),
+    );
+    let ctx = ctx_with_prefix(false, Some(tmp.path().join("sys")));
+    let mut request = args("agentsight");
+    request.backend = Some("raw".into());
+    request.repo = Some(repo_url);
+
+    let error = handle_with_fake_rpm(request, &ctx).expect_err("empty layout must fail");
+
+    assert!(
+        error
+            .reason()
+            .contains("declares no [install.files] — nothing to install")
+    );
+    let layout = common::resolve_layout(&ctx);
+    assert!(!layout.state_dir.join("installed.toml").exists());
+    assert!(!layout.bin_dir.join("agentsight").exists());
+}
+
+#[test]
 fn install_raw_end_to_end_from_local_repo() {
     use anolisa_platform::command::{CommandOutput, CommandRunner};
     use anolisa_platform::rpm_query::RpmPackageQuery;
@@ -831,6 +956,13 @@ fn install_raw_end_to_end_from_local_repo() {
                     "%{NAME}\n",
                     "anolisa-component(agentsight)",
                 ] => "no package provides anolisa-component(agentsight)",
+                [
+                    "-q",
+                    "--whatprovides",
+                    "--qf",
+                    "%{NAME}\n",
+                    "anolisa-component-core(agentsight)",
+                ] => "no package provides anolisa-component-core(agentsight)",
                 ["-q", "agentsight"]
                 | [
                     "-q",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import sys
@@ -122,14 +123,30 @@ class Scope:
         self.pid = os.getpid()
         self.handle: dict[str, Any] | None = None
         self.closed = False
+        self.failed = False
+        self.probe = None
+        self.on_failure = None
+        self.policy_revision = None
+        self.monitor = None
+        self.close_task = None
+        self.opening = None
         self.release_error: BaseException | None = None
         self.environment: dict[str, str] = {}
         self.invocation_limit = 0
         self.reservation: str | None = None
 
-    def check(self) -> None:
+    def check(self, *, cleanup: bool = False) -> None:
         if self.pid != os.getpid() or self.closed or self.handle is None:
             raise RuntimeError("SDK scope is closed, unbound or inherited across fork")
+        if not cleanup:
+            if self.failed:
+                raise RuntimeError("AW scope bridge validity failed")
+            try:
+                if self.probe is not None:
+                    self.probe()
+            except Exception as error:
+                self.invalidate(error)
+                raise
 
     async def ready(self) -> None:
         """Confirm managed startup without admitting an application task."""
@@ -176,22 +193,22 @@ class Scope:
     async def open(
         self, cwd: str, environment: dict[str, str], *, acknowledge: bool = True,
     ) -> None:
-        if self.handle is not None or self.closed or self.pid != os.getpid():
+        if self.opening is not None or self.handle is not None or self.closed or self.failed or self.pid != os.getpid():
             raise RuntimeError("SDK scope cannot be reopened or inherited across fork")
         self.environment = dict(environment)
-        code, output = await command(
-            self.config,
-            "open",
-            {
-                "pid": self.pid,
-                "cwd": str(Path(cwd).resolve()),
+
+        async def admit():
+            code, output = await command(self.config, "open", {
+                "pid": self.pid, "cwd": str(Path(cwd).resolve()),
                 "environment": environment,
-            },
-            33,
-        )
-        if code:
-            raise RuntimeError("AW task admission failed")
-        self.handle = json.loads(output)
+            }, 33)
+            if code:
+                raise RuntimeError("AW task admission failed")
+            self.handle = json.loads(output)
+
+        self.opening = asyncio.create_task(admit())
+        await asyncio.shield(self.opening)
+        self.check()
         # The handle is retained before acknowledgement; cancellation can now release it.
         if acknowledge:
             await self.acknowledge()
@@ -203,14 +220,74 @@ class Scope:
             code, _ = await command(self.config, "acknowledge", self.handle, 6)
             if code:
                 raise RuntimeError("AW task handoff acknowledgement failed")
+            self.check()
             code, output = await command(self.config, "enable", self.handle, 6)
             if code:
                 raise RuntimeError("AW invocation protocol admission failed")
             self.invocation_limit = json.loads(output)["invocations_per_binding"]
+            await self.watch()
         except BaseException:
             # ACK may already have committed; release despite request cancellation.
             with anyio.CancelScope(shield=True):
                 await self.close()
+            raise
+
+    def invalidate(self, error: BaseException) -> None:
+        """Latch failure for this owner without releasing native resources."""
+        if not self.failed:
+            self.failed = True
+            if self.on_failure is not None:
+                self.on_failure(error)
+
+    async def watch(self) -> None:
+        """Monitor the existing task identity while idle as well as at dispatch."""
+        self.check()
+        code, output = await command(self.config, "watch", self.handle, 6)
+        if code:
+            raise RuntimeError("AW scope watch admission failed")
+        watch = json.loads(output)
+        if (not isinstance(watch, dict) or not isinstance(watch.get("policy_revision"), str)
+                or re.fullmatch(r"[a-f0-9]{64}", watch["policy_revision"]) is None
+                or watch.get("interval_ms") != 2000):
+            raise RuntimeError("AW scope watch response is invalid")
+        self.check()
+        self.policy_revision = watch["policy_revision"]
+
+        async def monitor():
+            try:
+                while not self.closed:
+                    await asyncio.sleep(watch["interval_ms"] / 1000)
+                    await self.validate()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # validate already latched the failure and notified the owner.
+
+        self.monitor = asyncio.create_task(monitor())
+
+    async def validate(self) -> None:
+        """Recheck native seams and the service generation before a covered dispatch."""
+        if self.policy_revision is None:
+            self.check()
+            return
+        failure = None
+        try:
+            self.check()
+        except Exception as error:
+            failure = error
+        try:
+            code, _ = await command(self.config, "check", {
+                "scope": self.handle, "policy_revision": self.policy_revision,
+                "valid": failure is None,
+            }, 6)
+            if code:
+                raise RuntimeError("AW scope bridge validity failed")
+            if failure is not None:
+                raise failure
+            self.check()
+        except BaseException as error:
+            if not self.closed:
+                self.invalidate(error)
             raise
 
     async def invoke(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
@@ -222,7 +299,7 @@ class Scope:
         self, hook: dict[str, Any], payload: dict[str, Any],
     ) -> tuple[int, bytes, bytes]:
         """Retain native denial text separately from structured stdout directives."""
-        self.check()
+        await self.validate()
         try:
             native_input = json.dumps(payload, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as error:
@@ -240,6 +317,13 @@ class Scope:
         )
 
     async def close(self) -> None:
+        if self.pid != os.getpid():
+            raise RuntimeError("A forked child cannot close its parent's SDK scope")
+        if self.close_task is None:
+            self.close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self.close_task)
+
+    async def _close(self) -> None:
         if self.closed:
             if self.release_error is not None:
                 raise RuntimeError(
@@ -249,6 +333,11 @@ class Scope:
         if self.pid != os.getpid():
             raise RuntimeError("A forked child cannot close its parent's SDK scope")
         self.closed = True
+        if self.monitor is not None:
+            self.monitor.cancel()
+            await asyncio.gather(self.monitor, return_exceptions=True)
+        if self.opening is not None:
+            await asyncio.gather(self.opening, return_exceptions=True)
         if self.handle is not None:
             try:
                 code, _ = await command(self.config, "close", self.handle, 6)
@@ -261,7 +350,7 @@ class Scope:
                 self.environment.clear()
 
     async def register(self, sequence: int, call_id: str, name: str, arguments: Any) -> None:
-        self.check()
+        await self.validate()
         code, _ = await command(
             self.config,
             "register",
@@ -278,7 +367,7 @@ class Scope:
             raise RuntimeError("AW invocation registration rejected")
 
     async def finish(self, sequence: int, call_id: str) -> None:
-        self.check()
+        self.check(cleanup=True)
         code, _ = await command(
             self.config,
             "finish",

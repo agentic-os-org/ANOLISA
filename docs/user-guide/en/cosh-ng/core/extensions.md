@@ -47,6 +47,10 @@ found in system and user stores, choose one explicitly:
 /extensions select-source <name> system
 ```
 
+Set `COSH_HOME` to use a different user extension and state root.
+The default is `~/.copilot-shell`; `COSH_STATES_DIR`, when set, overrides only
+the state directory. Keep the same values for adapter and cosh commands.
+
 ## Extension settings
 
 ```text

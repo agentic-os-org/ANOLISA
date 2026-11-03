@@ -8,6 +8,165 @@ const EMPTY_CLAIMS_JWT: &str =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.y4pnSuvml8A03eqm8Uvz1gZ5ZQX_WGHDAdzFmzhAR5g";
 
 #[test]
+fn negative_context_requires_whole_words_and_preserves_fixture_markers() {
+    let scanner = PiiScanner::new().unwrap();
+    for (context, confidence) in [
+        ("", 0.78),
+        ("latest", 0.78),
+        ("greatest", 0.78),
+        ("contest", 0.78),
+        ("protest", 0.78),
+        ("testing", 0.78),
+        ("examples", 0.78),
+        ("test_data", 0.78),
+        ("_test", 0.78),
+        ("test123", 0.78),
+        ("123test", 0.78),
+        ("中文test", 0.78),
+        ("test中文", 0.78),
+        ("test", 0.43),
+        ("EXAMPLE", 0.43),
+        ("(dummy)", 0.43),
+        ("sample", 0.43),
+        ("test-only", 0.43),
+        ("sample-data", 0.43),
+        ("test\u{301}", 0.43),
+        ("\u{1e4d0}test", 0.43), // Unassigned in the frozen Unicode 14 word class.
+        ("host.invalidsuffix", 0.43),
+        ("api-key", 0.90),
+        ("test api-key", 0.55),
+    ] {
+        for text in [
+            format!("{context} 13812345678"),
+            format!("13812345678 {context}"),
+        ] {
+            assert_phone_score(&scanner, &text, confidence);
+        }
+    }
+}
+
+#[test]
+fn negative_context_keeps_original_boundaries_at_window_edges() {
+    let scanner = PiiScanner::new().unwrap();
+    for (text, confidence) in [
+        (format!("latest{}13812345678", ".".repeat(60)), 0.78),
+        (format!("🙂latest{}13812345678", ".".repeat(60)), 0.78),
+        (format!("13812345678{}testing", ".".repeat(60)), 0.78),
+        (format!(" test{}13812345678", ".".repeat(60)), 0.43),
+        (format!("test{}13812345678", ".".repeat(60)), 0.43),
+        (format!("test{}13812345678", ".".repeat(61)), 0.78),
+        (format!("13812345678{}test ", ".".repeat(60)), 0.43),
+        (format!("13812345678{}test", ".".repeat(61)), 0.78),
+    ] {
+        assert_phone_score(&scanner, &text, confidence);
+    }
+}
+
+fn assert_phone_score(scanner: &PiiScanner, text: &str, confidence: f64) {
+    for include_low_confidence in [false, true] {
+        let report = scanner
+            .scan(
+                text,
+                &PiiScanOptions {
+                    include_low_confidence,
+                    raw_evidence: true,
+                    redact_output: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let visible = include_low_confidence || confidence >= 0.5;
+        assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+        assert_eq!(report.findings.len(), usize::from(visible), "{text}");
+        assert_eq!(
+            report.verdict,
+            if visible {
+                Verdict::Warn
+            } else {
+                Verdict::Pass
+            }
+        );
+        if visible {
+            let finding = &report.findings[0];
+            assert_eq!(finding.pii_type, "phone_cn");
+            assert!((finding.confidence - confidence).abs() < 1e-9, "{text}");
+            assert_eq!(finding.raw_evidence.as_deref(), Some("13812345678"));
+            let start = text[..text.find("13812345678").unwrap()].chars().count();
+            assert_eq!((finding.span.start, finding.span.end), (start, start + 11));
+        }
+        assert_eq!(
+            report.redacted_text.unwrap(),
+            if visible {
+                text.replace("13812345678", "138****5678")
+            } else {
+                text.into()
+            },
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn negative_context_scoring_preserves_type_validation_and_exemptions() {
+    let scanner = PiiScanner::new().unwrap();
+    for (kind, value, base, penalty) in [
+        ("credit_card", "4111111111111111", 0.92, 0.35),
+        ("cn_id", "11010519491231002X", 0.93, 0.35),
+        ("api_key", "sk-abcdefghijklmnopqrstuvwxyz123456", 0.86, 0.35),
+        ("email", "alice@company.cn", 0.82, 0.0),
+        ("email", "alice@example.com", 0.35, 0.0),
+        (
+            "private_key",
+            "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----",
+            1.0,
+            0.0,
+        ),
+    ] {
+        for (context, expected) in [("latest", base), ("test-only", base - penalty)] {
+            let report = scanner
+                .scan(
+                    &format!("{context} {value}"),
+                    &PiiScanOptions {
+                        include_low_confidence: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let finding = report.findings.iter().find(|f| f.pii_type == kind).unwrap();
+            assert!(
+                (finding.confidence - expected).abs() < 1e-9,
+                "{kind}: {context}"
+            );
+        }
+    }
+    let report = scanner
+        .scan(
+            "sk-test9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA",
+            &PiiScanOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].pii_type, "api_key");
+    assert!((report.findings[0].confidence - 0.86).abs() < 1e-9);
+    assert_eq!(report.verdict, Verdict::Deny);
+    let report = scanner
+        .scan(
+            "accessKeySecret=abcdefghijklmnopqrstuvwxyz123456\nid=LTAI5tQnKxExampleToken12",
+            &PiiScanOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(report.findings.len(), 2);
+    for (finding, (kind, confidence)) in report.findings.iter().zip([
+        ("aliyun_access_key_secret", 0.94),
+        ("aliyun_access_key_id", 1.0),
+    ]) {
+        assert_eq!(finding.pii_type, kind);
+        assert!((finding.confidence - confidence).abs() < 1e-9);
+    }
+    assert_eq!(report.verdict, Verdict::Deny);
+}
+
+#[test]
 fn credit_card_structure_and_complete_spans() {
     let corpus: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/credit_cards.json")).unwrap();

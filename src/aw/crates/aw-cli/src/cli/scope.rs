@@ -60,6 +60,14 @@ struct Registration {
     input: Option<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Validity {
+    scope: Scope,
+    policy_revision: String,
+    valid: bool,
+}
+
 pub(super) fn run(args: &Arguments) -> Result<Exit> {
     let started = Instant::now();
     args.check(
@@ -190,10 +198,15 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
         std::io::stdout().flush()?;
         return Ok(Exit::Code(0));
     }
+    let mut validity = None;
     let mut registration = None;
     let (scope, native) = if matches!(action, "register" | "finish") {
         let value: Registration = serde_json::from_slice(&input)?;
         registration = Some((value.sequence, value.call_id, value.tool_name, value.input));
+        (value.scope, None)
+    } else if action == "check" {
+        let value: Validity = serde_json::from_slice(&input)?;
+        validity = Some((value.policy_revision, value.valid));
         (value.scope, None)
     } else if action == "invoke" {
         let value: Invocation = serde_json::from_slice(&input)?;
@@ -213,6 +226,28 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
         return Err("SDK task handle does not belong to this host".into());
     }
     match action {
+        "watch" => {
+            let result = client.call(
+                Operation::WatchScope {
+                    instance_id: scope.binding.instance_id,
+                    pid: owner_pid,
+                },
+                deadline,
+            )?;
+            serde_json::to_writer(std::io::stdout().lock(), &result)?;
+        }
+        "check" => {
+            let (policy_revision, valid) = validity.ok_or("missing scope validity")?;
+            client.call(
+                Operation::CheckScope {
+                    instance_id: scope.binding.instance_id,
+                    pid: owner_pid,
+                    policy_revision,
+                    valid,
+                },
+                deadline,
+            )?;
+        }
         "policy" => {
             let snapshot = client.call(
                 Operation::ScopePolicy {

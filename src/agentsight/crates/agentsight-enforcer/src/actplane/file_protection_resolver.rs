@@ -134,6 +134,7 @@ fn open_held_with_flags(
         mode: 0,
         resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
     };
+    // SAFETY: root, CString path, and repr(C) OpenHow remain live for the syscall.
     let fd = unsafe {
         libc::syscall(
             libc::SYS_openat2,
@@ -150,6 +151,7 @@ fn open_held_with_flags(
             io::Error::last_os_error(),
         ));
     }
+    // SAFETY: the successful syscall returned a unique FD whose ownership transfers to File.
     let file = unsafe { File::from_raw_fd(fd) };
     let identity = statx_identity(&file)
         .map_err(|error| ResolutionError::new(authored_path, ResolutionOperation::Stat, error))?;
@@ -198,7 +200,9 @@ pub(super) fn require_directory(path: &HeldPath) -> Result<(), BackendError> {
 }
 
 fn statx_identity(file: &File) -> io::Result<FileIdentity> {
+    // SAFETY: statx contains only integer fields, so zeroing yields a valid output buffer.
     let mut stat: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: File provides a valid FD and stat is a live writable output buffer.
     let rc = unsafe {
         libc::statx(
             file.as_raw_fd(),
@@ -226,7 +230,8 @@ fn statx_identity(file: &File) -> io::Result<FileIdentity> {
         ino: stat.stx_ino,
         dev: userspace_dev_to_kernel(encoded),
         mnt_id,
-        mode: stat.stx_mode,
+        // Permissions can change without changing the file's identity.
+        mode: stat.stx_mode & libc::S_IFMT as u16,
     })
 }
 

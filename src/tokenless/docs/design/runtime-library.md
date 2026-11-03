@@ -36,6 +36,15 @@ in Rust Core rather than Python configuration. A shell tool's `PostToolRequest` 
 command line in `command`; Core, not the adapter, reports a plain print of local files as
 `file_read` so that a printed HTML page stays verbatim while data in that output still compresses.
 
+PreTool preserves recognized native `head` and `tail` calls using the same direct-call and
+built-in wrapper recognition as `find`, including nesting and shell line continuations. Every
+argument form keeps native execution, including byte windows and follow mode. A recognized call
+keeps its entire pipeline or compound command outside RTK rewriting. This avoids structural
+truncation in RTK's `read --max-lines` path; explicit RTK calls retain their existing behavior.
+Custom `hooks.transparent_prefixes` are not inspected, so calls behind those prefixes may still
+be rewritten. The rule is independent of search path sharing and retains the existing PostTool
+file-read policy.
+
 The SDK never stores a process-global current session. `before_model` returns the exact visible
 marker set. An adapter declares whether it has a marker-authorized recovery path and owns any
 Agent-facing command or tool declaration. AgentScope keeps its Retrieve tool static across model

@@ -6,10 +6,12 @@
 
 ## 启动 Pi SDK worker
 
-高代码 Pi 应用使用 `adapter: pi`、公开 Coding Agent/Core SDK 0.84.2 与
+高代码 Pi 应用使用 `adapter: pi`、公开 Coding Agent/Core SDK（已验证基线为 0.84.2）与
 Node.js >=22.19.0。AW 管理前台 SDK worker，并接通工具前后两个 Hook 点。
 按应用现有依赖流程安装这些 SDK 包，保留应用模型与认证配置。原生 Pi CLI 是
 独立入口，这个 Adapter 不启动该 CLI。
+
+其他版本接入时，AW 检查包身份、模块布局和原生 Agent/AgentSession 接口，记录已安装的 Coding Agent 版本。
 
 在绝对路径的 `.mjs` 应用模块中暴露已有公共工厂与前台任务：
 

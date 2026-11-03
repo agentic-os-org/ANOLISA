@@ -124,6 +124,19 @@ pub fn list(svc: &MemoryService, dir: &str, opts: ListOptions) -> Result<Vec<Lis
             size,
         });
         if out.len() >= MAX_ENTRIES {
+            // The caller cannot distinguish "exactly MAX_ENTRIES entries"
+            // from "more exist but were cut" — a recursive listing of a
+            // large store silently looks complete. Surface the cut. The
+            // mount root renders as '.', matching the `dir` contract
+            // (empty and "." both mean root) instead of an ambiguous
+            // empty path.
+            let shown = if rel.is_empty() { "." } else { rel.as_str() };
+            tracing::warn!(
+                "mem_list hit the {}-entry cap under '{}' — listing truncated, \
+                 narrow with a glob or a subdirectory",
+                MAX_ENTRIES,
+                shown
+            );
             break;
         }
     }

@@ -15,6 +15,44 @@ pub(super) async fn handle_extensions(
     live_runtime: Option<&LiveExtensionRuntime>,
 ) -> OutputMessage {
     match action {
+        "adapter-capabilities" => registry_success(
+            request_id,
+            serde_json::json!({
+                "conditional_clear_user_source": true,
+            }),
+        ),
+        "clear-user-source" => {
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            let identity = params
+                .get("source_identity")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if name.is_empty() || identity.is_empty() {
+                return registry_error(request_id, "missing 'name' or 'source_identity' parameter");
+            }
+            let installer = match ExtensionInstaller::for_current_user() {
+                Ok(installer) => installer,
+                Err(error) => return extension_installer_error(request_id, &error),
+            };
+            match catalog_state_with_candidate_health(
+                &installer,
+                CatalogStateMutation::ClearUserSource {
+                    name: name.to_string(),
+                    source_identity: identity.to_string(),
+                },
+                config,
+                ext_manager,
+                live_runtime,
+            )
+            .await
+            {
+                Ok((_, publication)) => with_runtime_publication(
+                    registry_success(request_id, serde_json::json!({"name": name})),
+                    publication.as_ref(),
+                ),
+                Err(error) => registry_error(request_id, &error),
+            }
+        }
         "list" => {
             let extensions: Vec<Value> = ext_manager
                 .list()
@@ -100,7 +138,7 @@ pub(super) async fn handle_extensions(
             )
             .await
             {
-                Ok((extension, publication)) => {
+                Ok((Some(extension), publication)) => {
                     if !hook_names.is_empty() {
                         let _ = crate::state::remove_disabled_set(
                             crate::state::HOOKS_STATE,
@@ -112,6 +150,7 @@ pub(super) async fn handle_extensions(
                         publication.as_ref(),
                     )
                 }
+                Ok((None, _)) => registry_error(request_id, "extension disappeared after enable"),
                 Err(error) => {
                     registry_error(request_id, &format!("failed to enable extension: {error}"))
                 }
@@ -143,10 +182,11 @@ pub(super) async fn handle_extensions(
             )
             .await
             {
-                Ok((extension, publication)) => with_runtime_publication(
+                Ok((Some(extension), publication)) => with_runtime_publication(
                     extension_mutation_response(request_id, "disable", &extension),
                     publication.as_ref(),
                 ),
+                Ok((None, _)) => registry_error(request_id, "extension disappeared after disable"),
                 Err(error) => {
                     registry_error(request_id, &format!("failed to disable extension: {error}"))
                 }
@@ -179,10 +219,13 @@ pub(super) async fn handle_extensions(
             )
             .await
             {
-                Ok((extension, publication)) => with_runtime_publication(
+                Ok((Some(extension), publication)) => with_runtime_publication(
                     extension_mutation_response(request_id, "select-source", &extension),
                     publication.as_ref(),
                 ),
+                Ok((None, _)) => {
+                    registry_error(request_id, "extension disappeared after source selection")
+                }
                 Err(error) => registry_error(
                     request_id,
                     &format!("failed to select extension source: {error}"),

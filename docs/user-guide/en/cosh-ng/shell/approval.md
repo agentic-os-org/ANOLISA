@@ -29,8 +29,10 @@ a modifying command eligible. Stdout and the exit status remain available
 in the execution result, including when the command fails.
 
 When tokenless RTK rewriting is enabled, wrapped commands
-(`env TOKENLESS_* … /usr/bin/rtk <command>`, or `/usr/bin/rtk <command>`
-when RTK emits the absolute path itself) keep the same eligibility:
+(`env TOKENLESS_* … /usr/bin/tokenless rtk <command>` when Tokenless links
+RTK; with a standalone RTK, `env TOKENLESS_* … /usr/bin/rtk <command>`, or
+`/usr/bin/rtk <command>` when RTK emits the absolute path itself) keep the
+same eligibility:
 cosh assesses the wrapped read-only command and executes the wrapped
 form, so RTK output compression stays active on the approval-free path.
 A `TOKENLESS_DATA_DIR` that differs from the session's tokenless state

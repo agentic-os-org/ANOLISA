@@ -6,7 +6,8 @@
 
 ## 启动 Claude SDK worker
 
-使用 Claude Agent SDK 0.2.88 及其 bundled CLI 2.1.161。Adapter 启动一个前台
+已验证基线为 Claude Agent SDK 0.2.88 及其 bundled CLI 2.1.161。其他版本沿用
+原生 client、Hook、身份与 transport 生命周期检查。Adapter 记录已安装的 SDK 版本，启动一个前台
 Python script 或 `-m` module，要求 worker 公共工厂显式使用
 `aw_claude.create_client(options)`。模型认证继续由 SDK 配置。AW 为启动的 worker
 通过 `PYTHONPATH` 提供此模块，不会自动向任意 SDK 应用注入 Hooks。
@@ -46,8 +47,11 @@ Claude SDK 事件预算必须为 1..55,000 ms。每个 `tool.before` 或 `tool.a
 worker options cwd 必须等于启动 cwd。真实 SDK initialization 握手接受 callbacks
 后才发布 readiness。AW 在 `PreToolUse` 观察或拒绝，`PostToolUse` 与
 `PostToolUseFailure` 均供 after 观察。被拒绝工具不补造 after。既有 Hook veto 和
-原生权限继续有效。既有 pre-hook `updatedInput` 或 permission `updated_input`
-发生修改时明确拒绝，因为并发 callbacks 无法保证 AW 检查最终参数。启用
+原生权限继续有效。Python SDK 的既有 pre-hook `updatedInput` 或包装后的 permission
+`updated_input` 发生修改时明确拒绝。CLI 加载的 settings 和插件 Hook 独立调度，
+可以在 AW 的公共 `PreToolUse` 检查后改写普通工具参数；改写后的最终参数在执行前
+不会再经过 AW 检查。前置策略仅覆盖该 Hook 收到的输入；需要最终参数强制检查的应用
+须另行采用经过验收的执行边界。启用
 `tool.before` 时，非空 `PermissionRequest` matchers 在初始化前被拒绝；请改用
 受支持的 `PreToolUse` 或 `can_use_tool` callbacks。启用 `tool.before` 时也拒绝调用方
 指定 `permission_prompt_tool_name`；受保护 `can_use_tool` 的 SDK 内部 stdio 权限
@@ -56,15 +60,29 @@ worker options cwd 必须等于启动 cwd。真实 SDK initialization 握手接�
 launcher binding 中运行多个 SDK clients/任务；Gunicorn 和业务部署需要自己的任务
 生命周期接线。
 
-CLI 2.1.161 对 SDK MCP `isError: true` 响应仍发 `PostToolUse`，callback 数据不含
-该 flag，因此 after 观察不能分类所有业务失败。原生 Bash 执行失败使用
-`PostToolUseFailure`。身份、取消与验证限制见
+SDK 0.2.88 + CLI 2.1.161 实测：MCP 工具失败（SDK handler 合同的
+`is_error`，映射为线上 `isError`）与原生 Bash 执行失败一样以
+`PostToolUseFailure` 到达钩子；after 观察仍不能分类所有业务失败。身份、取消与验证限制见
 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/claude-sdk-adapter.md)。
 
-工厂要求 `setting_sources=[]`、无 `settings` 覆盖、无 CLI plugins。`extra_args`
-仅允许 `strict-mcp-config: None`；SDK 原生 `strict_mcp_config` 也保留。模型和认证
-配置不变。通过 settings sources 发现项目 skills 的应用，需要先明确接入设计才能
-使用该首版受限 Bridge。直接任务 worker 模式每进程只允许一个 client；多个任务客户端使用[常驻入口](../deployment/resident.md)。
+工厂保留 `setting_sources`（包括原生默认发现）、内联或文件形式的 `settings`、
+本地 `plugins` 和 SDK/HTTP/stdio `mcp_servers`。SDK 按原生顺序加载原始来源并发现
+项目 Skills；AW 沿用其加载逻辑，配置文件内容保持不变。上文的 callback 组合与运行时
+限制继续有效。`extra_args` 仍只允许 `strict-mcp-config: None`；settings 和 MCP 使用
+SDK 对应选项传入。模型和认证配置不变。配置兼容范围与 Hook 效果分别验收，
+Skills/plugins 内部执行的命令仍需单独核对覆盖边界。
+常驻客户端在接受 query 前读取 CLI 合并后的 settings。Anthropic Messages 中继沿用
+合并环境中的模型地址、代理和 TLS 配置，认证仍由 CLI 处理；会话内 settings 覆盖将
+模型响应路由到 AW，原配置文件保持不变。原生配置控制或中继路由确认失败时，connect
+直接失败。该路径要求已验收的 SDK 0.2.88 / bundled CLI 2.1.161 配置控制接口。
+中继在 connect 时固定上游环境；修改模型地址、代理或 TLS 配置后请创建新客户端。
+当前 sec-core Provider 提供提交、工具 PII 和 Skill 检查操作。Provider 操作和
+Adapter 能力分别准入：`scan_code` 和 `scan_tool_input` 检查 Claude callback 输入；
+`input.submit` 及强制输出 `on_error: withhold_result` 在 worker 启动前被拒绝。
+原生 Skill 发现继续可用；sec-core `check_skill` 的解析合同目前验收于 Qoder SDK 和
+QwenPaw，Claude 尚无对应解析合同。共享配置前请核对 [Provider 指南](../providers/sec-core.md)。
+
+直接任务 worker 模式每进程只允许一个 client；多个任务客户端使用[常驻入口](../deployment/resident.md)。
 
 当前 `adapter: claude-sdk` 支持上述受限前台 worker 工厂；`aw agent connect` 对该
 Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持。
@@ -79,7 +97,10 @@ Adapter 不提供持久安装命令，所有 `--native-*` overrides 均不支持
 PreTool 阻断原始 Bash 尝试，将重试参数返回模型；新调用重新经过所有策略及原生权限。
 PostTool 只替换完成、非图片且未中断的 Bash stdout。完成观察器和自定义步骤放在唯一
 最终 `replace_result` 前，看到原始结果；stderr 与其余原生字段保留。失败/report
-保留原始结果。该原生回调路径的 MCP tools 仍可观察，缺少可靠业务错误状态；使用[受管 MCP 工厂](../deployment/resident.md)获得结果压缩接点。
+保留原始结果。原生 HTTP MCP 工具投影模型可见字符串（structuredContent 序列化串，
+或纯文本结果的单一文本块），替换以该字符串在下一模型请求生效；多块与媒体结果
+保持原样。原生回调仍缺少可靠业务错误状态，MCP 错误分类继续依赖
+[受管 MCP 工厂](../deployment/resident.md)。
 
 固定版本原生测试由[贡献指南](../../../../../src/aw/CONTRIBUTING_zh.md)统一运行。
 常驻客户端与受管 MCP 见[常驻部署](../deployment/resident.md)。

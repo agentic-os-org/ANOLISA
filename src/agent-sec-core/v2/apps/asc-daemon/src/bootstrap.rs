@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asc_daemon_service::{
     BindError, BoundUnixSocket, ConfigError, RejectionEncoder, RequestDispatcher, ServeError,
@@ -76,8 +76,14 @@ pub async fn serve(
     rejection_encoder: Arc<dyn RejectionEncoder>,
     shutdown: ShutdownToken,
 ) -> Result<ServeReport, BootstrapError> {
+    let started = Instant::now();
+    tracing::info!(target: "asc_observability::diagnostic",
+        reason = "startup_stage", stage = "uds_bind", phase = "started");
     let socket = BoundUnixSocket::bind(&config.socket_path, config.socket_mode)?;
     let service = UnixService::new(socket, config.service, dispatcher, rejection_encoder)?;
+    tracing::info!(target: "asc_observability::diagnostic",
+        reason = "startup_stage", stage = "rpc_ready", phase = "completed",
+        duration_ms = started.elapsed().as_secs_f64() * 1000.0);
     Ok(service.serve(shutdown).await?)
 }
 

@@ -238,6 +238,17 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stops, [])
         self.assertTrue(self.transport.delegate.finalized)
 
+    async def test_native_init_accepts_other_cli_releases(self):
+        frames = [{"type": "system", "subtype": "init", "claude_code_version": version}
+                  for version in ("2.1.160", "2.1.162", "3.0.0-preview.1")]
+        self.transport.delegate.messages = frames
+        reader = self.reader()
+        for frame in frames:
+            self.assertEqual(await anext(reader), frame)
+        self.assertEqual(self.stops, [])
+        await reader.aclose()
+        self.assertTrue(self.transport.delegate.finalized)
+
     async def test_invalid_identity_stops_then_keeps_interrupt_reader_available(self):
         self.transport.delegate.messages = [
             {"type": "system", "subtype": "init", "claude_code_version": "invalid"},

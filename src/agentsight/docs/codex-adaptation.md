@@ -1,6 +1,6 @@
 # Codex CLI 适配指南
 
-AgentSight 通过 eBPF uprobe 捕获 Codex CLI 的 TLS 明文流量。Codex 通过 reqwest → native-tls → openssl-sys 静态链接 OpenSSL 3.x，并使用 `SSL_write_ex` / `SSL_read_ex` 作为加密入口（rustls + aws-lc-rs 仅用于 WebSocket TLS，不走 `SSL_write_ex`）。当二进制保留符号时按符号挂载即可；剥离了符号时需要通过内置 offset 表查表。
+AgentSight 通过 eBPF uprobe 捕获 Codex CLI 的 TLS 明文流量。已验证的默认 HTTPS 路径通过 reqwest → native-tls → openssl-sys 使用静态 OpenSSL 3.x 的 `SSL_write_ex` / `SSL_read_ex`。WebSocket TLS 不在此覆盖范围；自定义 CA 设置也可能使 HTTPS 改走 rustls。当二进制保留符号时按符号挂载即可；剥离了符号时需要通过内置 offset 表查表。
 
 ## 三级回退
 
@@ -14,10 +14,14 @@ AgentSight 通过 eBPF uprobe 捕获 Codex CLI 的 TLS 明文流量。Codex 通�
 
 ## 内置版本
 
-写入 `src/agentsight/agentsight.json -> codex_offsets.entries` 即可。当前内置：
+条目写入源码树 `src/agentsight/agentsight.json -> codex_offsets.entries` 后必须重新编译 AgentSight。
+`CODEX_OFFSET_TABLE` 使用 `include_str!` 嵌入，运行时 `--config` 中的同名字段不会更新该表。
+当前内置的官方 Linux x86_64 musl 构建：
 
 | codex 版本 | 状态 |
 |------------|------|
+| 0.162.1 | Tier 3 `SSL_*_ex`，HTTPS 401 与受控 HTTPS/SSE 200 采集验证通过 |
+| 0.147.0 | Tier 3 `SSL_*_ex`，HTTPS 401 与受控 HTTPS/SSE 200 采集验证通过 |
 | 0.141.0 | Tier 3 `SSL_*_ex` |
 | 0.137.0 | Tier 3 `SSL_*_ex` |
 
@@ -78,11 +82,16 @@ head -c 65536 /path/to/codex-stripped | sha256sum
 readelf -n /path/to/codex-stripped | grep "Build ID"   # 如有
 ```
 
-2. 在**带符号**那份上跑提取脚本：
+2. 用目标二进制配合同一次构建的符号文件运行提取脚本：
 
 ```bash
-python3 src/agentsight/scripts/extract-codex-offsets.py /path/to/codex-with-symbols
+python3 src/agentsight/scripts/extract-codex-offsets.py /path/to/codex-stripped \
+  --symbols /path/to/codex.debug
 ```
+
+脚本校验相同 Build ID；目标缺少 Build ID 时，校验目标 `.gnu_debuglink` 中的 CRC 与符号文件。
+无法证明匹配时拒绝提取。指纹始终取自实际目标二进制，而不是体积不同的 `.debug` 文件。
+若目标本身带符号，可省略 `--symbols`。
 
 脚本会优先匹配 `SSL_write_ex` / `SSL_read_ex` / `SSL_do_handshake`，若 `_ex` 变体不存在则退到 `SSL_write` / `SSL_read`，并据此生成 `write_is_ex` / `read_is_ex` 标志。输出形如：
 
@@ -103,9 +112,13 @@ python3 src/agentsight/scripts/extract-codex-offsets.py /path/to/codex-with-symb
 }
 ```
 
-3. 用**步骤 1** 拿到的 stripped binary 指纹覆盖 `fingerprint`，然后把整条 entry 追加到 `agentsight.json` 的 `codex_offsets.entries` 数组里。如果有 BuildID，也加进 `fingerprint`，AgentSight 会优先按 BuildID 匹配。
+3. 把生成的 entry 追加到源码树 `agentsight.json` 的 `codex_offsets.entries` 数组，重新编译并部署
+AgentSight 二进制。仅修改部署机 `/etc/agentsight/config.json` 再重启不会生效。
 
-4. 验证：重新启动 agentsight 后日志会出现：
+4. 验证：日志应出现以下匹配记录，还必须检查实际调用落库，不能只验证挂载成功。
+首次挂载之前就发出的请求仍可能漏采；受控测试可先启动 `codex exec` 等待 stdin，
+确认挂载后再发送提示词。成功 HTTPS/SSE 测试应看到 `complete`、HTTP 200、正确 usage；
+401 测试应看到 `complete`、HTTP 401，Token 为零。
 
 ```
 [attach_process] pid=<PID>: codex offset table matched for /proc/<PID>/root/.../codex
@@ -122,7 +135,9 @@ nm --defined-only /path/to/codex-with-symbols | grep -E ' (SSL_write_ex|SSL_read
 nm --defined-only /path/to/codex-with-symbols | grep -E ' (SSL_write|SSL_read|SSL_do_handshake)$'
 ```
 
-`nm` 输出第一列就是文件偏移（十六进制），直接转十进制填入 `offsets`。
+`nm` 输出第一列是虚拟地址，不保证等于文件偏移。必须通过目标 ELF 的可执行 `PT_LOAD` 段
+计算 `p_offset + symbol_address - p_vaddr`，并确认地址在 `p_filesz` 范围内；脚本已执行该转换。
+不能用符号文件的段偏移代替目标二进制的段偏移。
 
 ## 完全没有带符号副本时的后备路线
 

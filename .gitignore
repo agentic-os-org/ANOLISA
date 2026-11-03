@@ -50,6 +50,7 @@ website/build/
 
 .qoder/
 .claude/
+.qwen/
 .agents/
 
 !src/agent-sec-core/codex-plugin/.agents/

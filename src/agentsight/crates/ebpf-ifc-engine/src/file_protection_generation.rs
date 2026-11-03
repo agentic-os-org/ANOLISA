@@ -8,10 +8,12 @@ use super::file_protection_map_writer::{
     FileProtectionMapWriter, FileProtectionSlot, FileProtectionSlotValue,
     FileProtectionTargetValue, TreePathIdentity,
 };
+use super::file_protection_pinned_maps::PinnedFileProtectionMaps;
 
 /// A generation that has not yet published its domain activation record.
+/// Callers must merge same-key masks before staging each key once; counts are distinct map keys.
 #[derive(Debug)]
-pub struct FileProtectionStaging<W: FileProtectionMapWriter> {
+pub struct FileProtectionStaging<W: FileProtectionMapWriter = PinnedFileProtectionMaps> {
     writer: Option<W>,
     domain: u32,
     generation: FileProtectionGeneration,
@@ -25,21 +27,21 @@ pub struct FileProtectionStaging<W: FileProtectionMapWriter> {
 
 /// Active generation owner. Dropping it deactivates first, then attempts cleanup.
 #[derive(Debug)]
-pub struct ActiveFileProtectionGeneration<W: FileProtectionMapWriter> {
+pub struct ActiveFileProtectionGeneration<W: FileProtectionMapWriter = PinnedFileProtectionMaps> {
     staging: FileProtectionStaging<W>,
     active: bool,
 }
 
 /// Inactive generation whose partial cleanup can be retried without losing key metadata.
 #[derive(Debug)]
-pub struct InactiveFileProtectionGeneration<W: FileProtectionMapWriter> {
+pub struct InactiveFileProtectionGeneration<W: FileProtectionMapWriter = PinnedFileProtectionMaps> {
     staging: FileProtectionStaging<W>,
     needs_deactivation: bool,
 }
 
 /// Detach failure that retains the inactive retry owner and any held writer state.
 #[derive(Debug)]
-pub struct FileProtectionDetachError<W: FileProtectionMapWriter> {
+pub struct FileProtectionDetachError<W: FileProtectionMapWriter = PinnedFileProtectionMaps> {
     /// Individual map cleanup errors.
     pub errors: Vec<String>,
     /// Retry owner; activation may still exist when deactivation failed.
@@ -175,6 +177,7 @@ impl<W: FileProtectionMapWriter> FileProtectionStaging<W> {
         slot: FileProtectionSlot,
         value: FileProtectionSlotValue,
     ) -> io::Result<()> {
+        slot.validate()?;
         validate_identity(slot.parent)?;
         if value.direct_mask | value.exact_exclude_mask | value.subtree_exclude_mask == 0 {
             return Err(other("file protection slot has no classification bits"));
@@ -479,12 +482,15 @@ fn remove_tracked<K: Copy>(
 
 fn with_cleanup(context: &str, error: io::Error, cleanup: Vec<String>) -> io::Error {
     if cleanup.is_empty() {
-        other(format!("{context}: {error}"))
+        io::Error::new(error.kind(), format!("{context}: {error}"))
     } else {
-        other(format!(
-            "{context}: {error}; rollback failed: {}",
-            cleanup.join("; ")
-        ))
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{context}: {error}; rollback failed: {}",
+                cleanup.join("; ")
+            ),
+        )
     }
 }
 

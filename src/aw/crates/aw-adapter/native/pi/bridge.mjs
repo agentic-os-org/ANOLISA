@@ -155,6 +155,18 @@ export function installSessionBridge(session, scope = null) {
         process.stderr.write(
           `AW ${hook.event} step ${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`,
         );
+        // A report-configured fault keeps the unchecked native result and
+        // lets the session continue: identity, cleanup and cancellation
+        // failures latch scope.failed on their own before reaching here.
+        if (
+          config.scope &&
+          error.message !== "callback_aborted" &&
+          !config.scope.failed &&
+          hook.event === "tool.after" &&
+          hook.on_error === "report"
+        ) {
+          continue;
+        }
         if (config.scope) {
           config.scope.failed = true;
           agent.abort();
@@ -204,6 +216,7 @@ export function installSessionBridge(session, scope = null) {
       if (config.scope) await config.scope.finish(identity.invocation_id);
       return denied;
     }
+    if (config.scope) await config.scope.validate();
     active.set(call, { identity, object: context.toolCall });
     return original;
   };

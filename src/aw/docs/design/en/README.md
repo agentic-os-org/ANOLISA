@@ -4,15 +4,21 @@
 
 Design documents explain implementation ownership, protocol invariants and trade-offs. Operational steps live in the [developer guide](../../../../../docs/developer-guide/en/aw/index.md). Start with [architecture](architecture.md) and [boundaries](architecture-boundaries.md), then follow the area you are changing.
 
+`aw-package` owns local Provider management and configuration through a private
+file-transaction store; `aw-exec` owns runtime file leases. Distribution Make
+targets and scripts build release artifacts. Independently installed Providers
+connect through the process protocol without AW package records.
+
 ## Request execution
 
 | Area | Contract |
 | --- | --- |
-| Configuration | [Configuration](configuration/configuration.md) · [Editing](configuration/configuration-editing.md) |
+| Configuration | [Configuration](configuration/configuration.md) · [Editing and native sources](configuration/configuration-editing.md) |
+| Policy admission | [Core admission](core-admission.md) |
 | Native wiring | [Adapter dispatch](adapters/adapter-dispatch.md) |
 | Runtime | [Service](runtime/local-service.md) · [Policy updates](runtime/policy-reload.md) · [Host](runtime/provider-host.md) · [Bounded execution](runtime/bounded-execution.md) |
 | Capability plans | [Core execution](core-execution.md) |
-| Packages | [Package management](packaging/package-management.md) |
+| Provider extensions | [Local Provider management](packaging/package-management.md) |
 
 ## Adapters and extensions
 
@@ -25,6 +31,12 @@ Design documents explain implementation ownership, protocol invariants and trade
 | Private execution | [Execution leases](adapters/private-execution.md) |
 | sec-core | [Provider](providers/sec-core/sec-core-provider.md) · [Health](providers/sec-core/sec-core-health.md) |
 
+Tool selection and malformed-event failures are defined in the
+[Provider Host contract](runtime/provider-host.md); shipped names and input
+mappings are listed in the [sec-core configuration reference](../../../../../docs/developer-guide/en/aw/providers/sec-core.md#configure-a-provider).
+
 ## Evidence and observation
+
+[Public runtime/audit objects](runtime/public-objects.md)
 
 [Connector](integrations/agentsight/agentsight-readonly.md) · [Evidence context](runtime/evidence-context.md) · [Integration roadmap](integrations/agentsight/agentsight-integration.md)

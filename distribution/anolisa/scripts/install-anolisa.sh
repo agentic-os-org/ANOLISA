@@ -53,6 +53,7 @@
 #
 #   ${ANOLISA_PREFIX}/bin/anolisa                       (binary)
 #   ${ANOLISA_PREFIX}/share/anolisa/manifests/          (osbase)
+#   ${ANOLISA_PREFIX}/share/anolisa/components/         (integration contracts)
 #
 # The distribution index is NOT staged: the CLI downloads and caches it from
 # the configured mirror at runtime, so a datadir copy would never be read.
@@ -313,6 +314,7 @@ FINAL_BIN_DIR="$ANOLISA_PREFIX/bin"
 FINAL_DATADIR="$ANOLISA_PREFIX/share/anolisa"
 FINAL_MANIFESTS_DIR="$FINAL_DATADIR/manifests"
 FINAL_BIN_DEST="$FINAL_BIN_DIR/anolisa"
+COMPONENT_CONTRACTS=(cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory)
 
 log "mode            : $MODE"
 log "install mode    : $ANOLISA_INSTALL_MODE"
@@ -345,6 +347,7 @@ if [ "$MODE" = "url-fetch" ] && [ "$DRY_RUN" -eq 1 ]; then
   log "would write to prefix:"
   log "  $FINAL_BIN_DEST"
   log "  $FINAL_MANIFESTS_DIR/osbase/"
+  log "  $FINAL_DATADIR/components/"
   exit 0
 fi
 
@@ -587,13 +590,47 @@ realpath_inside() {
 # always execute (no DRY_RUN gating) — the staging tree is a tempdir, so the
 # operations are safe.
 #
-# Only osbase manifests are staged. The dev-tree runtime/ manifests and the
-# distribution-index/ directory were retired: component manifests are
-# downloaded from the distribution backend at install time, and the CLI
-# fetches + caches the distribution index from the mirror at runtime, so a
-# datadir copy of either would never be read.
+# Integration contracts belong to this distribution, separately from component
+# payloads and the remotely fetched artifact index. The runtime resolver reads
+# them directly from DATADIR/components before saving an installed snapshot.
+stage_component_contracts() {
+  local source_root="$1" component
+  for component in "${COMPONENT_CONTRACTS[@]}"; do
+    if [ ! -f "$source_root/$component/component.toml" ]; then
+      err "distribution integration contract missing: $source_root/$component/component.toml"
+      return 1
+    fi
+  done
+  for component in "${COMPONENT_CONTRACTS[@]}"; do
+    install -d -m 0755 "$DATADIR/components/$component"
+    install -m 0644 "$source_root/$component/component.toml" \
+      "$DATADIR/components/$component/component.toml"
+  done
+}
+
+preflight_component_contract_owners() {
+  command -v rpm >/dev/null 2>&1 || return 0
+  local datadir component path owners owner
+  for datadir in "$@"; do
+    for component in "${COMPONENT_CONTRACTS[@]}"; do
+      path="$datadir/components/$component/component.toml"
+      # rpmdb ownership survives a missing payload file; the old package's
+      # later erase would still remove a contract installed at this path.
+      owners="$(rpm -qf --queryformat '%{NAME}\n' -- "$path" 2>/dev/null)" || continue
+      while IFS= read -r owner; do
+        case "$owner" in
+          cosh-ng|tokenless|agentsight|skillfs|ws-ckpt|agent-memory|agent-sec-cli)
+            err "registry contract $path is still owned by component RPM $owner; upgrade that package before installing ANOLISA data"
+            return 1
+            ;;
+        esac
+      done <<< "$owners"
+    done
+  done
+}
 
 stage_from_local() {
+  stage_component_contracts "$FROM_LOCAL/manifests/components"
   for subdir in osbase; do
     local src="$FROM_LOCAL/manifests/$subdir"
     if [ ! -d "$src" ]; then
@@ -742,7 +779,9 @@ stage_from_url() {
     exit 1
   fi
 
-  # Copy manifests subdirs verbatim from the extracted bundle.
+  stage_component_contracts "$bundle_stage/manifests/components"
+
+  # Copy OS-base manifests verbatim from the extracted bundle.
   for subdir in osbase; do
     local src="$bundle_stage/manifests/$subdir"
     if [ ! -d "$src" ]; then
@@ -858,7 +897,7 @@ promote_to_prefix() {
   # keeps its own mode — and unlike a chmod walk over the raw path string,
   # this cannot follow `.`/`..` components (`fresh/../target`) and normalize a
   # directory outside the prefix.
-  local previous_umask
+  local previous_umask staged
   previous_umask="$(umask)"
   umask 022
   mkdir -p "$ANOLISA_PREFIX"
@@ -906,12 +945,20 @@ promote_to_prefix() {
     if [ "$entry" = "bin" ]; then
       chmod 0755 "$FINAL_BIN_DEST"
     else
-      find "$FINAL_DATADIR" -type d -exec chmod 0755 {} \;
-      find "$FINAL_DATADIR" -type f -exec chmod 0644 {} \;
+      # Component resources can share this datadir. Normalize only paths in
+      # our staged inventory, preserving their executable hooks and modes.
+      while IFS= read -r staged; do
+        chmod 0755 "$ANOLISA_PREFIX/share/${staged#"$src/"}"
+      done < <(find "$src" -mindepth 1 -type d)
+      while IFS= read -r staged; do
+        chmod 0644 "$ANOLISA_PREFIX/share/${staged#"$src/"}"
+      done < <(find "$src" -mindepth 1 -type f)
     fi
   done
 }
 
+# FHS metadata takes precedence at runtime even when this CLI has another prefix.
+preflight_component_contract_owners "$FINAL_DATADIR" /usr/share/anolisa || exit 1
 if ! promote_to_prefix; then
   exit 1
 fi

@@ -61,15 +61,9 @@ impl Adapter for Qoder {
         if version.is_empty() || version.len() > 128 {
             return Err("Qoder CLI version probe output must contain 1..128 bytes".into());
         }
-        let detected = semver::Version::parse(&version).map_err(|error| {
+        semver::Version::parse(&version).map_err(|error| {
             format!("could not parse Qoder CLI --version output; expected a bare SemVer such as 1.1.64, got {version:?}: {error}")
         })?;
-        let minimum = semver::Version::new(1, 1, 64);
-        if detected < minimum {
-            return Err(
-                format!("Qoder CLI {minimum} or newer is required (detected {version})").into(),
-            );
-        }
         Ok(Box::new(Prepared {
             input,
             settings,

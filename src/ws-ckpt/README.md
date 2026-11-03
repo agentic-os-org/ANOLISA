@@ -17,6 +17,9 @@ Btrfs-based workspace snapshot system for AI Agents. ws-checkpoint is a runtime 
 - **TOML config hot-reload** — single config entry at `/etc/ws-ckpt/config.toml`, `ws-ckpt reload` applies instantly
 - **Capacity alerting** — warns when any workspace exceeds 1000 snapshots or 90% filesystem usage
 
+Setting the health check interval to zero disables periodic diagnostics; the
+daemon still refreshes its advisory cache. See [CLI configuration](../../docs/user-guide/en/ws-ckpt/index.md#cli-based-configuration).
+
 After a successful rollback through the OpenClaw or Hermes plugin, the next
 turn-end checkpoint is skipped only for the restored workspace, whether the
 rollback uses its ID or registered path. Other
@@ -35,11 +38,10 @@ ws-ckpt/
 │   │   ├── common/            # Shared types, IPC protocol codec
 │   │   ├── daemon/            # Daemon core logic
 │   │   └── cli/               # CLI client
-│   ├── systemd/               # systemd service files
 │   └── skills/                # OS Skills
 ├── docs/                      # Documentation
-├── ws-ckpt.spec.in            # RPM spec template
-├── build-rpm.sh               # RPM build script
+├── packaging/                 # RPM/raw specs, service resources and delivery rules
+├── build-rpm.sh               # Compatibility wrapper for packaging/rpm/build.sh
 └── .gitignore
 ```
 
@@ -60,8 +62,7 @@ the first `checkpoint`.
 ### Build
 
 ```bash
-cd src
-cargo build --release
+make build
 ```
 
 [Maintainer guide: Raw packaging and GitHub builds](../../contribute/en/ws-ckpt/packaging.md)

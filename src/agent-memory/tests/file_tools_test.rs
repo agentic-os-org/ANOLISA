@@ -4,6 +4,7 @@
 //! (path-sandbox, missing file, etc.).
 
 use tempfile::tempdir;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use agent_memory::config::{AppConfig, Profile};
 use agent_memory::error::MemoryError;
@@ -220,6 +221,91 @@ fn list_hides_meta_dir() {
         )
         .unwrap();
     assert!(!entries.iter().any(|e| e.path.starts_with(".anolisa")));
+}
+
+/// A `tracing_subscriber` writer that captures formatted output into a
+/// shared buffer, so the truncation warning is assertable.
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn list_caps_entries_at_max() {
+    // Regression: a listing over the cap must return exactly the cap and
+    // not silently look complete at an arbitrary count, must say so in the
+    // log with the mount root rendered as '.', and an under-cap listing
+    // must stay silent.
+    let (_t, svc) = setup();
+    let mount_root = _t.path().join("user-tester");
+    let bulk = mount_root.join("bulk");
+    std::fs::create_dir_all(&bulk).unwrap();
+    for i in 0..(5000 + 10) {
+        std::fs::File::create(bulk.join(format!("f{i:05}.md"))).unwrap();
+    }
+
+    // Thread-local subscriber: the warning fires on this thread during the
+    // recursive listing, while concurrently running tests keep whatever
+    // default was installed.
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let _guard = tracing_subscriber::fmt()
+        .with_writer(move || CaptureWriter(sink.clone()))
+        .with_ansi(false)
+        .set_default();
+    let entries = svc
+        .list(
+            "",
+            ListOptions {
+                recursive: true,
+                glob: None,
+            },
+        )
+        .unwrap();
+    drop(_guard);
+    assert_eq!(entries.len(), 5000, "listing must stop at the cap");
+    let logged = String::from_utf8(std::mem::take(&mut *captured.lock().unwrap())).unwrap();
+    assert!(
+        logged.contains("listing truncated"),
+        "the over-cap cut must be visible in the log: {logged}"
+    );
+    assert!(
+        logged.contains("under '.'"),
+        "the mount root must render as '.', not an empty path: {logged}"
+    );
+
+    // An under-cap listing must not warn.
+    let quiet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = quiet.clone();
+    let _guard = tracing_subscriber::fmt()
+        .with_writer(move || CaptureWriter(sink.clone()))
+        .with_ansi(false)
+        .set_default();
+    let entries = svc
+        .list(
+            "",
+            ListOptions {
+                recursive: false,
+                glob: None,
+            },
+        )
+        .unwrap();
+    drop(_guard);
+    assert!(
+        entries.len() < 5000,
+        "the non-recursive top-level listing is far under the cap"
+    );
+    assert!(
+        quiet.lock().unwrap().is_empty(),
+        "an under-cap listing must not warn"
+    );
 }
 
 // ---------- mem_grep ----------
@@ -505,5 +591,66 @@ mod symlink_attacks {
         let err = svc.mkdir("out/inside").unwrap_err();
         assert!(matches!(err, MemoryError::PathOutsideMount(_)));
         assert!(!outside.path().join("escape/inside").exists());
+    }
+}
+
+fn setup_edit_overlap() -> (tempfile::TempDir, MemoryService) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.memory.paths.base_dir = tmp.path().join("data").to_string_lossy().into_owned();
+    cfg.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().into_owned();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg.memory.index.enabled = false;
+    cfg.memory.git.enabled = false;
+    (tmp, MemoryService::new(cfg).unwrap())
+}
+
+#[test]
+fn overlapping_edits_require_more_context_and_preserve_the_file() {
+    let (_tmp, svc) = setup_edit_overlap();
+    for (body, old) in [
+        ("ababa", "aba"),
+        ("哈哈哈", "哈哈"),
+        ("   code", "  "),
+        ("aaa", "aa"),
+        ("prefix ababa", "aba"),
+        ("前缀哈哈哈", "哈哈"),
+        ("前缀ababa", "aba"),
+    ] {
+        svc.write("note.md", body, true).unwrap();
+        let result = svc.edit("note.md", old, "replacement");
+        assert!(
+            matches!(result, Err(MemoryError::InvalidArgument(ref message))
+            if message.contains("multiple occurrences")),
+            "expected ambiguity for {body:?} / {old:?}, got {result:?}"
+        );
+        assert_eq!(svc.read("note.md").unwrap(), body);
+    }
+}
+
+#[test]
+fn unique_context_and_disjoint_repetition_keep_their_behavior() {
+    let (_tmp, svc) = setup_edit_overlap();
+    svc.write("note.md", "哈哈哈", false).unwrap();
+    svc.edit("note.md", "哈哈哈", "done").unwrap();
+    assert_eq!(svc.read("note.md").unwrap(), "done");
+    svc.write("note.md", "aba aba", true).unwrap();
+    assert!(svc.edit("note.md", "aba", "changed").is_err());
+    assert_eq!(svc.read("note.md").unwrap(), "aba aba");
+    assert!(svc.edit("note.md", "missing", "").is_err());
+}
+
+#[test]
+fn unique_edits_after_multibyte_prefix_and_at_eof() {
+    let (_tmp, svc) = setup_edit_overlap();
+    for (body, old, expected) in [
+        ("prefix aba", "aba", "prefix done"),
+        ("前缀哈哈", "哈哈", "前缀done"),
+        ("前缀aba", "aba", "前缀done"),
+        ("前缀aba tail", "aba", "前缀done tail"),
+    ] {
+        svc.write("note.md", body, true).unwrap();
+        svc.edit("note.md", old, "done").unwrap();
+        assert_eq!(svc.read("note.md").unwrap(), expected);
     }
 }

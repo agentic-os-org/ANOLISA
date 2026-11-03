@@ -9,6 +9,64 @@
 
 ## [未发布]
 
+## [0.3.21] - 2026-11-02
+
+### 新增
+
+- 执行 `anolisa adapter enable <component> cosh` 时，通过 cosh 原生注册表激活
+  托管扩展。状态检查验证所选用户来源和启用状态；禁用时只释放匹配的来源选择，
+  保留系统扩展和用户编辑过的文件。需要使用支持按身份条件清理来源选择的
+  cosh-ng 构建，并在启用或禁用后重启已有 cosh 会话；常驻会话的加载状态仍为
+  `unknown` ([#9352](https://github.com/agentic-os-org/ANOLISA/pull/9352))。
+
+### 变更
+
+- 由 ANOLISA 的 RPM、预构建归档、npm 平台包和安装器数据包提供组件发现及集成
+  配置。RPM 安装和接管会保存这些配置供适配器管理使用，并能识别独立核心包。
+  移动安装目录时需将 CLI 的 `bin/` 和 `share/` 目录一起保留。通过 RPM 升级时，
+  需在同一次 DNF/Yum 事务中联合升级 ANOLISA 与所有已安装且仍拥有注册表文件的
+  旧组件包。已启用的仓库必须同时提供相互兼容的 CLI、组件包及其所需子包。
+  回滚时需恢复相互匹配的组件包和注册表数据
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222))。
+- 按所选安装布局渲染 Agent Memory MCP 的命令路径，支持含引号或反斜杠的路径，
+  同时保留其他 JSON 字段。Agent Memory `0.2.13` 的 Raw 包需要 ANOLISA
+  `0.3.21` 或更高版本
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222))。
+- 将组件目录更新至 Agent Memory `0.2.13`、AgentSight `0.15.1`、cosh-ng `0.28.1`、
+  OS Skills `0.6.4`、agent-sec-core `1.1.2`、SkillFS `0.5.5`、Tokenless `0.9.2`
+  和 ws-ckpt `0.6.1`。
+
+### 修复
+
+- 在 Raw 安装、更新、回滚、修复和卸载过程中保留 ANOLISA 的组件发现文件。
+  现有归档可在注册表已存在时正常安装；过时的文件归属记录不再将注册表变化
+  误判为组件损坏，也不会在清理时删除注册表。恢复隔离记录时同样适用。
+  不再安装注册表文件的新 Raw 包需要 ANOLISA `0.3.21` 或更高版本
+  ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351))。
+
+## [0.3.20] - 2026-10-29
+
+### 新增
+
+- 为 Raw 制品的 `anolisa install` 新增 `--no-deps` 选项，支持与 `--all`
+  一起使用，让自行管理运行时依赖的用户跳过依赖检查与安装。安装成功后向
+  stderr 输出提醒，`--quiet` 下不显示；批量安装只要有组件实际安装成功，
+  就输出一次提醒。RPM 后端拒绝此选项，默认依赖处理行为不变
+  ([#9126](https://github.com/agentic-os-org/ANOLISA/pull/9126))。
+
+### 变更
+
+- 将组件目录更新至 Agent Memory `0.2.11`、AgentSight `0.15.0`、
+  SkillFS `0.5.4` 和 Tokenless `0.9.0`。
+
+### 修复
+
+- 当适配器状态查询或禁用（包括 dry-run）因路径超出框架允许目录而被拒绝时，
+  提供恢复指引。人类可读输出和 JSON 错误现在会提示检查框架目录配置与祖先
+  目录符号链接，并在目录被重定向时恢复原目录后重试。边界检查、安装记录保留
+  行为和退出码不变
+  ([#9220](https://github.com/agentic-os-org/ANOLISA/pull/9220))。
+
 ## [0.3.19] - 2026-10-25
 
 ### 变更

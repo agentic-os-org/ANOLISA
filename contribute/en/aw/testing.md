@@ -33,6 +33,60 @@ Use the target runner below; preserve each suite's report and verify that native
 processes and AW scopes have retired. Local parser transport alone does not
 establish native Worker authorization behavior.
 
+## User submission acceptance
+
+The Qoder SDK and QwenPaw targets include `input-submission`,
+`input-submission-backend-error` and `input-submission-timeout-block`. They use
+the candidate AW/Provider and real V2 CLI/daemon in fast mode. The normal suite
+checks prompt and user PII denial before model requests, clean input, recovery
+after a rejected turn and preserved native configuration. Qoder also checks
+native submit refusal. QwenPaw inspects actual model requests; Qoder uses the
+native zero-turn/API-time result and absence of assistant messages.
+
+Run from `src/aw` with the four candidate binaries in `target/native-binaries`:
+
+```bash
+python3 crates/aw-cli/tests/fixtures/sec_core/input_submission.py \
+  --agent qwenpaw --bin target/native-binaries \
+  --agent-bin "$(command -v qwenpaw)" --image ubuntu:24.04 \
+  --output target/input-submission-evidence
+```
+
+For Qoder use `--agent qoder-sdk --npm /absolute/path/to/private-sdk-install`
+and the runtime `QODER_PERSONAL_ACCESS_TOKEN`. Add `--fault backend-error` or
+`--fault timeout-block` for isolated backend failures. Use a new output directory
+for each run. The runner retains results, native messages/model requests and
+cleanup reports, and removes its runtime directory and daemon container. Pinned
+parser/middleware suites separately cover callback cancellation and cleanup.
+
+## Tool PII acceptance
+
+Both `qoder-sdk` and `qwenpaw` targets include `tool-pii`, `tool-pii-backend-error`,
+`tool-pii-timeout-block` and `tool-pii-cancel`. They use the candidate AW/Provider
+and real sec-core CLI/daemon. The baseline covers normal execution, input refusal
+without a marker, actual output replacement, existing code denial, native errors
+and preserved native settings. QwenPaw checks SSE and the next model request;
+Qoder checks adopted `tool_result` and the subsequent assistant messages.
+Fault suites withhold results; cancellation occurs after the output scan starts.
+
+Run from `src/aw` with the four binaries in `target/native-binaries`, a private
+SDK installation and the stock App dependencies. For an isolated QwenPaw check:
+
+```bash
+python3 crates/aw-cli/tests/fixtures/sec_core/tool_pii.py \
+  --agent qwenpaw --bin target/native-binaries \
+  --agent-bin "$(command -v qwenpaw)" --image ubuntu:24.04 \
+  --output target/tool-pii-evidence
+```
+
+For Qoder SDK use `--agent qoder-sdk --npm /absolute/path/to/private-sdk-install`
+with the runtime PAT in `QODER_PERSONAL_ACCESS_TOKEN`. Add `--fault backend-error`,
+`--fault timeout-block` or `--fault cancel` for a separate output-failure run.
+Each output directory must be new. `results.json`, `cleanup.json`, backend/process
+records and native messages/model requests are retained; runtime directories and
+the owned daemon container are removed. Multi-block/media, managed MCP and
+background PII result delivery require separate native acceptance.
+
 ## One native target
 
 Use a clean, committed checkout with manifest-required Python, Node 24.16.0, uv 0.11.13 and SDK dependencies.
@@ -53,7 +107,7 @@ Replace `--agent` with a manifest target. Resolve failures and missing evidence;
 Full mainline acceptance uses a 40-character candidate SHA already merged to main. Forks can run credential-free mode, retaining outstanding Qoder hosted-model checks.
 
 ```bash
-gh workflow run aw-preview.yml --ref main -f candidate_sha=<40-character-SHA>
+gh workflow run aw-integration.yml --ref main -f candidate_sha=<40-character-SHA>
 gh workflow run aw-ci.yml --repo <owner>/anolisa --ref <branch> \
   -f integration=true -f credential_free=true
 ```
@@ -74,3 +128,8 @@ Allow and denial cases check native results, tool markers and AW audit; failure 
 Runners reclaim owned processes, temporary profiles, sockets, containers and unique image tags. On Docker timeout or cleanup failure, inspect and remove exact resources using commands in the report.
 After evidence review, remove this run's `target/native-evidence/agentscope` and `target/resident-evidence`; retain shared build caches.
 Validate production endpoints, real load and deployment shutdown in the actual deployment environment.
+
+For input-submission cancellation, add `--fault cancel` to either runner command.
+The test pauses the real daemon, observes the active scanner process, closes the
+native Query or stops the App turn, and verifies a cancelled service record,
+scanner exit and zero model requests. The nightly matrix requires both reports.

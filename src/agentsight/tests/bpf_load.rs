@@ -34,6 +34,100 @@ fn make_shared_maps() -> (ProcTrace, SharedMaps) {
 
 #[test]
 #[ignore]
+fn traced_filter_recovers_after_late_exit_registrations() {
+    use libbpf_rs::MapFlags;
+
+    let mut trace = ProcTrace::new().expect("load isolated filter maps");
+    let live = std::process::id();
+    trace.add_traced_pid(live).expect("register live agent");
+    // 模拟异步处理 exec 晚于 exit：残留键直接耗尽实际 BPF HASH 容量。
+    for pid in (u32::MAX - 1023)..u32::MAX {
+        trace.add_traced_pid(pid).expect("seed exited pid");
+    }
+    let map = trace.traced_processes_handle().expect("filter handle");
+    assert_eq!(map.keys().count(), 1024);
+    trace
+        .add_traced_pid(1)
+        .expect("reap and register next agent");
+    assert_eq!(map.keys().count(), 2, "only live registrations remain");
+    for pid in [1u32, live] {
+        assert!(
+            map.lookup(&pid.to_ne_bytes(), MapFlags::ANY)
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn unclassified_non_tls_processes_leave_filter_slots_free() {
+    use libbpf_rs::MapFlags;
+    use std::process::Command;
+
+    let mut probes = Probes::new(&[], None, false, false, &[]).expect("load isolated probes");
+    let map = probes.traced_processes_handle().expect("filter handle");
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("non-TLS fixture");
+    let result = probes.attach_unclassified_process(child.id() as i32);
+    let registered = map
+        .lookup(&child.id().to_ne_bytes(), MapFlags::ANY)
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    result.expect("unsupported TLS is a normal skip");
+    assert!(registered.is_none());
+    assert_eq!(map.keys().count(), 0);
+
+    // 已识别 Agent 保留注册兜底；不支持 TLS 也不能改变已有契约。
+    probes
+        .attach_process(std::process::id() as i32)
+        .expect("classified fallback");
+    assert!(
+        map.lookup(&std::process::id().to_ne_bytes(), MapFlags::ANY)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+#[ignore]
+fn unclassified_tls_processes_still_register_for_first_call() {
+    use libbpf_rs::MapFlags;
+    use std::process::Command;
+
+    let mut probes = Probes::new(&[], None, false, false, &[]).expect("load isolated probes");
+    let map = probes.traced_processes_handle().expect("filter handle");
+    let mut child = Command::new("python3")
+        .args(["-c", "import ssl,time; time.sleep(60)"])
+        .spawn()
+        .expect("TLS fixture");
+    let mut registered = false;
+    for _ in 0..25 {
+        probes
+            .attach_unclassified_process(child.id() as i32)
+            .expect("attach TLS fixture");
+        registered = map
+            .lookup(&child.id().to_ne_bytes(), MapFlags::ANY)
+            .unwrap()
+            .is_some();
+        if registered {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        registered,
+        "unknown TLS process must retain early-call coverage"
+    );
+}
+
+#[test]
+#[ignore]
 fn proctrace_bpf_loads() {
     config::set_verbose(true);
     ProcTrace::new().expect("proctrace BPF should load on this kernel");

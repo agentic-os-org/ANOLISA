@@ -47,19 +47,17 @@ def test_v2_stages_root_system_unit(tmp_path):
     ):
         assert setting in content.splitlines()
     assert not (tmp_path / "usr/lib/sysusers.d/agent-sec-core.conf").exists()
-    spec = (ROOT / "agent-sec-core.spec.v2.in").read_text()
+    spec = (ROOT / "packaging/rpm/agent-sec-core.spec.v2.in").read_text()
     assert "%systemd_postun_with_restart agent-sec-core.service" in spec
-    assert (
-        '[ "$1" -eq 1 ] || [ -e /usr/lib/systemd/user/agent-sec-core.service ]' in spec
-    )
-    assert (
-        "/usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || :"
-        in spec
-    )
+    assert "rpm -qa --qf '%%{NAME}\\n'" in spec
+    assert "grep -Fxq agent-sec-cli" in spec
+    assert "%pre\n" in spec and "%posttrans\n" in spec
+    assert "if [ -e /usr/lib/systemd/user/agent-sec-core.service ]; then" in spec
+    assert "/usr/bin/systemctl enable --now agent-sec-core.service" in spec
     assert "systemd_user_" not in spec and "_userunitdir" not in spec
     assert "systemd-sysusers" not in spec
     assert "%pre -n agent-sec-cli" not in spec
-    makefile = (ROOT / "Makefile").read_text()
+    makefile = (ROOT / "packaging/install.mk").read_text()
     targets = [
         line
         for line in makefile.splitlines()
@@ -110,7 +108,7 @@ def test_shared_manifest_staging(tmp_path):
     assert (
         installed.read_bytes()
         == staged.read_bytes()
-        == (ROOT / ".anolisa/component.toml").read_bytes()
+        == (ROOT / "packaging/anolisa/component.toml").read_bytes()
     )
     component = tomllib.loads(installed.read_text())["component"]
     assert component["services"][0]["scope"] == "system"

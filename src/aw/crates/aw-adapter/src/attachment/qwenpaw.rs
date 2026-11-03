@@ -6,6 +6,28 @@ use serde_json::{json, Value};
 use std::{io::Read, time::Duration};
 
 impl Registration {
+    fn plugin_id(&self) -> Result<&str> {
+        let Self::Qwenpaw { descriptor, .. } = self else {
+            return Err("not a QwenPaw registration".into());
+        };
+        // Existing durable registrations used the fixed name before per-install IDs.
+        let id = descriptor
+            .get("plugin_id")
+            .map_or(Some("aw-native"), Value::as_str)
+            .ok_or("invalid QwenPaw plugin identity")?;
+        if id != "aw-native"
+            && !id.strip_prefix("aw-native-").is_some_and(|suffix| {
+                suffix.len() == 36
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            })
+        {
+            return Err("invalid QwenPaw plugin identity".into());
+        }
+        Ok(id)
+    }
+
     fn response(
         &self,
         method: reqwest::Method,
@@ -58,7 +80,11 @@ impl Registration {
         else {
             return Err("not a QwenPaw registration".into());
         };
-        if profile.join("plugins/aw-native").try_exists()? {
+        if profile
+            .join("plugins")
+            .join(self.plugin_id()?)
+            .try_exists()?
+        {
             return Err("QwenPaw AW plugin already exists".into());
         }
         let result = self.api(
@@ -66,7 +92,7 @@ impl Registration {
             "/install",
             Some(json!({"source":source,"force":false})),
         )?;
-        if result["id"] != "aw-native" || result["loaded"] != true {
+        if result["id"] != self.plugin_id()? || result["loaded"] != true {
             return Err("QwenPaw did not report loaded AW plugin".into());
         }
         self.check_plugin()
@@ -81,15 +107,17 @@ impl Registration {
         else {
             return Err("not a QwenPaw registration".into());
         };
-        let path = profile.join("plugins/aw-native");
+        let path = profile.join("plugins").join(self.plugin_id()?);
         files::directory(&path)?;
         let installed: Value =
             serde_json::from_slice(&files::read(&path.join("aw-attachment.json"))?)?;
         if &installed != descriptor
             || files::read(&path.join("plugin.py"))?
                 != include_bytes!("../../native/qwenpaw/plugin.py")
-            || files::read(&path.join("plugin.json"))?
-                != include_bytes!("../../native/qwenpaw/plugin.json")
+            || serde_json::from_slice::<Value>(&files::read(&path.join("plugin.json"))?)?
+                != serde_json::from_slice::<Value>(&crate::adapters::qwenpaw::manifest(
+                    self.plugin_id()?,
+                )?)?
         {
             return Err(
                 "native AW plugin was replaced; refusing to remove another installation".into(),
@@ -102,10 +130,18 @@ impl Registration {
         let Self::Qwenpaw { profile, .. } = self else {
             return Err("not a QwenPaw registration".into());
         };
-        if !profile.join("plugins/aw-native").try_exists()? {
+        if !profile
+            .join("plugins")
+            .join(self.plugin_id()?)
+            .try_exists()?
+        {
             // The pinned status API checks the live loader before disk. A 404
             // proves absence; disk absence alone never proves native unload.
-            let status = self.response(reqwest::Method::GET, "/aw-native/status", None)?;
+            let status = self.response(
+                reqwest::Method::GET,
+                &format!("/{}/status", self.plugin_id()?),
+                None,
+            )?;
             if status.status() == reqwest::StatusCode::NOT_FOUND {
                 return Ok(());
             }
@@ -115,8 +151,16 @@ impl Registration {
             return Err("native AW plugin tree is missing; unload cannot be verified; restore the owned tree before retrying detach".into());
         }
         self.check_plugin()?;
-        self.api(reqwest::Method::DELETE, "/aw-native", None)?;
-        if profile.join("plugins/aw-native").try_exists()? {
+        self.api(
+            reqwest::Method::DELETE,
+            &format!("/{}", self.plugin_id()?),
+            None,
+        )?;
+        if profile
+            .join("plugins")
+            .join(self.plugin_id()?)
+            .try_exists()?
+        {
             return Err("QwenPaw did not remove AW plugin".into());
         }
         Ok(())

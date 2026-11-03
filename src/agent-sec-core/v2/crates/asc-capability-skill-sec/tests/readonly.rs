@@ -61,9 +61,7 @@ fn service(state: &Path, pattern: &Path) -> Arc<SkillSecService> {
     )
 }
 
-#[test]
-#[ignore = "requires native Linux root, mount and unshare; never changes host mounts"]
-fn readonly_system_batches_skip_without_weakening_explicit_writes() {
+fn enter_private_mount_namespace() -> bool {
     let namespace = fs::read_link("/proc/self/ns/mnt").unwrap();
     if let Some(parent_namespace) = std::env::var_os("ASC_TEST_READONLY_NAMESPACE") {
         assert_ne!(namespace.as_os_str(), parent_namespace.as_os_str());
@@ -80,6 +78,49 @@ fn readonly_system_batches_skip_without_weakening_explicit_writes() {
                 ])
                 .env("ASC_TEST_READONLY_NAMESPACE", namespace),
         );
+        return false;
+    }
+    true
+}
+
+fn verify_component_skill_root(state: &Path) {
+    let component_parent = Path::new("/usr/share/agent-sec-core/skills");
+    let component_readonly = component_parent.join("readonly");
+    let component_writable = component_parent.join("writable");
+    for root in [&component_readonly, &component_writable] {
+        fs::create_dir_all(root).unwrap();
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: fixture\ndescription: fixture\n---\nSafe\n",
+        )
+        .unwrap();
+    }
+    bind_readonly(&component_readonly, &component_readonly);
+    let component = SkillSecExecutor::new(self::service(state, &component_parent.join("*")));
+    let result = run(&component, json!({"command":"scan", "all":true}));
+    assert!(result.success, "{result:?}");
+    let results = result.data["output"]["results"].as_array().unwrap();
+    let skipped = results
+        .iter()
+        .find(|value| value["skillName"] == "readonly")
+        .unwrap();
+    assert_eq!(skipped["reasonCode"], "readonly_system_skill");
+    assert!(!component_readonly.join(".skill-meta").exists());
+    assert!(component_writable.join(".skill-meta/latest.json").is_file());
+    assert!(
+        !run(
+            &component,
+            json!({"command":"scan", "skillDir":component_readonly})
+        )
+        .success
+    );
+    checked(Command::new("umount").arg(&component_readonly));
+}
+
+#[test]
+#[ignore = "requires native Linux root, mount and unshare; never changes host mounts"]
+fn readonly_system_batches_skip_without_weakening_explicit_writes() {
+    if !enter_private_mount_namespace() {
         return;
     }
     assert_eq!(rustix::process::geteuid().as_raw(), 0);
@@ -165,5 +206,7 @@ fn readonly_system_batches_skip_without_weakening_explicit_writes() {
     );
     checked(Command::new("umount").arg(&ordinary));
     checked(Command::new("umount").arg(&readonly));
+
+    verify_component_skill_root(&state);
     checked(Command::new("umount").arg("/usr/share"));
 }

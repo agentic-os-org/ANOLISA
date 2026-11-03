@@ -40,9 +40,11 @@ test("declarative plugin snapshot preserves role content and retires after use",
   await assert.rejects(stat(snapshot), { code: "ENOENT" });
 });
 
-test("plugins require an explicit declarative grant", async t => {
+test("native configuration preserves original plugin paths without snapshots", async t => {
   const f = await fixture(t);
-  await assert.rejects(prepareNativeOptions({ ...f.config, native_policy: {} }, f.options));
+  const result = await prepareNativeOptions({ ...f.config, native_policy: {} }, f.options);
+  assert.equal(result.options, f.options);
+  await result.close();
   assert.equal(pluginsAdmitted(f.options.plugins), false);
 });
 
@@ -196,6 +198,17 @@ test("native settings acknowledgement requires both flag and effective profile",
     {sources:{flag:fixed},effective:{skills:{disableShellExecution:false}}}])
     await assert.rejects(verifyNativeSettings(config, { request: async () => settings }, value => value));
   await verifyNativeSettings(config, { request: async () => ({sources:{flag:fixed},effective:fixed}) }, value => value);
+});
+
+test("native configuration rejects disabled Hooks before releasing a prompt", async () => {
+  const config = { resident: true };
+  for (const settings of [{}, { effective: [] }, { effective: { disableAllHooks: true } },
+    { effective: { hooksConfig: { enabled: false } } },
+    { effective: { hooksConfig: { headlessFastMode: true } } }])
+    await assert.rejects(verifyNativeSettings(config, { request: async () => settings }, value => value), /Hooks enabled/);
+  await verifyNativeSettings(config, { request: async () => ({ effective: {
+    disableAllHooks: false, hooksConfig: { enabled: true }, customKey: "preserved",
+  } }) }, value => value);
 });
 
 for (const mode of ["bypassPermissions", "dontAsk", "acceptEdits", "default"]) {
@@ -432,4 +445,12 @@ test("snapshot rejects unadmitted root entries before traversing them", async t 
     await assert.rejects(prepareNativeOptions(f.config, f.options));
     assert.equal(traversed, false);
   } finally { fs.promises.open = original; syncBuiltinESMExports(); }
+});
+
+
+test("headless fast CLI overrides cannot disable policy Hooks", () => {
+  for (const key of ["headless-fast-hooks", "headlessFastHooks"])
+    for (const value of [null, true, "true", false])
+      assert.throws(() => runtimeOptions({ resident: true }, { extraArgs: { [key]: value } }), /Hooks enabled/);
+  runtimeOptions({ resident: true }, { extraArgs: { "max-turns": "2" } });
 });

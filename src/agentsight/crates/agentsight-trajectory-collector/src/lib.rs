@@ -182,6 +182,12 @@ fn process_session(
         atif::convert_qoder_events(&events, &session.source)?
     };
     if trajectory.steps.is_empty() {
+        if is_gemini && gemini::explicitly_cleared(&events) {
+            // A successful rewind can remove every turn. The previous
+            // snapshot must not survive under the new file fingerprint.
+            store.clear_replayed_file(&file_path, file_size, file_mtime_ns)?;
+            return Ok(false);
+        }
         let _ = store.set_file_state(&file_path, file_size, file_mtime_ns);
         anyhow::bail!(
             "no ATIF steps extracted for source {}; converter support may be missing",

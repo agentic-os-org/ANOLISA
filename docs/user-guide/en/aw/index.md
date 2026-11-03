@@ -18,7 +18,7 @@ The framework continues to manage its interface, model account and permissions.
 | Associate AgentSight records with a run | [Connect AgentSight](observability.md) |
 | Check status, stop, upgrade or troubleshoot | [Operations](operations.md) |
 
-AW is currently a Linux Preview distributed as standalone packages. `anolisa install aw`
+AW is currently a Linux component distributed as standalone packages. `anolisa install aw`
 and RPM installation are not available. Install and sign in to your selected Agent first;
 AW does not install frameworks or configure model accounts.
 
@@ -43,7 +43,7 @@ aw stop --config "$HOME/aw/aw.yaml"
 ## Choose capabilities
 
 Core can launch an Agent independently. For safety checks or compression, install the
-corresponding Provider or all-in-one, then enable it in configuration.
+corresponding Provider and backend core components, then enable it in configuration.
 
 AW can observe or block calls before tools execute and compress supported text results afterwards.
 Native permission checks remain in effect. Current Hook checks do not provide an OS sandbox.

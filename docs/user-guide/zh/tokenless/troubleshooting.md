@@ -437,7 +437,7 @@ npm 到 npm 的升级同样在事务内。升级会就地替换软件包载荷�
 
 所有权看的是身份而不只是内容。anolisa 或直接 npm 安装同一版本会留下逐字相同的二进制与 manifest，因此 receipt 还会记录本次安装的 id、每个启动器解析到的链接目标，以及写进 Adapter 目录和 npm 模块目录的所有权标记（`.tokenless-owner`）。凡身份或标记不再匹配的内容，卸载脚本都会保留——文件、Adapter 资源、框架注册与 npm 全局包都一样。
 
-源码构建回退只支持 Linux。在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会执行 `cargo`。Intel Mac 也没有已发布的 npm 软件包，因此目前没有受支持的安装路径——见[快速开始](index.md#平台适配性)中的平台表格。
+源码构建回退只支持 Linux。在 macOS 上安装脚本要么走 npm 路径，要么直接报错退出，绝不会执行 `cargo`。Intel Mac 使用已发布的 npm 软件包——见[快速开始](index.md#平台适配性)中的平台表格。
 
 `~/.local/share/anolisa/adapters/tokenless` 与 anolisa CLI 以及直接执行的 `npm install -g` 共享。当该目录已属于其中之一时，npm 的 postinstall 不会碰它，安装脚本会把它与自己事先拍下的快照对比、**只有确实被替换过才恢复**，不记录 Adapter 目录，并明确提示。此后卸载脚本不会触碰这些资源，也不会触碰指向它们的框架注册。快照根本拍不下来时，脚本会在 `npm install -g` 替换任何内容之前停下。
 

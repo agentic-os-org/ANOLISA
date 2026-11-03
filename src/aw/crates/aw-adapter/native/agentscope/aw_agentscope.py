@@ -1,4 +1,4 @@
-"""AgentScope 2.0.6 factory bridge; native tool scheduling retains authority."""
+"""AgentScope factory bridge; native tool scheduling retains authority."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import stat
 import sys
 import tempfile
 from contextvars import ContextVar
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
 from uuid import uuid4
@@ -26,6 +25,20 @@ _invocation_id: ContextVar[str] = ContextVar("aw_agentscope_invocation_id")
 _pending_closes: ContextVar[dict[str, tuple[AwToolMiddleware, dict[str, Any], float]]] = ContextVar(
     "aw_agentscope_pending_closes"
 )
+_withheld: ContextVar[bool] = ContextVar("aw_agentscope_withheld", default=False)
+
+
+def _withheld_response() -> ToolResponse:
+    """Placeholder delivered to the model when a strict after check cannot run."""
+    return ToolResponse(
+        state=ToolResultState.ERROR,
+        content=[
+            TextBlock(
+                type="text",
+                text="AW post-tool check failed; result withheld by policy",
+            )
+        ],
+    )
 
 
 class AwInvocationMiddleware(MiddlewareBase):
@@ -37,8 +50,14 @@ class AwInvocationMiddleware(MiddlewareBase):
         token = _invocation_id.set(uuid4().hex)
         pending: dict[str, tuple[AwToolMiddleware, dict[str, Any], float]] = {}
         cleanup_token = _pending_closes.set(pending)
+        withheld_token = _withheld.set(False)
         try:
             async for item in next_handler():
+                # This wrapper is the outermost AW middleware, so strict
+                # withholding lands here after every after hook has observed
+                # the original response it was correlated against.
+                if isinstance(item, ToolResponse) and _withheld.get():
+                    item = _withheld_response()
                 yield item
         finally:
             try:
@@ -62,6 +81,7 @@ class AwInvocationMiddleware(MiddlewareBase):
                     if interrupted is not None:
                         raise interrupted
             finally:
+                _withheld.reset(withheld_token)
                 _pending_closes.reset(cleanup_token)
                 _invocation_id.reset(token)
 
@@ -240,6 +260,13 @@ class AwToolMiddleware(MiddlewareBase):
                         TextBlock(text="AW hook failed; configured failure action blocked the tool")
                     ],
                 )
+            # A strict after step must not deliver an unchecked native result,
+            # but yielding the placeholder here would change the payload outer
+            # after hooks observe under the same invocation. Flag it and let
+            # the invocation wrapper replace the completed response instead.
+            if self.hook["event"] == "tool.after" and self.hook["on_error"] == "withhold_result":
+                _withheld.set(True)
+                return None
             return None
 
     async def _evaluate(self, payload: dict[str, Any]) -> ToolResponse | None:
@@ -268,7 +295,11 @@ class AwToolMiddleware(MiddlewareBase):
             directive = json.loads(stdout) if stdout.strip() else None
         except RecursionError as error:
             raise CallbackFailure("native_output_too_deep") from error
-        except ValueError:
+        except ValueError as error:
+            # Strict after treats an undecodable reply as a failed check; report
+            # steps keep treating it as a neutral no-directive reply.
+            if self.hook["event"] == "tool.after" and self.hook["on_error"] == "withhold_result":
+                raise CallbackFailure("native_output_invalid") from error
             directive = None
         if isinstance(directive, dict) and (
             directive.get("action") in ("ask", "approve") or directive.get("decision") == "ask"
@@ -314,6 +345,9 @@ class AwToolMiddleware(MiddlewareBase):
                 return
         async for item in next_handler():
             # ToolChunk is intermediate; ToolResponse is the completed native result.
+            # A withheld replacement keeps chunks untouched: strict after checks only
+            # the completed response, and buffering chunks would need a stream gate
+            # the AgentScope middleware seam does not expose.
             if self.hook["event"] == "tool.after" and isinstance(item, ToolResponse):
                 replacement = await self._run(
                     {**payload, "tool_response": item.model_dump(mode="json")}
@@ -332,8 +366,6 @@ class AwBridge:
     """
 
     def __init__(self) -> None:
-        if version("agentscope") != "2.0.6":
-            raise RuntimeError("AW requires AgentScope 2.0.6")
         self.config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
@@ -346,8 +378,10 @@ class AwBridge:
                 raise ValueError("Unsupported AW native event")
             if not isinstance(hook.get("step"), str) or not hook["step"]:
                 raise ValueError("AW step must be a nonempty string")
-            if hook.get("on_error") not in {"report", "block"}:
+            if hook.get("on_error") not in {"report", "block", "withhold_result"}:
                 raise ValueError("Invalid AW failure policy")
+            if hook["on_error"] == "withhold_result" and hook["event"] != "tool.after":
+                raise ValueError("AW result withholding requires tool.after")
             if type(hook.get("replace_result")) is not bool:
                 raise ValueError("AW result replacement capability must be a boolean")
             if hook["replace_result"] and hook["event"] != "tool.after":
