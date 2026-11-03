@@ -330,6 +330,7 @@ impl Fixture {
         config.runtime_dir = root.path().join("run");
         let ca = root.path().join("system.pem");
         fs::write(&ca, CA).unwrap();
+        fs::set_permissions(&ca, fs::Permissions::from_mode(0o644)).unwrap();
         config.system_ca_bundles = vec![ca];
         config.load_timeout = Duration::from_secs(2);
         let plane = DataPlane::start(&config.runtime_dir);
