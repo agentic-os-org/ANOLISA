@@ -87,4 +87,7 @@ def main():
     print(r)
 
 if __name__ == "__main__":
+    # Unavailable stdout and caller streams without reconfigure keep their behavior.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors=sys.stdout.errors)
     main()
