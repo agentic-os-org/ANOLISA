@@ -169,7 +169,7 @@ impl Detector for ConfirmBeforeActStrategy {
             }
             Err(e) => {
                 ctx.judgments.record_failure(&e);
-                tracing::warn!("[confirm_before_act] LLM judgment failed: {e}");
+                tracing::warn!("[confirm_before_act] LLM judgment failed: {e:#}");
                 return vec![];
             }
         };

@@ -255,7 +255,7 @@ impl Detector for ExperienceLibraryStrategy {
             }
             Err(e) => {
                 ctx.judgments.record_failure(&e);
-                tracing::warn!("[experience_library] LLM judgment failed: {e}");
+                tracing::warn!("[experience_library] LLM judgment failed: {e:#}");
                 return vec![];
             }
         };

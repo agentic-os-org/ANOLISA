@@ -254,3 +254,19 @@ fn an_empty_trajectory_has_nothing_to_judge() {
     let doc = trajectory("");
     assert_eq!(last_round(&doc), None);
 }
+
+#[test]
+fn llm_call_errors_keep_the_provider_source() {
+    let doc = trajectory(r#"{"step_id": 1, "source": "user", "message": "判断这一轮"}"#);
+    let client = LlmClient::with_config("http://127.0.0.1:1/v1", "test-key", "test-model");
+    let error = actix_web::rt::System::new()
+        .block_on(judge_last_round(&client, &doc))
+        .unwrap_err();
+    match error {
+        JudgeError::Call(message) => assert!(
+            message.contains("Http client error"),
+            "the provider source must survive JudgeError::Call: {message}"
+        ),
+        other => panic!("expected a provider call failure, got {other:?}"),
+    }
+}
