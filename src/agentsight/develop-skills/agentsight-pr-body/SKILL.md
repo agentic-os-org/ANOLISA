@@ -146,7 +146,7 @@ closes #<issue-number>
 
 ## Checklist
 
-- [x] I have read the [Contributing Guide](../CONTRIBUTING.md)
+- [x] I have read the [Contributing Guide](../../../../CONTRIBUTING.md)
 - [x/空] `cargo fmt --check` pass（基于 preflight 结果勾选）
 - [x/空] `cargo clippy --all-targets -- -D warnings` pass（基于 preflight 结果勾选）
 - [x/空] `cargo llvm-cov` 测试 + 增量覆盖率 `diff-cover --fail-under=80` pass（基于 preflight 结果勾选）
