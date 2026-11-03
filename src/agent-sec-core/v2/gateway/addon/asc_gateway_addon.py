@@ -75,7 +75,9 @@ def _read_runtime_file(directory: str, name: str, limit: int) -> bytes:
     with os.fdopen(os.open(os.path.join(directory, name), flags), "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-            raise policy.LoadError(f"{name} is not a regular file within its size limit")
+            raise policy.LoadError(
+                f"{name} is not a regular file within its size limit"
+            )
         data = handle.read(limit + 1)
     if len(data) > limit:
         raise policy.LoadError(f"{name} exceeds its size limit")
@@ -107,14 +109,18 @@ def _peek_generation(raw: bytes) -> int | None:
 
 def _injected(flow: http.HTTPFlow) -> policy.Decision | None:
     decision = flow.metadata.get(METADATA_KEY)
-    if isinstance(decision, policy.Decision) and decision.action == policy.ACTION_INJECT:
+    if (
+        isinstance(decision, policy.Decision)
+        and decision.action == policy.ACTION_INJECT
+    ):
         return decision
     return None
 
 
 def _rewrite_fields(headers: http.Headers, decision: policy.Decision) -> None:
     fields = tuple(
-        (name, policy.rewrite_bytes(value, decision.replacements)) for name, value in headers.fields
+        (name, policy.rewrite_bytes(value, decision.replacements))
+        for name, value in headers.fields
     )
     if fields != headers.fields:
         headers.fields = fields
@@ -169,7 +175,9 @@ class _BufferedResponse:
                 if self.rejection is not None:
                     return []
                 decoded = (
-                    self.decoder.decompress(chunk, RESPONSE_BUFFER_LIMIT + 1 - len(self.body))
+                    self.decoder.decompress(
+                        chunk, RESPONSE_BUFFER_LIMIT + 1 - len(self.body)
+                    )
                     if self.decoder is not None
                     else chunk
                 )
@@ -234,17 +242,23 @@ class SecretGateway:
         # Transparent mode connects to the original destination IP; upstream
         # certificate verification is the only defense against a forged Host.
         if options.ssl_insecure:
-            raise exceptions.OptionsError("agent-sec-gateway requires ssl_insecure=false")
+            raise exceptions.OptionsError(
+                "agent-sec-gateway requires ssl_insecure=false"
+            )
         # Streamed bodies skip inspection; dumps and verbose output would
         # record injected credentials.
         if options.stream_large_bodies:
-            raise exceptions.OptionsError("agent-sec-gateway forbids stream_large_bodies")
+            raise exceptions.OptionsError(
+                "agent-sec-gateway forbids stream_large_bodies"
+            )
         if options.save_stream_file:
             raise exceptions.OptionsError("agent-sec-gateway forbids save_stream_file")
         if options.flow_detail != 0:
             raise exceptions.OptionsError("agent-sec-gateway requires flow_detail=0")
         if not options.agent_sec_runtime_dir:
-            raise exceptions.OptionsError("agent-sec-gateway requires agent_sec_runtime_dir")
+            raise exceptions.OptionsError(
+                "agent-sec-gateway requires agent_sec_runtime_dir"
+            )
         if options.termlog_verbosity not in ("warn", "error"):
             options.update(termlog_verbosity="warn")
         # Handler filters cover propagated logs, including pre-flow parser logs and ERROR tracebacks.
@@ -292,10 +306,16 @@ class SecretGateway:
         now = time.monotonic()
         if key == self._loaded_key:
             return
-        if self._failed and self._failed[0] == key and now - self._failed[1] < RETRY_SECONDS:
+        if (
+            self._failed
+            and self._failed[0] == key
+            and now - self._failed[1] < RETRY_SECONDS
+        ):
             return
         try:
-            raw = _read_runtime_file(self._runtime, MANIFEST_NAME, policy.MAX_MANIFEST_BYTES)
+            raw = _read_runtime_file(
+                self._runtime, MANIFEST_NAME, policy.MAX_MANIFEST_BYTES
+            )
             self._attempted = _peek_generation(raw)
             snapshot = policy.build_snapshot(
                 raw, lambda name, limit: _read_runtime_file(self._runtime, name, limit)
@@ -402,7 +422,9 @@ class SecretGateway:
             if length.isdigit() and int(length) > RESPONSE_BUFFER_LIMIT:
                 flow.kill()
                 return
-            encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+            encoding = (
+                response.headers.get("Content-Encoding", "identity").strip().lower()
+            )
             if encoding not in ("identity", "gzip", ""):
                 rejected = _reject_response("response_encoding_unsupported", 502)
                 flow.response = rejected

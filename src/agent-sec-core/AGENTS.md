@@ -75,11 +75,12 @@ cd agent-sec-cli && uv sync
 
 ### 4. 代码格式化
 
-使用 **black + isort** 进行代码格式化（配置在 `agent-sec-cli/pyproject.toml`）：
+使用 **black + isort** 进行代码格式化。Makefile 显式为 Black 传入
+`agent-sec-cli/pyproject.toml`，整个组件使用同一配置：
 
-- `line-length = 100`
-- `target-version = py311`
-- `isort` profile = "black"
+- Black `line-length = 88`
+- Black `target-version = py311`
+- isort `profile = "black"`、`line_length = 80`
 
 ```bash
 # 从 agent-sec-core 目录执行

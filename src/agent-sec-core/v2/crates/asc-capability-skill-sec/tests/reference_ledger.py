@@ -264,12 +264,15 @@ def main() -> None:
             root = ResolvedSkillRoot(skill, skill, "host")
             backend = Backend()
             # Only redirect configuration and forbid sockets; all domain functions run unchanged.
-            with patch(
-                "agent_sec_cli.skill_ledger.config.get_config_dir",
-                return_value=directory / "config",
-            ), patch(
-                "socket.socket.connect",
-                side_effect=AssertionError("oracle cannot access network"),
+            with (
+                patch(
+                    "agent_sec_cli.skill_ledger.config.get_config_dir",
+                    return_value=directory / "config",
+                ),
+                patch(
+                    "socket.socket.connect",
+                    side_effect=AssertionError("oracle cannot access network"),
+                ),
             ):
                 for step in case["steps"]:
                     try:

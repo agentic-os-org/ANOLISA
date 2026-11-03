@@ -8,7 +8,7 @@ _SEC_CORE_MAKE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 python-code-pretty: ## Format Python code using black and isort
 	@echo "🎨 Formatting code with black and isort..."
 	@uv run --project agent-sec-cli isort --settings-path ../.. --profile black --line-length 80 --skip-glob "*/backend-skill/templates/*" .
-	@uv run --project agent-sec-cli black --force-exclude "backend-skill/templates/" .
+	@uv run --project agent-sec-cli black --config agent-sec-cli/pyproject.toml --force-exclude "backend-skill/templates/" .
 
 .PHONY: python-lint
 python-lint: ## Run ruff lint check on all Python code (no fix)

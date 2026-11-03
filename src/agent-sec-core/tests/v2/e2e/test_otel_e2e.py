@@ -411,9 +411,10 @@ def test_maximum_unicode_baggage_with_full_business_frame(otel):
 @contextmanager
 def blocked_stderr():
     read_fd, write_fd = os.pipe()
-    with os.fdopen(read_fd, "rb", buffering=0), os.fdopen(
-        write_fd, "wb", buffering=0
-    ) as stderr:
+    with (
+        os.fdopen(read_fd, "rb", buffering=0),
+        os.fdopen(write_fd, "wb", buffering=0) as stderr,
+    ):
         os.set_blocking(stderr.fileno(), False)
         try:
             while True:
