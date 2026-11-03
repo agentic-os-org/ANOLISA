@@ -329,6 +329,13 @@ regex 模式扫描 Python 时，除 Python 规则外，还从 `os.system`、`os.
 描述和 evidence，顶层 `language` 仍为 `python`。变量、拼接字符串、带前缀字符串、argv
 列表、别名调用和其它动态表达式不执行 Shell 规则复用。
 
+V2 regex 模式处理含可识别内联解释器调用的 Bash 输入时，同时扫描完整 Bash 原文与
+第一个匹配到的内层载荷；内层 Python 继续复用上述 Shell 命令扫描，顶层 `language`
+保留内层语言。合并结果按 `rule_id` 聚合，保留首次出现的规则顺序，并对同规则的相同
+`evidence` 文本去重；不同位置的相同文本也会折叠，不用于统计执行次数。`rules` 过滤
+同时适用于各扫描路径，verdict 仍取所有 findings 的最高 severity。该行为修正 V1
+整行替换导致的外层漏扫，不改变 `llm` 模式。
+
 ### 7.3 Success/error
 
 | 情况 | success | exit_code | error_type |

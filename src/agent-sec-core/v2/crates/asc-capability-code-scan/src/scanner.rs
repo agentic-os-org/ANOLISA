@@ -1,7 +1,6 @@
 //! Scan orchestration: the single entry point that turns code into a verdict.
 //!
-//! A direct port of V1's `scanner.scan`. It validates input, rewrites a Bash
-//! command that wraps an inline interpreter call into that call's own language,
+//! It validates input, scans Bash input alongside an extracted interpreter payload,
 //! optionally narrows the rule set, runs the regex engine, and assembles a
 //! [`ScanResult`]. Every failure is turned into an error result rather than
 //! propagated, because the caller must always receive a verdict.
@@ -12,7 +11,7 @@ use std::time::Instant;
 use crate::engine::run_regex_rules_for_inputs;
 use crate::errors::CodeScanError;
 use crate::extractor::{extract_inline_code, extract_python_shell_commands};
-use crate::findings::{Finding, Verdict, build_summary, compute_verdict};
+use crate::findings::{Finding, Verdict, build_summary, compute_verdict, merge_findings};
 use crate::rules::{Language, load_rules};
 use crate::run_regex_rules;
 
@@ -46,7 +45,7 @@ pub struct ScanResult {
     pub verdict: Verdict,
     /// Human-readable one-line summary; wording is part of the contract.
     pub summary: String,
-    /// Matching rules in load order, with embedded Shell findings after Python findings.
+    /// Matching rules in first-seen order, with overlapping scan results merged by rule id.
     pub findings: Vec<Finding>,
     /// Language the code was scanned as, after any inline rewrite.
     pub language: Language,
@@ -106,9 +105,15 @@ pub fn scan(code: &str, language: Language, rules: Option<&[String]>, mode: &str
     // Resolved before the pipeline runs so that a failure reports the language
     // actually scanned. V1 rebinds its `code`/`language` locals inside the try
     // block, so its error handler already sees the rewritten language.
-    let (code, language) = resolve_target(code, language);
+    let (target, language) = resolve_target(code, language);
+    let findings = scan_with_regex(&target, language, rules).and_then(|mut findings| {
+        if matches!(target, Cow::Owned(_)) {
+            merge_findings(&mut findings, scan_with_regex(code, Language::Bash, rules)?);
+        }
+        Ok(findings)
+    });
 
-    match scan_with_regex(&code, language, rules) {
+    match findings {
         Ok(findings) => {
             let verdict = compute_verdict(&findings);
             let summary = build_summary(&findings, language);
@@ -165,11 +170,10 @@ fn scan_with_regex(
             if let Some(enabled) = rules {
                 shell_rules.retain(|rule| enabled.iter().any(|id| id == &rule.rule_id));
             }
-            findings.extend(run_regex_rules_for_inputs(
-                &commands,
-                &shell_rules,
-                Language::Bash,
-            )?);
+            merge_findings(
+                &mut findings,
+                run_regex_rules_for_inputs(&commands, &shell_rules, Language::Bash)?,
+            );
         }
     }
     Ok(findings)
@@ -292,6 +296,108 @@ mod tests {
             assert!(empty.ok);
             assert_eq!(empty.verdict, Verdict::Pass);
             assert!(empty.findings.is_empty());
+        }
+    }
+
+    #[test]
+    fn inline_interpreters_preserve_outer_findings() {
+        for dangerous in [
+            "cat /etc/shadow",
+            "rm -rf /tmp/test",
+            "dd if=/dev/zero of=/dev/sda",
+        ] {
+            let control = scan(dangerous, Language::Bash, None, "regex");
+            assert_eq!(control.verdict, Verdict::Warn);
+            for interpreter in [r#"python3 -c "print(1)""#, r#"bash -c "echo hi""#] {
+                for code in [
+                    format!("{dangerous}; {interpreter}"),
+                    format!("{interpreter} && {dangerous}"),
+                ] {
+                    let result = scan(&code, Language::Bash, None, "regex");
+                    assert!(result.ok, "{code}: {}", result.summary);
+                    assert_eq!(result.verdict, control.verdict, "{code}");
+                    for expected in &control.findings {
+                        assert!(
+                            result
+                                .findings
+                                .iter()
+                                .any(|finding| finding.rule_id == expected.rule_id),
+                            "{code}: missing {}",
+                            expected.rule_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_python_preserves_inner_and_outer_rule_filters() {
+        let code = r#"cat /etc/shadow; python3 -c "pickle.loads(data)""#;
+        let python = scan("pickle.loads(data)", Language::Python, None, "regex");
+        let bash = scan("cat /etc/shadow", Language::Bash, None, "regex");
+        assert!(!python.findings.is_empty());
+        assert!(!bash.findings.is_empty());
+        let combined = scan(code, Language::Bash, None, "regex");
+        assert!(combined.ok);
+        assert_eq!(combined.language, Language::Python);
+        for expected in python.findings.iter().chain(&bash.findings) {
+            let filtered = scan(
+                code,
+                Language::Bash,
+                Some(std::slice::from_ref(&expected.rule_id)),
+                "regex",
+            );
+            assert_eq!(filtered.verdict, Verdict::Warn);
+            assert_eq!(filtered.findings, vec![expected.clone()]);
+            assert!(combined.findings.contains(expected));
+        }
+        let empty = scan(code, Language::Bash, Some(&[]), "regex");
+        assert!(empty.ok);
+        assert_eq!(empty.verdict, Verdict::Pass);
+        assert!(empty.findings.is_empty());
+    }
+
+    #[test]
+    fn overlapping_shell_findings_are_merged_without_duplicate_evidence() {
+        for code in [
+            r#"python3 -c "subprocess.Popen('wipefs -a /dev/sda')""#,
+            r#"bash -c "wipefs -a /dev/sda""#,
+            r#"wipefs -a /dev/sda; python3 -c "subprocess.Popen('wipefs -a /dev/sda'); subprocess.run('shred /dev/sdb')""#,
+        ] {
+            let result = scan(
+                code,
+                Language::Bash,
+                Some(&["shell-disk-wipe".to_owned()]),
+                "regex",
+            );
+            let expected = scan(
+                if code.contains("shred") {
+                    "wipefs -a /dev/sda; shred /dev/sdb"
+                } else {
+                    "wipefs -a /dev/sda"
+                },
+                Language::Bash,
+                Some(&["shell-disk-wipe".to_owned()]),
+                "regex",
+            );
+            assert!(result.ok, "{code}: {}", result.summary);
+            assert_eq!(result.verdict, expected.verdict, "{code}");
+            assert_eq!(result.findings, expected.findings, "{code}");
+        }
+    }
+
+    #[test]
+    fn harmless_inline_interpreters_still_pass() {
+        for code in [
+            r#"python3 -c "print(1)""#,
+            r#"echo hello; python3 -c "print(1)""#,
+            r#"bash -c "echo hi" && echo done"#,
+        ] {
+            let result = scan(code, Language::Bash, None, "regex");
+            assert!(result.ok, "{code}: {}", result.summary);
+            assert_eq!(result.verdict, Verdict::Pass, "{code}");
+            assert!(result.findings.is_empty(), "{code}");
         }
     }
 
