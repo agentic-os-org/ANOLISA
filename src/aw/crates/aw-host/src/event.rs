@@ -84,8 +84,8 @@ impl Host {
     ) -> Result<Event<'a>, Error> {
         let started = Instant::now();
         check(deadline, cancelled)?;
-        if value["agent"]["adapter"] != self.capabilities.adapter
-            || value["agent"]["binding_id"] != self.target
+        if value["agent"]["adapter"] != self.capabilities().adapter
+            || value["agent"]["binding_id"] != self.target()
         {
             return Err(Error::Invalid(
                 "event Agent does not match prepared binding",
@@ -95,7 +95,7 @@ impl Host {
             .as_str()
             .ok_or(Error::Invalid("missing event name"))?
             .to_owned();
-        let spec = &self.configuration.as_value()["spec"];
+        let spec = &self.configuration().as_value()["spec"];
         let configured = &spec["events"][&name];
         if configured["enabled"] != true
             || !matches!(name.as_str(), "input.submit" | "tool.before" | "tool.after")
@@ -104,7 +104,7 @@ impl Host {
         }
         if native_input.is_none()
             && self
-                .steps
+                .steps()
                 .iter()
                 .any(|step| step.event == name && matches!(step.execution, StepExecution::Native))
         {
@@ -203,7 +203,7 @@ impl Event<'_> {
     /// Steps admitted for this event, retaining their configured order.
     pub fn steps(&self) -> impl Iterator<Item = &AdmittedStep> {
         self.host
-            .steps
+            .steps()
             .iter()
             .filter(|step| step.event == self.name)
     }
@@ -330,7 +330,7 @@ impl Event<'_> {
                     let build = |budget_ms| {
                         let value = json!({
                             "api_version": VERSION, "method": "invoke", "request_id": request_id,
-                            "operation": operation, "config_revision": self.host.revision,
+                            "operation": operation, "config_revision": self.host.revision(),
                             "budget_ms": budget_ms, "allowed_effects": effects,
                             "config": provider.config, "event": event,
                         });

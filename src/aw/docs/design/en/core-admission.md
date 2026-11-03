@@ -10,12 +10,11 @@ SHA-256 revision, the target Agent, trusted Adapter capabilities and admitted
 Hook steps into immutable Core types while keeping `aw_provider::admission` as
 the single rule implementation.
 
-On `agentic-os-org/ANOLISA` `main`, production Hook preparation in
-`crates/aw-service/src/runtime.rs` and `crates/aw-host/src/lib.rs` still calls
-`aw_config::Validator` and `aw_provider::admission::{preflight, admit}`
-directly. This module establishes the Core API and type boundary first;
-switching `aw-service` and `aw-host` to consume these types is tracked as the
-next migration step.
+Production Hook preparation in `crates/aw-service/src/runtime.rs` and
+`crates/aw-host/src/lib.rs` runs through this API via the sequence
+`AdmissionEngine::preflight → Host::discover → AdmissionEngine::admit → Host::from_admitted`.
+`Host::prepare` delegates to the same pipeline for standalone callers, while
+native Hook event execution continues along `Adapter → Service → Host → aw-exec → Provider`.
 
 ## Admission stages and types
 
@@ -47,11 +46,12 @@ changing `aw_core::Error` used by `Core::prepare` and `Core::execute`.
 
 `PolicyCandidate` and `AdmittedPolicy` keep all fields private, omit `Deserialize`
 and public struct constructors, and expose read-only accessors
-(`configuration`, `revision`, `target`, `capabilities`, `requirements` and
-`steps`). Callers cannot inject unverified `AdmittedStep` values or swap the
-configuration between preflight and Provider admission. `Debug` formatting omits
-the parsed configuration document so Provider-private values do not leak into
-diagnostics.
+(`configuration`, `revision`, `target`, `capabilities`, `providers`,
+`requirements` and `steps`). Callers cannot inject unverified `AdmittedStep`
+values or swap the configuration or Provider evidence between preflight,
+discovery and Host construction. `Debug` formatting omits the parsed
+configuration document and Provider evidence so Provider-private values do not
+leak into diagnostics.
 
 `AdmittedPolicy` records capability compatibility for the supplied snapshot only:
 

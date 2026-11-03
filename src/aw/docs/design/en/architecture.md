@@ -33,7 +33,7 @@ maintained separately under `providers/`.
 | `aw-cli` | Unified `aw` frontend, launch and command orchestration | adapter, config, exec, host, package, provider, service |
 | `aw-service` | Local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
 | `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, exec, provider |
-| `aw-host` | Prepare Providers and execute admitted Hook steps | config, exec, provider |
+| `aw-host` | Prepare Providers and execute admitted Hook steps | config, core, exec, provider |
 | `aw-provider` | Validate Provider messages and capability admission | config |
 | `aw-exec` | Bound process lifetimes and output; hold managed package files; clean up owned processes | None |
 | `aw-config` | Parse configuration and validate fields and static references | None |
@@ -161,12 +161,12 @@ for version pins, busy rejection, process association and acceptance boundaries.
 
 ### Where `aw-core` fits
 
-The current Hook path is `aw-service → aw-host → aw-exec`. The service reuses
+Hook preparation routes through `aw_core::admission` via
+`Service → Core.preflight → Host.discover → Core.admit → Host.from_admitted`,
+and Hook event execution runs along `aw-service → aw-host → aw-exec` (see
+[Core admission](core-admission.md)). The service also reuses
 `aw-core::journal::FileJournal` for audit storage, without calling
-`Core::prepare/execute`. `aw_core::admission` provides the pure Hook policy
-admission facade over `aw-config` and `aw-provider::admission`; production Hook
-preparation in `aw-service` and `aw-host` has not yet switched to this
-entrypoint (see [Core admission](core-admission.md)).
+`Core::prepare/execute`.
 
 `aw-core::Core` is a separate capability-plan API. Its embedding caller supplies
 `ProviderHost`, `Clock`, and `Journal`; it uses `aw-contracts` to validate plans

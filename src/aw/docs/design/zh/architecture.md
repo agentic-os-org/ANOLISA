@@ -27,7 +27,7 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 | `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、exec、host、package、provider、service |
 | `aw-service` | 本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
 | `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、exec、provider |
-| `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、exec、provider |
+| `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、core、exec、provider |
 | `aw-provider` | 校验 Provider 消息和能力准入 | config |
 | `aw-exec` | 管理进程期限、输出上限、安装文件读锁和退出清理 | 无 |
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
@@ -124,11 +124,11 @@ Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录
 
 ### `aw-core` 在哪里
 
-当前 Hook 路径是 `aw-service → aw-host → aw-exec`。服务复用
-`aw-core::journal::FileJournal` 保存审计，但不调用 `Core::prepare/execute`。
-`aw_core::admission` 基于 `aw-config` 与 `aw-provider::admission` 提供无副作用的
-Hook 策略准入门面；当前 `aw-service` 与 `aw-host` 的生产 Hook 准备路径尚未切换至
-该入口，详见 [Core 准入](core-admission.md)。
+Hook 策略准备经由 `aw_core::admission` 执行，路径为
+`Service → Core.preflight → Host.discover → Core.admit → Host.from_admitted`；
+Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
+[Core 准入](core-admission.md)。服务同时复用 `aw-core::journal::FileJournal`
+保存审计，不调用 `Core::prepare/execute`。
 
 `aw-core::Core` 是单独的能力计划执行接口。使用它的嵌入方要提供
 `ProviderHost`、`Clock` 和 `Journal`；它依赖 `aw-contracts` 校验计划和执行记录。

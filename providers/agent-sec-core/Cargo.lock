@@ -85,6 +85,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aw-core"
+version = "0.1.0"
+dependencies = [
+ "aw-config",
+ "aw-contracts",
+ "aw-provider",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "aw-exec"
 version = "0.1.0"
 dependencies = [
@@ -97,6 +109,7 @@ name = "aw-host"
 version = "0.1.0"
 dependencies = [
  "aw-config",
+ "aw-core",
  "aw-exec",
  "aw-provider",
  "serde_json",

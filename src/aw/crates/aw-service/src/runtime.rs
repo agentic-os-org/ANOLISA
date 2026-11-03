@@ -4,6 +4,7 @@ use crate::{
     audit::{self, Audit},
     rejected, Capabilities, EventHandle, Identity, Result,
 };
+use aw_core::admission::{AdmissionEngine, AdmissionError};
 use aw_host::{Host, ProcessContext};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -71,6 +72,7 @@ enum Job {
 pub(crate) struct Runtime {
     pub(crate) identity: Identity,
     bytes: Vec<u8>,
+    admission: AdmissionEngine,
     pub(crate) limits: limits::Limits,
     pub(crate) resources: limits::Resources,
     pub(crate) stopped: Arc<AtomicBool>,
@@ -94,6 +96,10 @@ impl Runtime {
             .trim()
             .to_owned();
         let revision = format!("{:x}", Sha256::digest(&bytes));
+        let admission = AdmissionEngine::new().map_err(|error| match error {
+            AdmissionError::Configuration(error) => error.into(),
+            AdmissionError::Provider(_) => rejected("binding_preflight"),
+        })?;
         let contexts = evidence::Contexts::new(&bytes)?;
         let limits = limits::Limits::parse(&bytes)?;
         Ok(Arc::new(Self {
@@ -106,6 +112,7 @@ impl Runtime {
                 config_revision: revision,
             },
             bytes,
+            admission,
             stopped,
             audit: Audit::new(directory)?,
             instances: Mutex::new(BTreeMap::new()),
@@ -144,16 +151,35 @@ impl Runtime {
         {
             return Err(rejected("binding_metadata_limit"));
         }
-        let config = aw_config::Validator::new()?.parse(bytes)?;
-        let capabilities = capabilities.into();
-        let steps = aw_provider::admission::preflight(&config, target, &capabilities)
-            .map_err(|_| rejected("binding_preflight"))?;
-        if steps.len() > MAX_STEPS {
+        let candidate = self
+            .admission
+            .preflight(bytes, target, capabilities.into())
+            .map_err(|error| match error {
+                AdmissionError::Configuration(error) => error.into(),
+                AdmissionError::Provider(_) => rejected("binding_preflight"),
+            })?;
+        if candidate.requirements().len() > MAX_STEPS {
             return Err(rejected("step_limit"));
         }
         self.audit.claim(key, json!({"kind": "preparation", "identity": self.identity, "instance_id": key, "binding_id": target}))?;
         let result = (|| {
-            let host = Host::prepare(bytes, target, capabilities, context, deadline, cancelled);
+            let host =
+                Host::discover(&candidate, context, deadline, cancelled).and_then(|prepared| {
+                    let policy = match self.admission.admit(candidate, prepared.evidence()) {
+                        Ok(policy) => policy,
+                        Err(error) => return Err(prepared.into_failure(error.into())),
+                    };
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(prepared
+                            .into_failure(aw_host::Error::Execution(aw_exec::Error::Cancelled)));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(prepared.into_failure(aw_host::Error::Execution(
+                            aw_exec::Error::DeadlineExceeded,
+                        )));
+                    }
+                    Host::from_admitted(policy, prepared)
+                });
             match host {
                 Ok(host) => {
                     self.audit.append(key, json!({"phase": "closed", "status": "ok", "calls": host.preparation().iter().map(audit::call).collect::<Vec<_>>()}))?;

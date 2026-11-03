@@ -237,7 +237,7 @@ class GateTests(GateFixture):
             ("aw-exec", self.root / "crates/aw-exec", ["libc", "thiserror"]),
             (
                 "aw-host", self.root / "crates/aw-host",
-                ["aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"],
+                ["aw-config", "aw-core", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"],
             ),
             (
                 "aw-service", self.root / "crates/aw-service",
@@ -363,7 +363,7 @@ class GateTests(GateFixture):
             (0, "aw-core"), (1, "tokio"), (1, "semver"), (1, "aw-host"), (1, "aw-service"),
             (1, "aw-exec"), (1, "aw-adapter"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
-            (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
+            (5, "aw-contracts"), (5, "aw-service"), (5, "aw-adapter"), (5, "libc"),
             (6, "aw-contracts"), (6, "tokio"), (6, "aw-provider-tokenless"),
             (7, "asc-daemon-client"), (7, "aw-core"),
             (10, "aw-service"), (10, "aw-host"), (10, "aw-provider-tokenless"),
@@ -398,7 +398,7 @@ class GateTests(GateFixture):
         invalid["packages"][3]["dependencies"][0]["path"] = str(self.root / "other-config")
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
-        for dependency in ("aw-config", "aw-exec", "aw-provider"):
+        for dependency in ("aw-config", "aw-core", "aw-exec", "aw-provider"):
             invalid = deepcopy(metadata)
             local = next(d for d in invalid["packages"][5]["dependencies"] if d["name"] == dependency)
             local["path"] = str(self.root / "other-local-crate")

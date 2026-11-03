@@ -146,7 +146,10 @@ fn admit_both(
     let policy =
         candidate.and_then(|candidate| ENGINE.admit(candidate, providers).map_err(core_reason));
     match (&policy, &expected) {
-        (Ok(policy), Ok(steps)) => assert_eq!(policy.steps(), steps.as_slice()),
+        (Ok(policy), Ok(steps)) => {
+            assert_eq!(policy.steps(), steps.as_slice());
+            assert_eq!(policy.providers().len(), providers.len());
+        }
         (Err(actual), Err(expected)) => assert_eq!(actual, expected),
         _ => panic!("Core admission diverged from Provider admission"),
     }

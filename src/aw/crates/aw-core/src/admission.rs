@@ -15,6 +15,7 @@
 //!     revision: String::new(),
 //!     target: String::new(),
 //!     capabilities: unimplemented!(),
+//!     providers: unimplemented!(),
 //!     steps: Vec::new(),
 //! };
 //! ```
@@ -120,6 +121,7 @@ impl AdmissionEngine {
             revision,
             target,
             capabilities,
+            providers: providers.clone(),
             steps,
         })
     }
@@ -170,6 +172,7 @@ pub struct AdmittedPolicy {
     revision: String,
     target: String,
     capabilities: AdapterCapabilities,
+    providers: BTreeMap<String, ProviderEvidence>,
     steps: Vec<AdmittedStep>,
 }
 
@@ -192,6 +195,11 @@ impl AdmittedPolicy {
     /// Trusted Adapter evidence used for admission.
     pub fn capabilities(&self) -> &AdapterCapabilities {
         &self.capabilities
+    }
+
+    /// Protocol-checked Provider evidence bound to this admitted policy.
+    pub fn providers(&self) -> &BTreeMap<String, ProviderEvidence> {
+        &self.providers
     }
 
     /// Admitted steps in configured order within each event.
