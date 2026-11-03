@@ -193,10 +193,43 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/debug_task.py` | Single-task interactive debug with verbose output |
 | `scripts/analyze.py` | Analyze batch trace artifacts |
 | `scripts/summarize_results.py` | Summarize batch results across runs |
+| `scripts/compare_batch_results.py` | Compare recorded task outcomes as CSV |
 | `scripts/generate_trial_reports.py` | Generate per-trial detailed reports |
 | `scripts/prompt_task.py` | Display the system prompt for a given task |
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
+
+### Compare recorded batches
+
+```bash
+python scripts/compare_batch_results.py \
+  --baseline claw-eval/traces/baseline/batch_results.json \
+  --candidate claw-eval/traces/candidate/batch_results.json \
+  --output batch-comparison.csv
+```
+
+The dependency-free command joins the union of exact `task_id` values in sorted
+order. CSV columns are `task_id`, `outcome_change`, `baseline_status`,
+`candidate_status`, `baseline_score`, `candidate_score`, `score_delta`,
+`baseline_trials`, `candidate_trials`, `baseline_error_trials` and
+`candidate_error_trials`. Scores use 12 significant digits; integer deltas retain
+their precision, and missing scores/trial counts are blank.
+
+Recorded `avg_passed` is authoritative, with a nonempty task `error` taking
+precedence; scores do not recompute pass status. Outcomes are `pass`, `fail`,
+`error`, `unknown` or `missing`. Changes are `improved`/`regressed` for transitions
+to/from pass, `changed` for other known status changes, `unchanged`, `unknown`,
+`added` or `removed`. Trial error counts use recorded truthy trial errors;
+individual errors do not override an otherwise completed task outcome.
+
+Both inputs are fully read and validated before output: duplicate/empty IDs,
+invalid containers/types and nonfinite/negative/out-of-range scores fail clearly.
+Omit `--output` for UTF-8 CSV on stdout. Optional files are published atomically
+through an owned temporary file, preserve prior output on publication failure,
+and cannot alias either input by path or file link. Input evidence is unchanged.
+Empty batches emit headers, and Unicode/multiline IDs retain CSV quoting. No
+agents, dataset downloads or judge calls run, and comparison does not establish
+identical task definitions or recompute recorded grading.
 
 ## Troubleshooting
 

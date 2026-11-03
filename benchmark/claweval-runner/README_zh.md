@@ -193,10 +193,39 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/debug_task.py` | 单任务交互式调试,输出详细信息 |
 | `scripts/analyze.py` | 分析批量 trace 产物 |
 | `scripts/summarize_results.py` | 汇总多次运行的批量结果 |
+| `scripts/compare_batch_results.py` | 以 CSV 对比已记录的任务结果 |
 | `scripts/generate_trial_reports.py` | 生成每次试验的详细报告 |
 | `scripts/prompt_task.py` | 显示指定任务的 system prompt |
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
+
+### 对比已记录的批量结果
+
+```bash
+python scripts/compare_batch_results.py \
+  --baseline claw-eval/traces/baseline/batch_results.json \
+  --candidate claw-eval/traces/candidate/batch_results.json \
+  --output batch-comparison.csv
+```
+
+该命令不需要外部依赖，按完整 `task_id` 的并集排序对齐。CSV 列为 `task_id`、
+`outcome_change`、`baseline_status`、`candidate_status`、`baseline_score`、
+`candidate_score`、`score_delta`、`baseline_trials`、`candidate_trials`、
+`baseline_error_trials`、`candidate_error_trials`。评分按 12 位有效数字显示；
+整数差值保留其精度，缺失评分或试验数量时留空。
+
+记录中的 `avg_passed` 为判定依据，非空的任务 `error` 优先；不会用评分重新判断
+是否通过。状态为 `pass`、`fail`、`error`、`unknown`、`missing`。转入或转出 pass
+分别标记 `improved`、`regressed`；其他已知状态变化为 `changed`，此外还有
+`unchanged`、`unknown`、`added`、`removed`。试验错误数按记录中为真的 trial
+error 统计；单个试验错误不会覆盖已经完成的任务判定。
+
+两个输入会在输出前完整读取并验证：重复或空 ID、无效容器/类型以及非有限、负值
+或超范围评分会明确报错。不传 `--output` 时向 stdout 输出 UTF-8 CSV。文件输出
+通过独占临时文件原子发布，发布失败保留旧输出，且不能通过路径或文件链接与任一
+输入指向同一文件；输入证据保持不变。空批次输出表头，Unicode/多行 ID 保留 CSV
+转义。不执行 agent、数据集下载或 judge 调用；对比不保证任务定义相同，也不重新
+计算已记录的评分。
 
 ## 故障排查
 
