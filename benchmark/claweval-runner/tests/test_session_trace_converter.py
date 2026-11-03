@@ -465,3 +465,127 @@ class TestTokenConsistency:
         assert trace_end["model_input_tokens"] == 1000
         assert trace_end["model_output_tokens"] == 200
         assert trace_end["total_tokens"] == 1200
+
+
+class TestToolResultImages:
+    """Tool-result media must survive conversion (#6620).
+
+    The OpenClaw session format carries screenshot/media results as image
+    blocks on the tool-result message (mcp_sandbox_tools emits them from
+    BrowserScreenshot and ReadMedia). The ClawEval trace contract keeps
+    the nested tool_result block text-only and puts visual content on the
+    outer user message - the same shape the native runner writes.
+    """
+
+    PNG = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAA"
+        "SUVORK5CYII="
+    )
+
+    def _convert(self, tmp_path, events):
+        from ce_runner.session_trace_converter import convert_session_to_trace
+
+        session = tmp_path / "session.jsonl"
+        trace = tmp_path / "trace.jsonl"
+        session.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        convert_session_to_trace(
+            str(session),
+            {"task_id": "M_fixture", "services": []},
+            str(trace),
+            preloaded_audit_data={},
+        )
+        return [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+
+    def _blocks(self, output, block_type):
+        return [
+            block
+            for event in output
+            if event.get("type") == "message"
+            for block in event["message"]["content"]
+            if block.get("type") == block_type
+        ]
+
+    def _screenshot_session(self):
+        return [
+            {
+                "type": "message",
+                "timestamp": "2026-10-08T10:00:01.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "call-1",
+                            "name": "BrowserScreenshot",
+                            "arguments": {"url": "http://fixture.invalid"},
+                        }
+                    ],
+                    "usage": {"input": 100, "output": 10},
+                },
+            },
+            {
+                "type": "message",
+                "timestamp": "2026-10-08T10:00:02.000Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call-1",
+                    "toolName": "BrowserScreenshot",
+                    "isError": False,
+                    "content": [
+                        {"type": "text", "text": "URL: fixture"},
+                        {"type": "image", "data": self.PNG, "mimeType": "image/png"},
+                    ],
+                },
+            },
+        ]
+
+    def test_tool_result_images_survive_conversion(self, tmp_path):
+        output = self._convert(tmp_path, self._screenshot_session())
+
+        images = self._blocks(output, "image")
+        assert len(images) == 1, f"session images=1, converted images={len(images)}"
+        assert images[0]["data"] == self.PNG
+        assert images[0]["mime_type"] == "image/png"
+
+        # The nested tool_result block keeps its text-only contract.
+        tool_results = self._blocks(output, "tool_result")
+        assert len(tool_results) == 1
+        assert tool_results[0]["tool_use_id"] == "call-1"
+        assert tool_results[0]["content"] == [{"type": "text", "text": "URL: fixture"}]
+
+    def test_plain_tool_results_are_unchanged(self, tmp_path):
+        events = [
+            {
+                "type": "message",
+                "timestamp": "2026-10-08T10:00:01.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "call-2",
+                            "name": "ReadFile",
+                            "arguments": {"path": "/etc/hostname"},
+                        }
+                    ],
+                    "usage": {"input": 10, "output": 5},
+                },
+            },
+            {
+                "type": "message",
+                "timestamp": "2026-10-08T10:00:02.000Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call-2",
+                    "toolName": "ReadFile",
+                    "isError": False,
+                    "content": [{"type": "text", "text": "host-a"}],
+                },
+            },
+        ]
+        output = self._convert(tmp_path, events)
+
+        assert self._blocks(output, "image") == []
+        tool_results = self._blocks(output, "tool_result")
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"] == [{"type": "text", "text": "host-a"}]
