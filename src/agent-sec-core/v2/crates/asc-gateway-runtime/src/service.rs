@@ -147,15 +147,17 @@ const CA_VARIABLES: [&str; 6] = [
 ];
 
 impl GatewayService {
-    /// Reads only the execution projection; performs no host mutation or authorization.
+    /// Loads the execution projection without host mutation or authorization on success.
     /// # Errors
-    /// Rejects corrupt or unsupported projections.
+    /// Rejects unreadable, corrupt or unsupported projections after attempting to stop
+    /// the proxy and withdraw routing and runtime files; retains state and credentials.
     pub fn new(
         config: GatewayConfig,
         host: Box<dyn Host>,
         repository: Arc<dyn PapRepository>,
     ) -> Result<Self, GatewayError> {
-        let state = State::load(&config.state_dir, &config.ports)?;
+        let state = State::load(&config.state_dir, &config.ports)
+            .map_err(|error| withdraw_on_failure(&config, host.as_ref(), error))?;
         Ok(Self {
             config,
             host,
@@ -777,8 +779,10 @@ impl GatewayService {
                     Err(error) if error.kind() == GatewayErrorKind::Unavailable => continue,
                     Err(error) => return Err(error),
                 }
-                if self.host.cgroup_exists(&attachment.cgroup) {
-                    routes.insert(attachment.cgroup.clone(), (id, domain.port));
+                for path in attachment.cgroups() {
+                    if self.host.cgroup_exists(path) {
+                        routes.insert(path.to_owned(), (id, domain.port));
+                    }
                 }
             }
         }
@@ -801,18 +805,7 @@ impl GatewayService {
         Ok(())
     }
     pub(crate) fn fail_closed(&self, error: GatewayError) -> GatewayError {
-        let cleanup = [
-            self.host.stop_unit(&self.config.unit).err(),
-            self.host.apply_nft(&nft::render_delete()).err(),
-            self.runtime(None).remove_all().err(),
-        ];
-        if cleanup.iter().all(Option::is_none) {
-            error.context("gateway stopped and traffic withdrawn; cleanup responsibility retained")
-        } else {
-            error.context(
-                "gateway fail-closed cleanup failed; operator must stop proxy and withdraw traffic",
-            )
-        }
+        withdraw_on_failure(&self.config, self.host.as_ref(), error)
     }
     fn status_of(&self, state: &State) -> GatewayStatus {
         let ready = state.enabled
@@ -838,6 +831,36 @@ impl GatewayService {
                 bindings: domain.bindings.keys().cloned().collect(),
             })
             .collect()
+    }
+}
+
+fn withdraw_on_failure(
+    config: &GatewayConfig,
+    host: &dyn Host,
+    error: GatewayError,
+) -> GatewayError {
+    // Construction can fail before an instance exists; never trust the projection to decide cleanup.
+    let runtime = RuntimeDirectory {
+        root: config.runtime_dir.clone(),
+        gateway: Owner { uid: 0, gid: 0 },
+    };
+    // Do not short-circuit: another fence may still succeed when any one withdrawal fails.
+    let cleanup = [
+        ("stop proxy", host.stop_unit(&config.unit)),
+        ("withdraw routing", host.apply_nft(&nft::render_delete())),
+        ("remove runtime", runtime.remove_all()),
+    ];
+    let failures: Vec<_> = cleanup
+        .into_iter()
+        .filter_map(|(operation, result)| result.err().map(|error| format!("{operation}: {error}")))
+        .collect();
+    if failures.is_empty() {
+        error.context("gateway stopped and traffic withdrawn; cleanup responsibility retained")
+    } else {
+        error.context(&format!(
+            "gateway fail-closed cleanup failed ({}); operator must stop proxy and withdraw traffic; cleanup responsibility retained",
+            failures.join("; ")
+        ))
     }
 }
 
@@ -879,4 +902,45 @@ fn read_secret_file(path: &Path, owner: u32) -> Result<Secret, GatewayError> {
     Ok(Secret::new(String::from_utf8(bytes).map_err(|_| {
         GatewayError::invalid("secret is not text")
     })?)?)
+}
+
+#[cfg(test)]
+mod secret_file_tests {
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::path::Path;
+
+    use super::read_secret_file;
+
+    #[test]
+    fn secret_files_require_private_single_link_regular_files_owned_by_the_expected_uid() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("token");
+        let uid = rustix::process::geteuid().as_raw();
+        fs::write(&path, "private-token\r\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_secret_file(&path, uid).unwrap().expose(),
+            "private-token"
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(read_secret_file(&path, uid).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_secret_file(&path, uid ^ 1).is_err());
+
+        let link = root.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(read_secret_file(&link, uid).is_err());
+        fs::remove_file(&link).unwrap();
+        fs::hard_link(&path, &link).unwrap();
+        assert!(read_secret_file(&path, uid).is_err());
+        fs::remove_file(&link).unwrap();
+        assert_eq!(
+            read_secret_file(&path, uid).unwrap().expose(),
+            "private-token"
+        );
+        assert!(read_secret_file(root.path(), uid).is_err());
+        assert!(read_secret_file(Path::new("token"), uid).is_err());
+    }
 }

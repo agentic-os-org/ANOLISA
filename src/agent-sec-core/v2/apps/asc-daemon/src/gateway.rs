@@ -16,10 +16,10 @@ use serde_json::Value;
 pub struct GatewayAdapter(Arc<GatewayService>);
 
 impl GatewayAdapter {
-    /// Loads the production gateway state below `data_dir`; the host is not touched.
+    /// Loads production state without host mutation on success.
     ///
     /// # Errors
-    /// Returns a corrupt or unreadable gateway state.
+    /// Rejects invalid state after attempting to stop and withdraw the old data plane.
     pub fn system(
         data_dir: &Path,
         repository: Arc<dyn asc_pap::PapRepository>,

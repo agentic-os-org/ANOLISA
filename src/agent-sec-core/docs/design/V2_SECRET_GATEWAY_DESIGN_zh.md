@@ -93,8 +93,13 @@ PID namespace、PID、start time、UID 和组；目标及已有后代快照逐�
 连接和接管期间在未迁移进程中并发产生的后代不受追溯保护。失败迁移可能保留部分已移动
 进程，清理责任不能丢弃。
 
-同一 Scope 的多实例共享 fake、端口与 Policy plan，各实例有独立 Binding 与执行 cgroup。
-实例退出只撤除对应执行责任，不撤销共享 fake。匹配实例重启由 discovery 重新接管，fake
+同一 Scope 的多实例共享 fake、端口与 Policy plan，各实例保留独立 Binding。
+不重叠进程树使用独立执行 cgroup；同 Scope 的父子重叠树复用已拥有的路径，不迁移已经
+受保护的进程。每条 Binding 持久保存根路径及覆盖的共享路径引用，先保存责任再接入未受
+保护的成员；重试只增加经过核验的引用，不丢弃已有责任。所有路径仍核验完整进程身份，
+拒绝跨 Scope 或无拥有者的网关 cgroup。先删父或先删子都不会撤除其它 Binding 仍引用的
+路径；实例退出只撤除对应执行责任，不撤销共享 fake。
+匹配实例重启由 discovery 重新接管，fake
 保持稳定。同 UID 多 Scope 有不同 fake，但同一用户仍可读取彼此 fake；cgroup 不是 UID
 内部的安全隔离边界。
 
@@ -219,8 +224,14 @@ enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
 
 命中 allow 后只替换 Authorization token/Basic 密码，保留 Basic 用户名。仅注入后的响应需
 反向改写：header/trailer 中实际注入的 Authorization（含 Basic 编码）和裸真实值均改回 fake；
-`buffered` body 限 8 MiB，只接受 identity/gzip，并使用相同替换表。解码/大小/编码不合格
-返回 502 或断开。改写后移除 ETag 和 Content-MD5。`none` 保持 body 流式。
+`buffered` body 的接收字节与解压字节分别限 8 MiB，只接受 identity/gzip，并使用相同替换表。
+正文通过流式回调有界接收、增量解压，完整检查后才交付；改写后的安全响应头可能先发送。
+协议层过滤非终止空 DATA，只有 EndOfMessage 才触发最终改写，避免把 HTTP/2 的合法空帧
+误当作 EOF。超限或解压失败立即关闭两端连接，不交付部分正文；不支持的编码返回 502 或断开。
+移除 ETag 和 Content-MD5；有正文时移除 Content-Length，HTTP/1 使用 chunked framing，
+HTTP/2 使用原生 DATA framing。HEAD、204、304 等无正文响应保持无正文，保留表示长度，
+不添加 chunked framing。固定依赖不支持 HTTP/1 trailers，遇到此类响应直接断开，不交付
+未经检查的正文。`none` 保持 body 流式，不受此 buffered 限额影响。
 响应钩子异常或已注入请求的上游协议错误（含响应头解析与字段校验失败）均直接关闭客户端
 连接，不交付包含原始上游字节的代理错误页。字段校验失败不受 flow kill 约束，addon 在
 error hook 返回前同步关闭底层 writer，覆盖 HTTP/1 与 HTTP/2；同一 HTTP/2 连接的其它流也
@@ -231,13 +242,18 @@ error hook 返回前同步关闭底层 writer，覆盖 HTTP/1 与 HTTP/2；同�
 `<数据目录>/gateway/state.json` 只保存 enabled、generation 与 Scope 执行投影：owner UID、端口、
 撤销 fence、Binding 责任与完整实例身份。它不保存另一套授权规则。恢复必须从 PAP 读取
 canonical Scope、固定的 Policy revision 和 Binding，核对 lifecycle 与实例身份；不从 PID
-单独恢复、不读取 latest Policy 替代快照。
+单独恢复、不读取 latest Policy 替代快照。version 2 的 Binding 投影增加 `sharedCgroups`，
+缺失时按仅有根路径读取。旧版本不认识此字段，不能直接回退二进制后沿用新投影；回退前
+必须关闭网关并撤流，canonical Scope/Binding 和 Credential Store 不属于该投影的清理范围。
 
 当前 daemon 在启动 Binding worker 前恢复 file Scope 的删除屏障，并同步执行
 `GatewayService.recover()`；开放 UDS 请求前再执行 `PapService.recover_scopes()`，不设置独立
 网关恢复 Job。SQLite 在 claim Apply 的同一事务中核对 canonical Scope 仍为 `Active`，
-防止删除中的 Scope 在 discovery 清理前重新部署策略。网关构造或恢复失败单独记录错误；
-Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，不阻塞原有 file-policy daemon readiness。
+防止删除中的 Scope 在 discovery 清理前重新部署策略。网关投影不可读、损坏或版本不支持时，
+构造失败先停止代理、撤除 nft 表并清除运行时快照，再返回错误；不依赖损坏投影判断是否撤流。
+持久投影和 Credential Store 保留，任一清理失败均显式报告，且仍尝试其它清理动作。
+网关构造或恢复失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，
+不阻塞原有 file-policy daemon readiness。
 file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
 管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
 
