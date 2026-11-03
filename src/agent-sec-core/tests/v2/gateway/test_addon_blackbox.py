@@ -328,7 +328,9 @@ class MockUpstream:
                     }
                 )
                 if self.path.startswith("/invalid-headers/"):
-                    raw_headers = auth.encode()  # No colon: the parser quotes this entire line.
+                    raw_headers = (
+                        auth.encode()
+                    )  # No colon: the parser quotes this entire line.
                 elif self.path.startswith("/invalid-content-length/"):
                     raw_headers = f"Content-Length: {auth}".encode()
                 elif self.path.startswith("/invalid-header-name/"):
@@ -336,17 +338,32 @@ class MockUpstream:
                 else:
                     raw_headers = None
                 if raw_headers is not None:
-                    self.connection.sendall(b"HTTP/1.1 200 OK\r\n" + raw_headers + b"\r\n\r\n")
+                    self.connection.sendall(
+                        b"HTTP/1.1 200 OK\r\n" + raw_headers + b"\r\n\r\n"
+                    )
                     self.close_connection = True
                     return
-                if self.path in ("/no-body/204", "/no-body/304", "/no-body/200", "/no-body/head"):
-                    status = 200 if self.command == "HEAD" else int(self.path.rsplit("/", 1)[1])
+                if self.path in (
+                    "/no-body/204",
+                    "/no-body/304",
+                    "/no-body/200",
+                    "/no-body/head",
+                ):
+                    status = (
+                        200
+                        if self.command == "HEAD"
+                        else int(self.path.rsplit("/", 1)[1])
+                    )
                     self.send_response(status)
                     self.send_header("X-Echo", auth)
                     if status != 204:
                         self.send_header(
                             "Content-Length",
-                            str(BIG) if status == 304 or self.command == "HEAD" else "0",
+                            (
+                                str(BIG)
+                                if status == 304 or self.command == "HEAD"
+                                else "0"
+                            ),
                         )
                     self.end_headers()
                     return
@@ -492,7 +509,9 @@ class GatewayCase(unittest.TestCase):
         make_certificates(cls.workdir)
         cls.mock = MockUpstream(cls.workdir / "leaf.pem", cls.workdir / "leaf.key")
         cls.rogue = MockUpstream(cls.workdir / "rogue.pem", cls.workdir / "rogue.key")
-        cls.misnamed = MockUpstream(cls.workdir / "misnamed.pem", cls.workdir / "misnamed.key")
+        cls.misnamed = MockUpstream(
+            cls.workdir / "misnamed.pem", cls.workdir / "misnamed.key"
+        )
         runtime = cls.workdir / "runtime"
         (runtime / "status").mkdir(parents=True)
         cls.ports = {
@@ -541,15 +560,23 @@ class GatewayCase(unittest.TestCase):
             "ASC_TEST_MOCK_PORT": str(cls.mock.port),
             "ASC_TEST_UNTRUSTED_PORT": str(cls.rogue.port),
             "ASC_TEST_MISNAMED_PORT": str(cls.misnamed.port),
-            **({"ASC_TEST_H2_PORT": str(cls.h2_port)} if hasattr(cls, "h2_port") else {}),
+            **(
+                {"ASC_TEST_H2_PORT": str(cls.h2_port)}
+                if hasattr(cls, "h2_port")
+                else {}
+            ),
             "TMPDIR": str(cls.workdir),
         }
         with open(cls.workdir / "mitmdump.log", "ab") as log:
-            return subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment)
+            return subprocess.Popen(
+                command, stdout=log, stderr=subprocess.STDOUT, env=environment
+            )
 
     @classmethod
     def health(cls) -> dict[str, object]:
-        return json.loads((cls.workdir / "runtime" / "status" / "health.json").read_text())
+        return json.loads(
+            (cls.workdir / "runtime" / "status" / "health.json").read_text()
+        )
 
     @classmethod
     def wait_health(cls, ready: object, timeout: float = 30.0) -> dict[str, object]:
@@ -584,7 +611,9 @@ class GatewayCase(unittest.TestCase):
         for request in cls.mock.requests:
             authorization = request["authorization"]
             if authorization:
-                assert authorization not in log, "mitmdump output contains upstream authorization"
+                assert (
+                    authorization not in log
+                ), "mitmdump output contains upstream authorization"
 
     def client_context(self) -> ssl.SSLContext:
         return ssl.create_default_context(
@@ -604,7 +633,9 @@ class GatewayCase(unittest.TestCase):
         body: bytes = b"",
         tls: bool = True,
     ) -> Response:
-        with self.connection(agent, host=host, sni=sni, connect=connect, tls=tls) as stream:
+        with self.connection(
+            agent, host=host, sni=sni, connect=connect, tls=tls
+        ) as stream:
             target_line = path if tls else f"http://{host}{path}"
             return self._exchange(stream, method, target_line, host, headers, body)
 
@@ -672,7 +703,9 @@ class GatewayCase(unittest.TestCase):
 class InjectionTest(GatewayCase):
     def test_ca_is_published(self) -> None:
         published = (self.workdir / "runtime" / "status" / "ca-cert.pem").read_bytes()
-        self.assertEqual(published, (self.workdir / "conf" / "mitmproxy-ca-cert.pem").read_bytes())
+        self.assertEqual(
+            published, (self.workdir / "conf" / "mitmproxy-ca-cert.pem").read_bytes()
+        )
 
     def test_bearer_is_injected_and_echo_rewritten(self) -> None:
         response = self.send(
@@ -682,7 +715,9 @@ class InjectionTest(GatewayCase):
             headers=[("Authorization", f"Bearer {FAKE}")],
         )
         self.assertEqual(response.status, 200)
-        self.assertEqual(self.recorded("/echo/bearer")[0]["authorization"], f"Bearer {REAL}")
+        self.assertEqual(
+            self.recorded("/echo/bearer")[0]["authorization"], f"Bearer {REAL}"
+        )
         self.assertEqual(response.json()["auth"], f"Bearer {FAKE}")
         self.assertEqual(response.headers["X-Echo"], f"Bearer {FAKE}")
         self.assertNotIn("ETag", response.headers)
@@ -715,9 +750,13 @@ class InjectionTest(GatewayCase):
                     )
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.json()["auth"], f"Bearer {FAKE}")
-                self.assertEqual(self.recorded(path)[0]["authorization"], f"Bearer {REAL}")
+                self.assertEqual(
+                    self.recorded(path)[0]["authorization"], f"Bearer {REAL}"
+                )
 
-    def test_unsupported_http1_trailers_abort_without_delivering_credentials(self) -> None:
+    def test_unsupported_http1_trailers_abort_without_delivering_credentials(
+        self,
+    ) -> None:
         received = bytearray()
         with self.connection("00000000-0000-4000-8000-000000000001") as stream:
             stream.sendall(
@@ -726,7 +765,9 @@ class InjectionTest(GatewayCase):
             )
             while chunk := stream.recv(4096):
                 received.extend(chunk)
-        self.assertEqual(self.recorded("/trailers")[0]["authorization"], f"Bearer {REAL}")
+        self.assertEqual(
+            self.recorded("/trailers")[0]["authorization"], f"Bearer {REAL}"
+        )
         self.assertEqual(received.partition(b"\r\n\r\n")[2], b"")
         self.assertNotIn(REAL.encode(), received)
 
@@ -738,7 +779,9 @@ class InjectionTest(GatewayCase):
             headers=[("Authorization", f"token {FAKE}")],
         )
         self.assertEqual(response.status, 200)
-        self.assertEqual(json.loads(gzip.decompress(response.body))["auth"], f"token {FAKE}")
+        self.assertEqual(
+            json.loads(gzip.decompress(response.body))["auth"], f"token {FAKE}"
+        )
 
     def test_basic_password_is_injected_for_git(self) -> None:
         basic = base64.b64encode(f"x-access-token:{FAKE}".encode()).decode()
@@ -751,7 +794,9 @@ class InjectionTest(GatewayCase):
             headers=[("Authorization", f"Basic {basic}")],
         )
         self.assertEqual(response.status, 200)
-        sent = base64.b64decode(self.recorded(path)[0]["authorization"].split()[1]).decode()
+        sent = base64.b64decode(
+            self.recorded(path)[0]["authorization"].split()[1]
+        ).decode()
         self.assertEqual(sent, f"x-access-token:{REAL}")
         for echoed in (response.headers["X-Echo"], response.json()["auth"]):
             scheme, encoded = echoed.split()
@@ -777,7 +822,9 @@ class InjectionTest(GatewayCase):
                 with self.subTest(failure=failure, scheme=presented.split()[0]):
                     path = f"/{failure}/{presented.split()[0]}"
                     received = bytearray()
-                    with self.connection("00000000-0000-4000-8000-000000000001") as stream:
+                    with self.connection(
+                        "00000000-0000-4000-8000-000000000001"
+                    ) as stream:
                         stream.sendall(
                             (
                                 f"GET {path} HTTP/1.1\r\nHost: api.github.com\r\n"
@@ -792,7 +839,9 @@ class InjectionTest(GatewayCase):
                             if not chunk:
                                 break
                             received.extend(chunk)
-                    self.assertEqual([r["authorization"] for r in self.recorded(path)], [injected])
+                    self.assertEqual(
+                        [r["authorization"] for r in self.recorded(path)], [injected]
+                    )
                     # No dependency error page, including an encoded Basic password, may escape.
                     self.assertEqual(received, b"")
 
@@ -845,12 +894,18 @@ class InjectionTest(GatewayCase):
                     [request["authorization"] for request in self.recorded(path)],
                     [f"Bearer {REAL}"],
                 )
-                self.assertTrue(self.mock.finished[path].wait(10), "upstream did not stop")
+                self.assertTrue(
+                    self.mock.finished[path].wait(10), "upstream did not stop"
+                )
                 sent, total = self.mock.progress[path]
-                self.assertLess(sent, total, "limit must abort before consuming the whole response")
+                self.assertLess(
+                    sent, total, "limit must abort before consuming the whole response"
+                )
                 self.assertNotIn(REAL.encode(), received)
                 self.assertEqual(received.partition(b"\r\n\r\n")[2], b"")
-                self.assertIsNone(self.process.poll(), "the shared proxy must remain usable")
+                self.assertIsNone(
+                    self.process.poll(), "the shared proxy must remain usable"
+                )
 
     def test_unsupported_encoding_is_rejected(self) -> None:
         response = self.send(
@@ -883,7 +938,9 @@ class InjectionTest(GatewayCase):
 
 
 class RejectionTest(GatewayCase):
-    def assert_rejected(self, response: Response, code: str, path: str, status: int = 403) -> None:
+    def assert_rejected(
+        self, response: Response, code: str, path: str, status: int = 403
+    ) -> None:
         self.assertEqual(response.status, status)
         self.assertEqual(response.json()["error"], code)
         self.assertEqual(self.recorded(path), [], "upstream must not be called")
@@ -891,7 +948,9 @@ class RejectionTest(GatewayCase):
     def test_disallowed_method_and_path(self) -> None:
         auth = [("Authorization", f"Bearer {FAKE}")]
         self.assert_rejected(
-            self.send("00000000-0000-4000-8000-000000000001", "OPTIONS", "/x1", headers=auth),
+            self.send(
+                "00000000-0000-4000-8000-000000000001", "OPTIONS", "/x1", headers=auth
+            ),
             "credential_not_allowed",
             "/x1",
         )
@@ -947,7 +1006,9 @@ class RejectionTest(GatewayCase):
         self.assert_rejected(response, "sni_host_mismatch", "/x6", 421)
 
     def test_unconfigured_listener_fails_closed(self) -> None:
-        self.assert_rejected(self.send("unconfigured", "GET", "/x7"), "gateway_not_ready", "/x7")
+        self.assert_rejected(
+            self.send("unconfigured", "GET", "/x7"), "gateway_not_ready", "/x7"
+        )
 
     def test_forged_destination_fails_upstream_verification(self) -> None:
         for destination, upstream in (
@@ -992,7 +1053,9 @@ class Http2InjectionTest(GatewayCase):
         received = bytearray()
         body = bytearray()
         ended = False
-        with self.connection("00000000-0000-4000-8000-000000000001", alpn="h2") as stream:
+        with self.connection(
+            "00000000-0000-4000-8000-000000000001", alpn="h2"
+        ) as stream:
             self.assertEqual(stream.selected_alpn_protocol(), "h2")
             stream.sendall(
                 b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -1037,7 +1100,9 @@ class Http2InjectionTest(GatewayCase):
                     # HPACK literal fields without indexing or Huffman coding.
                     block.extend(bytes((0, len(key))) + key + bytes((len(raw),)) + raw)
                 received = bytearray()
-                with self.connection("00000000-0000-4000-8000-000000000001", alpn="h2") as stream:
+                with self.connection(
+                    "00000000-0000-4000-8000-000000000001", alpn="h2"
+                ) as stream:
                     self.assertEqual(stream.selected_alpn_protocol(), "h2")
                     stream.sendall(
                         b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -1119,7 +1184,9 @@ class Http2UpstreamInjectionTest(GatewayCase):
             while True:
                 self.assertIsNone(process.poll(), "HTTP/2 upstream mitmdump exited")
                 try:
-                    with socket.create_connection(("127.0.0.1", self.h2_port), timeout=0.2):
+                    with socket.create_connection(
+                        ("127.0.0.1", self.h2_port), timeout=0.2
+                    ):
                         break
                 except OSError:
                     if time.monotonic() >= deadline:
@@ -1134,7 +1201,9 @@ class Http2UpstreamInjectionTest(GatewayCase):
                 process.kill()
                 process.wait(timeout=10)
 
-    def test_empty_nonterminal_http2_data_preserves_identity_and_gzip_rewrite(self) -> None:
+    def test_empty_nonterminal_http2_data_preserves_identity_and_gzip_rewrite(
+        self,
+    ) -> None:
         with self.h2_upstream():
             for encoding in ("identity", "gzip"):
                 with self.subTest(encoding=encoding):
@@ -1146,10 +1215,15 @@ class Http2UpstreamInjectionTest(GatewayCase):
                         sni="api.github.com",
                         headers=[("Authorization", f"Bearer {FAKE}")],
                     )
-                    proof = json.loads((self.workdir / f"h2-proof-{encoding}.json").read_text())
-                    self.assertEqual(proof, {"authorization": f"Bearer {REAL}", "alpn": "h2"})
+                    proof = json.loads(
+                        (self.workdir / f"h2-proof-{encoding}.json").read_text()
+                    )
+                    self.assertEqual(
+                        proof, {"authorization": f"Bearer {REAL}", "alpn": "h2"}
+                    )
                     self.assertFalse(
-                        (self.workdir / "h2-error.json").exists(), "HTTP/2 upstream failed"
+                        (self.workdir / "h2-error.json").exists(),
+                        "HTTP/2 upstream failed",
                     )
                     self.assertEqual(response.status, 200)
                     body = response.body
@@ -1159,7 +1233,9 @@ class Http2UpstreamInjectionTest(GatewayCase):
                     self.assertEqual(json.loads(body), {"auth": f"Bearer {FAKE}"})
                     self.assertNotIn(REAL.encode(), body)
                     self.assertNotIn(REAL.encode(), response.body)
-                    self.assertIsNone(self.process.poll(), "the gateway must remain usable")
+                    self.assertIsNone(
+                        self.process.poll(), "the gateway must remain usable"
+                    )
 
 
 class LogProtectionTest(GatewayCase):
@@ -1169,7 +1245,9 @@ class LogProtectionTest(GatewayCase):
         encoded = base64.b64encode(f"synthetic-user:{dummy_real}".encode()).decode()
         retired = VALUES["retiredFake"]
         partial = FAKE[:16]
-        with self.connection("00000000-0000-4000-8000-000000000001", tls=False) as stream:
+        with self.connection(
+            "00000000-0000-4000-8000-000000000001", tls=False
+        ) as stream:
             stream.sendall(
                 (
                     "GET http://api.github.com/partial-headers HTTP/1.1\r\n"
@@ -1188,7 +1266,9 @@ class LogProtectionTest(GatewayCase):
             tls=False,
             headers=[("Authorization", f"Bearer {FAKE}")],
         )
-        self.assertEqual((response.status, response.json()["error"]), (403, "plaintext_credential"))
+        self.assertEqual(
+            (response.status, response.json()["error"]), (403, "plaintext_credential")
+        )
         # Flush redirected stdout before asserting absence; this class owns its subprocess.
         self.process.terminate()
         self.process.wait(timeout=10)
@@ -1211,7 +1291,9 @@ class ReloadTest(GatewayCase):
             }
         )
         secrets["entries"] = [
-            e for e in secrets["entries"] if e["scopeId"] != "00000000-0000-4000-8000-000000000001"
+            e
+            for e in secrets["entries"]
+            if e["scopeId"] != "00000000-0000-4000-8000-000000000001"
         ]
         write_generation(
             runtime,
@@ -1231,14 +1313,18 @@ class ReloadTest(GatewayCase):
             "/r1",
             headers=[("Authorization", f"Bearer {FAKE}")],
         )
-        self.assertEqual((response.status, response.json()["error"]), (403, "gateway_not_ready"))
+        self.assertEqual(
+            (response.status, response.json()["error"]), (403, "gateway_not_ready")
+        )
         response = self.send(
             "00000000-0000-4000-8000-000000000002",
             "GET",
             "/r2",
             headers=[("Authorization", f"Bearer {FAKE}")],
         )
-        self.assertEqual((response.status, response.json()["error"]), (403, "retired_credential"))
+        self.assertEqual(
+            (response.status, response.json()["error"]), (403, "retired_credential")
+        )
 
         broken = json.loads(json.dumps(secrets))
         write_generation(
@@ -1252,7 +1338,9 @@ class ReloadTest(GatewayCase):
             ],
             broken,
         )
-        health = self.wait_health(lambda health: health["lastAttempt"]["generation"] == 3)
+        health = self.wait_health(
+            lambda health: health["lastAttempt"]["generation"] == 3
+        )
         self.assertEqual(health["loadedGeneration"], 2)
         self.assertIn("generation", health["lastAttempt"]["error"])
         response = self.send(
@@ -1266,7 +1354,9 @@ class ReloadTest(GatewayCase):
         (runtime / "active.json").unlink()
         self.wait_health(lambda health: health["loadedGeneration"] is None)
         response = self.send("00000000-0000-4000-8000-000000000002", "GET", "/r4")
-        self.assertEqual((response.status, response.json()["error"]), (403, "gateway_not_ready"))
+        self.assertEqual(
+            (response.status, response.json()["error"]), (403, "gateway_not_ready")
+        )
 
 
 @unittest.skipUnless(MITMDUMP and os.access(MITMDUMP, os.X_OK), "MITMDUMP is not set")
@@ -1279,7 +1369,10 @@ class StartupTest(unittest.TestCase):
             ("flow_detail=2", b"flow_detail=0"),
         ]
         for setting, message in unsafe:
-            with self.subTest(setting=setting), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(setting=setting),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 # mitmdump refuses repeated options, so only add the safe default when needed.
                 options = [setting]
                 if not setting.startswith("flow_detail="):

@@ -200,7 +200,7 @@ Summary:
 
 - **Version**: Python 3.11.6 (pinned)
 - **Package manager**: [uv](https://docs.astral.sh/uv/)
-- **Formatting**: black + isort (`line-length = 100`)
+- **Formatting**: black (line length 88) + isort (line length 80); use `make python-code-pretty`
 - **Linting**: [ruff](https://docs.astral.sh/ruff/) (F, E, W, I, TID252, ANN, S-subset, etc.)
 - **Type annotations**: required on all function parameters and return types
 - **Imports**: absolute only (`from agent_sec_cli.xxx import yyy`); no relative imports
