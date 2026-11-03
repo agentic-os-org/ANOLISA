@@ -395,7 +395,10 @@ def build_summary_table(data: list, reports: dict) -> tuple:
         avg_passed = task.get("avg_passed")
 
         for i, trial in enumerate(task.get("trials", []), 1):
-            trace_field = trial.get("trace", "")
+            # ce_runner.batch_runner writes "trace_file"; native claw-eval
+            # writes "trace". Join on whichever the trial carries; the trailing
+            # or "" absorbs a present-but-None value (dict.get defaults do not).
+            trace_field = trial.get("trace") or trial.get("trace_file") or ""
             trace_basename = os.path.basename(trace_field) if trace_field else ""
             trial_hash = extract_trial_hash(trace_field)
             report = reports.get(trace_basename) if reports else None
@@ -507,7 +510,10 @@ def build_structured_data(data: list, reports: dict, trace_name: str) -> dict:
         }
 
         for trial in task.get("trials", []):
-            trace_field = trial.get("trace", "")
+            # ce_runner.batch_runner writes "trace_file"; native claw-eval
+            # writes "trace". Join on whichever the trial carries; the trailing
+            # or "" absorbs a present-but-None value (dict.get defaults do not).
+            trace_field = trial.get("trace") or trial.get("trace_file") or ""
             trace_basename = os.path.basename(trace_field)
             trial_hash = extract_trial_hash(trace_field)
             report = reports.get(trace_basename) if reports else None
