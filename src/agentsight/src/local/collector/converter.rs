@@ -442,6 +442,14 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
         let Some(step) = owner.map(|index| &mut steps[index]) else {
             continue;
         };
+        let source_call_id = agentsight_atif::resolve_call_id(
+            id,
+            step.tool_calls
+                .iter()
+                .flatten()
+                .map(|call| call.tool_call_id.as_str()),
+        )
+        .map(str::to_string);
         let observation = step.observation.get_or_insert_with(|| Observation {
             results: Vec::new(),
         });

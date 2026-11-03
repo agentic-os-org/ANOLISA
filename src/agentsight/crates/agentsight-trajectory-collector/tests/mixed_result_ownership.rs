@@ -122,7 +122,6 @@ fn mixed_reply_retains_call_identity_error_flag_and_result_timestamp() {
     let agent = &trajectory.steps[0];
     let results = &agent.observation.as_ref().unwrap().results;
     assert_eq!(results.len(), 2);
-    assert_eq!(results[1].source_call_id.as_deref(), Some("callb"));
     assert_eq!(results[1].is_error(), Some(true));
     let call = agent
         .tool_calls
@@ -131,6 +130,12 @@ fn mixed_reply_retains_call_identity_error_flag_and_result_timestamp() {
         .iter()
         .find(|call| call.tool_call_id == "call-b")
         .unwrap();
+    assert_eq!(call.tool_call_id, "call-b");
+    assert_eq!(
+        results[1].source_call_id.as_deref(),
+        Some(call.tool_call_id.as_str())
+    );
+    assert_eq!(results[1].content, Some(json!("recorded result callb")));
     assert_eq!(
         call.extra.as_ref().unwrap()["result_timestamp"],
         "2026-10-01T00:00:02Z"

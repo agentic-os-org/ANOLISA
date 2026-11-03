@@ -642,7 +642,7 @@ fn merge_tool_results_into_agent_steps(
             None
         };
         let result = ObservationResult {
-            source_call_id: Some(tr.tool_use_id.clone()),
+            source_call_id: owner,
             content: Some(serde_json::Value::String(tr.content.clone())),
             subagent_trajectory_ref: None,
             extra,
