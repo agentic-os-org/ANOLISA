@@ -383,6 +383,42 @@ fn clean_process_exit_completes_captured_error_headers_once() {
 }
 
 #[test]
+fn process_exit_delivers_drained_response_without_deferring_its_session() {
+    let pid = std::process::id();
+    let response = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/event-stream\r\n",
+        "\r\n",
+        "data: {\"id\":\"exit-drained\",\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"reply\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20}}\n",
+        "\n"
+    )
+    .as_bytes();
+    let mut fixture = pending_runtime(pid, response);
+    let log_path = fixture.directory.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    std::fs::File::create(&log_path).unwrap();
+    fixture.genai_exporters.push(Box::new(logtail));
+
+    fixture.handle_procmon_event(&crate::probes::procmon::Event::Exit {
+        pid,
+        tid: pid,
+        uid: 0,
+        timestamp_ns: 10,
+        comm: "fixture".into(),
+        exit_code: 0,
+    });
+
+    assert_eq!(fixture.pending_genai.len(), 0);
+    assert_eq!(fixture.rows(), ["exit-drained"]);
+}
+
+#[test]
 fn dead_process_maintenance_releases_connections_with_and_without_sqlite() {
     for persist in [true, false] {
         let mut fixture = pending_runtime(

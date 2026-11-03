@@ -171,6 +171,37 @@ fn runtime_without_pacing_delivers_immediately() {
 }
 
 #[test]
+fn busy_maintenance_expires_deferred_genai_without_an_idle_event_loop() {
+    let mut fixture = RuntimeFixture::new(0);
+    let log_path = fixture.directory.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    std::fs::File::create(&log_path).unwrap();
+    fixture.genai_exporters.push(Box::new(logtail));
+    fixture.process_aggregated_results(vec![capture(
+        &mut Aggregator::new(),
+        "busy-deferred",
+        "payload",
+    )]);
+    assert_eq!(fixture.pending_genai.len(), 1);
+    assert!(fixture.rows().is_empty());
+
+    for pending in &mut fixture.pending_genai.entries {
+        pending.created_at = Instant::now() - PENDING_SESSION_TIMEOUT;
+    }
+    fixture.last_drain_check = Instant::now() - Duration::from_secs(2);
+    fixture.tick();
+
+    assert_eq!(fixture.pending_genai.len(), 0);
+    assert_eq!(fixture.rows(), ["busy-deferred"]);
+}
+
+#[test]
 fn runtime_accounting_failures_preserve_queued_and_oversized_delivery() {
     let mut fixture = RuntimeFixture::new(25);
     fixture
