@@ -161,8 +161,11 @@ dependencies = [
 name = "aw-core"
 version = "0.1.0"
 dependencies = [
+ "aw-config",
  "aw-contracts",
+ "aw-provider",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

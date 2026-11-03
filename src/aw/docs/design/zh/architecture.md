@@ -31,7 +31,7 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 | `aw-provider` | 校验 Provider 消息和能力准入 | config |
 | `aw-exec` | 管理进程期限、输出上限、安装文件读锁和退出清理 | 无 |
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
-| `aw-core` | 能力计划执行器、Host/Journal 接口和 FileJournal | contracts |
+| `aw-core` | Hook 策略准入、能力计划执行器、Host/Journal 接口和 FileJournal | config、contracts、provider |
 | `aw-contracts` | Schema、规范编码和记录间一致性校验 | 无 |
 | `aw-package` | Provider 准入、私有扩展事务与 AW 配置 | config、exec |
 
@@ -126,6 +126,9 @@ Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录
 
 当前 Hook 路径是 `aw-service → aw-host → aw-exec`。服务复用
 `aw-core::journal::FileJournal` 保存审计，但不调用 `Core::prepare/execute`。
+`aw_core::admission` 基于 `aw-config` 与 `aw-provider::admission` 提供无副作用的
+Hook 策略准入门面；当前 `aw-service` 与 `aw-host` 的生产 Hook 准备路径尚未切换至
+该入口，详见 [Core 准入](core-admission.md)。
 
 `aw-core::Core` 是单独的能力计划执行接口。使用它的嵌入方要提供
 `ProviderHost`、`Clock` 和 `Journal`；它依赖 `aw-contracts` 校验计划和执行记录。
@@ -146,7 +149,7 @@ Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录
 | `crates/aw-cli/src/command.rs`、`crates/aw-cli/src/command/` | 公开命令的 typed 声明、生成的帮助与处理逻辑分发 |
 | `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
-| `crates/aw-core/src/journal.rs` | 持久审计实现 |
+| `crates/aw-core/src/admission.rs`、`crates/aw-core/src/journal.rs` | Hook 策略准入门面与持久审计实现 |
 | `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | 私有扩展记录、本地校验、计划与持久文件变更 |
 | `crates/aw-package/src/configuration/`、`crates/aw-package/src/config_edit.rs` | AW 配置渲染与安全离线编辑 |
 | `../../distribution/packaging/aw/` | AW 独立归档、集成后端构建与具体配置模板 |

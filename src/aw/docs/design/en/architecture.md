@@ -37,7 +37,7 @@ maintained separately under `providers/`.
 | `aw-provider` | Validate Provider messages and capability admission | config |
 | `aw-exec` | Bound process lifetimes and output; hold managed package files; clean up owned processes | None |
 | `aw-config` | Parse configuration and validate fields and static references | None |
-| `aw-core` | Capability plan executor, Host/Journal ports, and FileJournal | contracts |
+| `aw-core` | Hook policy admission, capability plan executor, Host/Journal ports, and FileJournal | config, contracts, provider |
 | `aw-contracts` | Schemas, canonical encoding, and cross-record validation | None |
 | `aw-package` | Provider admission, private extension transactions and AW configuration | config, exec |
 
@@ -163,7 +163,10 @@ for version pins, busy rejection, process association and acceptance boundaries.
 
 The current Hook path is `aw-service → aw-host → aw-exec`. The service reuses
 `aw-core::journal::FileJournal` for audit storage, without calling
-`Core::prepare/execute`.
+`Core::prepare/execute`. `aw_core::admission` provides the pure Hook policy
+admission facade over `aw-config` and `aw-provider::admission`; production Hook
+preparation in `aw-service` and `aw-host` has not yet switched to this
+entrypoint (see [Core admission](core-admission.md)).
 
 `aw-core::Core` is a separate capability-plan API. Its embedding caller supplies
 `ProviderHost`, `Clock`, and `Journal`; it uses `aw-contracts` to validate plans
@@ -187,7 +190,7 @@ and packaging scope.
 | `crates/aw-cli/src/command.rs`, `crates/aw-cli/src/command/` | Typed public command declaration, generated help and handler dispatch |
 | `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service and event execution |
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
-| `crates/aw-core/src/journal.rs` | Durable audit storage |
+| `crates/aw-core/src/admission.rs`, `crates/aw-core/src/journal.rs` | Hook policy admission facade and durable audit storage |
 | `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | Private records, local verification, planning and durable extension file changes |
 | `crates/aw-package/src/configuration/`, `crates/aw-package/src/config_edit.rs` | AW configuration rendering and safe offline editing |
 | `../../distribution/packaging/aw/` | Independent AW archives, integration backend builds and concrete configuration templates |

@@ -219,7 +219,11 @@ class GateTests(GateFixture):
         packages = []
         for name, directory, dependencies in (
             ("aw-contracts", self.root / "crates/aw-contracts", ["serde_json"]),
-            ("aw-core", core, ["aw-contracts", "serde_json", "thiserror"]),
+            (
+                "aw-core",
+                core,
+                ["aw-config", "aw-contracts", "aw-provider", "serde_json", "sha2", "thiserror"],
+            ),
             (
                 "aw-config",
                 self.root / "crates/aw-config",
@@ -356,7 +360,8 @@ class GateTests(GateFixture):
         with self.assertRaises(ValueError):
             gate.structure(invalid, self.root)
         for package, dependency in (
-            (0, "aw-core"), (1, "tokio"), (1, "semver"), (2, "aw-core"), (2, "aw-contracts"),
+            (0, "aw-core"), (1, "tokio"), (1, "semver"), (1, "aw-host"), (1, "aw-service"),
+            (1, "aw-exec"), (1, "aw-adapter"), (2, "aw-core"), (2, "aw-contracts"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
             (5, "aw-core"), (5, "aw-contracts"), (5, "libc"),
             (6, "aw-contracts"), (6, "tokio"), (6, "aw-provider-tokenless"),
@@ -379,16 +384,16 @@ class GateTests(GateFixture):
                 ValueError, "unreviewed dependency aw-cli"
             ):
                 gate.structure(invalid, self.root)
-        invalid = deepcopy(metadata)
-        invalid["packages"][1]["dependencies"][0]["path"] = str(self.root / "other-contracts")
-        with self.assertRaises(ValueError):
-            gate.structure(invalid, self.root)
-        invalid["packages"][1]["dependencies"][0] = {
-            "name": "aw-contracts",
-            "source": "registry+fixture",
-        }
-        with chdir(self.root), self.assertRaises(ValueError):
-            gate.structure(invalid, self.root)
+        for dependency in ("aw-config", "aw-contracts", "aw-provider"):
+            invalid = deepcopy(metadata)
+            local = next(d for d in invalid["packages"][1]["dependencies"] if d["name"] == dependency)
+            local["path"] = str(self.root / "other-local-crate")
+            with self.subTest(core_dependency=dependency), self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
+            local.pop("path")
+            local["source"] = "registry+fixture"
+            with self.subTest(core_source=dependency), chdir(self.root), self.assertRaises(ValueError):
+                gate.structure(invalid, self.root)
         invalid = deepcopy(metadata)
         invalid["packages"][3]["dependencies"][0]["path"] = str(self.root / "other-config")
         with self.assertRaises(ValueError):
