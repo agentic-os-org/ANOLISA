@@ -31,6 +31,7 @@ Usage:
 import argparse
 import json
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -89,9 +90,43 @@ def _parse_assistant_response(session_file: str) -> str:
     return last_text
 
 
+def _session_file_snapshot(
+    directory: Path,
+) -> dict[Path, tuple[int, int, int, int, int] | None] | None:
+    try:
+        paths = list(directory.iterdir())
+    except FileNotFoundError:
+        return {}
+    except OSError as error:
+        log(f"  [ERROR] Cannot inspect sessions in {directory}: {error}")
+        return None
+    snapshot = {}
+    for path in paths:
+        if not path.name.endswith(".jsonl") or path.name.endswith(".trajectory.jsonl"):
+            continue
+        try:
+            info = path.stat()
+        except OSError:
+            snapshot[path] = None
+            continue
+        if stat.S_ISREG(info.st_mode):
+            snapshot[path] = (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            )
+    return snapshot
+
+
 def _send_prompt(prompt: str, agent_id: str, timeout: int) -> str:
     """Send a prompt via HTTP API and return the session file path."""
     import httpx
+    from ce_runner._common import _agent_sessions_dir
+
+    sessions_directory = Path(_agent_sessions_dir(agent_id))
+    before = _session_file_snapshot(sessions_directory)
 
     with open(OPENCLAW_CONFIG) as f:
         oc_config = json.load(f)
@@ -127,14 +162,17 @@ def _send_prompt(prompt: str, agent_id: str, timeout: int) -> str:
         log(f"  [ERROR] HTTP API call timed out after {api_timeout}s")
         return ""
 
-    # Locate the session file created by this request
-    from ce_runner._common import _agent_sessions_dir
-    sessions_dir = _agent_sessions_dir(agent_id)
-    sdir = Path(sessions_dir)
-    sessions = [p for p in sdir.glob("*.jsonl")
-                if not p.name.endswith(".trajectory.jsonl")]
-    if sessions:
-        return str(max(sessions, key=lambda p: p.stat().st_mtime))
+    after = _session_file_snapshot(sessions_directory)
+    if before is not None and after is not None:
+        fresh = [
+            (state[3], str(path), path) for path, state in after.items()
+            if state is not None and (
+                path not in before or (before[path] is not None and before[path] != state)
+            )
+        ]
+        if fresh:
+            return str(max(fresh)[2])
+    log(f"  [ERROR] No fresh session file observed for agent {agent_id}")
     return ""
 
 
