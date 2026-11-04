@@ -150,7 +150,10 @@ def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]
                 # Keep the record in the inventory and final audit, but do not
                 # invent a load level for unusable evidence in comparisons.
                 continue
-            grouped[(qps, run["version"])].append(run)
+            version = run.get("version")
+            if not isinstance(version, str):
+                continue
+            grouped[(qps, version)].append(run)
     rows = []
     for (qps, version), runs in sorted(grouped.items()):
         row: dict[str, Any] = {
@@ -158,7 +161,8 @@ def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]
             "version": version,
             "repetitions": len(runs),
             "pass_count": sum(
-                run.get("evaluation", {}).get("verdict") == "PASS" for run in runs
+                (run.get("evaluation") or {}).get("verdict") == "PASS"
+                for run in runs
             ),
         }
         fields = {
@@ -340,7 +344,10 @@ def write_soak(results: Path, items: list[tuple[Path, dict[str, Any]]]) -> None:
     ]
     runs = scenario_runs(items, "soak")
     for _, run in runs:
-        summary = run["summary"]
+        summary = run.get("summary")
+        summary = summary if isinstance(summary, dict) else {}
+        evaluation = run.get("evaluation")
+        verdict = evaluation.get("verdict", "—") if isinstance(evaluation, dict) else "—"
         lines.append(
             f"| {run['version']} | {run['duration_seconds']}s | "
             f"{display(nested(summary, 'resources', 'rss_mb', 'first'))}/"
@@ -368,7 +375,7 @@ def write_soak(results: Path, items: list[tuple[Path, dict[str, Any]]]) -> None:
             f"{display(nested(summary, 'resources', 'connection_cache_bytes', 'max'))} | "
             f"{ratio_display(nested(summary, 'drop_rate'))}/"
             f"{ratio_display(nested(summary, 'trace_completeness'))} | "
-            f"{run['evaluation']['verdict']} |"
+            f"{verdict} |"
         )
     if not runs:
         lines.append("| — | — | — | — | — | — | — | — | — | NOT EXECUTED |")
