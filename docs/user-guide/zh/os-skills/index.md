@@ -20,6 +20,20 @@ OS Skills 覆盖三大领域：
 anolisa install os-skills
 ```
 
+开发者也可以从源码检出目录安装供 cosh 使用的技能集合：
+
+```bash
+make -C src/os-skills install
+```
+
+普通用户继续使用原有的 `~/.copilot-shell/skills/` 目录；root 默认安装到
+`/usr/local/share/anolisa/skills/`。系统资源的 `AWPRJ` 默认为 `anolisa`，可显式覆盖。
+使用 `SKILLS_DIR=/absolute/path` 可选择其他技能集合目录；卸载时使用相同的值。
+启动新的 cosh 会话后，运行 `/skills` 检查已安装的技能。
+
+技能同名时，本地系统副本优先于 `/usr/share/anolisa/skills/` 中的 RPM 副本。
+同一集合应选择一种交付方式；管理旧的源码安装时，将 `SKILLS_DIR` 指向原目录。
+
 ---
 
 ## 快速开始
