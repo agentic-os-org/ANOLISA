@@ -24,15 +24,15 @@ const ACTPLANE_MAX_LOWERED_PATTERN_BYTES: usize = 63;
 const ACTPLANE_MAX_RULES: usize = 128;
 const DSL_REASON: &str = "AgentSecCore file deletion policy";
 
-/// Pure `AgentSight` Adapter for native deletion and Cedar deletion/write constraints.
+/// Pure `AgentSight` Translator for native deletion and Cedar deletion/write constraints.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct AgentSightAdapter;
+pub struct AgentSightTranslator;
 
-impl AgentSightAdapter {
+impl AgentSightTranslator {
     /// Translates one complete immutable Binding without persistence or I/O.
     ///
     /// # Errors
-    /// Returns an internal Adapter fault. A deterministic semantic mismatch is
+    /// Returns an internal translation fault. A deterministic semantic mismatch is
     /// represented by [`TranslationOutcome::Rejected`].
     pub fn translate(&self, binding: &PreparedBinding) -> Result<TranslationOutcome, AdapterFault> {
         if binding.validate().is_err() {

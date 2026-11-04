@@ -85,10 +85,10 @@ The current crates are:
   the original text and exact schema reference in SQLite. Cedar target translation
   and deployment remain follow-up work. See the
   [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
-- `asc-policy-adapter-agentsight`: deterministic file-deletion and pinned-process
+- `asc-policy-translator-agentsight`: deterministic file-deletion and pinned-process
   translation directly from the Binding's template into an AgentSight/ActPlane
   plan, with semantic and encoding checks. Reusable policies contain general
-  rules; this Adapter supports only block + file/write + operation=delete without
+  rules; this Translator supports only block + file/write + operation=delete without
   history. Any unsupported rule rejects the complete Binding with its rule index.
   Typed resources currently cover files; undefined resource formats are rejected.
   Compiler acceptance belongs to the deployed target, not an embedded compiler.

@@ -15,8 +15,8 @@ use store::{TestAdmission, TestStore};
 
 use asc_agentsight_client::*;
 use asc_pcp::*;
-use asc_policy_adapter_agentsight::AgentSightAdapter;
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
+use asc_policy_translator_agentsight::AgentSightTranslator;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use common::*;
@@ -116,7 +116,7 @@ fn cedar_delete_and_write_flow_through_pap_sqlite_reconciler_and_http() {
         assert_eq!(binding.spec.policy, policy);
         let id = binding.spec.binding_id.clone();
         let TranslationOutcome::Translated(plan) =
-            AgentSightAdapter.translate(&binding.spec).unwrap()
+            AgentSightTranslator.translate(&binding.spec).unwrap()
         else {
             panic!("expected Cedar translation");
         };
@@ -285,10 +285,10 @@ fn core(
         transport,
         Identity::default(),
     ));
-    let adapter = |binding: &PreparedBinding| AgentSightAdapter.translate(binding);
+    let translator = |binding: &PreparedBinding| AgentSightTranslator.translate(binding);
     BindingReconciler::new(
         repo,
-        Arc::new(adapter),
+        Arc::new(translator),
         BTreeMap::from([(
             DEFAULT_AGENTSIGHT_ROUTE.into(),
             Arc::new(move || Ok(client.clone())) as Arc<dyn asc_pcp::TargetDeploymentClientFactory>,
@@ -594,7 +594,7 @@ fn retry_rejects_reused_process_identity_and_retains_unknown_cleanup() {
         let clock = Arc::new(TestClock::default());
         let core = BindingReconciler::new(
             repo.clone(),
-            Arc::new(|b: &PreparedBinding| AgentSightAdapter.translate(b)),
+            Arc::new(|b: &PreparedBinding| AgentSightTranslator.translate(b)),
             BTreeMap::from([(DEFAULT_AGENTSIGHT_ROUTE.into(), {
                 Arc::new(move || Ok(client.clone() as Arc<dyn TargetDeploymentClient>))
                     as Arc<dyn asc_pcp::TargetDeploymentClientFactory>

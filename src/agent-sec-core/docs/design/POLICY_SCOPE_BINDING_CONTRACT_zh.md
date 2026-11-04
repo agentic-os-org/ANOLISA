@@ -354,7 +354,7 @@ Scope 创建成功仅表示分配已保存，后续 Binding 可因目标不支�
 
 实现复用现有类型、Adapter、Repository 和 Runtime，没有新增 crate 或独立规则执行框架。
 领域校验回归见 [通用规则测试](../../v2/crates/asc-policy-types/tests/authoring.rs)，
-逐规则转换、拒绝及 DSL 注入边界见 [Adapter 测试](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs)，
+逐规则转换、拒绝及 DSL 注入边界见 [Translator 测试](../../v2/crates/asc-policy-translator-agentsight/tests/translation.rs)，
 三处快照重开及旧编码拒绝见 [SQLite 契约测试](../../v2/crates/asc-policy-repository-sqlite/tests/contracts.rs)。
 [HTTP mock E2E](../../tests/v2/e2e/test_policy_delivery_e2e.py) 覆盖完整下发与含不支持规则时
 保存成功、Binding 失败且无 HTTP 调用。测试验证本地数据和 mock 请求，不代表真实内核执行。

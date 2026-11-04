@@ -288,10 +288,10 @@ dependencies = [
  "asc-pap",
  "asc-pcp",
  "asc-persistence-sqlite",
- "asc-policy-adapter-agentsight",
  "asc-policy-repository",
  "asc-policy-repository-sqlite",
  "asc-policy-runtime",
+ "asc-policy-translator-agentsight",
  "asc-policy-types",
  "asc-security-events",
  "asc-telemetry",
@@ -494,10 +494,10 @@ dependencies = [
  "asc-agentsight-client",
  "asc-foundation-types",
  "asc-pap",
- "asc-policy-adapter-agentsight",
  "asc-policy-repository",
  "asc-policy-repository-sqlite",
  "asc-policy-target-contracts",
+ "asc-policy-translator-agentsight",
  "asc-policy-types",
  "serde",
  "serde_json",
@@ -531,18 +531,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
-]
-
-[[package]]
-name = "asc-policy-adapter-agentsight"
-version = "1.1.2"
-dependencies = [
- "asc-agentsight-protocol",
- "asc-policy-cedar",
- "asc-policy-types",
- "cedar-policy",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -612,6 +600,18 @@ name = "asc-policy-target-contracts"
 version = "1.1.2"
 dependencies = [
  "asc-policy-types",
+ "serde_json",
+]
+
+[[package]]
+name = "asc-policy-translator-agentsight"
+version = "1.1.2"
+dependencies = [
+ "asc-agentsight-protocol",
+ "asc-policy-cedar",
+ "asc-policy-types",
+ "cedar-policy",
+ "serde",
  "serde_json",
 ]
 

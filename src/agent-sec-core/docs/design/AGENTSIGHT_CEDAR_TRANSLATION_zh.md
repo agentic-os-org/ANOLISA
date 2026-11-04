@@ -6,7 +6,7 @@
 
 AgentSecCore 将 Cedar 的文件删除和普通写入限制翻译成 AgentSight 结构化文件防护策略。
 本实现基于 `af1bc18a9` 已有的 Cedar 准入与持久化，原生 JSON 策略继续使用原有 DSL 路径。
-生产 daemon 已注册 `AgentSightAdapter` 和 `AgentSightClientFactory`，两种前端共用既有部署生命周期。
+生产 daemon 已注册 `AgentSightTranslator` 和 `AgentSightClientFactory`，两种前端共用既有部署生命周期。
 
 ## 1. 接口、版本与决策语义
 
@@ -55,7 +55,7 @@ permit；通用前端仍保留 permit 供其他消费者使用。不补隐含 pe
 路径必须是绝对字面路径，不能包含 NUL、`* ? [ ] { } \\`、重复分隔符、`.`、`..`，除 `/`
 外不能有末尾斜杠。不补 cwd，不做 shell 展开或大小写折叠，不在 PAP 主机解析文件系统。
 路径相等不代表整个目录树，也不等于 Cedar 实体 ID 相等。
-部署沿用现有进程树 Scope；`CgroupId` selector 仍被该 Adapter 拒绝。
+部署沿用现有进程树 Scope；Translator 拒绝 `CgroupId` selector。
 
 排除项只属于所在目标，其他目标仍可以保护该条目。相同目标及相同排除项可合并操作开关；
 相同路径的目标类型或排除列表不同时直接拒绝，不引入隐含优先级。只排除目录根、保留其
@@ -175,7 +175,7 @@ Client 解码策略、检查能力并保留重放和回执核对。Reconciler �
 在 `v2` 下执行：
 
 ```sh
-cargo test -p asc-policy-adapter-agentsight -p asc-agentsight-client -p asc-pcp --locked
+cargo test -p asc-policy-translator-agentsight -p asc-agentsight-client -p asc-pcp --locked
 ```
 
 Translator 测试在显式 permit 基线下，对照 Cedar 决策检查已支持的路径和操作条件，并覆盖
@@ -191,10 +191,10 @@ Cedar 源码及快照保留[整体设计](POLICY_FRONTEND_AST_AND_TRANSLATION_zh
 
 ## 6. 原有 JSON 策略的翻译边界
 
-`AgentSightAdapter::translate` 读取完整 Binding 快照，校验全部输入，将规则降低为
+`AgentSightTranslator::translate` 读取完整 Binding 快照，校验全部输入，将规则降低为
 ActPlane DSL，再包装为目标计划。它不查询最新模板，不执行请求求值，也不进行目标 I/O。
 
-| AST 要素 | Adapter 接受范围 | 超出范围时 |
+| AST 要素 | Translator 接受范围 | 超出范围时 |
 |---|---|---|
 | 效果 | `block` | `RULE_<index>_UNSUPPORTED_EFFECT` |
 | category/action | `file` / `write` | `RULE_<index>_UNSUPPORTED_ACTION` |
@@ -240,9 +240,9 @@ rule agentseccore-unlink-0000:
 显式 `because` 会替换默认理由。SecCore 生成格式为 `agentsight.actplane.binding.v2`
 的 `TargetBindingPlan`，其中携带来源 ID/revision、DSL 和固定实例的进程树挂载信息。
 
-源码：[翻译器](../../v2/crates/asc-policy-adapter-agentsight/src/translate.rs)、
-[计划结构](../../v2/crates/asc-policy-adapter-agentsight/src/plan.rs)、
-[翻译测试](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs)。
+源码：[翻译器](../../v2/crates/asc-policy-translator-agentsight/src/translate.rs)、
+[计划结构](../../v2/crates/asc-policy-translator-agentsight/src/plan.rs)、
+[翻译测试](../../v2/crates/asc-policy-translator-agentsight/tests/translation.rs)。
 
 ## 7. AgentSight 后端部署细节
 

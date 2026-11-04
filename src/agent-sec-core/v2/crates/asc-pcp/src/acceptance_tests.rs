@@ -341,9 +341,9 @@ fn complete_serialized_core_cases() {
 }
 
 #[test]
-fn actual_agentsight_adapter_uses_the_core_port_without_interface_changes() {
-    use asc_policy_adapter_agentsight::{
-        AGENTSIGHT_BINDING_PLAN_FORMAT, AgentSightAdapter, AgentSightBindingPlan,
+fn actual_agentsight_translator_uses_the_core_port_without_interface_changes() {
+    use asc_policy_translator_agentsight::{
+        AGENTSIGHT_BINDING_PLAN_FORMAT, AgentSightBindingPlan, AgentSightTranslator,
     };
 
     let objects: BTreeMap<String, Value> = serde_json::from_str(include_str!(
@@ -377,19 +377,19 @@ fn actual_agentsight_adapter_uses_the_core_port_without_interface_changes() {
         now: AtomicU64::new(0),
         id: case.id.clone(),
     });
-    let adapter_harness = harness.clone();
-    let adapter = move |binding: &PreparedBinding| {
-        let expected = TargetBindingAdapter::translate(adapter_harness.as_ref(), binding)?;
-        let actual = AgentSightAdapter.translate(binding)?;
+    let translator_harness = harness.clone();
+    let translator = move |binding: &PreparedBinding| {
+        let expected = TargetBindingAdapter::translate(translator_harness.as_ref(), binding)?;
+        let actual = AgentSightTranslator.translate(binding)?;
         assert_eq!(
             actual, expected,
-            "actual Adapter output differs from frozen golden"
+            "actual Translator output differs from frozen golden"
         );
         Ok(actual)
     };
     let reconciler = BindingReconciler::new(
         harness.clone(),
-        Arc::new(adapter),
+        Arc::new(translator),
         BTreeMap::from([("test".into(), {
             let client = harness.clone();
             Arc::new(move || Ok(client.clone() as Arc<dyn TargetDeploymentClient>))

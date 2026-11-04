@@ -1,5 +1,5 @@
-use asc_policy_adapter_agentsight::{
-    AgentSightAdapter, AgentSightBindingPlan, FILE_PROTECTION_POLICY_MEDIA_TYPE,
+use asc_policy_translator_agentsight::{
+    AgentSightBindingPlan, AgentSightTranslator, FILE_PROTECTION_POLICY_MEDIA_TYPE,
 };
 use asc_policy_types::{binding::PreparedBinding, target::TranslationOutcome};
 use serde_json::{Value, json};
@@ -23,7 +23,8 @@ fn rule(condition: &str) -> String {
 }
 
 fn translate(text: &str) -> Value {
-    let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&binding(text)).unwrap()
+    let TranslationOutcome::Translated(plan) =
+        AgentSightTranslator.translate(&binding(text)).unwrap()
     else {
         panic!("expected structured policy: {text}");
     };
@@ -115,7 +116,7 @@ fn unsupported_conditions_reject_the_whole_policy_including_later_statements() {
         r#"context.input.operation != SecCore::WriteOperation::"write" && resource.path == "/a""#,
         r#"resource.path == "/a""#,
     ] {
-        let outcome = AgentSightAdapter
+        let outcome = AgentSightTranslator
             .translate(&binding(&format!("{supported}{}", rule(condition))))
             .unwrap();
         let TranslationOutcome::Rejected(error) = outcome else {
@@ -130,7 +131,7 @@ fn unsupported_conditions_reject_the_whole_policy_including_later_statements() {
         supported.replace("resource is SecCore::File)", "resource == SecCore::File::\"a\")"),
         "forbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/a\" };".into(),
     ] {
-        assert!(matches!(AgentSightAdapter.translate(&binding(&text)).unwrap(), TranslationOutcome::Rejected(_)));
+        assert!(matches!(AgentSightTranslator.translate(&binding(&text)).unwrap(), TranslationOutcome::Rejected(_)));
     }
 }
 
@@ -155,7 +156,7 @@ fn conflicts_limits_empty_output_and_unknown_schema_fail_without_a_plan() {
     ] {
         assert!(
             matches!(
-                AgentSightAdapter.translate(&binding(&text)).unwrap(),
+                AgentSightTranslator.translate(&binding(&text)).unwrap(),
                 TranslationOutcome::Rejected(_)
             ),
             "{text}"
@@ -168,7 +169,7 @@ fn conflicts_limits_empty_output_and_unknown_schema_fail_without_a_plan() {
     };
     source.schema.revision = asc_policy_types::identifiers::Revision::new(2).unwrap();
     assert!(matches!(
-        AgentSightAdapter.translate(&input).unwrap(),
+        AgentSightTranslator.translate(&input).unwrap(),
         TranslationOutcome::Rejected(_)
     ));
 }
