@@ -32,6 +32,78 @@ from agent_sec_cli.sandbox.rules import (
     SHELL_UNSAFE_OPERATORS,
 )
 
+# 会吞掉下一个参数的 flag（每命令一张表）。子命令提取必须同时跳过 flag 和它的值，
+# 否则 `git -C /repo push` 会把 `/repo` 当成子命令。只列出确定带值的 flag。
+_VALUE_FLAGS: Dict[str, frozenset] = {
+    "git": frozenset(
+        {
+            "-C",
+            "-c",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--exec-path",
+            "--super-prefix",
+            "--config-env",
+        }
+    ),
+    "npm": frozenset(
+        {
+            "--registry",
+            "--prefix",
+            "--cache",
+            "--userconfig",
+            "--globalconfig",
+            "--logs-dir",
+            "--script-shell",
+            "--workspace",
+            "-w",
+        }
+    ),
+    "pip": frozenset(
+        {
+            "-i",
+            "--index-url",
+            "--extra-index-url",
+            "-t",
+            "--target",
+            "--prefix",
+            "--root",
+            "-c",
+            "--constraint",
+            "-r",
+            "--requirement",
+            "--cache-dir",
+            "--proxy",
+            "--timeout",
+            "--retries",
+            "--src",
+            "--log",
+        }
+    ),
+}
+_VALUE_FLAGS["pip3"] = _VALUE_FLAGS["pip"]
+
+
+def subcommand_of(cmd: str, args: List[str]) -> Optional[str]:
+    """返回第一个非 flag 参数，跳过已知带值 flag 的值。
+
+    `--flag=value` 只占一个参数，无需特殊处理；未知命令没有带值 flag 表，行为与
+    逐参数扫描一致。
+    """
+    value_flags = _VALUE_FLAGS.get(cmd, frozenset())
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg.startswith("-"):
+            if arg in value_flags:
+                skip_next = True
+            continue
+        return arg
+    return None
+
 
 class RuleEngine:
     """统一规则匹配引擎 - 支持 rules.py 中所有 Match Schema 字段"""
@@ -92,8 +164,7 @@ class RuleEngine:
 
         # subcommands: 子命令匹配（第一个非 flag 参数）
         if "subcommands" in rule:
-            subcmd = next((a for a in args if not a.startswith("-")), None)
-            if subcmd not in rule["subcommands"]:
+            if subcommand_of(cmd, args) not in rule["subcommands"]:
                 return False, ""
 
         # target_in: 位置参数在此列表中
@@ -235,7 +306,7 @@ class CommandClassifier:
 
         # 3. git 特殊处理：非危险 / 非网络子命令视为安全
         if cmd == "git":
-            subcmd = next((a for a in args if not a.startswith("-")), None)
+            subcmd = subcommand_of(cmd, args)
             dangerous_subcmds = {"clean"}
             network_subcmds = {"clone", "fetch", "pull", "push"}
             if subcmd is None or (
@@ -294,8 +365,7 @@ class CommandClassifier:
                 continue
             # 子命令匹配
             if "subcommands" in rule:
-                subcmd = next((a for a in args if not a.startswith("-")), None)
-                if subcmd not in rule["subcommands"]:
+                if subcommand_of(cmd, args) not in rule["subcommands"]:
                     continue
             # args_contain 匹配（参数须包含指定值）
             if "args_contain" in rule:
