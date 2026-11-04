@@ -40,8 +40,12 @@ def escape_text(s: str) -> tuple[str, bool]:
     """
     Return (escaped_text, needs_preserve).
     needs_preserve is True if the string has leading or trailing whitespace.
+
+    Carriage returns become the numeric character reference ``&#13;``: an XML
+    parser normalizes a literal CR in text content to LF, even inside
+    ``xml:space="preserve"``, which would silently rewrite the cell value.
     """
-    escaped = html.escape(s, quote=False)
+    escaped = html.escape(s, quote=False).replace("\r", "&#13;")
     needs_preserve = s != s.strip()
     return escaped, needs_preserve
 
