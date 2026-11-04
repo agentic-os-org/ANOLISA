@@ -7,6 +7,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-11-04
+
+### Component Versions
+
+| Component | Version |
+|-----------|--------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 1.1.1 |
+| agentsight | 0.15.3 |
+| tokenless | 0.9.0 |
+| agent-memory | 0.2.12 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.20 |
+| skillfs | 0.5.4 |
+| ws-ckpt | 0.6.0 |
+| cosh-ng | 0.28.0 |
+
+> **Release composition:** These versions are pinned to the Agentic OS 1.6.1 component release
+> and may differ from rolling or Nightly component manifests on `main`.
+
+> **Note:** copilot-shell and os-skills are unchanged since v1.6; they are listed to show the
+> complete stack composition. This release updates component RPMs only and does not publish a
+> new Agentic OS system image.
+
+### Highlights
+
+- **cosh-ng**: Updated to v0.28.0, prevents project configuration and changed commands or hooks from weakening approval boundaries while bounding session and diagnostic storage, users get safer long-running shell sessions with predictable disk use (#7244, #6787, #6788, #7157, #7158, #7159)
+- **agent-sec-core**: Updated to v1.1.1, makes policy reconciliation and policy storage more resilient, scans command strings passed to Python process APIs, and standardizes the SkillSec CLI, administrators get more consistent enforcement and actionable recovery paths (#6944, #8782, #9128, #8907)
+- **agentsight**: Updated to v0.15.3, activates structured file protection and expands local trajectory, token, cost, export, HTTP, and resource analysis, operators get more complete and accurate Agent observability across supported runtimes
+- **tokenless**: Updated to v0.9.0, preserves complete JSON shape and numeric literals while validating RTK output before further compression, agents avoid silent tool-result changes and can use TOON spec v4.4 when compatible (#8814, #7784, #7752, #8901)
+- **anolisa**: Updated to v0.3.20, recognizes container deployments, preserves user-added or edited Skill files when disabling OpenClaw and Hermes installations with per-file Skill ownership records, and provides actionable adapter-path recovery guidance, administrators can identify container deployments and recover failed adapter lifecycle operations (#8206, #6221, #9220)
+- **agent-memory**: Updated to v0.2.12, rechecks capture consent, isolates new observations by Agent, publishes overwrite operations atomically, and validates snapshot restoration, users get more reliable memory writes, recovery, and retrieval (#8865, #7776, #8982, #7631)
+- **skillfs**: Updated to v0.5.4, recovers managed mounts, hides installation staging state, and refreshes discovery immediately after Skill moves, agents see a consistent Skill view during installation and runtime changes (#8883, #7767, #9124)
+- **ws-ckpt**: Updated to v0.6.0, resumes interrupted rollbacks, rejects checkpoints under unsafe btrfs pressure, and paginates large snapshot sets, users can recover workspaces without compounding storage or index damage (#8570, #7888, #3451)
+
+### Updated
+
+- **cosh-ng**: Updated to v0.28.0, ignores project-level `approval_mode`, `allowed_tools`, and configuration hooks that would lower system or user security; binds command approval and project-hook consent to exact content; enforces 100 MiB/7-day session and 20 MiB/3-day diagnostic-log budgets; redacts access keys and PEM material; and fixes routing restoration, timeout prompts, approval cards, special-filename diffs, and low-space checkpoint handling, users retain secure and stable sessions without unbounded local state (#7244, #6787, #6788, #7158, #7157, #7159, #7396, #7350, #7489, #7333, #8042)
+- **agent-sec-core**: Updated to v1.1.1, rejects stale policy results, supersedes exhausted Apply retries with newer Delete intents, recovers SQLite state deterministically, and falls back to `/var/lib/agent-sec/policy/policy-state.db` when the default location is unsafe; Python `os.system`, `os.popen`, and `subprocess` command strings now use the existing Shell rules; `skillsec` is the primary command group with `skill-ledger` retained as an alias; YAML-sensitive Skill names remain valid; and the unsupported `scope create --cgroup-id` option is removed, administrators get a more predictable system security service and clearer migration behavior (#6944, #8782, #9128, #8907, #8948, #9134)
+- **agentsight**: Updated to v0.15.3, lowers structured file policies into enforceable kernel rules for deletion, rename or exchange, truncation, and ordinary writes; discovers Gemini CLI, Hermes, and Claude SDK sessions; removes collected trajectories when source histories are cleared; retains partial, usage-only, and bare JSON SSE token records; scopes accuracy analysis to the latest answered request; preserves developer instructions, tool completion times, and local identities in ATIF; decodes stacked HTTP content encodings; validates resource evidence before reporting thresholds; and reduces missed TLS traffic and capture-query memory, operators receive file-protection status and analysis that reflect the evidence actually collected
+- **tokenless**: Updated to v0.9.0, retains empty fields, `null` values, and array positions in complete JSON candidates; falls back to exact JSON when TOON cannot preserve a number's value or type; upgrades TOON encoding to spec v4.4; resumes post-tool compression only when the executed RTK command and byte-identity evidence match; and emits `compress-response` and `compress-schema` payloads without an added newline, agents can compress supported responses without changing their structure, numeric meaning, or emitted bytes (#8814, #7784, #7752, #8901, #7789, #7796)
+- **anolisa**: Updated to v0.3.20, reports container deployments as `container` instead of inheriting the host cloud product, preserves user-added or edited OpenClaw and Hermes Skill files on disable when their installation records track per-file Skill ownership, refuses cleanup through redirected or dangling ancestor directories while retaining installation records, explains how to recover adapter operations rejected by path boundaries, and returns standard JSON envelopes for telemetry lifecycle commands, administrators can identify container installations and recover lifecycle failures (#8206, #6221, #9220, #8706)
+- **agent-memory**: Updated to v0.2.12, rechecks persisted OpenClaw capture consent on every automatic observation, immediately attributes new observations to `MCP_CLIENT_NAME`, prepares replacement files before `mem_edit` or `mem_write` publication, limits `mem_revert` to the requested file, verifies gzip snapshots before restoration, starts watching before indexing, treats dotted filenames and Boolean-looking terms as literal search text, reports corrupted index rows, and publishes all 38 runtime tools in the packaged catalog, agents receive current, isolated, and recoverable memory results across write, revert, startup, and search paths (#8865, #7776, #8982, #9082, #7631, #8880, #9127, #9089, #8012, #8854, #9148)
+- **skillfs**: Updated to v0.5.4, lets `skillfs mount --config mount.toml --managed` recover a failed worker from the startup configuration while reading current sources, starts reliably on dot-prefixed mountpoints and slow hosts, keeps Flat and Hermes staging directories hidden, removes stale discovery entries after moving a Skill, leaves ambiguous npm commands unchanged when Yarn is selected, and treats `--logs-dir` literally, agents and operators see consistent mounts, installation state, discovery, and statistics (#8883, #8080, #7767, #7742, #9124, #9003, #9180)
+- **ws-ckpt**: Updated to v0.6.0, finishes interrupted rollbacks after daemon restart and restores the correct rollback head, rejects new checkpoints when btrfs data or metadata reaches safety thresholds, paginates snapshot listings, verifies cron-lock ownership and rejects line breaks in scheduled values, isolates temporary diff snapshots and rejects malformed lists, validates metadata and parent chains before snapshot creation, refuses plugin updates from inside a workspace, surfaces initialization failures, and re-arms file watching after rollback, users can operate large or stressed workspaces with bounded failure and recovery behavior (#8570, #7888, #3451, #8273, #3755, #6774, #6198, #3558, #5695, #6956, #8467, #6216, #6217, #5054)
+
+### Compatibility
+
+- **agent-sec-core**: `scope create --cgroup-id` has been removed; use `--pid`, `--process-name`, or `--executable`, and confirm that the system-level daemon is running after upgrade (#9134).
+- **agentsight**: The Enforcer protocol moves from v4 to v5 and is not backward compatible; upgrade AgentSight and Enforcer together. The default CPU throttle target is 25% of one logical CPU and the default connection capacity is 128.
+- **tokenless**: Complete JSON compression no longer removes empty fields or values. External TOON consumers must support spec v4.4 (#8814, #7752).
+- **anolisa**: Consumers of `product_type` must accept the new `container` value; refresh or remove stale `PRODUCT_TYPE` declarations from container images. Skill-file preservation requires per-file Skill ownership records; legacy OpenClaw and Hermes installation records without them still use whole-directory cleanup after path validation. Back up user-added or edited Skill files before disabling these legacy installations (#8206, #6221).
+- **agent-memory**: Upgrade the server and adapters together to v0.2.12 because older servers reject the new `memory_capture` hook. Validate time-decay settings before upgrade (#8865, #8701, #8699).
+- **ws-ckpt**: Refusing checkpoint creation under storage pressure is expected protection. Plugin updates cannot run from inside the workspace, and cosh-ng v0.28.0 or later is required for the updated protocol.
+
 ## [1.6] - 2026-10-16
 
 ### Component Versions
