@@ -7,6 +7,37 @@ AW 为 Agent 和 SDK 应用提供统一 Hook 编排、受管 MCP 接入和策略
 支持的常驻入口可在任务排空后更新策略，保留宿主进程。
 Agent 继续管理自己的模型、界面和权限。AW 运行于 Linux。
 
+<a id="安装与使用"></a>
+<a id="安装与首次运行"></a>
+
+## 快速入门
+
+按[安装指南](../../docs/user-guide/zh/aw/installation.md)安装 AW core 和可选 Provider 扩展。
+当前使用独立安装包；`anolisa install aw` 和 RPM 安装入口尚未提供。
+先安装并登录所选 Agent，再用 `aw config init` 生成配置。
+
+下面以已安装、登录的 Qoder 为例。`AW_PREFIX` 是安装指南中选定的安装目录，
+`qodercli` 和 `aw` 应已加入 `PATH`。
+
+```bash
+export AW_HOME="$HOME/aw"
+install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
+  --qoder "$(command -v qodercli)"
+aw config validate --config "$AW_HOME/aw.yaml"
+cd "$AW_HOME/workspace"
+aw run --config "$AW_HOME/aw.yaml" --agent qoder
+```
+
+进入 Qoder 后，请它用工具读取当前目录，并按原生提示处理权限确认。
+退出 Agent 后，本地服务仍可复用。使用结束后查询并停止它。
+
+```bash
+aw service status --config "$AW_HOME/aw.yaml"
+aw service stop --config "$AW_HOME/aw.yaml"
+```
+
 ## 通用能力
 
 | 能力 | 用户能做什么 |
@@ -43,36 +74,6 @@ sec-core Provider 支持 fast 提示词注入扫描，风险与故障分别按�
 [用户提交检查](../../docs/user-guide/zh/aw/security.md#检查用户提交)。
 
 
-<a id="安装与使用"></a>
-
-## 安装与首次运行
-
-按[安装指南](../../docs/user-guide/zh/aw/installation.md)安装 AW core 和可选 Provider 扩展。
-当前使用独立安装包；`anolisa install aw` 和 RPM 安装入口尚未提供。
-先安装并登录所选 Agent，再用 `aw config init` 生成配置。
-
-下面以已安装、登录的 Qoder 为例。`AW_PREFIX` 是安装指南中选定的安装目录，
-`qodercli` 和 `aw` 应已加入 `PATH`。
-
-```bash
-export AW_HOME="$HOME/aw"
-install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
-aw config init --prefix "$AW_PREFIX" \
-  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
-  --qoder "$(command -v qodercli)"
-aw validate --config "$AW_HOME/aw.yaml"
-cd "$AW_HOME/workspace"
-aw run --config "$AW_HOME/aw.yaml" --agent qoder
-```
-
-进入 Qoder 后，请它用工具读取当前目录，并按原生提示处理权限确认。
-退出 Agent 后，本地服务仍可复用。使用结束后查询并停止它。
-
-```bash
-aw status --config "$AW_HOME/aw.yaml"
-aw stop --config "$AW_HOME/aw.yaml"
-```
-
 <a id="hook-支持"></a>
 <a id="adapter-能力覆盖"></a>
 
@@ -93,7 +94,8 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需�
 
 | 任务 | 文档 |
 | --- | --- |
-| 安装并完成首次运行 | [AW 用户手册](../../docs/user-guide/zh/aw/index.md) |
+| 安装并完成首次运行 | [快速入门](../../docs/user-guide/zh/aw/index.md) |
+| 查询完整子命令与参数 | [CLI 命令参考](../../docs/user-guide/zh/aw/cli-reference.md) |
 | 选择 Agent、配置规则和更新策略 | [配置与启动](../../docs/user-guide/zh/aw/configuration.md) |
 | 启用输出压缩或安全检查 | [Tokenless](../../docs/user-guide/zh/aw/tokenless.md)、[sec-core](../../docs/user-guide/zh/aw/security.md) |
 | 查看运行记录 | [AgentSight](../../docs/user-guide/zh/aw/observability.md) |

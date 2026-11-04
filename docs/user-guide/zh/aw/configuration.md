@@ -2,7 +2,7 @@
 
 [English](../../en/aw/configuration.md)
 
-`aw.yaml` 保存 Agent 入口、Provider 和工具规则。先完成[安装与首次运行](installation.md)，下文沿用其中的 `AW_HOME`、`AW_PREFIX` 和 `AW_QODER`。
+`aw.yaml` 保存 Agent 入口、Provider 和工具规则。先完成[快速入门](index.md)，下文沿用其中的 `AW_HOME`、`AW_PREFIX` 和 `AW_QODER`。
 
 ## 选择能力
 

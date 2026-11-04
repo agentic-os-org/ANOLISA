@@ -2,6 +2,9 @@
 
 [中文版](../../../zh/aw/reference/cli.md)
 
+For the full command and option inventory, see the user [CLI reference](../../../../user-guide/en/aw/cli-reference.md).
+This page describes output contracts for scripts and automation.
+
 Use `aw commands --json` for command and argument discovery, and command-specific `--help` for conditional requirements.
 
 ## Output selection
