@@ -498,7 +498,9 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((stage / "usr/share/suite/extensions/agent-sec-core").exists())
 
-    def test_gateway_uninstall_withdraws_before_removal_and_retains_files_on_failure(self):
+    def test_gateway_uninstall_withdraws_before_removal_and_retains_files_on_failure(
+        self,
+    ):
         commands = self.base / "commands"
         commands.mkdir()
         systemctl = commands / "systemctl"
