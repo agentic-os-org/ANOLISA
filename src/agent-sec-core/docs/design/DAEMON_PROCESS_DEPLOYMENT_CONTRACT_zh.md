@@ -523,6 +523,7 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 | DPROC-017 | state migrator 完成 V1 per-user 到 system-owned state 的 owner-safe 迁移和回滚 |
 | DPROC-018 | CLI/TUI 不直读 SQLite；query 必须经过 daemon authorization |
 | DPROC-019 | raw/RPM/container/systemd/Helm 生成 checksum、SBOM 和 build metadata |
+| DPROC-024 | V2 分包回滚到旧 V2 `agent-sec-cli` 服务包时，保留事务前的服务启用策略和运行状态；`tests/test-component-rpm-rollback.py` 验证真实 RPM 事务顺序，`tests/v2/packaging/test_rpm_service_migration.py` 验证状态恢复。前者使用隔离 rpmdb 和模拟 systemd，不替代真实 daemon 就绪验收 |
 | DPROC-023 | Policy 默认目录安全性选择与已有状态冲突拒绝；已有自有叶目录修复为 `0700`，仅祖先不安全触发回退；显式数据根不回退，不修改已有数据库；fixture 为 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs` 和 `v2/apps/asc-daemon/tests/bootstrap.rs` 的同名测试及叶目录修复回归 |
 
 每个 DPROC ID 必须映射到机器可执行 fixture 或真实部署证据。Rust unit test 不能代替安装后

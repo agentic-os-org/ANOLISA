@@ -23,16 +23,24 @@ HOOKS = (
 
 
 def sections(text):
+    # These spec-local macros are expanded into the binary RPM scriptlets.
+    definition = r"^%define (asc_\w+)\(\) %\{expand:\n(.*?)^\}\n\n"
+    macros = dict(re.findall(definition, text, re.MULTILINE | re.DOTALL))
+    text = re.sub(definition, "", text, flags=re.MULTILINE | re.DOTALL)
+    for name, body in macros.items():
+        text = text.replace("%{" + name + "}", body.rstrip().replace(r"\\n", r"\n"))
     result = {}
     current = None
     for line in text.splitlines():
         match = re.match(
-            r"^%(package|description|files|pre|post|posttrans|preun|postun|prep|build|install|changelog)(?:\s+(.*))?$",
+            r"^%(package|description|files|pre|post|posttrans|preun|postun|triggerprein|prep|build|install|changelog)(?:\s+(.*))?$",
             line,
         )
         if match:
             kind, suffix = match.groups()
             name = suffix.removeprefix("-n ") if suffix else "agent-sec-core"
+            if kind == "triggerprein":
+                name = "agent-sec-core"
             current = kind, name
             if current in result:
                 raise AssertionError(f"duplicate RPM section: {current}")

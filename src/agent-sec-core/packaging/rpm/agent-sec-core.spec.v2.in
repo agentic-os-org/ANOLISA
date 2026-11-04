@@ -44,6 +44,8 @@ Requires:       bubblewrap
 Requires(pre):  rpm coreutils grep systemd
 Requires(post): systemd
 Requires(posttrans): coreutils systemd
+Requires:       rpm coreutils grep
+Requires(postun): rpm coreutils grep systemd
 Provides:       agent-sec-cli = %{version}-%{release}
 # Replace legacy packages from before the split.
 Obsoletes:      agent-sec-cli < 1.1.2
@@ -53,11 +55,10 @@ Native V2 CLI, daemon, health helper, sandbox, configuration and system service.
 Framework integrations and skills are supplied separately by agent-sec-plugins
 and agent-sec-skills. ANOLISA discovery metadata belongs to the distribution.
 
-%pre
-# A virtual Provides does not preserve the old package's final-erase scriptlets.
-# Capture before unpacking; restore in posttrans, after old preun/postun ran.
+# Expand these helpers into scriptlets: rollback also needs them after
+# the runtime package (and any files it owned) has been removed.
+%define asc_capture_service() %{expand:
 set -eu
-state_dir=/run/agent-sec-core-rpm
 unit=agent-sec-core.service
 if [ -L "$state_dir" ] || { [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; }; then
     echo "ERROR: unsafe AgentSec RPM migration directory: $state_dir" >&2
@@ -68,12 +69,7 @@ if [ -d "$state_dir" ]; then
     chmod 0700 "$state_dir"
     rm -f "$state_dir/state" "$state_dir/state.tmp"
 fi
-# Check the actual NAME, never --whatprovides (which would match the new core).
-installed_names=$(rpm -qa --qf '%%{NAME}\n') || {
-    echo 'ERROR: cannot inspect installed RPM identities; refusing to guess' >&2
-    exit 1
-}
-if ! printf '%s\n' "$installed_names" | grep -Fxq agent-sec-cli; then
+if [ "$capture" -eq 0 ]; then
     rmdir "$state_dir" 2>/dev/null || :
     exit 0
 fi
@@ -112,21 +108,11 @@ else
         mode=system
     fi
 fi
-printf '%s\n' "$mode" "$enabled" "$active" > "$state_dir/state.tmp"
+printf '%s\\n' "$mode" "$enabled" "$active" > "$state_dir/state.tmp"
 mv -f "$state_dir/state.tmp" "$state_dir/state"
+}
 
-%post
-# Transfers, including offline ones, must not be mistaken for fresh installs.
-if [ ! -f /run/agent-sec-core-rpm/state ] && [ -d /run/systemd/system ]; then
-    %systemd_post agent-sec-core.service
-    if [ "$1" -eq 1 ]; then
-        /usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || \
-            echo 'WARNING: AgentSec initial service activation failed' >&2
-    fi
-fi
-
-%posttrans
-state_dir=/run/agent-sec-core-rpm
+%define asc_restore_service() %{expand:
 unit=agent-sec-core.service
 if [ ! -e "$state_dir/state" ]; then
     exit 0
@@ -242,12 +228,59 @@ if [ "$restore_failed" -ne 0 ]; then
     echo 'WARNING: AgentSec service state restoration failed; check the unit manually' >&2
     exit 1
 fi
+}
+
+%pre
+# Check the actual NAME, never --whatprovides (which would match the new core).
+installed_names=$(rpm -qa --qf '%%{NAME}\n') || {
+    echo 'ERROR: cannot inspect installed RPM identities; refusing to guess' >&2
+    exit 1
+}
+capture=0
+if printf '%s\n' "$installed_names" | grep -Fxq agent-sec-cli; then
+    capture=1
+fi
+state_dir=/run/agent-sec-core-rpm
+%{asc_capture_service}
+
+%post
+# Transfers, including offline ones, must not be mistaken for fresh installs.
+if [ ! -f /run/agent-sec-core-rpm/state ] && [ -d /run/systemd/system ]; then
+    %systemd_post agent-sec-core.service
+    if [ "$1" -eq 1 ]; then
+        /usr/bin/systemctl enable --now agent-sec-core.service >/dev/null 2>&1 || \
+            echo 'WARNING: AgentSec initial service activation failed' >&2
+    fi
+fi
+
+%posttrans
+state_dir=/run/agent-sec-core-rpm
+%{asc_restore_service}
+
+# The old CLI treats a rollback as a first installation and enables the unit.
+# Capture before its scripts run, only when the installed runtime owns the unit.
+%triggerprein -- agent-sec-cli < 1.1.2
+[ -e %{_unitdir}/agent-sec-core.service ] || exit 0
+owner=$(rpm -qf %{_unitdir}/agent-sec-core.service --qf '%%{NAME}\n') || exit 1
+printf '%s\n' "$owner" | grep -Fxq agent-sec-core || exit 0
+state_dir=/run/agent-sec-core-rpm-rollback
+capture=1
+%{asc_capture_service}
 
 %preun
 %systemd_preun agent-sec-core.service
 
 %postun
 %systemd_postun_with_restart agent-sec-core.service
+state_dir=/run/agent-sec-core-rpm-rollback
+if [ -f "$state_dir/state" ]; then
+    owner=$(rpm -qf %{_unitdir}/agent-sec-core.service --qf '%%{NAME}\n') || exit 1
+    if ! printf '%s\n' "$owner" | grep -Fxq agent-sec-cli; then
+        echo 'WARNING: legacy CLI did not take over; AgentSec rollback state was not restored' >&2
+        exit 1
+    fi
+    %{asc_restore_service}
+fi
 
 %files
 %defattr(0644,root,root,0755)
