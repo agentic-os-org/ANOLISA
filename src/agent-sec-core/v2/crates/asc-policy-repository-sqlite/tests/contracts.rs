@@ -9,43 +9,113 @@ use asc_policy_types::{
 };
 use std::os::unix::fs::PermissionsExt;
 
-#[test]
-fn repository_retains_sqlite_wal_locks_like_a_plain_connection() {
+/// Upper bound for observing a POSIX lock the kernel already holds.
+///
+/// `/proc/locks` is produced by an iterator over the kernel lock table, so a
+/// multi-page read can omit an entry while other locks are being added and
+/// removed around it (see #9405). Polling keeps a genuine regression failing
+/// while removing that false negative.
+const LOCK_OBSERVATION_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+const LOCK_OBSERVATION_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Poll `observe` until it reports success or `deadline` elapses.
+fn observed_within_deadline(observe: impl Fn() -> bool, deadline: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if observe() {
+            return true;
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        std::thread::sleep(LOCK_OBSERVATION_POLL);
+    }
+}
+
+/// Report whether this process holds SQLite's WAL deadman lock on `name`.
+fn holds_deadman_lock(dir: &std::path::Path, name: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
 
-    let dir = private_dir();
-    let holds_deadman_lock = |name: &str| {
-        let inode = std::fs::metadata(dir.path().join(name))
-            .unwrap()
-            .ino()
-            .to_string();
-        let pid = std::process::id().to_string();
-        let locks = std::fs::read_to_string("/proc/locks").unwrap();
-        locks.lines().any(|line| {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            fields.len() >= 8
-                && fields[1] == "POSIX"
-                && fields[4] == pid
-                && fields[5].rsplit(':').next() == Some(inode.as_str())
-                && fields[6].parse::<u64>().is_ok_and(|start| start <= 128)
-                && (fields[7] == "EOF" || fields[7].parse::<u64>().is_ok_and(|end| end >= 128))
-        })
+    let Ok(metadata) = std::fs::metadata(dir.join(name)) else {
+        return false;
     };
+    let inode = metadata.ino().to_string();
+    let pid = std::process::id().to_string();
+    let Ok(locks) = std::fs::read_to_string("/proc/locks") else {
+        return false;
+    };
+    locks.lines().any(|line| {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        fields.len() >= 8
+            && fields[1] == "POSIX"
+            && fields[4] == pid
+            && fields[5].rsplit(':').next() == Some(inode.as_str())
+            && fields[6].parse::<u64>().is_ok_and(|start| start <= 128)
+            && (fields[7] == "EOF" || fields[7].parse::<u64>().is_ok_and(|end| end >= 128))
+    })
+}
+
+/// Assert that the WAL deadman lock on `name` is observed as held.
+///
+/// A transiently missing `/proc/locks` entry no longer fails the assertion,
+/// while a genuinely absent lock still does after the whole deadline.
+fn assert_deadman_lock_held(dir: &std::path::Path, name: &str, message: &str) {
+    assert!(
+        observed_within_deadline(|| holds_deadman_lock(dir, name), LOCK_OBSERVATION_DEADLINE),
+        "{message}"
+    );
+}
+
+#[test]
+fn lock_observation_retries_instead_of_failing_on_the_first_miss() {
+    let attempts = std::cell::Cell::new(0);
+    assert!(observed_within_deadline(
+        || {
+            attempts.set(attempts.get() + 1);
+            attempts.get() > 2
+        },
+        LOCK_OBSERVATION_DEADLINE
+    ));
+    assert_eq!(
+        attempts.get(),
+        3,
+        "observation must retry until it succeeds"
+    );
+}
+
+#[test]
+fn lock_observation_still_fails_when_the_lock_never_appears() {
+    let started = std::time::Instant::now();
+    assert!(!observed_within_deadline(
+        || false,
+        std::time::Duration::from_millis(50)
+    ));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(50),
+        "an absent lock must be observed for the whole deadline before failing"
+    );
+}
+
+#[test]
+fn repository_retains_sqlite_wal_locks_like_a_plain_connection() {
+    let dir = private_dir();
     let plain = rusqlite::Connection::open(dir.path().join("plain.db")).unwrap();
     plain
         .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE example(value);")
         .unwrap();
-    assert!(
-        holds_deadman_lock("plain.db-shm"),
-        "positive control must retain the WAL deadman lock"
+    assert_deadman_lock_held(
+        dir.path(),
+        "plain.db-shm",
+        "positive control must retain the WAL deadman lock",
     );
 
     let repository = SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap();
     repository.check_writable().unwrap();
     // An unrelated close() must not release SQLite's cross-process protection.
-    assert!(
-        holds_deadman_lock("policy-state.db-shm"),
-        "Repository file validation released SQLite's WAL deadman lock"
+    assert_deadman_lock_held(
+        dir.path(),
+        "policy-state.db-shm",
+        "Repository file validation released SQLite's WAL deadman lock",
     );
     let initial = seed(&repository);
     let applying = transition(&repository, &initial, BindingStatus::Applying);
@@ -55,9 +125,10 @@ fn repository_retains_sqlite_wal_locks_like_a_plain_connection() {
             .unwrap(),
         Some(applying)
     );
-    assert!(
-        holds_deadman_lock("policy-state.db-shm"),
-        "Repository reads and writes must preserve SQLite's WAL deadman lock"
+    assert_deadman_lock_held(
+        dir.path(),
+        "policy-state.db-shm",
+        "Repository reads and writes must preserve SQLite's WAL deadman lock",
     );
 }
 
