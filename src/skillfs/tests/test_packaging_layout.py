@@ -97,7 +97,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertNotIn("unexpected-activation-or-build", result.stderr)
 
     def test_core_ignores_unselected_skill_destination_links(self) -> None:
-        skill = self.destination / "usr/share/skillfs/skills/skillfs-mount"
+        skill = self.destination / "usr/share/anolisa/skills/skillfs-mount"
         skill.parent.mkdir(parents=True)
         outside = self.work / "outside-skills"
         outside.mkdir()
@@ -119,11 +119,11 @@ class PackagingLayout(unittest.TestCase):
         self.assertTrue(binary.is_symlink())
         self.assertEqual(outside.read_text(), "preserve")
         self.assertTrue(
-            (self.destination / "usr/share/skillfs/skills/skillfs-mount/SKILL.md").is_file()
+            (self.destination / "usr/share/anolisa/skills/skillfs-mount/SKILL.md").is_file()
         )
 
     def test_complete_install_rejects_skill_destination_before_copying_core(self) -> None:
-        skill = self.destination / "usr/share/skillfs/skills/skillfs-mount"
+        skill = self.destination / "usr/share/anolisa/skills/skillfs-mount"
         skill.parent.mkdir(parents=True)
         outside = self.work / "outside-skills"
         outside.mkdir()
@@ -167,6 +167,18 @@ class PackagingLayout(unittest.TestCase):
             (self.destination / "opt/skills-data/skills/skillfs-mount/SKILL.md").is_file()
         )
         self.assertFalse((self.destination / "usr/share/anolisa/skills").exists())
+
+    def test_default_namespace_and_explicit_independent_install(self) -> None:
+        for namespace, relative in (
+            (None, "usr/share/anolisa/skills/skillfs-mount"),
+            ("", "usr/share/skillfs/skills/skillfs-mount"),
+        ):
+            with self.subTest(namespace=namespace):
+                settings = {} if namespace is None else {"AWPRJ": namespace}
+                result = self.make("install-skills", **settings)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((self.destination / relative / "SKILL.md").is_file())
+                shutil.rmtree(self.destination)
 
     def test_explicit_legacy_layout_retains_raw_paths(self) -> None:
         result = self.make("install", PROFILE="legacy-anolisa")
@@ -337,7 +349,7 @@ class PackagingLayout(unittest.TestCase):
             else Path("/usr/local/bin")
         )
         self.assertTrue((self.destination / str(legacy_bin).lstrip("/") / COMPONENT.name).is_file())
-        self.assertIn("DATADIR=/usr/local/share/" + COMPONENT.name, result.stdout)
+        self.assertIn("DATADIR=/usr/local/share/anolisa/" + COMPONENT.name, result.stdout)
 
     def test_root_entry_works_from_archived_source_without_monorepo(self) -> None:
         archive = self.work / "source.tar"
