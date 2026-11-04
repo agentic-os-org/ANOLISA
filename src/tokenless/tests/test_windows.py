@@ -105,7 +105,12 @@ class WindowsHookTests(unittest.TestCase):
             engine_env = manifest["engines"][engine_name]["env"]
             self.assertEqual(engine_env["QWENWORK_PLUGIN_HOOK_COMPATIBILITY"], "managed-tool-hooks-v1")
             with mock.patch.dict(os.environ, engine_env):
-                for tool in ("Bash", "mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+                for tool in (
+                    "Bash",
+                    "mcp__workspace__bash",
+                    "mcp__qw-builtin__mcp_workspace_bash",
+                    "mcp__qw-builtin__mcp__workspace__bash",
+                ):
                     with self.subTest(engine=engine_name, tool=tool):
                         self.assert_native_call(tool, engine_name + "-" + tool)
 

@@ -343,6 +343,7 @@ _QWENWORK_WORKSPACE_SHELLS = frozenset(
     {
         "mcp__workspace__bash",
         "mcp__qw-builtin__mcp_workspace_bash",
+        "mcp__qw-builtin__mcp__workspace__bash",
     }
 )
 _QWENWORK_PRIVATE_RUNTIME = False

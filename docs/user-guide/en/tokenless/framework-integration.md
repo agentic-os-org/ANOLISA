@@ -136,8 +136,9 @@ passthrough. The adapter also accepts the macOS workspace Shell contract observe
 in QwenWorkCN 1.3.2. Linux VM execution remains unsupported; the hook dispatcher
 passes through outside macOS.
 
-PreToolUse matches `Bash`, `mcp__workspace__bash`, and
-`mcp__qw-builtin__mcp_workspace_bash`, and rewrites supported commands through RTK.
+PreToolUse matches `Bash`, `mcp__workspace__bash`,
+`mcp__qw-builtin__mcp_workspace_bash`, and `mcp__qw-builtin__mcp__workspace__bash`,
+and rewrites supported commands through RTK.
 PostToolUse has **no tool matcher**: eligible full Bash and non-Bash results enter
 the shared policy. Metadata-only callbacks from `mcp_list`, `mcp_get`, or `mcp_call`
 pass through because replacing their real output with telemetry would lose content;
@@ -207,8 +208,6 @@ and records file ownership. Restart QwenWorkCN and open a new session;
 check plugin activation in the application. `status` verifies application presence
 and managed files, while loading and activation remain `unknown`. Sideloading
 never changes settings, permissions, databases, or disabled/blocked plugin lists.
-Compatibility baselines are 1.2.5 native Bash and 1.3.2 workspace Shell; other
-versions produce a compatibility warning.
 
 `TOKENLESS_QWENWORK_APP` selects a non-default application bundle;
 `TOKENLESS_QWENWORK_HOME` selects its data directory. Defaults search `/Applications`

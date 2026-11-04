@@ -42,6 +42,11 @@ UTILS_SPEC = importlib.util.spec_from_file_location("qwenwork_utils", COMMON / "
 utils = importlib.util.module_from_spec(UTILS_SPEC)
 UTILS_SPEC.loader.exec_module(utils)
 REAL_BIN = os.environ.get("TOKENLESS_TEST_BIN")
+WORKSPACE_SHELL_TOOLS = (
+    "mcp__workspace__bash",
+    "mcp__qw-builtin__mcp_workspace_bash",
+    "mcp__qw-builtin__mcp__workspace__bash",
+)
 
 
 def snapshot(root: Path) -> dict:
@@ -682,7 +687,9 @@ class QwenWorkInstallTests(unittest.TestCase):
         self.prepare_detached_plugin()
         self.assertEqual(set(self.hooks), {"PreToolUse", "PostToolUse"})
         matcher = self.hooks["PreToolUse"][0]["matcher"]
-        for tool in ("Bash", "mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+        self.assertEqual(set(WORKSPACE_SHELL_TOOLS), set(utils._QWENWORK_WORKSPACE_SHELLS))
+        self.assertLessEqual({"Bash", *WORKSPACE_SHELL_TOOLS}, set(matcher.split("|")))
+        for tool in ("Bash", *WORKSPACE_SHELL_TOOLS):
             self.assertIsNotNone(re.fullmatch(matcher, tool))
         self.assertIsNone(re.fullmatch(matcher, "mcp__office__list_rows"))
         self.assertNotIn("matcher", self.hooks["PostToolUse"][0])
@@ -732,10 +739,19 @@ class QwenWorkInstallTests(unittest.TestCase):
         (self.bin / "tokenless").chmod(0o755)
         self.env["TOKENLESS_MOCK_REQUEST_LOG"] = str(self.root / "requests.jsonl")
 
+    def test_workspace_shell_aliases_leave_other_agents_unchanged(self) -> None:
+        before = snapshot(self.root)
+        for tool in WORKSPACE_SHELL_TOOLS:
+            with self.subTest(tool=tool):
+                payload = self.payload([{"type": "text", "text": '{"count": 2}'}], tool)
+                payload["cwd"] = str(self.root)
+                self.assertIs(utils.prepare_hook_input(payload, "claude-code"), payload)
+        self.assertEqual(snapshot(self.root), before)
+
     def test_workspace_shell_aliases_rewrite_preserve_arguments_and_deduplicate(self) -> None:
         self.prepare_detached_plugin()
         self.use_contract_mock()
-        for tool in ("mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+        for tool in WORKSPACE_SHELL_TOOLS:
             with self.subTest(tool=tool):
                 payload = self.payload("", tool)
                 payload["cwd"] = str(self.root)
@@ -782,7 +798,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         other_cwd = self.root / "other workspace"
         other_cwd.mkdir()
         custom = self.root / "custom data '$;`"
-        for tool in ("mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+        for tool in WORKSPACE_SHELL_TOOLS:
             for override in (None, "", str(custom)):
                 with self.subTest(tool=tool, override=override):
                     self.env.pop("TOKENLESS_DATA_DIR", None)
@@ -861,7 +877,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                     out, error = self.run_action("detect")
                     self.assertIn("unavailable", out)
                     self.assertIn("no trusted home directory", error)
-                    for tool in ("mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+                    for tool in WORKSPACE_SHELL_TOOLS:
                         with contextlib.redirect_stdout(io.StringIO()) as output:
                             with contextlib.redirect_stderr(io.StringIO()):
                                 with self.assertRaises(SystemExit) as stopped:
@@ -904,7 +920,7 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
     def test_workspace_text_blocks_use_text_slot_and_preserve_failure(self) -> None:
         self.prepare_detached_plugin()
         _create_mock_tokenless(str(self.bin), behavior="compress-text")
-        for tool in ("mcp__workspace__bash", "mcp__qw-builtin__mcp_workspace_bash"):
+        for tool in WORKSPACE_SHELL_TOOLS:
             with self.subTest(tool=tool):
                 text = "plain shell log " * 200
                 payload = self.payload([{"type": "text", "text": text}], tool)
@@ -920,24 +936,45 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                 payload["is_error"] = True
                 self.assertEqual(self.replay("PostToolUse", payload), {})
 
+    def test_workspace_json_blocks_compress_body(self) -> None:
+        self.prepare_detached_plugin()
+        body = json.dumps({"body": "数据" * 250, "count": 2}, ensure_ascii=False)
+        for tool in WORKSPACE_SHELL_TOOLS:
+            with self.subTest(tool=tool):
+                payload = self.payload([{"type": "text", "text": body}], tool)
+                payload["cwd"] = str(self.root)
+                payload["tool_input"] = {"command": "python3 report.py"}
+                result = self.replay("PostToolUse", payload)
+                replacement = result["hookSpecificOutput"]["updatedToolOutput"]
+                self.assertIsInstance(replacement, str)
+                self.assertEqual(json.loads(replacement), {"body": "数据" * 10, "count": 2})
+                request = json.loads((self.bin / "request.json").read_text())
+                self.assertEqual(request["content"], body)
+                self.assertEqual(request["tool_name"], "Bash")
+                self.assertEqual(request["content_origin"], "command_output")
+                self.assertEqual(request["command"], "python3 report.py")
+                self.assertTrue(request["capabilities"]["replace_with_text"])
+
     def test_workspace_unknown_blocks_and_invalid_cwd_pass_through(self) -> None:
         self.prepare_detached_plugin()
-        payload = self.payload([], "mcp__qw-builtin__mcp_workspace_bash")
-        payload["cwd"] = str(self.root)
         text = {"type": "text", "text": "log " * 500}
-        for blocks in (
-            [],
-            [text, text],
-            [{**text, "annotations": {}}],
-            [{"type": "image", "data": "image"}],
-            [{"type": "text", "text": {}}],
-        ):
-            payload["tool_response"] = blocks
-            self.assertEqual(self.replay("PostToolUse", payload), {})
-        payload["tool_response"] = [text]
-        for cwd in (None, "relative", str(self.root / "missing")):
-            payload["cwd"] = cwd
-            self.assertEqual(self.replay("PostToolUse", payload), {})
+        for tool in WORKSPACE_SHELL_TOOLS:
+            with self.subTest(tool=tool):
+                payload = self.payload([], tool)
+                payload["cwd"] = str(self.root)
+                for blocks in (
+                    [],
+                    [text, text],
+                    [{**text, "annotations": {}}],
+                    [{"type": "image", "data": "image"}],
+                    [{"type": "text", "text": {}}],
+                ):
+                    payload["tool_response"] = blocks
+                    self.assertEqual(self.replay("PostToolUse", payload), {})
+                payload["tool_response"] = [text]
+                for cwd in (None, "relative", str(self.root / "missing")):
+                    payload["cwd"] = cwd
+                    self.assertEqual(self.replay("PostToolUse", payload), {})
         self.assertFalse((self.bin / "spawn_log").exists())
 
     def test_private_binaries_are_used_without_changing_native_bash_output_shape(self) -> None:
