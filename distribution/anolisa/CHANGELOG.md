@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.22] - 2026-11-04
+
+### Added
+
+- Raw components can prepare a verified candidate before installation, update or repair. Installing a matching companion reuses the installed component’s version and repository. [#9430](https://github.com/agentic-os-org/ANOLISA/pull/9430)
+
 ## [0.3.21] - 2026-11-02
 
 ### Added

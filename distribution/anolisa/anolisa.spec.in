@@ -149,7 +149,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Mon Nov 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Nov 04 2026 1570005763 <daniel.duan@linux.alibaba.com> - @VERSION@-1
+- Prepare verified raw candidates and resolve matching companion components.
+
+* Mon Nov 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.21-1
 - Ship distribution-owned component contracts and recognize standalone RPM cores.
 - Render MCP command paths and preserve discovery files during raw lifecycle operations.
 - Activate managed cosh extensions and refresh component catalog versions.
