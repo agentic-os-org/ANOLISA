@@ -131,8 +131,8 @@ class MigrationFixture:
             body,
         )
         body = re.sub(
-            r"%systemd_preun agent-sec-core.service",
-            f'if [ "$1" -eq 0 ]; then "{self.systemctl}" disable --now agent-sec-core.service; fi',
+            r"%systemd_preun (agent-sec-(?:core|gateway)\.service)",
+            lambda match: f'if [ "$1" -eq 0 ]; then "{self.systemctl}" disable --now {match[1]}; fi',
             body,
         )
         body = re.sub(
