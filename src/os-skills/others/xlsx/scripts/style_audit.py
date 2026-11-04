@@ -184,6 +184,24 @@ def _looks_like_year(value_text: str) -> bool:
         return False
 
 
+def iter_sheet_cells(worksheet: ET.Element):
+    """Yield (cell, row_style) for every cell, with row inheritance resolved.
+
+    A cell without its own ``s`` inherits the row's ``s`` when the row sets
+    ``customFormat``, not ``cellXfs[0]``: ECMA-376 ``CT_Row`` defines
+    ``@customFormat`` as "1 if the row style shall be applied".
+    """
+    rows = worksheet.findall(f".//{NSP}row")
+    if not rows:
+        for cell in worksheet.findall(f".//{NSP}c"):
+            yield cell, None
+        return
+    for row in rows:
+        row_style = row.get("s") if row.get("customFormat") in ("1", "true") else None
+        for cell in row.findall(f"{NSP}c"):
+            yield cell, row_style
+
+
 def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
     """
     Run all formatting compliance checks.
@@ -264,7 +282,7 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
     for sheet_name, sheet_xml in sheet_xmls:
         ws = ET.fromstring(sheet_xml)
 
-        for cell in ws.findall(f".//{NSP}c"):
+        for cell, row_style in iter_sheet_cells(ws):
             cell_ref = cell.get("r", "?")
             s_attr = cell.get("s")
             has_formula = cell.find(f"{NSP}f") is not None
@@ -272,17 +290,24 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             value_text = v_elem.text if v_elem is not None else None
             total_cells += 1
 
-            # Skip cells with no style
-            if s_attr is None:
-                continue
-
+            # A cell without an s attribute inherits its row's s when the row
+            # sets customFormat, and cellXfs[0] (the workbook default) otherwise.
+            # Neither is "unstyled": skipping such cells hid violations the
+            # inherited format carries, such as a blue input-role font on a
+            # formula cell.
+            inherited = s_attr if s_attr is not None else row_style
             try:
-                s_idx = int(s_attr)
+                s_idx = 0 if inherited is None else int(inherited)
             except ValueError:
                 continue
 
             # Check C1: s index out of range
             if s_idx >= len(xfs):
+                if s_attr is None and row_style is None:
+                    # styles.xml need not carry a cellXfs element at all
+                    # (CT_Stylesheet/cellXfs is minOccurs=0). With no
+                    # cellXfs[0] there is no default format to audit.
+                    continue
                 v.append({
                     "type": "style_index_out_of_range",
                     "sheet": sheet_name,
