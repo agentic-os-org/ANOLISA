@@ -87,7 +87,9 @@ It performs five checks:
 
 2. **Broken cross-sheet reference detection**: If the cell has an `<f>` element, the script extracts all sheet names referenced in the formula (both `SheetName!` and `'Sheet Name'!` syntax). Each name is compared against the list of sheets in `workbook.xml`. A mismatch is a broken reference.
 
-3. **Unknown named-range detection (heuristic)**: Identifiers in formulas that are not function names, not cell references, and not found in `workbook.xml`'s `<definedNames>` are flagged as `unknown_name_ref` warnings. This is a heuristic — false positives are possible; always verify manually.
+   Text inside a double-quoted string literal (`="Warning!"`) is data, not a reference, and is removed before this comparison — so a message that happens to look like `Sheet!A1` is not reported. A quoted sheet name (`'Q3 "Final"'!A1`) is **not** a literal: its quotes are part of the name, and the name is matched with them intact. This is why `="Warning!"` in a cell is not a broken reference while `'Missing'!A1` still is.
+
+3. **Unknown named-range detection (heuristic)**: Identifiers in formulas that are not function names, not cell references, and not found in `workbook.xml`'s `<definedNames>` are flagged as `unknown_name_ref` warnings. This is a heuristic — false positives are possible; always verify manually. The same literal removal applies here, so `="Gross_Margin"` does not warn about a name that only appears inside a string.
 
 4. **Shared formula integrity**: Shared formula consumer cells (those with only `<f t="shared" si="N"/>`) are skipped for formula counting and cross-ref checks because they inherit the primary cell's formula. Only the primary cell (with `ref="..."` attribute and formula text) is checked and counted.
 
