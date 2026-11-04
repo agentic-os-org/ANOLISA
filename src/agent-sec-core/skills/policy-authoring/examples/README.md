@@ -1,10 +1,15 @@
 # 示例策略
 
 每个 `.cedar` 文件是一份独立的规则集，也可以按需要拼成同一份 policy set：
-permit 叠加授权，forbid 优先覆盖，不需要额外写 deny 兜底。
+permit 叠加授权，forbid 优先覆盖；排他要求需要同动作的补集 forbid。
 
 这些文件全部写在官方校验接受的子集里：裸 `principal`、无注解、规范绝对路径。
 示例中的 `/work/...`、`/usr/bin/git` 都是占位值，实际使用时必须换成任务里的真实路径。
+
+本 Skill 只交付 Cedar 源码，不包装或提交。下游提交格式与校验边界见
+[`语言参考`](../references/cedar-policy-language.md) 的"下游提交格式"。
+
+下面的 Allow / Deny 只指 Cedar Authorizer 对构造请求的策略判定，不是操作系统实际读写或拦截结果。
 
 ## 每个示例怎么触发
 
@@ -14,23 +19,28 @@ Agent 验收：如果它给出的规则和"产出"对不上，就说明 Step 1 �
 ### `readonly-review.cedar` —— 只读审查
 
 - 触发句："让 Agent 帮我做代码审查，只能看代码，不许改文件、不许跑命令、不许联网。"
-- 产出：1 条 `file.read` permit + 3 条 forbid（`file.write` / `file.exec` / `network.use`），
-  是完整 policy set，可整份提交。
-- 仍被拒绝：一切写、执行、联网。
+- 先问审查根目录及是否包含后代；用户确认 `/work/project` 自身及整棵子树后才使用本示例。
+- 产出：1 条限定目录的 `file.read` permit + 4 条 forbid（目录外 read、所有 write / exec / network），
+  是完整 Cedar policy set；下游提交时按参考说明包装。
+- 仍被拒绝：范围外读取以及一切写、执行、联网；与全局 read permit 拼接仍拒绝范围外读取。
+- 验收：读取 `/work/project`、`/work/project/src/main.rs` 为 Allow，
+  `/home/user/.ssh/id_ed25519` 为 Deny。目录内按路径授权，不能自动区分代码与秘密。
 
 ### `allow-read-subtree.cedar` —— 只开一个目录的读取
 
 - 触发句："只在 `/work/project` 里读代码，别的地方都不让读。"
-- 产出：1 条 permit，条件为 `resource.path == "/work/project" || like "/work/project/*"`。
-- 关键点：子树必须两条，`like` 不匹配目录自身。
-- 仍被拒绝：该目录之外的读取（默认拒绝，不需要额外 forbid）。
+- 产出：permit + 同动作 `unless` 补集 forbid，完整条件为
+  `resource.path == "/work/project" || resource.path like "/work/project/*"`。
+- 关键点：子树有两个 `||` 连接的路径子条件，`like` 不匹配目录自身；补集抵挡已有的宽 read permit。
+- 仍被拒绝：目录外读取，单独使用或拼接全局 read permit 时都成立；未写的其他动作仍取决于最终集合。
+- 验收：上述目录自身和后代为 Allow，`/etc/shadow` 与同前缀邻居 `/work/project-other` 为 Deny。
 
-### `forbid-delete.cedar` —— 能写但不能删
+### `forbid-delete.cedar` —— 保留已有写许可但不能删
 
-- 触发句："Agent 可以改文件，但绝对不能删任何东西。"
-- 产出：1 条 `file.write` forbid，带 `context.input.operation == "delete"`。
-- 关键点：operation 条件不能省，否则会禁掉全部写操作。
-- 仍被拒绝：所有 `delete`（`create` / `rename` / `setattr` 不受影响）。
+- 触发句："已有经过确认的写权限，保留这些权限，但禁止删除任何文件。"
+- 产出：1 条 `file.write` forbid，带 `context.input.operation == SecCore::WriteOperation::"delete"`。
+- 关键点：operation 条件不能省，否则会禁掉全部写操作；这是已有写许可的补充，不授予写权限。
+- 仍被拒绝：所有 `delete`。其他 operation 是否允许取决于已有许可；单独使用本示例时正常 write 也 Deny。
 
 ### `protect-file.cedar` —— 单文件不可写
 
@@ -44,16 +54,18 @@ Agent 验收：如果它给出的规则和"产出"对不上，就说明 Step 1 �
 
 - 触发句："只允许在 `/work` 里跑 `/usr/bin/git`，其他程序一律不许执行。"
 - 产出：permit + 同动作补集 forbid，两条条件相同。
-- 关键点：只写 permit 等于放开全部执行，补集 forbid 不能省。
+- 关键点：只写 permit 不能收窄已有的宽执行许可，补集 forbid 不能省。
 - 仍被拒绝：其他程序，以及在其他 `cwd` 下执行的 `git`。
 
 ### `exclusive-write.cedar` —— 只许写一个文件的一种 operation
 
 - 触发句："Agent 只能往 `/work/report` 里写内容，别的文件不许碰，也不能删或改名。"
-- 产出：permit（`path == report` 且 `operation == "write"`）+ 补集 forbid（`operation == "write"`
-  且 `path != report`）。
-- 关键点：补集必须保留同一 operation 条件，否则会顺带禁掉本来允许的其他写。
-- 仍被拒绝：其他路径的一切写；`/work/report` 上的 `delete` / `rename` / `setattr`。
+- 产出：permit（`resource.path == "/work/report"` 且 `operation == SecCore::WriteOperation::"write"`）
+  + `unless { 完整许可条件 }` 补集 forbid。
+- 关键点：补集必须连同路径和 operation 一起否定，拒绝其余全部写操作。
+- 仍被拒绝：其他路径的全部写操作；`/work/report` 上的 create / delete / rename / setattr，
+  单独使用或拼接全局 file.write permit 时都成立。
+- 验收：`write /work/report` 为 Allow，`delete /etc/other`、`rename /work/report` 为 Deny。
 
 ### `deny-network.cedar` —— 关闭全部网络
 

@@ -1,8 +1,8 @@
 # SecCore Cedar 语言参考
 
-本文件是 agent-sec-core 接受范围的速查，不是完整 Cedar 手册。类型定义以
+本文件是本 Skill 写作范围的速查，不是完整 Cedar 手册。类型定义以
 [`seccore.cedarschema`](seccore.cedarschema) 为准，逐项检查见
-[`self-check.md`](self-check.md)。
+[`self-check.md`](self-check.md)。写作约束不等于策略入口的拒绝条件。
 
 ## 规则结构
 
@@ -42,7 +42,7 @@
 | 字段存在 | `context.input has mode` |
 | 集合相等 | `context.input.args == [{index: 0, value: "status"}, {index: 1, value: "--short"}]` |
 
-限制：
+本 Skill 的限制：
 
 - 没有算术运算，没有 `let ... in`，没有 `count`、`sum`、`min`、`max`。
 - 集合无序，参数位置必须靠 `index` 表达；`index` 从 `0` 开始，对应 `argv[1]`。
@@ -51,16 +51,19 @@
 
 ## 路径与字符串
 
-路径只在 `resource.path`、`context.input.program`、`context.input.cwd` 三处出现，并且必须：
+路径只在 `resource.path`、`context.input.program`、`context.input.cwd` 三处出现。以下是本 Skill 的
+写作约束，不代表策略入口一定拒绝其他路径写法：
 
 - 是规范绝对路径：`/` 开头，无 `..`、无空段、无重复 `/`、无尾部 `/`、无反斜杠、无控制字符；
-- 与**字面量**比较，不能和另一个属性比较（`resource.path == context.input.program` 被拒）；
-- 子树写成两条：`resource.path == "/dir"` 或 `resource.path like "/dir/*"`，
+- 与**字面量**比较，不和另一个属性比较（不写 `resource.path == context.input.program`）；
+- 子树写成两个子条件：`resource.path == "/dir"` 或 `resource.path like "/dir/*"`，
   因为 `like "/dir/*"` 不匹配 `/dir` 本身，`== "/dir"` 也不匹配 `/dir/child`；
 - 根目录子树写成 `resource.path like "/*"`（再配 `== "/"`）；
-- 文件名里真实的 `*` 写成 `\*`，反斜杠和引号按 Cedar 字符串转义写 `\\`、`\"`。
+- 等式中的真实星号原样写：`resource.path == "/a*b"`；写成 `"/a\*b"` 会报 invalid escape；
+- 仅在 `like` 模式中把真实星号转义为 `\*`：`resource.path like "/a\*b/*"`，末尾 `*` 才是通配；
+- 反斜杠和引号按 Cedar 字符串转义写 `\\`、`\"`。
 
-`like` 的接受形态只有"字面量前缀 + 末尾 `/*`"，以下都被拒：
+本 Skill 的 `like` 形态只有"字面量前缀 + 末尾 `/*`"，以下违反写作约束，不代表策略入口会拒绝：
 
 ```text
 resource.path like "/a*"      // 前缀不以 / 结尾
@@ -78,7 +81,6 @@ resource.path == "/a\\b"    // 反斜杠
 |---|---|
 | `permit(principal == SecCore::Subject::"A", ...)` | 主体由 Scope/Binding 选择，策略不绑定身份 |
 | `when { principal == ... }` | 条件中不允许引用 `principal` |
-| `resource == SecCore::File::"/a"` | 不允许用文件实体 UID，路径只写在 `resource.path` |
 | `@id("x")` / `@advice("x")` | 任何注解都不写 |
 | 模板与 `?principal` | 不支持模板链接 |
 | 空策略集 | 至少要有一条静态策略 |
@@ -90,5 +92,26 @@ resource.path == "/a\\b"    // 反斜杠
 - 默认拒绝：没有匹配的 permit 即拒绝。
 - forbid 优先：任何匹配的 forbid 都压过 permit。
 - permit 只增加权限，不能收窄另一条 permit；排他要求必须写成同动作的补集 forbid。
-- 同一份 policy set 内多条规则按"默认拒绝 + forbid 覆盖"组合，不需要显式 deny 兜底。
+- 补集写 `unless { 完整许可条件 }`，连同路径、operation 或执行条件一起否定。
+- 同一份 policy set 内多条规则按"默认拒绝 + forbid 覆盖"组合；纯 forbid 不授予许可，排他要求仍需补集。
 - `file.read` 只是内容读取；`file.exec` 只是程序启动；`network.use` 只有全网络开关。
+
+## 下游提交格式（仅供参考）
+
+本 Skill 只交付 Cedar 源码，不负责包装或提交。下游提交时将源码放入 JSON 策略模板的
+`content.text`，声明语言与固定 schema 引用，不直接提交裸 `.cedar` 文件。例如：
+
+```json
+{
+  "language": "cedar",
+  "content": {
+    "schema": { "schemaId": "seccore.system", "revision": 1 },
+    "text": "forbid(principal, action == SecCore::Action::\"network.use\", resource == SecCore::Network::\"all\");"
+  }
+}
+```
+
+区分三个阶段：
+1. Cedar 源码：实际解析语法、检查支持的写法与字段类型才算源码校验；离线自检不算。
+2. 策略模板：JSON 包装与源码校验通过后可保存，不表示已经批准、绑定或下发。
+3. 执行目标：是否支持 Cedar 执行须另行确认，模板保存成功不代表策略已经生效或实际拦截。
