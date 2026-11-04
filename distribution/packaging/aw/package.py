@@ -183,10 +183,15 @@ def _readme(repo: Path, language: str) -> str:
         text = text.replace(
             f"]({name}.md)", f"](https://agentic-os.sh{locale}/docs/user-guide/aw/{name}/)"
         )
-    return text.replace(
-        f"../../../../contribute/{language}/aw/building.md",
-        f"https://agentic-os.sh{locale}/docs/contribute/aw/building/",
-    )
+    for source, route in (
+        (f"../../../../contribute/{language}/aw/building.md", "contribute/aw/building"),
+        (
+            f"../../../developer-guide/{language}/aw/reference/packages.md",
+            "developer-guide/aw/reference/packages",
+        ),
+    ):
+        text = text.replace(source, f"https://agentic-os.sh{locale}/docs/{route}/")
+    return text
 
 
 class _Writer:
