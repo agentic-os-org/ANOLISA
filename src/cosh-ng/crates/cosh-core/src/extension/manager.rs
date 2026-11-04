@@ -108,11 +108,12 @@ impl ExtensionManager {
         for system_dir in canonical_unique_roots(system_dirs) {
             self.scan_directory(&system_dir, ExtensionSourceKind::System, &mut candidates);
         }
-        if let Some(user_dir) = self
+        let user_dirs = self
             .user_dir_override
             .clone()
-            .or_else(super::user_extensions_dir)
-        {
+            .map(|directory| vec![directory])
+            .unwrap_or_else(super::user_extensions_dirs);
+        for user_dir in canonical_unique_roots(user_dirs) {
             self.scan_managed_directory(&user_dir.join(MANAGED_DIR), &mut candidates);
             self.scan_directory(&user_dir, ExtensionSourceKind::Legacy, &mut candidates);
         }

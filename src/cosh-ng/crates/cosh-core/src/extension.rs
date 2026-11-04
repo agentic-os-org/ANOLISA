@@ -205,8 +205,13 @@ pub fn user_extensions_dir() -> Option<PathBuf> {
 
 /// Returns system extension directories for the running installation.
 pub(crate) fn system_extensions_dirs() -> Vec<PathBuf> {
-    crate::paths::system_data_dirs()
+    crate::paths::resource_dirs().system_extensions
+}
+
+/// Returns installed user resources without changing the managed install target.
+pub(crate) fn user_extensions_dirs() -> Vec<PathBuf> {
+    user_extensions_dir()
         .into_iter()
-        .map(|dir| dir.join("extensions"))
+        .chain(crate::paths::resource_dirs().user_extensions)
         .collect()
 }

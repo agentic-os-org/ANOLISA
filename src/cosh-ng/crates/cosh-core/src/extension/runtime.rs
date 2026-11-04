@@ -115,10 +115,18 @@ impl<'a> RuntimeSnapshotBuilder<'a> {
             .iter()
             .filter_map(|path| expand_path(path))
             .collect::<Vec<_>>();
+        let system_paths = self
+            .config
+            .skills
+            .system_paths
+            .iter()
+            .filter_map(|path| expand_path(path))
+            .collect();
         let skill_manager = SkillManager::new(
             self.project_root.clone(),
             custom_paths,
             self.manager.skill_dirs(),
+            system_paths,
         );
         if self.load_skills {
             skill_manager.refresh().await;

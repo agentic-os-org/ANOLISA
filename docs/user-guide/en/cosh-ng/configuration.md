@@ -64,6 +64,10 @@ status_symbols = false
 Use environment expansion or `/auth` instead of writing a raw secret into
 TOML. See [Providers](core/providers.md) for provider choices.
 
+Use `skills.custom_paths` for preferred shared Skills or `skills.system_paths`
+for additional installed collections at system priority. See
+[Skills](core/skills.md#add-shared-directories) for directory examples.
+
 ## Approval and turn budgets
 
 Core approval modes apply to direct integrations:
