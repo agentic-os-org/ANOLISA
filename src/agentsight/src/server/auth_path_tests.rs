@@ -128,6 +128,14 @@ async fn llm_preferences_get_fails_closed_without_credentials() {
             .route(
                 "/api/preferences",
                 web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/preferences/export",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/preferences/turns",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
             ),
     )
     .await;
@@ -164,7 +172,12 @@ async fn llm_preferences_get_fails_closed_without_credentials() {
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
     }
 
-    for uri in ["/api/preferences", "/api/preferences?llm=false"] {
+    for uri in [
+        "/api/preferences",
+        "/api/preferences?llm=false",
+        "/api/preferences/export?llm=true",
+        "/api/preferences/turns?llm=true",
+    ] {
         let response = awtest::call_service(
             &app,
             awtest::TestRequest::get()
@@ -174,6 +187,16 @@ async fn llm_preferences_get_fails_closed_without_credentials() {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+#[test]
+fn duplicate_preferences_llm_values_fail_query_parsing() {
+    for query in ["llm=false&llm=true", "llm=true&llm=false"] {
+        assert!(
+            web::Query::<crate::preferences::api::PreferencesQuery>::from_query(query).is_err(),
+            "{query}"
+        );
     }
 }
 
