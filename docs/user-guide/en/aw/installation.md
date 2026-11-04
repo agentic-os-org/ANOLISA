@@ -1,4 +1,4 @@
-# Installation and first run
+# Installation
 
 [中文版](../../zh/aw/installation.md)
 
@@ -72,43 +72,18 @@ A Provider installed by RPM or another deployment owner can instead be reference
 by its absolute `transport.argv`. See [Provider bundles](../../../developer-guide/en/aw/reference/packages.md) for optional
 raw extension management.
 
-## Create configuration
+<a id="create-configuration"></a>
+<a id="launch-and-verify"></a>
 
-Prepare the Agent using its own installation guide. This example requires a
-signed-in Qoder CLI 1.1.64 or later. Generate an empty policy as your ordinary
-user, keeping configuration and data outside the installed payloads. With the
-default `~/.local` prefix, XDG state at `~/.local/state/aw` is also accepted;
-state must not target the installed `bin`, `libexec` or `share` directories.
+## Configure and start using AW
 
-```bash
-export AW_HOME="$HOME/aw"
-export AW_QODER="$(command -v qodercli)"
-install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
-qodercli --version
-aw config init --prefix "$AW_PREFIX" \
-  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
-  --qoder "$AW_QODER"
-aw validate --config "$AW_HOME/aw.yaml"
-```
-
-`AW_QODER` must select the actual executable by absolute path. `config init`
-refuses to overwrite an existing configuration.
+Continue with [Quickstart](index.md#2-create-configuration) to generate your first
+configuration, launch Qoder, verify a tool call and stop the service. The first
+run uses an empty policy and needs only AW core.
 
 To enable a Provider, use its extension prefix and explicit template/backend
 paths from [Tokenless](tokenless.md) or [security checks](security.md).
-Use actual absolute paths in YAML; AW does not expand shell variables there.
-Other Agent entrypoints and native settings are described in
-[configuration](configuration.md).
+Other Agent entrypoints are described in [configuration and launch](configuration.md).
 
-## Launch and verify
-
-```bash
-cd "$AW_HOME/workspace"
-aw run --config "$AW_HOME/aw.yaml" --agent qoder
-```
-
-Confirm that the native Agent starts and can call a tool. Exit the Agent, then
-run `aw status --config "$AW_HOME/aw.yaml"` and
-`aw stop --config "$AW_HOME/aw.yaml"`. An empty policy does not perform security
-checks or compression. Enable the selected Provider and verify its actual tool
-effects before using it for a workload.
+See the [CLI reference](cli-reference.md) for the complete subcommand and option
+inventory, defaults and usage constraints.

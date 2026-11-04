@@ -2,7 +2,7 @@
 
 [中文版](../../zh/aw/configuration.md)
 
-`aw.yaml` holds Agent entrypoints, Providers and tool rules. Complete [installation and first run](installation.md) first; this page reuses `AW_HOME`, `AW_PREFIX` and `AW_QODER`.
+`aw.yaml` holds Agent entrypoints, Providers and tool rules. Complete [Quickstart](index.md) first; this page reuses `AW_HOME`, `AW_PREFIX` and `AW_QODER`.
 
 ## Choose capabilities
 

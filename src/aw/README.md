@@ -7,6 +7,37 @@ One configuration composes security checks before tool execution, output compres
 Supported resident entrypoints can update policy after tasks drain while keeping the host process running.
 Agents retain their models, interfaces and permissions. AW runs on Linux.
 
+<a id="install-and-use"></a>
+<a id="installation-and-first-run"></a>
+
+## Quickstart
+
+Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
+AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
+Install and sign in to your Agent first, then generate configuration with `aw config init`.
+
+The example below uses an installed, signed-in Qoder. `AW_PREFIX` is the installation directory
+selected in the guide; both `qodercli` and `aw` must be on `PATH`.
+
+```bash
+export AW_HOME="$HOME/aw"
+install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
+aw config init --prefix "$AW_PREFIX" \
+  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
+  --qoder "$(command -v qodercli)"
+aw config validate --config "$AW_HOME/aw.yaml"
+cd "$AW_HOME/workspace"
+aw run --config "$AW_HOME/aw.yaml" --agent qoder
+```
+
+In Qoder, ask it to read the current directory with a tool and follow its native permission prompts.
+The local service remains reusable after the Agent exits. Inspect and stop it when finished.
+
+```bash
+aw service status --config "$AW_HOME/aw.yaml"
+aw service stop --config "$AW_HOME/aw.yaml"
+```
+
 ## Shared capabilities
 
 | Capability | What you can do |
@@ -44,36 +75,6 @@ injection scanning with separate risk and failure policies; see
 [user submission checks](../../docs/user-guide/en/aw/security.md#check-user-submissions).
 
 
-<a id="install-and-use"></a>
-
-## Installation and first run
-
-Install AW core and optional Provider extensions using the [installation guide](../../docs/user-guide/en/aw/installation.md).
-AW currently uses standalone packages; `anolisa install aw` and RPM installation are not available yet.
-Install and sign in to your Agent first, then generate configuration with `aw config init`.
-
-The example below uses an installed, signed-in Qoder. `AW_PREFIX` is the installation directory
-selected in the guide; both `qodercli` and `aw` must be on `PATH`.
-
-```bash
-export AW_HOME="$HOME/aw"
-install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
-aw config init --prefix "$AW_PREFIX" \
-  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
-  --qoder "$(command -v qodercli)"
-aw validate --config "$AW_HOME/aw.yaml"
-cd "$AW_HOME/workspace"
-aw run --config "$AW_HOME/aw.yaml" --agent qoder
-```
-
-In Qoder, ask it to read the current directory with a tool and follow its native permission prompts.
-The local service remains reusable after the Agent exits. Inspect and stop it when finished.
-
-```bash
-aw status --config "$AW_HOME/aw.yaml"
-aw stop --config "$AW_HOME/aw.yaml"
-```
-
 <a id="hook-support"></a>
 <a id="adapter-capability-coverage"></a>
 
@@ -97,7 +98,8 @@ covered dispatch. Status separates live workers from failed AW bridges; see
 
 | Task | Guide |
 | --- | --- |
-| Install and complete a first run | [AW user manual](../../docs/user-guide/en/aw/index.md) |
+| Install and complete a first run | [Quickstart](../../docs/user-guide/en/aw/index.md) |
+| Look up every subcommand and option | [CLI reference](../../docs/user-guide/en/aw/cli-reference.md) |
 | Select an Agent, configure rules and update policy | [Configuration and launch](../../docs/user-guide/en/aw/configuration.md) |
 | Enable output compression or security checks | [Tokenless](../../docs/user-guide/en/aw/tokenless.md), [sec-core](../../docs/user-guide/en/aw/security.md) |
 | Inspect runtime records | [AgentSight](../../docs/user-guide/en/aw/observability.md) |

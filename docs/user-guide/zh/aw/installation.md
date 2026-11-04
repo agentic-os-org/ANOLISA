@@ -1,4 +1,4 @@
-# 安装与首次运行
+# 安装
 
 [English](../../en/aw/installation.md)
 
@@ -69,39 +69,16 @@ scope。`aw install` 用于安装本地 Provider bundle。
 接入。可选 raw 扩展管理见
 [Provider bundle](../../../developer-guide/zh/aw/reference/packages.md)。
 
-## 创建配置
+<a id="创建配置"></a>
+<a id="启动并验证"></a>
 
-按 Agent 自身指南准备 Agent。本例要求已登录的 Qoder CLI 1.1.64 或更高版本。
-以普通用户生成空策略配置，将配置和数据保存在已安装负载之外。默认 `~/.local`
-前缀下也接受 XDG 状态目录 `~/.local/state/aw`；状态目录不得落在已安装的
-`bin`、`libexec` 或 `share` 目录内：
+## 配置并开始使用
 
-```bash
-export AW_HOME="$HOME/aw"
-export AW_QODER="$(command -v qodercli)"
-install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
-qodercli --version
-aw config init --prefix "$AW_PREFIX" \
-  --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
-  --qoder "$AW_QODER"
-aw validate --config "$AW_HOME/aw.yaml"
-```
+接着按[快速入门](index.md#2-生成配置)生成首次配置、启动 Qoder、验证工具调用并停止服务。
+首次运行使用空策略，只需安装 AW core。
 
-`AW_QODER` 必须为真实可执行文件的绝对路径。`config init` 拒绝覆盖已有配置。
+启用 Provider 时，使用其扩展 prefix，并按 [Tokenless](tokenless.md) 或
+[安全检查](security.md)提供显式模板与后端路径。
+其他 Agent 入口见[配置与 Agent 启动](configuration.md)。
 
-启用 Provider 时，使用扩展 prefix，
-并按 [Tokenless](tokenless.md) 或[安全检查](security.md)提供显式模板与后端路径。
-YAML 中应填写真实绝对路径，AW 不在其中展开 shell 变量。
-其他 Agent 入口与原生设置见[配置](configuration.md)。
-
-## 启动并验证
-
-```bash
-cd "$AW_HOME/workspace"
-aw run --config "$AW_HOME/aw.yaml" --agent qoder
-```
-
-确认原生 Agent 启动并能够调用工具。退出 Agent 后，执行
-`aw status --config "$AW_HOME/aw.yaml"` 和
-`aw stop --config "$AW_HOME/aw.yaml"`。空策略不执行安全检查或压缩。
-用于实际工作前，启用所选 Provider 并验证它对真实工具调用的效果。
+完整子命令、参数、默认值及使用约束见 [CLI 命令参考](cli-reference.md)。

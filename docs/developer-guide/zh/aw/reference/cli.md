@@ -2,6 +2,9 @@
 
 [English](../../../en/aw/reference/cli.md)
 
+完整子命令与参数枚举见用户手册的 [CLI 命令参考](../../../../user-guide/zh/aw/cli-reference.md)。
+本页说明脚本与自动化使用的输出约定。
+
 用 `aw commands --json` 获取命令和参数清单，用具体命令的 `--help` 查询条件约束。
 
 ## 输出选择
