@@ -355,11 +355,25 @@ fn extract_verdict(content: &str) -> Result<bool, String> {
         }
     }
     let uppercase = text.to_uppercase();
-    match (uppercase.contains("PASS"), uppercase.contains("DENY")) {
+    match (
+        contains_standalone_word(&uppercase, "PASS"),
+        contains_standalone_word(&uppercase, "DENY"),
+    ) {
         (true, false) => Ok(false),
         (false, true) => Ok(true),
         _ => Err(text.chars().take(120).collect()),
     }
+}
+
+/// Whether `haystack` contains `word` as a standalone token.
+///
+/// The free-text fallback must not read a verdict out of a larger word:
+/// `bypass` / `passage` / `denied` / `denying` would otherwise flip the
+/// verdict of a pre-execution gate in the wrong direction.
+fn contains_standalone_word(haystack: &str, word: &str) -> bool {
+    haystack
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|token| token == word)
 }
 
 fn json_candidates(text: &str) -> Vec<&str> {
@@ -458,6 +472,46 @@ mod tests {
         ] {
             assert_eq!(extract_verdict(content), Ok(expected), "{content}");
         }
+    }
+
+    #[test]
+    fn v1_verdict_fallback_requires_standalone_words() {
+        // Words that merely contain PASS / DENY carry no verdict.
+        for content in [
+            "the code cannot bypass the sandbox",
+            "bypass detected",
+            "this passage allows access",
+            "request was denied",
+            "denying access",
+        ] {
+            assert!(extract_verdict(content).is_err(), "{content}");
+        }
+
+        for (content, expected) in [
+            ("Verdict: PASS.", false),
+            ("**PASS**", false),
+            ("The result is DENY.", true),
+        ] {
+            assert_eq!(extract_verdict(content), Ok(expected), "{content}");
+        }
+    }
+
+    #[test]
+    fn v1_bypass_wording_fails_closed_instead_of_passing() {
+        let result = scan(
+            "echo hello",
+            Language::Bash,
+            &FixedResponseClient {
+                response: json!({"message": {"content": "the code cannot bypass the sandbox"}}),
+            },
+        );
+
+        assert!(!result.ok);
+        assert_eq!(result.verdict, Verdict::Error);
+        assert_eq!(
+            result.summary,
+            "scan error: raw output: the code cannot bypass the sandbox"
+        );
     }
 
     #[test]
