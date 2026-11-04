@@ -359,7 +359,13 @@ def verify_skills_dir(skills_dir: str, trusted_keys: list) -> SkillsDirectoryRes
     for entry in entries:
         if entry.name.startswith("."):
             continue
-        if not stat.S_ISDIR(entry.stat().st_mode):
+        try:
+            mode = entry.stat().st_mode
+        except FileNotFoundError:
+            # A dangling symlink reports its missing target here; skip it like any
+            # other non-directory entry instead of aborting the whole run.
+            continue
+        if not stat.S_ISDIR(mode):
             continue
 
         checked += 1
