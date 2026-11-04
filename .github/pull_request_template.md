@@ -28,6 +28,18 @@ For a genuinely trivial change, use `no-issue: <brief reason>`. -->
 
 <!-- List the relevant tests, commands, environments, or manual checks. -->
 
+### AgentSight validation
+
+<!-- Required for PRs touching src/agentsight; omit for other components.
+GitHub binds each push to its current SHA and CI results automatically.
+Use the existing Test agentsight check for build/test results; do not copy
+its SHA, environment, commands or output into this description after each push.
+Explain the regression case once; update it only when the tested behavior changes.
+Describe any verification CI cannot cover (for example, real-kernel BPF tracing),
+including environment, commands/results and gaps. Omit that detail if CI covers it. -->
+
+- Regression evidence: <regression test/case; or not applicable with reason>
+
 ## Documentation and rollback
 
 <!-- What documentation changed? How can this be reverted or disabled? -->

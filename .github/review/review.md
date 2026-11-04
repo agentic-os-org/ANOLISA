@@ -39,6 +39,13 @@ The trusted workflow appends runtime context after this policy.
 - For `REVIEW_MODE=incremental`, review only code introduced or modified by `REVIEW_RANGE`; do not reopen untouched pull request code.
 - For `REVIEW_MODE=full`, `rewritten-history`, or `full-unreliable-increment`, review the current complete pull request diff.
 - Read surrounding code, callers, tests, and configuration only when needed to verify impact. Do not report defects in unchanged code unless the current diff exposes them.
+- For AgentSight, inspect available check results against the current head SHA
+  and affected platforms. A static review or another agent's agreement is not
+  build or runtime evidence. Use GitHub's current-revision CI checks and logs;
+  do not require authors to copy SHA or CI output into the PR description after
+  pushes. Review separately documented verification for behavior CI cannot cover.
+  If check results are unavailable, leave execution explicitly unverified; do not
+  run PR-head code to obtain them.
 
 ## Review Process
 
@@ -83,4 +90,6 @@ Do not report formatting, spelling, simple lint, personal preference, speculativ
 - Each inline comment must identify the code location, trigger, and actual consequence, and must not exceed 160 Chinese characters.
 - The review summary must not exceed 120 Chinese characters or three bullets.
 - Do not output an overall assessment, praise, `Verification Advice`, `Thoughts & Suggestions`, future work, or generic test recommendations.
-- If there are no findings, submit only: `本次审查范围内未发现需要修改的问题。`
+- If there are no findings, submit: `本次审查范围内未发现需要修改的问题。`
+  For AgentSight, also state whether current-head execution evidence was checked
+  or remains unverified, within the existing summary length limit.

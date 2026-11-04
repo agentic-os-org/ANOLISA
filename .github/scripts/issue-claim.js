@@ -1,5 +1,7 @@
 'use strict';
 
+const { workLimit, quotaExempt } = require('./sight-work-limits');
+
 const TRUSTED_BOT_LOGIN = 'github-actions[bot]';
 const CLAIM_MARKER_RE =
   /^<!-- anolisa-claim owner=([A-Za-z0-9][A-Za-z0-9-]{0,38}) state=(claimed|released) -->$/;
@@ -27,6 +29,34 @@ const READY_STATUS_LABELS = [
   'status:accepted',
   'status:ready',
 ];
+
+function urgentIssue(issue) {
+  const labels = labelNames(issue);
+  return labels.has('priority:p0') || labels.has('priority:p1');
+}
+
+async function activeSightClaims(github, owner, repo, actor, currentIssue) {
+  const issues = await github.paginate(github.rest.issues.listForRepo, {
+    owner, repo, state: 'open', labels: 'component:sight', per_page: 100,
+  });
+  const active = [];
+  for (const issue of issues) {
+    if (issue.pull_request || issue.state !== 'open' ||
+        !labelNames(issue).has('component:sight') || urgentIssue(issue) ||
+        issue.number === currentIssue || issue.comments === 0) continue;
+    const comments = await github.paginate(github.rest.issues.listComments, {
+      owner, repo, issue_number: issue.number, per_page: 100,
+    });
+    let latest = null;
+    for (const comment of comments) {
+      const marker = parseClaimMarker(comment);
+      if (marker) latest = marker;
+    }
+    if (latest?.state === 'claimed' &&
+        latest.owner.toLowerCase() === actor.toLowerCase()) active.push(issue.number);
+  }
+  return active;
+}
 
 function parseAutomationMode(value) {
   if (!['apply', 'shadow'].includes(value)) {
@@ -187,6 +217,19 @@ async function run({ github, context, core, env }) {
       );
       return;
     }
+    if (!recovering && labels.has('component:sight') && !urgentIssue(issue) &&
+        !await quotaExempt(github, { owner, repo }, actor)) {
+      const limit = workLimit(env.SIGHT_MAX_ACTIVE_CLAIMS, 'SIGHT_MAX_ACTIVE_CLAIMS');
+      const active = await activeSightClaims(github, owner, repo, actor, issueNumber);
+      if (active.length >= limit) {
+        await post(
+          `@${actor}, the AgentSight external contributor limit is ${limit} active ordinary claims. ` +
+          `Complete or release ${active.map((number) => `#${number}`).join(', ')} ` +
+          'before claiming another issue. Maintainer-prioritized P0/P1 issues are exempt.'
+        );
+        return;
+      }
+    }
     if (mode === 'shadow') {
       core.notice(`[shadow] would claim #${issueNumber} for @${actor}`);
       return;
@@ -301,6 +344,7 @@ async function run({ github, context, core, env }) {
 }
 
 module.exports = {
+  activeSightClaims,
   parseClaimMarker,
   parseCommand,
   run,
