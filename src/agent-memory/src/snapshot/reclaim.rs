@@ -1,4 +1,5 @@
-//! Reclaim orphaned snapshot artefacts under `<mount>/.anolisa/snapshots/`.
+//! Reclaim orphaned snapshot artefacts under `<mount>/.anolisa/snapshots/`,
+//! plus atomic-write staging tempfiles under the meta directory itself.
 //!
 //! Artefact shapes that can accumulate without any code path reclaiming
 //! them:
@@ -33,6 +34,14 @@
 //!    so past the age guard the directory can be removed wholesale —
 //!    via `remove_restore_staging`, since a crashed extraction
 //!    reproduces archived (possibly read-only) directory modes.
+//! 6. `.memory-write-*.tmp` under the meta directory itself —
+//!    `safe_fs::write_atomic` (called by the write and edit tools with the
+//!    meta directory as its staging parent) stages its replacement there
+//!    before publishing, so a hard kill between staging and publication
+//!    leaves one behind. Like `*.partial` it appears in no listing, Git
+//!    status or tar export, so past the age guard it is reclaimed purely
+//!    on age. The main sweep only enumerates `snapshots/`, which is why
+//!    these files need their own pass over the meta directory root.
 //!
 //! The sweeper is age-guarded: an artefact younger than
 //! `min_artifact_age_secs` is never touched, so an in-flight snapshot in
@@ -96,9 +105,12 @@ pub struct ReclaimReport {
     pub staging_dirs_removed: usize,
     /// Artefacts seen but kept because they are younger than the age guard.
     pub kept_young: usize,
-    /// Removal/regeneration attempts that failed (permissions, ...). Kept
-    /// separate from `kept_young`: a persistently failing removal is what
-    /// an operator needs surfaced, an age-guard hit is normal.
+    /// Removal/regeneration attempts that failed (permissions, ...), plus
+    /// rule-6 staging files whose anchored regular-file re-check refused
+    /// a swapped name (suspected tampering surfaced through the same
+    /// counter). Kept separate from `kept_young`: a persistently failing
+    /// removal is what an operator needs surfaced, an age-guard hit is
+    /// normal.
     pub removal_failures: usize,
     /// (archive, sidecar) pairs discarded because the sidecar was a
     /// symlink or otherwise unresolvable through the anchored path —
@@ -199,10 +211,13 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
     let _restore_guard = super::tar::restore_lock();
     let mut report = ReclaimReport::default();
     let dir = snapshots_dir(mount);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        // No snapshots directory (or unreadable): nothing to reclaim.
-        Err(_) => return report,
+    // Collect up front: a missing or unreadable snapshots directory only
+    // empties the snapshots sweep — the meta-directory sweep below (rule 6)
+    // must still run, since `write_atomic` stages there even on a mount
+    // that has never taken a snapshot.
+    let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries.flatten().collect(),
+        Err(_) => Vec::new(),
     };
     let now = std::time::SystemTime::now();
 
@@ -217,7 +232,7 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
     let mut archives = Vec::new();
     let mut sidecars = Vec::new();
     let mut staging_dirs = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
         let file_type = match entry.file_type() {
             Ok(t) => t,
             Err(_) => continue,
@@ -243,15 +258,18 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         }
         match path.extension().and_then(|s| s.to_str()) {
             Some("partial") => partials.push(path),
-            // Atomic-write staging (`safe_fs::write_atomic`'s tempfiles,
-            // created under the meta directory) — a hard kill between
-            // staging and publication leaves one behind; no listing ever
-            // shows it, so it is reclaimed purely on age like `*.partial`.
+            // Atomic-write staging (`safe_fs::write_atomic`'s tempfiles)
+            // left by rule 4's sidecar repair below, which stages its
+            // replacement next to the archives in `snapshots/` — a hard
+            // kill between staging and publication leaves one behind; no
+            // listing ever shows it, so it is reclaimed purely on age like
+            // `*.partial`. (The write/edit tools stage in the meta
+            // directory root instead; rule 6 covers those.)
             Some("tmp") => {
                 if path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|n| n.starts_with(".memory-write-"))
+                    .is_some_and(|n| n.starts_with(crate::safe_fs::ATOMIC_WRITE_TMP_PREFIX))
                 {
                     partials.push(path);
                 }
@@ -645,6 +663,109 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         }
     }
 
+    // 6. `.memory-write-*.tmp` under the meta directory itself —
+    //    `write_atomic`'s staging parent for the write/edit tools is the
+    //    meta directory root, one level above `snapshots/`, so the main
+    //    listing above never sees these. Same class as rule 1's `.tmp` arm:
+    //    never referenced by any listing, reclaimed purely on age.
+    //
+    //    SECURITY: the name comes from a directory listing of a
+    //    model-writable parent (the mount root), so the *decision* is
+    //    anchored at the root fd — both the age probe and the
+    //    regular-file re-check resolve through RESOLVE_BENEATH |
+    //    NO_SYMLINKS, so a symlinked meta directory is refused before any
+    //    unlink, and a name swapped to a symlink or directory after the
+    //    listing is refused at the re-check. The unlink itself goes
+    //    through the absolute path (as in rules 1-3), but `unlink(2)` does
+    //    not dereference its final component, so a name swapped in
+    //    between the re-check and the unlink loses only the link, never
+    //    its target. An unresolvable entry reads as young and is left
+    //    for the next sweep, mirroring the anchored age probe's contract.
+    //
+    //    The age guard protects an in-flight `write_atomic` the same way
+    //    it protects a snapshot: a staging file's mtime is its own write
+    //    time (`copy_metadata` copies no timestamps), so a live write
+    //    reads young. At the 60 s floor an unusually long stall between
+    //    the last staged byte and `persist` can therefore unlink the
+    //    staging file out from under the write — `persist` then fails
+    //    with ENOENT (the tool errors, the destination keeps its old
+    //    inode), never corrupting the destination.
+    let meta_rel = Path::new(mount.meta_dir_name());
+    let meta_entries: Vec<(std::path::PathBuf, std::ffi::OsString)> =
+        match std::fs::read_dir(&mount.meta_dir) {
+            Ok(entries) => entries
+                .flatten()
+                .filter_map(|entry| {
+                    let file_type = entry.file_type().ok()?;
+                    if !file_type.is_file() {
+                        return None;
+                    }
+                    let name = entry.file_name();
+                    let is_tmp = name.to_str().is_some_and(|n| {
+                        n.starts_with(crate::safe_fs::ATOMIC_WRITE_TMP_PREFIX)
+                            && n.ends_with(crate::safe_fs::ATOMIC_WRITE_TMP_SUFFIX)
+                    });
+                    is_tmp.then(|| (entry.path(), name))
+                })
+                .collect(),
+            // The meta directory must exist for a live mount; a read failure
+            // here leaves nothing to collect and the sweep ends empty.
+            Err(_) => Vec::new(),
+        };
+    for (path, name) in meta_entries {
+        let rel = meta_rel.join(&name);
+        // One anchored metadata call yields both the age and the
+        // regular-file type, so the two cannot observe different states
+        // (and one openat2 walk is saved).
+        let anchored_meta = crate::safe_fs::metadata(mount.root_fd.as_fd(), &rel);
+        let old_enough = anchored_meta
+            .as_ref()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .is_some_and(|modified| match now.duration_since(modified) {
+                Ok(age) => age >= min_age,
+                // Future mtime: treat as young rather than ancient.
+                Err(_) => false,
+            });
+        if !old_enough {
+            report.kept_young += 1;
+            continue;
+        }
+        // The same anchored metadata doubles as the regular-file re-check:
+        // a name swapped to a symlink or directory since `read_dir` is
+        // refused (NO_SYMLINKS) or reports a non-file type, and the tmp is
+        // spared rather than unlinked through a hostile target. Counted
+        // here because the sweep could not complete — but a refused
+        // resolution is suspected tampering, so it is surfaced separately.
+        let is_regular = matches!(&anchored_meta, Ok(m) if m.is_file());
+        if !is_regular {
+            tracing::warn!(
+                "snapshot reclaim: refused anchored re-check of atomic-write staging file {} \
+                 (swapped name or unresolvable through the mount root: {:?}); leaving it alone",
+                path.display(),
+                anchored_meta.as_ref().err()
+            );
+            report.removal_failures += 1;
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                report.partials_removed += 1;
+                tracing::info!(
+                    "snapshot reclaim: removed stale atomic-write staging file {}",
+                    path.display()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "snapshot reclaim: could not remove atomic-write staging file {}: {e}",
+                    path.display()
+                );
+                report.removal_failures += 1;
+            }
+        }
+    }
+
     if report.total_removed() > 0
         || report.sidecars_repaired > 0
         || report.removal_failures + report.tampered_pairs > 0
@@ -660,13 +781,13 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
                 tracing::$level!(
                     "snapshot reclaim: removed {} partial, {} orphaned archive, {} orphaned sidecar \
                      file(s), repaired {} truncated sidecar(s), removed {} stale staging dir(s) \
-                     under {} ({} below the age guard, {} removal failures, {} tampered pair(s))",
+                     under the snapshots and meta directories ({} below the age guard, \
+                     {} removal failures, {} tampered pair(s))",
                     report.partials_removed,
                     report.archives_removed,
                     report.sidecars_removed,
                     report.sidecars_repaired,
                     report.staging_dirs_removed,
-                    dir.display(),
                     report.kept_young,
                     report.removal_failures,
                     report.tampered_pairs

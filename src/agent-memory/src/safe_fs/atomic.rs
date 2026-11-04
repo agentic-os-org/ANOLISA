@@ -15,6 +15,12 @@ use crate::error::{MemoryError, Result};
 
 use super::open_in_root;
 
+/// Filename shape of `write_atomic`'s staging tempfiles. The reclaim sweep
+/// (`snapshot::reclaim`) matches crash leftovers by this shape, so the
+/// writer and the reclaimer must agree — keep both reading these constants.
+pub(crate) const ATOMIC_WRITE_TMP_PREFIX: &str = ".memory-write-";
+pub(crate) const ATOMIC_WRITE_TMP_SUFFIX: &str = ".tmp";
+
 /// Write a complete replacement in `staging_dir` before atomically publishing it.
 ///
 /// `staging_dir` must be a hidden metadata directory beneath `root`, on the same
@@ -94,8 +100,8 @@ pub fn write_atomic(
     let anchored_parent = Path::new("/proc/self/fd").join(parent.as_raw_fd().to_string());
     let anchored_staging = Path::new("/proc/self/fd").join(staging.as_raw_fd().to_string());
     let mut staged = tempfile::Builder::new()
-        .prefix(".memory-write-")
-        .suffix(".tmp")
+        .prefix(ATOMIC_WRITE_TMP_PREFIX)
+        .suffix(ATOMIC_WRITE_TMP_SUFFIX)
         .permissions(std::fs::Permissions::from_mode(0o600))
         .tempfile_in(&anchored_staging)
         .map_err(|e| context(rel, "create replacement in metadata directory", e))?;
