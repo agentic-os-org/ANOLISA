@@ -120,7 +120,7 @@ fn raw_install(manager: &Path, optional_root: &Path) -> io::Result<Command> {
         && base["raw_repository_sha256"].is_null()
     {
         return Err(error(
-            "missing original raw repository: use anolisa >= 0.3.22 and verify the original repository and exact base version. A repair that replays sec-core records its source; if repair reports nothing to repair, install the optional component explicitly with the verified --repo and --version",
+            "missing original raw repository: use anolisa >= 0.4.1 and verify the original repository and exact base version. A repair that replays sec-core records its source; if repair reports nothing to repair, install the optional component explicitly with the verified --repo and --version",
         ));
     }
     let identity = raw_identity(base)?;

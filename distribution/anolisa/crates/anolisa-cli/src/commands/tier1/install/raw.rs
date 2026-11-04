@@ -2089,7 +2089,7 @@ mod tests {
 
     #[test]
     fn min_anolisa_version_gate_protects_candidate_preparation() {
-        let manifest = contract_manifest(Some("0.3.22"));
+        let manifest = contract_manifest(Some("0.4.1"));
         for source in [
             InstallContractSource::EmbeddedArtifact,
             InstallContractSource::SidecarMeta,
@@ -2099,7 +2099,7 @@ mod tests {
                     &manifest,
                     "sec-core-skill-score",
                     source,
-                    "0.3.21"
+                    "0.4.0"
                 )
                 .is_err()
             );

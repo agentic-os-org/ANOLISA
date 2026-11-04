@@ -27,14 +27,14 @@ On a system raw installation, this command invokes ANOLISA with the repository a
 
 In a raw install result or dry run, `source_repo` and `artifact` are display labels. Explicit HTTP(S) sources show the scheme, host and optional port. Replaying a recorded source shows SHA-256 fingerprints. For a download URL, use the verified repository configuration and its distribution index.
 
-The base raw package accepts ANOLISA 0.3.21. The optional package needs 0.3.22 or later. If an older manager installed the base, upgrade the manager and verify the original raw repository and installed version. Point the system raw backend in `/etc/anolisa/repo.toml` to that verified source before running `sudo anolisa --install-mode system repair sec-core`. A repair that replays the base records its repository. Check the base row’s `raw_repository_sha256` in `anolisa --install-mode system --json status` before retrying `install-runtime`. If a healthy base returns `nothing-to-repair` and the fingerprint is still missing, use the verified source and exact version explicitly:
+The base raw package accepts ANOLISA 0.3.21. The optional package needs 0.4.1 or later. If an older manager installed the base, upgrade the manager and verify the original raw repository and installed version. Point the system raw backend in `/etc/anolisa/repo.toml` to that verified source before running `sudo anolisa --install-mode system repair sec-core`. A repair that replays the base records its repository. Check the base row’s `raw_repository_sha256` in `anolisa --install-mode system --json status` before retrying `install-runtime`. If a healthy base returns `nothing-to-repair` and the fingerprint is still missing, use the verified source and exact version explicitly:
 
 ```sh
 sudo anolisa --install-mode system install sec-core-skill-score --backend raw \
   --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
 ```
 
-To restore the unified command after a no-op repair, uninstall `sec-core` during a maintenance window and reinstall the same base version from the verified original repository using ANOLISA 0.3.22 or later. Confirm the base fingerprint in status before running `install-runtime`.
+To restore the unified command after a no-op repair, uninstall `sec-core` during a maintenance window and reinstall the same base version from the verified original repository using ANOLISA 0.4.1 or later. Confirm the base fingerprint in status before running `install-runtime`.
 
 On Linux x86_64 with the V2 RPM, install the base with `sudo dnf install agent-sec-core`, then use the same command above. The existing `agent-sec-core` RPM supplies build recipes. Explicit installation prepares the runtime under `/usr/lib/agent-sec-core/skill-score`; repeat the command after an RPM upgrade. Final package removal cleans owned generated environments. Mixed system raw and RPM CLI installations must be resolved before using this command.
 

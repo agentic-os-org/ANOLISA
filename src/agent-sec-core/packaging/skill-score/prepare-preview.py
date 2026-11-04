@@ -93,7 +93,7 @@ def package_contract(
             )
             if entry is None or entry.read() != runtime_bytes:
                 raise ValueError("optional raw runtime manifest differs from release")
-            if contract["component"]["contract"]["min_anolisa_version"] != "0.3.22":
+            if contract["component"]["contract"]["min_anolisa_version"] != "0.4.1":
                 raise ValueError(
                     "optional component must require the preparation-capable installer"
                 )

@@ -2,7 +2,7 @@ manifest_version = 2
 
 [component]
 name = "sec-core-skill-score"
-version = "1.1.2"
+version = "1.2.0"
 layer = "runtime"
 domain = "security"
 display_name = "Agent Security Core optional Skill Score runtime"
@@ -12,7 +12,7 @@ repository = "https://github.com/alibaba/anolisa"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.3.22"
+min_anolisa_version = "0.4.1"
 
 [component.platform]
 os = ["linux"]

@@ -27,14 +27,14 @@ sudo agent-sec-cli skillsec score install-runtime
 
 raw 安装结果和 dry-run 中的 `source_repo` 与 `artifact` 是展示标识。显式 HTTP(S) 来源只显示协议、主机和可选端口；重放已记录的来源时显示 SHA-256 指纹。需要下载地址时，请查看已核实的仓库配置及其分发索引。
 
-基础 raw 包支持 ANOLISA 0.3.21，可选包要求 0.3.22 或更新版本。若旧管理器安装了基础包，先升级管理器，核实原始 raw 仓库和已装版本。在 `/etc/anolisa/repo.toml` 的 raw 后端配置该可信原始地址，再执行 `sudo anolisa --install-mode system repair sec-core`。修复若重放了基础包，会记录其来源。执行 `anolisa --install-mode system --json status`，确认基础包行已有 `raw_repository_sha256` 后再重试 `install-runtime`。若健康基础包返回 `nothing-to-repair` 且指纹仍缺失，可使用已核实的原地址和精确版本显式安装：
+基础 raw 包支持 ANOLISA 0.3.21，可选包要求 0.4.1 或更新版本。若旧管理器安装了基础包，先升级管理器，核实原始 raw 仓库和已装版本。在 `/etc/anolisa/repo.toml` 的 raw 后端配置该可信原始地址，再执行 `sudo anolisa --install-mode system repair sec-core`。修复若重放了基础包，会记录其来源。执行 `anolisa --install-mode system --json status`，确认基础包行已有 `raw_repository_sha256` 后再重试 `install-runtime`。若健康基础包返回 `nothing-to-repair` 且指纹仍缺失，可使用已核实的原地址和精确版本显式安装：
 
 ```sh
 sudo anolisa --install-mode system install sec-core-skill-score --backend raw \
   --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
 ```
 
-如需在空操作修复后恢复统一命令，可在维护窗口卸载 `sec-core`，使用 ANOLISA 0.3.22 或更新版本从已核实的原始仓库重新安装同一版本的基础包，在 status 中确认来源指纹后执行 `install-runtime`。
+如需在空操作修复后恢复统一命令，可在维护窗口卸载 `sec-core`，使用 ANOLISA 0.4.1 或更新版本从已核实的原始仓库重新安装同一版本的基础包，在 status 中确认来源指纹后执行 `install-runtime`。
 
 Linux x86_64 的 V2 RPM 用户先执行 `sudo dnf install agent-sec-core`，再执行上面的同一条命令。现有 `agent-sec-core` RPM 携带构建配方，显式安装时才在 `/usr/lib/agent-sec-core/skill-score` 下准备运行时。RPM 升级后再次执行该命令，最终卸载时会清理归本包所有的生成环境。同机同时存在系统 raw 和 RPM 两份 CLI 时，需要先解决混装。
 
