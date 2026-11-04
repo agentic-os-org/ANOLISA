@@ -99,6 +99,8 @@ stage_payload() {
         "$stage/share/doc/cosh-ng"
     install -p -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
     cosh_copy_binaries "$BIN_DIR" "$stage" /bin /libexec/anolisa/cosh-ng
+    cosh_write_resources "$stage/libexec/anolisa/cosh-ng/resources.conf" '' \
+        '{datadir}/skills' '{datadir}/extensions'
     install -p -m 0755 \
         "$SCRIPT_DIR/assets/bin/cosh" \
         "$SCRIPT_DIR/assets/bin/cosh-switch" \

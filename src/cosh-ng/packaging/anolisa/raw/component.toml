@@ -66,6 +66,12 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/resources.conf"
+target = "{libexecdir}/cosh-ng/resources.conf"
+mode = "0644"
+render = "anolisa-paths-v1"
+
+[[component.layout.files]]
 source = "share/anolisa/cosh-ng/cosh-gateway@.service.in"
 target = "{unitdir}/cosh-gateway@.service"
 mode = "0644"

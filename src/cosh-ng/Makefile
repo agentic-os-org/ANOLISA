@@ -7,7 +7,7 @@ build:
 DELIVERY_COMPONENT_ROOT := $(abspath $(dir $(firstword $(MAKEFILE_LIST))))
 delivery_quote = '$(subst ','"'"',$(1))'
 # Forward explicit paths; the installer resolves and validates layout defaults.
-DELIVERY_INPUTS := AWPRJ PREFIX INSTALL_PROFILE BINDIR LIBDIR LIBEXECDIR DATADIR SKILLDIR UNITDIR BIN_DIR RTK_BIN DESTDIR
+DELIVERY_INPUTS := AWPRJ PREFIX INSTALL_PROFILE BINDIR LIBDIR LIBEXECDIR DATADIR SKILLDIR EXTENSIONDIR UNITDIR BIN_DIR RTK_BIN DESTDIR
 DELIVERY_ENV = env $(foreach name,$(DELIVERY_INPUTS) COMPONENT_ROOT,-u $(name)) \
 	$(call delivery_quote,COMPONENT_ROOT=$(DELIVERY_COMPONENT_ROOT)) \
 	$(foreach name,$(DELIVERY_INPUTS),$(if $(filter command line environment,$(origin $(name))),$(call delivery_quote,$(name)=$($(name)))))

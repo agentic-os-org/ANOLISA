@@ -17,11 +17,26 @@ cosh_copy_skills() {
     install -p -m 0644 "$source/skills/manage-task-checkpoints/SKILL.md" "$destination/manage-task-checkpoints/"
 }
 
+cosh_write_resources() {
+    local destination="$1" profile="$2" skilldir="$3" extensiondir="$4" value
+    for value in "$profile" "$skilldir" "$extensiondir"; do
+        case "$value" in
+            *$'\r'*|*$'\n'*) printf 'ERROR: resource layout values must be single lines\n' >&2; return 1 ;;
+        esac
+    done
+    {
+        [ -z "$profile" ] || printf 'profile=%s\n' "$profile"
+        printf 'skill_dir=%s\nextension_dir=%s\n' "$skilldir" "$extensiondir"
+    } > "$destination"
+    chmod 0644 "$destination"
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     set -euo pipefail
     case "${1:-}" in
         binaries) shift; cosh_copy_binaries "$@" ;;
         skills) shift; cosh_copy_skills "$@" ;;
-        *) printf 'ERROR: usage: %s {binaries|skills} ARGS...\n' "$0" >&2; exit 1 ;;
+        resources) shift; cosh_write_resources "$@" ;;
+        *) printf 'ERROR: usage: %s {binaries|skills|resources} ARGS...\n' "$0" >&2; exit 1 ;;
     esac
 fi
