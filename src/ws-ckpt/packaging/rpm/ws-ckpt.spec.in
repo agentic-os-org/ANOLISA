@@ -39,6 +39,8 @@ Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
 Requires(postun): util-linux
+Requires:       rpm coreutils grep
+Requires(postun): rpm coreutils grep
 Conflicts:      %{name} < %{version}
 Conflicts:      anolisa < 0.3.21
 
@@ -149,6 +151,34 @@ echo "Run 'ws-ckpt --help' for usage."
 # This obsolete directory is not part of the current per-framework inventory.
 rm -rf %{_datadir}/anolisa/adapters/ws-ckpt/scripts 2>/dev/null || true
 
+# A rollback installs the old service owner before erasing the new core.
+# Save policy before the old package enables/restarts the service.
+%triggerprein core -- ws-ckpt < 0.6.1
+owner=$(rpm -qf %{_unitdir}/ws-ckpt.service --qf '%%{NAME}\n') || exit 1
+printf '%s\n' "$owner" | grep -Fxq ws-ckpt-core || exit 0
+[ -d /run/systemd/system ] || exit 0
+set -eu
+state_dir=/run/ws-ckpt-rpm-rollback
+if [ -L "$state_dir" ] || { [ -e "$state_dir" ] && { [ ! -d "$state_dir" ] || [ ! -O "$state_dir" ]; }; }; then
+    echo 'ERROR: unsafe ws-ckpt RPM rollback state directory' >&2
+    exit 1
+fi
+install -d -m 0700 "$state_dir"
+rm -f "$state_dir/state" "$state_dir/state.tmp"
+umask 077
+enabled=$(systemctl is-enabled ws-ckpt.service) || :
+active=$(systemctl is-active ws-ckpt.service) || :
+case "$enabled" in
+    enabled|enabled-runtime|disabled|masked|masked-runtime) ;;
+    *) echo 'ERROR: cannot capture ws-ckpt enablement for rollback' >&2; exit 1 ;;
+esac
+case "$active" in
+    active|reloading|activating|inactive|failed|deactivating) ;;
+    *) echo 'ERROR: cannot capture ws-ckpt activity for rollback' >&2; exit 1 ;;
+esac
+printf '%s\n' "$enabled" "$active" > "$state_dir/state.tmp"
+mv -f "$state_dir/state.tmp" "$state_dir/state"
+
 %preun core
 if [ $1 -eq 0 ]; then
     # Recover workspaces before stopping the daemon. A sentinel file carries
@@ -195,6 +225,61 @@ if [ $1 -eq 0 ]; then
     fi
     rm -f /run/ws-ckpt-recover-failed
     systemctl daemon-reload
+fi
+
+# Final erase of core can be a handoff to the legacy monolith, not an uninstall.
+state_dir=/run/ws-ckpt-rpm-rollback
+if [ -f "$state_dir/state" ]; then
+    if [ -L "$state_dir" ] || [ ! -O "$state_dir" ] || [ -L "$state_dir/state" ] || [ ! -O "$state_dir/state" ]; then
+        echo 'ERROR: unsafe ws-ckpt RPM rollback state' >&2
+        exit 1
+    fi
+    set -eu
+    remask_required=0
+    runtime=
+    cleanup_rollback() {
+        if [ "$remask_required" -eq 1 ]; then
+            systemctl mask $runtime ws-ckpt.service || echo 'WARNING: ws-ckpt rollback could not restore mask' >&2
+        fi
+        rm -f "$state_dir/state"
+        rmdir "$state_dir"
+    }
+    trap cleanup_rollback EXIT
+    trap 'exit 1' HUP INT TERM
+    owner=$(rpm -qf %{_unitdir}/ws-ckpt.service --qf '%%{NAME}\n')
+    if ! printf '%s\n' "$owner" | grep -Fxq ws-ckpt; then
+        echo 'ERROR: legacy ws-ckpt did not take over; rollback state was not restored' >&2
+        exit 1
+    fi
+    { IFS= read -r enabled; IFS= read -r active; } < "$state_dir/state"
+    case "$active" in
+        active|reloading|activating) action=start ;;
+        inactive|failed|deactivating) action=stop ;;
+        *) echo 'ERROR: invalid ws-ckpt rollback activity' >&2; exit 1 ;;
+    esac
+    case "$enabled" in
+        masked|masked-runtime)
+            # A unit can be masked while still running. Restore both dimensions.
+            remask_required=1
+            [ "$enabled" != masked-runtime ] || runtime=--runtime
+            if [ "$action" = start ]; then
+                systemctl unmask $runtime ws-ckpt.service
+            fi
+            systemctl "$action" ws-ckpt.service
+            systemctl mask $runtime ws-ckpt.service
+            remask_required=0
+            ;;
+        enabled|enabled-runtime|disabled)
+            systemctl disable --runtime ws-ckpt.service
+            systemctl disable ws-ckpt.service
+            case "$enabled" in
+                enabled) systemctl enable ws-ckpt.service ;;
+                enabled-runtime) systemctl enable --runtime ws-ckpt.service ;;
+            esac
+            systemctl "$action" ws-ckpt.service
+            ;;
+        *) echo 'ERROR: invalid ws-ckpt rollback enablement' >&2; exit 1 ;;
+    esac
 fi
 
 %changelog

@@ -78,6 +78,8 @@ class MigrationFixture:
         self.manager.mkdir()
         self.marker = base / "migration"
         self.legacy_unit = base / "legacy-user-unit"
+        self.system_unit = base / "system-unit"
+        self.system_unit.touch()
         self.data = base / "systemctl.json"
         self.rpm_data = base / "rpm.json"
         self.systemctl = self.bin / "systemctl"
@@ -119,6 +121,7 @@ class MigrationFixture:
             ("/run/agent-sec-core-rpm", str(self.marker)),
             ("/run/systemd/system", str(self.manager)),
             ("/usr/lib/systemd/user/agent-sec-core.service", str(self.legacy_unit)),
+            ("%{_unitdir}/agent-sec-core.service", str(self.system_unit)),
             ("/usr/bin/systemctl", str(self.systemctl)),
         ):
             body = body.replace(old, new)
@@ -171,6 +174,48 @@ class ServiceMigrationTests(unittest.TestCase):
     def phase(self, name, count=2):
         result = self.fixture.run(name, count)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_legacy_cli_rollback_restores_policy_after_old_install_scripts(self):
+        for enabled, active in (
+            ("enabled", "active"),
+            ("disabled", "inactive"),
+            ("enabled", "inactive"),
+            ("disabled", "active"),
+            ("enabled-runtime", "active"),
+            ("masked", "inactive"),
+            ("masked-runtime", "inactive"),
+        ):
+            with self.subTest(enabled=enabled, active=active):
+                self.fixture.reset(enabled, active, old=False)
+                self.phase("triggerprein", 1)
+                subprocess.run(
+                    [
+                        str(self.fixture.systemctl),
+                        "enable",
+                        "--now",
+                        "agent-sec-core.service",
+                    ],
+                    check=True,
+                )
+                self.fixture.rpm_data.write_text(json.dumps({"old": True}))
+                self.phase("preun", 1)
+                self.phase("postun", 1)
+                self.assertEqual(self.fixture.state()["enabled"], enabled)
+                self.assertEqual(self.fixture.state()["active"], active)
+                self.assertFalse(
+                    self.fixture.marker.with_name("migration-rollback").exists()
+                )
+
+    def test_trigger_on_forward_migration_does_not_record_rollback_state(self):
+        self.fixture.reset(old=True)
+        self.phase("triggerprein", 1)
+        self.assertFalse(self.fixture.marker.with_name("migration-rollback").exists())
+
+    def test_trigger_skips_legacy_user_unit_without_a_system_unit(self):
+        self.fixture.system_unit.unlink()
+        self.fixture.legacy_unit.touch()
+        self.phase("triggerprein", 1)
+        self.assertFalse(self.fixture.marker.with_name("migration-rollback").exists())
 
     def test_enabled_active_inactive_disabled_and_runtime_states_survive_final_erase(
         self,

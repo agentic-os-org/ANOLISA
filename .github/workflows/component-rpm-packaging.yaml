@@ -46,7 +46,7 @@ jobs:
         run: |
           sed -i -e 's/cloud.aliyuncs/aliyun/g' /etc/yum.repos.d/*.repo
           dnf install -y bash binutils coreutils diffutils file findutils git \
-            gzip make python3 rpm-build systemd-rpm-macros tar
+            gzip make python3 python3-rpm rpm-build systemd-rpm-macros tar
 
       - uses: actions/checkout@v4
 
@@ -61,6 +61,9 @@ jobs:
           make -s test-packaging
           install -d -m 0700 /var/lib/cosh-ng-rpm-test
           COSH_RPM_TEST_SAFE_DIR=/var/lib/cosh-ng-rpm-test bash src/cosh-ng/tests/test-package-rpm.sh
+
+      - name: Verify service state across legacy RPM rollback
+        run: python3 tests/test-component-rpm-rollback.py
 
       - name: Check shared builder syntax
         run: bash -n scripts/rpm-build.sh
