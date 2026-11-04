@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """DashScope image generation (wanx models)."""
-import argparse, base64, json, os, sys, time, urllib.request, urllib.error
+import argparse, base64, http.client, json, os, sys, time, urllib.request, urllib.error
 
 def _key():
     # 1. 环境变量
@@ -56,14 +56,44 @@ def _compat(prompt, model, size, key, base):
     except urllib.error.HTTPError:
         return _wanx(prompt, model, size, key)
     d = res.get("data",[])
-    if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
+    if d:
+        url = d[0].get("url")
+        if url: return url
+        b64 = d[0].get("b64_json")
+        if b64: return "b64:"+b64
+        # 有些 OpenAI 兼容服务只回 revised_prompt；拼出 "b64:" 会让 _save 写出 0 字节文件
+        print(f"ERROR: response has no image payload: {json.dumps(d[0])[:200]}",file=sys.stderr); sys.exit(1)
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
 
 def _save(src, path):
     if src.startswith("b64:"):
-        data = base64.b64decode(src[4:])
+        payload = src[4:]
+        if not payload:
+            print(f"ERROR: empty image payload, nothing saved to {path}",file=sys.stderr); sys.exit(1)
+        try:
+            data = base64.b64decode(payload)
+        except ValueError:
+            print(f"ERROR: image payload is not valid base64, nothing saved to {path}",file=sys.stderr); sys.exit(1)
     else:
-        with urllib.request.urlopen(urllib.request.Request(src,headers={"User-Agent":"Mozilla/5.0"}),timeout=60) as r: data = r.read()
+        # A truncated 200 raises IncompleteRead from the read() above, not an
+        # empty result: the transport noticed the body was short. Catch it so a
+        # short download reports what arrived instead of an uncaught traceback,
+        # and so nothing is written for a partial image.
+        try:
+            with urllib.request.urlopen(urllib.request.Request(src,headers={"User-Agent":"Mozilla/5.0"}),timeout=60) as r: data = r.read()
+        except http.client.IncompleteRead as e:
+            # `expected` is None on both chunked paths: `_read_chunked` re-raises
+            # with only the partial body and `_get_chunk_left` raises with b"".
+            # Arithmetic on it turns the diagnostic into a TypeError that escapes
+            # this handler, which is strictly worse than the traceback it replaced.
+            received = len(e.partial)
+            total = ("an unknown total" if e.expected is None
+                     else f"{received + e.expected} bytes")
+            print(f"ERROR: image download was truncated: got {received} of {total} from {src}",file=sys.stderr); sys.exit(1)
+        except (urllib.error.URLError, OSError) as e:
+            print(f"ERROR: image download failed: {type(e).__name__}: {e}",file=sys.stderr); sys.exit(1)
+    if not data:
+        print(f"ERROR: image download returned no bytes from {src}",file=sys.stderr); sys.exit(1)
     os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
     with open(path,"wb") as f: f.write(data)
     print(f"Saved {path} ({len(data)/1024:.1f}KB)")
