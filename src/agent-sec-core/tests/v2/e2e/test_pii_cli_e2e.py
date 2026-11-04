@@ -550,6 +550,7 @@ def test_business_and_propagation_budgets_are_independent(pii_daemon, pii_enviro
     payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
     assert len(payload) > 4 * 1024 * 1024
     response = _rpc(pii_daemon, payload)
+    assert "error" not in response, response.get("error")
     assert response["result"]["ok"]
     assert response["result"]["summary"]["coverage"]["status"] == "complete"
     [event] = _events(pii_environment)
