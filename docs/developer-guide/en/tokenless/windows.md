@@ -28,8 +28,9 @@ input unchanged; exit code 2 is reserved for blocking decisions. A missing
 Python interpreter or shared hook resource therefore disables optimization for
 that invocation without requiring another dispatcher.
 
-PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`, and
-`mcp__qw-builtin__mcp_workspace_bash`; RTK decides whether to rewrite each command.
+PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`,
+`mcp__qw-builtin__mcp_workspace_bash`, and `mcp__qw-builtin__mcp__workspace__bash`;
+RTK decides whether to rewrite each command.
 PowerShell calls run RTK through the native `tokenless.exe` and scope attribution
 variables to that invocation. PostTool classifies PowerShell output as command output,
 retains file-content protection, and avoids compressing RTK output twice.
@@ -111,8 +112,8 @@ The Windows smoke suite invokes real PowerShell hooks and native executables;
 application UI loading and activation require a separate QwenWork local session.
 Set `TOKENLESS_TEST_QWENWORK_APP` to the installed version directory (containing
 `QwenWorkCN.exe`) to test managed Bash with the actual host manifest environment
-for both engines and both MCP aliases, and to exercise the installed OpenCode
-hook runner using Node on PATH. Set `TOKENLESS_TEST_BASH` to Git Bash's executable
+for both engines and all recognized MCP workspace-Shell aliases, and to exercise
+the installed OpenCode hook runner using Node on PATH. Set `TOKENLESS_TEST_BASH` to Git Bash's executable
 to include legacy execution tests. The database rejection fixtures use system
 temporary storage (`%SystemRoot%/Temp` on Windows, `/tmp` on Unix), independently
 of a home-backed `TEMP`/`TMP`/`TMPDIR`; they report unavailable fixtures if that

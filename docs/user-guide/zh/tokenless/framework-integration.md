@@ -124,8 +124,9 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 JSON 转 TOON 输出及 Read 透传。适配器也接受 QwenWorkCN 1.3.2 中观察到的
 macOS 工作区 Shell 契约。Linux VM 执行仍不受支持，Hook 在非 macOS 环境直接透传。
 
-PreToolUse 匹配 `Bash`、`mcp__workspace__bash` 和
-`mcp__qw-builtin__mcp_workspace_bash`，使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
+PreToolUse 匹配 `Bash`、`mcp__workspace__bash`、
+`mcp__qw-builtin__mcp_workspace_bash` 和 `mcp__qw-builtin__mcp__workspace__bash`，
+使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
 符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
 仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
 被接受的结果通过 `updatedToolOutput` 替换原文；对象和数组保留类型，文本槽可以使用 TOON。
@@ -177,8 +178,7 @@ anolisa adapter status tokenless
 CLI 将自包含插件复制到 `~/.qwenworkcn/plugins-custom/tokenless` 并记录文件归属。
 完成后重启千问办公、开启新会话，并在应用内检查插件激活状态。
 `status` 验证应用存在及受管理文件完整性，加载和激活状态保持 `unknown`。
-旁加载不修改 settings、权限、数据库或禁用／阻止列表。兼容性基线为 1.2.5 原生 Bash 和 1.3.2 工作区 Shell；
-其他版本会显示兼容性未验证的警告。
+旁加载不修改 settings、权限、数据库或禁用／阻止列表。
 
 `TOKENLESS_QWENWORK_APP` 指定非默认应用 Bundle；`TOKENLESS_QWENWORK_HOME` 指定数据目录。
 默认在 `/Applications` 和 `~/Applications` 查找应用，数据目录为 `~/.qwenworkcn`。

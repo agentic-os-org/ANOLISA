@@ -50,7 +50,7 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
 后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
-千问办公的 Hook Adapter 在两个生命周期请求之前，将两个工作区 Shell MCP 名称统一为
+千问办公的 Hook Adapter 在两个生命周期请求之前，将识别到的工作区 Shell MCP 名称统一为
 `Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
 确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置
 及结构化响应处理。插件私有二进制也由 Adapter 解析；私有 PATH 或工作区状态不代表

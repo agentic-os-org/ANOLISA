@@ -60,7 +60,7 @@ in that set. Host applications
 retain raw tool values for UI and business logic and pass only copied, final model-visible text to
 `post_tool`. Retrieve output never enters PostTool again.
 
-QwenWork's hook adapter normalizes its two workspace Shell MCP names to `Bash`
+QwenWork's hook adapter normalizes recognized workspace Shell MCP names to `Bash`
 before either lifecycle request. It unwraps only an exact single plain text block;
 unknown block arrays pass through without compression. The workspace event's
 absolute `cwd` anchors `.tokenless` state for both hooks and the RTK command.

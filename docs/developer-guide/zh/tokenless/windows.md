@@ -21,8 +21,9 @@ Hook 命令的 PowerShell；前述 manifest 标记识别的是工具使用的 Sh
 已验证的宿主会忽略普通 Hook 执行失败，保持工具输入不变；退出码 2 专用于阻断决定。
 因此，Python 解释器或共享 Hook 资源缺失时，该次调用会失去优化，无需额外分发脚本。
 
-PreTool 匹配 `Bash`、`PowerShell`、`mcp__workspace__bash` 和
-`mcp__qw-builtin__mcp_workspace_bash`，由 RTK 决定每条命令是否改写。PowerShell 调用
+PreTool 匹配 `Bash`、`PowerShell`、`mcp__workspace__bash`、
+`mcp__qw-builtin__mcp_workspace_bash` 和 `mcp__qw-builtin__mcp__workspace__bash`，
+由 RTK 决定每条命令是否改写。PowerShell 调用
 通过原生 `tokenless.exe` 运行 RTK，并在该次调用内设置归属环境变量。PostTool 将 PowerShell 输出归类为
 命令输出，保留文件内容保护，避免对 RTK 输出重复压缩。不支持的命令透传。
 
@@ -88,8 +89,8 @@ Linux 打包主机 `src/tokenless` 下的同一位置。两台主机使用相同
 Windows smoke 测试调用真实 PowerShell Hook 和原生二进制；应用界面的插件加载与激活
 需要另行在千问办公本地会话中验证。
 将 `TOKENLESS_TEST_QWENWORK_APP` 指向包含 `QwenWorkCN.exe` 的已安装版本目录，
-可用真实宿主 manifest 环境测试两个引擎的托管 Bash 及两个 MCP 别名，并通过 PATH
-中的 Node 调用已安装的 OpenCode Hook 执行器。设置 `TOKENLESS_TEST_BASH` 为 Git Bash
+可用真实宿主 manifest 环境测试两个引擎的托管 Bash 及全部已识别的 MCP 工作区 Shell 别名，
+并通过 PATH 中的 Node 调用已安装的 OpenCode Hook 执行器。设置 `TOKENLESS_TEST_BASH` 为 Git Bash
 可执行文件可加入旧版执行测试。数据库拒绝测试使用系统临时目录（Windows 为
 `%SystemRoot%/Temp`，Unix 为 `/tmp`），不依赖可能位于用户目录中的 `TEMP`、`TMP` 或
 `TMPDIR`；若系统临时目录不可写或处于受信用户目录内，测试会提示 fixture 不可用。
