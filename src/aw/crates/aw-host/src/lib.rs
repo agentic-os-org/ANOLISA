@@ -7,6 +7,7 @@ mod event;
 mod report;
 mod transport;
 
+pub use aw_core::admission::AdapterCapabilities;
 pub use event::Event;
 pub use report::{
     CallFailure, CallRecord, Failure, FailureAction, Invocation, Method, NativeOutput,
@@ -14,12 +15,12 @@ pub use report::{
 };
 
 use aw_config::Configuration;
-use aw_core::admission::{AdmissionEngine, AdmissionError, AdmittedPolicy, PolicyCandidate};
-use aw_exec::{CommandSpec, Limits, PackageLeases};
-use aw_provider::{
-    admission::{AdapterCapabilities, AdmittedStep, ProviderEvidence},
-    Protocol, Reply, MAX_MESSAGE_BYTES, VERSION,
+use aw_core::admission::{
+    AdmissionEngine, AdmissionError, AdmittedPolicy, AdmittedStep, PolicyCandidate,
+    ProviderEvidence,
 };
+use aw_exec::{CommandSpec, Limits, PackageLeases};
+use aw_provider::{Protocol, Reply, MAX_MESSAGE_BYTES, VERSION};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -61,7 +62,10 @@ pub enum Error {
     Configuration(#[from] aw_config::Error),
     /// Invalid admission evidence or configuration capability requirements.
     #[error(transparent)]
-    Admission(#[from] aw_provider::Error),
+    Admission(AdmissionError),
+    /// Bundled Provider protocol schema failed to compile.
+    #[error(transparent)]
+    Protocol(#[from] aw_provider::Error),
     /// Preparation or event creation exceeded its limit or was cancelled.
     #[error(transparent)]
     Execution(#[from] aw_exec::Error),
@@ -83,7 +87,7 @@ impl From<AdmissionError> for Error {
     fn from(error: AdmissionError) -> Self {
         match error {
             AdmissionError::Configuration(error) => Self::Configuration(error),
-            AdmissionError::Provider(error) => Self::Admission(error),
+            error @ AdmissionError::Rejected(_) => Self::Admission(error),
         }
     }
 }

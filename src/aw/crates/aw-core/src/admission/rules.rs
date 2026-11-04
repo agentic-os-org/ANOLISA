@@ -1,120 +1,10 @@
-//! Pure capability admission for structured Providers and explicit native hook steps.
+//! Pure capability admission rules for structured Providers and native hook steps.
 
-use crate::{Description, Error, ValidatedConfig};
+use super::{
+    selection, AdapterCapabilities, AdmissionError, AdmittedStep, ProviderEvidence, StepExecution,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
-
-mod selection;
-
-pub use selection::{projected_out_steps, ProjectedOutStep};
-
-/// Protocol-checked evidence supplied by the caller for one configured Provider.
-///
-/// The caller owns discovery and must associate both responses with the same
-/// configured Provider. These values do not establish process identity or prove
-/// that an Agent has installed a hook.
-#[derive(Clone)]
-pub struct ProviderEvidence {
-    /// The operations, events and effects declared by the Provider.
-    pub description: Description,
-    /// The exact private configuration accepted by that Provider.
-    pub configuration: ValidatedConfig,
-}
-
-/// Trusted Adapter evidence for a specific version and interaction entrypoint.
-///
-/// The embedding application supplies this evidence independently of Provider
-/// claims. Admission does not probe the Agent or certify the supplied version.
-#[derive(Clone, Debug)]
-pub struct AdapterCapabilities {
-    /// One of the adapters declared by the configuration contract.
-    pub adapter: String,
-    /// The actual Agent version whose capabilities were established by the caller.
-    pub version: String,
-    /// The validated interaction mode, such as a print or interactive entrypoint.
-    pub entrypoint: String,
-    /// Supported effects by event, restricted to this library's initial surface.
-    pub events: BTreeMap<String, Vec<String>>,
-    /// Additional failure actions supported by each event at this exact entrypoint.
-    pub failure_actions: BTreeMap<String, Vec<String>>,
-}
-
-/// One configured step checked against the implementation and Adapter.
-///
-/// Structured steps returned by [`admit`] have also passed Provider admission;
-/// native steps require no Provider handshake. Steps returned by [`preflight`]
-/// remain candidates, and public fields carry no proof
-/// of admission. This is not an executable Core plan or a Ready status. Runtime
-/// binding, budgets, process ownership and adoption remain Host concerns.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AdmittedStep {
-    /// The event that selects this step.
-    pub event: String,
-    /// The step identifier within its event.
-    pub step_id: String,
-    /// The named Provider in the desired configuration.
-    pub provider: String,
-    /// Structured Provider evaluation or uninterpreted native hook execution.
-    pub execution: StepExecution,
-    /// The Host action required when Provider execution fails.
-    pub on_error: String,
-    /// Event-level tool selectors; intersected with the step selectors.
-    pub event_tools: Vec<String>,
-    /// Step-level tool selectors; omitted configuration admits all tools.
-    pub step_tools: Vec<String>,
-}
-
-impl AdmittedStep {
-    /// Match a validated normalized event against both configured tool selectors.
-    ///
-    /// Standard selectors compare `tool.name`; exact native selectors compare the
-    /// Adapter ID and retained `tool.native_name`. No aliases or globs are inferred.
-    /// A mismatch still consumes the step and participates in ordered completion.
-    pub fn matches_tool(&self, event: &Value) -> bool {
-        let matches = |selectors: &[String]| {
-            selectors.iter().any(|selector| {
-                if selector == "*" {
-                    return true;
-                }
-                if let Some(native) = selector.strip_prefix("native:") {
-                    return native.split_once(':').is_some_and(|(adapter, name)| {
-                        event["agent"]["adapter"] == adapter && event["tool"]["native_name"] == name
-                    });
-                }
-                event["tool"]["name"] == *selector
-            })
-        };
-        matches(&self.event_tools) && matches(&self.step_tools)
-    }
-}
-
-/// Execution contract selected by the configured protocol or its documented default.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StepExecution {
-    /// Invoke a boolean command once; the Host projects configured effects.
-    Hook {
-        /// Effects to request when the command returns true.
-        effects: Vec<String>,
-        /// Optional configured explanation for a match.
-        reason_code: Option<String>,
-    },
-    /// Validate requests and candidate effects with aw-provider/v1alpha1.
-    Provider {
-        /// Operation declared by the Provider.
-        operation: String,
-        /// Requested effects checked against Provider and Adapter evidence.
-        effects: Vec<String>,
-    },
-    /// Preserve raw callback input, output and process status for the Adapter.
-    Native,
-}
-
-impl StepExecution {
-    /// Whether this structured step requests a model-visible text replacement.
-    pub fn replaces_result(&self) -> bool {
-        matches!(self, Self::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_result"))
-    }
-}
 
 /// Admits enabled event steps using explicit Provider and trusted Adapter evidence.
 ///
@@ -133,13 +23,22 @@ pub fn admit(
     target: &str,
     capabilities: &AdapterCapabilities,
     providers: &BTreeMap<String, ProviderEvidence>,
-) -> Result<Vec<AdmittedStep>, Error> {
+) -> Result<Vec<AdmittedStep>, AdmissionError> {
     let steps = preflight(config, target, capabilities)?;
+    admit_requirements(config, &steps, providers)?;
+    Ok(steps)
+}
+
+pub(super) fn admit_requirements(
+    config: &aw_config::Configuration,
+    steps: &[AdmittedStep],
+    providers: &BTreeMap<String, ProviderEvidence>,
+) -> Result<(), AdmissionError> {
     let spec = &config.as_value()["spec"];
-    for step in &steps {
+    for step in steps {
         check_provider(spec, step, providers)?;
     }
-    Ok(steps)
+    Ok(())
 }
 
 /// Checks enabled steps before the Host discovers or runs any Provider.
@@ -160,11 +59,11 @@ pub fn preflight(
     config: &aw_config::Configuration,
     target: &str,
     capabilities: &AdapterCapabilities,
-) -> Result<Vec<AdmittedStep>, Error> {
+) -> Result<Vec<AdmittedStep>, AdmissionError> {
     let spec = &config.as_value()["spec"];
     let agent = spec["agents"]
         .get(target)
-        .ok_or(Error::Invalid("unknown configured Agent target"))?;
+        .ok_or(AdmissionError::Rejected("unknown configured Agent target"))?;
     require(
         // Configuration is already validated against the catalog-aligned schema.
         agent["adapter"] == capabilities.adapter,
@@ -192,9 +91,9 @@ pub fn preflight(
         spec["execution"]["guarantee"] == "native_hook",
         "only native_hook execution can be admitted",
     )?;
-    let events = spec["events"]
-        .as_object()
-        .ok_or(Error::Invalid("configuration events must be an object"))?;
+    let events = spec["events"].as_object().ok_or(AdmissionError::Rejected(
+        "configuration events must be an object",
+    ))?;
     let mut candidates = Vec::new();
     for (event_name, event) in events {
         if event["enabled"] != true {
@@ -208,7 +107,7 @@ pub fn preflight(
         let mut has_enabled_steps = false;
         for step in event["steps"]
             .as_array()
-            .ok_or(Error::Invalid("event steps must be an array"))?
+            .ok_or(AdmissionError::Rejected("event steps must be an array"))?
         {
             if step["enabled"] == false {
                 continue;
@@ -228,7 +127,9 @@ pub fn preflight(
         let effects = capabilities
             .events
             .get(event_name)
-            .ok_or(Error::Invalid("Adapter evidence lacks an enabled event"))?;
+            .ok_or(AdmissionError::Rejected(
+                "Adapter evidence lacks an enabled event",
+            ))?;
         require(
             event.get("guard").is_none(),
             "event guards are not supported",
@@ -262,11 +163,11 @@ fn preflight_step(
     step: &Value,
     adapter_effects: &[String],
     capabilities: &AdapterCapabilities,
-) -> Result<AdmittedStep, Error> {
+) -> Result<AdmittedStep, AdmissionError> {
     let provider_name = string(&step["provider"])?;
     let provider = spec["providers"]
         .get(provider_name)
-        .ok_or(Error::Invalid("unknown configured Provider"))?;
+        .ok_or(AdmissionError::Rejected("unknown configured Provider"))?;
     let protocol = provider["protocol"]
         .as_str()
         .unwrap_or(aw_config::HOOK_PROTOCOL);
@@ -285,7 +186,7 @@ fn preflight_step(
         let mut effects = Vec::new();
         for effect in step["effects"]
             .as_array()
-            .ok_or(Error::Invalid("step effects must be an array"))?
+            .ok_or(AdmissionError::Rejected("step effects must be an array"))?
         {
             let effect = string(effect)?;
             require(
@@ -342,7 +243,7 @@ fn check_provider(
     spec: &Value,
     step: &AdmittedStep,
     providers: &BTreeMap<String, ProviderEvidence>,
-) -> Result<(), Error> {
+) -> Result<(), AdmissionError> {
     let StepExecution::Provider {
         operation: requested,
         effects,
@@ -352,17 +253,21 @@ fn check_provider(
     };
     let evidence = providers
         .get(&step.provider)
-        .ok_or(Error::Invalid("enabled step lacks Provider evidence"))?;
+        .ok_or(AdmissionError::Rejected(
+            "enabled step lacks Provider evidence",
+        ))?;
     require(
         evidence.configuration.as_value() == &spec["providers"][&step.provider]["config"],
         "Provider validation evidence does not match its private configuration",
     )?;
     let operation = evidence.description.as_value()["operations"]
         .as_array()
-        .ok_or(Error::Invalid("Provider description lacks operations"))?
+        .ok_or(AdmissionError::Rejected(
+            "Provider description lacks operations",
+        ))?
         .iter()
         .find(|operation| operation["name"] == *requested)
-        .ok_or(Error::Invalid(
+        .ok_or(AdmissionError::Rejected(
             "Provider does not declare the requested operation",
         ))?;
     require(
@@ -396,26 +301,26 @@ fn contains(value: &Value, expected: &str) -> bool {
         .is_some_and(|values| values.iter().any(|value| value == expected))
 }
 
-fn string(value: &Value) -> Result<&str, Error> {
-    value
-        .as_str()
-        .ok_or(Error::Invalid("configuration field must be a string"))
+pub(super) fn string(value: &Value) -> Result<&str, AdmissionError> {
+    value.as_str().ok_or(AdmissionError::Rejected(
+        "configuration field must be a string",
+    ))
 }
 
-fn require(condition: bool, reason: &'static str) -> Result<(), Error> {
+fn require(condition: bool, reason: &'static str) -> Result<(), AdmissionError> {
     if condition {
         Ok(())
     } else {
-        Err(Error::Invalid(reason))
+        Err(AdmissionError::Rejected(reason))
     }
 }
 
-fn tool_selectors(value: &Value) -> Result<Vec<String>, Error> {
+pub(super) fn tool_selectors(value: &Value) -> Result<Vec<String>, AdmissionError> {
     match value["match"].get("tools") {
         None => Ok(vec!["*".into()]),
         Some(tools) => tools
             .as_array()
-            .ok_or(Error::Invalid("tool selectors must be an array"))?
+            .ok_or(AdmissionError::Rejected("tool selectors must be an array"))?
             .iter()
             .map(|tool| string(tool).map(str::to_owned))
             .collect(),

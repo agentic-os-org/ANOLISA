@@ -7,8 +7,7 @@ use super::super::{
     },
     read_file, Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -462,7 +461,7 @@ mod tests {
 
     #[test]
     fn generated_profile_marks_only_the_admitted_replacement_step() {
-        use aw_provider::admission::StepExecution;
+        use aw_core::admission::StepExecution;
         let parent =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
         fs::create_dir_all(&parent).unwrap();

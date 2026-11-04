@@ -40,6 +40,19 @@ impl ValidatedConfig {
     }
 }
 
+/// Protocol-checked evidence supplied by the caller for one configured Provider.
+///
+/// The caller owns discovery and must associate both responses with the same
+/// configured Provider. These values do not establish process identity or prove
+/// that an Agent has installed a hook.
+#[derive(Clone)]
+pub struct ProviderEvidence {
+    /// The operations, events and effects declared by the Provider.
+    pub description: Description,
+    /// The exact private configuration accepted by that Provider.
+    pub configuration: ValidatedConfig,
+}
+
 /// Candidate effects from one invocation, never a receipt or adoption record.
 pub struct Outcome(Value);
 

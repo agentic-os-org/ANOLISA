@@ -2,8 +2,8 @@
 
 use super::tests::{deadline, Fixture};
 use super::*;
+use aw_core::admission::AdapterCapabilities;
 use aw_host::{Host, ProcessContext};
-use aw_provider::admission::AdapterCapabilities;
 use std::collections::BTreeMap;
 
 fn fixture() -> Fixture {

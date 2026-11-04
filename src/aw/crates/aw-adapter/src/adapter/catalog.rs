@@ -1,7 +1,7 @@
 //! Registered native dialects and the runtime capabilities admitted by their launchers.
 
 use super::Adapter;
-use aw_provider::admission::AdapterCapabilities as Capabilities;
+use aw_core::admission::AdapterCapabilities as Capabilities;
 
 pub(crate) struct Profile {
     pub name: &'static str,

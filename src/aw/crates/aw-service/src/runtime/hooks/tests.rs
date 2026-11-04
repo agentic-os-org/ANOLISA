@@ -3,8 +3,8 @@
 use super::*;
 
 use crate::runtime::{EventEntry, Instance};
+use aw_core::admission::AdapterCapabilities;
 use aw_host::{Host, ProcessContext};
-use aw_provider::admission::AdapterCapabilities;
 use std::{
     collections::BTreeMap,
     fs,

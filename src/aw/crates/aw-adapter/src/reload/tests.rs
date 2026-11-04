@@ -1,7 +1,7 @@
 //! Native policy updates retain scheduling and vetoes independently of service state.
 
 use super::*;
-use aw_provider::admission::StepExecution;
+use aw_core::admission::StepExecution;
 
 fn document(adapter: &str) -> Value {
     json!({"spec":{"agents":{"target":{"adapter":adapter}},"events":{},"execution":{"default_event_budget_ms":1000}}})
@@ -127,7 +127,7 @@ fn native_routes_use_only_the_targets_admitted_steps() {
         ]),
         failure_actions: BTreeMap::new(),
     };
-    let selected = aw_provider::admission::preflight(&config, "sdk", &capabilities).unwrap();
+    let selected = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
     let native = adapter::native_steps(&selected, "tool.after", false);
     assert_eq!(native.len(), 1);
     assert_eq!(native[0].step_id, "sdk");

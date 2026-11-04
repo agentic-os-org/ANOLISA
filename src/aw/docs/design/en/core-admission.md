@@ -4,11 +4,11 @@
 
 [Design index](README.md) · [Architecture](architecture.md)
 
-`aw_core::admission` provides a side-effect-free Hook policy admission API over
-one configuration snapshot. It binds configuration parsing, the exact-byte
+`aw_core::admission` owns Hook policy admission rules, admitted plan types and
+tool selector intersection. It binds configuration parsing, the exact-byte
 SHA-256 revision, the target Agent, trusted Adapter capabilities and admitted
-Hook steps into immutable Core types while keeping `aw_provider::admission` as
-the single rule implementation.
+Hook steps into immutable Core types while exposing pure rule helpers for
+callers that already hold a validated `aw_config::Configuration`.
 
 Production Hook preparation in `crates/aw-service/src/runtime.rs` and
 `crates/aw-host/src/lib.rs` runs through this API via the sequence
@@ -19,27 +19,33 @@ native Hook event execution continues along `Adapter → Service → Host → aw
 ## Admission stages and types
 
 `AdmissionEngine` compiles the bundled `aw-config` schema once and exposes two
-pure transitions:
+pure transitions alongside direct `Configuration` helpers:
 
 | Stage | Entry | Input | Output |
 | --- | --- | --- | --- |
-| Static preflight | `AdmissionEngine::preflight` | Raw configuration bytes, target name, trusted `AdapterCapabilities` | `PolicyCandidate` |
-| Evidence admission | `AdmissionEngine::admit` | Consumed `PolicyCandidate`, protocol-checked `BTreeMap<String, ProviderEvidence>` | `AdmittedPolicy` |
+| Static preflight | `AdmissionEngine::preflight` / `admission::preflight` | Raw configuration bytes (or validated `Configuration`), target name, trusted `AdapterCapabilities` | `PolicyCandidate` / `Vec<AdmittedStep>` |
+| Evidence admission | `AdmissionEngine::admit` / `admission::admit` | Consumed `PolicyCandidate` (or validated `Configuration`), protocol-checked `BTreeMap<String, ProviderEvidence>` | `AdmittedPolicy` / `Vec<AdmittedStep>` |
+| Selector projection | `admission::projected_out_steps` | Validated `Configuration`, target name | `Vec<ProjectedOutStep>` |
 
-`preflight` parses the input bytes with `aw_config::Validator`, computes the
-lowercase hexadecimal SHA-256 digest of those exact bytes, and delegates static
-target, event, effect, selector, transport and failure-action checks to
-`aw_provider::admission::preflight`. Semantically equal documents with different
-byte encodings keep distinct revisions, matching `aw-host::Host::revision`.
+`AdmissionEngine::preflight` parses the input bytes with `aw_config::Validator`,
+computes the lowercase hexadecimal SHA-256 digest of those exact bytes, and runs
+`admission::preflight` to validate target existence, event/effect support, tool
+selector intersections, transport protocols and failure actions. Semantically
+equal documents with different byte encodings keep distinct revisions, matching
+`aw-host::Host::revision`.
 
-`admit` consumes the `PolicyCandidate` by value so the validated
-`aw_config::Configuration`, revision, target and `AdapterCapabilities` remain
-bound to the same snapshot. It delegates Provider operation, event, effect and
-private-configuration checks to `aw_provider::admission::admit`. Steps using
+`AdmissionEngine::admit` consumes the `PolicyCandidate` by value so the
+validated `aw_config::Configuration`, revision, target and `AdapterCapabilities`
+remain bound to the same snapshot. It checks Provider operations, events,
+effects and private-configuration evidence against the preflighted
+`PolicyCandidate` requirements without repeating static preflight. Steps using
 `aw-hook/v1alpha1` or `native-hook/v1alpha1` require no `ProviderEvidence`
-entry.
+entry. `ProviderEvidence` remains in `aw-provider` as the protocol evidence
+carrier (`Description` and `ValidatedConfig`) and is re-exported by
+`aw_core::admission`.
 
-`AdmissionError` wraps `aw_config::Error` and `aw_provider::Error` without
+`AdmissionError` wraps `aw_config::Error` and carries
+`AdmissionError::Rejected` for Core-owned admission rule rejections without
 changing `aw_core::Error` used by `Core::prepare` and `Core::execute`.
 
 ## Invariants and runtime boundaries

@@ -1,8 +1,7 @@
 //! A deterministic consumer with real Provider transport and recorded native side effects.
 
 use aw_adapter::{select, NativeContext};
-use aw_host::{Host, Invocation, ProcessContext, StepOutput};
-use aw_provider::admission::AdapterCapabilities;
+use aw_host::{AdapterCapabilities, Host, Invocation, ProcessContext, StepOutput};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,

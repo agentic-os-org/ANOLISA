@@ -4,10 +4,8 @@ use crate::{
     check, identifier, positive, Error, Exchange, Failure, FailureAction, Host, Invocation, Method,
     StepOutput,
 };
-use aw_provider::{
-    admission::{AdmittedStep, StepExecution},
-    Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION,
-};
+use aw_core::admission::{AdmittedStep, StepExecution};
+use aw_provider::{Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -128,7 +126,11 @@ impl Host {
                 _ => {}
             }
         }
-        if crate::encode(&value)?.len() > MAX_MESSAGE_BYTES {
+        if serde_json::to_vec(&value)
+            .map_err(|_| Error::Invalid("event encoding failed"))?
+            .len()
+            > MAX_MESSAGE_BYTES
+        {
             return Err(Error::Invalid("event size limit"));
         }
         check(deadline, cancelled)?;

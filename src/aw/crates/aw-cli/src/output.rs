@@ -176,7 +176,7 @@ mod mutation;
 pub(crate) enum ValidationError {
     Io(std::io::Error),
     Configuration(aw_config::Error),
-    Projection(aw_provider::Error),
+    Projection(aw_core::admission::AdmissionError),
 }
 
 struct Failure {

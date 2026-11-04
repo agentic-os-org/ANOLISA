@@ -15,8 +15,8 @@ embedding application.
 | Layer | Responsibility |
 | --- | --- |
 | `aw-config` | Parse desired configuration and validate static references |
-| `aw-core::admission` | Produce immutable `PolicyCandidate` and `AdmittedPolicy` snapshots |
-| `aw-provider` | Check protocol messages, offline preflight and capability admission |
+| `aw-core::admission` | Validate offline preflight, capability admission and immutable `PolicyCandidate` / `AdmittedPolicy` snapshots |
+| `aw-provider` | Check protocol messages, Provider evidence and view contracts |
 | `aw-exec` | Execute literal commands with bounded byte transport and owned cleanup |
 | `aw-host` | Retain execution context, discover Providers and invoke admitted event steps |
 | Embedding Adapter | Supply trusted capabilities, normalize events, schedule steps and apply native effects |

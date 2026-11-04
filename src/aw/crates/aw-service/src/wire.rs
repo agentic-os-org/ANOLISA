@@ -1,6 +1,6 @@
 //! Versioned local control messages; native identities are data, not authentication.
 
-use aw_provider::admission::AdapterCapabilities;
+use aw_core::admission::AdapterCapabilities;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, ffi::OsString};

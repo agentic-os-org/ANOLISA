@@ -7,8 +7,7 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, time::Duration};
 
@@ -264,7 +263,7 @@ fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aw_provider::admission::StepExecution;
+    use aw_core::admission::StepExecution;
     use std::path::PathBuf;
 
     #[test]

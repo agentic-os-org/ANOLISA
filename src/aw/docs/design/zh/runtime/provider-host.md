@@ -13,8 +13,8 @@ Agent 启动、原生 Hook 安装、效果采用和审计持久化仍由接入�
 | 层 | 职责 |
 | --- | --- |
 | `aw-config` | 解析期望配置并校验静态引用 |
-| `aw-core::admission` | 生成不可变的 `PolicyCandidate` 与 `AdmittedPolicy` 快照 |
-| `aw-provider` | 检查协议消息、离线预检与能力准入 |
+| `aw-core::admission` | 执行离线预检、能力准入，并生成不可变的 `PolicyCandidate` 与 `AdmittedPolicy` 快照 |
+| `aw-provider` | 检查协议消息、Provider 证据与视图契约 |
 | `aw-exec` | 按字面参数执行命令，提供有界字节传输与所属进程清理 |
 | `aw-host` | 保留执行上下文，发现 Provider 并调用已准入的事件步骤 |
 | 接入 Adapter | 提供可信能力、归一化事件、调度步骤并应用原生效果 |

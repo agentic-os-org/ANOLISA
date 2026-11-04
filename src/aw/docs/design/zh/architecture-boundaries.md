@@ -17,10 +17,10 @@ ANOLISA/
 │   │   │   └── native/             # Python / JavaScript 桥接资产
 │   │   ├── aw-contracts/           # src/、schemas/、tests/
 │   │   ├── aw-config/              # 配置解析与静态校验
-│   │   ├── aw-provider/            # 通用 Provider 协议与能力准入
+│   │   ├── aw-provider/            # 通用 Provider 协议与视图契约
 │   │   ├── aw-exec/                # 有界进程执行
 │   │   ├── aw-host/                # Provider 准备与调用
-│   │   ├── aw-core/                # 计划执行 API 与 Journal
+│   │   ├── aw-core/                # Hook 策略准入、计划执行 API 与 Journal
 │   │   ├── aw-cli/                 # 统一 aw 命令入口
 │   │   ├── aw-service/             # 客户端、服务与运行状态
 │   │   └── aw-package/             # AW 扩展管理与配置编辑
