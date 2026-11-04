@@ -1002,6 +1002,19 @@ fn top_batch_option_variants_are_supported() {
 }
 
 #[test]
+fn sudo_option_like_tokens_with_multibyte_chars_do_not_panic() {
+    // The second character is multibyte, so a two-byte prefix slice would
+    // split it. The token falls through to the program position instead.
+    assert_eq!(memory_target_program("sudo -选项 free -m"), "-选项");
+    assert_eq!(memory_target_program("sudo -你 top -b -n1"), "-你");
+    assert_eq!(memory_target_program("sudo -é free -m"), "-é");
+    assert_eq!(memory_target_program("sudo -üx free -m"), "-üx");
+    // Attached-value short options keep their existing meaning.
+    assert_eq!(memory_target_program("sudo -uroot free -m"), "free");
+    assert_eq!(memory_target_program("sudo -gstaff top -b -n1"), "top");
+}
+
+#[test]
 fn env_wrapper_options_are_supported_fail_closed() {
     assert_eq!(
         memory_target_program("env -u LC_ALL LANG=C free -m"),

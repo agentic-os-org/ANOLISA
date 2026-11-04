@@ -239,7 +239,14 @@ pub(in crate::hooks::linux_memory) fn is_sudo_option_token(
     {
         return true;
     }
-    if token.len() > 2 && matches!(&token[..2], "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+    // Attached-value short options (`-uroot`). Compare whole ASCII prefixes:
+    // slicing the first two bytes panics when the second character is
+    // multibyte, and every memory-hook command parse runs this predicate.
+    if token.len() > 2
+        && ["-u", "-g", "-h", "-p", "-C", "-T"]
+            .iter()
+            .any(|opt| token.starts_with(opt))
+    {
         return true;
     }
     token
