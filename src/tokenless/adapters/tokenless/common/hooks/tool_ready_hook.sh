@@ -117,15 +117,15 @@ SPEC_FILE=""
 for candidate in \
     "${TOKENLESS_TOOL_READY_SPEC:-}" \
     "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tool-ready-spec.json}" \
-    "${USER_DATA:+$USER_DATA/tokenless/adapters/common/tool-ready-spec.json}" \
+    "${SCRIPT_DIR}/../tool-ready-spec.json" \
     "${USER_DATA:+$USER_DATA/anolisa/adapters/tokenless/common/tool-ready-spec.json}" \
-    "/usr/local/share/tokenless/adapters/common/tool-ready-spec.json" \
-    "/usr/share/tokenless/adapters/common/tool-ready-spec.json" \
     "${USER_HOME:+$USER_HOME/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json}" \
     "/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
     "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
-    "${USER_HOME:+$USER_HOME/.tokenless/tool-ready-spec.json}" \
-    "${SCRIPT_DIR}/../tool-ready-spec.json"; do
+    "${USER_DATA:+$USER_DATA/tokenless/adapters/common/tool-ready-spec.json}" \
+    "/usr/local/share/tokenless/adapters/common/tool-ready-spec.json" \
+    "/usr/share/tokenless/adapters/common/tool-ready-spec.json" \
+    "${USER_HOME:+$USER_HOME/.tokenless/tool-ready-spec.json}"; do
     if [ -n "$candidate" ] && is_trusted_file "$candidate"; then
         SPEC_FILE="$candidate"
         break
@@ -138,15 +138,15 @@ FIX_SCRIPT=""
 for candidate in \
     "${TOKENLESS_ENV_FIX_SCRIPT:-}" \
     "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tokenless-env-fix.sh}" \
-    "${USER_DATA:+$USER_DATA/tokenless/adapters/common/tokenless-env-fix.sh}" \
+    "${SCRIPT_DIR}/../tokenless-env-fix.sh" \
     "${USER_DATA:+$USER_DATA/anolisa/adapters/tokenless/common/tokenless-env-fix.sh}" \
-    "/usr/local/share/tokenless/adapters/common/tokenless-env-fix.sh" \
-    "/usr/share/tokenless/adapters/common/tokenless-env-fix.sh" \
     "${USER_HOME:+$USER_HOME/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh}" \
     "/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
     "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
-    "${USER_HOME:+$USER_HOME/.tokenless/tokenless-env-fix.sh}" \
-    "${SCRIPT_DIR}/../tokenless-env-fix.sh"; do
+    "${USER_DATA:+$USER_DATA/tokenless/adapters/common/tokenless-env-fix.sh}" \
+    "/usr/local/share/tokenless/adapters/common/tokenless-env-fix.sh" \
+    "/usr/share/tokenless/adapters/common/tokenless-env-fix.sh" \
+    "${USER_HOME:+$USER_HOME/.tokenless/tokenless-env-fix.sh}"; do
     if [ -n "$candidate" ] && [ -r "$candidate" ] && is_trusted_file "$candidate"; then
         FIX_SCRIPT="$candidate"
         break

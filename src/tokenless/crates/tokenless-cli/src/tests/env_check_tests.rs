@@ -240,7 +240,12 @@ fn version_ge_patch_comparison() {
 #[test]
 fn binary_fallback_paths_cover_supported_installers() {
     let paths = binary_fallback_paths("jq", "/home/alice");
-    let expected = ["/home/alice/.local/bin/jq", "/usr/local/bin/jq", "/usr/bin/jq"].map(PathBuf::from);
+    let expected = [
+        "/home/alice/.local/bin/jq",
+        "/usr/local/bin/jq",
+        "/usr/bin/jq",
+    ]
+    .map(PathBuf::from);
     assert_eq!(paths, expected);
 }
 
@@ -918,6 +923,7 @@ fn spec_path_candidates_ordered_correctly() {
     let _guard = EnvGuard::set_spec("/custom/spec.json");
     let c = spec_path_candidates();
     assert_eq!(c[0], "/custom/spec.json");
+    assert_namespaced_resources_precede_independent(&c);
     assert!(
         c.iter()
             .any(|path| path == "/usr/local/share/tokenless/adapters/common/tool-ready-spec.json")
@@ -950,11 +956,42 @@ fn spec_path_candidates_ordered_correctly() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn custom_adapter_root_precedes_compatibility_resources() {
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = directory.path().join("vendor/adapters/tokenless");
+    let common = adapter.join("common");
+    std::fs::create_dir_all(&common).unwrap();
+    let spec = common.join("tool-ready-spec.json");
+    let fixer = common.join("tokenless-env-fix.sh");
+    std::fs::write(&spec, "{}").unwrap();
+    std::fs::write(&fixer, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut guard = EnvGuard::set("ANOLISA_ADAPTER_DIR", adapter.to_str().unwrap());
+    for key in ["TOKENLESS_TOOL_READY_SPEC", "TOKENLESS_ENV_FIX_SCRIPT"] {
+        guard.previous.push((key, std::env::var_os(key)));
+        unsafe { std::env::remove_var(key) };
+    }
+
+    assert_eq!(find_spec_path().unwrap(), spec);
+    assert_eq!(
+        fix_script_candidates()[0],
+        fixer.to_string_lossy().into_owned()
+    );
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&spec, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(!is_trusted_path(&spec));
+    assert_ne!(find_spec_path().ok(), Some(spec));
+}
+
 #[test]
 fn fix_script_candidates_ordered_correctly() {
     // Pure-function check: covers the auto_fix candidate list to prevent
     // the two lists (spec + fix script) from drifting apart.
+    let _guard = EnvGuard::set("TOKENLESS_ENV_FIX_SCRIPT", "/custom/fix.sh");
     let c = fix_script_candidates();
+    assert_eq!(c[0], "/custom/fix.sh");
+    assert_namespaced_resources_precede_independent(&c);
 
     assert!(
         c.iter().any(|p| p
@@ -978,6 +1015,21 @@ fn fix_script_candidates_ordered_correctly() {
     assert!(
         fhs_local < legacy_local,
         "FHS /usr/local must come before legacy /usr/local"
+    );
+}
+
+fn assert_namespaced_resources_precede_independent(candidates: &[String]) {
+    let last_namespaced = candidates
+        .iter()
+        .rposition(|path| path.contains("/anolisa/adapters/tokenless/common/"))
+        .unwrap();
+    let first_independent = candidates
+        .iter()
+        .position(|path| path.contains("/tokenless/adapters/common/"))
+        .unwrap();
+    assert!(
+        last_namespaced < first_independent,
+        "namespaced resources must precede retained independent installs: {candidates:?}"
     );
 }
 

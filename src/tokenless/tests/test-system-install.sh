@@ -29,25 +29,25 @@ layout() {
     env -u AWPRJ -u PREFIX -u INSTALL_PROFILE make -s -C "$ROOT" layout "$@"
 }
 default_layout="$(layout INSTALL_PROFILE=system)"
-grep -Fxq 'AWPRJ=' <<< "$default_layout"
-grep -Fxq 'LIBEXECDIR=/usr/local/libexec/tokenless' <<< "$default_layout"
-grep -Fxq 'DATADIR=/usr/local/share/tokenless' <<< "$default_layout"
-grep -Fxq 'ADAPTERDIR=/usr/local/share/tokenless/adapters' <<< "$default_layout"
-grep -Fxq 'EXTENSIONDIR=/usr/local/share/tokenless/cosh-extension' <<< "$default_layout"
-distribution_layout="$(layout INSTALL_PROFILE=system AWPRJ=anolisa PREFIX=/opt/vendor/)"
-grep -Fxq 'LIBEXECDIR=/opt/vendor/libexec/anolisa/tokenless' <<< "$distribution_layout"
-grep -Fxq 'ADAPTERDIR=/opt/vendor/share/anolisa/adapters/tokenless' <<< "$distribution_layout"
-grep -Fxq 'EXTENSIONDIR=/opt/vendor/share/anolisa/extensions/tokenless' <<< "$distribution_layout"
+grep -Fxq 'AWPRJ=anolisa' <<< "$default_layout"
+grep -Fxq 'LIBEXECDIR=/usr/local/libexec/anolisa/tokenless' <<< "$default_layout"
+grep -Fxq 'DATADIR=/usr/local/share/anolisa/tokenless' <<< "$default_layout"
+grep -Fxq 'ADAPTERDIR=/usr/local/share/anolisa/adapters/tokenless' <<< "$default_layout"
+grep -Fxq 'EXTENSIONDIR=/usr/local/share/anolisa/extensions/tokenless' <<< "$default_layout"
+distribution_layout="$(layout INSTALL_PROFILE=system AWPRJ=vendor PREFIX=/opt/vendor/)"
+grep -Fxq 'LIBEXECDIR=/opt/vendor/libexec/vendor/tokenless' <<< "$distribution_layout"
+grep -Fxq 'ADAPTERDIR=/opt/vendor/share/vendor/adapters/tokenless' <<< "$distribution_layout"
+grep -Fxq 'EXTENSIONDIR=/opt/vendor/share/vendor/extensions/tokenless' <<< "$distribution_layout"
 data_override_layout="$(layout INSTALL_PROFILE=system AWPRJ=anolisa DATADIR=/custom/data)"
 grep -Fxq 'ADAPTERDIR=/custom/data/adapters' <<< "$data_override_layout"
 grep -Fxq 'EXTENSIONDIR=/custom/data/cosh-extension' <<< "$data_override_layout"
 mkdir -p "$TMP/user-home"
 user_layout="$(HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" layout INSTALL_PROFILE=user)"
 grep -Fxq "PREFIX=$TMP/user-home/.local" <<< "$user_layout"
-grep -Fxq "LIBEXECDIR=$TMP/user-home/.local/libexec/tokenless" <<< "$user_layout"
-grep -Fxq "DATADIR=$TMP/xdg-data/tokenless" <<< "$user_layout"
+grep -Fxq "LIBEXECDIR=$TMP/user-home/.local/libexec/anolisa/tokenless" <<< "$user_layout"
+grep -Fxq "DATADIR=$TMP/xdg-data/anolisa/tokenless" <<< "$user_layout"
 fallback_layout="$(HOME="$TMP/user-home" XDG_DATA_HOME= layout INSTALL_PROFILE=user)"
-grep -Fxq "DATADIR=$TMP/user-home/.local/share/tokenless" <<< "$fallback_layout"
+grep -Fxq "DATADIR=$TMP/user-home/.local/share/anolisa/tokenless" <<< "$fallback_layout"
 XDG_DATA_HOME=relative layout INSTALL_PROFILE=system PREFIX=/usr >/dev/null
 if HOME="$TMP/user-home" XDG_DATA_HOME=relative layout INSTALL_PROFILE=user >/dev/null 2>&1; then
     printf 'ERROR: relative XDG data root accepted\n' >&2; exit 1
@@ -79,23 +79,24 @@ for uid in 0 1001; do
     if [ "$uid" = 0 ]; then
         grep -Fxq 'INSTALL_PROFILE=system' <<< "$detected"
         grep -Fxq 'PREFIX=/usr/local' <<< "$detected"
-        grep -Fxq 'DATADIR=/usr/local/share/tokenless' <<< "$detected"
+        grep -Fxq 'DATADIR=/usr/local/share/anolisa/tokenless' <<< "$detected"
     else
         grep -Fxq 'INSTALL_PROFILE=user' <<< "$detected"
         grep -Fxq "PREFIX=$TMP/user-home/.local" <<< "$detected"
-        grep -Fxq "DATADIR=$TMP/xdg-data/tokenless" <<< "$detected"
+        grep -Fxq "DATADIR=$TMP/xdg-data/anolisa/tokenless" <<< "$detected"
     fi
     system_override="$(PATH="$UID_TOOLS:$PATH" DELIVERY_TEST_UID="$uid" XDG_DATA_HOME=relative layout INSTALL_PROFILE=system PREFIX=/usr)"
-    grep -Fxq 'DATADIR=/usr/share/tokenless' <<< "$system_override"
+    grep -Fxq 'DATADIR=/usr/share/anolisa/tokenless' <<< "$system_override"
     user_override="$(PATH="$UID_TOOLS:$PATH" DELIVERY_TEST_UID="$uid" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" layout INSTALL_PROFILE=user PREFIX=/opt/programs)"
     grep -Fxq 'PREFIX=/opt/programs' <<< "$user_override"
-    grep -Fxq "DATADIR=$TMP/xdg-data/tokenless" <<< "$user_override"
+    grep -Fxq "DATADIR=$TMP/xdg-data/anolisa/tokenless" <<< "$user_override"
     direct_layout="$(env -u INSTALL_PROFILE -u PREFIX -u AWPRJ PATH="$UID_TOOLS:$PATH" DELIVERY_TEST_UID="$uid" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" bash "$ROOT/packaging/install.sh" --print-layout)"
     test "$direct_layout" = "$detected"
 done
 
-# Explicit system staging ignores user XDG roots.
-export INSTALL_PROFILE=system PREFIX=/usr
+# Most fixtures retain the independent layout explicitly; default-namespace
+# cases below unset AWPRJ. System staging also ignores user XDG roots.
+export INSTALL_PROFILE=system PREFIX=/usr AWPRJ=
 SOURCE="$TMP/source"
 ADAPTERS="$SOURCE/adapters/tokenless"
 mkdir -p "$SOURCE" "$TMP/bin" "$ADAPTERS/common/hooks" "$ADAPTERS/common/commands" \
@@ -171,12 +172,147 @@ mkdir -p "$TMP/direct/libexec/tokenless"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/direct/libexec/tokenless/rtk"
 chmod 0755 "$TMP/direct/libexec/tokenless/rtk"
 ln -s "$TMP/direct/libexec/tokenless/rtk" "$TMP/direct/bin/rtk"
+# The explicit old default still upgrades unmarked pre-namespace installs.
+rm "$TMP/direct/share/tokenless/adapters/.tokenless-owner" "$TMP/direct/share/tokenless/cosh-extension/.tokenless-owner"
 make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/direct"
+grep -Fxq source-install:tokenless "$TMP/direct/share/tokenless/adapters/.tokenless-owner"
 test ! -L "$TMP/direct/bin/rtk"
 test ! -e "$TMP/direct/libexec/tokenless"
-make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/namespaced" AWPRJ=anolisa
+# A role override must not claim an unmarked tree, even at the old default path.
+mkdir -p "$TMP/legacy-override/share/tokenless/adapters"
+printf 'keep\n' > "$TMP/legacy-override/share/tokenless/adapters/foreign"
+if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/legacy-override" \
+    ADAPTERDIR="$TMP/legacy-override/share/tokenless/adapters" >/dev/null 2>&1; then
+    printf 'ERROR: unmarked role override accepted\n' >&2; exit 1
+fi
+test ! -e "$TMP/legacy-override/bin/tokenless"
+# Foreign markers also override the legacy exception.
+printf 'npm:foreign\n' > "$TMP/legacy-override/share/tokenless/adapters/.tokenless-owner"
+if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/legacy-override" >/dev/null 2>&1; then
+    printf 'ERROR: foreign legacy resources overwritten\n' >&2; exit 1
+fi
+make -s -C "$SOURCE" uninstall PREFIX="$TMP/legacy-override" >/dev/null 2>&1
+test "$(cat "$TMP/legacy-override/share/tokenless/adapters/foreign")" = keep
+env -u AWPRJ make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/namespaced"
 test ! -e "$TMP/namespaced/libexec"
 test -f "$TMP/namespaced/share/anolisa/adapters/tokenless/manifest.json"
+grep -Fxq source-install:tokenless "$TMP/namespaced/share/anolisa/adapters/tokenless/.tokenless-owner"
+grep -Fxq source-install:tokenless "$TMP/namespaced/share/anolisa/extensions/tokenless/.tokenless-owner"
+# A later managed installation takes precedence over any retained source marker.
+mkdir -p "$TMP/namespaced/share/anolisa/components/tokenless"
+printf 'managed\n' > "$TMP/namespaced/share/anolisa/components/tokenless/component.toml"
+if env -u AWPRJ make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/namespaced" >/dev/null 2>&1; then
+    printf 'ERROR: managed resources overwritten despite component contract\n' >&2; exit 1
+fi
+env -u AWPRJ make -s -C "$SOURCE" uninstall PREFIX="$TMP/namespaced" >/dev/null 2>&1
+test -f "$TMP/namespaced/share/anolisa/adapters/tokenless/manifest.json"
+test -f "$TMP/namespaced/share/anolisa/extensions/tokenless/cosh-extension.json"
+env -u AWPRJ make -s -C "$SOURCE" uninstall PREFIX="$TMP/namespaced" \
+    ADAPTERDIR="$TMP/namespaced/share/anolisa/adapters/tokenless///" \
+    EXTENSIONDIR="$TMP/namespaced/share/anolisa/extensions/tokenless/" >/dev/null 2>&1
+test -f "$TMP/namespaced/share/anolisa/adapters/tokenless/manifest.json"
+test -f "$TMP/namespaced/share/anolisa/extensions/tokenless/cosh-extension.json"
+rm "$TMP/namespaced/share/anolisa/components/tokenless/component.toml"
+env -u AWPRJ make -s -C "$SOURCE" uninstall PREFIX="$TMP/namespaced"
+test ! -e "$TMP/namespaced/share/anolisa/adapters/tokenless"
+test ! -e "$TMP/namespaced/share/anolisa/extensions/tokenless"
+
+# Older managed releases own both the standalone helper and its public link.
+for target in install-core uninstall; do
+    for layout_kind in default independent; do
+        managed="$TMP/managed-helpers-$target-$layout_kind"
+        managed_rtk=/usr/local/libexec/anolisa/tokenless/rtk
+        managed_record="$managed/usr/local/share/anolisa/components/tokenless"
+        mkdir -p "$managed/usr/local/bin" "$managed_record" "$(dirname "$managed$managed_rtk")"
+        printf 'managed\n' > "$managed_record/component.toml"
+        printf 'managed rtk\n' > "$managed$managed_rtk"
+        managed_link="$managed_rtk"
+        args=(BIN_DIR="$TMP/bin" DESTDIR="$managed" INSTALL_PROFILE=system PREFIX=/usr/local)
+        if [ "$layout_kind" = independent ]; then
+            args+=(AWPRJ=)
+            managed_link=../libexec/anolisa/tokenless/rtk
+            mkdir -p "$managed/usr/local/libexec/tokenless"
+            printf 'stale rtk\n' > "$managed/usr/local/libexec/tokenless/rtk"
+        fi
+        ln -s "$managed_link" "$managed/usr/local/bin/rtk"
+        env -u AWPRJ make -s -C "$SOURCE" "$target" "${args[@]}"
+        test "$(cat "$managed$managed_rtk")" = 'managed rtk'
+        test "$(readlink "$managed/usr/local/bin/rtk")" = "$managed_link"
+        test ! -e "$managed/usr/local/libexec/tokenless"
+    done
+done
+
+# Managed user helpers use the lib tree and a separately resolved data root.
+user_prefix="$TMP/user-home/.local"
+for target in install-core uninstall; do
+    for xdg_data_home in '' "$TMP/xdg-data"; do
+        managed="$TMP/managed-user-helpers-$target${xdg_data_home:+-xdg}"
+        managed_bin="$managed$user_prefix/bin"
+        managed_helpers="$managed$user_prefix/lib/anolisa/libexec/tokenless"
+        stale_helpers="$managed$user_prefix/libexec/anolisa/tokenless"
+        managed_record="$managed${xdg_data_home:-$user_prefix/share}/anolisa/components/tokenless"
+        mkdir -p "$managed_bin" "$managed_helpers" "$stale_helpers" "$managed_record"
+        printf 'managed\n' > "$managed_record/component.toml"
+        for helper in rtk toon; do
+            printf 'managed %s\n' "$helper" > "$managed_helpers/$helper"
+            printf 'stale %s\n' "$helper" > "$stale_helpers/$helper"
+            ln -s "../lib/anolisa/libexec/tokenless/$helper" "$managed_bin/$helper"
+        done
+        env -u AWPRJ -u PREFIX make -s -C "$SOURCE" "$target" \
+            BIN_DIR="$TMP/bin" DESTDIR="$managed" INSTALL_PROFILE=user \
+            HOME="$TMP/user-home" XDG_DATA_HOME="$xdg_data_home"
+        test ! -e "$stale_helpers"
+        for helper in rtk toon; do
+            test "$(cat "$managed_helpers/$helper")" = "managed $helper"
+            test "$(readlink "$managed_bin/$helper")" = "../lib/anolisa/libexec/tokenless/$helper"
+        done
+    done
+done
+
+# A link that escapes DESTDIR must not use a component record outside the stage.
+outside="$TMP/outside-stage"
+mkdir -p "$outside/libexec/anolisa/tokenless" "$outside/share/anolisa/components/tokenless"
+printf 'outside\n' > "$outside/libexec/anolisa/tokenless/rtk"
+printf 'managed\n' > "$outside/share/anolisa/components/tokenless/component.toml"
+for target in install-core uninstall; do
+    stage="$TMP/escaping-helper-$target"
+    mkdir -p "$stage/usr/local/bin"
+    ln -s ../../../../outside-stage/libexec/anolisa/tokenless/rtk "$stage/usr/local/bin/rtk"
+    env -u AWPRJ make -s -C "$SOURCE" "$target" \
+        BIN_DIR="$TMP/bin" DESTDIR="$stage" INSTALL_PROFILE=system PREFIX=/usr/local
+    test ! -L "$stage/usr/local/bin/rtk"
+    test "$(cat "$outside/libexec/anolisa/tokenless/rtk")" = outside
+done
+
+# Foreign and unmarked shared trees must survive both install and uninstall.
+for owner in unmarked npm:anolisa-tokenless@test curl-installer:test; do
+    foreign="$TMP/foreign-${owner%%:*}"
+    for directory in adapters extensions; do
+        mkdir -p "$foreign/share/anolisa/$directory/tokenless"
+        printf 'keep\n' > "$foreign/share/anolisa/$directory/tokenless/foreign"
+        if [ "$owner" != unmarked ]; then
+            printf '%s\n' "$owner" > "$foreign/share/anolisa/$directory/tokenless/.tokenless-owner"
+        fi
+    done
+    if env -u AWPRJ make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$foreign" >"$TMP/foreign-error" 2>&1; then
+        printf 'ERROR: foreign resources overwritten\n' >&2; exit 1
+    fi
+    grep -Fq 'without source-install ownership' "$TMP/foreign-error"
+    test ! -e "$foreign/bin/tokenless"
+    env -u AWPRJ make -s -C "$SOURCE" uninstall PREFIX="$foreign" >"$TMP/foreign-warning" 2>&1
+    grep -Fq 'preserving resources' "$TMP/foreign-warning"
+    for directory in adapters extensions; do
+        test "$(cat "$foreign/share/anolisa/$directory/tokenless/foreign")" = keep
+    done
+done
+# An extension conflict must also fail before creating any adapter or core file.
+mkdir -p "$TMP/foreign-extension/share/anolisa/extensions/tokenless"
+printf 'keep\n' > "$TMP/foreign-extension/share/anolisa/extensions/tokenless/foreign"
+if env -u AWPRJ make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/foreign-extension" >/dev/null 2>&1; then
+    printf 'ERROR: foreign extension overwritten\n' >&2; exit 1
+fi
+test ! -e "$TMP/foreign-extension/share/anolisa/adapters/tokenless"
+test ! -e "$TMP/foreign-extension/bin/tokenless"
 
 # Registration and uninstall follow the same resolved paths as file installation.
 make -s -C "$SOURCE" adapter-scan PREFIX="$TMP/direct" | grep -Fq 'component: tokenless vtest'
@@ -186,6 +322,8 @@ test -f "$TMP/cosh host/tokenless/cosh-extension.json"
 make -s -C "$SOURCE" cosh-extension-uninstall PREFIX="$TMP/direct" \
     COSH_EXTENSION_DIR="$TMP/cosh host/tokenless"
 test ! -e "$TMP/cosh host/tokenless"
+# Legacy unmarked trees can still be removed using explicit AWPRJ=.
+rm "$TMP/direct/share/tokenless/adapters/.tokenless-owner" "$TMP/direct/share/tokenless/cosh-extension/.tokenless-owner"
 make -s -C "$SOURCE" uninstall PREFIX="$TMP/direct"
 test ! -e "$TMP/direct/bin/tokenless"
 test ! -e "$TMP/direct/bin/rtk"
@@ -251,12 +389,25 @@ HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data" make -s -C "$SOURCE" uninst
 test ! -e "$TMP/user-prefix/bin/tokenless"
 test ! -e "$TMP/user-data/tokenless/adapters"
 test ! -e "$TMP/user-data/tokenless/cosh-extension"
+env -u AWPRJ make -s -C "$SOURCE" install INSTALL_PROFILE=user PREFIX="$TMP/user-prefix" \
+    BIN_DIR="$TMP/bin" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data"
+test -f "$TMP/user-data/anolisa/adapters/tokenless/manifest.json"
+test -f "$TMP/user-data/anolisa/extensions/tokenless/cosh-extension.json"
+env -u AWPRJ make -s -C "$SOURCE" uninstall INSTALL_PROFILE=user PREFIX="$TMP/user-prefix" \
+    HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/user-data"
+test ! -e "$TMP/user-prefix/bin/tokenless"
+test ! -e "$TMP/user-data/anolisa/adapters/tokenless"
+test ! -e "$TMP/user-data/anolisa/extensions/tokenless"
 mv "$ADAPTERS/openclaw/dist/index.js" "$TMP/group-plugin.saved"
 make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" DESTDIR="$TMP/core-only"
 test -x "$TMP/core-only/usr/bin/tokenless"
 test ! -e "$TMP/core-only/usr/libexec"
 test ! -e "$TMP/core-only/usr/share/tokenless/adapters"
 test ! -e "$TMP/core-only/usr/share/tokenless/cosh-extension"
+env -u AWPRJ make -s -C "$SOURCE" install-core BIN_DIR="$TMP/bin" DESTDIR="$TMP/core-default"
+test -x "$TMP/core-default/usr/bin/tokenless"
+test ! -e "$TMP/core-default/usr/share/anolisa/adapters/tokenless"
+test ! -e "$TMP/core-default/usr/share/anolisa/extensions/tokenless"
 mv "$TMP/group-plugin.saved" "$ADAPTERS/openclaw/dist/index.js"
 mv "$TMP/bin" "$TMP/group-binaries.saved"
 make -s -C "$SOURCE" install-plugins BIN_DIR="$TMP/bin" DESTDIR="$TMP/plugins-only"
@@ -295,11 +446,26 @@ for destination in "$TMP/link" "$TMP/link/child" "$TMP/../escape" relative / //;
         printf 'ERROR: unsafe staging root accepted: %s\n' "$destination" >&2; exit 1
     fi
 done
-mkdir -p "$TMP/unsafe/usr/share/tokenless/adapters"
-ln -s "$TMP/outside" "$TMP/unsafe/usr/share/tokenless/adapters/common"
-if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/unsafe" >/dev/null 2>&1; then
-    printf 'ERROR: symbolic link in target tree accepted\n' >&2; exit 1
-fi
+for namespace in '' anolisa; do
+    unsafe_adapterdir="$(layout INSTALL_PROFILE=system PREFIX=/usr AWPRJ="$namespace" | sed -n 's/^ADAPTERDIR=//p')"
+    unsafe="$TMP/unsafe-${namespace:-independent}"
+    mkdir -p "$unsafe$unsafe_adapterdir"
+    ln -s "$TMP/outside" "$unsafe$unsafe_adapterdir/common"
+    if make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$unsafe" AWPRJ="$namespace" >/dev/null 2>&1; then
+        printf 'ERROR: symbolic link in target tree accepted\n' >&2; exit 1
+    fi
+done
+# Ownership checks must not follow a marker supplied as a symbolic link.
+marker_dir="$TMP/unsafe-marker/usr/share/anolisa/adapters/tokenless"
+mkdir -p "$marker_dir"
+printf 'keep\n' > "$TMP/marker-outside"
+ln -s "$TMP/marker-outside" "$marker_dir/.tokenless-owner"
+for target in install uninstall; do
+    if env -u AWPRJ make -s -C "$SOURCE" "$target" BIN_DIR="$TMP/bin" DESTDIR="$TMP/unsafe-marker" >/dev/null 2>&1; then
+        printf 'ERROR: symbolic ownership marker accepted\n' >&2; exit 1
+    fi
+done
+test "$(cat "$TMP/marker-outside")" = keep
 test -z "$(find "$TMP/outside" -mindepth 1 -print -quit)"
 mkdir -p "$TMP/shared/usr/bin" "$TMP/shared/other-component"
 ln -s "$TMP/outside" "$TMP/shared/other-component/runtime"
@@ -406,7 +572,7 @@ if root.name == "tokenless":
         assert result.returncode == 0, result.stderr
         assert f"LEGACY=user|{Path.home()}/.local|anolisa" in result.stdout, result.stdout
         data = "/usr/local/share" if os.geteuid() == 0 else (env.get("XDG_DATA_HOME") or str(Path.home() / ".local/share"))
-        assert f"DATADIR={data}/tokenless" in result.stdout, result.stdout
+        assert f"DATADIR={data}/anolisa/tokenless" in result.stdout, result.stdout
         assert "DEFAULT=all" in result.stdout
     assert not log.exists()
 PYROOT

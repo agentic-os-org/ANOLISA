@@ -69,4 +69,44 @@ HOME="$TEST_DIR" XDG_DATA_HOME="$USER_DATA" ANOLISA_ADAPTER_DIR= \
     assert_resource_paths "$USER_DATA/tokenless/adapters/common/tool-ready-spec.json" \
         "$USER_DATA/tokenless/adapters/common/tokenless-env-fix.sh"
 
+# A retained independent install must not shadow the new default namespace.
+NAMESPACED_COMMON="$USER_DATA/anolisa/adapters/tokenless/common"
+mkdir -p "$NAMESPACED_COMMON"
+cp "$SPEC" "$NAMESPACED_COMMON/tool-ready-spec.json"
+cp "$FIXER" "$NAMESPACED_COMMON/tokenless-env-fix.sh"
+HOME="$TEST_DIR" XDG_DATA_HOME="$USER_DATA" ANOLISA_ADAPTER_DIR= \
+    TOKENLESS_TOOL_READY_SPEC= TOKENLESS_ENV_FIX_SCRIPT= \
+    assert_resource_paths "$NAMESPACED_COMMON/tool-ready-spec.json" \
+        "$NAMESPACED_COMMON/tokenless-env-fix.sh"
+
+# Both adapter and extension hooks carry their resources next to their own tree.
+for relative in adapters/tokenless/common extensions/tokenless; do
+    local_resources="$TEST_DIR/custom-prefix/share/vendor/$relative"
+    mkdir -p "$local_resources/hooks"
+    cp "$RESOLVER" "$local_resources/hooks/resolve-paths.sh"
+    cp "$SPEC" "$local_resources/tool-ready-spec.json"
+    cp "$FIXER" "$local_resources/tokenless-env-fix.sh"
+
+    HOME="$TEST_DIR" XDG_DATA_HOME="$USER_DATA" ANOLISA_ADAPTER_DIR= \
+        TOKENLESS_TOOL_READY_SPEC= TOKENLESS_ENV_FIX_SCRIPT= \
+        RESOLVER="$local_resources/hooks/resolve-paths.sh" \
+        assert_resource_paths "$local_resources/hooks/../tool-ready-spec.json" \
+            "$local_resources/hooks/../tokenless-env-fix.sh"
+    HOME="$TEST_DIR" XDG_DATA_HOME="$USER_DATA" ANOLISA_ADAPTER_DIR="$ADAPTERS" \
+        TOKENLESS_TOOL_READY_SPEC= TOKENLESS_ENV_FIX_SCRIPT= \
+        RESOLVER="$local_resources/hooks/resolve-paths.sh" \
+        assert_resource_paths "$ADAPTERS/common/tool-ready-spec.json" "$ADAPTERS/common/tokenless-env-fix.sh"
+    HOME="$TEST_DIR" XDG_DATA_HOME="$USER_DATA" ANOLISA_ADAPTER_DIR="$ADAPTERS" \
+        TOKENLESS_TOOL_READY_SPEC="$SPEC" TOKENLESS_ENV_FIX_SCRIPT="$FIXER" \
+        RESOLVER="$local_resources/hooks/resolve-paths.sh" \
+        assert_resource_paths "$SPEC" "$FIXER"
+
+    chmod 0666 "$local_resources/tool-ready-spec.json" "$local_resources/tokenless-env-fix.sh"
+    HOME="$TEST_DIR" XDG_DATA_HOME="$USER_DATA" ANOLISA_ADAPTER_DIR= \
+        TOKENLESS_TOOL_READY_SPEC= TOKENLESS_ENV_FIX_SCRIPT= \
+        RESOLVER="$local_resources/hooks/resolve-paths.sh" \
+        assert_resource_paths "$NAMESPACED_COMMON/tool-ready-spec.json" \
+            "$NAMESPACED_COMMON/tokenless-env-fix.sh"
+done
+
 echo "tool-ready resource precedence test passed"

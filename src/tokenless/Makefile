@@ -731,7 +731,7 @@ help:
 	@echo ""
 	@echo "Variables:"
 	@echo "  INSTALL_PROFILE  UID selects system/user by default; explicit values override"
-	@echo "  AWPRJ            Optional install namespace (default: empty)"
+	@echo "  AWPRJ            Install namespace (default: anolisa; empty for independent layout)"
 	@echo "  DESTDIR          Optional temporary root (default: direct file installation)"
 	@echo "  PREFIX           Install prefix (system: /usr/local; user: owned HOME/.local)"
 	@echo "  BINDIR           Binary install path"

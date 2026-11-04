@@ -18,7 +18,7 @@ tokenless_resolve_layout() {
         user) ;;
         *) tokenless_layout_error 'INSTALL_PROFILE must be system or user'; return 1 ;;
     esac
-    AWPRJ="${AWPRJ-}"
+    AWPRJ="${AWPRJ-anolisa}"
     case "$AWPRJ" in
         '' | [a-zA-Z0-9]*) ;;
         *) tokenless_layout_error 'AWPRJ must be empty or start with a letter or digit'; return 1 ;;
@@ -40,6 +40,7 @@ tokenless_resolve_layout() {
         [ -d "$user_home" ] && [ -O "$user_home" ] || { tokenless_layout_error 'user HOME must be an existing directory owned by the invoking user'; return 1; }
         default_prefix="$user_home/.local"
         data_root="${XDG_DATA_HOME:-$user_home/.local/share}"
+        managed_user_record="$data_root/anolisa/components/tokenless/component.toml"
     fi
     PREFIX="${PREFIX-$default_prefix}"
     while [ "$PREFIX" != / ] && [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX="${PREFIX%/}"; done
@@ -61,6 +62,11 @@ tokenless_resolve_layout() {
     if [ -n "$AWPRJ" ] && [ "$datadir_explicit" != x ]; then
         default_adapterdir="$data_root/$AWPRJ/adapters/tokenless"
         default_extensiondir="$data_root/$AWPRJ/extensions/tokenless"
+    fi
+    legacy_adapterdir= legacy_extensiondir=
+    if [ -z "$AWPRJ" ] && [ "$datadir_explicit" != x ]; then
+        [ "${ADAPTERDIR+x}" = x ] || legacy_adapterdir="$default_adapterdir"
+        [ "${EXTENSIONDIR+x}" = x ] || legacy_extensiondir="$default_extensiondir"
     fi
     ADAPTERDIR="${ADAPTERDIR-$default_adapterdir}"
     EXTENSIONDIR="${EXTENSIONDIR-$default_extensiondir}"
@@ -119,25 +125,70 @@ check_destination() {
     fi
 }
 
-# Older releases installed standalone rtk and toon helpers; tokenless now
-# embeds both. A BINDIR link is removed only when it points into a Tokenless
-# helper layout, so an independently installed rtk or toon stays.
-remove_stale_helpers() {
-    rm -f "$root$LIBEXECDIR/rtk" "$root$LIBEXECDIR/toon"
-    if [ -L "$root$BINDIR/rtk" ]; then
-        case "$(readlink "$root$BINDIR/rtk")" in
-            "$LIBEXECDIR/rtk"|*/anolisa/tokenless/rtk|*/libexec/tokenless/rtk) rm -f "$root$BINDIR/rtk" ;;
+# Resolve link targets in the installation's logical root before adding DESTDIR.
+normalize_helper_directory() {
+    local remaining="$1/" component directory=""
+    while [ -n "$remaining" ]; do
+        component="${remaining%%/*}"
+        remaining="${remaining#*/}"
+        case "$component" in
+            ''|.) ;;
+            ..)
+                [ -n "$directory" ] || return 1
+                directory="${directory%/*}" ;;
+            *) directory="$directory/$component" ;;
+        esac
+    done
+    printf '%s\n' "${directory:-/}"
+}
+
+has_managed_helper_record() {
+    local directory user_directory
+    directory="$(normalize_helper_directory "$1")" || return 1
+    if [ "$INSTALL_PROFILE" = user ]; then
+        user_directory="$(normalize_helper_directory "$HOME/.local/lib/anolisa/libexec/tokenless")"
+        case "$directory" in
+            "$user_directory") [ -e "$root$managed_user_record" ]; return ;;
+            # A user-facing link or role override can point at a system install.
+            */usr/libexec/anolisa/tokenless|*/usr/local/libexec/anolisa/tokenless) ;;
+            *) return 1 ;;
         esac
     fi
-    if [ -L "$root$BINDIR/toon" ]; then
-        case "$(readlink "$root$BINDIR/toon")" in
-            */anolisa/tokenless/toon|*/anolisa/libexec/tokenless/toon) rm -f "$root$BINDIR/toon" ;;
-        esac
-    fi
-    # Only the private helper directory, never a shared libexec, and only if empty.
-    case "$LIBEXECDIR" in
-        */tokenless) rmdir "$root$LIBEXECDIR" 2>/dev/null || true ;;
+    # System helper and record directories share a prefix, including overrides.
+    case "$directory" in
+        */libexec/anolisa/tokenless)
+            [ -e "$root${directory%/libexec/anolisa/tokenless}/share/anolisa/components/tokenless/component.toml" ] ;;
+        *) return 1 ;;
     esac
+}
+
+# Tokenless now embeds rtk and toon. Retire its old standalone helpers and links.
+remove_stale_helpers() {
+    local cleanup_libexec=1 helper link
+    if has_managed_helper_record "$LIBEXECDIR"; then
+        cleanup_libexec=0
+    else
+        rm -f "$root$LIBEXECDIR/rtk" "$root$LIBEXECDIR/toon"
+    fi
+    for helper in rtk toon; do
+        [ -L "$root$BINDIR/$helper" ] || continue
+        link="$(readlink "$root$BINDIR/$helper")" || continue
+        case "$helper:$link" in
+            "rtk:$LIBEXECDIR/rtk"|rtk:*/anolisa/tokenless/rtk|rtk:*/libexec/tokenless/rtk|\
+            toon:*/anolisa/tokenless/toon|toon:*/anolisa/libexec/tokenless/toon) ;;
+            *) continue ;;
+        esac
+        # A link can point to the managed layout even when LIBEXECDIR differs.
+        [[ "$link" = /* ]] || link="$BINDIR/$link"
+        if ! has_managed_helper_record "${link%/*}"; then
+            rm -f "$root$BINDIR/$helper"
+        fi
+    done
+    if [ "$cleanup_libexec" = 1 ]; then
+        case "$LIBEXECDIR" in
+            */tokenless) rmdir "$root$LIBEXECDIR" 2>/dev/null || true ;;
+        esac
+    fi
 }
 
 check_tree_destinations() {
@@ -153,6 +204,32 @@ check_tree_destinations() {
     done < <(find "$source" -mindepth 1 -print)
 }
 
+owns_resource_tree() {
+    local target="$1"
+    while [ "$target" != / ] && [ "${target%/}" != "$target" ]; do target="${target%/}"; done
+    case "$target" in
+        */adapters/tokenless|*/extensions/tokenless)
+            [ ! -e "${target%/*/*}/components/tokenless/component.toml" ] || return 1 ;;
+    esac
+    if [ -e "$target/.tokenless-owner" ]; then
+        [ "$(cat "$target/.tokenless-owner" 2>/dev/null)" = source-install:tokenless ]
+        return
+    fi
+    # Older source installs had no marker in their exclusive default trees.
+    if [ -n "$legacy_adapterdir" ] && [ "$target" = "$root$legacy_adapterdir" ]; then return 0; fi
+    [ -n "$legacy_extensiondir" ] && [ "$target" = "$root$legacy_extensiondir" ]
+}
+
+check_resource_owner() {
+    local target="$1"
+    check_destination "$target/.tokenless-owner" file
+    if [ -d "$target" ] && [ -n "$(find "$target" -mindepth 1 -print -quit)" ] && ! owns_resource_tree "$target"; then
+        printf 'ERROR: refusing to replace resources without source-install ownership: %s\n' "$target" >&2
+        printf 'Use the owning installer to remove them, or select separate ADAPTERDIR and EXTENSIONDIR paths.\n' >&2
+        exit 1
+    fi
+}
+
 group="${1:-all}"
 [ "$#" -le 1 ] || { printf 'ERROR: usage: %s [all|core|plugins|uninstall]\n' "$0" >&2; exit 1; }
 case "$group" in all|core|plugins|uninstall) ;; *) printf 'ERROR: unsupported install group: %s\n' "$group" >&2; exit 1;; esac
@@ -164,13 +241,20 @@ if [ "$group" = uninstall ]; then
                 printf 'ERROR: refusing to remove shared directory: %s\n' "$directory" >&2; exit 1 ;;
         esac
         check_destination "$root$directory" directory
+        check_destination "$root$directory/.tokenless-owner" file
     done
     check_destination "$root$BINDIR/tokenless" file
     check_destination "$root$LIBEXECDIR/rtk" file
     check_destination "$root$DATADIR/LICENSE" file
     rm -f "$root$BINDIR/tokenless" "$root$DATADIR/LICENSE"
     remove_stale_helpers
-    rm -rf "$root$ADAPTERDIR" "$root$EXTENSIONDIR"
+    for directory in "$ADAPTERDIR" "$EXTENSIONDIR"; do
+        if owns_resource_tree "$root$directory"; then
+            rm -rf "$root$directory"
+        elif [ -d "$root$directory" ]; then
+            printf 'WARNING: preserving resources without source-install ownership: %s; use the owning installer to remove them.\n' "$root$directory" >&2
+        fi
+    done
     exit 0
 fi
 BIN_DIR="${BIN_DIR:-$COMPONENT_ROOT/target/release}"
@@ -201,6 +285,8 @@ fi
 if [ "$group" != core ]; then
     check_tree_destinations "$payload/adapters" "$root$ADAPTERDIR"
     check_tree_destinations "$payload/extension" "$root$EXTENSIONDIR"
+    check_resource_owner "$root$ADAPTERDIR"
+    check_resource_owner "$root$EXTENSIONDIR"
 fi
 if [ "$group" != plugins ]; then
     install -d -m 0755 "$root$BINDIR" "$root$DATADIR"
@@ -212,5 +298,7 @@ if [ "$group" != core ]; then
     install -d -m 0755 "$root$ADAPTERDIR" "$root$EXTENSIONDIR"
     cp -pR "$payload/adapters/." "$root$ADAPTERDIR/"
     cp -pR "$payload/extension/." "$root$EXTENSIONDIR/"
+    printf '%s\n' source-install:tokenless > "$root$ADAPTERDIR/.tokenless-owner"
+    printf '%s\n' source-install:tokenless > "$root$EXTENSIONDIR/.tokenless-owner"
 fi
 printf 'Installed selected prebuilt files; framework registration and cosh discovery remain separate host operations.\n' >&2
