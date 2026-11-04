@@ -617,7 +617,11 @@ pub(super) fn apply_owned_with_hydration(
         .find(ObjectKind::Component, target)
         .map(|record| &record.binding)
     {
-        Some(ProviderBinding::Owned { artifact }) if artifact.version == prior.version => {
+        Some(ProviderBinding::Owned { artifact })
+            if artifact.version == prior.version
+                && artifact.raw_package == prior.raw_package
+                && artifact.repository_sha256() == prior.repository_sha256() =>
+        {
             artifact.clone()
         }
         Some(ProviderBinding::Owned { artifact }) => {

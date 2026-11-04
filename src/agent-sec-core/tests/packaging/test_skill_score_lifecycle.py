@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -32,7 +32,7 @@ class LifecycleTests(unittest.TestCase):
 
     def initialize(self) -> None:
         with LIFECYCLE.exclusive(self.root, create=True):
-            LIFECYCLE.request_directory(self.root)
+            LIFECYCLE.request_directory(self.root, os.getgid())
 
     def environment(self, *, retained: bool = False, receipt: bool = True) -> Path:
         manifest = {
@@ -108,17 +108,117 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(valid.exists())
         self.assertTrue((self.root / LIFECYCLE.LOCK).exists())
 
-    def test_pending_recovery_and_forged_records_are_never_consumed(self) -> None:
+    def test_unrelated_entries_do_not_block_management_or_trigger_deletion(
+        self,
+    ) -> None:
         target = self.environment()
-        for name in ("requests", "recovery"):
-            directory = self.root / name
-            directory.mkdir(exist_ok=True)
-            record = directory / "untrusted.json"
-            record.write_text('{"delete": "/unrelated-user-data"}')
-            with self.assertRaisesRegex(RuntimeError, "unconfirmed scoring cleanup"):
-                LIFECYCLE.uninstall(self.root)
-            self.assertTrue(target.exists())
-            record.unlink()
+        registry = self.root / "requests"
+        self.assertEqual(registry.stat().st_mode & 0o7777, 0o1770)
+        self.assertEqual((self.root / LIFECYCLE.LOCK).stat().st_mode & 0o777, 0o640)
+        other = self.parent / "user-data"
+        other.write_text("untouched")
+        (registry / ("c" * 32 + ".json")).symlink_to(other)
+        (registry / ("d" * 32 + ".json")).write_bytes(b"")
+        (registry / "unrelated").touch()
+        LIFECYCLE.pending_cleanup(self.root)
+        LIFECYCLE.uninstall(self.root)
+        self.assertFalse(target.exists())
+        self.assertTrue((registry / "unrelated").exists())
+        self.assertEqual(other.read_text(), "untouched")
+        LIFECYCLE.uninstall(self.root)
+
+    def test_legacy_valid_records_require_an_authorized_writer_or_retained_resources(
+        self,
+    ) -> None:
+        requests = self.root / "requests"
+        requests.chmod(0o1777)
+        for char in "ab":
+            identity = char * 32
+            path = requests / (identity + ".json")
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": "agent-sec-skill-score/pending-request-v1",
+                        "request_id": identity,
+                        "compose_project": f"asc-score-{identity}__env",
+                    }
+                )
+            )
+            path.chmod(0o600)
+        stat_function = os.fstat
+        foreign_uid = self.root.stat().st_uid + 1
+
+        def foreign_stat(fd: int):
+            meta = stat_function(fd)
+            return Mock(
+                st_mode=meta.st_mode, st_nlink=meta.st_nlink, st_uid=foreign_uid
+            )
+
+        with (
+            patch.object(os, "fstat", side_effect=foreign_stat),
+            patch.object(LIFECYCLE, "docker_writer", return_value=True) as allowed,
+            patch.object(LIFECYCLE.subprocess, "run") as docker,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unconfirmed"):
+                LIFECYCLE.pending_cleanup(self.root)
+            docker.assert_not_called()
+            allowed.return_value = False
+            docker.return_value.stdout = ""
+            LIFECYCLE.pending_cleanup(self.root)
+            self.assertEqual(
+                [call.args[0][1] for call in docker.call_args_list],
+                ["container", "network", "volume"],
+            )
+            self.assertTrue(
+                all(call.kwargs["timeout"] == 5 for call in docker.call_args_list)
+            )
+            docker.return_value.stdout = f"asc-score-{'a' * 32}__env\n"
+            with self.assertRaisesRegex(RuntimeError, "unconfirmed"):
+                LIFECYCLE.pending_cleanup(self.root)
+            docker.side_effect = subprocess.TimeoutExpired("docker", 5)
+            with self.assertRaisesRegex(RuntimeError, "cannot verify legacy"):
+                LIFECYCLE.pending_cleanup(self.root)
+
+    def test_socket_access_uses_the_actual_primary_or_supplementary_group(self) -> None:
+        with (
+            patch.object(
+                Path, "stat", return_value=Mock(st_mode=0o140660, st_gid=900, st_uid=1)
+            ) as socket,
+            patch.object(
+                LIFECYCLE.pwd,
+                "getpwuid",
+                return_value=Mock(pw_name="scorer", pw_gid=20),
+            ),
+            patch.object(os, "getgrouplist", return_value=[20, 900]) as groups,
+        ):
+            self.assertTrue(LIFECYCLE.docker_writer(1))
+            groups.assert_not_called()
+            self.assertTrue(LIFECYCLE.docker_writer(2))
+            groups.return_value = [20]
+            self.assertFalse(LIFECYCLE.docker_writer(2))
+            socket.return_value.st_mode = 0o140600
+            self.assertFalse(LIFECYCLE.docker_writer(2))
+
+    def test_owner_only_docker_and_legacy_permissions_require_no_group_access(
+        self,
+    ) -> None:
+        registry = self.root / "requests"
+        registry.chmod(0o1777)
+        with self.assertRaisesRegex(ValueError, "repair"):
+            LIFECYCLE.request_directory(self.root, os.getgid(), verify_only=True)
+        LIFECYCLE.request_directory(self.root, None)
+        LIFECYCLE.request_directory(self.root, None, verify_only=True)
+        self.assertEqual(registry.stat().st_mode & 0o7777, 0o1700)
+        self.assertEqual((self.root / LIFECYCLE.LOCK).stat().st_mode & 0o777, 0o600)
+
+    def test_private_readiness_recovery_blocks_removal(self) -> None:
+        target = self.environment()
+        recovery = self.root / "recovery"
+        recovery.mkdir(mode=0o700)
+        (recovery / "interrupted.json").touch()
+        with self.assertRaisesRegex(RuntimeError, "unconfirmed scoring cleanup"):
+            LIFECYCLE.uninstall(self.root)
+        self.assertTrue(target.exists())
 
     def test_active_process_lease_blocks_uninstall_and_prepare(self) -> None:
         target = self.environment()
@@ -150,18 +250,33 @@ class LifecycleTests(unittest.TestCase):
         code = (
             "import fcntl,os,sys; f=open(sys.argv[1]); fcntl.flock(f,fcntl.LOCK_SH); "
             "fd=os.open(sys.argv[2],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); "
-            "os.write(fd,b'pending owned request'); os.close(fd); os._exit(9)"
+            "os.write(fd,sys.argv[3].encode()); os.fsync(fd); os.close(fd); os._exit(9)"
         )
-        record = self.root / "requests/crashed.json"
+        identity = "a" * 32
+        record = self.root / "requests" / (identity + ".json")
+        payload = json.dumps(
+            {
+                "schema": "agent-sec-skill-score/pending-request-v1",
+                "request_id": identity,
+                "compose_project": "asc-score-" + identity + "__env",
+            }
+        )
         child = subprocess.run(
-            [sys.executable, "-c", code, str(self.root / LIFECYCLE.LOCK), str(record)],
+            [
+                sys.executable,
+                "-c",
+                code,
+                str(self.root / LIFECYCLE.LOCK),
+                str(record),
+                payload,
+            ],
             check=False,
         )
         self.assertEqual(child.returncode, 9)
         with self.assertRaisesRegex(RuntimeError, "unconfirmed"):
             LIFECYCLE.uninstall(self.root)
         self.assertTrue(target.exists())
-        self.assertEqual(record.read_text(), "pending owned request")
+        self.assertEqual(record.read_text(), payload)
 
     def test_symlink_environment_lock_and_ancestor_are_rejected(self) -> None:
         external = self.parent / "outside"

@@ -148,7 +148,7 @@ class PreviewTest(unittest.TestCase):
         self.assertEqual(index["entries"][0]["version"], VERSION)
         self.assertEqual(len(index["entries"]), 2)
         self.assertEqual(manifest["schema_version"], "agent-sec-skill-score/release-v4")
-        self.assertEqual(manifest["installer"]["version"], "0.3.20")
+        self.assertEqual(manifest["installer"]["version"], PREVIEW.INSTALLER_VERSION)
         self.assertNotIn("python_cli", manifest)
         self.assertEqual(manifest["source_commit"], SOURCE)
         self.assertEqual(manifest["raw_repository"], "v1")

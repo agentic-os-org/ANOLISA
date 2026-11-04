@@ -28,6 +28,7 @@ Source1:        %{name}-%{version}-vendor.tar.gz
 BuildRequires:  cargo = 1.93.1
 BuildRequires:  rust = 1.93.1
 BuildRequires:  gcc
+BuildRequires:  python3 >= 3.11
 BuildRequires:  glibc-static
 BuildRequires:  make
 BuildRequires:  nodejs
@@ -279,6 +280,12 @@ if [ "$1" -eq 0 ] && [ -d /run/systemd/system ] && {
         exit 1
     }
 fi
+%ifarch x86_64
+runtime=/usr/lib/agent-sec-core/skill-score
+if [ "$1" -eq 0 ] && { [ -e "$runtime/.lifecycle.lock" ] || [ -d "$runtime/requests" ] || [ -d "$runtime/environments" ] || [ -d "$runtime/recovery" ]; }; then
+    /usr/bin/python3 -B "$runtime/uninstall.py" || exit 1
+fi
+%endif
 %systemd_preun agent-sec-core.service
 %systemd_preun agent-sec-gateway.service
 
@@ -314,6 +321,10 @@ fi
 %attr(0755,root,root) %{_datadir}/anolisa/sec-core/gateway/install-mitmproxy.sh
 %dir %{_sysconfdir}/agent-sec
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/agent-sec/skillsec.json
+%ifarch x86_64
+%defattr(-,root,root,0755)
+/usr/lib/agent-sec-core/skill-score/
+%endif
 %license LICENSE
 
 %package -n agent-sec-plugins
@@ -395,6 +406,11 @@ make build-all-v2-offline
 %install
 rm -rf $RPM_BUILD_ROOT
 make install-all-for-rpmbuild-v2 DESTDIR=$RPM_BUILD_ROOT
+%ifarch x86_64
+python3 packaging/skill-score/package-optional.py \
+    "$RPM_BUILD_ROOT/usr/lib/agent-sec-core/skill-score" --rpm-stage \
+    --version "%{version}" --source-commit "$(cat packaging/skill-score/rpm-source-commit)"
+%endif
 
 %changelog
 * Wed Oct 28 2026 Shirong Hao <shirong@linux.alibaba.com> - 1.1.1-1

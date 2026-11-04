@@ -9,7 +9,7 @@ score_output="$(realpath -m "$1")"
 [ ! -e "$score_output" ] || { echo "output directory must not exist" >&2; exit 2; }
 [ -z "$(git -C "$score_repo" status --porcelain)" ] || { echo "preview requires a clean commit" >&2; exit 1; }
 score_source="$(git -C "$score_repo" rev-parse HEAD)"
-score_base="$(python3 "$score_component/packaging/raw/verify_release.py" "$score_component" "$score_component/.anolisa/component.toml")"
+score_base="$(python3 "$score_component/packaging/raw/verify_release.py" "$score_component" "$score_component/packaging/anolisa/component.toml")"
 score_version="$score_base-skillscore.${score_source:0:12}"
 score_epoch="$(git -C "$score_repo" show -s --format=%ct "$score_source")"
 mkdir -p "$score_output"
@@ -17,8 +17,9 @@ make -C "$score_component" package-raw RAW_PREVIEW_VERSION="$score_version" OUTP
 python3 "$score_component/packaging/skill-score/package-optional.py" "$score_output" \
     --version "$score_version" --source-commit "$score_source" --epoch "$score_epoch"
 cargo build --manifest-path "$score_repo/distribution/anolisa/Cargo.toml" --release --locked -p anolisa-cli
+score_installer_version="$("$score_repo/distribution/anolisa/target/release/anolisa" --version | awk '{print $NF}')"
 tar --owner=0 --group=0 --mtime="@$score_epoch" -czf \
-    "$score_output/anolisa-cli-0.3.20-linux-x86_64.tar.gz" \
+    "$score_output/anolisa-cli-$score_installer_version-linux-x86_64.tar.gz" \
     -C "$score_repo/distribution/anolisa/target/release" anolisa
 git -C "$score_repo" archive --format=tar.gz --output="$score_output/source.tar.gz" \
     "$score_source" LICENSE src/agent-sec-core distribution/anolisa

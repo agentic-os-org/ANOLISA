@@ -838,6 +838,7 @@ mod tests {
     fn owned_record() -> Installation {
         installation(ProviderBinding::Owned {
             artifact: OwnedArtifact {
+                repository: None,
                 version: "1.2.3".to_string(),
                 distribution_source: None,
                 raw_package: None,

@@ -148,6 +148,8 @@ runs:
             -name 'dist' -o -name '__pycache__' -o -name '.pytest_cache' -o \
             -name '.ruff_cache' \
           \) -prune -exec rm -rf {} +
+          git -c safe.directory="$GITHUB_WORKSPACE" -C "$GITHUB_WORKSPACE" rev-parse HEAD \
+            > "/tmp/build/${ARCHIVE_NAME}/packaging/skill-score/rpm-source-commit"
           # Replace example keys in trusted-keys with the real GPG public key
           # so the packaged archive ships the production key.
           if [ -n "$GPG_PUBLIC_KEY" ]; then

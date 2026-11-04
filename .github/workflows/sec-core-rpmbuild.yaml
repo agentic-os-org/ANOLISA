@@ -368,6 +368,32 @@ jobs:
             echo "ERROR: V1 site-packages present in V2 RPM"; exit 1;
           fi
 
+      - name: Verify the installed RPM Skill Score entry point and ownership boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime=/usr/lib/agent-sec-core/skill-score
+          /usr/bin/agent-sec-cli skillsec score install-runtime --help
+          test -x "$runtime/prepare.sh"
+          test ! -e "$runtime/environments"
+          test ! -e "$runtime/.lifecycle.lock"
+          for owned in /usr/bin/agent-sec-cli "$runtime/prepare.sh" "$runtime/runtime-manifest.json"; do
+            test "$(rpm -qf --qf '%{NAME}' "$owned")" = agent-sec-core
+          done
+          test ! -e /usr/local/bin/agent-sec-cli
+          install -d /usr/local/bin
+          touch /usr/local/bin/agent-sec-cli
+          trap 'rm -f /usr/local/bin/agent-sec-cli' EXIT
+          if /usr/bin/agent-sec-cli skillsec score install-runtime > /tmp/score-install.log 2>&1; then exit 1; fi
+          grep -F 'resolve the mixed installation' /tmp/score-install.log
+          test ! -e "$runtime/.lifecycle.lock"
+          rm -f /usr/local/bin/agent-sec-cli
+          trap - EXIT
+          # A fresh RPM must reach the real preparer. Offline mode forbids a first image build.
+          if ANOLISA_SKILL_SCORE_OFFLINE=1 /usr/bin/agent-sec-cli skillsec score install-runtime > /tmp/score-rpm-offline.log 2>&1; then exit 1; fi
+          test -f "$runtime/.lifecycle.lock" || { cat /tmp/score-rpm-offline.log; exit 1; }
+          grep -Ei 'docker|offline' /tmp/score-rpm-offline.log
+          test -z "$(find "$runtime" -name ready.json -print -quit)"
       - name: Verify V2 source installation layout
         run: V2_BIN_BUILD_DIR=/usr/bin bash src/agent-sec-core/tests/packaging/test-skillsec-install.sh
 
@@ -500,4 +526,39 @@ jobs:
           fi
           # Cleanup is best-effort so an earlier test failure remains visible.
           :
-# End of workflow
+      - name: Export the tested CLI RPM for the Docker-host regression
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-score-cli-rpm
+          path: /tmp/rpms/agent-sec-core-[0-9]*.rpm
+          if-no-files-found: error
+          retention-days: 1
+
+  test-rpm-skill-score:
+    name: Prepare and recheck the installed RPM runtime on a Docker host
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-rpm-v2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: skill-score-cli-rpm
+          path: rpm
+      - name: Install the native RPM payload and exercise its public CLI twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y rpm
+          # The preceding native job covers dnf and systemd scriptlets. Here the same RPM
+          # is installed into rpmdb on a disposable Docker host without starting the daemon.
+          sudo rpm -i --nodeps --noscripts rpm/agent-sec-core-[0-9]*.rpm
+          root=/usr/lib/agent-sec-core/skill-score
+          test ! -e "$root/environments"
+          sudo /usr/bin/agent-sec-cli skillsec score install-runtime
+          envdir="$root/environments/$(sha256sum "$root/runtime-manifest.json" | cut -d' ' -f1)"
+          sudo sha256sum "$envdir/ready.json" "$envdir/image-build.json" > "$RUNNER_TEMP/score-rpm.sha256"
+          sudo env ANOLISA_SKILL_SCORE_OFFLINE=1 /usr/bin/agent-sec-cli skillsec score install-runtime
+          sudo sha256sum -c "$RUNNER_TEMP/score-rpm.sha256"

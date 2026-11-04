@@ -12,7 +12,12 @@ import tomllib
 from pathlib import Path
 
 COMPONENTS = ("sec-core", "sec-core-skill-score")
-INSTALLER = "anolisa-cli-0.3.20-linux-x86_64.tar.gz"
+INSTALLER_VERSION = tomllib.loads(
+    (
+        Path(__file__).resolve().parents[4] / "distribution/anolisa/Cargo.toml"
+    ).read_text()
+)["workspace"]["package"]["version"]
+INSTALLER = f"anolisa-cli-{INSTALLER_VERSION}-linux-x86_64.tar.gz"
 # These are standard-library contents of the pinned adapter-only CPython archive.
 BASE_ENSUREPIP_WHEELS = {
     "lib/anolisa/sec-core/python3.11/runtime/lib/python3.11/ensurepip/_bundled/" + wheel
@@ -88,7 +93,7 @@ def package_contract(
             )
             if entry is None or entry.read() != runtime_bytes:
                 raise ValueError("optional raw runtime manifest differs from release")
-            if contract["component"]["contract"]["min_anolisa_version"] != "0.3.20":
+            if contract["component"]["contract"]["min_anolisa_version"] != "0.3.22":
                 raise ValueError(
                     "optional component must require the preparation-capable installer"
                 )
@@ -173,7 +178,7 @@ manifest_digest = "sha256:{hashlib.sha256(contract).hexdigest()}"
         "runtime_manifest": "runtime-manifest.json",
         "installer": {
             "file": INSTALLER,
-            "version": "0.3.20",
+            "version": INSTALLER_VERSION,
             "sha256": digest(directory / INSTALLER),
         },
         "python_worker": runtime["python"]["version"],

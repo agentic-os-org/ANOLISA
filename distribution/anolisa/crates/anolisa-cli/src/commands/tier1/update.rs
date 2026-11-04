@@ -590,15 +590,13 @@ pub(crate) fn plan_component_update(
         .map(|r| &r.binding)
     {
         Some(ProviderBinding::Owned { artifact }) => {
-            let repo_config =
-                common::load_repo_config(ctx, &layout, &command, RepoPersistPolicy::Require)?;
             let env = anolisa_env::EnvService::detect();
             let inputs = resolve_raw_inputs_for_component(
                 target.to_string(),
-                "raw",
-                artifact.raw_package.as_deref(),
+                artifact,
+                ctx,
+                &layout,
                 &env,
-                &repo_config,
                 &command,
             )?;
             let resolution =
@@ -3930,13 +3928,32 @@ sha256 = "{sha}"
             .expect("mkdir contract");
         std::fs::write(&contract, "framework = \"datadir\"\n").expect("write datadir contract");
         let new_body: &[u8] = b"#!/bin/sh\necho skillfs v2\n";
-        publish_raw_repo(
+        let repo = publish_raw_repo(
             &tmp.path().join("repo"),
             &common::resolve_layout(&c),
             "skillfs",
             "0.2.0",
             &raw_artifact("skillfs", "0.2.0", new_body),
         );
+        let mut store = StateStore::load(&state_path, 0).unwrap();
+        let ProviderBinding::Owned { artifact } = &mut store
+            .find_mut(ObjectKind::Component, "skillfs")
+            .unwrap()
+            .binding
+        else {
+            unreachable!()
+        };
+        artifact.repository = Some(repo.clone());
+        artifact.raw_package = Some("skillfs".into());
+        store.save(&state_path).unwrap();
+        let config = layout.etc_dir.join("repo.toml");
+        std::fs::write(
+            &config,
+            std::fs::read_to_string(&config)
+                .unwrap()
+                .replace(&repo, "file:///unrelated/unavailable/v1"),
+        )
+        .unwrap();
         let rpm = FakeRpm::new("unused", None);
 
         update_component_with_deps("skillfs", &c, &rpm, &rpm, false)
@@ -3963,6 +3980,10 @@ sha256 = "{sha}"
         );
         let record = find_component(&c, "skillfs");
         let artifact = owned_artifact(&record);
+        assert_eq!(
+            artifact.repository_url(&layout.state_dir).unwrap(),
+            Some(repo)
+        );
         assert_eq!(artifact.version, "0.2.0");
         assert_eq!(record.status, LifecycleStatus::Installed);
         assert!(
@@ -4943,15 +4964,13 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         let state_path = layout.state_dir.join("installed.toml");
         let journal_dir = rpm_install::journal_dir(&layout);
         let env = anolisa_env::EnvService::detect();
-        let repo_config =
-            common::load_repo_config(&c, &layout, "update foo", RepoPersistPolicy::Require)
-                .expect("repo config");
+        let prior = owned_artifact(&find_component(&c, "foo"));
         let inputs = resolve_raw_inputs_for_component(
             "foo".to_string(),
-            "raw",
-            None,
+            &prior,
+            &c,
+            &layout,
             &env,
-            &repo_config,
             "update foo",
         )
         .expect("resolve inputs");
