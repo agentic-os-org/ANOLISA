@@ -97,6 +97,11 @@ fn request_case_name(value: &local::WsCkptRequest) -> &'static str {
             "request/guarded_rollback_evidence_v2"
         }
         local::WsCkptRequest::Unregister { .. } => "request/unregister",
+        local::WsCkptRequest::RecoverPreview { .. } => "request/recover_preview",
+        local::WsCkptRequest::RecoverConfirmed { .. } => "request/recover_confirmed",
+        local::WsCkptRequest::ListOrphans { .. } => "request/list_orphans",
+        local::WsCkptRequest::ListPage { .. } => "request/list_page",
+        local::WsCkptRequest::WatcherHealth => "request/watcher_health",
     }
 }
 
@@ -161,6 +166,9 @@ fn response_case_name(value: &local::WsCkptResponse) -> &'static str {
         }
         local::WsCkptResponse::RecoverWithWarning { .. } => "response/recover_with_warning",
         local::WsCkptResponse::UnregisterOk { .. } => "response/unregister_ok",
+        local::WsCkptResponse::RecoverPreviewOk { .. } => "response/recover_preview_ok",
+        local::WsCkptResponse::ListPageOk { .. } => "response/list_page_ok",
+        local::WsCkptResponse::WatcherHealthOk { .. } => "response/watcher_health_ok",
     }
 }
 
@@ -270,6 +278,29 @@ fn request_cases() -> Vec<(&'static str, local::WsCkptRequest)> {
         local::WsCkptRequest::Unregister {
             workspace: "/ws".into(),
         },
+        // Mirror-tail variants (#7592 review round 2): index fidelity with
+        // ws-ckpt-common; only `WatcherHealth` is sent by cosh-ng itself.
+        local::WsCkptRequest::RecoverPreview {
+            workspace: "/ws".into(),
+        },
+        local::WsCkptRequest::RecoverConfirmed {
+            preview: local::RecoveryPreview {
+                ws_id: Some("ws-abcdef".into()),
+                registration_path: "/ws".into(),
+                snapshot_count: 2,
+                confirmation_digest: [0x55; 32],
+            },
+        },
+        local::WsCkptRequest::ListOrphans {
+            workspace: Some("/ws".into()),
+        },
+        local::WsCkptRequest::ListPage {
+            orphans_only: true,
+            workspace: None,
+            limit: 25,
+            cursor: Some("tok".into()),
+        },
+        local::WsCkptRequest::WatcherHealth,
     ];
     samples
         .into_iter()
@@ -506,6 +537,34 @@ fn response_cases() -> Vec<(&'static str, local::WsCkptResponse)> {
         local::WsCkptResponse::UnregisterOk {
             workspace: "/ws".into(),
             retained_paths: vec!["/snapshots/ws-id".into()],
+        },
+        // Mirror-tail variants (#7592 review round 2); `WatcherHealthOk` is
+        // decoded by the checkpoint status sidecar.
+        local::WsCkptResponse::RecoverPreviewOk {
+            preview: local::RecoveryPreview {
+                ws_id: Some("ws-abcdef".into()),
+                registration_path: "/ws".into(),
+                snapshot_count: 2,
+                confirmation_digest: [0x55; 32],
+            },
+        },
+        local::WsCkptResponse::ListPageOk {
+            snapshots: vec![
+                local::SnapshotListItem::Full(local_snapshot()),
+                local::SnapshotListItem::Summary(local::SnapshotSummary {
+                    id: "s2".into(),
+                    workspace: "/ws".into(),
+                    created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                    pinned: false,
+                    missing: true,
+                    omitted_fields: vec!["meta".into()],
+                }),
+            ],
+            next_cursor: Some("tok".into()),
+        },
+        local::WsCkptResponse::WatcherHealthOk {
+            workspaces_without_watcher: vec!["ws-degraded".into()],
+            watcher_queue_overflows: 3,
         },
     ];
     samples
