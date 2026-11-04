@@ -3589,6 +3589,261 @@ fn qoder_native_disable_without_cli_keeps_receipt() {
     );
 }
 
+/// Drop the search permission on a directory for the length of a scope.
+///
+/// `stat` on an entry inside a directory without `x` fails with `EACCES`, which
+/// is the closest a test can get to a cache the process is not allowed to read.
+struct UnsearchableDir {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl UnsearchableDir {
+    fn new(path: &Path) -> Self {
+        let mode = std::fs::metadata(path)
+            .expect("cache directory exists")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
+            .expect("drop search permission on the cache directory");
+        Self {
+            path: path.to_path_buf(),
+            mode,
+        }
+    }
+}
+
+impl Drop for UnsearchableDir {
+    fn drop(&mut self) {
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode))
+            .expect("restore search permission on the cache directory");
+    }
+}
+
+#[test]
+fn qoder_disable_without_cli_keeps_receipt_when_cache_is_unreadable() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+    assert!(cache.join("tokenless").is_dir(), "enable cached the plugin");
+    assert!(settings.exists(), "enable wrote settings.json");
+    guard.set("QODERCLI_BIN", &world.prefix.join("missing-qodercli"));
+
+    // The cache cannot be inspected, so its emptiness is unproven: the receipt
+    // and the settings entries both have to survive, or forget/uninstall would
+    // proceed past a plugin that is still registered.
+    let blocked = UnsearchableDir::new(&cache);
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable returns a cleanup report");
+    drop(blocked);
+
+    assert!(
+        !disabled.claim_removed,
+        "an unreadable cache is not evidence of absence: {:?}",
+        disabled.report.messages
+    );
+    assert!(!disabled.report.cleanup_complete);
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_some(),
+        "receipt kept"
+    );
+    assert!(
+        settings.exists(),
+        "settings must not be pruned while the plugin may still be cached"
+    );
+}
+
+#[test]
+fn qoder_native_disable_without_cli_keeps_receipt_when_cache_is_unreadable() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable native plugin");
+    assert!(cache.join("tokenless").is_dir(), "enable cached the plugin");
+    guard.set("QODERCLI_BIN", &world.prefix.join("missing-qodercli"));
+
+    let blocked = UnsearchableDir::new(&cache);
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable returns a cleanup report");
+    drop(blocked);
+
+    assert!(
+        !disabled.claim_removed,
+        "an unreadable cache is not evidence of absence: {:?}",
+        disabled.report.messages
+    );
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .expect("receipt kept")
+            .status,
+        ClaimStatus::CleanupFailed
+    );
+}
+
+#[test]
+fn qoder_disable_without_cli_drops_a_never_installed_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    // The plugin install itself fails, which is exactly how a host without
+    // qodercli ends up: the receipt is recorded write-ahead and left behind
+    // while the framework never receives the plugin.
+    guard.set("FAKE_QODER_FAIL", Path::new("install"));
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("enable must fail when the plugin install fails");
+    assert!(
+        !cache.join("tokenless").exists(),
+        "the framework never cached the plugin"
+    );
+    assert_eq!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .expect("write-ahead receipt kept after the failed enable")
+            .status,
+        ClaimStatus::CleanupFailed
+    );
+
+    // qodercli is not installed on this host at all, so retrying can never
+    // succeed. An empty plugin cache proves no registration survives, so
+    // disable must retire the receipt instead of leaving forget/uninstall
+    // permanently blocked.
+    guard.set("QODERCLI_BIN", &world.prefix.join("missing-qodercli"));
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable returns a cleanup report");
+    assert!(
+        disabled.claim_removed,
+        "nothing is registered, so the receipt must go: {:?}",
+        disabled.report.messages
+    );
+    assert!(disabled.report.cleanup_complete);
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "receipt gone"
+    );
+}
+
+#[test]
+fn qoder_disable_without_cli_keeps_a_cached_plugin_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+    assert!(cache.join("tokenless").is_dir(), "enable cached the plugin");
+
+    // A cached plugin still needs qodercli to be unregistered, so the receipt
+    // is kept: only a provably empty cache may retire one without the CLI.
+    guard.set("QODERCLI_BIN", &world.prefix.join("missing-qodercli"));
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable returns a cleanup report");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .expect("receipt kept")
+            .status,
+        ClaimStatus::CleanupFailed
+    );
+}
+
+#[test]
+fn qoder_disable_without_cli_prunes_settings_when_the_cache_is_empty() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+    assert!(
+        enabled_plugins(&read_json(&settings)).contains(&"tokenless@local".to_string()),
+        "enable merged the plugin entry"
+    );
+
+    // qodercli is reinstalled or its cache is wiped, so the plugin is gone from
+    // the framework and only the settings.json entries ANOLISA owns remain.
+    // Pruning those needs no CLI, so disable must still complete the cleanup.
+    std::fs::remove_dir_all(cache.join("tokenless")).expect("drop the cached plugin");
+    guard.set("QODERCLI_BIN", &world.prefix.join("missing-qodercli"));
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable returns a cleanup report");
+    assert!(
+        disabled.claim_removed,
+        "the settings prune completes the cleanup: {:?}",
+        disabled.report.messages
+    );
+    let cfg = read_json(&settings);
+    assert!(!enabled_plugins(&cfg).contains(&"tokenless@local".to_string()));
+    assert!(hook_names(&cfg, "PreToolUse").is_empty());
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "receipt gone"
+    );
+}
+
 #[test]
 fn qoder_native_status_fails_closed_for_unverifiable_or_inconsistent_state() {
     let guard = EnvGuard::acquire();

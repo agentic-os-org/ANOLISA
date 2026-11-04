@@ -724,20 +724,6 @@ impl FrameworkDriver for QoderDriver {
         if native_claim(claim)? {
             return disable_native(claim, ctx);
         }
-        // Framework-side deregistration needs the CLI. Without it, the plugin
-        // would stay in qodercli's cache, so keep the receipt for a retry
-        // rather than pruning settings and pretending cleanup finished.
-        let Some(cli) = resolve_qodercli(ctx.user_home.as_deref()) else {
-            return Ok(DisableReport {
-                cleanup_complete: false,
-                messages: vec![
-                    "qodercli not found on PATH or under ~/.qoder/bin; receipt kept for retry"
-                        .to_string(),
-                ],
-            });
-        };
-        let program = cli.to_string_lossy().into_owned();
-
         // Fail closed: act only on resources the receipt actually declares.
         // A malformed/forged receipt missing the plugin or settings resource
         // must not drive `plugins uninstall` or a settings write against a
@@ -764,6 +750,56 @@ impl FrameworkDriver for QoderDriver {
 
         let mut messages = Vec::new();
 
+        // Framework-side deregistration needs the CLI, because the plugin would
+        // stay in qodercli's cache otherwise. Without the CLI that cache is the
+        // only remaining inventory: an absent cache proves nothing is left to
+        // unregister, so the settings prune below finishes the cleanup instead
+        // of stranding a receipt whose retry can never succeed. A cached plugin
+        // still needs the CLI, so that case keeps the receipt as before.
+        let Some(cli) = resolve_qodercli(ctx.user_home.as_deref()) else {
+            match plugin_cache_state(ctx.user_home.as_deref(), &plugin) {
+                PluginCacheState::Present => {
+                    return Ok(DisableReport {
+                        cleanup_complete: false,
+                        messages: vec![format!(
+                            "qodercli not found on PATH or under ~/.qoder/bin and plugin \
+                             '{plugin}' is still cached; receipt kept for retry"
+                        )],
+                    });
+                }
+                // The cache is the only remaining inventory, and it could not be
+                // read: keeping the receipt is the safe answer, because dropping
+                // it would let forget/uninstall proceed past a plugin that may
+                // still be registered.
+                PluginCacheState::Unverifiable => {
+                    return Ok(DisableReport {
+                        cleanup_complete: false,
+                        messages: vec![format!(
+                            "qodercli not found on PATH or under ~/.qoder/bin and the qoder \
+                             plugin cache could not be inspected; receipt kept for retry"
+                        )],
+                    });
+                }
+                PluginCacheState::Absent => {}
+            }
+            messages.push(format!(
+                "qodercli not found; qoder plugin '{plugin}' is not cached, so nothing remains \
+                 registered"
+            ));
+            let settings_ok = prune_settings_via_ops(
+                ctx,
+                &settings,
+                &plugin,
+                managed_hook_specs(claim).unwrap_or(&[]),
+                &mut messages,
+            );
+            return Ok(DisableReport {
+                cleanup_complete: settings_ok,
+                messages,
+            });
+        };
+        let program = cli.to_string_lossy().into_owned();
+
         // 1. Unregister the plugin. An already-removed plugin exits non-zero,
         //    so treat a CLI failure as clean only when the plugin cache is
         //    confirmed gone; otherwise cleanup is incomplete.
@@ -773,7 +809,8 @@ impl FrameworkDriver for QoderDriver {
         let plugin_ok = if out.success() {
             messages.push(format!("uninstalled qoder plugin '{plugin}'"));
             true
-        } else if !plugin_cache_present(ctx.user_home.as_deref(), &plugin) {
+        } else if plugin_cache_state(ctx.user_home.as_deref(), &plugin) == PluginCacheState::Absent
+        {
             messages.push(format!("qoder plugin '{plugin}' already absent"));
             true
         } else {
@@ -956,12 +993,44 @@ fn common_hooks_dir(resource_root: &Path) -> PathBuf {
 
 /// Whether qodercli's plugin cache holds `<plugin>` (or the target-suffixed
 /// `<plugin>-qoder` variant the legacy scripts also accept).
-fn plugin_cache_present(user_home: Option<&Path>, plugin: &str) -> bool {
+/// What the qoder plugin cache says about a plugin's presence.
+///
+/// Presence has to be *confirmed* before a receipt is dropped. `Path::is_dir()`
+/// answers `false` both for a directory that is not there and for one that
+/// cannot be stat-ed, so a bare boolean turns an unreadable cache into evidence
+/// of absence and lets cleanup finish while the plugin is still registered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PluginCacheState {
+    /// A plugin directory exists under the cache.
+    Present,
+    /// Both expected plugin directories are confirmed absent.
+    Absent,
+    /// The cache could not be inspected, so absence is not confirmed.
+    Unverifiable,
+}
+
+fn plugin_cache_state(user_home: Option<&Path>, plugin: &str) -> PluginCacheState {
     let Some(home) = user_home else {
-        return false;
+        // Installation needs a home directory to stage into and cache under, so
+        // without one nothing can have been cached.
+        return PluginCacheState::Absent;
     };
     let base = qoder_home(home).join("plugins").join("cache").join("local");
-    base.join(plugin).is_dir() || base.join(format!("{plugin}-qoder")).is_dir()
+    let mut unverifiable = false;
+    for candidate in [base.join(plugin), base.join(format!("{plugin}-qoder"))] {
+        match std::fs::metadata(&candidate) {
+            Ok(meta) if meta.is_dir() => return PluginCacheState::Present,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            // A permission error or an I/O error is not evidence of absence.
+            Err(_) => unverifiable = true,
+        }
+    }
+    if unverifiable {
+        PluginCacheState::Unverifiable
+    } else {
+        PluginCacheState::Absent
+    }
 }
 
 /// The Qoder-specific payload of a receipt, when it is one.
@@ -1389,13 +1458,40 @@ fn disable_native(claim: &AdapterClaim, ctx: &DriverCtx) -> Result<DisableReport
             )],
         });
     }
-    let Some(program) = qodercli_program(ctx.user_home.as_deref()) else {
-        return Ok(DisableReport {
-            cleanup_complete: false,
-            messages: vec!["qodercli unavailable; receipt kept for retry".to_string()],
-        });
-    };
     let expected = plugin_entry(&plugin);
+    let Some(program) = qodercli_program(ctx.user_home.as_deref()) else {
+        // Without the CLI the plugin cache is the only remaining inventory: an
+        // absent cache proves nothing is registered, so an unconfirmed
+        // write-ahead receipt is dropped instead of blocking forget/uninstall
+        // forever. A cached plugin still needs the CLI, and keeps its receipt.
+        match plugin_cache_state(ctx.user_home.as_deref(), &plugin) {
+            PluginCacheState::Absent => {
+                return Ok(DisableReport {
+                    cleanup_complete: true,
+                    messages: vec![format!(
+                        "qodercli unavailable and qoder plugin '{plugin}' is not cached; nothing \
+                         remains registered, removed the receipt"
+                    )],
+                });
+            }
+            PluginCacheState::Present => {
+                return Ok(DisableReport {
+                    cleanup_complete: false,
+                    messages: vec!["qodercli unavailable; receipt kept for retry".to_string()],
+                });
+            }
+            PluginCacheState::Unverifiable => {
+                return Ok(DisableReport {
+                    cleanup_complete: false,
+                    messages: vec![
+                        "qodercli unavailable and the qoder plugin cache could not be inspected; \
+                         receipt kept for retry"
+                            .to_string(),
+                    ],
+                });
+            }
+        }
+    };
     if !native_install_confirmed(claim, payload) {
         let (cleanup_complete, message) = match ctx
             .ops
