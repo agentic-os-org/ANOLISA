@@ -349,3 +349,52 @@ async fn failed_survivor_rearm_releases_its_partial_watch_descriptors() {
         "the sibling survivor's coverage must survive the failed re-arm's cleanup"
     );
 }
+
+#[tokio::test]
+async fn failed_ancestor_rearm_keeps_routes_outside_the_original_release_observing() {
+    // #7592 fourth review (P1): `p` ⊃ {`a`, `x`}. Releasing `a` disturbs
+    // only `p`; `p`'s re-arm then fails partway under watch-budget
+    // pressure, and the recursive unwatch that releases its partial set
+    // strips `x` as well, although `x` never overlapped `a`. That release
+    // frees the budget, so `x` must be re-armed instead of staying
+    // silently unwatched behind a healthy route.
+    let _shaping = SHAPING_LOCK.lock().await;
+    let base = tempfile::tempdir().unwrap();
+    let p = base.path().join("p");
+    let a = p.join("a");
+    let x = p.join("x");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&x).unwrap();
+    let p_watcher = WorkspaceWatcher::start(&p).unwrap();
+    let a_watcher = WorkspaceWatcher::start(&a).unwrap();
+    let x_watcher = WorkspaceWatcher::start(&x).unwrap();
+
+    // Freeze the budget at exactly what is armed now, then grow `p`'s
+    // tree well beyond the one descriptor releasing `a` frees (and beyond
+    // what other root watchers' churn may free in the meantime).
+    let Some(_guard) = shape_watch_limit(0) else {
+        return;
+    };
+    for i in 0..256 {
+        fs::create_dir(p.join(format!("new-{i:03}"))).unwrap();
+    }
+
+    drop(a_watcher); // `p` re-arms and fails; its release strips `x`
+
+    assert!(p_watcher.is_degraded());
+    assert!(!x_watcher.is_degraded());
+
+    // Real coverage, not just a published route: the release latched the
+    // flag, a write close clears it, and a write on a held file sets it.
+    use std::io::Write as _;
+    let x_flag = x_watcher.is_writing_flag();
+    fs::write(x.join("a.log"), b"data").unwrap();
+    eventually_sync(&x_flag, false, "`x` to observe the write close");
+    let mut held = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(x.join("b.log"))
+        .unwrap();
+    held.write_all(b"data").unwrap();
+    eventually_sync(&x_flag, true, "`x` to observe the held write");
+}

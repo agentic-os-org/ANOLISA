@@ -1091,11 +1091,16 @@ impl DaemonState {
     }
 
     pub async fn unregister_workspace(&self, ws_id: &str) {
-        // Stop watcher if present
-        if let Ok(mut watchers) = self.watchers.lock() {
-            if let Some(w) = watchers.remove(ws_id) {
-                w.stop();
-            }
+        // Stop watcher if present. Drop it only after releasing the watcher
+        // table: dropping the last handle on a path synchronously re-arms
+        // overlapping roots, which can walk a large tree (#7592 review).
+        let removed = self
+            .watchers
+            .lock()
+            .ok()
+            .and_then(|mut watchers| watchers.remove(ws_id));
+        if let Some(w) = removed {
+            w.stop();
         }
         {
             let mut registry = self.registry.write().unwrap_or_else(|err| err.into_inner());
@@ -1112,9 +1117,14 @@ impl DaemonState {
 
     /// Register a file watcher for a workspace.
     pub fn register_watcher(&self, ws_id: String, watcher: WorkspaceWatcher) {
-        if let Ok(mut watchers) = self.watchers.lock() {
-            watchers.insert(ws_id, watcher);
-        }
+        // The replaced handle drops outside the watcher table, like in
+        // `unregister_workspace`.
+        let replaced = self
+            .watchers
+            .lock()
+            .ok()
+            .and_then(|mut watchers| watchers.insert(ws_id, watcher));
+        drop(replaced);
     }
 
     /// Whether a live, covered file watcher is registered for `ws_id`.

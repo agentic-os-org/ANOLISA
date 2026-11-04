@@ -145,6 +145,16 @@ impl SharedWatcher {
         coverage.entry(root.to_path_buf()).or_default().uncovered = false;
     }
 
+    /// Drop `root`'s coverage bookkeeping once its last route is retired,
+    /// so registration churn over distinct paths does not retain an entry
+    /// per historical path for the daemon's lifetime (#7592 review).
+    fn retire_coverage(&self, root: &Path) {
+        self.coverage
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(root);
+    }
+
     /// Whether `root`'s route is published but its kernel coverage is gone.
     fn route_degraded(&self, root: &Path) -> bool {
         self.coverage
@@ -186,11 +196,37 @@ impl SharedWatcher {
     /// closed — instead of leaving a route whose silent flag reads as
     /// quiescence.
     fn unwatch_preserving_overlaps(&self, watcher: &mut RecommendedWatcher, root: &Path) {
+        self.release_overlapping(watcher, root, &mut Vec::new());
+    }
+
+    /// One overlap-preserving release of `root`: latch and mark every
+    /// published route overlapping it, unwatch, then re-arm each of them.
+    ///
+    /// A failed re-arm keeps the route's degraded mark and releases the
+    /// partial descriptors its walk installed: notify 6.1.1's recursive
+    /// `watch()` adds one descriptor per directory and bails out at the
+    /// first failure without rolling back, and a leaked partial set pins
+    /// the per-user watch budget (`max_user_watches`) for later re-arms
+    /// and heals. That release is the same recursive
+    /// `unwatch`, so it disturbs every published route overlapping the
+    /// failed root — not only the survivors of the original release: with
+    /// `/p` ⊃ {`/p/a`, `/p/x`}, releasing `/p/a` disturbs only `/p`, but
+    /// releasing a failed `/p` strips `/p/x` too (#7592 review). Roots
+    /// whose re-arm failed are collected in `failed` and never disturbed
+    /// again in this call tree, so each failure adds one root and the
+    /// cascade is bounded by the number of routes.
+    fn release_overlapping(
+        &self,
+        watcher: &mut RecommendedWatcher,
+        root: &Path,
+        failed: &mut Vec<PathBuf>,
+    ) {
         let survivors: Vec<PathBuf> = {
             let routes = self.routes.write().unwrap_or_else(|err| err.into_inner());
             let survivors: Vec<PathBuf> = routes
                 .keys()
                 .filter(|registered| registered.starts_with(root) || root.starts_with(*registered))
+                .filter(|registered| !failed.contains(*registered))
                 .cloned()
                 .collect();
             for survivor in &survivors {
@@ -207,103 +243,24 @@ impl SharedWatcher {
         // Restore the kernel descriptors the prefix removal took away.
         // notify re-adds the root first, then walks the tree, so the
         // interruption window is bounded by one registration round-trip.
-        // `restored` tracks the survivors whose coverage is whole again,
-        // so a failure's cleanup knows whose descriptors it must not
-        // disturb permanently.
-        let mut restored: Vec<PathBuf> = Vec::new();
         for survivor in survivors {
-            self.rearm_survivor(watcher, &survivor, &mut restored);
-        }
-    }
-
-    /// Re-arm one survivor of an overlapping release. A failed recursive
-    /// re-arm keeps the route's degraded mark (coverage stays unavailable
-    /// until a heal re-registers) and releases the partial descriptors
-    /// the failed walk installed.
-    fn rearm_survivor(
-        &self,
-        watcher: &mut RecommendedWatcher,
-        survivor: &Path,
-        restored: &mut Vec<PathBuf>,
-    ) {
-        match watcher.watch(survivor, RecursiveMode::Recursive) {
-            Ok(()) => {
-                // Coverage is whole again; the interruption is over.
-                self.clear_degraded(survivor);
-                restored.push(survivor.to_path_buf());
+            // A nested release below may already have failed this root.
+            if failed.contains(&survivor) {
+                continue;
             }
-            Err(e) => {
-                // The pre-unwatch mark stays: coverage remains
-                // unavailable for this root until a heal re-registers.
-                self.release_partial_registration(watcher, survivor, restored);
-                error!(
-                    "failed to re-arm the overlapping watch on {:?}: {} — change detection \
-                     is degraded for that workspace until it is re-registered",
-                    survivor, e
-                );
-            }
-        }
-    }
-
-    /// Release the descriptors a failed recursive registration installed.
-    ///
-    /// notify 6.1.1's recursive `watch()` adds one descriptor per
-    /// directory and bails out at the first failure without rolling back,
-    /// so a failed survivor re-arm would leave a partial set pinning the
-    /// per-user watch budget (`max_user_watches`): later survivors and
-    /// heals then register against a budget occupied by the incomplete
-    /// registration, prolonging the monitoring outage (#7592 review). A
-    /// recursive `unwatch` releases the whole partial set at once, but
-    /// its prefix removal also strips descriptors that already-restored
-    /// survivors rely on — roots nested inside the failed one, and
-    /// ancestors whose recursive walk covers it — so those are latched,
-    /// marked uncovered, and re-armed afterwards, exactly like the outer
-    /// release. A restore that fails recurses the same way; a failed
-    /// root never (re-)enters `restored`, so a failure cascade always
-    /// runs out of roots to disturb instead of looping.
-    fn release_partial_registration(
-        &self,
-        watcher: &mut RecommendedWatcher,
-        failed: &Path,
-        restored: &mut Vec<PathBuf>,
-    ) {
-        let disturbed: Vec<PathBuf> = restored
-            .iter()
-            .filter(|p| p.starts_with(failed) || failed.starts_with(*p))
-            .cloned()
-            .collect();
-        if !disturbed.is_empty() {
-            let routes = self.routes.write().unwrap_or_else(|err| err.into_inner());
-            for survivor in &disturbed {
-                // Their coverage is about to be interrupted again: latch
-                // and mark before the unwatch strips it (same invariant
-                // as the outer release).
-                if let Some(flags) = routes.get(survivor) {
-                    for flag in flags {
-                        flag.store(true, Ordering::Release);
-                    }
-                }
-                self.mark_degraded(survivor);
-            }
-        }
-        let _ = watcher.unwatch(failed);
-        for survivor in disturbed {
-            // Re-added on success only: once a root's restore failed it
-            // stays degraded and is never re-watched in this call tree,
-            // which bounds the cascade.
-            restored.retain(|p| p != &survivor);
             match watcher.watch(&survivor, RecursiveMode::Recursive) {
-                Ok(()) => {
-                    self.clear_degraded(&survivor);
-                    restored.push(survivor);
-                }
+                // Coverage is whole again; the interruption is over.
+                Ok(()) => self.clear_degraded(&survivor),
                 Err(e) => {
-                    self.release_partial_registration(watcher, &survivor, restored);
+                    // The pre-unwatch mark stays: coverage remains
+                    // unavailable for this root until a heal re-registers.
+                    failed.push(survivor.clone());
+                    self.release_overlapping(watcher, &survivor, failed);
                     error!(
-                        "failed to restore the overlapping watch on {:?} while releasing \
-                         the partial registration of {:?}: {} — change detection is \
-                         degraded for that workspace until it is re-registered",
-                        survivor, failed, e
+                        "failed to re-arm the overlapping watch on {:?} while releasing {:?}: \
+                         {} — change detection is degraded for that workspace until it is \
+                         re-registered",
+                        survivor, root, e
                     );
                 }
             }
@@ -344,6 +301,7 @@ impl SharedWatcher {
                 last_handle
             };
             if last_handle {
+                self.retire_coverage(workspace_path);
                 // notify 6.1.1 does not roll back a partially installed
                 // recursive registration: its walk adds one descriptor per
                 // directory and bails out on the first failure (an
@@ -404,6 +362,7 @@ impl SharedWatcher {
         if !last_handle {
             return;
         }
+        self.retire_coverage(workspace_path);
         // The recursive unwatch prefix-strips every descriptor under the
         // released root; re-arm the overlapping survivors it disturbs (or
         // mark them degraded when that fails) — see the helper.
@@ -924,5 +883,71 @@ mod tests {
             "a quiet period observed across a coverage interruption proves nothing; the \
              check must report activity so the caller re-observes once coverage is stable"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_ancestor_rearm_disturbs_routes_outside_the_original_release() {
+        // #7592 fourth review (P1): `/p` ⊃ {`/p/a`, `/p/x`}. Dropping
+        // `/p/a` disturbs only `/p`; when `/p`'s re-arm then fails, the
+        // recursive unwatch that releases its partial registration also
+        // strips `/p/x`, which never overlapped `/p/a`. `/p/x` must be
+        // handled like any other disturbed route — here its re-arm fails
+        // too (the whole tree was renamed away), so it must fail closed
+        // instead of keeping a silent flag that reads as quiescence.
+        let base = tempfile::tempdir().unwrap();
+        let p = base.path().join("p");
+        let a = p.join("a");
+        let x = p.join("x");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&x).unwrap();
+        let p_watcher = WorkspaceWatcher::start(&p).unwrap();
+        let a_watcher = WorkspaceWatcher::start(&a).unwrap();
+        let x_watcher = WorkspaceWatcher::start(&x).unwrap();
+
+        std::fs::rename(&p, base.path().join("moved")).unwrap();
+        drop(a_watcher); // survivor re-arm of `/p` fails: path missing
+
+        assert!(p_watcher.is_degraded());
+        assert!(
+            x_watcher.is_degraded(),
+            "a route stripped by the failed re-arm's release must be marked degraded"
+        );
+        assert!(
+            !x_watcher.check_quiescent().await,
+            "a route stripped by the failed re-arm's release must not read as quiescent"
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_the_last_route_drops_its_coverage_entry() {
+        // #7592 fourth review (P2): coverage entries are created by every
+        // successful registration and must be retired with the path's last
+        // route, or registration churn over distinct paths retains one
+        // entry per historical path for the daemon's lifetime.
+        let base = tempfile::tempdir().unwrap();
+        let shared = shared_watcher().unwrap();
+        let paths: Vec<PathBuf> = (0..8)
+            .map(|i| base.path().join(format!("ws-{i}")))
+            .collect();
+        for path in &paths {
+            std::fs::create_dir(path).unwrap();
+            drop(WorkspaceWatcher::start(path).unwrap());
+        }
+        {
+            let coverage = shared.coverage.read().unwrap();
+            for path in &paths {
+                assert!(
+                    !coverage.contains_key(path),
+                    "retired path {path:?} must not keep a coverage entry"
+                );
+            }
+        }
+
+        // A remaining handle on the same path keeps the entry.
+        let kept = WorkspaceWatcher::start(&paths[0]).unwrap();
+        drop(WorkspaceWatcher::start(&paths[0]).unwrap());
+        assert!(shared.coverage.read().unwrap().contains_key(&paths[0]));
+        drop(kept);
+        assert!(!shared.coverage.read().unwrap().contains_key(&paths[0]));
     }
 }
