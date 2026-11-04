@@ -550,3 +550,58 @@ class TestMcporterDispatchStatus:
         events = self._convert(tmp_path, "Error: unknown tool: nope")
 
         assert self._virtual_dispatch(events)["response_status"] == 500
+
+
+class TestInvalidTimestamps:
+    """A present-but-invalid timestamp must not abort the conversion.
+
+    Missing timestamps already fall back to the current time; a timestamp that
+    is present but null, numeric or empty used to kill the whole conversion
+    (TypeError in the event sort, AttributeError in normalize_timestamp), which
+    recorded the trial as "Trace conversion failed" and lost the session.
+    """
+
+    def _convert(self, tmp_path, lines):
+        from ce_runner._common import load_task_yaml
+        from ce_runner.session_trace_converter import convert_session_to_trace
+
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text("".join(lines))
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text("task_id: T001\nservices: []\ntools: []\n")
+        output_file = tmp_path / "output.jsonl"
+
+        convert_session_to_trace(
+            str(session_file), load_task_yaml(str(task_yaml)), str(output_file)
+        )
+
+        return [json.loads(line) for line in output_file.read_text().strip().split("\n")]
+
+    @pytest.mark.parametrize("bad_timestamp", ["null", "1761300000", '""', "1.5", "[1]"])
+    def test_invalid_timestamp_still_converts_the_session(self, tmp_path, bad_timestamp):
+        events = self._convert(
+            tmp_path,
+            [
+                '{"type": "message", "timestamp": "2024-01-15T10:00:00.000Z", '
+                '"message": {"role": "user", "content": []}}\n',
+                f'{{"type": "message", "timestamp": {bad_timestamp}, "message": '
+                '{"role": "assistant", "content": [], "stopReason": "endTurn"}}\n',
+            ],
+        )
+
+        assert events[-1]["type"] == "trace_end"
+
+    def test_wall_time_ignores_non_string_timestamps(self, tmp_path):
+        events = self._convert(
+            tmp_path,
+            [
+                '{"type": "message", "timestamp": "2024-01-15T10:00:00.000Z", '
+                '"message": {"role": "user", "content": []}}\n',
+                '{"type": "message", "timestamp": 1761300000, "message": '
+                '{"role": "assistant", "content": []}}\n',
+                '{"type": "message", "timestamp": "2024-01-15T10:01:00.000Z", '
+                '"message": {"role": "assistant", "content": [], "stopReason": "endTurn"}}\n',
+            ],
+        )
+
+        assert events[-1]["wall_time_s"] == pytest.approx(60.0)
