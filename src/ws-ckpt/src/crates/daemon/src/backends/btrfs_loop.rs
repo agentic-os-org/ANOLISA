@@ -980,7 +980,11 @@ async fn detach_idle_image_loops(img: &str, expected: ImageIdentity) -> anyhow::
 }
 
 /// Release only an idle association to this exact image. O_EXCL guards against
-/// mounts in other namespaces; deferred AUTOCLEAR is undone for a raw opener.
+/// mounts in other namespaces. A deferred AUTOCLEAR after CLR_FD means some
+/// other opener still holds the device; the flag is undone to stay in charge
+/// and the detach is retried briefly, which tolerates short-lived openers
+/// (e.g. udev probing after the failed mount, issue #9437). A long-term holder
+/// keeps the association and the caller refuses to reattach.
 async fn detach_owned_unused_loop(
     img: &str,
     dev: &str,
@@ -1022,34 +1026,59 @@ async fn detach_owned_unused_loop(
     {
         return Ok(false);
     }
+    // CLR_FD only defers the detach (AUTOCLEAR) while another opener exists;
+    // short-lived openers such as udev probes close within milliseconds, so a
+    // brief bounded retry (at most three CLR_FD attempts in total) detaches
+    // cleanly instead of failing the whole mount retry (#9437). The flag is
+    // undone before every wait so a genuine holder cannot pull the association
+    // out from under us, and a persistent holder still ends in the
+    // conservative refuse-and-keep path below.
+    const DETACH_RETRIES: usize = 2;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+    // The association must still target this exact image before every CLR_FD:
+    // a concurrent plain-fd holder can retarget it via LOOP_CHANGE_FD or shift
+    // its geometry via LOOP_SET_STATUS64 while we wait, and detaching then
+    // would release another image's association (PR #9471 review).
+    let identity_matches = |info: &LoopInfo64| {
+        info.lo_number == number
+            && info.lo_device == expected.dev
+            && info.lo_inode == expected.ino
+            && info.lo_offset == 0
+            && info.lo_sizelimit == 0
+    };
     loop_ioctl(fd, 0x4c01, std::ptr::null_mut()).context("Cannot clear loop binding")?;
     let mut after = LoopInfo64::default();
-    match loop_ioctl(fd, 0x4c05, &mut after) {
-        Err(e) if e.raw_os_error() == Some(libc::ENXIO) => Ok(true),
-        Ok(())
-            if after.lo_number == number
-                && after.lo_device == expected.dev
-                && after.lo_inode == expected.ino
-                && after.lo_flags & AUTOCLEAR != 0 =>
-        {
-            after.lo_flags &= !AUTOCLEAR;
-            loop_ioctl(fd, 0x4c04, &mut after)
-                .context("Cannot restore busy loop's autoclear flag")?;
-            let mut restored = LoopInfo64::default();
-            loop_ioctl(fd, 0x4c05, &mut restored)
-                .context("Cannot verify busy loop was retained")?;
-            if restored.lo_number != number
-                || restored.lo_device != expected.dev
-                || restored.lo_inode != expected.ino
-                || restored.lo_flags & AUTOCLEAR != 0
-            {
-                bail!("Busy loop {dev} was not restored");
+    for retry in 0..=DETACH_RETRIES {
+        match loop_ioctl(fd, 0x4c05, &mut after) {
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => return Ok(true),
+            Ok(()) if identity_matches(&after) && after.lo_flags & AUTOCLEAR != 0 => {
+                after.lo_flags &= !AUTOCLEAR;
+                loop_ioctl(fd, 0x4c04, &mut after)
+                    .context("Cannot restore busy loop's autoclear flag")?;
+                let mut restored = LoopInfo64::default();
+                loop_ioctl(fd, 0x4c05, &mut restored)
+                    .context("Cannot verify busy loop was retained")?;
+                if !identity_matches(&restored) || restored.lo_flags & AUTOCLEAR != 0 {
+                    bail!("Busy loop {dev} was not restored");
+                }
+                if retry == DETACH_RETRIES {
+                    return Ok(false);
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+                match loop_ioctl(fd, 0x4c05, &mut after) {
+                    Err(e) if e.raw_os_error() == Some(libc::ENXIO) => return Ok(true),
+                    Ok(()) if identity_matches(&after) => {}
+                    Ok(()) => bail!("Loop {dev} changed identity during cleanup"),
+                    Err(e) => return Err(e).context("Cannot verify loop cleanup"),
+                }
+                loop_ioctl(fd, 0x4c01, std::ptr::null_mut())
+                    .context("Cannot clear loop binding")?;
             }
-            Ok(false)
+            Ok(()) => bail!("Loop {dev} changed identity during cleanup"),
+            Err(e) => return Err(e).context("Cannot verify loop cleanup"),
         }
-        Ok(()) => bail!("Loop {dev} changed identity during cleanup"),
-        Err(e) => Err(e).context("Cannot verify loop cleanup"),
     }
+    unreachable!("detach retry loop always returns")
 }
 
 /// Live-mount migration legacy → target: idle-check, umount, rename, remount.
