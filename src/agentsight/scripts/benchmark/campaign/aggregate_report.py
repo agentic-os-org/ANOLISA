@@ -348,8 +348,10 @@ def write_soak(results: Path, items: list[tuple[Path, dict[str, Any]]]) -> None:
         summary = summary if isinstance(summary, dict) else {}
         evaluation = run.get("evaluation")
         verdict = evaluation.get("verdict", "—") if isinstance(evaluation, dict) else "—"
+        version = display(run.get("version"))
+        duration = display(run.get("duration_seconds"), "s")
         lines.append(
-            f"| {run['version']} | {run['duration_seconds']}s | "
+            f"| {version} | {duration} | "
             f"{display(nested(summary, 'resources', 'rss_mb', 'first'))}/"
             f"{display(nested(summary, 'resources', 'rss_mb', 'last'))}/"
             f"{display(nested(summary, 'resources', 'rss_mb', 'avg'))}/"

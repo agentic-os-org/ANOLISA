@@ -98,3 +98,35 @@ def test_matrix_report_cli_preserves_incomplete_evidence(
         assert not any(
             row["version"] == "baseline" and row["qps"] == 100 for row in rows
         )
+
+
+def test_report_writers_tolerate_partial_run_records(tmp_path: Path) -> None:
+    import aggregate_report
+
+    soak_items = [
+        (tmp_path / "soak.json", {"scenario": "soak", "version": "baseline"})
+    ]
+    aggregate_report.write_soak(tmp_path, soak_items)
+
+    soak_report = (tmp_path / "soak-report.md").read_text()
+    assert "| baseline | — |" in soak_report
+    assert "NOT EXECUTED" not in soak_report
+
+
+def test_matrix_rows_skip_records_without_identity() -> None:
+    import aggregate_report
+
+    items = [
+        (Path("a"), {"scenario": "matrix", "qps": 100}),
+        (Path("b"), {"scenario": "matrix", "qps": 100, "version": None}),
+    ]
+    assert aggregate_report.matrix_rows(items) == []
+
+    null_evaluation = [
+        (
+            Path("c"),
+            {"scenario": "matrix", "qps": 100, "version": "baseline", "evaluation": None},
+        )
+    ]
+    rows = aggregate_report.matrix_rows(null_evaluation)
+    assert rows[0]["pass_count"] == 0
