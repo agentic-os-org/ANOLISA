@@ -43,6 +43,8 @@ rm -rf %{buildroot}
 
 # Copy the shared core inventory; RPM owns its launcher and rendered unit.
 bash packaging/payload.sh binaries target/release "%{buildroot}" "%{_bindir}" "%{_libexecdir_cosh}"
+bash packaging/payload.sh resources "%{buildroot}%{_libexecdir_cosh}/resources.conf" system \
+    "%{_skilldir_cosh}" "%{_datadir}/anolisa/extensions"
 
 # Install the rendered system-level Gateway template.
 install -d %{buildroot}%{_unitdir}
@@ -93,6 +95,7 @@ bash packaging/payload.sh skills . "%{buildroot}%{_skilldir_cosh}"
 %{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
+%{_libexecdir_cosh}/resources.conf
 %{_unitdir}/cosh-gateway@.service
 
 %{_skilldir_cosh}/manage-task-checkpoints/

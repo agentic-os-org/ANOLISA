@@ -67,6 +67,12 @@ Use the component root Makefile. `make build` compiles the workspace;
 bundled skill. Installation accepts `PREFIX`, `AWPRJ` and `DESTDIR` without
 building, registering a shell or activating a service.
 
+The installer writes `resources.conf` beside `cosh-core`. It records the final
+`skill_dir` and `extension_dir` paths (never `DESTDIR`) and the user/system
+profile. Values are literal paths, not shell expressions. RPM owns the same
+file; raw delivery renders its `{datadir}` paths during installation. Keep this
+file in the payload whenever adding or changing a delivery channel.
+
 Without an explicit `INSTALL_PROFILE`, effective UID 0 selects the system
 profile (`PREFIX=/usr/local`); other UIDs select the user profile
 (`PREFIX=$HOME/.local`) and `XDG_DATA_HOME` resources (or the owned home

@@ -109,7 +109,7 @@ class RpmPackageTests(unittest.TestCase):
                 )
                 ownership = file_entries(self.source, "%files", macros)
                 files = [p for p in stage.rglob("*") if p.is_symlink() or p.is_file()]
-                self.assertEqual(len(files), 10)
+                self.assertEqual(len(files), 11)
                 for path in files:
                     installed = "/" + str(path.relative_to(stage))
                     matches = sum(
@@ -128,6 +128,16 @@ class RpmPackageTests(unittest.TestCase):
                     os.readlink(stage / "usr/bin/cosh"), macros["_libexecdir_cosh"] + "/cosh-shell"
                 )
                 self.assertIn("cosh-ng)", (stage / "usr/bin/cosh-switch").read_text())
+                resources = stage / macros["_libexecdir_cosh"].lstrip("/") / "resources.conf"
+                self.assertEqual(
+                    resources.read_text().splitlines(),
+                    [
+                        "profile=system",
+                        "skill_dir=" + macros["_skilldir_cosh"],
+                        "extension_dir=/usr/share/anolisa/extensions",
+                    ],
+                )
+                self.assertEqual(resources.stat().st_mode & 0o777, 0o644)
 
     @unittest.skipUnless(
         shutil.which("rpmspec"), "rpmspec is unavailable; fixture inventory is still checked"

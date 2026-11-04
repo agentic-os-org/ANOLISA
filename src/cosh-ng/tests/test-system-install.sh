@@ -33,9 +33,11 @@ grep -Fxq 'AWPRJ=' <<< "$default_layout"
 grep -Fxq 'LIBEXECDIR=/usr/local/libexec/cosh-ng' <<< "$default_layout"
 grep -Fxq 'DATADIR=/usr/local/share/cosh-ng' <<< "$default_layout"
 grep -Fxq 'SKILLDIR=/usr/local/share/cosh-ng/skills' <<< "$default_layout"
+grep -Fxq 'EXTENSIONDIR=/usr/local/share/cosh-ng/extensions' <<< "$default_layout"
 distribution_layout="$(layout INSTALL_PROFILE=system AWPRJ=anolisa PREFIX=/opt/vendor/)"
 grep -Fxq 'LIBEXECDIR=/opt/vendor/libexec/anolisa/cosh-ng' <<< "$distribution_layout"
 grep -Fxq 'SKILLDIR=/opt/vendor/share/anolisa/skills' <<< "$distribution_layout"
+grep -Fxq 'EXTENSIONDIR=/opt/vendor/share/anolisa/extensions' <<< "$distribution_layout"
 mkdir -p "$TMP/user-home"
 user_layout="$(HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" layout INSTALL_PROFILE=user)"
 grep -Fxq "PREFIX=$TMP/user-home/.local" <<< "$user_layout"
@@ -55,6 +57,11 @@ done
 if layout INSTALL_PROFILE=unsupported >/dev/null 2>&1 || layout PREFIX=relative >/dev/null 2>&1; then
     printf 'ERROR: unsupported system layout accepted\n' >&2; exit 1
 fi
+for invalid in $'/skills/line\nbreak' $'/skills/carriage\rreturn'; do
+    if layout INSTALL_PROFILE=system SKILLDIR="$invalid" >/dev/null 2>&1; then
+        printf 'ERROR: multiline resource path accepted\n' >&2; exit 1
+    fi
+done
 
 # Exercise both effective-UID defaults without changing the test process identity.
 UID_TOOLS="$TMP/uid-tools"
@@ -112,12 +119,16 @@ test -f "$SOURCE/packaging/anolisa/rpm/component.toml"
 test ! -e "$SOURCE/.anolisa"
 make -s -C "$SOURCE" install \
     DESTDIR="$TMP/stage" BIN_DIR="$TMP/bin" PREFIX=/opt/vendor \
-    BINDIR=/custom/bin LIBEXECDIR=/custom/runtime DATADIR=/custom/data SKILLDIR=/custom/skills
+    BINDIR=/custom/bin LIBEXECDIR=/custom/runtime DATADIR=/custom/data SKILLDIR=/custom/skills \
+    EXTENSIONDIR=/custom/extensions
 test -x "$TMP/stage/custom/bin/cosh-cli"
 test -x "$TMP/stage/custom/runtime/cosh-shell"
 test -f "$TMP/stage/custom/data/systemd/cosh-gateway@.service.in"
 cmp "$SOURCE/LICENSE" "$TMP/stage/custom/data/LICENSE"
 test -f "$TMP/stage/custom/skills/manage-task-checkpoints/SKILL.md"
+printf '%s\n' 'profile=system' 'skill_dir=/custom/skills' 'extension_dir=/custom/extensions' \
+    > "$TMP/expected-resources"
+cmp "$TMP/expected-resources" "$TMP/stage/custom/runtime/resources.conf"
 test ! -e "$TMP/stage/custom/bin/cosh"
 test ! -e "$TMP/stage/opt/vendor/lib/systemd/system/cosh-gateway@.service"
 make -s -C "$SOURCE" install \
@@ -128,6 +139,8 @@ make -s -j4 -C "$SOURCE" install \
     DESTDIR="$TMP/parallel" BIN_DIR="$TMP/bin" PREFIX=/opt/vendor AWPRJ=parallel
 test -x "$TMP/parallel/opt/vendor/libexec/parallel/cosh-ng/cosh-core"
 test -f "$TMP/parallel/opt/vendor/share/parallel/skills/manage-task-checkpoints/SKILL.md"
+grep -Fxq 'skill_dir=/opt/vendor/share/parallel/skills' \
+    "$TMP/parallel/opt/vendor/libexec/parallel/cosh-ng/resources.conf"
 make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/direct"
 test -x "$TMP/direct/bin/cosh-cli"
 test -x "$TMP/direct/libexec/cosh-ng/cosh-core"
@@ -159,6 +172,15 @@ for uid in 0 1001; do
 done
 test -x "$TMP/user-prefix/libexec/cosh-ng/cosh-core"
 test -f "$TMP/user-data/cosh-ng/skills/manage-task-checkpoints/SKILL.md"
+printf '%s\n' 'profile=user' "skill_dir=$TMP/user-data/cosh-ng/skills" \
+    "extension_dir=$TMP/user-data/cosh-ng/extensions" > "$TMP/expected-resources"
+cmp "$TMP/expected-resources" "$TMP/user-prefix/libexec/cosh-ng/resources.conf"
+
+quoted_skilldir="/resources/quote's \"double\" \\ path=one"
+make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" DESTDIR="$TMP/quoted" \
+    SKILLDIR="$quoted_skilldir" EXTENSIONDIR="/resources/extensions=two"
+grep -Fxq "skill_dir=$quoted_skilldir" "$TMP/quoted/usr/libexec/cosh-ng/resources.conf"
+grep -Fxq 'extension_dir=/resources/extensions=two' "$TMP/quoted/usr/libexec/cosh-ng/resources.conf"
 for group in core skills; do
     if COMPONENT_ROOT="$SOURCE" BIN_DIR="$TMP/bin" DESTDIR="$TMP/removed-$group" \
         bash "$SOURCE/packaging/install.sh" "$group" >/dev/null 2>&1; then

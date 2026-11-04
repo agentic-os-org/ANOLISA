@@ -20,6 +20,7 @@ REQUIRED_SOURCES = {
     "bin/cosh-switch",
     "libexec/anolisa/cosh-ng/cosh-core",
     "libexec/anolisa/cosh-ng/cosh-shell",
+    "libexec/anolisa/cosh-ng/resources.conf",
     "share/doc/cosh-ng/LICENSE",
     "share/doc/cosh-ng/README.md",
 }

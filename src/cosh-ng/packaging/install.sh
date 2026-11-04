@@ -59,15 +59,21 @@ cosh_resolve_layout() {
     local default_skilldir="$DATADIR/skills"
     [ -z "$AWPRJ" ] || default_skilldir="$data_root/$AWPRJ/skills"
     SKILLDIR="${SKILLDIR-$default_skilldir}"
+    local default_extensiondir="$DATADIR/extensions"
+    [ -z "$AWPRJ" ] || default_extensiondir="$data_root/$AWPRJ/extensions"
+    EXTENSIONDIR="${EXTENSIONDIR-$default_extensiondir}"
     UNITDIR="${UNITDIR-$root/lib/systemd/system}"
     local directory
-    for directory in "$PREFIX" "$BINDIR" "$LIBDIR" "$LIBEXECDIR" "$DATADIR" "$SKILLDIR" "$UNITDIR"; do
+    for directory in "$PREFIX" "$BINDIR" "$LIBDIR" "$LIBEXECDIR" "$DATADIR" "$SKILLDIR" "$EXTENSIONDIR" "$UNITDIR"; do
         case "$directory" in
             /*) ;;
             *) cosh_layout_error "layout directory must be absolute: $directory"; return 1 ;;
         esac
         case "/$directory/" in
             */../* | */./*) cosh_layout_error "layout directory contains a dot segment: $directory"; return 1 ;;
+        esac
+        case "$directory" in
+            *$'\r'*|*$'\n'*) cosh_layout_error 'layout directory must be a single line'; return 1 ;;
         esac
     done
 }
@@ -77,7 +83,7 @@ if [ "${1:-}" = --print-layout ]; then
     [ "$#" -eq 1 ] || { printf 'ERROR: --print-layout accepts no arguments\n' >&2; exit 1; }
     printf '%s\n' "INSTALL_PROFILE=$INSTALL_PROFILE" "AWPRJ=$AWPRJ" "PREFIX=$PREFIX" "BINDIR=$BINDIR" \
         "LIBDIR=$LIBDIR" "LIBEXECDIR=$LIBEXECDIR" "DATADIR=$DATADIR" \
-        "SKILLDIR=$SKILLDIR" "UNITDIR=$UNITDIR"
+        "SKILLDIR=$SKILLDIR" "EXTENSIONDIR=$EXTENSIONDIR" "UNITDIR=$UNITDIR"
     exit 0
 fi
 
@@ -126,11 +132,13 @@ check_destination_file "$root$BINDIR/cosh-cli"
 for binary in $COSH_PRIVATE_BINARIES; do
     check_destination_file "$root$LIBEXECDIR/$binary"
 done
+check_destination_file "$root$LIBEXECDIR/resources.conf"
 check_destination_file "$root$DATADIR/systemd/cosh-gateway@.service.in"
 check_destination_file "$root$DATADIR/LICENSE"
 check_destination_file "$root$SKILLDIR/manage-task-checkpoints/SKILL.md"
 
 cosh_copy_binaries "$BIN_DIR" "$root" "$BINDIR" "$LIBEXECDIR"
+cosh_write_resources "$root$LIBEXECDIR/resources.conf" "$INSTALL_PROFILE" "$SKILLDIR" "$EXTENSIONDIR"
 install -d -m 0755 "$root$DATADIR/systemd"
 install -p -m 0644 "$COMPONENT_ROOT/packaging/systemd/cosh-gateway@.service.in" "$root$DATADIR/systemd/"
 install -p -m 0644 "$COMPONENT_ROOT/LICENSE" "$root$DATADIR/LICENSE"

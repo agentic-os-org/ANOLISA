@@ -357,6 +357,9 @@ cmp "$LINUX_X64/cosh-cli" "$EXTRACTED/bin/cosh-cli"
 cmp "$LINUX_X64/cosh-core" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-core"
 cmp "$LINUX_X64/cosh-gateway" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway"
 cmp "$LINUX_X64/cosh-shell" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell"
+printf '%s\n' 'skill_dir={datadir}/skills' 'extension_dir={datadir}/extensions' \
+    > "$TMP/expected-resources"
+cmp "$TMP/expected-resources" "$EXTRACTED/libexec/anolisa/cosh-ng/resources.conf"
 cmp "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
     "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 cmp "$ROOT/skills/manage-task-checkpoints/SKILL.md" \
@@ -402,6 +405,7 @@ file_mode() {
 test "$(file_mode "$EXTRACTED/bin/cosh")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell")" = 755
+test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/resources.conf")" = 644
 test "$(file_mode "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in")" = 644
 test "$(file_mode "$EXTRACTED/share/anolisa/skills/manage-task-checkpoints/SKILL.md")" = 644
 test "$(file_mode "$EXTRACTED/share/doc/cosh-ng/README.md")" = 644
@@ -468,6 +472,14 @@ assert linux["component"]["contract"]["min_anolisa_version"] == "0.3.21"
 assert macos["component"]["contract"]["min_anolisa_version"] == "0.3.21"
 assert linux["component"]["conflicts"] == ["cosh"]
 assert macos["component"]["conflicts"] == ["cosh"]
+resource_file = {
+    "source": "libexec/anolisa/cosh-ng/resources.conf",
+    "target": "{libexecdir}/cosh-ng/resources.conf",
+    "mode": "0644",
+    "render": "anolisa-paths-v1",
+}
+for component in (linux["component"], macos["component"]):
+    assert resource_file in component["layout"]["files"]
 linux_dependencies = {
     dependency["name"]: dependency for dependency in linux["component"]["dependencies"]
 }
@@ -528,6 +540,7 @@ MACOS_EXTRACTED="$TMP/extracted-macos"
 install -d -m 0755 "$MACOS_EXTRACTED"
 tar -xzf "$TMP/out-macos-arm64/$MACOS_ARTIFACT" -C "$MACOS_EXTRACTED"
 cmp "$MACOS_CONTRACT" "$MACOS_EXTRACTED/.anolisa/component.toml"
+cmp "$TMP/expected-resources" "$MACOS_EXTRACTED/libexec/anolisa/cosh-ng/resources.conf"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway-acp@.service.in"
 
