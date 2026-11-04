@@ -108,24 +108,29 @@ impl EditTool {
             .map_err(|e| format!("Failed to read {}: {e}", display_path.display()))?;
         after_snapshot().await;
 
-        let count = content.matches(old_string).count();
-        if count == 0 {
+        let occurrences = overlapping_occurrences(content, old_string);
+        if occurrences == 0 {
             return Ok(ToolResult::error(format!(
                 "old_string not found in {}",
                 display_path.display()
             )));
         }
-        if count > 1 && !replace_all {
+        if occurrences > 1 && !replace_all {
             return Ok(ToolResult::error(format!(
-                "old_string found {count} times in {}. Use replace_all=true to replace all, or provide more context to make the match unique.",
+                "old_string found {occurrences} times in {}. Use replace_all=true to replace all, or provide more context to make the match unique.",
                 display_path.display()
             )));
         }
 
-        let new_content = if replace_all {
-            content.replace(old_string, new_string)
+        // `replace_all` keeps `str::replace` semantics: replacements do not overlap, so the
+        // reported count is the number of replacements actually written.
+        let (new_content, replaced) = if replace_all {
+            (
+                content.replace(old_string, new_string),
+                content.matches(old_string).count(),
+            )
         } else {
-            content.replacen(old_string, new_string, 1)
+            (content.replacen(old_string, new_string, 1), 1)
         };
 
         if let Err(error) =
@@ -141,10 +146,33 @@ impl EditTool {
         }
 
         Ok(ToolResult::success(format!(
-            "Replaced {count} occurrence(s) in {}",
+            "Replaced {replaced} occurrence(s) in {}",
             display_path.display()
         )))
     }
+}
+
+/// Count every position where `needle` matches, including overlapping ones.
+///
+/// `str::matches` resumes after each match, so it reports one occurrence of `aba` in
+/// `ababa`. The uniqueness check needs both positions: replacing the first of two
+/// overlapping matches rewrites a string the caller expected to be unambiguous.
+fn overlapping_occurrences(content: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        // Matches `str::matches("")`, which reports a position at every boundary.
+        return content.chars().count() + 1;
+    }
+    let mut count = 0;
+    let mut from = 0;
+    while let Some(offset) = content[from..].find(needle) {
+        count += 1;
+        let start = from + offset;
+        match content[start..].chars().next() {
+            Some(next) => from = start + next.len_utf8(),
+            None => break,
+        }
+    }
+    count
 }
 
 #[cfg(test)]
@@ -247,6 +275,83 @@ mod tests {
         assert!(result.is_error);
         assert!(result.output.contains("escapes workspace root"));
         assert_eq!(fs::read_to_string(outside.path()).unwrap(), "stable");
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_an_overlapping_ambiguous_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.txt");
+        fs::write(&path, "ababa").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "path": path.to_str().unwrap(),
+                    "old_string": "aba",
+                    "new_string": "X"
+                }),
+                &test_ctx(directory.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error, "{}", result.output);
+        assert!(result.output.contains("2 times"), "{}", result.output);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "ababa");
+    }
+
+    #[tokio::test]
+    async fn edit_replace_all_keeps_non_overlapping_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.txt");
+        fs::write(&path, "ababa").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "path": path.to_str().unwrap(),
+                    "old_string": "aba",
+                    "new_string": "X",
+                    "replace_all": true
+                }),
+                &test_ctx(directory.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "Xba");
+        // The reported count describes what was written, not the overlap-aware count.
+        assert!(
+            result.output.contains("Replaced 1 occurrence(s)"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_unique_match_next_to_a_partial_prefix_still_applies() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.txt");
+        fs::write(&path, "abab").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "path": path.to_str().unwrap(),
+                    "old_string": "aba",
+                    "new_string": "X"
+                }),
+                &test_ctx(directory.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "Xb");
     }
 
     #[tokio::test]
