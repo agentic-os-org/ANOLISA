@@ -7,7 +7,12 @@ echo "[anolisa] Starting ANOLISA Agentic OS container..."
 # AgentSight: start if binary is available and eBPF capabilities are present
 # ---------------------------------------------------------------------------
 if command -v agentsight &>/dev/null; then
-  if capsh --print 2>/dev/null | grep -qE 'cap_bpf|cap_sys_admin'; then
+  # capsh --print also reports the bounding set (capabilities that may be
+  # raised) and, on libcap 2.41+, a "Current IAB:" line that names capabilities
+  # the process does NOT hold with a leading "!". Match the held set only.
+  CURRENT_CAPS="$(capsh --print 2>/dev/null | sed -n 's/^Current: *//p')"
+  if printf '%s' "$CURRENT_CAPS" \
+      | grep -qE '(^|,)(cap_bpf|cap_perfmon|cap_sys_admin)([=, ]|$)'; then
     echo "[anolisa] eBPF capabilities detected, starting agentsight..."
     if command -v agentsight-start &>/dev/null; then
       agentsight-start &
@@ -15,7 +20,7 @@ if command -v agentsight &>/dev/null; then
       agentsight serve &
     fi
   else
-    echo "[anolisa] WARNING: Missing cap_bpf/cap_perfmon capabilities."
+    echo "[anolisa] WARNING: Missing cap_bpf/cap_perfmon/cap_sys_admin capabilities."
     echo "[anolisa] agentsight will NOT start. To enable, run with:"
     echo "[anolisa]   docker run --cap-add CAP_BPF --cap-add CAP_PERFMON ..."
     echo "[anolisa]   or: docker run --privileged ..."
