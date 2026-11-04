@@ -108,12 +108,12 @@ File read/write/exec rules, logical conditions, history predicates, and block/al
 require_confirmation decisions can be saved when valid. Network and AgentHook target
 formats are not yet defined and cannot be saved.
 
-The AgentSight Adapter currently executes only block + file/write + operation=delete
+For native JSON, the PEP Translator supports only block + file/write + operation=delete
 rules without history. Unsupported rules fail the entire Binding with a bounded code
 such as `RULE_1_UNSUPPORTED_EFFECT`; no supported subset is sent. Quotes, backslashes
 and control characters in `because` are rejected during translation because the target
 DSL has no escape syntax; ordinary Unicode text is preserved. An omitted reason uses
-the Adapter's default. Policy creation success does not establish that the target
+the Translator's default. Policy creation success does not establish that the target
 PEP (Policy Enforcement Point) supports these rules.
 
 The generated DSL expresses deletion prevention. Actual delete-only kernel behavior
@@ -153,7 +153,7 @@ envelope in `--file`. Save this example as `cedar-policy.json`:
   "language": "cedar",
   "content": {
     "schema": {"schemaId": "seccore.system", "revision": 1},
-    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/workspace/important\" };"
+    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { context.input.operation == SecCore::WriteOperation::\"delete\" && resource.path == \"/workspace/important\" };"
   }
 }
 ```
@@ -169,9 +169,9 @@ syntax, schema or common-subset constructs return `invalid_argument` without
 changing stored policy content or revisions. Unknown schema revisions are rejected
 without fallback. Native templates remain supported in their existing shape.
 
-Policy creation success does not establish target PEP support. The current
-AgentSight Translator does not yet support Cedar: Cedar Bindings targeting
-AgentSight receive `UNSUPPORTED_POLICY_LANGUAGE`. Existing
+Policy creation success does not establish target PEP support. The current PEP
+Translator supports a Cedar `forbid` subset for deletion and ordinary-write
+restrictions; unsupported semantics reject the entire translation. Existing
 Scope/Binding snapshots retain their saved Policy revision and schema when a
 Policy is updated or deleted. Source can be reloaded into an in-memory PST;
 neither AST nor PST is stored in SQLite. An older binary cannot read new Cedar

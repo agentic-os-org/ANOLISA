@@ -388,7 +388,7 @@ Detailed PIP/Agent Hook detection facts are deferred.
 
 | Component | Inputs and outputs | Current implementation counterpart |
 |---|---|---|
-| Policy Translator | Accept an in-memory representation, Cedar schema reference where applicable, binding information and target capabilities; produce target rules/configuration without deployment I/O | `TargetBindingAdapter::translate`; PEP Adapters declare the supported native AST and Cedar PST subsets |
+| Policy Translator | Read the Binding source and schema reference, load its representation and translate the target's supported subset without deployment I/O | `TargetBindingAdapter::translate`; PEP Adapters declare the supported native AST and Cedar PST subsets |
 | Deployment Client | Accept a target plan, encode protocols, install/update/revoke and return receipts | `TargetDeploymentClient`: `prepare_apply`, `create`, `update`, `delete` |
 | Reconciler | Invoke Translator for a plan, then Client; track state, retry and recover | Reconciler in `asc-pcp` |
 
@@ -403,8 +403,8 @@ the installation target and receipt meaning; the destination is not fixed across
 all backends. SecCore records deployment success from that API's successful receipt;
 the backend contract defines what taking effect guarantees.
 
-This section uses Translator for translation. Adapter in sections 1–7 follows
-source names. See the [target contracts](../../v2/crates/asc-policy-target-contracts/src/lib.rs)
+Translator denotes pure conversion; Adapter includes Translator and Deployment
+Client. The translation port remains `TargetBindingAdapter`. See the [target contracts](../../v2/crates/asc-policy-target-contracts/src/lib.rs)
 and [Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs).
 The target interface carries a source snapshot; the PEP Translator calls `pst` for Cedar translation.
 
