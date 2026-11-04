@@ -307,13 +307,34 @@ fn load_all_tasks(svc: &MemoryService) -> Result<Vec<Task>> {
             _ => {}
         }
         let rel = std::path::Path::new(TASKS_DIR).join(entry.file_name());
+        // The file name is the id every other task tool addresses; frontmatter
+        // is not. Deriving it here keeps the listing to ids that resume, close
+        // and save accept, so a planted file cannot advertise an id the
+        // documented flow cannot reach. Validate before the read: a name that
+        // can never be listed is not worth opening.
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            tracing::warn!(
+                "skipping task file with a non-UTF-8 name: {:?}",
+                entry.file_name()
+            );
+            continue;
+        };
+        if let Err(err) = validate_task_id(stem) {
+            tracing::warn!(
+                "skipping task file whose name is not a valid task id: {} ({err})",
+                entry.file_name().to_string_lossy()
+            );
+            continue;
+        }
         let content = match crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel) {
             Ok(c) => c,
             Err(_) => continue,
         };
-        if let Ok(task) = parse_task(&content) {
-            tasks.push(task);
-        }
+        let Ok(mut task) = parse_task(&content) else {
+            continue;
+        };
+        task.id = stem.to_string();
+        tasks.push(task);
     }
 
     // Sort by updated_at descending (most recent first).
@@ -353,7 +374,13 @@ fn read_task(svc: &MemoryService, id: &str) -> Result<Task> {
     validate_task_id(id)?;
     let rel = std::path::Path::new(TASKS_DIR).join(format!("{id}.md"));
     let content = crate::safe_fs::read_to_string(svc.mount.root_fd.as_fd(), &rel)?;
-    parse_task(&content)
+    let mut task = parse_task(&content)?;
+    // The file name is the id every task tool addresses. A frontmatter id
+    // naming a different task must not survive the read: close and save key
+    // their write on it, so keeping it would write to a file the listing
+    // never advertised and fork the task in two.
+    task.id = id.to_string();
+    Ok(task)
 }
 
 /// Whether a task file exists, without following symlinks: a symlinked
@@ -848,6 +875,74 @@ mod tests {
             !svc.mount.root.join(TASKS_DIR).exists(),
             "tasks/ dir should not have been created by rejected saves"
         );
+    }
+
+    #[test]
+    fn reading_a_task_uses_the_file_name_as_its_id() {
+        let (_tmp, svc) = setup();
+        memory_task_save(
+            &svc,
+            "Planted task",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("claimed-id"),
+        )
+        .unwrap();
+        let tasks_dir = svc.mount.root.join(TASKS_DIR);
+        std::fs::rename(
+            tasks_dir.join("claimed-id.md"),
+            tasks_dir.join("real-id.md"),
+        )
+        .unwrap();
+
+        // Keeping the frontmatter id here would make close and save write to
+        // claimed-id.md while the listing advertises real-id, forking the task
+        // into two files.
+        let task = read_task(&svc, "real-id").unwrap();
+        assert_eq!(task.id, "real-id");
+    }
+
+    fn task_listing_derives_the_id_from_the_file_name() {
+        let (_tmp, svc) = setup();
+        memory_task_save(
+            &svc,
+            "Planted task",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("claimed-id"),
+        )
+        .unwrap();
+
+        // Rename the file: the frontmatter still claims `claimed-id`, while the
+        // only id the other tools would look up is the file name.
+        let tasks_dir = svc.mount.root.join(TASKS_DIR);
+        std::fs::rename(
+            tasks_dir.join("claimed-id.md"),
+            tasks_dir.join("real-id.md"),
+        )
+        .unwrap();
+
+        // A file whose stem is not a valid id cannot be addressed at all, so it
+        // must not be listed either.
+        std::fs::write(tasks_dir.join("bad.id.md"), "---\nid: bad.id\n---\n").unwrap();
+
+        let tasks = load_all_tasks(&svc).unwrap();
+        assert_eq!(tasks.len(), 1, "only the addressable task is listed");
+        assert_eq!(
+            tasks[0].id, "real-id",
+            "the listed id must be one that resume, close and save accept"
+        );
+        assert!(memory_task_resume(&svc, &tasks[0].id).is_ok());
     }
 
     #[test]
