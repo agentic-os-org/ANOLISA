@@ -108,6 +108,7 @@ fn cedar_delete_and_write_flow_through_pap_sqlite_reconciler_and_http() {
                     policy_id: policy.policy_id.clone(),
                     policy_revision: policy.revision,
                 }],
+                None,
             )
             .unwrap();
         pap.sync_instances(&scope.scope_id, &[spec(7).scope.process])

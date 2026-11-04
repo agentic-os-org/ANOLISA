@@ -259,12 +259,16 @@ canonical Scope、固定的 Policy revision 和 Binding，核对 lifecycle 与�
 缺失时按仅有根路径读取。旧版本不认识此字段，不能直接回退二进制后沿用新投影；回退前
 必须关闭网关并撤流，canonical Scope/Binding 和 Credential Store 不属于该投影的清理范围。
 
-当前 daemon 在启动 Binding worker 前恢复 file Scope 的删除屏障，并同步执行
-`GatewayService.recover()`；开放 UDS 请求前再执行 `PapService.recover_scopes()`，不设置独立
-网关恢复 Job。SQLite 在 claim Apply 的同一事务中核对 canonical Scope 仍为 `Active`，
+当前 daemon 在启动 Binding worker 前恢复 file Scope 的删除屏障，并在 blocking task 中执行
+网关构造与 `GatewayService.recover()`；信号监听先启动，恢复期间收到停止请求后不开放 UDS。
+开放 UDS 请求前再执行 `PapService.recover_scopes()`，不设置独立网关恢复 Job。SQLite 在 claim Apply 的同一事务中核对 canonical Scope 仍为 `Active`，
 防止删除中的 Scope 在 discovery 清理前重新部署策略。网关投影不可读、损坏或版本不支持时，
 构造失败先停止代理、撤除 nft 表并清除运行时快照，再返回错误；不依赖损坏投影判断是否撤流。
-持久投影和 Credential Store 保留，任一清理失败均显式报告，且仍尝试其它清理动作。
+投影文件缺失而运行目录、活动代理或 nft 表仍存在时，同样先撤旧数据面；Credential Store 保留，
+不从代理缓存重建授权。无法检查 nft 表也按故障撤流；任一清理失败均显式报告，且仍尝试其它清理动作。
+宿主命令最长运行 5 秒，输出分别限制 64 KiB，超限终止进程组并回收子进程。
+调度层最多允许一个凭据 Binding worker 等待网关控制操作，其余凭据 Binding 延后 admission，
+不消耗部署或调度重试预算；文件 Binding 绕过该屏障，保留原有重试语义。
 网关构造或恢复失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，
 不阻塞原有 file-policy daemon readiness。
 file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
@@ -324,6 +328,8 @@ ANOLISA 托管服务，由 daemon 独占启停。安装不下载 standalone、�
 raw 升级只更新文件，不因新增网关资产而启用或重启代理；运行中的代理须由管理员显式重启
 以加载新 addon。raw 卸载在停止服务和删除文件前执行严格撤流钩子；活动 unit 或运行 manifest
 存在时，disable 失败拒绝卸载，手动安装的 standalone 与持久凭据仍保留。
+源码 `make uninstall` 也先检查活动代理、manifest 或残留 nft 表，成功 disable 后才删除文件；
+并行卸载同样遵守此屏障。`DESTDIR` 暂存目录删除不操作宿主服务。
 
 | 层级 | 验证入口 |
 | --- | --- |

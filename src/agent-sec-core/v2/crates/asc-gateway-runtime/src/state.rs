@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::GatewayError;
 use crate::files::{self, ensure_directory, read_limited};
 
-const STATE_FILE_NAME: &str = "state.json";
+pub(crate) const STATE_FILE_NAME: &str = "state.json";
 const STATE_VERSION: u32 = 2;
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
 

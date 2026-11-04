@@ -1,13 +1,20 @@
 //! Host operations the control plane needs from systemd, nftables and procfs.
 
-use std::io::Write as _;
+use std::fs::File;
+use std::io::{Read as _, Seek as _, Write as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
+
 use crate::{GatewayError, ProcessIdentity};
 
 const OUTPUT_LIMIT: usize = 512;
+const CAPTURE_LIMIT: u64 = 64 * 1024;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_POLL: Duration = Duration::from_millis(20);
 const ATTACH_WAIT: Duration = Duration::from_secs(2);
 
 /// Account the gateway data plane runs as.
@@ -104,6 +111,11 @@ pub trait Host: Send + Sync {
 
     /// Whether a systemd unit is active.
     fn unit_active(&self, unit: &str) -> bool;
+
+    /// Whether gateway routing remains installed, independently of systemd and runtime files.
+    /// # Errors
+    /// Returns failures to inspect the host ruleset.
+    fn routing_active(&self) -> Result<bool, GatewayError>;
 
     /// Loads one nftables transaction.
     ///
@@ -229,6 +241,14 @@ impl Host for SystemHost {
 
     fn unit_active(&self, unit: &str) -> bool {
         run("systemctl", &["is-active", "--quiet", unit], None).is_ok()
+    }
+
+    fn routing_active(&self) -> Result<bool, GatewayError> {
+        run("nft", &["list", "tables"], None).map(|tables| {
+            tables
+                .lines()
+                .any(|line| line.trim() == "table inet agent_sec_gateway")
+        })
     }
 
     fn apply_nft(&self, ruleset: &str) -> Result<(), GatewayError> {
@@ -371,41 +391,267 @@ impl Host for SystemHost {
 }
 
 fn run(program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, GatewayError> {
+    run_with_timeout(program, args, stdin, COMMAND_TIMEOUT)
+}
+
+fn run_with_timeout(
+    program: &str,
+    args: &[&str],
+    stdin: Option<&str>,
+    timeout: Duration,
+) -> Result<String, GatewayError> {
+    let start = Instant::now();
+    let (input, mut stdout, mut stderr) = (|| -> std::io::Result<_> {
+        let input = if let Some(text) = stdin {
+            let mut file = tempfile::tempfile()?;
+            file.write_all(text.as_bytes())?;
+            file.rewind()?;
+            Stdio::from(file)
+        } else {
+            Stdio::null()
+        };
+        Ok((input, tempfile::tempfile()?, tempfile::tempfile()?))
+    })()
+    .map_err(|error| GatewayError::internal(format!("cannot prepare {program} I/O: {error}")))?;
     let mut child = Command::new(program)
         .args(args)
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .env("LC_ALL", "C")
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .process_group(0)
+        .stdin(input)
+        .stdout(stdout.try_clone().map_err(|error| {
+            GatewayError::internal(format!("cannot prepare {program} stdout: {error}"))
+        })?)
+        .stderr(stderr.try_clone().map_err(|error| {
+            GatewayError::internal(format!("cannot prepare {program} stderr: {error}"))
+        })?)
         .spawn()
         .map_err(|error| GatewayError::unavailable(format!("cannot run {program}: {error}")))?;
-    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(input.as_bytes())
-            .map_err(|error| GatewayError::internal(format!("cannot feed {program}: {error}")))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| GatewayError::internal(format!("cannot wait for {program}: {error}")))?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-    }
-    let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if detail.len() > OUTPUT_LIMIT {
-        let mut end = OUTPUT_LIMIT;
-        while !detail.is_char_boundary(end) {
-            end -= 1;
+    let group = Pid::from_child(&child);
+    let outcome = wait_for_exit(program, group, &stdout, &stderr, start, timeout);
+    let cleanup = kill_process_group(group, Signal::KILL).or_else(|error| {
+        if error == rustix::io::Errno::SRCH {
+            Ok(())
+        } else {
+            Err(error)
         }
-        detail.truncate(end);
+    });
+    if cleanup.is_err() {
+        let _ = child.kill();
     }
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => std::thread::sleep(COMMAND_POLL),
+            Err(error) => break Err(error),
+        }
+    }
+    .map_err(|error| GatewayError::internal(format!("cannot reap {program}: {error}")))?;
+    cleanup.map_err(|error| {
+        GatewayError::internal(format!("cannot kill {program} process group: {error}"))
+    })?;
+    outcome?;
+    check_output_size(program, &stdout, &stderr)?;
+    let (stream, file) = if status.success() {
+        ("stdout", &mut stdout)
+    } else {
+        ("stderr", &mut stderr)
+    };
+    let mut bytes = Vec::new();
+    file.rewind()
+        .and_then(|()| file.take(CAPTURE_LIMIT + 1).read_to_end(&mut bytes))
+        .map_err(|error| {
+            GatewayError::internal(format!("cannot read {program} {stream}: {error}"))
+        })?;
+    if bytes.len() as u64 > CAPTURE_LIMIT {
+        return Err(GatewayError::unavailable(format!(
+            "{program} {stream} exceeded {CAPTURE_LIMIT} bytes"
+        )));
+    }
+    if status.success() {
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    let detail: String = String::from_utf8_lossy(&bytes)
+        .trim()
+        .chars()
+        .take(OUTPUT_LIMIT)
+        .collect();
     Err(GatewayError::unavailable(format!(
-        "{program} {} failed ({}): {detail}",
+        "{program} {} failed ({status}): {detail}",
         args.first().copied().unwrap_or_default(),
-        output.status
     )))
+}
+
+fn check_output_size(program: &str, stdout: &File, stderr: &File) -> Result<(), GatewayError> {
+    for (stream, file) in [("stdout", stdout), ("stderr", stderr)] {
+        let size = file.metadata().map_err(|error| {
+            GatewayError::internal(format!("cannot inspect {program} {stream}: {error}"))
+        })?;
+        if size.len() > CAPTURE_LIMIT {
+            return Err(GatewayError::unavailable(format!(
+                "{program} {stream} exceeded {CAPTURE_LIMIT} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_exit(
+    program: &str,
+    group: Pid,
+    stdout: &File,
+    stderr: &File,
+    start: Instant,
+    timeout: Duration,
+) -> Result<(), GatewayError> {
+    loop {
+        check_output_size(program, stdout, stderr)?;
+        if start.elapsed() >= timeout {
+            return Err(GatewayError::unavailable(format!(
+                "{program} timed out after {timeout:?}"
+            )));
+        }
+        // Keep the leader waitable until group cleanup to prevent PID reuse.
+        if waitid(
+            WaitId::Pid(group),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        )
+        .map_err(|error| GatewayError::internal(format!("cannot inspect {program} exit: {error}")))?
+        .is_some()
+        {
+            return Ok(());
+        }
+        std::thread::sleep(COMMAND_POLL.min(timeout.saturating_sub(start.elapsed())));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use rustix::process::{WaitOptions, waitpid};
+
+    fn assert_dead_and_reaped(marker: &std::path::Path) {
+        let pids: Vec<Pid> = std::fs::read_to_string(marker)
+            .unwrap()
+            .split_whitespace()
+            .map(|text| Pid::from_raw(text.parse().unwrap()).unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2);
+        assert_eq!(
+            waitpid(Some(pids[0]), WaitOptions::NOHANG).unwrap_err(),
+            rustix::io::Errno::CHILD
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        for pid in pids {
+            let path = format!("/proc/{pid}/stat");
+            loop {
+                match std::fs::read_to_string(&path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Ok(stat)
+                        if stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                            matches!(rest.as_bytes().first(), Some(b'Z' | b'X'))
+                        }) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("cannot inspect {path}: {error}"),
+                    Ok(_) => {}
+                }
+                assert!(Instant::now() < deadline, "process {pid} survived cleanup");
+                std::thread::sleep(COMMAND_POLL);
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_reaps() {
+        let input = "x".repeat(2 * 1024 * 1024);
+        for stdin in [None, Some(input.as_str())] {
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("pids");
+            let start = Instant::now();
+            let error = run_with_timeout(
+                "/bin/sh",
+                &[
+                    "-c",
+                    "sleep 30 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; wait",
+                    "timeout-test",
+                    marker.to_str().unwrap(),
+                ],
+                stdin,
+                Duration::from_millis(500),
+            )
+            .unwrap_err();
+            assert!(start.elapsed() < Duration::from_secs(5));
+            assert_eq!(error.kind(), crate::GatewayErrorKind::Unavailable);
+            assert!(error.to_string().contains("timed out"));
+            assert_dead_and_reaped(&marker);
+        }
+    }
+
+    #[test]
+    fn output_limit() {
+        for (stream, finish) in [("stdout", "wait"), ("stderr", "wait"), ("stdout", "exit")] {
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("pids");
+            let error = run_with_timeout(
+                "/bin/sh",
+                &[
+                    "-c",
+                    "sleep 30 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; \
+                     if [ \"$2\" = stdout ]; then \
+                       dd if=/dev/zero bs=1024 count=65 2>/dev/null; \
+                     else dd if=/dev/zero bs=1024 count=65 >&2 2>/dev/null; fi; \
+                     if [ \"$3\" = wait ]; then wait; fi",
+                    "output-test",
+                    marker.to_str().unwrap(),
+                    stream,
+                    finish,
+                ],
+                None,
+                Duration::from_secs(3),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), crate::GatewayErrorKind::Unavailable);
+            assert!(error.to_string().contains(&format!("{stream} exceeded")));
+            assert_dead_and_reaped(&marker);
+        }
+    }
+
+    #[test]
+    fn exit_cleanup() {
+        let detail = "é".repeat(600);
+        for exit_code in ["0", "7"] {
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("pids");
+            let start = Instant::now();
+            let result = run_with_timeout(
+                "/bin/sh",
+                &[
+                    "-c",
+                    "cat; sleep 30 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; \
+                     printf 'done'; printf '%s' \"$2\" >&2; exit \"$3\"",
+                    "exit-test",
+                    marker.to_str().unwrap(),
+                    &detail,
+                    exit_code,
+                ],
+                Some("input\n"),
+                Duration::from_secs(3),
+            );
+            assert!(start.elapsed() < Duration::from_secs(5));
+            if exit_code == "0" {
+                assert_eq!(result.unwrap(), "input\ndone");
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), crate::GatewayErrorKind::Unavailable);
+                assert_eq!(
+                    error.to_string(),
+                    format!("/bin/sh -c failed (exit status: 7): {}", "é".repeat(512))
+                );
+            }
+            assert_dead_and_reaped(&marker);
+        }
+    }
 }

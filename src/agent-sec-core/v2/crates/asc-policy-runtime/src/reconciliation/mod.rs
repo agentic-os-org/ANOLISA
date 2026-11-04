@@ -482,6 +482,7 @@ fn scheduling_decision(
             // to the timer rather than immediately retrying.
             Ok((Some((*at).max(now.saturating_add(1))), true))
         }
+        Ok(Disposition::DeferredAt { at }) => Ok((Some((*at).max(now.saturating_add(1))), false)),
         Ok(Disposition::Superseded) => Ok((Some(retry_at(now, delay)), true)),
         Ok(Disposition::Skipped) => repository.get_binding_state(id).map(|record| {
             let deadline = record
