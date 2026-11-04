@@ -33,6 +33,13 @@ from agent_sec_cli.sandbox.rules import (
 )
 
 
+def _is_sed_in_place_arg(arg: str) -> bool:
+    """判断参数是否为 sed 的原地编辑开关（`-i`、`-i<suffix>`、`--in-place`、`--in-place=<suffix>`）。"""
+    return (
+        arg == "-i" or arg.startswith("-i") or arg == "--in-place" or arg.startswith("--in-place=")
+    )
+
+
 class RuleEngine:
     """统一规则匹配引擎 - 支持 rules.py 中所有 Match Schema 字段"""
 
@@ -244,9 +251,9 @@ class CommandClassifier:
                 return True, f"安全 git 操作: git {subcmd or ''}"
             return False, ""
 
-        # 4. sed 特殊处理：无 -i 时为只读
+        # 4. sed 特殊处理：无 -i / --in-place 时为只读
         if cmd == "sed":
-            if not any(a == "-i" or a.startswith("-i") for a in args):
+            if not any(_is_sed_in_place_arg(a) for a in args):
                 return True, "sed 只读模式"
             return False, ""
 
