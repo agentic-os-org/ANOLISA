@@ -13,9 +13,11 @@ pub(in crate::raw_input) mod events;
 mod navigation;
 mod prompt_draft;
 mod text;
+mod trial;
 
 #[derive(Debug, Default)]
 pub(super) struct CardInputState {
+    trial: trial::TrialInputState,
     selected: usize,
     free_text: String,
     active_kind: Option<CardInputKind>,
@@ -34,6 +36,9 @@ pub(super) struct CardInputState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CardInputKind {
+    TrialWaiting {
+        id: String,
+    },
     Question {
         id: String,
         option_count: usize,
@@ -73,6 +78,9 @@ enum CardInputKind {
 impl CardInputState {
     pub(super) fn apply_capture(&mut self, capture: &RawInputCapture) {
         let kind = match capture {
+            RawInputCapture::TrialWaiting { id, .. } => {
+                CardInputKind::TrialWaiting { id: id.clone() }
+            }
             RawInputCapture::Question {
                 id,
                 option_count,
@@ -177,6 +185,7 @@ impl CardInputState {
                 _ => Vec::new(),
             };
             self.pending_input.clear();
+            self.trial = trial::TrialInputState::default();
             self.draft = match capture {
                 RawInputCapture::PromptDraft { initial_text, .. } => {
                     PromptDraftEditor::from_text(initial_text)
@@ -190,6 +199,7 @@ impl CardInputState {
 
     pub(super) fn reset(&mut self) {
         self.active_kind = None;
+        self.trial = trial::TrialInputState::default();
         self.selected = 0;
         self.free_text.clear();
         self.selected_options.clear();
@@ -213,6 +223,26 @@ impl CardInputState {
         capture: &RawInputCapture,
         bytes: &[u8],
     ) -> (Vec<RawInputEvent>, Vec<u8>) {
+        if let RawInputCapture::TrialWaiting {
+            id,
+            settings,
+            allow_settings,
+        } = capture
+        {
+            let action = match settings {
+                Some(selected) => self.trial.consume_settings(bytes, *selected),
+                None if *allow_settings => self.trial.consume(bytes).map(str::to_string),
+                None => self.trial.consume_transition(bytes),
+            };
+            let events = action
+                .map(|action| RawInputEvent::TrialControl {
+                    id: id.clone(),
+                    action,
+                })
+                .into_iter()
+                .collect();
+            return (events, Vec::new());
+        }
         let mut events = Vec::new();
         let mut input = Vec::new();
         if self.pending_input.is_empty() {
@@ -226,6 +256,7 @@ impl CardInputState {
             match input[idx] {
                 CTRL_C => {
                     match capture {
+                        RawInputCapture::TrialWaiting { .. } => {}
                         RawInputCapture::Approval { id, .. }
                         | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
@@ -328,6 +359,7 @@ impl CardInputState {
                 }
                 0x1b if input.get(idx + 1) == Some(&0x1b) => {
                     match capture {
+                        RawInputCapture::TrialWaiting { .. } => {}
                         RawInputCapture::Approval { id, .. }
                         | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
@@ -367,6 +399,9 @@ impl CardInputState {
                     break;
                 }
                 0x1b => match capture {
+                    RawInputCapture::TrialWaiting { .. } => {
+                        idx += 1;
+                    }
                     RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                         events.push(RawInputEvent::CardCancel(id.clone()));
                         idx += 1;
@@ -413,6 +448,9 @@ impl CardInputState {
                     }
                 },
                 byte if !byte.is_ascii_control() => match capture {
+                    RawInputCapture::TrialWaiting { .. } => {
+                        idx += 1;
+                    }
                     RawInputCapture::PromptDraft { .. } => {
                         idx = self.draft_insert_visible(capture, &input, idx, &mut events);
                         continue;
@@ -651,6 +689,7 @@ impl CardInputState {
                 }
                 Some(RawInputEvent::SessionResume(id.clone(), self.selected))
             }
+            RawInputCapture::TrialWaiting { .. } => None,
             RawInputCapture::Evidence { id } => Some(RawInputEvent::EvidenceSend(id.clone())),
             RawInputCapture::PromptDraft { id, .. } => self.draft_submit_event(id, capture),
         }

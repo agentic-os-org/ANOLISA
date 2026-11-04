@@ -493,6 +493,7 @@ pub(crate) fn agent_event_is_provider_progress(event: &AgentEvent) -> bool {
         | AgentEvent::AgentCompleted { .. }
         | AgentEvent::AgentFailed { .. }
         | AgentEvent::AgentCancelled { .. }
+        | AgentEvent::EcsTrialState { .. }
         | AgentEvent::AuthRequired { .. }
         | AgentEvent::ShellEvidenceRequest { .. }
         | AgentEvent::HookNotification { .. } => true,

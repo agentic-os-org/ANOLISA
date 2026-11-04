@@ -5,6 +5,8 @@ pub mod audit;
 mod card;
 pub(crate) mod composer;
 mod continuation;
+mod ecs_trial;
+pub use ecs_trial::{EcsTrialAction, EcsTrialContext, EcsTrialProgress};
 pub mod hooks;
 mod shell_event_metadata;
 mod shell_handoff;
@@ -404,6 +406,10 @@ pub enum QuestionSelectionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    EcsTrialState {
+        run_id: String,
+        progress: EcsTrialProgress,
+    },
     StatusChanged {
         run_id: String,
         phase: String,

@@ -33,6 +33,13 @@ pub fn govern_agent_events_with_language(
 
     for (idx, event) in events.iter().cloned().enumerate() {
         let (decision, policy_decision, reason, display_text, auto_execute) = match &event {
+            AgentEvent::EcsTrialState { .. } => (
+                GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
+                "ECS trial state".into(),
+                String::new(),
+                false,
+            ),
             AgentEvent::StatusChanged { phase, message, .. } => (
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::DisplayOnly,

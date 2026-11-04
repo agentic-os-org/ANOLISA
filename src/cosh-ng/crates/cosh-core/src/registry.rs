@@ -20,6 +20,8 @@ mod auth;
 mod extensions;
 
 use auth::handle_auth;
+#[cfg(test)]
+pub(crate) use auth::TEST_ECS_PROBE;
 use extensions::handle_extensions;
 
 /// Bridge from registry mutations into the generation controller of a live core process.

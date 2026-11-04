@@ -7,11 +7,11 @@
 
 use std::collections::HashMap;
 
-use super::provider_management::ExistingProvider;
+use super::provider_management::{CoreEcsTrialState, ExistingProvider};
 
 /// Label of the SysOM free-trial row, reused for a saved RAM-role provider promoted to the
 /// first slot so both spellings of "already on ECS" read the same.
-const SYSOM_ENTRY_LABEL: &str = "SysOM (free trial, uses this ECS instance's RAM role)";
+const SYSOM_ENTRY_LABEL: &str = "OS Console (ECS RAM role)";
 
 const ADD_NEW_PROVIDER_LABEL: &str = "  + Add new provider";
 
@@ -46,6 +46,10 @@ pub(super) struct SysomMenu {
     prepare: Option<PrefetchedAliyunPrepare>,
     /// A saved RAM-role provider holds the first slot, so no shortcut row is added.
     promoted: bool,
+    trial_auto_use: Option<bool>,
+    trial_active: bool,
+    trial_model: Option<String>,
+    retry_trial_disable: bool,
 }
 
 impl SysomMenu {
@@ -54,6 +58,10 @@ impl SysomMenu {
         Self {
             prepare: Some(PrefetchedAliyunPrepare::EcsRamRole(prepare)),
             promoted: false,
+            trial_auto_use: None,
+            trial_active: false,
+            trial_model: None,
+            retry_trial_disable: false,
         }
     }
 
@@ -62,6 +70,10 @@ impl SysomMenu {
         Self {
             prepare: Some(PrefetchedAliyunPrepare::Manual),
             promoted: false,
+            trial_auto_use: None,
+            trial_active: false,
+            trial_model: None,
+            retry_trial_disable: false,
         }
     }
 
@@ -73,6 +85,43 @@ impl SysomMenu {
     /// Whether the first saved provider is an already-configured SysOM setup.
     pub(super) fn promoted(&self) -> bool {
         self.promoted
+    }
+
+    pub(super) fn with_trial(auto_use: bool) -> Self {
+        Self {
+            trial_auto_use: Some(auto_use),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn with_ecs_trial(auto_use: bool, active: bool, model: String) -> Self {
+        Self {
+            trial_active: active && auto_use,
+            trial_model: Some(model),
+            ..Self::with_trial(auto_use)
+        }
+    }
+
+    pub(super) fn with_disable_retry(mut self, retry: bool) -> Self {
+        self.retry_trial_disable = retry;
+        self
+    }
+
+    pub(super) fn retry_trial_disable(&self) -> bool {
+        self.retry_trial_disable
+    }
+
+    pub(super) fn trial_active(&self) -> bool {
+        self.trial_active
+    }
+
+    pub(super) fn refresh_trial(&mut self, trial: &CoreEcsTrialState, auto_use: bool) {
+        let replacement = if trial.available {
+            Self::with_ecs_trial(auto_use, trial.active, trial.model.clone())
+        } else {
+            Self::default()
+        };
+        *self = replacement.with_disable_retry(self.retry_trial_disable);
     }
 
     fn shows_shortcut(&self) -> bool {
@@ -112,6 +161,8 @@ fn is_ecs_ram_role_provider(provider: &ExistingProvider) -> bool {
 /// A selectable row of the top-level `/auth` management panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthManagementEntry {
+    RetryTrialDisable,
+    EcsTrialShortcut,
     /// Configure SysOM through this instance's RAM role (ECS hosts without one saved).
     SysomShortcut,
     /// Act on `existing_providers[index]`.
@@ -126,6 +177,12 @@ pub(super) fn management_entries(
     existing_count: usize,
 ) -> Vec<AuthManagementEntry> {
     let mut entries = Vec::with_capacity(existing_count + 2);
+    if sysom.retry_trial_disable {
+        entries.push(AuthManagementEntry::RetryTrialDisable);
+    }
+    if sysom.trial_auto_use.is_some() {
+        entries.push(AuthManagementEntry::EcsTrialShortcut);
+    }
     if sysom.shows_shortcut() {
         entries.push(AuthManagementEntry::SysomShortcut);
     }
@@ -175,6 +232,26 @@ pub(super) fn management_options(sysom: &SysomMenu, providers: &[ExistingProvide
     management_entries(sysom, providers.len())
         .into_iter()
         .map(|entry| match entry {
+            AuthManagementEntry::RetryTrialDisable => "  重试保存免配置接入设置".into(),
+            AuthManagementEntry::EcsTrialShortcut => format!(
+                "{}操作系统控制台（免配置接入）{}{}",
+                if sysom.trial_active {
+                    "* [active] "
+                } else {
+                    "  "
+                },
+                if sysom.trial_auto_use == Some(false) {
+                    "（自动接入已关闭）"
+                } else {
+                    ""
+                },
+                sysom
+                    .trial_model
+                    .as_ref()
+                    .filter(|model| !model.is_empty())
+                    .map(|model| format!(" - {model}"))
+                    .unwrap_or_default()
+            ),
             AuthManagementEntry::SysomShortcut => format!("  {SYSOM_ENTRY_LABEL}"),
             AuthManagementEntry::Existing(index) => {
                 existing_provider_option(sysom, providers, index)
@@ -402,5 +479,29 @@ mod tests {
     #[test]
     fn non_ecs_without_saved_providers_has_nothing_to_manage() {
         assert!(!has_manageable_entries(&SysomMenu::default(), 0));
+    }
+}
+
+#[cfg(test)]
+mod trial_tests {
+    use super::*;
+    #[test]
+    fn explicit_trial_entry_shows_disabled_state_and_preserves_custom_models() {
+        let menu = SysomMenu::with_trial(false);
+        let options = management_options(&menu, &[]);
+        assert!(options[0].contains("操作系统控制台（免配置接入）"));
+        assert!(options[0].contains("已关闭"));
+        assert!(options.last().unwrap().contains("Add new provider"));
+        assert!(!options[0].contains("SysOM"));
+    }
+}
+
+#[cfg(test)]
+mod access_copy_tests {
+    #[test]
+    fn access_copy_provider_label_has_no_free_service_promise() {
+        assert!(!super::SYSOM_ENTRY_LABEL
+            .to_ascii_lowercase()
+            .contains("free"));
     }
 }

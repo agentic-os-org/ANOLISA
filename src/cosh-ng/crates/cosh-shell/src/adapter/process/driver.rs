@@ -346,7 +346,10 @@ pub(crate) fn start_control_protocol_provider_process<S: ProviderDriverSpec>(
                     // Receipts exist only for cosh-core's residual approval
                     // timeout; provider control protocols have no receipt
                     // semantic, so consume them without touching the wire.
-                    Ok(ApprovalChannelMessage::Receipt { .. }) => continue,
+                    Ok(
+                        ApprovalChannelMessage::Receipt { .. }
+                        | ApprovalChannelMessage::EcsTrialControl { .. },
+                    ) => continue,
                     Ok(ApprovalChannelMessage::Response(response)) => match &response.decision {
                         ApprovalDecision::Allow => S::serialize_allow(&response),
                         ApprovalDecision::Deny { message } => {

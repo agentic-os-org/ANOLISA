@@ -36,6 +36,9 @@ mod shell_host;
 mod slash;
 #[allow(dead_code, unused_imports)]
 mod tools;
+#[cfg(test)]
+#[path = "ui/trial_layout_tests.rs"]
+mod trial_layout_tests;
 #[allow(dead_code, unused_imports)]
 mod types;
 #[allow(dead_code, unused_imports)]

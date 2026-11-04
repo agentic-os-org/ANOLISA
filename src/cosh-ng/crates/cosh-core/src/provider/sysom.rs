@@ -18,12 +18,20 @@ use uuid::Uuid;
 
 use super::{ContentGenerator, GenerateConfig, GenerateStream, Message, ToolDeclaration};
 
-use self::stream::sysom_event_stream;
+use self::stream::{sysom_event_stream, sysom_event_stream_structured};
+use super::{DispatchState, GenerateEvent, ProviderFailure, ProviderFailureKind};
 
 pub use self::ecs_metadata::{probe_ecs_ram_role, CredentialStatus, NotReadyReason, ProbeError};
 
+pub(super) mod credential_manager;
+pub(super) mod ecs_identity;
 mod ecs_metadata;
 pub mod endpoint;
+mod failure;
+#[cfg(test)]
+mod identity_provider_tests;
+#[cfg(test)]
+mod identity_test_support;
 mod stream;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -70,10 +78,27 @@ fn build_streaming_client(
     connect_timeout: Duration,
     read_timeout: Duration,
 ) -> Result<reqwest::Client, String> {
-    endpoint
+    build_streaming_client_for_source(endpoint, connect_timeout, read_timeout, false)
+}
+
+fn build_streaming_client_for_source(
+    endpoint: &endpoint::ResolvedEndpoint,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    identity: bool,
+) -> Result<reqwest::Client, String> {
+    let builder = endpoint
         .configure_client(reqwest::Client::builder())
         .connect_timeout(connect_timeout)
-        .read_timeout(read_timeout)
+        .read_timeout(read_timeout);
+    let builder = if identity {
+        builder
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+    } else {
+        builder
+    };
+    builder
         .build()
         .map_err(|err| format!("failed to build HTTP client: {err}"))
 }
@@ -85,11 +110,17 @@ pub struct EcsAuthChallenge {
 }
 
 /// Credentials that can be refreshed at runtime (for STS).
-#[derive(Debug, Clone)]
-struct SysomCredentials {
+#[derive(Clone)]
+pub(super) struct SysomCredentials {
     access_key_id: String,
     access_key_secret: String,
     security_token: Option<String>,
+}
+
+impl std::fmt::Debug for SysomCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SysomCredentials([REDACTED])")
+    }
 }
 
 /// SysOM Provider that connects to Aliyun SysOM API with ACS3-HMAC-SHA256 signing.
@@ -102,12 +133,45 @@ pub struct SysomProvider {
     /// cached process-wide, so the probe still runs at most once.
     configured_endpoint: String,
     credentials: RwLock<SysomCredentials>,
-    /// Only ECS RAM Role credentials may be replaced from instance metadata.
-    refresh_from_ecs_metadata: bool,
+    source: CredentialSource,
     cancelled: Arc<AtomicBool>,
     /// Resolved once per provider instance, including a negative result; only the
     /// on-disk cache honours [`INSTANCE_ID_CACHE_TTL_SECS`].
     instance_id: OnceCell<Option<String>>,
+}
+
+enum CredentialSource {
+    Static,
+    EcsRamRole,
+    EcsIdentity(Arc<credential_manager::CredentialManager>),
+}
+
+struct IdentityRequest {
+    manager: Arc<credential_manager::CredentialManager>,
+    generation: u64,
+    expires_at: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+}
+
+impl IdentityRequest {
+    fn new(
+        manager: Arc<credential_manager::CredentialManager>,
+        lease: &credential_manager::CredentialLease,
+        deadline: tokio::time::Instant,
+    ) -> Self {
+        Self {
+            manager,
+            generation: lease.generation,
+            expires_at: lease.expires_at,
+            deadline,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SysomRequestError {
+    Legacy(String),
+    LeaseExpired,
 }
 
 impl SysomProvider {
@@ -124,7 +188,7 @@ impl SysomProvider {
                 access_key_secret: access_key_secret.to_string(),
                 security_token: security_token.map(|s| s.to_string()),
             }),
-            refresh_from_ecs_metadata: false,
+            source: CredentialSource::Static,
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id: OnceCell::new(),
         }
@@ -138,10 +202,32 @@ impl SysomProvider {
                 access_key_secret: String::new(),
                 security_token: None,
             }),
-            refresh_from_ecs_metadata: true,
+            source: CredentialSource::EcsRamRole,
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id: OnceCell::new(),
         }
+    }
+
+    pub fn from_ecs_identity(configured_endpoint: &str) -> Self {
+        let mut provider = Self::new("", "", None, configured_endpoint);
+        provider.source = CredentialSource::EcsIdentity(Arc::new(
+            credential_manager::CredentialManager::new(configured_endpoint.into()),
+        ));
+        provider
+    }
+
+    pub fn from_ecs_identity_with_admission(
+        configured_endpoint: &str,
+        check: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        let mut provider = Self::new("", "", None, configured_endpoint);
+        provider.source = CredentialSource::EcsIdentity(Arc::new(
+            credential_manager::CredentialManager::with_admission(
+                configured_endpoint.into(),
+                check,
+            ),
+        ));
+        provider
     }
 
     /// Build the JSON request body for the SysOM API.
@@ -284,12 +370,17 @@ impl ContentGenerator for SysomProvider {
         config: &GenerateConfig,
     ) -> Result<GenerateStream, String> {
         self.cancelled.store(false, Ordering::SeqCst);
+        if let CredentialSource::EcsIdentity(manager) = &self.source {
+            return self
+                .generate_identity(messages, tools, config, manager.clone())
+                .await;
+        }
         self.instance_id.get_or_init(resolve_instance_id).await;
 
         let body = self.build_request_body(messages, tools, config)?;
         let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("JSON serialize: {e}"))?;
 
-        if self.refresh_from_ecs_metadata
+        if matches!(self.source, CredentialSource::EcsRamRole)
             && self.credentials.read().unwrap().security_token.is_none()
             && !self.refresh_sts_credentials().await
         {
@@ -299,7 +390,7 @@ impl ContentGenerator for SysomProvider {
         // First attempt
         match self.do_streaming_request(&body_bytes).await {
             Ok(stream) => Ok(stream),
-            Err(e) if self.refresh_from_ecs_metadata && is_sts_error(&e) => {
+            Err(e) if matches!(self.source, CredentialSource::EcsRamRole) && is_sts_error(&e) => {
                 // STS credential expired — try to refresh from ECS metadata and retry once
                 tracing::debug!("STS credential error, attempting refresh...");
                 if self.refresh_sts_credentials().await {
@@ -319,17 +410,143 @@ impl ContentGenerator for SysomProvider {
 }
 
 impl SysomProvider {
+    async fn generate_identity(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDeclaration],
+        config: &GenerateConfig,
+        manager: Arc<credential_manager::CredentialManager>,
+    ) -> Result<GenerateStream, String> {
+        let deadline = tokio::time::Instant::now() + ecs_identity::PREPARATION_TIMEOUT;
+        for _ in 0..3 {
+            let lease = match tokio::time::timeout_at(deadline, manager.ensure()).await {
+                Ok(Ok(lease)) => lease,
+                Ok(Err(ecs_identity::IdentityError::LeaseExpired)) => continue,
+                result => {
+                    let error = match result {
+                        Ok(Err(error)) => error,
+                        _ => ecs_identity::IdentityError::Timeout,
+                    };
+                    let kind = if error == ecs_identity::IdentityError::PermissionDenied {
+                        ProviderFailureKind::PermissionDenied
+                    } else {
+                        ProviderFailureKind::Identity
+                    };
+                    return Ok(failure_stream(failure::fixed(
+                        error.code(),
+                        kind,
+                        DispatchState::NotDispatched,
+                    )));
+                }
+            };
+            self.instance_id
+                .get_or_init(|| async { lease.instance_id.clone() })
+                .await;
+            let body = self.build_request_body(messages, tools, config)?;
+            let body_bytes =
+                serde_json::to_vec(&body).map_err(|error| format!("JSON serialize: {error}"))?;
+            let identity = IdentityRequest::new(manager.clone(), &lease, deadline);
+            match self
+                .send_streaming_request(&body_bytes, lease.credentials, Some(identity))
+                .await
+            {
+                Err(SysomRequestError::LeaseExpired) => manager.invalidate(lease.generation).await,
+                Err(SysomRequestError::Legacy(error)) => return Err(error),
+                Ok(stream) => return Ok(stream),
+            }
+        }
+        Ok(failure_stream(failure::fixed(
+            ecs_identity::IdentityError::LeaseExpired.code(),
+            ProviderFailureKind::Identity,
+            DispatchState::NotDispatched,
+        )))
+    }
+
     /// Send a streaming request using current credentials.
     async fn do_streaming_request(&self, body_bytes: &[u8]) -> Result<GenerateStream, String> {
         let creds = self.credentials.read().unwrap().clone();
-        let resolved = endpoint::resolve(&self.configured_endpoint).await;
+        self.send_streaming_request(body_bytes, creds, None)
+            .await
+            .map_err(|error| match error {
+                SysomRequestError::Legacy(error) => error,
+                SysomRequestError::LeaseExpired => "Sysom.Identity.LeaseExpired".into(),
+            })
+    }
+
+    async fn send_streaming_request(
+        &self,
+        body_bytes: &[u8],
+        creds: SysomCredentials,
+        identity: Option<IdentityRequest>,
+    ) -> Result<GenerateStream, SysomRequestError> {
+        if identity.as_ref().is_some_and(|context| {
+            context
+                .expires_at
+                .saturating_duration_since(tokio::time::Instant::now())
+                < ecs_identity::MINIMUM_SEND_TTL
+        }) {
+            return Err(SysomRequestError::LeaseExpired);
+        }
+        let resolved = if let Some(context) = &identity {
+            match tokio::time::timeout_at(
+                context.deadline,
+                endpoint::resolve(&self.configured_endpoint),
+            )
+            .await
+            {
+                Ok(endpoint) => endpoint,
+                Err(_) => {
+                    return Ok(failure_stream(failure::fixed(
+                        ecs_identity::IdentityError::Timeout.code(),
+                        ProviderFailureKind::Identity,
+                        DispatchState::NotDispatched,
+                    )))
+                }
+            }
+        } else {
+            endpoint::resolve(&self.configured_endpoint).await
+        };
+        if identity.is_some() {
+            let trusted = ecs_identity::trusted_endpoint(&resolved);
+            #[cfg(test)]
+            let trusted = trusted
+                || reqwest::Url::parse(&resolved.base_url())
+                    .ok()
+                    .and_then(|url| {
+                        url.host_str()
+                            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                    })
+                    .is_some_and(|ip| ip.is_loopback());
+            if !trusted {
+                return Ok(failure_stream(failure::fixed(
+                    "Sysom.Identity.UntrustedEndpoint",
+                    ProviderFailureKind::Identity,
+                    DispatchState::NotDispatched,
+                )));
+            }
+        }
         tracing::debug!(
             host = %resolved.host,
             origin = resolved.origin.as_str(),
             "sysom endpoint"
         );
         let url = format!("{}{}", resolved.base_url(), API_PATH);
-        let client = build_streaming_client(&resolved, CONNECT_TIMEOUT, READ_TIMEOUT)?;
+        let built_client = if identity.is_some() {
+            build_streaming_client_for_source(&resolved, CONNECT_TIMEOUT, READ_TIMEOUT, true)
+        } else {
+            build_streaming_client(&resolved, CONNECT_TIMEOUT, READ_TIMEOUT)
+        };
+        let client = match built_client {
+            Ok(client) => client,
+            Err(error) if identity.is_none() => return Err(SysomRequestError::Legacy(error)),
+            Err(_) => {
+                return Ok(failure_stream(failure::fixed(
+                    "Sysom.TransportError",
+                    ProviderFailureKind::Transport,
+                    DispatchState::Unknown,
+                )))
+            }
+        };
         let host = resolved.host;
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let nonce = Uuid::new_v4().to_string();
@@ -381,29 +598,119 @@ impl SysomProvider {
                 .header("x-acs-security-token", token);
         }
 
+        let req = req.body(body_bytes.to_vec());
+        if let Some(identity) = &identity {
+            let admission =
+                tokio::time::timeout_at(identity.deadline, identity.manager.check_admission())
+                    .await
+                    .unwrap_or(Err(ecs_identity::IdentityError::Timeout));
+            if let Err(error) = admission {
+                return Ok(failure_stream(failure::fixed(
+                    error.code(),
+                    ProviderFailureKind::Identity,
+                    DispatchState::NotDispatched,
+                )));
+            }
+        }
+
+        if let Some(context) = &identity {
+            if context
+                .expires_at
+                .saturating_duration_since(tokio::time::Instant::now())
+                < ecs_identity::MINIMUM_SEND_TTL
+            {
+                return Err(SysomRequestError::LeaseExpired);
+            }
+            if tokio::time::Instant::now() >= context.deadline {
+                return Ok(failure_stream(failure::fixed(
+                    ecs_identity::IdentityError::Timeout.code(),
+                    ProviderFailureKind::Identity,
+                    DispatchState::NotDispatched,
+                )));
+            }
+        }
+
         // Report the request before it is encrypted; see `provider::observe` for
         // why an out-of-process observer cannot read it off the wire.
         super::observe::tap_request("POST", &url, body_bytes);
 
-        let response = req
-            .body(body_bytes.to_vec())
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+        let response = match req.send().await {
+            Ok(response) => response,
+            Err(error) if identity.is_none() => {
+                return Err(SysomRequestError::Legacy(format!(
+                    "HTTP request failed: {error}"
+                )))
+            }
+            Err(_) => {
+                return Ok(failure_stream(failure::fixed(
+                    "Sysom.TransportError",
+                    ProviderFailureKind::Transport,
+                    DispatchState::Unknown,
+                )))
+            }
+        };
 
         // Announce the response before the status check, mirroring
         // `openai_compat`: an error response must still be reported or the
         // observer is left with a pending request that never completes.
-        super::observe::tap_response_head(response.status().as_u16(), "text/event-stream");
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown".to_string());
-            super::observe::tap_response_chunk(text.as_bytes());
-            return Err(format!("SysOM API error {status}: {text}"));
+        let status = response.status();
+        let response_is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+            });
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("text/event-stream")
+            .to_owned();
+        super::observe::tap_response_head(status.as_u16(), &content_type);
+        if !status.is_success()
+            || content_type
+                .to_ascii_lowercase()
+                .contains("application/json")
+            || (identity.is_some() && !response_is_sse)
+        {
+            let body = match bounded_error_body(response).await {
+                Ok(body) => body,
+                Err(kind) => {
+                    return Ok(failure_stream(failure::fixed(
+                        if kind == ProviderFailureKind::Transport {
+                            "Sysom.TransportError"
+                        } else {
+                            "Sysom.InvalidResponse"
+                        },
+                        kind,
+                        DispatchState::Unknown,
+                    )))
+                }
+            };
+            if identity.is_none() && !status.is_success() {
+                let text = String::from_utf8_lossy(&body);
+                super::observe::tap_response_chunk(&body);
+                return Err(SysomRequestError::Legacy(format!(
+                    "SysOM API error {status}: {text}"
+                )));
+            }
+            if let Some(failure) = failure::from_payload(&body, DispatchState::NotDispatched) {
+                if failure.kind == ProviderFailureKind::CredentialsExpired {
+                    if let Some(identity) = &identity {
+                        identity.manager.invalidate(identity.generation).await;
+                    }
+                }
+                return Ok(failure_stream(failure));
+            }
+            return Ok(failure_stream(failure::fixed(
+                "Sysom.ProviderFailure",
+                ProviderFailureKind::Other,
+                DispatchState::Unknown,
+            )));
         }
 
         let cancelled = Arc::clone(&self.cancelled);
@@ -422,7 +729,22 @@ impl SysomProvider {
                 .map_err(|e| e.to_string())
         });
 
-        Ok(sysom_event_stream(Box::pin(byte_stream), cancelled))
+        if let Some(identity) = identity {
+            let manager = identity.manager;
+            let generation = identity.generation;
+            let stream = sysom_event_stream_structured(Box::pin(byte_stream), cancelled);
+            let stream =
+                futures::stream::once(async { GenerateEvent::RequestAccepted }).chain(stream);
+            Ok(Box::pin(stream.then(move |event|{
+                let manager=manager.clone();
+                async move {
+                    if matches!(&event,GenerateEvent::ProviderFailure(failure) if failure.kind==ProviderFailureKind::CredentialsExpired) { manager.invalidate(generation).await; }
+                    event
+                }
+            })))
+        } else {
+            Ok(sysom_event_stream(Box::pin(byte_stream), cancelled))
+        }
     }
 
     /// Refresh only with credentials accepted by the same validator as auth preflight.
@@ -442,6 +764,36 @@ impl SysomProvider {
             }
         }
     }
+}
+
+fn failure_stream(failure: ProviderFailure) -> GenerateStream {
+    Box::pin(futures::stream::once(async {
+        GenerateEvent::ProviderFailure(failure)
+    }))
+}
+
+async fn bounded_error_body(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, ProviderFailureKind> {
+    const LIMIT: usize = 64 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|length| length > LIMIT as u64)
+    {
+        return Err(ProviderFailureKind::Other);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ProviderFailureKind::Transport)?
+    {
+        if chunk.len() > LIMIT - body.len() {
+            return Err(ProviderFailureKind::Other);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Check if an error string contains STS-related error codes.

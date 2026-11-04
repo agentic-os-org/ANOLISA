@@ -1075,13 +1075,13 @@ fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
     append_startup_auth_hint(&mut state, &mut body);
     assert_eq!(body.len(), 1);
 
-    // Explicitly unconfigured credentials add the /auth hint line.
+    // Explicitly unconfigured credentials show ECS trial and optional model setup.
     state.startup_auth.resolved = Some(false);
     append_startup_auth_hint(&mut state, &mut body);
     assert_eq!(body.len(), 3);
     assert_eq!(body[1], "");
     assert!(body[2].contains("/auth"), "{:?}", body[2]);
-    assert!(body[2].contains("AI not configured"), "{:?}", body[2]);
+    assert!(body[2].contains("ECS"), "{:?}", body[2]);
 
     // AI disabled by config suppresses the hint even when unconfigured.
     let mut disabled = InlineState::default();
@@ -1090,6 +1090,42 @@ fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
     let mut quiet = Vec::new();
     append_startup_auth_hint(&mut disabled, &mut quiet);
     assert!(quiet.is_empty());
+}
+
+#[test]
+fn startup_auth_hint_presents_ecs_trial_and_optional_model_setup_in_both_languages() {
+    for (language, direct_question, model_choice, misleading_claims) in [
+        (
+            Language::EnUs,
+            "ask directly",
+            "your preferred model",
+            ["AI not configured", "unlock", "must run /auth"],
+        ),
+        (
+            Language::ZhCn,
+            "可直接提问",
+            "自选模型",
+            ["尚未配置 AI", "解锁", "必须先"],
+        ),
+    ] {
+        let mut state = InlineState {
+            language,
+            ..InlineState::default()
+        };
+        state.startup_auth.resolved = Some(false);
+        let mut body = Vec::new();
+
+        append_startup_auth_hint(&mut state, &mut body);
+
+        assert_eq!(body.len(), 2);
+        let hint = &body[1];
+        for expected in ["ECS", direct_question, "/auth", model_choice] {
+            assert!(hint.contains(expected), "missing {expected:?}: {hint}");
+        }
+        for claim in misleading_claims {
+            assert!(!hint.contains(claim), "misleading claim {claim:?}: {hint}");
+        }
+    }
 }
 
 #[test]

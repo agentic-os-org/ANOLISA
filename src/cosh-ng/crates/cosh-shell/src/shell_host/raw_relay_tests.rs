@@ -1111,6 +1111,14 @@ fn foreground_passthrough_cancels_waiting_prompt_restore() {
 
 #[test]
 fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
+    for (stale_replay, pending) in [(false, true), (true, true), (true, false)] {
+        for ghost in [None, Some("objdump")] {
+            assert_prompt_fragment_restore(stale_replay, pending, ghost);
+        }
+    }
+}
+
+fn assert_prompt_fragment_restore(stale_replay: bool, pending: bool, ghost: Option<&str>) {
     let mut parser = parser_for_test("fragmented-prompt-ghost");
     feed_shell_ready(&mut parser);
     parser
@@ -1119,6 +1127,16 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     let mut output = Vec::new();
     let mut display_start = 0;
     let (_generation, mut prompt_replay) = tracker_for_test();
+    if stale_replay {
+        parser.feed(b"[root@host]# ").expect("feed cached prompt");
+        prompt_replay.arm_for_replay(parser.last_prompt_display());
+        parser
+            .feed(b"\x1b[?1h\x1b=\x1b[?2004h")
+            .expect("feed zsh mode tail");
+    }
+    if !pending {
+        display_start = parser.display_position();
+    }
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut prompt_presentation = PromptPresentation::new(false);
@@ -1132,7 +1150,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         &mut output,
         &input_mode,
         RawObserverAction::RestorePrompt {
-            ghost_text: Some("objdump".to_string()),
+            ghost_text: ghost.map(str::to_string),
             ghost_route: Default::default(),
         },
         &mut display_start,
@@ -1145,6 +1163,21 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     )
     .expect("restore prompt");
     assert_eq!(action, RawObserverAction::Continue);
+    if stale_replay {
+        assert!(
+            String::from_utf8_lossy(&output)
+                .matches("[root@host]# ")
+                .count()
+                == 1,
+            "a new restore must not deduplicate the prompt against an earlier ghost: {:?}",
+            output
+        );
+    }
+
+    if !pending {
+        assert!(prompt_replay.is_armed());
+        assert!(prompt_replay.strip(parser.last_prompt_display()).is_empty());
+    }
 
     parser
         .feed(b"\x1b[?2004h[root@host]# ")
@@ -1159,11 +1192,15 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     )
     .expect("write prompt fragment");
 
-    assert!(
-        output.ends_with(b"\x1b7\x1b[?7l\x1b[2m objdump\x1b[0m\x1b[?7h\x1b8"),
-        "{}",
-        String::from_utf8_lossy(&output)
-    );
+    if ghost.is_some() {
+        assert!(
+            output.ends_with(b"\x1b7\x1b[?7l\x1b[2m objdump\x1b[0m\x1b[?7h\x1b8"),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+    } else {
+        assert!(output.ends_with(b"[root@host]# "));
+    }
 }
 
 #[test]

@@ -3,6 +3,17 @@
 use super::*;
 use crate::provider::sysom::{CredentialStatus, ProbeError};
 
+mod ecs_trial;
+
+#[cfg(test)]
+#[path = "auth/trial_tests.rs"]
+mod trial_tests;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_ECS_PROBE: (Result<bool, ProbeError>, std::sync::Arc<std::sync::atomic::AtomicUsize>);
+}
+
 fn ecs_probe_response(
     request_id: &str,
     result: Result<CredentialStatus, ProbeError>,
@@ -58,6 +69,32 @@ pub(super) async fn handle_auth(
 ) -> OutputMessage {
     match action {
         "state" => {
+            let (trial_preferences, available) = tokio::join!(
+                async {
+                    match tokio::task::spawn_blocking(crate::auth::trial_preferences::load).await {
+                        Ok(Ok(auto_use)) => serde_json::json!({ "auto_use": auto_use }),
+                        result => {
+                            let error = match result {
+                                Ok(Err(error)) => error,
+                                _ => crate::auth::trial_preferences::Error::Worker,
+                            };
+                            serde_json::json!({ "auto_use": false, "error_code": error.code() })
+                        }
+                    }
+                },
+                async {
+                    params.get("probe_ecs_trial").and_then(Value::as_bool) == Some(true)
+                        && ecs_trial::available().await.unwrap_or(false)
+                }
+            );
+            let ecs_trial = ecs_trial::state(
+                config,
+                available,
+                trial_preferences
+                    .get("auto_use")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            );
             let templates: Vec<Value> = crate::auth::builtin_auth_providers()
                 .into_iter()
                 .map(|provider| {
@@ -111,6 +148,8 @@ pub(super) async fn handle_auth(
                 request_id: request_id.to_string(),
                 success: true,
                 data: Some(serde_json::json!({
+                    "trial_preferences": trial_preferences,
+                    "ecs_trial": ecs_trial,
                     "templates": templates,
                     "saved_providers": saved_providers,
                     "active_provider": active_provider,
@@ -119,6 +158,44 @@ pub(super) async fn handle_auth(
                 error: None,
             }
         }
+        "set_trial_preference" => {
+            let Some(auto_use) = params.get("auto_use").and_then(Value::as_bool) else {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: Some(
+                        serde_json::json!({ "error_code": "trial_preferences_invalid_argument" }),
+                    ),
+                    error: Some("trial_preferences_invalid_argument".into()),
+                };
+            };
+            let result =
+                tokio::task::spawn_blocking(move || crate::auth::trial_preferences::save(auto_use))
+                    .await;
+            match result {
+                Ok(Ok(())) => OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: true,
+                    data: Some(
+                        serde_json::json!({ "trial_preferences": { "auto_use": auto_use } }),
+                    ),
+                    error: None,
+                },
+                result => {
+                    let error = match result {
+                        Ok(Err(error)) => error,
+                        _ => crate::auth::trial_preferences::Error::Worker,
+                    };
+                    OutputMessage::RegistryResponse {
+                        request_id: request_id.to_string(),
+                        success: false,
+                        data: Some(serde_json::json!({ "error_code": error.code() })),
+                        error: Some(error.to_string()),
+                    }
+                }
+            }
+        }
+        "activate_trial" => ecs_trial::activate(request_id, config, None).await,
         "activate" => {
             let provider_id = params
                 .get("provider_id")
@@ -126,6 +203,12 @@ pub(super) async fn handle_auth(
                 .unwrap_or("");
             if provider_id.is_empty() || !config.ai.providers.contains_key(provider_id) {
                 return registry_error(request_id, "provider not found");
+            }
+            let provider = &config.ai.providers[provider_id];
+            if provider.provider_type.as_deref() == Some("aliyun")
+                && provider.auth_source.as_deref() == Some("ecs_identity")
+            {
+                return ecs_trial::activate(request_id, config, Some(provider_id)).await;
             }
             let mut candidate = config.clone();
             candidate.ai.active_provider = Some(provider_id.to_string());

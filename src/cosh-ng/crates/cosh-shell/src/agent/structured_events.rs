@@ -283,7 +283,8 @@ mod tests {
             .try_iter()
             .filter_map(|message| match message {
                 crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
-                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+                crate::adapter::ApprovalChannelMessage::Receipt { .. }
+                | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
             })
             .collect();
         let terminal: Vec<_> = responses
@@ -372,7 +373,8 @@ mod tests {
             .try_iter()
             .filter_map(|message| match message {
                 crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
-                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+                crate::adapter::ApprovalChannelMessage::Receipt { .. }
+                | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
             })
             .collect();
         let terminal: Vec<_> = responses
@@ -513,7 +515,8 @@ mod tests {
             .try_iter()
             .filter_map(|message| match message {
                 crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
-                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+                crate::adapter::ApprovalChannelMessage::Receipt { .. }
+                | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
             })
             .collect();
         assert!(
@@ -577,7 +580,8 @@ mod tests {
             .try_iter()
             .filter_map(|message| match message {
                 crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
-                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+                crate::adapter::ApprovalChannelMessage::Receipt { .. }
+                | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
             })
             .collect();
         let terminal: Vec<_> = responses
@@ -671,7 +675,8 @@ mod tests {
             .try_iter()
             .filter_map(|message| match message {
                 crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
-                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+                crate::adapter::ApprovalChannelMessage::Receipt { .. }
+                | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
             })
             .collect();
         assert_eq!(responses.len(), 1);

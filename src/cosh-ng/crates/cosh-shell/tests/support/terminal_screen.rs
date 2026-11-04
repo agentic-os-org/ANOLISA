@@ -228,12 +228,16 @@ impl TerminalSession {
     }
 
     pub(crate) fn resize(&mut self, cols: u16) {
+        self.resize_to(ROWS, cols);
+    }
+
+    pub(crate) fn resize_to(&mut self, rows: u16, cols: u16) {
         self.action_start = self.raw.len();
         // Keep the same parser, changing its geometry before consuming the
         // shell's response to SIGWINCH. Old output is never replayed at a new size.
-        self.parser.screen_mut().set_size(ROWS, cols);
+        self.parser.screen_mut().set_size(rows, cols);
         let size = libc::winsize {
-            ws_row: ROWS,
+            ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
             ws_ypixel: 0,

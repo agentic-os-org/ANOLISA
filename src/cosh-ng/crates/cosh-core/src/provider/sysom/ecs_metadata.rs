@@ -11,6 +11,7 @@ use tokio::time::{timeout_at, Instant};
 use super::{SysomCredentials, ECS_METADATA_ENDPOINT, ECS_RAM_ROLE_NAME, METADATA_CONNECT_TIMEOUT};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const RETRY_DELAY: Duration = Duration::from_millis(50);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_TOKEN_BYTES: usize = 4096;
 const TOKEN_HEADER: &str = "x-aliyun-ecs-metadata-token";
@@ -23,7 +24,7 @@ tokio::task_local! {
     pub(super) static TEST_ENDPOINT: String;
 }
 
-fn metadata_endpoint() -> String {
+pub(super) fn metadata_endpoint() -> String {
     #[cfg(test)]
     if let Ok(endpoint) = TEST_ENDPOINT.try_with(Clone::clone) {
         return endpoint;
@@ -72,9 +73,18 @@ pub enum ProbeError {
     Timeout,
     /// Metadata returned another non-success HTTP status.
     Http,
+    /// Metadata returned a retryable HTTP status.
+    ServiceUnavailable,
 }
 
 impl ProbeError {
+    pub(super) fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::Timeout | Self::Unreachable | Self::ServiceUnavailable
+        )
+    }
+
     /// Stable error code shared by verify and configure preflight.
     pub fn code(&self) -> &'static str {
         match self {
@@ -82,7 +92,7 @@ impl ProbeError {
             Self::InvalidResponse => "invalid_metadata_response",
             Self::Unreachable => "metadata_unreachable",
             Self::Timeout => "metadata_timeout",
-            Self::Http => "metadata_http_error",
+            Self::Http | Self::ServiceUnavailable => "metadata_http_error",
         }
     }
 }
@@ -94,7 +104,9 @@ impl fmt::Display for ProbeError {
             Self::InvalidResponse => "ECS instance metadata returned an invalid response.",
             Self::Unreachable => "Unable to reach ECS instance metadata.",
             Self::Timeout => "ECS instance metadata request timed out.",
-            Self::Http => "ECS instance metadata returned an HTTP error.",
+            Self::Http | Self::ServiceUnavailable => {
+                "ECS instance metadata returned an HTTP error."
+            }
         })
     }
 }
@@ -166,7 +178,8 @@ fn validate_credentials(
 /// Probe only the fixed ECS metadata address and SysOM role, without returning secrets.
 ///
 /// The three-second total deadline includes token acquisition and all body reads.
-/// No redirects, proxies, retries, IMDSv1 fallback, or role enumeration are used.
+/// Each transient metadata request may retry once within that deadline.
+/// No redirects, proxies, IMDSv1 fallback, or role enumeration are used.
 ///
 /// # Errors
 /// Returns a safe classification for transport, HTTP, or credential format failures.
@@ -222,7 +235,7 @@ pub(super) async fn fetch_identity() -> Result<Option<(String, String)>, ProbeEr
 
 /// A short-lived IMDSv2 session shares one deadline across token and GET requests.
 /// The token is neither cached on disk nor passed outside the metadata owner.
-struct MetadataSession {
+pub(super) struct MetadataSession {
     client: reqwest::Client,
     base_url: String,
     token: HeaderValue,
@@ -230,8 +243,9 @@ struct MetadataSession {
 }
 
 impl MetadataSession {
-    async fn start(base_url: &str) -> Result<Self, ProbeError> {
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
+    pub(super) async fn start(base_url: &str) -> Result<Self, ProbeError> {
+        let started = Instant::now();
+        let deadline = started + REQUEST_TIMEOUT;
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -239,18 +253,34 @@ impl MetadataSession {
             .connect_timeout(METADATA_CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .map_err(|_| ProbeError::Unreachable)?;
-        let (status, body) = read_response(
-            client
-                .put(format!("{base_url}/latest/api/token"))
-                .header(TOKEN_TTL_HEADER, TOKEN_TTL),
+            .map_err(|_| {
+                tracing::warn!(
+                    stage = "client",
+                    error_code = "metadata_unreachable",
+                    "ECS metadata client initialization failed"
+                );
+                ProbeError::Unreachable
+            })?;
+        let (status, body) = read_metadata(
+            || {
+                client
+                    .put(format!("{base_url}/latest/api/token"))
+                    .header(TOKEN_TTL_HEADER, TOKEN_TTL)
+            },
             deadline,
+            started + METADATA_CONNECT_TIMEOUT,
             MAX_TOKEN_BYTES,
+            "/latest/api/token",
         )
         .await?;
         // A missing token endpoint is not a missing role and never permits IMDSv1.
         check_status(status)?;
         if body.is_empty() || !body.iter().all(|byte| byte.is_ascii_graphic()) {
+            tracing::warn!(
+                stage = "/latest/api/token",
+                error_code = "invalid_metadata_response",
+                "ECS metadata token validation failed"
+            );
             return Err(ProbeError::InvalidResponse);
         }
         let mut token = HeaderValue::from_bytes(&body).map_err(|_| ProbeError::InvalidResponse)?;
@@ -268,6 +298,11 @@ impl MetadataSession {
         if id.starts_with("i-") && id.len() > 2 {
             Ok(id)
         } else {
+            tracing::warn!(
+                stage = "/latest/meta-data/instance-id",
+                error_code = "invalid_metadata_response",
+                "ECS instance identity validation failed"
+            );
             Err(ProbeError::InvalidResponse)
         }
     }
@@ -276,7 +311,14 @@ impl MetadataSession {
         let (status, body) = self.get(path).await?;
         check_status(status)?;
         let text = std::str::from_utf8(&body)
-            .map_err(|_| ProbeError::InvalidResponse)?
+            .map_err(|_| {
+                tracing::warn!(
+                    stage = path,
+                    error_code = "invalid_metadata_response",
+                    "ECS metadata text validation failed"
+                );
+                ProbeError::InvalidResponse
+            })?
             .trim();
         // Identity fields become URL components, so reject delimiters and error pages.
         if text.is_empty()
@@ -284,20 +326,78 @@ impl MetadataSession {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
+            tracing::warn!(
+                stage = path,
+                error_code = "invalid_metadata_response",
+                "ECS metadata text validation failed"
+            );
             return Err(ProbeError::InvalidResponse);
         }
         Ok(text.to_string())
     }
 
-    async fn get(&self, path: &str) -> Result<(u16, Vec<u8>), ProbeError> {
-        read_response(
-            self.client
-                .get(format!("{}{path}", self.base_url))
-                .header(TOKEN_HEADER, self.token.clone()),
+    pub(super) async fn get(&self, path: &str) -> Result<(u16, Vec<u8>), ProbeError> {
+        read_metadata(
+            || {
+                self.client
+                    .get(format!("{}{path}", self.base_url))
+                    .header(TOKEN_HEADER, self.token.clone())
+            },
+            self.deadline,
             self.deadline,
             MAX_RESPONSE_BYTES,
+            path.split('?').next().unwrap_or_default(),
         )
         .await
+    }
+}
+
+async fn read_metadata(
+    build_request: impl Fn() -> reqwest::RequestBuilder,
+    deadline: Instant,
+    retry_deadline: Instant,
+    limit: usize,
+    stage: &str,
+) -> Result<(u16, Vec<u8>), ProbeError> {
+    let mut retried = false;
+    let mut first_http_failure = None;
+    loop {
+        let request = if retried {
+            build_request().timeout(retry_deadline.saturating_duration_since(Instant::now()))
+        } else {
+            build_request()
+        };
+        let result = read_response(request, deadline, limit).await;
+        let failure = match &result {
+            Ok((status, _)) => check_status(*status).err(),
+            Err(error) => Some(*error),
+        };
+        if let Some(error) = failure {
+            let retry =
+                !retried && error.is_transient() && Instant::now() + RETRY_DELAY < retry_deadline;
+            tracing::warn!(
+                stage,
+                error_code = error.code(),
+                http_status = result.as_ref().ok().map(|(status, _)| *status),
+                retry,
+                "ECS metadata request failed"
+            );
+            if retry {
+                first_http_failure = result.as_ref().ok().map(|_| error);
+                tokio::time::sleep(RETRY_DELAY).await;
+                if Instant::now() >= retry_deadline {
+                    return result;
+                }
+                retried = true;
+                continue;
+            }
+        }
+        if matches!(&result, Err(ProbeError::Timeout | ProbeError::Unreachable)) {
+            if let Some(error) = first_http_failure {
+                return Err(error);
+            }
+        }
+        return result;
     }
 }
 
@@ -332,21 +432,72 @@ async fn read_response(
     .unwrap_or(Err(ProbeError::Timeout))
 }
 
-fn check_status(status: u16) -> Result<(), ProbeError> {
+pub(super) fn check_status(status: u16) -> Result<(), ProbeError> {
     match status {
         200..=299 => Ok(()),
         401 | 403 => Err(ProbeError::AccessDenied),
+        429 | 500 | 502 | 503 | 504 => Err(ProbeError::ServiceUnavailable),
         _ => Err(ProbeError::Http),
     }
 }
 
 fn transport_error(error: reqwest::Error) -> ProbeError {
-    if error.is_timeout() {
+    let classified = if error.is_timeout() {
         ProbeError::Timeout
     } else if error.is_connect() {
         ProbeError::Unreachable
     } else {
         // A connected peer sending malformed HTTP is not evidence of non-ECS.
         ProbeError::InvalidResponse
+    };
+    let mut cause = std::error::Error::source(&error);
+    let mut os_error = None;
+    while let Some(source) = cause {
+        if let Some(source) = source.downcast_ref::<std::io::Error>() {
+            os_error = source.raw_os_error();
+            break;
+        }
+        cause = source.source();
+    }
+    tracing::warn!(
+        error_code = classified.code(),
+        connect = error.is_connect(),
+        body = error.is_body(),
+        os_error,
+        "ECS metadata transport failed"
+    );
+    classified
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn identity_stability_elapsed_retry_budget_never_sends_second_attempt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/latest/api/token", listener.local_addr().unwrap());
+        drop(listener);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .retry(reqwest::retry::never())
+            .build()
+            .unwrap();
+        let attempts = AtomicUsize::new(0);
+        let started = Instant::now();
+        let result = read_metadata(
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                client.put(&url)
+            },
+            started + REQUEST_TIMEOUT,
+            started - Duration::from_millis(1),
+            MAX_TOKEN_BYTES,
+            "/latest/api/token",
+        )
+        .await;
+        assert!(matches!(result, Err(ProbeError::Unreachable)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

@@ -626,3 +626,43 @@ fn edit_retry_without_a_name_field_restores_the_first_credential() {
     assert_eq!(auth.current_field_info().unwrap().name, "base_url");
     assert_eq!(auth.collected_values["provider_id"], "qwen-prod");
 }
+
+#[test]
+fn access_copy_configure_partial_save_closes_form_without_losing_credentials_or_replay() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("registry.sh");
+    std::fs::write(&script, r#"#!/bin/sh
+read -r request
+printf '%s\n' '{"success":false,"data":{"provider_updated":true,"error_code":"io_error"},"error":"session save failed"}'
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let adapter = crate::adapter::AdapterInstance::CoshCore(crate::adapter::CoshCoreAdapter::new(
+        script.to_string_lossy(),
+        false,
+    ));
+    let mut state = filling_provider_id_state();
+    state.auth.state.as_mut().unwrap().backend = AuthBackend::CoreRegistry;
+    state
+        .auth
+        .state
+        .as_mut()
+        .unwrap()
+        .collected_values
+        .insert("api_key".into(), "SECRET_MUST_NOT_RENDER".into());
+    state.auth.ecs_trial.auto_use_allowed = false;
+    state.auth.ecs_trial.cancelled_question = true;
+    state.personalization.foreground_model = Some("previous".into());
+    let mut output = Vec::new();
+    send_auth_response(Some(&adapter), &mut state, &mut output).unwrap();
+    assert!(state.auth.state.is_none());
+    assert!(state.auth.completed_ids.contains("auth-req-1"));
+    assert!(state.personalization.foreground_model.is_none());
+    assert!(!state.auth.ecs_trial.auto_use_allowed);
+    assert!(state.auth.ecs_trial.cancelled_question);
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("session could not be saved"), "{text}");
+    assert!(!text.contains("Credentials were not saved"), "{text}");
+    assert!(!text.contains("SECRET_MUST_NOT_RENDER"), "{text}");
+    assert!(!text.contains("Auth configured"), "{text}");
+}

@@ -58,6 +58,9 @@ fn render_raw_inline_event_view<W: Write>(
     {
         return Ok(RawObserverAction::InvalidateApprovalCapture(id));
     }
+    if let Some(id) = inline_state.auth.ecs_trial.take_invalidation() {
+        return Ok(RawObserverAction::InvalidateTrialCapture(id));
+    }
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
@@ -74,6 +77,9 @@ fn render_raw_inline_event_view<W: Write>(
     }
     if let Some(capture) = pending_card_capture(inline_state) {
         return Ok(RawObserverAction::CaptureInput(capture));
+    }
+    if inline_state.auth.ecs_trial.preference_job.is_some() {
+        return Ok(RawObserverAction::HoldShellOutput);
     }
     if inline_state.trigger_pty_prompt {
         inline_state.trigger_pty_prompt = false;
@@ -229,6 +235,9 @@ pub(crate) fn render_inline_guidance<W: Write>(
 }
 
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
+    if let Some(capture) = crate::auth::trial::pending_capture(state) {
+        return Some(capture);
+    }
     // #1721 D13: an open draft card owns every keystroke until submit/cancel.
     if let Some(draft) = state.prompt_draft.as_ref() {
         return Some(draft.capture());

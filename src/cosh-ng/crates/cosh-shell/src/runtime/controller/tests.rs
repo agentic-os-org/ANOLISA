@@ -419,3 +419,22 @@ fn terminal_capture_invalidation_precedes_unrelated_approved_handoff_emission() 
         render_raw_inline_events(&[], &mut Vec::new(), &adapter, "bash", &mut state).unwrap();
     assert_eq!(second, RawObserverAction::EmitToPty(request));
 }
+
+#[test]
+fn access_copy_pending_provider_switch_holds_prompt_until_result() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState::default();
+    let (_send, receive) = std::sync::mpsc::channel();
+    state.auth.ecs_trial.preference_job = Some(receive);
+    state.trigger_pty_prompt = true;
+    let mut output = Vec::new();
+    let action = render_raw_inline_events(&[], &mut output, &adapter, "bash", &mut state).unwrap();
+    assert_eq!(action, RawObserverAction::HoldShellOutput);
+    assert!(output.is_empty());
+    state.auth.ecs_trial.preference_job = None;
+    state.trigger_pty_prompt = true;
+    assert!(matches!(
+        render_raw_inline_events(&[], &mut output, &adapter, "bash", &mut state).unwrap(),
+        RawObserverAction::RestorePrompt { .. }
+    ));
+}

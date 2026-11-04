@@ -99,11 +99,36 @@ impl Drop for PersistentCoshCoreRuntime {
 }
 
 impl PersistentCoshCoreRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::adapter) fn start_run(
         &self,
         run_id: String,
         prepared: PreparedInvocation,
         raw_user_input: Option<String>,
+        mode: CoshApprovalMode,
+        session_state: Arc<Mutex<SessionRuntimeState>>,
+        session_scope: String,
+        resume_attempt: SessionResumeAttempt,
+    ) -> AgentRunHandle {
+        self.start_run_with_trial(
+            run_id,
+            prepared,
+            raw_user_input,
+            None,
+            mode,
+            session_state,
+            session_scope,
+            resume_attempt,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::adapter) fn start_run_with_trial(
+        &self,
+        run_id: String,
+        prepared: PreparedInvocation,
+        raw_user_input: Option<String>,
+        ecs_trial_context: Option<crate::types::EcsTrialContext>,
         mode: CoshApprovalMode,
         session_state: Arc<Mutex<SessionRuntimeState>>,
         session_scope: String,
@@ -193,7 +218,8 @@ impl PersistentCoshCoreRuntime {
         let command = RunCommand {
             run_id,
             prepared,
-            raw_user_input,
+            raw_user_input: raw_user_input.map(String::into_boxed_str),
+            ecs_trial_context: ecs_trial_context.map(Box::new),
             mode,
             session_state,
             session_scope,
@@ -246,19 +272,36 @@ impl PersistentCoshCoreRuntime {
         params: Value,
         short: impl FnOnce() -> Result<Value, RegistryQueryError>,
     ) -> Result<Value, RegistryQueryError> {
+        self.registry_idle_query("activate", params, short)
+    }
+
+    pub(crate) fn trial_idle(&self) -> bool {
+        self.admission
+            .lock()
+            .map(|state| *state == AdmissionState::Idle)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn registry_idle_query(
+        &self,
+        action: &str,
+        params: Value,
+        short: impl FnOnce() -> Result<Value, RegistryQueryError>,
+    ) -> Result<Value, RegistryQueryError> {
         let mut admission = self
             .admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if *admission != AdmissionState::Idle {
             return Err(RegistryQueryError::Response {
+                provider_updated: false,
                 message: "cosh-core runtime is busy; retry provider activation when idle".into(),
                 code: Some("runtime_busy".into()),
             });
         }
         *admission = AdmissionState::Registry;
         if self.live.load(Ordering::SeqCst) {
-            let receiver = match self.enqueue_registry("auth", "activate", params) {
+            let receiver = match self.enqueue_registry("auth", action, params) {
                 Ok(receiver) => receiver,
                 Err(error) => {
                     *admission = AdmissionState::Idle;
@@ -266,7 +309,7 @@ impl PersistentCoshCoreRuntime {
                 }
             };
             drop(admission);
-            return Self::receive_registry(receiver, registry_timeout("auth", "activate"));
+            return Self::receive_registry(receiver, registry_timeout("auth", action));
         }
         drop(admission);
         let _reservation = ShortRegistryReservation(Arc::clone(&self.admission));
@@ -399,6 +442,21 @@ mod provider_activation_tests {
             *adapter.runtime.admission.lock().unwrap() = AdmissionState::Run { queued: false };
             let error = adapter
                 .registry_query_classified("auth", "activate", Value::Null)
+                .unwrap_err()
+                .into_message();
+            assert!(error.contains("busy"), "live={live}: {error}");
+            assert!(!error.contains("spawn"));
+        }
+    }
+
+    #[test]
+    fn ecs_builtin_activation_never_mutates_a_short_process_while_runtime_is_busy() {
+        for live in [false, true] {
+            let adapter = CoshCoreAdapter::new("/nonexistent-core-activation", false);
+            adapter.runtime.live.store(live, Ordering::SeqCst);
+            *adapter.runtime.admission.lock().unwrap() = AdmissionState::Run { queued: false };
+            let error = adapter
+                .registry_query_classified("auth", "activate_trial", Value::Null)
                 .unwrap_err()
                 .into_message();
             assert!(error.contains("busy"), "live={live}: {error}");

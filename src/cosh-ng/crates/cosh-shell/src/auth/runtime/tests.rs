@@ -17,6 +17,308 @@ use crate::adapter::{AdapterInstance, FakeAgentAdapter};
 use crate::auth::capture::auth_capture_id;
 use std::collections::HashMap;
 
+fn trial_state_adapter(state: serde_json::Value) -> (tempfile::TempDir, AdapterInstance) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("registry.sh");
+    let reply = serde_json::json!({"success": true, "data": state}).to_string();
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nread -r request\nprintf '%s\\n' \"$request\" >> \"$0.requests\"\nprintf '%s\\n' '{}'\n",
+            reply.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let adapter = AdapterInstance::CoshCore(crate::adapter::CoshCoreAdapter::new(
+        script.to_string_lossy(),
+        false,
+    ));
+    (dir, adapter)
+}
+
+#[test]
+fn ecs_builtin_state_probe_is_explicit_and_non_ecs_has_no_trial_row() {
+    let (dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use": true},
+        "ecs_trial": {"available": false,"active": false,"model":"ecs-model"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let request: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(dir.path().join("registry.sh.requests"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["params"]["probe_ecs_trial"], true);
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::SelectingProvider);
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, 0),
+        vec![AuthManagementEntry::AddNew]
+    );
+}
+
+#[test]
+fn review5_non_ecs_identity_edit_uses_manual_credentials_without_identity_source() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"aliyun","label":"Aliyun","fields":[
+            {"name":"access_key_id","label":"AK","secret":true,"required":true},
+            {"name":"access_key_secret","label":"SK","secret":true,"required":true}
+        ]}],
+        "saved_providers": [{"provider_id":"saved-identity","provider_type":"aliyun",
+            "auth_source":"ecs_identity","active":true,"model":"qwen3.7-plus"}],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":false,"active":false,"model":"qwen3.7-plus"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ProviderAction { provider_idx: 0 };
+    auth.selected_provider = 0;
+    let id = auth_capture_id(auth);
+    handle_auth_answer(&adapter, &mut state, &id, "", &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert_eq!(
+        auth.editing_provider_name.as_deref(),
+        Some("saved-identity")
+    );
+    assert!(!auth.collected_values.contains_key("auth_source"));
+    assert_eq!(auth.current_field_info().unwrap().name, "access_key_id");
+}
+
+#[test]
+fn review5_alternate_identity_activation_unblocks_only_explicit_identity_selection() {
+    for source in ["ecs_identity", "ecs_ram_role"] {
+        let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+            "templates": [{"id":"aliyun","label":"Aliyun","fields":[]}],
+            "saved_providers": [
+                {"provider_id":"builtin","provider_type":"aliyun","auth_source":"ecs_identity","active":true,"model":"trial-model"},
+                {"provider_id":"alternate","provider_type":"aliyun","auth_source":source,"active":false,"model":"alternate-model"}
+            ],
+            "trial_preferences": {"auto_use":false},
+            "ecs_trial": {"available":true,"active":true,"model":"trial-model","provider_id":"builtin"}
+        }));
+        let mut state = InlineState::default();
+        state.auth.ecs_trial.auto_use_allowed = false;
+        state.auth.ecs_trial.disable_save_failed = true;
+        state.auth.ecs_trial.cancelled_question = true;
+        super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+        let provider = state.auth.state.as_ref().unwrap().existing_providers[0].clone();
+        assert_eq!(provider.name, "alternate");
+        super::super::activation::activate_provider(
+            &adapter,
+            &mut state,
+            &provider,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.auth.ecs_trial.auto_use_allowed,
+            source == "ecs_identity"
+        );
+        assert_eq!(
+            state.auth.ecs_trial.disable_save_failed,
+            source != "ecs_identity"
+        );
+        assert!(state.auth.ecs_trial.cancelled_question);
+    }
+}
+
+#[test]
+fn ecs_builtin_menu_marks_current_and_uses_core_model() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use": true},
+        "ecs_trial": {"available": true,"active": true,"model":"ecs-model-from-core"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert!(options[0].contains("[active]"), "{options:?}");
+    assert!(options[0].contains("ecs-model-from-core"), "{options:?}");
+}
+
+#[test]
+fn ecs_builtin_folds_only_its_provider_and_preserves_other_identity_configs() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"aliyun","label":"Aliyun","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"builtin-trial","provider_type":"aliyun","auth_source":"ecs_identity","active":true,"model":"builtin-model"},
+            {"provider_id":"custom-identity","provider_type":"aliyun","auth_source":"ecs_identity","active":false,"model":"custom-model"},
+            {"provider_id":"legacy-role","provider_type":"aliyun","auth_source":"ecs_ram_role","active":false,"model":"legacy-model"}
+        ],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":true,"active":true,"model":"builtin-model","provider_id":"builtin-trial"}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    let names: Vec<_> = auth
+        .existing_providers
+        .iter()
+        .map(|provider| provider.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["custom-identity", "legacy-role"]);
+}
+
+#[test]
+fn ecs_builtin_keeps_disabled_entry_when_own_provider_is_current() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"my-provider","provider_type":"openai_compat","active":true,"model":"own-model"}
+        ],
+        "trial_preferences": {"auto_use":false},
+        "ecs_trial": {"available":true,"active":false,"model":"builtin-model","provider_id":null}
+    }));
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("own-observed-model".into());
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert!(options[0].contains("已关闭"), "{options:?}");
+    assert!(options[0].contains("builtin-model"), "{options:?}");
+    assert!(!options[0].contains("[active]"), "{options:?}");
+    assert!(!options[0].contains("own-observed-model"), "{options:?}");
+    assert!(options[1].contains("[active]"), "{options:?}");
+}
+
+#[test]
+fn ecs_builtin_non_ecs_preserves_retry_disable_without_trial_entry() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use":false},
+        "ecs_trial": {"available":false,"active":false,"model":"builtin-model"}
+    }));
+    let mut state = InlineState::default();
+    state.auth.ecs_trial.disable_save_failed = true;
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_ref().unwrap();
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, 0),
+        vec![
+            AuthManagementEntry::RetryTrialDisable,
+            AuthManagementEntry::AddNew
+        ]
+    );
+}
+
+#[test]
+fn ecs_builtin_legacy_core_preferences_keep_existing_provider_and_old_prepare() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"my-provider","provider_type":"openai_compat","active":true,"model":"own-model"}
+        ],
+        "trial_preferences": {"auto_use":true}
+    }));
+    let mut state = InlineState::default();
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    assert_eq!(auth.phase, AuthPhase::PreparingMenu);
+    super::finish_sysom_menu_prepare(auth, Ok(serde_json::json!({"mode":"manual"})));
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, auth.existing_providers.len()),
+        vec![
+            AuthManagementEntry::Existing(0),
+            AuthManagementEntry::AddNew
+        ]
+    );
+}
+
+#[test]
+fn ecs_builtin_legacy_prepare_preserves_failed_disable_retry() {
+    let (_dir, adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use":true}
+    }));
+    let mut state = InlineState::default();
+    state.auth.ecs_trial.disable_save_failed = true;
+    state.auth.ecs_trial.auto_use_allowed = false;
+    super::trigger_auth_from_slash(&adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    super::finish_sysom_menu_prepare(auth, Ok(serde_json::json!({"mode":"manual"})));
+    assert_eq!(
+        crate::auth::menu::management_entries(&auth.sysom, 0),
+        vec![
+            AuthManagementEntry::RetryTrialDisable,
+            AuthManagementEntry::AddNew
+        ]
+    );
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+}
+
+fn delete_own_provider_reloading_trial(auto_use_allowed: bool) -> (InlineState, String) {
+    let (_initial_dir, initial_adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [
+            {"provider_id":"my-provider","provider_type":"openai_compat","active":true,"model":"own-model"}
+        ],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":true,"active":false,"model":"old-trial-model"}
+    }));
+    let (_reloaded_dir, reloaded_adapter) = trial_state_adapter(serde_json::json!({
+        "templates": [{"id":"openai_compat","label":"OpenAI","fields":[]}],
+        "saved_providers": [],
+        "trial_preferences": {"auto_use":true},
+        "ecs_trial": {"available":true,"active":true,"model":"current-trial-model"}
+    }));
+    let mut state = InlineState::default();
+    state.auth.ecs_trial.auto_use_allowed = auto_use_allowed;
+    state.auth.ecs_trial.disable_save_failed = !auto_use_allowed;
+    super::trigger_auth_from_slash(&initial_adapter, &mut state, &mut Vec::new()).unwrap();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::ConfirmDelete { provider_idx: 0 };
+    auth.selected_provider = 1;
+    let id = auth_capture_id(auth);
+    let mut output = Vec::new();
+    assert!(handle_auth_answer(&reloaded_adapter, &mut state, &id, "", &mut output).unwrap());
+    (state, String::from_utf8(output).unwrap())
+}
+
+#[test]
+fn ecs_builtin_delete_refreshes_current_and_model_from_core() {
+    let (state, output) = delete_own_provider_reloading_trial(true);
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert!(options[0].contains("[active]"), "{options:?}");
+    assert!(options[0].contains("current-trial-model"), "{options:?}");
+    assert!(
+        !output.contains("Select a provider to make it active."),
+        "{output}"
+    );
+}
+
+#[test]
+fn ecs_builtin_delete_refresh_preserves_session_block_and_disable_retry() {
+    let (state, _output) = delete_own_provider_reloading_trial(false);
+    let auth = state.auth.state.as_ref().unwrap();
+    let options = crate::auth::menu::management_options(&auth.sysom, &auth.existing_providers);
+    assert_eq!(
+        crate::auth::menu::management_entry(&auth.sysom, 0, 0),
+        AuthManagementEntry::RetryTrialDisable
+    );
+    assert!(options[1].contains("current-trial-model"), "{options:?}");
+    assert!(options[1].contains("已关闭"), "{options:?}");
+    assert!(!options[1].contains("[active]"), "{options:?}");
+    assert!(!state.auth.ecs_trial.auto_use_allowed);
+    assert!(state.auth.ecs_trial.disable_save_failed);
+}
+
 /// Any registry round-trip through this adapter fails, so reaching the ECS metadata
 /// service a second time turns into a visible error instead of a silent probe.
 fn adapter_without_registry() -> AdapterInstance {

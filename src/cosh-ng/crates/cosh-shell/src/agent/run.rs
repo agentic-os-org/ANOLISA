@@ -334,7 +334,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
         }
     }
 
-    if state.agent_run.active.is_some() {
+    if state.agent_run.active.is_some() || state.auth.ecs_trial.is_blocking() {
         return Ok(enqueue(
             state,
             PendingAgentRequest {
@@ -365,7 +365,29 @@ fn start_agent_run_with_queue_policy<W: Write>(
     enforce_insight_context_budget(&mut request);
     annotate_continuation_user_approval_mode(&mut request, state.approval_mode);
     let provider_mode = provider_mode_for_agent_run(&request, state.approval_mode);
-    let handle = adapter.start_cancellable(request.clone(), provider_mode);
+    let handle = match adapter {
+        AdapterInstance::CoshCore(core) => core.start_cancellable_with_trial(
+            request.clone(),
+            provider_mode,
+            Some(crate::types::EcsTrialContext {
+                schema_version: 1,
+                shell_session_id: state
+                    .shell_session_id
+                    .clone()
+                    .unwrap_or_else(|| request.session_id.clone()),
+                intent: match intent {
+                    AgentStartIntent::UserInitiated => "user_initiated",
+                    AgentStartIntent::InternalBestEffort => "internal_best_effort",
+                }
+                .into(),
+                auto_use_allowed: state.auth.ecs_trial.auto_use_allowed,
+            }),
+        ),
+        _ => adapter.start_cancellable(request.clone(), provider_mode),
+    };
+    if intent == AgentStartIntent::UserInitiated {
+        state.auth.ecs_trial.new_user_request();
+    }
     record_started_agent_request(state, &request);
     let now = Instant::now();
     let i18n = state.i18n();

@@ -13,6 +13,9 @@ mod provider_management;
 mod required;
 mod retry;
 pub(crate) mod runtime;
+pub(crate) mod trial;
+mod trial_state;
+mod trial_terminal;
 mod validation;
 
 #[cfg(test)]

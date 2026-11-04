@@ -129,6 +129,7 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     assert_eq!(
         result,
         Err(RegistryQueryError::Response {
+            provider_updated: false,
             message: "candidate validation failed".to_string(),
             code: None,
         })
@@ -155,6 +156,7 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     assert_eq!(
         result,
         Err(RegistryQueryError::Response {
+            provider_updated: false,
             message: "The API key was rejected.".to_string(),
             code: Some("invalid_credentials".to_string()),
         })
@@ -226,4 +228,19 @@ printf '%s\n' 'this is not valid json'
 
     let err = result.expect_err("should fail on invalid json");
     assert!(err.contains("parse error"), "unexpected error: {err}");
+}
+
+#[test]
+fn access_copy_short_registry_preserves_partial_save_result() {
+    let script = write_mock_script(
+        "partial-save",
+        r#"read REQUEST
+printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":false,"data":{"provider_updated":true,"error_code":"io_error"},"error":"session persistence failed"}'
+"#,
+    );
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let result = adapter.registry_query_classified("auth", "configure", Value::Null);
+    let _ = std::fs::remove_file(&script);
+    let error = format!("{:?}", result.unwrap_err());
+    assert!(error.contains("provider_updated: true"), "{error}");
 }

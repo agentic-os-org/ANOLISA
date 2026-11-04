@@ -1,3 +1,6 @@
+mod failure;
+pub use failure::{DispatchState, ProviderFailure, ProviderFailureKind};
+
 pub mod mock;
 pub mod observe;
 pub mod openai_compat;
@@ -268,6 +271,7 @@ pub(crate) fn clamp_output_cap_fields(body: &mut Value, max_tokens: u32) {
 
 #[derive(Debug, Clone)]
 pub enum GenerateEvent {
+    RequestAccepted,
     TextDelta(String),
     ToolCallStart {
         index: u32,
@@ -291,6 +295,7 @@ pub enum GenerateEvent {
     MessageEnd,
     Cancelled,
     Error(String),
+    ProviderFailure(ProviderFailure),
 }
 
 /// Highest tool-call index a provider may report within one message.
