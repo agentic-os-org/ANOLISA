@@ -194,11 +194,31 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             # Also update formulas in every row (formulas can reference any row)
             for cell_el in row_el:
                 f_el = cell_el.find(_tag("f"))
-                if f_el is not None and f_el.text:
-                    new_f = shift_formula(f_el.text, at, delta)
-                    if new_f != f_el.text:
-                        f_el.text = new_f
-                        changes += 1
+                if f_el is not None:
+                    if f_el.text:
+                        new_f = shift_formula(f_el.text, at, delta)
+                        if new_f != f_el.text:
+                            f_el.text = new_f
+                            changes += 1
+                    # 共享/数组公式的 ref 声明了 master 覆盖的范围；消费单元格随行移动后
+                    # 必须一起移动，否则它们落在声明范围之外，Excel 会提示修复文件。
+                    # `dataTable` 的 r1/r2 是同一张表的另两个声明，但语义不同：`ref` 是
+                    # 范围，`r1`/`r2` 是单单元格引用，指向数据表的输入单元格。ECMA-376
+                    # 允许输入单元格落在 `ref` 之外（§18.3.1.38：「Although the input
+                    # cell does not need to be part of the data table…」），所以这里并不
+                    # 存在「必须落在范围内」的约束。真正的要求是三者各自跟着自己指向的
+                    # 行移动：只平移 ref 会让 r1/r2 继续指向旧的输入格，数据表于是把输入
+                    # 代进一个已经被别的行占用的单元格，静默算出错值而不报修复提示。
+                    for attr in ("ref", "r1", "r2"):
+                        value = f_el.get(attr)
+                        if not value:
+                            continue
+                        shifted = (shift_sqref if attr == "ref" else shift_formula)(
+                            value, at, delta
+                        )
+                        if shifted != value:
+                            f_el.set(attr, shifted)
+                            changes += 1
 
     # 3. <mergeCell ref="A5:C7">
     for mc in root.iter(_tag("mergeCell")):
