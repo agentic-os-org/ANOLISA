@@ -4,6 +4,8 @@ use std::process::Stdio;
 use serde_json::Value;
 
 mod common;
+#[path = "jsonl_protocol/trial_access.rs"]
+mod trial_access;
 
 fn private_wire_corpus() -> Value {
     serde_json::from_str(include_str!("fixtures/cosh-private-wire-dual-version.json"))

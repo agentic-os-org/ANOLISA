@@ -14,6 +14,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use serde_json::Value;
 
+use super::super::{DispatchState, ProviderFailureKind};
 use super::super::{GenerateEvent, GenerateStream, MAX_TOOL_CALL_INDEX};
 use super::hex_sha256;
 
@@ -173,6 +174,7 @@ struct SseToolState {
 
 #[derive(Default)]
 struct SseParseState {
+    structured_failures: bool,
     /// Last complete cumulative assistant text; new snapshots must extend it.
     last_content: String,
     /// Tool state in first-seen order, addressed by provider index.
@@ -243,6 +245,18 @@ fn parse_sysom_sse_events(
         // A provider failure is terminal: EOF bookkeeping must not follow it
         // with a clean `MessageEnd` over a turn that failed.
         state.stream_ended = true;
+        if let Some(failure) =
+            super::failure::from_payload(data_str.as_bytes(), DispatchState::Unknown)
+        {
+            return Ok(vec![GenerateEvent::ProviderFailure(failure)]);
+        }
+        if state.structured_failures {
+            return Ok(vec![GenerateEvent::ProviderFailure(super::failure::fixed(
+                "Sysom.StreamFailure",
+                ProviderFailureKind::Other,
+                DispatchState::Unknown,
+            ))]);
+        }
         return Ok(vec![GenerateEvent::Error(format!(
             "SysOM stream failed: {}",
             failure_summary(&data_str)
@@ -558,12 +572,23 @@ pub(super) fn sysom_event_stream(
     bytes: SysomByteStream,
     cancelled: Arc<AtomicBool>,
 ) -> GenerateStream {
+    event_stream(bytes, cancelled, false)
+}
+
+fn event_stream(
+    bytes: SysomByteStream,
+    cancelled: Arc<AtomicBool>,
+    structured_failures: bool,
+) -> GenerateStream {
     let initial = SysomStreamState {
         bytes,
         buf: Vec::new(),
         scanned: 0,
         cancelled,
-        parse: SseParseState::default(),
+        parse: SseParseState {
+            structured_failures,
+            ..SseParseState::default()
+        },
         pending: VecDeque::new(),
     };
 
@@ -596,13 +621,27 @@ pub(super) fn sysom_event_stream(
                         buffered_bytes: pos,
                         limit: MAX_SSE_BLOCK_BYTES,
                     };
-                    return Some((GenerateEvent::Error(error.to_string()), state));
+                    return Some((
+                        stream_error(
+                            error.to_string(),
+                            state.parse.structured_failures,
+                            ProviderFailureKind::Other,
+                        ),
+                        state,
+                    ));
                 }
                 let event_block = match decode_block(&state.buf[..pos]) {
                     Ok(text) => text.to_string(),
                     Err(e) => {
                         state.parse.stream_ended = true;
-                        return Some((GenerateEvent::Error(e.to_string()), state));
+                        return Some((
+                            stream_error(
+                                e.to_string(),
+                                state.parse.structured_failures,
+                                ProviderFailureKind::Other,
+                            ),
+                            state,
+                        ));
                     }
                 };
                 state.buf.drain(..pos + delimiter);
@@ -614,7 +653,14 @@ pub(super) fn sysom_event_stream(
                     Ok(events) => state.pending.extend(events),
                     Err(e) => {
                         state.parse.stream_ended = true;
-                        return Some((GenerateEvent::Error(e.to_string()), state));
+                        return Some((
+                            stream_error(
+                                e.to_string(),
+                                state.parse.structured_failures,
+                                ProviderFailureKind::Other,
+                            ),
+                            state,
+                        ));
                     }
                 }
                 continue;
@@ -629,7 +675,14 @@ pub(super) fn sysom_event_stream(
                     buffered_bytes: state.buf.len(),
                     limit: MAX_SSE_BLOCK_BYTES,
                 };
-                return Some((GenerateEvent::Error(error.to_string()), state));
+                return Some((
+                    stream_error(
+                        error.to_string(),
+                        state.parse.structured_failures,
+                        ProviderFailureKind::Other,
+                    ),
+                    state,
+                ));
             }
 
             match state.bytes.next().await {
@@ -644,7 +697,14 @@ pub(super) fn sysom_event_stream(
                     // Transport failures are terminal too: nothing after a
                     // broken connection can be trusted to extend the turn.
                     state.parse.stream_ended = true;
-                    return Some((GenerateEvent::Error(format!("stream error: {e}")), state));
+                    return Some((
+                        stream_error(
+                            format!("stream error: {e}"),
+                            state.parse.structured_failures,
+                            ProviderFailureKind::Transport,
+                        ),
+                        state,
+                    ));
                 }
                 None => {
                     // Flush a trailing frame that arrived without its blank line.
@@ -652,7 +712,14 @@ pub(super) fn sysom_event_stream(
                         Ok(text) => text.to_string(),
                         Err(e) => {
                             state.parse.stream_ended = true;
-                            return Some((GenerateEvent::Error(e.to_string()), state));
+                            return Some((
+                                stream_error(
+                                    e.to_string(),
+                                    state.parse.structured_failures,
+                                    ProviderFailureKind::Other,
+                                ),
+                                state,
+                            ));
                         }
                     };
                     state.buf.clear();
@@ -662,7 +729,14 @@ pub(super) fn sysom_event_stream(
                             Ok(events) => state.pending.extend(events),
                             Err(e) => {
                                 state.parse.stream_ended = true;
-                                return Some((GenerateEvent::Error(e.to_string()), state));
+                                return Some((
+                                    stream_error(
+                                        e.to_string(),
+                                        state.parse.structured_failures,
+                                        ProviderFailureKind::Other,
+                                    ),
+                                    state,
+                                ));
                             }
                         }
                     }
@@ -678,6 +752,29 @@ pub(super) fn sysom_event_stream(
             }
         }
     }))
+}
+
+pub(super) fn sysom_event_stream_structured(
+    bytes: SysomByteStream,
+    cancelled: Arc<AtomicBool>,
+) -> GenerateStream {
+    event_stream(bytes, cancelled, true)
+}
+
+fn stream_error(message: String, structured: bool, kind: ProviderFailureKind) -> GenerateEvent {
+    if structured {
+        GenerateEvent::ProviderFailure(super::failure::fixed(
+            if kind == ProviderFailureKind::Transport {
+                "Sysom.TransportError"
+            } else {
+                "Sysom.StreamFailure"
+            },
+            kind,
+            DispatchState::Unknown,
+        ))
+    } else {
+        GenerateEvent::Error(message)
+    }
 }
 
 /// Largest single SSE block accepted, with or without its terminator.

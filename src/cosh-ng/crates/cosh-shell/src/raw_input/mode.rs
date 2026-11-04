@@ -31,7 +31,22 @@ pub(crate) fn update_locked_input_mode(
     action: &RawObserverAction,
     acknowledged_generation: Option<u64>,
 ) {
-    if let RawObserverAction::InvalidateApprovalCapture(id) = action {
+    if matches!(
+        action,
+        RawObserverAction::InvalidateApprovalCapture(_)
+            | RawObserverAction::InvalidateTrialCapture(_)
+    ) {
+        let invalidates = |capture: &RawInputCapture| match (action, capture) {
+            (
+                RawObserverAction::InvalidateApprovalCapture(id),
+                RawInputCapture::Approval { id: active, .. },
+            )
+            | (
+                RawObserverAction::InvalidateTrialCapture(id),
+                RawInputCapture::TrialWaiting { id: active, .. },
+            ) => id == active,
+            _ => false,
+        };
         if let RawInputMode::Draining {
             previous_capture,
             next_capture,
@@ -39,12 +54,10 @@ pub(crate) fn update_locked_input_mode(
             ..
         } = mode
         {
-            if matches!(next_capture, Some(RawInputCapture::Approval { id: active, .. }) if active == id)
-            {
+            if next_capture.as_ref().is_some_and(invalidates) {
                 *next_capture = None;
             }
-            if matches!(previous_capture, RawInputCapture::Approval { id: active, .. } if active == id)
-            {
+            if invalidates(previous_capture) {
                 *invalidated = true;
             }
             return;
@@ -66,7 +79,7 @@ pub(crate) fn update_locked_input_mode(
             _ => None,
         };
         if let Some((capture, generation)) = capture {
-            if matches!(&capture, RawInputCapture::Approval { id: active, .. } if active == id) {
+            if invalidates(&capture) {
                 *mode = RawInputMode::Draining {
                     previous_capture: capture,
                     generation,
@@ -206,6 +219,7 @@ pub(crate) fn update_locked_input_mode(
         },
         RawObserverAction::Continue
         | RawObserverAction::InvalidateApprovalCapture(_)
+        | RawObserverAction::InvalidateTrialCapture(_)
         | RawObserverAction::EmitToPty(_)
         | RawObserverAction::EmitToPtyWithPromptRestore(_)
         | RawObserverAction::InterruptForeground

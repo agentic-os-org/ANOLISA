@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 
@@ -40,10 +41,16 @@ pub fn cosh_core_command(home: &Path) -> Command {
 #[allow(dead_code)] // used by whichever integration tests include this module
 pub fn opt_out_telemetry(command: &mut Command, home: &Path) {
     let dir = home.join(".copilot-shell");
-    fs::create_dir_all(&dir).expect("create .copilot-shell");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .expect("create .copilot-shell");
 
     let user_sentinel = dir.join("telemetry_disabled");
     fs::write(&user_sentinel, "").expect("create user telemetry opt-out sentinel");
+    fs::set_permissions(&user_sentinel, fs::Permissions::from_mode(0o600))
+        .expect("make user telemetry opt-out sentinel private");
     command.env("COSH_TELEMETRY_DISABLED_PATH", &user_sentinel);
 }
 

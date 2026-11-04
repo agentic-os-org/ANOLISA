@@ -2,9 +2,37 @@
 
 [中文版](../../../zh/cosh-ng/core/providers.md)
 
-Use `/auth` in the interactive terminal. For a managed or headless setup,
+Use `/auth` to configure a model in the interactive terminal. For a managed or headless setup,
 define the provider in the system or user config file; project config cannot
 add credentials or provider definitions.
+
+## Automatic model access on ECS
+
+With a compatible Cosh Shell/Core, a user-initiated model request on ECS can use
+automatic access to OS Console model service without `/auth` when no provider, endpoint, or credentials
+have been selected. Existing model configurations keep their current behavior.
+This path defaults to `qwen3.7-plus`; an explicitly selected model is preserved.
+This path requires server support for ECS instance identity exchange.
+
+Automatic access removes manual credential setup; it does not promise a permanently free service. Monthly free allowances will be introduced after the current preview period. Once the available allowance is exhausted, requests stop unless the user purchases a top-up or explicitly enables pay-as-you-go. OS Console determines current availability and quota; Cosh never enables paid access automatically.
+
+When activation is required, the terminal displays a QR code and the
+[OS Console link](https://console.aliyun.com/alinux/welcome?source=cosh). Activate with the account
+that owns the ECS instance. Cosh checks automatically and resumes the current
+question without confirmation. Temporary credentials stay in memory and are
+refreshed before subsequent requests as expiry approaches; no AK/SK is saved.
+
+- `Esc` cancels the current wait. Cancelled questions are never replayed automatically.
+- `n` opens automatic access preferences for this Shell session or future sessions. Disabling
+  the prompt also stops automatic model access.
+- Session preferences end when the Shell exits. Persistent preferences live in
+  `~/.copilot-shell/cosh/preferences.toml` and survive `/new` or a Core restart.
+- Use `/auth` to configure another model or explicitly re-enable automatic access.
+  Re-enabling does not replay a cancelled question.
+
+An explicit server quota failure produces a quota warning without automatic
+retries; check OS Console or use `/auth` to change providers. Network, permission, and identity errors
+are reported separately from activation requirements.
 
 ## Choose a provider interactively
 

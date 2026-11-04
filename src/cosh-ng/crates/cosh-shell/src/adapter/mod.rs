@@ -173,6 +173,29 @@ pub enum AgentRunPoll {
 }
 
 impl AgentRunHandle {
+    pub(crate) fn send_trial_control(
+        &self,
+        progress: &crate::types::EcsTrialProgress,
+        action: crate::types::EcsTrialAction,
+    ) -> bool {
+        if !self
+            .control_capabilities
+            .lock()
+            .map(|caps| caps.can_handle_ecs_trial_v1)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.approval_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ApprovalChannelMessage::EcsTrialControl {
+                    progress: progress.clone(),
+                    action,
+                })
+                .is_ok()
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn test_with_approval_sender(
         approval_sender: mpsc::Sender<ApprovalChannelMessage>,

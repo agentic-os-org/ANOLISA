@@ -102,6 +102,22 @@ pub(super) fn spawn_response_writer(
         while !done.load(Ordering::SeqCst) && !cancelled.load(Ordering::SeqCst) {
             if approval_open {
                 match approval_rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok(ApprovalChannelMessage::EcsTrialControl { progress, action }) => {
+                        let capable = capabilities
+                            .lock()
+                            .map(|caps| caps.can_handle_ecs_trial_v1)
+                            .unwrap_or(false);
+                        if capable
+                            && send_json(
+                                &stdin,
+                                &control_protocol::ecs_trial::serialize_control(&progress, action),
+                            )
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     Ok(ApprovalChannelMessage::Receipt { request_id }) => {
                         // #1940 receipt protocol: only providers that announce
                         // `can_handle_approval_receipt` understand this line;
@@ -378,11 +394,15 @@ pub(super) fn send_user_turn(
     let session_id = process.session_id.clone();
     send_json(
         &process.stdin,
-        &user_message_with_raw_input(
-            &command.prepared.prompt,
-            command.raw_user_input.as_deref(),
-            session_id.as_deref(),
-            &command.session_scope,
+        &control_protocol::ecs_trial::attach_context(
+            &user_message_with_raw_input(
+                &command.prepared.prompt,
+                command.raw_user_input.as_deref(),
+                session_id.as_deref(),
+                &command.session_scope,
+            ),
+            command.ecs_trial_context.as_deref(),
+            process.control_capabilities.can_handle_ecs_trial_v1,
         ),
     )
 }

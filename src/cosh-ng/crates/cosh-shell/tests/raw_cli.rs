@@ -42,6 +42,8 @@ mod daily_terminal;
 mod diagnostics;
 #[path = "raw_cli/doctor.rs"]
 mod doctor;
+#[path = "raw_cli/ecs_trial.rs"]
+mod ecs_trial;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
 #[path = "raw_cli/external_hook.rs"]

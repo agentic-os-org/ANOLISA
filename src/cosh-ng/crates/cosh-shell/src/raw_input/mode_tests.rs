@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn trial_capture_invalidation_is_scoped_to_its_kind_and_wakes_unsubmitted_cleanup() {
+    let capture = RawInputCapture::TrialWaiting {
+        id: "flow".into(),
+        settings: None,
+        allow_settings: true,
+    };
+    let mut mode = RawInputMode::Capture {
+        capture,
+        generation: 55,
+        installed_at: std::time::Instant::now(),
+    };
+    update_locked_input_mode(
+        &mut mode,
+        &RawObserverAction::InvalidateApprovalCapture("flow".into()),
+        None,
+    );
+    assert!(matches!(mode, RawInputMode::Capture { generation: 55, .. }));
+    update_locked_input_mode(
+        &mut mode,
+        &RawObserverAction::InvalidateTrialCapture("flow".into()),
+        None,
+    );
+    assert!(matches!(
+        mode,
+        RawInputMode::Draining {
+            generation: 55,
+            invalidated: true,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn terminal_approval_invalidation_rejects_submitted_tail_and_preserves_foreign_owner() {
     let capture = RawInputCapture::Approval {
         id: "dead-approval".to_string(),

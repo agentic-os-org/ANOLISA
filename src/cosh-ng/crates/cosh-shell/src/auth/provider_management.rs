@@ -31,13 +31,26 @@ impl ExistingProvider {
 }
 
 pub(super) struct CoreAuthState {
+    pub(super) trial_auto_use: Option<bool>,
+    pub(super) ecs_trial: Option<CoreEcsTrialState>,
     pub(super) templates: Vec<AuthProviderInfo>,
     pub(super) existing_providers: Vec<ExistingProvider>,
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct CoreEcsTrialState {
+    pub(super) available: bool,
+    pub(super) active: bool,
+    pub(super) model: String,
+    #[serde(default)]
+    provider_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegistryAuthState {
     templates: Vec<AuthProviderInfo>,
+    #[serde(default)]
+    ecs_trial: Option<CoreEcsTrialState>,
     #[serde(default)]
     saved_providers: Vec<CoreSavedProvider>,
 }
@@ -143,12 +156,24 @@ fn restore_plan_template(provider: &mut ExistingProvider, templates: &[AuthProvi
 }
 
 pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAuthState, String> {
-    let value = cosh_core.registry_query("auth", "state", Value::Null)?;
+    let value = cosh_core.registry_query("auth", "state", json!({"probe_ecs_trial": true}))?;
+    let trial_auto_use = value
+        .get("trial_preferences")
+        .and_then(|prefs| prefs.get("auto_use"))
+        .and_then(Value::as_bool);
     let state: RegistryAuthState =
         serde_json::from_value(value).map_err(|error| format!("invalid auth state: {error}"))?;
     let mut existing_providers: Vec<ExistingProvider> = state
         .saved_providers
         .into_iter()
+        .filter(|provider| {
+            !state.ecs_trial.as_ref().is_some_and(|trial| {
+                trial.available
+                    && trial.provider_id.as_deref() == Some(provider.provider_id.as_str())
+                    && provider.provider_type.as_deref() == Some("aliyun")
+                    && provider.auth_source.as_deref() == Some("ecs_identity")
+            })
+        })
         .map(|provider| {
             let mut provider = ExistingProvider::from(provider);
             restore_plan_template(&mut provider, &state.templates);
@@ -162,6 +187,8 @@ pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAu
             .then(left.name.cmp(&right.name))
     });
     Ok(CoreAuthState {
+        trial_auto_use,
+        ecs_trial: state.ecs_trial,
         templates: state.templates,
         existing_providers,
     })
@@ -170,13 +197,18 @@ pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAu
 pub(super) fn core_auth_activate(
     adapter: &AdapterInstance,
     provider_id: &str,
-) -> Result<(), String> {
+) -> Result<(), AuthConfigureFailure> {
     let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
+        return Err(AuthConfigureFailure {
+            message: "auth registry requires cosh-core backend".into(),
+            code: None,
+            provider_updated: false,
+        });
     };
     cosh_core
-        .registry_query("auth", "activate", json!({ "provider_id": provider_id }))
+        .registry_query_classified("auth", "activate", json!({ "provider_id": provider_id }))
         .map(|_| ())
+        .map_err(auth_configure_failure)
 }
 
 pub(super) fn core_auth_delete(adapter: &AdapterInstance, provider_id: &str) -> Result<(), String> {
@@ -196,6 +228,7 @@ pub(super) fn core_auth_configure(
         return Err(AuthConfigureFailure {
             message: "auth registry requires cosh-core backend".to_string(),
             code: None,
+            provider_updated: false,
         });
     };
     cosh_core
@@ -212,20 +245,30 @@ pub(super) fn core_auth_configure(
         .map_err(auth_configure_failure)
 }
 
-fn auth_configure_failure(error: crate::adapter::RegistryQueryError) -> AuthConfigureFailure {
+pub(super) fn auth_configure_failure(
+    error: crate::adapter::RegistryQueryError,
+) -> AuthConfigureFailure {
     match error {
         crate::adapter::RegistryQueryError::Transport(message) => AuthConfigureFailure {
             message,
             code: None,
+            provider_updated: false,
         },
-        crate::adapter::RegistryQueryError::Response { message, code } => {
-            AuthConfigureFailure { message, code }
-        }
+        crate::adapter::RegistryQueryError::Response {
+            message,
+            code,
+            provider_updated,
+        } => AuthConfigureFailure {
+            message,
+            code,
+            provider_updated,
+        },
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AuthConfigureFailure {
+pub(crate) struct AuthConfigureFailure {
+    pub(super) provider_updated: bool,
     pub(super) message: String,
     pub(super) code: Option<String>,
 }
@@ -276,6 +319,7 @@ mod auth_configure_failure_tests {
         AuthConfigureFailure {
             message: "safe message".to_string(),
             code: Some(code.to_string()),
+            provider_updated: false,
         }
     }
 

@@ -1033,13 +1033,12 @@ impl CoreConfig {
     }
 
     pub fn resolve_provider(&self) -> ResolvedProvider {
-        let provider_name = self
-            .ai
-            .active_provider
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+        let provider_name = self.ai.active_provider.as_deref().unwrap_or("default");
+        self.resolve_named_provider(provider_name)
+    }
 
-        let provider_cfg = self.ai.providers.get(&provider_name);
+    pub(crate) fn resolve_named_provider(&self, provider_name: &str) -> ResolvedProvider {
+        let provider_cfg = self.ai.providers.get(provider_name);
 
         // SysOM's API host, kept deliberately separate from `base_url`.
         //
@@ -1142,8 +1141,10 @@ impl ResolvedProvider {
             return false;
         }
         if self.provider_type == "aliyun" {
-            return self.auth_source.as_deref() != Some("ecs_ram_role")
-                && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
+            return !matches!(
+                self.auth_source.as_deref(),
+                Some("ecs_ram_role" | "ecs_identity")
+            ) && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
         }
         self.api_key.is_empty()
     }

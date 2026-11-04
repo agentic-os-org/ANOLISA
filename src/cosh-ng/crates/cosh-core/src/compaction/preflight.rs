@@ -143,7 +143,8 @@ fn attempt_is_transient(error: &CompactionError) -> bool {
         // summary cannot pay for itself, the prefix cannot fit the summarizer
         // input, the revision clock is spent, the transcript is malformed, or
         // compaction is switched off. Manual compaction repeats the failure.
-        CompactionError::NotReducing
+        CompactionError::Access(_)
+        | CompactionError::NotReducing
         | CompactionError::OversizedInput
         | CompactionError::RevisionExhausted
         | CompactionError::Boundary(_)
@@ -186,6 +187,7 @@ fn emergency_ladder(preserve_recent_runs: usize) -> Vec<PreservationPolicy> {
 /// Returns a `context_limit:`-prefixed message classifying why the effective
 /// context still exceeds the emergency threshold. The prefix is a stable
 /// contract consumed by the shell's session-recovery path.
+/// Provider access failures instead short-circuit with `provider_access:<code>`.
 pub(crate) async fn run_context_preflight<W: Write>(
     runtime: &mut CompactionRuntime,
     messages: &[Message],
@@ -243,6 +245,13 @@ pub(crate) async fn run_context_preflight<W: Write>(
                         emit_status(writer, "compaction_emergency_completed");
                         return Ok(());
                     }
+                }
+                Err(error @ CompactionError::Access(_)) => {
+                    emit_status(
+                        writer,
+                        &format!("compaction_emergency_failed:{}", error.code()),
+                    );
+                    return Err(error.to_string());
                 }
                 // Cut-specific outcomes: this policy protected too much
                 // history for the attempt to help, but a more aggressive rung

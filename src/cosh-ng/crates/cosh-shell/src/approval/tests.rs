@@ -1708,7 +1708,8 @@ fn batch_drain_writes_drop_audit_before_responding() {
         .try_iter()
         .filter_map(|message| match message {
             crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
-            crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+            crate::adapter::ApprovalChannelMessage::Receipt { .. }
+            | crate::adapter::ApprovalChannelMessage::EcsTrialControl { .. } => None,
         })
         .collect();
     assert_eq!(responses.len(), 1, "{responses:?}");

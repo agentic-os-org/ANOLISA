@@ -243,6 +243,10 @@ impl PromptReplayTracker {
         self.pending_prompt.as_ref().map_or(0, Vec::len)
     }
 
+    pub(super) fn disarm_replay(&mut self) {
+        self.pending_prompt = None;
+    }
+
     fn expire_on_user_input(&mut self) {
         if self.pending_prompt.is_some() && self.input_generation.current() != self.armed_at {
             self.pending_prompt = None;

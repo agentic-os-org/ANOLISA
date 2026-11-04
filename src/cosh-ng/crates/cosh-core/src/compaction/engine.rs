@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::cli::CliArgs;
 use crate::config::CoreConfig;
 use crate::context::ContextBuilder;
-use crate::provider::ContentGenerator;
+use crate::provider::{ContentGenerator, DispatchState, ProviderFailure, ProviderFailureKind};
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 
 use super::boundary::{
@@ -89,6 +89,7 @@ impl CompactionTrigger {
 #[derive(Debug, Clone)]
 /// Failure classes that leave the previous projection untouched.
 pub enum CompactionError {
+    Access(ProviderFailure),
     /// Compaction is disabled by configuration.
     Disabled,
     /// The transcript has no compactable complete Agent run.
@@ -119,8 +120,9 @@ pub enum CompactionError {
 
 impl CompactionError {
     /// Returns the stable machine-readable code.
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
+            Self::Access(failure) => &failure.code,
             Self::Disabled => "disabled",
             Self::NothingToCompact => "nothing_to_compact",
             Self::Boundary(_) => "unsafe_boundary",
@@ -141,6 +143,7 @@ impl CompactionError {
 impl std::fmt::Display for CompactionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Access(failure) => write!(formatter, "provider_access:{}", failure.code),
             Self::Disabled => write!(formatter, "session compaction is disabled"),
             Self::NothingToCompact => {
                 write!(formatter, "no complete Agent run is available to compact")
@@ -189,6 +192,7 @@ impl From<BoundaryError> for CompactionError {
 impl From<SummaryError> for CompactionError {
     fn from(error: SummaryError) -> Self {
         match error {
+            SummaryError::Access(failure) => Self::Access(failure),
             SummaryError::Provider(detail) => Self::Provider(detail),
             SummaryError::Empty => Self::EmptySummary,
             SummaryError::Oversized => Self::OversizedSummary,
@@ -599,6 +603,17 @@ async fn compact_cli_inner(
             }));
         }
     };
+
+    let resolved = config.resolve_provider();
+    if resolved.provider_type == "aliyun" && resolved.auth_source.as_deref() == Some("ecs_identity")
+    {
+        return Err(CompactionError::Access(ProviderFailure {
+            code: "EcsTrialInteractionRequired".to_string(),
+            kind: ProviderFailureKind::Other,
+            dispatch: DispatchState::NotDispatched,
+            request_id: None,
+        }));
+    }
 
     let workspace = args
         .workspace

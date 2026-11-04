@@ -104,6 +104,8 @@ impl CoshCore {
             truncator: OutputTruncator::default(),
             loop_detector: LoopDetector::new(),
             client_capabilities: crate::protocol::ClientControlCapabilities::default(),
+            trial_access: None,
+            trial_identity_provider: None,
             approval_response_timeout_default: Duration::from_secs(
                 APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS,
             ),

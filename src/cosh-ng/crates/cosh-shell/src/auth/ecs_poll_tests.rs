@@ -542,6 +542,7 @@ fn shell_exit_preserves_unknown_save_result_without_scheduling() {
         Err(AuthConfigureFailure {
             message: "Save result is unknown".into(),
             code: None,
+            provider_updated: false,
         }),
     );
     state.shell_exited = true;
@@ -1007,6 +1008,7 @@ fn unavailable_configure_rechecks_before_claiming_authorization_is_missing() {
         Err(AuthConfigureFailure {
             message: "ECS credentials unavailable".into(),
             code: Some("credential_source_unavailable".into()),
+            provider_updated: false,
         }),
     );
     // Inspect the transition before the next scheduled probe.
@@ -1231,4 +1233,36 @@ fn shell_exit_cancels_and_reaps_an_inflight_probe() {
         std::io::Error::last_os_error().raw_os_error(),
         Some(nix::libc::ECHILD)
     );
+}
+
+#[test]
+fn access_copy_role_configuration_partial_save_finishes_without_retrying_credentials() {
+    let mut state = state("partial-role-save");
+    state.auth.ecs_trial.auto_use_allowed = false;
+    state.auth.ecs_trial.cancelled_question = true;
+    state.personalization.foreground_model = Some("previous".into());
+    completed_configuration(
+        &mut state,
+        Err(AuthConfigureFailure {
+            message: "session save failed".into(),
+            code: Some("io_error".into()),
+            provider_updated: true,
+        }),
+    );
+    let mut output = Vec::new();
+    poll(
+        &AdapterInstance::Fake(FakeAgentAdapter),
+        &mut state,
+        &mut output,
+    )
+    .unwrap();
+    assert!(state.auth.state.is_none());
+    assert!(state.auth.ecs.is_none());
+    assert!(state.auth.completed_ids.contains("partial-role-save"));
+    assert!(!state.auth.ecs_trial.auto_use_allowed);
+    assert!(state.auth.ecs_trial.cancelled_question);
+    assert!(state.personalization.foreground_model.is_none());
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("session could not be saved"), "{text}");
+    assert!(!text.contains("Auth configured"), "{text}");
 }

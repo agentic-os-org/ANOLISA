@@ -123,6 +123,7 @@ impl RuntimeAuthState {
 #[derive(Debug, Default)]
 pub(crate) struct AuthState {
     pub(crate) state: Option<RuntimeAuthState>,
+    pub(crate) ecs_trial: super::trial::TrialSession,
     pub(super) ecs: Option<super::ecs_poll::EcsFlow>,
     pub(crate) handled_card_events: HashSet<String>,
     pub(crate) completed_ids: HashSet<String>,
@@ -130,6 +131,8 @@ pub(crate) struct AuthState {
 
 pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
     state.auth.state.is_some()
+        || state.auth.ecs_trial.flow.is_some()
+        || state.auth.ecs_trial.preference_job.is_some()
 }
 
 /// Trigger auth panel from `/auth` slash command.
@@ -187,11 +190,27 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
             .as_millis()
     );
     let id = format!("auth-{request_id}");
+    let trial_auto_use =
+        core_state.trial_auto_use.unwrap_or(true) && state.auth.ecs_trial.auto_use_allowed;
+    let mut sysom =
+        SysomMenu::default().with_disable_retry(state.auth.ecs_trial.disable_save_failed);
+    if let Some(trial) = core_state.ecs_trial.as_ref() {
+        sysom.refresh_trial(trial, trial_auto_use);
+    }
+    let phase = if core_state.ecs_trial.is_some() {
+        if has_manageable_entries(&sysom, core_state.existing_providers.len()) {
+            AuthPhase::ManagingProviders
+        } else {
+            AuthPhase::SelectingProvider
+        }
+    } else {
+        AuthPhase::PreparingMenu
+    };
 
     state.auth.state = Some(RuntimeAuthState {
         id: id.clone(),
         request_id,
-        phase: AuthPhase::PreparingMenu,
+        phase,
         providers,
         selected_provider: 0,
         current_field: 0,
@@ -205,7 +224,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         from_sysom_shortcut: false,
         error_message: None,
         backend: AuthBackend::CoreRegistry,
-        sysom: SysomMenu::default(),
+        sysom,
     });
 
     render_current_auth_panel(state, output)?;
@@ -259,7 +278,8 @@ pub(super) fn finish_sysom_menu_prepare(
             tracing::debug!("auth prepare for the SysOM menu entry failed: {error}");
             SysomMenu::default()
         }
-    };
+    }
+    .with_disable_retry(auth.sysom.retry_trial_disable());
     auth.sysom.sync(&mut auth.existing_providers);
     auth.phase = if has_manageable_entries(&auth.sysom, auth.existing_providers.len()) {
         AuthPhase::ManagingProviders
@@ -364,6 +384,14 @@ fn handle_auth_answer<W: std::io::Write>(
                 }
                 // The SysOM shortcut is the aliyun template with the ECS challenge already
                 // in hand; a template list without `aliyun` falls back to the picker.
+                AuthManagementEntry::EcsTrialShortcut => {
+                    return super::trial::set_preference_from_auth(adapter, state, output, true)
+                        .map(|_| true);
+                }
+                AuthManagementEntry::RetryTrialDisable => {
+                    return super::trial::set_preference_from_auth(adapter, state, output, false)
+                        .map(|_| true);
+                }
                 AuthManagementEntry::SysomShortcut => {
                     if !begin_sysom_shortcut(auth) {
                         begin_new_provider(auth);
@@ -439,17 +467,16 @@ fn handle_auth_answer<W: std::io::Write>(
                             .insert("auth_source".to_string(), v.clone());
                     }
 
-                    if should_apply_aliyun_prepare_for_edit(&existing) {
-                        if apply_aliyun_prepare(auth) {
-                            clear_active_auth_panel(state, output)?;
-                            render_current_auth_panel(state, output)?;
-                            return Ok(true);
-                        }
-                        clear_ecs_auth_source_for_manual_aliyun_edit(
-                            &existing,
-                            &mut auth.collected_values,
-                        );
+                    if should_apply_aliyun_prepare_for_edit(&existing) && apply_aliyun_prepare(auth)
+                    {
+                        clear_active_auth_panel(state, output)?;
+                        render_current_auth_panel(state, output)?;
+                        return Ok(true);
                     }
+                    clear_ecs_auth_source_for_manual_aliyun_edit(
+                        &existing,
+                        &mut auth.collected_values,
+                    );
 
                     auth.phase = AuthPhase::FillingField;
                     auth.current_field = auth.first_editable_field();
@@ -480,8 +507,13 @@ fn handle_auth_answer<W: std::io::Write>(
                 .existing_providers
                 .get(provider_idx)
                 .is_some_and(|provider| provider.is_active);
-            let outcome = submit_delete_confirmation(adapter, auth, provider_idx)
-                .map_err(std::io::Error::other)?;
+            let outcome = submit_delete_confirmation(
+                adapter,
+                auth,
+                provider_idx,
+                state.auth.ecs_trial.auto_use_allowed,
+            )
+            .map_err(std::io::Error::other)?;
             clear_observed_model_after_provider_delete(
                 state,
                 deleted_provider_was_active,
@@ -584,7 +616,12 @@ fn clear_ecs_auth_source_for_manual_aliyun_edit(
     existing: &ExistingProvider,
     values: &mut HashMap<String, String>,
 ) {
-    if should_apply_aliyun_prepare_for_edit(existing) {
+    if existing.provider_type == "aliyun"
+        && matches!(
+            existing.auth_source.as_deref(),
+            Some("ecs_ram_role" | "ecs_identity")
+        )
+    {
         values.remove("auth_source");
     }
 }
@@ -670,6 +707,10 @@ pub(super) fn send_auth_response<W: std::io::Write>(
                     std::io::Error::other("missing adapter for cosh-core auth registry")
                 })?;
                 if let Err(error) = core_auth_configure(adapter, &response) {
+                    if error.provider_updated {
+                        state.auth.completed_ids.insert(auth.id);
+                        return super::completion::finish_partial_configuration(state, output);
+                    }
                     restore_after_configure_failure(
                         &mut auth,
                         error.code.as_deref(),

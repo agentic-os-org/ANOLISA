@@ -289,7 +289,11 @@ fn ensure_private_log_dir(dir: &std::path::Path) -> std::io::Result<()> {
             ));
         }
     }
-    std::fs::create_dir_all(dir)?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

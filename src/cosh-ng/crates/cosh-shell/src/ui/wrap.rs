@@ -270,7 +270,7 @@ fn wrap_long_token(
     }
 }
 
-pub(super) fn strip_ansi_escape(text: &str) -> String {
+pub(crate) fn strip_ansi_escape(text: &str) -> String {
     let mut stripped = String::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {

@@ -27,7 +27,7 @@ fn disabled_telemetry() -> (
     (id, disabled, root, lock)
 }
 
-fn background_compaction_fixture() -> (tempfile::TempDir, SessionRuntime, CoshCore) {
+pub(super) fn background_compaction_fixture() -> (tempfile::TempDir, SessionRuntime, CoshCore) {
     let root = tempfile::tempdir().expect("temporary session store");
     let store = SessionStore::for_test_workspace(
         root.path().join("sessions").to_str().unwrap(),
@@ -224,4 +224,54 @@ fn compaction_fixture_preserves_telemetry_environment() {
         std::env::var_os("COSH_TELEMETRY_DISABLED_PATH").unwrap(),
         disabled.as_os_str()
     );
+}
+
+#[test]
+fn kongche_trial_candidates_do_not_recommend_an_unusable_standalone_compactor() {
+    let _environment = disabled_telemetry();
+    let (_root, runtime, mut engine) = background_compaction_fixture();
+    engine.config.session.compaction.auto = true;
+    engine.config.session.compaction.model_context_window = Some(2_000_000);
+    engine.config.session.compaction.auto_compact_token_limit = Some(1500);
+    engine.config.session.compaction.preserve_recent_runs = 1;
+    engine.config.ai.active_provider = Some("mine".into());
+    engine.config.ai.providers.insert(
+        "mine".into(),
+        crate::config::ProviderConfig {
+            provider_type: Some("mock".into()),
+            ..Default::default()
+        },
+    );
+    engine.messages = (0..4)
+        .flat_map(|_| {
+            [
+                Message::user(&"x".repeat(10_000)),
+                Message::assistant("answer"),
+            ]
+        })
+        .collect();
+    let mut output = Vec::new();
+    runtime.recommend_auto_compaction(&mut engine, &mut output);
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("compaction_recommended_v1:"));
+    for explicit in [false, true] {
+        engine.config.ai.providers.clear();
+        engine.config.ai.active_provider = None;
+        if explicit {
+            engine.config.ai.active_provider = Some("trial".into());
+            engine.config.ai.providers.insert(
+                "trial".into(),
+                crate::config::ProviderConfig {
+                    provider_type: Some("aliyun".into()),
+                    auth_source: Some("ecs_identity".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(engine.trial_access.is_none());
+        let mut output = Vec::new();
+        runtime.recommend_auto_compaction(&mut engine, &mut output);
+        assert!(output.is_empty(), "{}", String::from_utf8_lossy(&output));
+    }
 }

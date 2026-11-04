@@ -265,7 +265,7 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                     );
                 }
             }
-            AgentEvent::ToolHookVerdict { .. } => {
+            AgentEvent::EcsTrialState { .. } | AgentEvent::ToolHookVerdict { .. } => {
                 // Audit-only marker: the status line is already driven by the
                 // tool result events around it.
             }

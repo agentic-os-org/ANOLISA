@@ -21,7 +21,8 @@ use super::super::{
 pub(super) struct RunCommand {
     pub(super) run_id: String,
     pub(super) prepared: PreparedInvocation,
-    pub(super) raw_user_input: Option<String>,
+    pub(super) raw_user_input: Option<Box<str>>,
+    pub(super) ecs_trial_context: Option<Box<crate::types::EcsTrialContext>>,
     pub(super) mode: CoshApprovalMode,
     pub(super) session_state: Arc<Mutex<SessionRuntimeState>>,
     pub(super) session_scope: String,

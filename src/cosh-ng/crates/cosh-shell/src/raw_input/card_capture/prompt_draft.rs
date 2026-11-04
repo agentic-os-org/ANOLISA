@@ -137,8 +137,10 @@ impl CardInputState {
     /// A bare ESC is being held for the draft card, waiting for a possible
     /// split CR/LF continuation (#1721). The relay cancels on timeout.
     pub(in super::super) fn draft_escape_pending(&self) -> bool {
-        self.pending_input == [0x1b]
-            && matches!(self.active_kind, Some(CardInputKind::PromptDraft { .. }))
+        (self.trial.pending == [0x1b]
+            && matches!(self.active_kind, Some(CardInputKind::TrialWaiting { .. })))
+            || (self.pending_input == [0x1b]
+                && matches!(self.active_kind, Some(CardInputKind::PromptDraft { .. })))
     }
 
     /// Pasted CR/LF extends the draft; only a real Enter keystroke submits

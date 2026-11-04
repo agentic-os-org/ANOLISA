@@ -1,6 +1,60 @@
 use crate::i18n::{I18n, MessageId};
 
-pub(super) fn display_agent_error(error: &str, i18n: &I18n) -> String {
+pub(crate) fn display_agent_error(error: &str, i18n: &I18n) -> String {
+    let code = error.strip_prefix("provider_access:").unwrap_or(error);
+    let zh = i18n.language() == crate::Language::ZhCn;
+    let trial_message = match code {
+        "ModelNotConfigured" => Some(if zh {
+            "尚未配置模型，可用 /auth 配置。"
+        } else {
+            "No model configured. Use /auth to configure a model."
+        }),
+        "Sysom.CreditsExhausted" => Some(if zh {
+            "当前可用额度不足。问题已保留，请前往控制台查看；也可用 /auth 切换模型服务。\nhttps://console.aliyun.com/alinux"
+        } else {
+            "Available quota is insufficient. Your question is retained. Check OS Console or use /auth to switch model services.\nhttps://console.aliyun.com/alinux"
+        }),
+        "trial_cancelled" => Some(if zh {
+            "已取消，问题已保留。"
+        } else {
+            "Cancelled. Your question is retained."
+        }),
+        "EcsIdentityUnavailable"
+        | "metadata_access_denied"
+        | "invalid_metadata_response"
+        | "metadata_unreachable"
+        | "metadata_timeout"
+        | "metadata_http_error" => Some(if zh {
+            "无法识别或访问 ECS 实例身份。问题已保留，可用 /auth 配置模型。"
+        } else {
+            "Unable to access the ECS identity. Your question is retained; use /auth to configure a model."
+        }),
+        "EcsTrialDisabled" => Some(if zh {
+            "自动接入已关闭。问题已保留，可用 /auth 配置模型或重新启用。"
+        } else {
+            "Automatic OS Console access is disabled. Your question is retained; use /auth to configure a model or enable automatic access."
+        }),
+        "trial_wait_timeout" => Some(if zh {
+            "等待开通已超时。问题已保留，可用 /auth 配置模型。"
+        } else {
+            "Activation wait timed out. Your question is retained; use /auth to configure a model."
+        }),
+        "Sysom.ProviderFailure" => Some(if zh {
+            "模型服务暂时不可用。问题已保留，可重新提问或用 /auth 配置模型。"
+        } else {
+            "Model service unavailable. Your question is retained; ask again or use /auth to configure a model."
+        }),
+        code if code.starts_with("trial_preferences_") => Some(if zh {
+            "无法读取免配置接入设置，本次未自动接入。可用 /auth 重试或配置模型。"
+        } else {
+            "Unable to read automatic access preferences. Use /auth to retry or configure a model."
+        }),
+        _ => None,
+    };
+    if let Some(message) = trial_message {
+        return message.to_string();
+    }
+
     if error == "cosh-core-question-protocol:answer-write-failed" {
         format!(
             "{}\n{}",

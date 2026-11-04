@@ -10,6 +10,7 @@ pub enum RawObserverAction {
     DelayShellOutput,
     CaptureInput(RawInputCapture),
     InvalidateApprovalCapture(String),
+    InvalidateTrialCapture(String),
     EmitToPty(ShellHandoffRequest),
     EmitToPtyWithPromptRestore(ShellHandoffRequest),
     InterruptForeground,
@@ -143,6 +144,7 @@ impl PostCaptureOwner {
             } => Self::PromptGhost,
             RawObserverAction::CaptureInput(_)
             | RawObserverAction::InvalidateApprovalCapture(_)
+            | RawObserverAction::InvalidateTrialCapture(_)
             | RawObserverAction::Continue
             | RawObserverAction::EmitToPty(_)
             | RawObserverAction::EmitToPtyWithPromptRestore(_)
@@ -193,6 +195,11 @@ impl RawInputMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawInputCapture {
+    TrialWaiting {
+        id: String,
+        settings: Option<usize>,
+        allow_settings: bool,
+    },
     Question {
         id: String,
         option_count: usize,

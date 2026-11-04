@@ -1,3 +1,6 @@
+#[path = "registry_protocol/trial_preferences.rs"]
+mod trial_preferences;
+
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;

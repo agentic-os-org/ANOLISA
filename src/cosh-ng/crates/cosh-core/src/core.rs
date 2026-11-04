@@ -45,7 +45,10 @@ use self::tool_execution::{
 
 mod auth;
 mod extensions;
+pub(crate) mod provider_access;
 mod tool_execution;
+#[cfg(test)]
+mod trial_integration_tests;
 
 fn is_sensitive_write(tool_name: &str, params: &serde_json::Value) -> bool {
     tool_name == "write_file"
@@ -97,6 +100,8 @@ pub struct CoshCore {
     /// both flags opts trust-mode shell commands into the core-issued
     /// approval channel instead (#2067).
     pub client_capabilities: ClientControlCapabilities,
+    pub(crate) trial_access: Option<Arc<provider_access::TrialAccess>>,
+    pub(crate) trial_identity_provider: Option<(String, Arc<dyn ContentGenerator>)>,
     // One-shot mode shortens only this fallback; explicit overrides and
     // receipt-based handoff keep their existing semantics.
     approval_response_timeout_default: Duration,
@@ -117,6 +122,10 @@ impl CoshCore {
 
     pub(crate) fn set_session_resumed(&mut self, resumed: bool) {
         self.session_resumed = resumed;
+    }
+
+    pub(crate) fn is_session_resumed(&self) -> bool {
+        self.session_resumed
     }
 
     pub(crate) fn use_one_shot_approval_timeout(&mut self) {
@@ -588,16 +597,42 @@ impl CoshCore {
             // The loop top is always a complete model/tool exchange boundary
             // with no pending approval or user question, so an emergency
             // compaction here can never split an unfinished interaction.
-            crate::compaction::run_context_preflight(
-                &mut self.compaction,
-                &self.messages,
-                self.provider.as_ref(),
-                &self.model,
-                &self.config,
-                prefix_tokens,
-                writer,
-            )
-            .await?;
+            let trial_access = self.trial_access.clone();
+            if trial_access.is_some() {
+                let mut preflight_output = Vec::new();
+                let preflight = crate::compaction::run_context_preflight(
+                    &mut self.compaction,
+                    &self.messages,
+                    self.provider.as_ref(),
+                    &self.model,
+                    &self.config,
+                    prefix_tokens,
+                    &mut preflight_output,
+                );
+                let result =
+                    provider_access::drive(trial_access.as_ref(), preflight, reader, writer).await;
+                if let Some(failure) = trial_access.as_ref().and_then(|access| access.failure()) {
+                    return Err(format!("provider_access:{}", failure.code));
+                }
+                writer
+                    .write_all(&preflight_output)
+                    .map_err(|_| "control transport write failed".to_string())?;
+                writer
+                    .flush()
+                    .map_err(|_| "control transport flush failed".to_string())?;
+                result?;
+            } else {
+                crate::compaction::run_context_preflight(
+                    &mut self.compaction,
+                    &self.messages,
+                    self.provider.as_ref(),
+                    &self.model,
+                    &self.config,
+                    prefix_tokens,
+                    writer,
+                )
+                .await?;
+            }
 
             let turn_id = uuid::Uuid::new_v4().to_string();
             let turn_scope = CoreAuditScope::turn(&run_id, &turn_id);
@@ -636,7 +671,11 @@ impl CoshCore {
             msgs_with_system.extend(provider_messages);
 
             let provider_request_id = uuid::Uuid::new_v4().to_string();
-            let resolved_provider = self.config.resolve_provider();
+            let mut resolved_provider = self.config.resolve_provider();
+            if trial_access.is_some() {
+                resolved_provider.provider_type = "aliyun".to_string();
+                resolved_provider.auth_source = Some("ecs_identity".to_string());
+            }
             let provider_data = AuditProviderData {
                 provider: resolved_provider.provider_type.clone(),
                 model: Some(self.model.clone()),
@@ -654,10 +693,14 @@ impl CoshCore {
             self.metrics.api_requests += 1;
             let api_start = Instant::now();
 
-            let stream_result = self
-                .provider
-                .generate(&msgs_with_system, turn_tool_decls, &generate_config)
-                .await;
+            let stream_result = provider_access::drive(
+                trial_access.as_ref(),
+                self.provider
+                    .generate(&msgs_with_system, turn_tool_decls, &generate_config),
+                reader,
+                writer,
+            )
+            .await;
 
             let mut stream = match stream_result {
                 Ok(s) => s,
@@ -718,9 +761,23 @@ impl CoshCore {
             let in_band_questions_enabled =
                 self.tools.supports_ask_user_question() && !self.execution_profile.is_brokered();
 
-            self.emit(writer, &OutputMessage::stream_message_start());
+            let mut stream_started = false;
 
-            while let Some(event) = stream.next().await {
+            while let Some(event) =
+                provider_access::drive(trial_access.as_ref(), stream.next(), reader, writer).await
+            {
+                if !stream_started
+                    && !matches!(
+                        &event,
+                        GenerateEvent::ProviderFailure(_)
+                            | GenerateEvent::RequestAccepted
+                            | GenerateEvent::Error(_)
+                            | GenerateEvent::Cancelled
+                    )
+                {
+                    self.emit(writer, &OutputMessage::stream_message_start());
+                    stream_started = true;
+                }
                 // Tool indices size `tool_calls` below, so an out-of-range index
                 // would let one malformed frame allocate billions of slots. Fail
                 // the stream instead of trusting or silently dropping it.
@@ -732,6 +789,7 @@ impl CoshCore {
                     _ => event,
                 };
                 match event {
+                    GenerateEvent::RequestAccepted => {}
                     GenerateEvent::ThinkingDelta(delta) => {
                         if !thinking_block_started {
                             self.emit(writer, &OutputMessage::stream_thinking_start(block_index));
@@ -854,6 +912,24 @@ impl CoshCore {
                         );
                         return Err("provider request cancelled".to_string());
                     }
+                    GenerateEvent::ProviderFailure(failure) => {
+                        self.metrics.api_errors += 1;
+                        self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                        self.audit.record_provider_terminal(
+                            provider_scope,
+                            &resolved_provider.provider_type,
+                            &provider_data,
+                            AuditOutcomeStatus::Failed,
+                            &failure.code,
+                            api_start.elapsed().as_millis() as u64,
+                        );
+                        self.audit.record_turn_terminal(
+                            turn_scope,
+                            AuditOutcomeStatus::Failed,
+                            Some(&failure.code),
+                        );
+                        return Err(format!("provider_access:{}", failure.code));
+                    }
                     GenerateEvent::Error(e) => {
                         self.metrics.api_errors += 1;
                         self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
@@ -909,6 +985,16 @@ impl CoshCore {
             );
 
             // ─── Hook: AfterModel ───
+            provider_access::drive(
+                trial_access.as_ref(),
+                std::future::ready(()),
+                reader,
+                writer,
+            )
+            .await;
+            if trial_access.as_ref().is_some_and(|access| access.stopped()) {
+                return Err("provider_access:trial_cancelled".to_string());
+            }
             let after_model_result = self
                 .hook_system
                 .fire_after_model(
@@ -1085,6 +1171,21 @@ impl CoshCore {
             let mut fatal_turn: Option<FatalTurn> = None;
 
             for tc in &tool_calls {
+                provider_access::drive(
+                    trial_access.as_ref(),
+                    std::future::ready(()),
+                    reader,
+                    writer,
+                )
+                .await;
+                if trial_access.as_ref().is_some_and(|access| access.stopped())
+                    && fatal_turn.is_none()
+                {
+                    fatal_turn = Some(FatalTurn::new(
+                        "provider_access:trial_cancelled".to_string(),
+                        "trial_cancelled",
+                    ));
+                }
                 if tc.name.is_empty() {
                     continue;
                 }
@@ -1780,7 +1881,11 @@ impl CoshCore {
             if let Some(fatal) = fatal_turn {
                 self.audit.record_turn_terminal(
                     turn_scope,
-                    AuditOutcomeStatus::Failed,
+                    if fatal.reason_code == "trial_cancelled" {
+                        AuditOutcomeStatus::Cancelled
+                    } else {
+                        AuditOutcomeStatus::Failed
+                    },
                     Some(fatal.reason_code),
                 );
                 return Err(fatal.error);

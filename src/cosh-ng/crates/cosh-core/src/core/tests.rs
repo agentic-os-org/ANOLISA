@@ -4343,6 +4343,7 @@ fn trust_shell_core(calls: Arc<AtomicUsize>, provider: MockProvider) -> CoshCore
 
 fn fully_capable_client() -> ClientControlCapabilities {
     ClientControlCapabilities {
+        can_handle_ecs_trial_v1: false,
         can_handle_can_use_tool: true,
         can_handle_host_executed_shell: true,
     }
@@ -4375,6 +4376,7 @@ fn trust_classify_keeps_shell_local_without_full_capabilities() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut core = trust_shell_core(calls, MockProvider::new(vec![]));
     core.client_capabilities = ClientControlCapabilities {
+        can_handle_ecs_trial_v1: false,
         can_handle_can_use_tool: true,
         can_handle_host_executed_shell: false,
     };

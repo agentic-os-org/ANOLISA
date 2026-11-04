@@ -331,11 +331,24 @@ impl CoshCoreAdapter {
         }
     }
 
+    pub(crate) fn trial_runtime_idle(&self) -> bool {
+        self.runtime.trial_idle()
+    }
+
     /// Starts a cancellable cosh-core turn and updates recovery state.
     pub fn start_cancellable(
         &self,
         request: AgentRequest,
         mode: CoshApprovalMode,
+    ) -> AgentRunHandle {
+        self.start_cancellable_with_trial(request, mode, None)
+    }
+
+    pub(crate) fn start_cancellable_with_trial(
+        &self,
+        request: AgentRequest,
+        mode: CoshApprovalMode,
+        trial: Option<crate::types::EcsTrialContext>,
     ) -> AgentRunHandle {
         let session_scope = session_scope_from_request(&request);
         let mut prepared = self.prepare_invocation(&request, mode);
@@ -346,10 +359,11 @@ impl CoshCoreAdapter {
 
         let resume_attempt = self.begin_resume_attempt(&mut prepared, &session_scope);
         let raw_user_input = request.user_input.clone();
-        self.runtime.start_run(
+        self.runtime.start_run_with_trial(
             request.id,
             prepared,
             raw_user_input,
+            trial,
             mode,
             Arc::clone(&self.session),
             session_scope,

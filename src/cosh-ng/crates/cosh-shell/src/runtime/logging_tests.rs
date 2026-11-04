@@ -797,3 +797,20 @@ fn foreign_uid_current_log_refuses_append() {
     assert!(linked_gate.lock().unwrap().suppressed);
     assert_eq!(foreign_uid_snapshot(&foreign), before);
 }
+
+#[test]
+fn newly_created_log_parents_are_private() {
+    let home = tempfile::tempdir().unwrap();
+    let parent = home.path().join(".copilot-shell");
+    let logs = parent.join("logs");
+    ensure_private_log_dir(&logs).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(logs).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}

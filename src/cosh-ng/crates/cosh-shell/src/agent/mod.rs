@@ -5,7 +5,7 @@ pub(crate) mod composer;
 #[cfg(test)]
 mod composer_tests;
 pub(crate) mod continuation;
-mod display;
+pub(crate) mod display;
 pub(crate) mod events;
 pub(crate) mod failed_command;
 pub(crate) mod finish;
@@ -18,6 +18,8 @@ pub(crate) mod queue;
 pub(super) mod run;
 pub(crate) mod skill_context;
 mod structured_events;
+#[cfg(test)]
+mod trial_display_tests;
 pub(crate) mod turn_extension;
 
 pub(crate) use governance::{govern_agent_events, govern_agent_events_with_language};

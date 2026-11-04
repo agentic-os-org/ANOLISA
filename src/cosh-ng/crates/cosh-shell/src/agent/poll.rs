@@ -131,7 +131,7 @@ fn poll_active_agent_run_with_policy<W: Write>(
             break;
         }
 
-        let event = match active_run.handle.poll_event_timeout(poll_timeout) {
+        let mut event = match active_run.handle.poll_event_timeout(poll_timeout) {
             Ok(AgentRunPoll::Event(event)) => event,
             Ok(AgentRunPoll::Timeout) => {
                 if let Some((fallback, origin)) = stalled_provider_shell_fallback {
@@ -156,6 +156,9 @@ fn poll_active_agent_run_with_policy<W: Write>(
                 break;
             }
             Ok(AgentRunPoll::Finished) => {
+                if state.auth.ecs_trial.owns_run(&active_run.request.id) {
+                    crate::auth::trial::before_terminal_output(&mut state.auth.ecs_trial, output)?;
+                }
                 should_finish = true;
                 break;
             }
@@ -167,6 +170,61 @@ fn poll_active_agent_run_with_policy<W: Write>(
             },
         };
 
+        if let AgentEvent::EcsTrialState { run_id, progress } = &event {
+            active_run.prepare_structured_surface(output)?;
+            let owner = active_run.request.id.clone();
+            if run_id == &owner {
+                crate::auth::trial::observe(state, &owner, progress.clone(), output)?;
+            }
+            return Ok(());
+        }
+        if state.auth.ecs_trial.owns_run(&active_run.request.id) {
+            if matches!(&event, AgentEvent::AgentFailed { error, .. } if state.auth.ecs_trial.handles_cancelled_result(error))
+            {
+                crate::auth::trial::before_terminal_output(&mut state.auth.ecs_trial, output)?;
+                active_run.status_animation.clear(output)?;
+                crate::agent::events::record_trial_cancellation(active_run, event);
+                active_run.completed = true;
+                should_finish = finish_completed;
+                break;
+            }
+            if matches!(
+                event,
+                AgentEvent::AgentCompleted { .. }
+                    | AgentEvent::AgentFailed { .. }
+                    | AgentEvent::AgentCancelled { .. }
+            ) {
+                crate::auth::trial::before_terminal_output(&mut state.auth.ecs_trial, output)?;
+                if let Some(code) = crate::auth::trial::observe_terminal(&mut state.auth.ecs_trial)
+                {
+                    event = AgentEvent::AgentFailed {
+                        run_id: active_run.request.id.clone(),
+                        error: format!("provider_access:{code}"),
+                        error_code: Some(code),
+                        max_turns: None,
+                    };
+                }
+            } else {
+                if let AgentEvent::ToolPermissionRequest {
+                    request_id,
+                    tool_use_id,
+                    tool_input,
+                    ..
+                } = &event
+                {
+                    let _ = active_run.handle.respond_approval(ApprovalResponse {
+                        request_id: request_id.clone(),
+                        tool_use_id: Some(tool_use_id.clone()),
+                        tool_input: Some(tool_input.clone()),
+                        decision: ApprovalDecision::Deny {
+                            message: "Model request is paused or waiting for OS Console activation"
+                                .into(),
+                        },
+                    });
+                }
+                continue;
+            }
+        }
         if let AgentEvent::ShellEvidenceRequest {
             run_id,
             request_id,

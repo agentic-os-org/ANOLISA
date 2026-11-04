@@ -334,6 +334,7 @@ fn take_reply(flow: &mut EcsFlow) -> Option<Reply> {
                 Err(AuthConfigureFailure {
                     message: "Configuration worker failed; save result is unknown".into(),
                     code: None,
+                    provider_updated: false,
                 })
             }))
         }
@@ -554,6 +555,9 @@ pub(crate) fn poll<W: Write>(
                     runtime::clear_observed_model_after_provider_change(state);
                     clear_active_auth_panel(state, output)?;
                     return finish_auth_configuration(state, output, &label);
+                }
+                Err(error) if error.provider_updated => {
+                    return super::completion::finish_partial_configuration(state, output);
                 }
                 Err(error) if error.code.as_deref() == Some("credential_source_unavailable") => {
                     flow.stage = Stage::Checking;
