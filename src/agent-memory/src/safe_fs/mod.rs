@@ -20,6 +20,7 @@
 mod atomic;
 
 pub use atomic::write_atomic;
+pub(crate) use atomic::{ATOMIC_WRITE_TMP_PREFIX, ATOMIC_WRITE_TMP_SUFFIX};
 
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};

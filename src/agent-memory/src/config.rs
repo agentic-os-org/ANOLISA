@@ -62,8 +62,10 @@ pub struct MemoryConfig {
     pub consolidation: ConsolidationConfig,
     /// Snapshot artefact reclaim: at mount open, remove orphaned snapshot
     /// artefacts (stale `*.partial`, sidecar-less `*.tar.gz`, orphan
-    /// `*.json`) older than `min_artifact_age_secs`. The age guard keeps
-    /// an in-flight snapshot from another process out of the sweep.
+    /// `*.json`, crashed-restore `.<id>.staging` dirs, and atomic-write
+    /// staging tempfiles under the meta directory root) older than
+    /// `min_artifact_age_secs`. The age guard keeps an in-flight snapshot
+    /// or write from another process out of the sweep.
     #[serde(default)]
     pub snapshot_reclaim: SnapshotReclaimConfig,
     /// Agent memory scope: "shared" (default, all agents see all memories),

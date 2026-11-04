@@ -1090,12 +1090,13 @@ fn reclaim_sweep_at_mount_open_does_not_block_or_delete_live_data() {
     cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
     cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
     // Seed the snapshots dir before the first open: an old orphan partial,
-    // an old orphan sidecar, and a complete pair. Default config has reclaim
-    // enabled, so opening the service must sweep the orphans while leaving
-    // the complete pair — and all user files — untouched.
-    let dir = tmp
-        .path()
-        .join("user-reclaim-open-tester/.anolisa/snapshots");
+    // an old orphan sidecar, a complete pair, and a stale atomic-write
+    // staging leftover one level up in the meta root (rule 6 through the
+    // real production call site). Default config has reclaim enabled, so
+    // opening the service must sweep the orphans while leaving the
+    // complete pair — and all user files — untouched.
+    let meta = tmp.path().join("user-reclaim-open-tester/.anolisa");
+    let dir = meta.join("snapshots");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("snap_ORPH.tar.gz.partial"), b"junk").unwrap();
     age_file(&dir.join("snap_ORPH.tar.gz.partial"), 2 * 24 * 3600);
@@ -1117,6 +1118,9 @@ fn reclaim_sweep_at_mount_open_does_not_block_or_delete_live_data() {
     .unwrap();
     age_file(&dir.join("snap_BAD.tar.gz"), 2 * 24 * 3600);
     age_file(&dir.join("snap_BAD.json"), 2 * 24 * 3600);
+    let stale_tmp = meta.join(".memory-write-OLD.tmp");
+    std::fs::write(&stale_tmp, b"junk").unwrap();
+    age_file(&stale_tmp, 2 * 24 * 3600);
 
     let svc = MemoryService::new(cfg).unwrap();
     svc.write("note.md", "survives", false).unwrap();
@@ -1130,6 +1134,10 @@ fn reclaim_sweep_at_mount_open_does_not_block_or_delete_live_data() {
     let list = svc.mem_snapshot_list().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, "snap_KEEP");
+    assert!(
+        !stale_tmp.exists(),
+        "rule 6 must run at the mount-open sweep"
+    );
 }
 
 #[test]
@@ -1341,6 +1349,105 @@ fn reclaim_removes_readonly_staging_dirs() {
         assert_eq!(report.removal_failures, 0, "staging mode {mode:o}");
         assert!(!stale.exists());
     }
+}
+
+// ---- atomic-write staging tempfiles under the meta directory (#9476) ----
+
+#[test]
+fn reclaim_removes_stale_meta_dir_write_tmp_and_keeps_young() {
+    let (_tmp, svc) = setup();
+    // `write_atomic` stages directly in the meta directory root, one level
+    // above `snapshots/` — plant a crash leftover there, old, and a young
+    // one (a write in flight in another process). The meta root also holds
+    // the audit log, manifest and FTS DB, so an unrelated *foreign* `.tmp`
+    // name must never be touched either (the prefix check pins the shape).
+    let stale = svc.mount.meta_dir.join(".memory-write-OLD.tmp");
+    let young = svc.mount.meta_dir.join(".memory-write-NEW.tmp");
+    let unrelated = svc.mount.meta_dir.join(".other-tool-state");
+    let foreign = svc.mount.meta_dir.join("foreign.tmp");
+    std::fs::write(&stale, b"content").unwrap();
+    std::fs::write(&young, b"content").unwrap();
+    std::fs::write(&unrelated, b"keep").unwrap();
+    std::fs::write(&foreign, b"keep").unwrap();
+    age_file(&stale, 2 * 24 * 3600);
+    age_file(&foreign, 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.partials_removed, 1);
+    assert_eq!(report.kept_young, 1);
+    assert_eq!(report.removal_failures, 0);
+    assert!(!stale.exists());
+    assert!(young.exists());
+    assert!(unrelated.exists());
+    assert!(foreign.exists());
+}
+
+#[test]
+fn reclaim_meta_dir_write_tmp_is_anchored_against_planted_symlink() {
+    let (_tmp, svc) = setup();
+    // A symlink is never a `write_atomic` staging file (tempfile only
+    // creates regular files), and the listing's regular-file filter drops
+    // a `DT_LNK` entry before any anchored probe runs: the sweep must
+    // leave the link — and its target — completely untouched, removing
+    // nothing and charging no failure. The anchoring itself (the age
+    // probe and metadata re-check through the root fd) is pinned by
+    // `reclaim_meta_dir_symlink_is_not_followed_out_of_the_mount` below.
+    let planted = svc.mount.meta_dir.join(".memory-write-EVIL.tmp");
+    let victim_dir = svc.mount.meta_dir.join("snapshots");
+    std::fs::create_dir_all(&victim_dir).unwrap();
+    std::os::unix::fs::symlink(&victim_dir, &planted).unwrap();
+    age_file(&planted, 2 * 24 * 3600);
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert_eq!(report.partials_removed, 0);
+    assert_eq!(report.removal_failures, 0);
+    assert!(
+        std::fs::symlink_metadata(&planted).is_ok(),
+        "the planted link itself must survive the refused sweep"
+    );
+    assert!(victim_dir.exists(), "the link target must be untouched");
+    assert!(
+        std::fs::read_dir(&victim_dir).unwrap().count() == 0,
+        "nothing may be deleted through the planted link"
+    );
+}
+
+#[test]
+fn reclaim_meta_dir_symlink_is_not_followed_out_of_the_mount() {
+    let (tmp, svc) = setup();
+    // The discriminating shape for the anchored probes: the listing still
+    // sees staging-named *regular files* — through a symlinked meta
+    // directory — so the d_type filter cannot refuse them, and only the
+    // root-fd resolution (RESOLVE_BENEATH | NO_SYMLINKS) stops the unlink.
+    // A meta directory swapped for a symlink to an out-of-mount victim
+    // holding an aged staging-named file must leave the victim untouched.
+    let victim = tmp.path().join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    let victim_file = victim.join(".memory-write-EVIL.tmp");
+    std::fs::write(&victim_file, b"secret").unwrap();
+    age_file(&victim_file, 2 * 24 * 3600);
+
+    // Swap the meta directory itself for a symlink to the victim.
+    let meta = svc.mount.meta_dir.clone();
+    std::fs::remove_dir_all(&meta).unwrap();
+    std::os::unix::fs::symlink(&victim, &meta).unwrap();
+
+    let report = agent_memory::snapshot::reclaim::reclaim_artifacts(
+        &svc.mount,
+        Duration::from_secs(24 * 3600),
+    );
+    assert!(
+        victim_file.exists(),
+        "sweep must not unlink through a symlinked meta dir"
+    );
+    assert_eq!(report.partials_removed, 0);
+    assert_eq!(report.removal_failures, 0);
 }
 
 /// A real (gzip + tar, one regular entry) archive for repair tests: the
