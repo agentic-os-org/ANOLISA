@@ -330,7 +330,7 @@ PEP 实施结果。普通工具或内容请求通常不需要逐次生成持久�
 
 | 组件 | 输入与输出 | 当前实现对应 |
 |---|---|---|
-| Policy Translator（策略翻译器） | 输入内存策略表示、Cedar schema 引用（如适用）、绑定信息及目标能力；输出目标规则与执行配置；不承担部署 I/O | `TargetBindingAdapter::translate`；各 PEP Adapter 声明支持的原有 AST 与 Cedar PST 子集 |
+| Policy Translator（策略翻译器） | 读取 Binding 源码和 schema 引用，加载策略表示并翻译目标支持的子集；不承担部署 I/O | `TargetBindingAdapter::translate`；各 PEP Adapter 声明支持的原有 AST 与 Cedar PST 子集 |
 | Deployment Client（部署客户端） | 输入目标计划，封装协议，执行安装、更新和撤销，返回回执 | `TargetDeploymentClient` 的 `prepare_apply`、`create`、`update`、`delete` |
 | Reconciler（部署协调） | 调用 Translator 取得计划，再调用 Client；跟踪状态、重试与恢复 | `asc-pcp` 中的 Reconciler |
 
@@ -342,7 +342,7 @@ Client 的接收方是目标后端的**管理接口**：独立 PDP 可提供策�
 安装位置与回执含义，不能把“翻译给 PDP 还是 PEP”当成所有后端共用的固定答案。
 SecCore 以该接口的成功回执记录部署成功，具体生效保证由后端契约承担。
 
-本节用 Translator 表示翻译组件。第 1–7 节中的 Adapter 沿用源码名称。
+Translator 表示纯翻译组件；Adapter 包括 Translator 和 Deployment Client，翻译端口仍名为 `TargetBindingAdapter`。
 职责对应参见[目标接口](../../v2/crates/asc-policy-target-contracts/src/lib.rs)和
 [Reconciler](../../v2/crates/asc-pcp/src/reconciler.rs)。目标接口携带源码快照；PEP Translator 在翻译时调用 `pst`。
 
@@ -428,7 +428,7 @@ Translator，应用 schema 版本仍以源码中的引用为准。两次调用�
 SDK 升级由依赖管理和回归测试验证；需要跨进程传递 AST 时再定义相应协议。
 源码契约包含 `PolicySource` 的 `language/content` 输入及精确 schema 引用。
 
-拟接入的 Cedar Translator 消费公开语法树 PST，通过类型化 Rust 节点读取策略表达式。
+现有 Cedar Translator 消费公开语法树 PST，通过类型化 Rust 节点读取策略表达式。
 源码封装携带共享 schema 定义的引用，由前端单独解析该引用。
 
 当前 SQLite 的存储位置和约束见
@@ -487,7 +487,7 @@ Dogwood 事件派生，`events.dwschema` 属于该时序扩展。SecCore 需要�
 输入、schema 解析、语法或公共子集检查失败时结束调用；SDK schema 校验错误及被拒绝的
 `InvalidActionApplication` warnings 通过 `CedarError::Validation` 汇总返回；
 非阻断的 SDK warnings 在 `validate` 成功时返回。错误枚举区分失败类别，SDK 诊断保留
-可获得的策略 ID 和源码位置。失败时不返回部分 PST。目标后端的能力由 Translator 检查。
+可获得的策略 ID 和源码位置。失败时不返回部分 PST。Translator 检查语义支持范围，Client 检查运行时能力。
 
 principal 条件检查借用 SDK 已解析的 AST。该私有函数使用 SDK 隐藏的
 `AsRef<ast::Policy>` 接口和 `subexpressions()` 遍历器。`cedar-policy-core` 与

@@ -93,10 +93,10 @@ PolicyTemplate 是可被多个 Scope 按 ID/revision 选用的可复用策略。
 block/allow/require_confirmation 决策均可保存；Network 和 AgentHook 的目标格式尚未定义，
 目前不能保存。
 
-AgentSight Adapter 当前只执行不带历史条件的 block + file/write + operation=delete 规则。
+对于原生 JSON，PEP Translator 只支持不带历史条件的 block + file/write + operation=delete 规则。
 任意规则不支持，整个 Binding 失败，例如返回有界错误码 `RULE_1_UNSUPPORTED_EFFECT`，
 不发送受支持的规则子集。目标 DSL 不支持转义语法，because 包含引号、反斜杠或控制字符时
-转换失败，普通 Unicode 文本保持原样；省略理由时使用 Adapter 默认值。
+转换失败，普通 Unicode 文本保持原样；省略理由时使用 Translator 默认值。
 策略创建成功不代表目标 PEP（策略执行点）支持这些规则。
 
 生成的 DSL 表达禁止删除；真实内核是否仅阻止删除仍需单独验证，当前 ActPlane 的
@@ -130,7 +130,7 @@ Policy ID 保留 revision 计数器；update 可按下一 revision 重建内容�
   "language": "cedar",
   "content": {
     "schema": {"schemaId": "seccore.system", "revision": 1},
-    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/workspace/important\" };"
+    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { context.input.operation == SecCore::WriteOperation::\"delete\" && resource.path == \"/workspace/important\" };"
   }
 }
 ```
@@ -145,9 +145,9 @@ Get/list 返回保存的原文及精确 schema 引用。语法、schema 或公�
 `invalid_argument`，不修改已保存的策略内容及 revision。未知 schema revision 直接拒绝，
 不回退到其他版本。原生模板继续使用原有形状。
 
-策略创建成功不代表目标 PEP 支持该策略。当前 AgentSight Translator 尚未接入 Cedar：
-以 AgentSight 为目标的 Cedar Binding 返回
-`UNSUPPORTED_POLICY_LANGUAGE`。Policy 更新或删除后，已有 Scope/Binding 快照仍保留原
+策略创建成功不代表目标 PEP 支持该策略。当前 PEP Translator 支持限制删除和普通写入的
+Cedar `forbid` 子集；不支持的语义使整个翻译失败。
+Policy 更新或删除后，已有 Scope/Binding 快照仍保留原
 Policy revision 和 schema。源码可重新加载为内存 PST，SQLite 不保存 AST/PST。
 旧二进制不能读取新增 Cedar 记录，需要回滚时应保留升级前的数据库备份。
 深层嵌套源码导致 SDK 栈溢出的已知限制仍未解决，应使用管理员审阅的策略，避免不可信生成输入。

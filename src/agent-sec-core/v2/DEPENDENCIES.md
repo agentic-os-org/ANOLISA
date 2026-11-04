@@ -3,14 +3,14 @@
 `Cargo.lock` pins the resolved dependency graph; it does not establish that the
 sources are available offline or that the dependencies have been security-audited.
 The workspace currently has registry and local path dependencies, with no ActPlane
-Git dependency. The Adapter emits the supported DSL subset; compiler acceptance
-belongs to the actual AgentSight/ActPlane deployment.
+Git dependency. The Translator emits native-policy DSL or structured Cedar
+file-protection JSON; target-side validation belongs to the deployed PEP.
 
 ## HTTP/TLS and unsafe inventory
 
 | Dependency path | Purpose and review boundary |
 |---|---|
-| `asc-pap -> asc-policy-cedar -> cedar-policy / cedar-policy-core` | Cedar create/update admission and call-local PST loading. The frontend checks the exact embedded schema; policy-types and protocol crates remain independent of the SDK. No schema registry or deployment I/O. |
+| `asc-pap -> asc-policy-cedar -> cedar-policy / cedar-policy-core` | Cedar create/update admission. The frontend checks the exact embedded schema; policy-types and protocol crates remain independent of the SDK. No schema registry or deployment I/O. |
 | `asc-policy-cedar -> miette` | Reuses Cedar's diagnostic dependency to retain policy IDs and byte locations in RPC errors; no terminal renderer or new registry package. |
 | `asc-daemon / asc-cli -> asc-observability[runtime] -> opentelemetry_sdk / tracing-opentelemetry` | Local context and stderr diagnostics only. No OTLP exporter, HTTP client or TLS provider in this path. |
 | `asc-agentsight-client -> ureq -> rustls / rustls-webpki -> ring` | AgentSight API HTTP/TLS. ureq 2.12.1 explicitly selects the ring provider for its default TLS config. This Client is wired into the daemon through Policy Runtime. |
@@ -48,8 +48,8 @@ cargo tree -p asc-capability-code-scan --edges normal --locked
 cargo tree -p asc-daemon --edges normal,build --locked
 ```
 
-The daemon's normal/build graph includes Policy Runtime, the AgentSight Adapter
-and Client, and the Client's ureq/rustls/ring dependencies. Runtime itself depends
+The daemon's normal/build graph includes Policy Runtime, the PEP Translator
+and Client, the Cedar SDK, and the Client's ureq/rustls/ring dependencies. Runtime itself depends
 only on generic policy ports and std threads. Reconciliation adds local path
 crates to the daemon graph without adding registry packages to Cargo.lock. Verify
 the executable dependency boundary separately from workspace tests:

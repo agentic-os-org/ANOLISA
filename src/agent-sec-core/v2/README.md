@@ -9,9 +9,9 @@ Agent Hook migration is separate; the core never calls Python Ledger.
 This workspace slice contains the dependency-light contracts, Policy
 Administration Point, first-version PAP daemon protocol, Policy-template
 validation, protocol-independent Unix-domain-socket service framework, and runnable
-foreground process bootstrap, together with the first AgentSight file-deletion
-target Adapter, and its independent deployment Client used by later AgentSecCore
-V2 work packages. `asc-pcp` provides synchronous attempts and
+foreground process bootstrap, together with a PEP Translator for native JSON
+file-deletion rules and Cedar deletion/ordinary-write restrictions, and an
+independent Deployment Client. `asc-pcp` provides synchronous attempts and
 `asc-policy-runtime/src/reconciliation/` provides the bounded Binding queue,
 workers, retry timers and compensation scanning. The daemon stores Policy, Scope
 and Binding state in SQLite, including deployment cleanup responsibility.
@@ -82,16 +82,14 @@ The current crates are:
   through `validate` and official typed PST output through `pst`. Agent Hook
   actions can add separate typed contexts.
   PAP uses it to validate Cedar sources submitted through CLI/RPC before saving
-  the original text and exact schema reference in SQLite. Cedar target translation
-  and deployment remain follow-up work. See the
+  the original text and exact schema reference in SQLite. Cedar file-deletion and ordinary-write
+  translation and deployment are connected. See the
   [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
-- `asc-policy-translator-agentsight`: deterministic file-deletion and pinned-process
-  translation directly from the Binding's template into an AgentSight/ActPlane
-  plan, with semantic and encoding checks. Reusable policies contain general
-  rules; this Translator supports only block + file/write + operation=delete without
-  history. Any unsupported rule rejects the complete Binding with its rule index.
-  Typed resources currently cover files; undefined resource formats are rejected.
-  Compiler acceptance belongs to the deployed target, not an embedded compiler.
+- `asc-policy-translator-agentsight`: translates immutable Binding snapshots into
+  target plans. Native JSON supports block + file/write + operation=delete without
+  history and produces DSL; Cedar supports a bounded `forbid` subset for deletion
+  and ordinary writes and produces structured file-protection JSON. Unsupported
+  rules reject the entire translation. Backend validation occurs at deployment.
 - `asc-agentsight-client`: health-gated AgentSight apply/delete transport for
   one configured endpoint, with process identity resolution and complete HTTP
   fixtures. It does not depend on a reconciliation framework.
@@ -215,8 +213,9 @@ PAP validates Cedar against its exact schema before saving source; the shared
 source decoder reads historical native Policy, Scope and Binding snapshots.
 Native serialization and SQLite storage version 1 are retained. Saved Cedar
 source can be passed to the existing `asc-policy-cedar::pst` entrypoint to
-regenerate the official PST under its saved schema. Cedar translation/deployment is
-not yet connected; AgentSight rejects it with `UNSUPPORTED_POLICY_LANGUAGE`.
+regenerate the official PST under its saved schema. The PEP Translator supports
+Cedar `forbid` deletion/ordinary-write restrictions; unsupported semantics reject
+the entire translation. The Deployment Client checks capabilities and applies the plan.
 
 The current bootstrap bounds frame read, application dispatch, rejection
 encoding, response write, connection drain, and final Tokio runtime shutdown.

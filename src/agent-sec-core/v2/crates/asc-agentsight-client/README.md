@@ -1,4 +1,4 @@
-# AgentSight Adapter: deployment Client and Reconciler integration
+# AgentSight Deployment Client and Reconciler integration
 
 `AgentSightClient<T, R>` implements `asc_policy_target_contracts::TargetDeploymentClient` directly.
 The composition root registers `AgentSightClientFactory::default()` in the
@@ -16,7 +16,7 @@ added to the Reconciler, and the Client never reads or writes a repository.
 
 | Client API | Behavior |
 |---|---|
-| `prepare_apply(plan)` | Decode the existing Adapter plan; derive UUIDv5 from Binding ID/revision; read boot ID and process start time; encode a fixed, non-secret request and cleanup reference. No HTTP. |
+| `prepare_apply(plan)` | Decode the Translator's plan; derive UUIDv5 from Binding ID/revision; read boot ID and process start time; encode a fixed, non-secret request and cleanup reference. No HTTP. |
 | `create(prepared)` | Validate format, digest, target reference and process identity; check PEP capability; recheck identity; send the exact saved request bytes. |
 | `update(previous, prepared)` | Validate/preflight before deleting old enforcement; delete old targets; create only when all old targets are confirmed absent. Return partial observations on any failure. |
 | `delete_targets(targets)` | Delete saved target references without reading the current Binding, PID or boot ID. Only 204 or typed `binding_not_found` 404 confirms absence. |
@@ -106,7 +106,7 @@ must include the new variant.
 
 ## Failure and update semantics
 
-The Adapter generates native DSL or structured file protection. Client preflight
+The Translator generates native DSL or structured file protection. Client preflight
 checks request integrity, process identity and target health/capability. Backend
 DSL compilation and structured filesystem/topology validation still happen on
 Apply. The Client has no remote validate-only call, so update can confirm old-target
@@ -147,7 +147,7 @@ core. The shared ports are in `asc-policy-target-contracts`; data types are in
 `asc-pcp` or its repository.
 
 The Reconciler crate owns the subsequent `agentsight_integration` suite, which
-connects Adapter, Reconciler, Client, Ureq and the SQLite repository to an HTTP mock
+connects Translator, Reconciler, Client, Ureq and the SQLite repository to an HTTP mock
 and checks exact requests and registration before modification.
 
 This establishes real Client/transport wiring, not live AgentSight or kernel
