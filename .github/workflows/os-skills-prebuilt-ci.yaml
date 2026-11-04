@@ -28,6 +28,6 @@ jobs:
           python-version: '3.11'
       - name: Verify raw package and action
         run: |
-          python3 -m unittest discover -s src/os-skills/tests -p test_raw_packaging.py
+          python3 -m unittest discover -s src/os-skills/tests -p 'test_*.py'
           python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
           bash .github/actions/build-os-skills-prebuilt/test.sh

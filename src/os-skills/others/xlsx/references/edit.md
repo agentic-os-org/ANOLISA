@@ -526,6 +526,8 @@ python3 SKILL_DIR/scripts/formula_check.py output.xlsx
 - Named ranges in `xl/workbook.xml` `<definedNames>` — check and update if they reference shifted rows.
 - Structured table references (`Table[@Column]`) inside formulas.
 - External workbook links in `xl/externalLinks/`.
+- An uppercase name used without call parentheses (e.g. a defined name like `LOG10`, or a bare function reference) — its digits still shift; only call syntax like `LOG10(...)` is protected.
+- References inside double-quoted string literals (e.g. `HYPERLINK("#A5","go")`) — intentionally left alone, matching Excel's own recalc behavior.
 
 ### 5.2 Inserting a Column in the Middle
 

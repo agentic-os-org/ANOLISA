@@ -28,9 +28,14 @@ After running, repack with xlsx_pack.py and re-validate with formula_check.py.
 
 Limitations:
   - Named ranges in workbook.xml <definedNames> are NOT updated automatically.
-    Review them manually after running this script.
-  - Structured table references (Table[@Column]) are NOT updated.
+    Review them manually after running this script. Defined names used in
+    formulas (e.g. Q1_TOTAL) are left untouched, not shifted.
+  - Structured table references (Table[@Column]) are NOT updated and are
+    left untouched in formulas.
   - External workbook links in xl/externalLinks/ are NOT updated.
+  - An uppercase name used WITHOUT call parentheses (e.g. a bare LOG10
+    defined name or function value) still has its digits shifted; only
+    call syntax like LOG10(...) is protected.
 """
 
 import sys
@@ -73,7 +78,14 @@ def _shift_refs(text: str, at: int, delta: int) -> str:
             row = max(1, row + delta)
         return f"{dollar_col}{col_part}{dollar_row}{row}"
 
-    pattern = r'(\$?)([A-Z]+)(\$?)(\d+)'
+    # Boundaries keep non-cell tokens intact: function names (LOG10),
+    # scientific notation (1E5), unquoted sheet prefixes (Q1!), structured
+    # references (TBL1[...]), defined names (Q1_TOTAL), and dotted/_xlfn
+    # prefixes (Data.A1). The {1,3} cap bounds the token LENGTH, so
+    # four-plus-letter tokens (ABCD12) never match; it is not a value
+    # check — three-letter tokens above the XFD limit (ZZZ1) still
+    # match and still shift.
+    pattern = r'(?<![A-Za-z0-9_.])(\$?)([A-Z]{1,3})(\$?)(\d+)(?![A-Za-z0-9_(!\[])'
     return re.sub(pattern, replacer, text)
 
 
@@ -88,16 +100,57 @@ def shift_formula(formula: str, at: int, delta: int) -> str:
       B$7      (relative col, absolute — shifts)
       BUT NOT:  B:B  (whole-column reference — left as-is)
 
-    Skips content inside single-quoted sheet name prefixes to avoid
-    corrupting names like 'Budget FY2025' (where FY2025 is NOT a cell ref).
+    Skips content inside single-quoted sheet name prefixes ('Budget
+    FY2025' — where FY2025 is NOT a cell ref) and double-quoted string
+    literals ("Q3") so their contents are never rewritten.
+
+    Leaves untouched (not cell references): unquoted sheet prefixes
+    (Q1! — the reference after ! still shifts), defined names
+    (Q1_TOTAL), structured references (TBL1[#All]), dotted and _xlfn
+    prefixes (Data.A1), and four-plus-letter uppercase tokens
+    (ABCD12).
 
     Does NOT handle:
       - Named ranges
-      - Structured references (Table[@Col])
+      - Structured references (Table[@Col]) — left untouched, not
+        translated (same outcome as above, listed for completeness)
       - R1C1 notation
     """
-    # Split on quoted sheet names: 'Sheet Name' portions are odd-indexed
-    segments = re.split(r"('[^']*(?:''[^']*)*')", formula)
+    # Split out quoted regions: 'sheet name' and "string literal"
+    # portions, plus bracket interiors of structured references
+    # (Sales[FY2025]), are odd-indexed and never rewritten ('' and ""
+    # are Excel's quote escapes).
+    # The (?<=\[) lookbehind keeps the opening "[" in the processed
+    # segment: this split and the "[" in the _shift_refs lookahead are
+    # a coupled pair. Consuming "[" here (dropping the lookbehind)
+    # would hide it from the lookahead and let TBL1[#All] regress to
+    # TBL3[#All], so do not "simplify" either half away.
+    # The bracket alternative is tried FIRST and is escape-aware
+    # ('' for a literal quote, ']'/'['/'#' for the bracket-special
+    # chars): inside brackets, ' belongs to the bracket interior, so a
+    # sheet-quote run must not start there. One character class cannot
+    # satisfy both "a quoted sheet name may contain ]" (e.g.
+    # '[Book.xlsx]Q1 Data'!A5) and "a bracket interior must stop at a
+    # bare ]" — hence the two separate alternatives, in this order.
+    # Reversing the order lets a ' right after [ re-open a sheet-quote
+    # run and swallow the rest of the formula.
+    # The bracket body's three branches are deliberately MUTUALLY
+    # EXCLUSIVE: each ' position has exactly one parse ('' / '[' /
+    # ']' / '#' as a two-char escape, any other ' via the negative
+    # lookahead, non-quote chars via the class). Overlapping branches
+    # ('' and bare-' both consuming two apostrophes) made a failed
+    # bracket run backtrack through every split of the apostrophes,
+    # growing the parse count Fibonacci-fast — an unterminated "[" plus
+    # ~40 apostrophes (a 55-char formula) never returned. Exclusivity
+    # is what keeps matching linear; do not "simplify" it away.
+    # Consequence of the exclusive reading: a lone ' immediately before
+    # the closing ] escapes that ], so a malformed odd trailing quote
+    # (TBL1[Q5']) leaves the interior treated as regular text; Excel's
+    # legal encoding of a trailing quote is '' (TBL1[Q5'']), which
+    # stays protected.
+    quoted = ("(" + r"(?<=\[)(?:[^'\]]|'[\]\[#']|'(?!['\]\[#]))*\]"
+              + r"|'[^']*(?:''[^']*)*'" + r'|"(?:[^"]|"")*"' + ")")
+    segments = re.split(quoted, formula)
     result = []
     for i, seg in enumerate(segments):
         if i % 2 == 1:
@@ -384,7 +437,8 @@ def main() -> None:
     print(f"Total changes: {total_changes}")
     print()
     print("IMPORTANT: Review named ranges in xl/workbook.xml <definedNames> manually.")
-    print("           Structured table references (Table[@Col]) are NOT updated.")
+    print("           Structured table references (TBL1[#All]) are NOT updated")
+    print("           and are left untouched in formulas.")
     print()
     print("Next steps:")
     print("  1. Review the changes above")
