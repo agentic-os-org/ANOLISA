@@ -30,6 +30,10 @@ sudo agentsight serve --host 0.0.0.0 --port 7396
 已保存的 Tokenless 记录列表即使从 loopback 访问也需要 Dashboard 凭据。这项变更约束
 元数据访问；现有页面、登录流程及统计计算保持不变。
 
+`GET /api/preferences?llm=true` 会使用服务端保存的 LLM 凭据，因此即使从 loopback 访问也需要
+Dashboard 凭据。规则模式偏好查询、`/api/preferences/export` 和 `/api/preferences/turns`
+的现有访问行为不变。
+
 ![Dashboard 登录页](../../../images/agentsight/zh/dashboard-login.png)
 
 令牌在首次启动 `serve` 时生成（64 位十六进制），保存在数据库旁边的
