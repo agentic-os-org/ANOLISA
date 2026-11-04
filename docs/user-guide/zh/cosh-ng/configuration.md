@@ -58,6 +58,9 @@ status_symbols = false
 
 优先使用环境变量或 `/auth`，不要把原始 secret 写入 TOML。Provider 选择见 [Providers](core/providers.md)。
 
+使用 `skills.custom_paths` 添加优先采用的共享 Skill，或使用 `skills.system_paths`
+以系统优先级添加已安装的技能集合。目录示例见 [Skills](core/skills.md#添加共享目录)。
+
 ## 审批与轮次预算
 
 Core 审批模式适用于直接集成：
