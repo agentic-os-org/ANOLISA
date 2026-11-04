@@ -89,7 +89,7 @@ def load_config(config_path: Path) -> VerificationConfig:
                 continue
 
             if in_list:
-                if line == "]":
+                if line in ("]", "],"):
                     in_list = False
                 else:
                     value = line.rstrip(",").strip()
