@@ -409,9 +409,23 @@ deduplicated.
 
 The source field identifies automatic notes; audit entries and git commit labels
 still use `memory_observe` to preserve existing versioning and consolidation
-behavior. The existing consent query and consolidation reader keep their prior
-policies: malformed settings can be reported as default allow by the query even
-though automatic capture rejects them. For a malformed regular settings file,
+behavior. Consent is re-read on every gate rather than cached, so a change made
+through another client takes effect on the next pass.
+
+An absent `consent.toml` defaults to allow, and so does any key the file omits —
+each field is `#[serde(default)]` and the default is `allow`. A file that exists
+but cannot be interpreted at all — zero bytes, whitespace only, or TOML that does
+not parse — denies automatic capture and consolidation, and `memory_consent query`
+reports the error instead of a settings view. Touching an empty file is therefore
+enough to stop automatic writes until an allow/deny repairs it. Every gate that
+reads consent at run time — capture and consolidation alike — goes through the
+same sandboxed read and denies when the file is unreadable or is a symlink, so a
+revocation cannot be undone by pointing the path elsewhere. A repair of one scope
+does not grant the other: a single-scope allow/deny on such a file leaves the
+scope the caller did not name denied, matching what the gates were enforcing while
+the file was unreadable. Consent updates publish by rename, so a reader sees either
+the previous settings or the new ones, never a partial body. For a malformed
+regular settings file,
 repair it with an explicit `memory_consent` allow/deny operation. If the
 settings path is a symlink, safe writes reject it too: inspect and remove the
 link itself (not its target), then repeat the allow/deny operation to create
