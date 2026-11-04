@@ -1082,6 +1082,17 @@ fn generate_checklist_json(results: &[ToolReadyResult]) -> Value {
     })
 }
 
+fn adapter_resource(relative: &str) -> Option<String> {
+    let directory = std::env::var_os("ANOLISA_ADAPTER_DIR").filter(|value| !value.is_empty())?;
+    Some(
+        PathBuf::from(directory)
+            .join("common")
+            .join(relative)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 fn user_data_resource(home: &str, relative: &str) -> Option<String> {
     let data = std::env::var_os("XDG_DATA_HOME")
         .filter(|value| !value.is_empty())
@@ -1102,25 +1113,26 @@ fn user_data_resource(home: &str, relative: &str) -> Option<String> {
 
 /// Build the ordered candidate list for `auto_fix`.
 ///
-/// Order mirrors `spec_path_candidates`: env override → user dot-dir →
-/// user FHS → system FHS → legacy flat-layout mirrors.
+/// Order mirrors `spec_path_candidates`: env override → adapter root → user dot-dir →
+/// namespaced resources → independent resources → legacy flat-layout mirrors.
 fn fix_script_candidates() -> Vec<String> {
     let home = super::get_home_dir();
     vec![
         std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok(),
+        adapter_resource("tokenless-env-fix.sh"),
         Some(format!("{home}/.tokenless/tokenless-env-fix.sh")),
-        user_data_resource(&home, "tokenless/adapters/common/tokenless-env-fix.sh"),
         user_data_resource(
             &home,
             "anolisa/adapters/tokenless/common/tokenless-env-fix.sh",
         ),
-        Some("/usr/local/share/tokenless/adapters/common/tokenless-env-fix.sh".into()),
-        Some("/usr/share/tokenless/adapters/common/tokenless-env-fix.sh".into()),
         Some(format!(
             "{home}/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh"
         )),
         Some("/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".into()),
         Some("/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".into()),
+        user_data_resource(&home, "tokenless/adapters/common/tokenless-env-fix.sh"),
+        Some("/usr/local/share/tokenless/adapters/common/tokenless-env-fix.sh".into()),
+        Some("/usr/share/tokenless/adapters/common/tokenless-env-fix.sh".into()),
         Some(format!(
             "{home}/.local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"
         )),
@@ -1275,25 +1287,26 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
 
 /// Build the ordered candidate list for `find_spec_path`.
 ///
-/// Order: env override → user dot-dir → user FHS → system FHS (usr/local,
-/// then usr) → legacy flat-layout mirrors of the same four roots.
+/// Order: env override → adapter root → user dot-dir → namespaced resources → independent
+/// resources → legacy flat-layout mirrors.
 fn spec_path_candidates() -> Vec<String> {
     let home = super::get_home_dir();
     vec![
         std::env::var("TOKENLESS_TOOL_READY_SPEC").ok(),
+        adapter_resource("tool-ready-spec.json"),
         Some(format!("{home}/.tokenless/tool-ready-spec.json")),
-        user_data_resource(&home, "tokenless/adapters/common/tool-ready-spec.json"),
         user_data_resource(
             &home,
             "anolisa/adapters/tokenless/common/tool-ready-spec.json",
         ),
-        Some("/usr/local/share/tokenless/adapters/common/tool-ready-spec.json".into()),
-        Some("/usr/share/tokenless/adapters/common/tool-ready-spec.json".into()),
         Some(format!(
             "{home}/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json"
         )),
         Some("/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json".into()),
         Some("/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json".into()),
+        user_data_resource(&home, "tokenless/adapters/common/tool-ready-spec.json"),
+        Some("/usr/local/share/tokenless/adapters/common/tool-ready-spec.json".into()),
+        Some("/usr/share/tokenless/adapters/common/tool-ready-spec.json".into()),
         Some(format!(
             "{home}/.local/share/anolisa/adapters/tokenless/tool-ready-spec.json"
         )),

@@ -85,7 +85,7 @@ class ComponentDeliveryInterface(unittest.TestCase):
     def test_install_defaults_keep_local_prefix_and_component_namespace(self) -> None:
         namespaces = {
             "cosh-ng": "anolisa",
-            "tokenless": "",
+            "tokenless": "anolisa",
             "agent-sec-core": "",
             "agentsight": "",
             "skillfs": "",
