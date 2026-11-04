@@ -409,9 +409,14 @@ deduplicated.
 
 The source field identifies automatic notes; audit entries and git commit labels
 still use `memory_observe` to preserve existing versioning and consolidation
-behavior. The existing consent query and consolidation reader keep their prior
-policies: malformed settings can be reported as default allow by the query even
-though automatic capture rejects them. For a malformed regular settings file,
+behavior. Consent is re-read on every gate rather than cached, so a change made
+through another client takes effect on the next pass. The query still reports
+malformed settings as default allow, but every gate that reads consent at run
+time — capture and consolidation alike — goes through the same sandboxed read and
+denies when the file is unreadable or is a symlink, so a revocation cannot be
+undone by pointing the path elsewhere. Consent writes are not atomic: a reader
+that catches a partially written file fails to parse it and denies. For a
+malformed regular settings file,
 repair it with an explicit `memory_consent` allow/deny operation. If the
 settings path is a symlink, safe writes reject it too: inspect and remove the
 link itself (not its target), then repeat the allow/deny operation to create
