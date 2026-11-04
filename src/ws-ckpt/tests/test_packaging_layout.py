@@ -143,10 +143,11 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse((self.destination / "usr/share/owner/adapters/ws-ckpt").exists())
 
     def test_adapter_discovers_independent_and_namespaced_installations(self) -> None:
-        for namespace in ("", "anolisa"):
+        for namespace in (None, "", "anolisa"):
             with self.subTest(namespace=namespace):
                 shutil.rmtree(self.destination, ignore_errors=True)
-                result = self.make("install", AWPRJ=namespace)
+                settings = {} if namespace is None else {"AWPRJ": namespace}
+                result = self.make("install", **settings)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 for framework in ("openclaw", "hermes"):
                     helper = self.source / "scripts" / framework / "lib-discover.sh"
@@ -189,7 +190,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
     def test_core_ignores_unselected_plugin_destination_links(self) -> None:
-        plugin = self.destination / "usr/libexec/ws-ckpt/plugins"
+        plugin = self.destination / "usr/share/anolisa/plugins/ws-ckpt"
         plugin.parent.mkdir(parents=True)
         outside = self.work / "outside-plugin"
         outside.mkdir()
@@ -448,7 +449,7 @@ class PackagingLayout(unittest.TestCase):
             else Path("/usr/local/bin")
         )
         self.assertTrue((self.destination / str(legacy_bin).lstrip("/") / COMPONENT.name).is_file())
-        self.assertIn("DATADIR=/usr/local/share/" + COMPONENT.name, result.stdout)
+        self.assertIn("DATADIR=/usr/local/share/anolisa/" + COMPONENT.name, result.stdout)
 
     def test_root_entry_works_from_archived_source_without_monorepo(self) -> None:
         archive = self.work / "source.tar"
@@ -519,7 +520,7 @@ class PackagingLayout(unittest.TestCase):
             ["make", "-s", "-C", str(source), "layout"], text=True, capture_output=True
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("DATADIR=/usr/local/share/ws-ckpt", result.stdout)
+        self.assertIn("DATADIR=/usr/local/share/anolisa/ws-ckpt", result.stdout)
 
     def test_raw_archive_rejects_independent_namespace(self) -> None:
         result = subprocess.run(

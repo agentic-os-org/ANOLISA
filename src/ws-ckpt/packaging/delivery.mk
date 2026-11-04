@@ -10,7 +10,7 @@ delivery-input = $(if $(filter command line environment override,$(origin $(1)))
 # System file installation; explicit install-legacy retains historical behavior.
 DELIVERY_PROFILE := $(call delivery-input,PROFILE,standalone)
 DELIVERY_INSTALL_PROFILE := $(call delivery-input,INSTALL_PROFILE,system)
-DELIVERY_AWPRJ := $(call delivery-input,AWPRJ,$(if $(filter legacy-anolisa,$(DELIVERY_PROFILE)),anolisa,))
+DELIVERY_AWPRJ := $(call delivery-input,AWPRJ,anolisa)
 DELIVERY_PREFIX := $(call delivery-input,PREFIX,/usr/local)
 DELIVERY_BINDIR := $(call delivery-input,BINDIR,$(if $(filter legacy-anolisa,$(DELIVERY_PROFILE)),/usr/local/bin,$(DELIVERY_PREFIX)/bin))
 DELIVERY_LIBDIR := $(call delivery-input,LIBDIR,$(DELIVERY_PREFIX)/lib)
