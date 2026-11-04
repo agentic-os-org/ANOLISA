@@ -48,14 +48,11 @@ class PreviewTest(unittest.TestCase):
     def package(
         self,
         version: str = VERSION,
-        embedded_images: bool = False,
-        old_launcher: bool = False,
         members: tuple[tarfile.TarInfo, ...] = (),
         component: str = "sec-core",
-        filename_version: str = VERSION,
     ) -> None:
         with tarfile.open(
-            self.directory / f"{component}-{filename_version}-linux-x86_64.tar.gz",
+            self.directory / f"{component}-{VERSION}-linux-x86_64.tar.gz",
             "w:gz",
         ) as archive:
             data = (
@@ -64,14 +61,6 @@ class PreviewTest(unittest.TestCase):
             member = tarfile.TarInfo("./.anolisa/component.toml")
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
-            if embedded_images:
-                archive.addfile(
-                    tarfile.TarInfo("lib/skill-score-images.tar.gz"), io.BytesIO()
-                )
-            if old_launcher:
-                archive.addfile(
-                    tarfile.TarInfo("./bin/agent-sec-skill-score"), io.BytesIO()
-                )
             for member in members:
                 archive.addfile(member, io.BytesIO())
 
@@ -152,7 +141,7 @@ class PreviewTest(unittest.TestCase):
         self.assertEqual(index["entries"][0]["version"], VERSION)
         self.assertEqual(len(index["entries"]), 2)
         self.assertEqual(manifest["schema_version"], "agent-sec-skill-score/release-v4")
-        self.assertEqual(manifest["installer"]["version"], "0.3.20")
+        self.assertEqual(manifest["installer"]["version"], PREVIEW.INSTALLER_VERSION)
         self.assertNotIn("python_cli", manifest)
         self.assertEqual(manifest["source_commit"], SOURCE)
         self.assertEqual(manifest["raw_repository"], "v1")
@@ -252,7 +241,7 @@ class PreviewTest(unittest.TestCase):
             PREVIEW.prepare(self.directory, "a" * 40, VERSION, self.components)
 
     def test_rejects_standalone_launcher(self) -> None:
-        self.package(old_launcher=True)
+        self.package(members=(tarfile.TarInfo("./bin/agent-sec-skill-score"),))
         with self.assertRaisesRegex(ValueError, "unified"):
             self.prepare()
 
