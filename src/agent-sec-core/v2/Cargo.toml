@@ -34,6 +34,8 @@ members = [
     "crates/asc-pcp",
     "crates/asc-policy-runtime",
     "crates/asc-policy-target-contracts",
+    "crates/asc-os-permission-types",
+    "crates/asc-sandbox-types",
     "crates/asc-policy-types",
     "crates/asc-policy-repository",
     "crates/asc-policy-repository-sqlite",
@@ -84,6 +86,8 @@ linux-sandbox = { path = "../linux-sandbox" }
 asc-policy-cedar = { path = "crates/asc-policy-cedar" }
 asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }
 asc-policy-repository = { path = "crates/asc-policy-repository" }
+asc-os-permission-types = { path = "crates/asc-os-permission-types" }
+asc-sandbox-types = { path = "crates/asc-sandbox-types" }
 asc-policy-types = { path = "crates/asc-policy-types" }
 asc-security-events = { path = "crates/asc-security-events" }
 asc-telemetry = { path = "crates/asc-telemetry" }

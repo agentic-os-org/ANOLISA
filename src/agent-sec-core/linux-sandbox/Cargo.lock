@@ -67,13 +67,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "asc-policy-types"
+name = "asc-os-permission-types"
 version = "1.1.2"
 dependencies = [
  "asc-foundation-types",
  "serde",
- "serde_json",
- "thiserror",
+]
+
+[[package]]
+name = "asc-sandbox-types"
+version = "1.1.2"
+dependencies = [
+ "asc-os-permission-types",
+ "serde",
 ]
 
 [[package]]
@@ -429,7 +435,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "linux-sandbox"
 version = "0.0.0"
 dependencies = [
- "asc-policy-types",
+ "asc-sandbox-types",
  "clap",
  "dirs",
  "libc",
@@ -686,7 +692,6 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
- "indexmap",
  "itoa",
  "memchr",
  "serde",

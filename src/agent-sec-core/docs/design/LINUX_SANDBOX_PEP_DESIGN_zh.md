@@ -18,7 +18,7 @@ agent-sec-cli sandbox run --permissions permissions.json -- python3 agent.py
 程序按调用方的 PATH 与工作目录解析，固定解析后的路径及对象身份，保留原始程序名和参数。
 环境变量名称、值与执行路径必须可表示为 UTF-8。
 
-`asc-policy-types` 定义 `OsPermissionSet`、`LaunchSpec`、`PathFact`、`ExecutionSpec`
+`asc-os-permission-types` 定义 `OsPermissionSet`。`asc-sandbox-types` 定义 `LaunchSpec`、`PathFact`、`ExecutionSpec`
 和执行状态类型。`OsPermissionSet.version` 为 1，未知字段被拒绝：
 
 | 对象 | 语义 |

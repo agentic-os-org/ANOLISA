@@ -1,7 +1,7 @@
 //! Real isolation checks; dedicated Linux CI must enable ASC_SANDBOX_INTEGRATION.
 #![cfg(target_os = "linux")]
 
-use asc_policy_types::{BackendStatus, ExecutionSpec, PathFact};
+use asc_sandbox_types::{BackendStatus, ExecutionSpec, PathFact};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -286,7 +286,7 @@ fn strict_runtime_drops_caps_and_applies_baseline_in_full_network() {
         work.path(),
         "grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/self/status && grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status && ! unshare -Ur true",
     );
-    spec.permissions.network.mode = asc_policy_types::NetworkMode::Full;
+    spec.permissions.network.mode = asc_sandbox_types::NetworkMode::Full;
     let (output, statuses) = run(&spec);
     assert!(
         output.status.success(),
@@ -356,7 +356,7 @@ else:
     raise SystemExit('host Unix socket unexpectedly allowed')
 PYTHON"#;
     let mut spec = spec(work.path(), script);
-    spec.permissions.network.mode = asc_policy_types::NetworkMode::Full;
+    spec.permissions.network.mode = asc_sandbox_types::NetworkMode::Full;
     let (output, statuses) = run(&spec);
     assert!(
         output.status.success(),
@@ -542,8 +542,8 @@ else:
     raise SystemExit('datagram socketpair can reach host Unix endpoints')
 PYTHON"#;
     for mode in [
-        asc_policy_types::NetworkMode::Off,
-        asc_policy_types::NetworkMode::Full,
+        asc_sandbox_types::NetworkMode::Off,
+        asc_sandbox_types::NetworkMode::Full,
     ] {
         let mut spec = spec(work.path(), script);
         spec.permissions.network.mode = mode;
@@ -584,7 +584,7 @@ left.close()
 right.close()
 PYTHON"#;
     let mut spec = spec(work.path(), script);
-    spec.permissions.network.mode = asc_policy_types::NetworkMode::Full;
+    spec.permissions.network.mode = asc_sandbox_types::NetworkMode::Full;
     let (output, statuses) = run(&spec);
     assert!(
         output.status.success(),
@@ -615,7 +615,7 @@ for number in (39, 41):
     assert result == -1 and ctypes.get_errno() == errno.EPERM, (result, ctypes.get_errno())
 PYTHON"#;
     let mut spec = spec(work.path(), script);
-    spec.permissions.network.mode = asc_policy_types::NetworkMode::Full;
+    spec.permissions.network.mode = asc_sandbox_types::NetworkMode::Full;
     let (output, statuses) = run(&spec);
     assert!(
         output.status.success(),

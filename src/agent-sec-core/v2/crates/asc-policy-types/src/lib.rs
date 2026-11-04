@@ -11,15 +11,10 @@ pub mod authoring;
 pub mod binding;
 pub mod cedar;
 pub mod error;
-pub mod execution;
 pub mod identifiers;
-pub mod permissions;
 pub mod policy;
 pub mod process_discovery;
 pub mod scope;
 pub mod target;
 
 pub use error::{Validate, ValidationError};
-
-pub use execution::*;
-pub use permissions::*;

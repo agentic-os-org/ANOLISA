@@ -175,13 +175,18 @@ class ContractSourcePublishing(unittest.TestCase):
             path = source / name
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(original / name, path)
-        for name in ("packaging", "v2/crates/asc-policy-types", "v2/crates/asc-foundation-types"):
+        for name in (
+            "packaging",
+            "v2/crates/asc-sandbox-types",
+            "v2/crates/asc-os-permission-types",
+            "v2/crates/asc-foundation-types",
+        ):
             shutil.copytree(
                 original / name,
                 source / name,
                 ignore=shutil.ignore_patterns("target", "__pycache__"),
             )
-        generated = source / "v2/crates/asc-policy-types/target/generated"
+        generated = source / "v2/crates/asc-sandbox-types/target/generated"
         generated.parent.mkdir()
         generated.write_text("must not ship")
         script = self.work / "scripts/rpm-build.sh"
@@ -208,15 +213,16 @@ class ContractSourcePublishing(unittest.TestCase):
                 return tomllib.loads(archive.extractfile(prefix + name).read().decode())
 
             sandbox = manifest("linux-sandbox/Cargo.toml")
-            dependency = sandbox["target"]['cfg(target_os = "linux")']["dependencies"][
-                "asc-policy-types"
-            ]
-            types = os.path.normpath("linux-sandbox/" + dependency["path"])
-            policy = manifest(types + "/Cargo.toml")
-            self.assertTrue(policy["dependencies"]["asc-foundation-types"]["workspace"])
+            deps = sandbox["target"]['cfg(target_os = "linux")']["dependencies"]
+            self.assertNotIn("asc-policy-types", deps)
+            types = os.path.normpath("linux-sandbox/" + deps["asc-sandbox-types"]["path"])
             workspace = manifest("v2/Cargo.toml")["workspace"]
-            foundation = "v2/" + workspace["dependencies"]["asc-foundation-types"]["path"]
-            for crate in (types, foundation):
+            crates = [types]
+            for dependency in ("asc-os-permission-types", "asc-foundation-types"):
+                parent = manifest(crates[-1] + "/Cargo.toml")
+                self.assertTrue(parent["dependencies"][dependency]["workspace"])
+                crates.append("v2/" + workspace["dependencies"][dependency]["path"])
+            for crate in crates:
                 self.assertIn(prefix + crate + "/src/lib.rs", names)
                 self.assertTrue(manifest(crate + "/Cargo.toml")["package"]["version"]["workspace"])
             self.assertIn("version", workspace["package"])

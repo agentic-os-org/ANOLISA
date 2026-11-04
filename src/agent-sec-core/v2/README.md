@@ -73,8 +73,9 @@ The current crates are:
 - `asc-foundation-types`: bounded transport-independent identifiers and revisions.
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, template validation, and target Adapter contracts. Snapshots retain
-  `policyId`, `policyName`, `revision` and `template`. It also defines the versioned
-  `OsPermissionSet` and standalone execution contracts.
+  `policyId`, `policyName`, `revision` and `template`.
+- `asc-os-permission-types`: versioned OS permissions shared by enforcement backends.
+- `asc-sandbox-types`: the standalone sandbox invocation, path identity and status contracts.
 - `asc-pep-runtime`: command and path preparation, strict sandbox execution and
   installation-handshake supervision for caller-supplied permissions.
 - `asc-policy-cedar`: Cedar frontend library with a pinned file/process and

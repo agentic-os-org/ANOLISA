@@ -2,7 +2,7 @@
 #![cfg(target_os = "linux")]
 
 use asc_pep_runtime::{SandboxBackend, prepare_launch, prepare_path_facts};
-use asc_policy_types::{ExecutionSpec, LaunchSpec, OsPermissionSet};
+use asc_sandbox_types::{ExecutionSpec, LaunchSpec, OsPermissionSet};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 
