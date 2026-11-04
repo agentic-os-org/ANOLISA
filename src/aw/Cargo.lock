@@ -99,6 +99,7 @@ version = "0.1.0"
 dependencies = [
  "aw-config",
  "aw-contracts",
+ "aw-core",
  "aw-exec",
  "aw-provider",
  "libc",
@@ -119,6 +120,7 @@ dependencies = [
  "aw-adapter",
  "aw-config",
  "aw-contracts",
+ "aw-core",
  "aw-exec",
  "aw-host",
  "aw-package",

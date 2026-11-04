@@ -49,6 +49,7 @@ version = "0.1.0"
 dependencies = [
  "aw-config",
  "aw-contracts",
+ "aw-core",
  "aw-exec",
  "aw-provider",
  "libc",
@@ -136,7 +137,6 @@ dependencies = [
 name = "aw-provider"
 version = "0.1.0"
 dependencies = [
- "aw-config",
  "jsonschema",
  "serde",
  "serde_json",

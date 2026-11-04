@@ -196,7 +196,7 @@ fn empty_policy_keeps_native_command_and_zero_hook_readiness() {
 
 #[test]
 fn generated_profile_marks_only_the_admitted_replacement_step() {
-    use aw_provider::admission::StepExecution;
+    use aw_core::admission::StepExecution;
     let profile = Profile::new("unknown: keep\n");
     let launch = profile.0.join("launch");
     fs::create_dir(&launch).unwrap();

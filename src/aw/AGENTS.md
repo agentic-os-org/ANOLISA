@@ -112,8 +112,8 @@ crates separately from concrete Providers:
 | Unified user entrypoint | `aw-cli` | CLI parsing, presentation, compatibility and command orchestration |
 | Local runtime | `aw-service` | Client, bindings, events, deadlines, cancellation and audit |
 | Hook execution | `aw-host`, `aw-exec` | Prepare Providers and execute steps; bound process lifetime and cleanup |
-| Shared validation | `aw-config`, `aw-provider`, `aw-contracts` | Configuration, Provider protocol/admission, schemas and record validation |
-| Plan API and journal | `aw-core` | Independent plan execution API and FileJournal |
+| Shared validation | `aw-config`, `aw-provider`, `aw-contracts` | Configuration, Provider protocol/views, schemas and record validation |
+| Admission, plan API and journal | `aw-core` | Hook policy admission, independent plan execution API and FileJournal |
 
 The Hook path is Adapter -> service -> Host -> executor -> Provider process.
 Results return to the Adapter for native adoption. The service uses

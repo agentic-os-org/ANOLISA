@@ -1,6 +1,6 @@
 //! Exact selectors use the admitted event identity and never infer aliases.
 
-use aw_provider::admission::{preflight, AdapterCapabilities};
+use aw_core::admission::{preflight, AdapterCapabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -8,7 +8,7 @@ fn selected(
     event_tools: Option<Value>,
     step_tools: Option<Value>,
     adapter: &str,
-) -> Option<aw_provider::admission::AdmittedStep> {
+) -> Option<AdmittedStep> {
     let validator = aw_config::Validator::new().unwrap();
     let mut value = validator
         .parse(include_bytes!("../../aw-config/examples/aw.minimal.yaml"))

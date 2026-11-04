@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 aw-config = { workspace = true }
 aw-contracts = { workspace = true }
+aw-core = { workspace = true }
 aw-exec = { workspace = true }
 aw-provider = { workspace = true }
 libc = { workspace = true }

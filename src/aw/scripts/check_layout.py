@@ -8,12 +8,12 @@ def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and source sizes explicit."""
     allowed = {
         "aw-cli": {
-            "aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
-            "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde", "serde_json",
-            "serde_yaml_ng", "sha2", "tempfile", "reqwest",
+            "aw-adapter", "aw-config", "aw-contracts", "aw-core", "aw-exec", "aw-host",
+            "aw-package", "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde",
+            "serde_json", "serde_yaml_ng", "sha2", "tempfile", "reqwest",
         },
         "aw-adapter": {
-            "aw-config", "aw-contracts", "aw-exec", "aw-provider",
+            "aw-config", "aw-contracts", "aw-core", "aw-exec", "aw-provider",
             "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror",
             "libc", "semver", "tempfile", "reqwest",
         },

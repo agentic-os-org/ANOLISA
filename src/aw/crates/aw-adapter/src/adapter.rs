@@ -5,8 +5,8 @@ pub(crate) mod catalog;
 #[cfg(test)]
 use crate::Exit;
 use crate::Result;
+use aw_core::admission::{AdapterCapabilities, AdmittedStep};
 use aw_exec::CommandSpec;
-use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{

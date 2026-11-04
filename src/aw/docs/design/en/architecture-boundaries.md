@@ -18,10 +18,10 @@ ANOLISA/
 │   │   │   └── native/             # Python / JavaScript bridge assets
 │   │   ├── aw-contracts/           # src/, schemas/, tests/
 │   │   ├── aw-config/              # Configuration and static validation
-│   │   ├── aw-provider/            # Common Provider protocol and admission
+│   │   ├── aw-provider/            # Common Provider protocol and view contracts
 │   │   ├── aw-exec/                # Bounded process execution
 │   │   ├── aw-host/                # Provider preparation and invocation
-│   │   ├── aw-core/                # Plan API and Journal
+│   │   ├── aw-core/                # Hook policy admission, Plan API and Journal
 │   │   ├── aw-cli/                 # Unified aw command frontend
 │   │   ├── aw-service/             # Client, service and runtime state
 │   │   └── aw-package/             # AW extension management and config editing

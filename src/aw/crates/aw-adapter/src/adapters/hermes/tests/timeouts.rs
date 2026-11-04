@@ -1,5 +1,5 @@
 use super::*;
-use aw_provider::admission::StepExecution;
+use aw_core::admission::StepExecution;
 
 fn prepared(profile: &Profile, mode: &str) -> Prepared {
     Prepared {

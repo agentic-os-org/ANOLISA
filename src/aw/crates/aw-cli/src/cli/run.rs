@@ -144,7 +144,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     if resident_policy_reload {
         aw_adapter::reload::resident_supported(&prepared.capabilities())?;
     }
-    let steps = aw_provider::admission::preflight(&config, target, &capabilities.clone().into())?;
+    let steps = aw_core::admission::preflight(&config, target, &capabilities.clone().into())?;
     prepared.validate_steps(&steps)?;
     let configuration = Path::new(args.required("--config")?);
     let remember_connection = args.flags.contains_key("--reloadable")

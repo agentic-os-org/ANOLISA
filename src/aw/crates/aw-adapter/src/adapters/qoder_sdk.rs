@@ -7,7 +7,7 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
+use aw_core::admission::{AdapterCapabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 

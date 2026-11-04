@@ -1,7 +1,7 @@
 //! Stable bridge plans keep native scheduling and lifecycle interpretation in Adapters.
 
 use crate::{adapter, HookEvent, HookOutput, NativeContext, NativeExit, Result};
-use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
+use aw_core::admission::{AdapterCapabilities, AdmittedStep};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -68,7 +68,7 @@ pub fn validate_resident(
         .map_err(|error| error.to_string())?
         .parse(&serde_json::to_vec(document)?)
         .map_err(|error| error.to_string())?;
-    let steps = aw_provider::admission::preflight(&config, target, capabilities)
+    let steps = aw_core::admission::preflight(&config, target, capabilities)
         .map_err(|error| error.to_string())?;
     scope_policy(document, target, &steps, capabilities)?;
     Ok(())
@@ -104,8 +104,8 @@ pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabiliti
         .map_err(|e| e.to_string())?
         .parse(&bytes)
         .map_err(|e| e.to_string())?;
-    let steps = aw_provider::admission::preflight(&config, target, capabilities)
-        .map_err(|e| e.to_string())?;
+    let steps =
+        aw_core::admission::preflight(&config, target, capabilities).map_err(|e| e.to_string())?;
     if steps
         .iter()
         .any(|step| crate::adapters::sdk_tools::checks_skill(step, &capabilities.adapter))

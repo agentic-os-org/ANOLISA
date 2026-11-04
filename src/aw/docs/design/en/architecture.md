@@ -30,11 +30,11 @@ maintained separately under `providers/`.
 
 | Crate | Responsibility | Direct AW dependencies |
 | --- | --- | --- |
-| `aw-cli` | Unified `aw` frontend, launch and command orchestration | adapter, config, exec, host, package, provider, service |
+| `aw-cli` | Unified `aw` frontend, launch and command orchestration | adapter, config, core, exec, host, package, provider, service |
 | `aw-service` | Local service, client and runtime state | adapter, config, contracts, core, exec, host, provider |
-| `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, exec, provider |
+| `aw-adapter` | Native registration, callback normalization, phase validation and effect adoption | config, contracts, core, exec, provider |
 | `aw-host` | Prepare Providers and execute admitted Hook steps | config, core, exec, provider |
-| `aw-provider` | Validate Provider messages and capability admission | config |
+| `aw-provider` | Validate Provider messages and view contracts | None |
 | `aw-exec` | Bound process lifetimes and output; hold managed package files; clean up owned processes | None |
 | `aw-config` | Parse configuration and validate fields and static references | None |
 | `aw-core` | Hook policy admission, capability plan executor, Host/Journal ports, and FileJournal | config, contracts, provider |
@@ -42,7 +42,7 @@ maintained separately under `providers/`.
 | `aw-package` | Provider admission, private extension transactions and AW configuration | config, exec |
 
 The dependency column omits the `aw-` prefix. Tests in `aw-package` also depend
-on `aw-service`; CLI integration tests also use `aw-contracts` and `reqwest`. Libraries do not
+on `aw-service`; tests in `aw-provider` also depend on `aw-config`; CLI integration tests also use `aw-contracts` and `reqwest`. Libraries do not
 depend on `aw-cli`. The `aw` frontend calls AW configuration and local-extension APIs in-process.
 The standalone `aw-package` executable has been removed; its crate remains.
 AW CLI builds use `make -C src/aw build`; archive assembly uses
@@ -190,7 +190,7 @@ and packaging scope.
 | `crates/aw-cli/src/command.rs`, `crates/aw-cli/src/command/` | Typed public command declaration, generated help and handler dispatch |
 | `crates/aw-service/src/server.rs`, `crates/aw-service/src/runtime/` | Local service and event execution |
 | `crates/aw-host/src/lib.rs`, `crates/aw-host/src/event.rs` | Provider preparation and invocation |
-| `crates/aw-core/src/admission.rs`, `crates/aw-core/src/journal.rs` | Hook policy admission facade and durable audit storage |
+| `crates/aw-core/src/admission.rs`, `crates/aw-core/src/admission/`, `crates/aw-core/src/journal.rs` | Hook policy admission rules/types and durable audit storage |
 | `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | Private records, local verification, planning and durable extension file changes |
 | `crates/aw-package/src/configuration/`, `crates/aw-package/src/config_edit.rs` | AW configuration rendering and safe offline editing |
 | `../../distribution/packaging/aw/` | Independent AW archives, integration backend builds and concrete configuration templates |

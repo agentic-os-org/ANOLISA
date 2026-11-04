@@ -7,8 +7,7 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf, time::Duration};
 

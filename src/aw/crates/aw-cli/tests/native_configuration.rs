@@ -5,9 +5,9 @@ use aw_config::{
     native::{NativeSource, SourceKind},
     Validator,
 };
+use aw_core::admission::AdapterCapabilities;
 use aw_host::{FailureAction, Host, ProcessContext, StepOutput};
 use aw_package::config_edit::ConfigurationEditor;
-use aw_provider::admission::AdapterCapabilities;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,

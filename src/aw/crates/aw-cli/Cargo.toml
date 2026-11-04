@@ -16,6 +16,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 aw-adapter = { workspace = true }
 aw-config = { workspace = true }
+aw-core = { workspace = true }
 aw-exec = { workspace = true }
 aw-host = { workspace = true }
 aw-package = { workspace = true }

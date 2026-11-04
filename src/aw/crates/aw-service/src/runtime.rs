@@ -98,7 +98,7 @@ impl Runtime {
         let revision = format!("{:x}", Sha256::digest(&bytes));
         let admission = AdmissionEngine::new().map_err(|error| match error {
             AdmissionError::Configuration(error) => error.into(),
-            AdmissionError::Provider(_) => rejected("binding_preflight"),
+            AdmissionError::Rejected(_) => rejected("binding_preflight"),
         })?;
         let contexts = evidence::Contexts::new(&bytes)?;
         let limits = limits::Limits::parse(&bytes)?;
@@ -156,7 +156,7 @@ impl Runtime {
             .preflight(bytes, target, capabilities.into())
             .map_err(|error| match error {
                 AdmissionError::Configuration(error) => error.into(),
-                AdmissionError::Provider(_) => rejected("binding_preflight"),
+                AdmissionError::Rejected(_) => rejected("binding_preflight"),
             })?;
         if candidate.requirements().len() > MAX_STEPS {
             return Err(rejected("step_limit"));

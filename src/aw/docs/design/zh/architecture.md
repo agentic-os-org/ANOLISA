@@ -24,18 +24,18 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 
 | Crate | 职责 | 直接依赖的 AW crate |
 | --- | --- | --- |
-| `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、exec、host、package、provider、service |
+| `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、core、exec、host、package、provider、service |
 | `aw-service` | 本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
-| `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、exec、provider |
+| `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、core、exec、provider |
 | `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、core、exec、provider |
-| `aw-provider` | 校验 Provider 消息和能力准入 | config |
+| `aw-provider` | 校验 Provider 消息与视图契约 | 无 |
 | `aw-exec` | 管理进程期限、输出上限、安装文件读锁和退出清理 | 无 |
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
 | `aw-core` | Hook 策略准入、能力计划执行器、Host/Journal 接口和 FileJournal | config、contracts、provider |
 | `aw-contracts` | Schema、规范编码和记录间一致性校验 | 无 |
 | `aw-package` | Provider 准入、私有扩展事务与 AW 配置 | config、exec |
 
-依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
+依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，`aw-provider` 的测试还依赖 `aw-config`，CLI 集成测试还使用
 `aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；`aw` 在进程内调用配置与本地扩展管理 API。
 独立 `aw-package` 可执行文件已删除，Rust crate 保留。`make -C src/aw build`
 构建 AW CLI；`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
@@ -149,7 +149,7 @@ Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
 | `crates/aw-cli/src/command.rs`、`crates/aw-cli/src/command/` | 公开命令的 typed 声明、生成的帮助与处理逻辑分发 |
 | `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
-| `crates/aw-core/src/admission.rs`、`crates/aw-core/src/journal.rs` | Hook 策略准入门面与持久审计实现 |
+| `crates/aw-core/src/admission.rs`、`crates/aw-core/src/admission/`、`crates/aw-core/src/journal.rs` | Hook 策略准入规则/类型与持久审计实现 |
 | `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | 私有扩展记录、本地校验、计划与持久文件变更 |
 | `crates/aw-package/src/configuration/`、`crates/aw-package/src/config_edit.rs` | AW 配置渲染与安全离线编辑 |
 | `../../distribution/packaging/aw/` | AW 独立归档、集成后端构建与具体配置模板 |

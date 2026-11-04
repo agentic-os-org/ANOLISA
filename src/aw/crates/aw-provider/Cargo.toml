@@ -3,13 +3,15 @@ name = "aw-provider"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Offline AW provider protocol and native capability admission"
+description = "Offline AW provider protocol and view contracts"
 publish = false
 
 [dependencies]
-aw-config = { workspace = true }
 jsonschema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+aw-config = { workspace = true }

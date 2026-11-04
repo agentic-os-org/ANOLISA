@@ -1,10 +1,10 @@
 //! Pure Hook policy admission over one exact configuration snapshot.
 //!
-//! `aw_provider::admission` owns the event, effect, selector and failure-action
-//! rules. This module binds their output to the parsed configuration, target,
-//! Adapter evidence and exact-byte revision that produced it. Admission starts
-//! no process, opens no socket and writes no journal. Native Hook readiness,
-//! Agent authorization and tool dispatch checks remain caller responsibilities.
+//! This module owns the event, effect, selector and failure-action admission
+//! rules, and binds their output to the parsed configuration, target, Adapter
+//! evidence and exact-byte revision that produced it. Admission starts no
+//! process, opens no socket and writes no journal. Native Hook readiness, Agent
+//! authorization and tool dispatch checks remain caller responsibilities.
 //!
 //! Admitted types have private fields and no public constructor or
 //! deserializer:
@@ -34,11 +34,113 @@
 //! }
 //! ```
 
+mod rules;
+mod selection;
+
+pub use aw_provider::ProviderEvidence;
+pub use rules::{admit, preflight};
+pub use selection::{projected_out_steps, ProjectedOutStep};
+
 use aw_config::{Configuration, Validator};
-use aw_provider::admission::{self, AdapterCapabilities, AdmittedStep, ProviderEvidence};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+
+/// Trusted Adapter evidence for a specific version and interaction entrypoint.
+///
+/// The embedding application supplies this evidence independently of Provider
+/// claims. Admission does not probe the Agent or certify the supplied version.
+#[derive(Clone, Debug)]
+pub struct AdapterCapabilities {
+    /// One of the adapters declared by the configuration contract.
+    pub adapter: String,
+    /// The actual Agent version whose capabilities were established by the caller.
+    pub version: String,
+    /// The validated interaction mode, such as a print or interactive entrypoint.
+    pub entrypoint: String,
+    /// Supported effects by event, restricted to this library's initial surface.
+    pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions supported by each event at this exact entrypoint.
+    pub failure_actions: BTreeMap<String, Vec<String>>,
+}
+
+/// One configured step checked against the implementation and Adapter.
+///
+/// Structured steps returned by [`admit`] have also passed Provider admission;
+/// native steps require no Provider handshake. Steps returned by [`preflight`]
+/// remain candidates, and public fields carry no proof
+/// of admission. This is not an executable Core plan or a Ready status. Runtime
+/// binding, budgets, process ownership and adoption remain Host concerns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmittedStep {
+    /// The event that selects this step.
+    pub event: String,
+    /// The step identifier within its event.
+    pub step_id: String,
+    /// The named Provider in the desired configuration.
+    pub provider: String,
+    /// Structured Provider evaluation or uninterpreted native hook execution.
+    pub execution: StepExecution,
+    /// The Host action required when Provider execution fails.
+    pub on_error: String,
+    /// Event-level tool selectors; intersected with the step selectors.
+    pub event_tools: Vec<String>,
+    /// Step-level tool selectors; omitted configuration admits all tools.
+    pub step_tools: Vec<String>,
+}
+
+impl AdmittedStep {
+    /// Match a validated normalized event against both configured tool selectors.
+    ///
+    /// Standard selectors compare `tool.name`; exact native selectors compare the
+    /// Adapter ID and retained `tool.native_name`. No aliases or globs are inferred.
+    /// A mismatch still consumes the step and participates in ordered completion.
+    pub fn matches_tool(&self, event: &Value) -> bool {
+        let matches = |selectors: &[String]| {
+            selectors.iter().any(|selector| {
+                if selector == "*" {
+                    return true;
+                }
+                if let Some(native) = selector.strip_prefix("native:") {
+                    return native.split_once(':').is_some_and(|(adapter, name)| {
+                        event["agent"]["adapter"] == adapter && event["tool"]["native_name"] == name
+                    });
+                }
+                event["tool"]["name"] == *selector
+            })
+        };
+        matches(&self.event_tools) && matches(&self.step_tools)
+    }
+}
+
+/// Execution contract selected by the configured protocol or its documented default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StepExecution {
+    /// Invoke a boolean command once; the Host projects configured effects.
+    Hook {
+        /// Effects to request when the command returns true.
+        effects: Vec<String>,
+        /// Optional configured explanation for a match.
+        reason_code: Option<String>,
+    },
+    /// Validate requests and candidate effects with aw-provider/v1alpha1.
+    Provider {
+        /// Operation declared by the Provider.
+        operation: String,
+        /// Requested effects checked against Provider and Adapter evidence.
+        effects: Vec<String>,
+    },
+    /// Preserve raw callback input, output and process status for the Adapter.
+    Native,
+}
+
+impl StepExecution {
+    /// Whether this structured step requests a model-visible text replacement.
+    pub fn replaces_result(&self) -> bool {
+        matches!(self, Self::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_result"))
+    }
+}
 
 /// Admission failures; diagnostics omit configuration values.
 #[derive(Debug, thiserror::Error)]
@@ -47,8 +149,8 @@ pub enum AdmissionError {
     #[error(transparent)]
     Configuration(#[from] aw_config::Error),
     /// Static or evidence-based capability admission rejected the policy.
-    #[error(transparent)]
-    Provider(#[from] aw_provider::Error),
+    #[error("policy admission rejected: {0}")]
+    Rejected(&'static str),
 }
 
 /// Stateless admission entrypoint holding the compiled configuration schema.
@@ -75,7 +177,7 @@ impl AdmissionEngine {
     ///
     /// # Errors
     /// Returns [`AdmissionError::Configuration`] for an invalid document and
-    /// [`AdmissionError::Provider`] for an unsupported target, event, effect,
+    /// [`AdmissionError::Rejected`] for an unsupported target, event, effect,
     /// selector, transport or failure action.
     pub fn preflight(
         &self,
@@ -84,7 +186,7 @@ impl AdmissionEngine {
         capabilities: AdapterCapabilities,
     ) -> Result<PolicyCandidate, AdmissionError> {
         let config = self.validator.parse(bytes)?;
-        let requirements = admission::preflight(&config, target, &capabilities)?;
+        let requirements = preflight(&config, target, &capabilities)?;
         Ok(PolicyCandidate {
             config,
             revision: format!("{:x}", Sha256::digest(bytes)),
@@ -101,8 +203,7 @@ impl AdmissionEngine {
     /// evidence. The candidate is consumed so its snapshot stays fixed.
     ///
     /// # Errors
-    /// Returns [`AdmissionError::Provider`] for missing or mismatched evidence or
-    /// any static rule rejected by the shared Provider admission.
+    /// Returns [`AdmissionError::Rejected`] for missing or mismatched evidence.
     pub fn admit(
         &self,
         candidate: PolicyCandidate,
@@ -113,16 +214,16 @@ impl AdmissionEngine {
             revision,
             target,
             capabilities,
-            requirements: _,
+            requirements,
         } = candidate;
-        let steps = admission::admit(&config, &target, &capabilities, providers)?;
+        rules::admit_requirements(&config, &requirements, providers)?;
         Ok(AdmittedPolicy {
             config,
             revision,
             target,
             capabilities,
             providers: providers.clone(),
-            steps,
+            steps: requirements,
         })
     }
 }

@@ -12,16 +12,13 @@ pub(crate) struct ProjectedOutStep {
 
 pub(crate) fn collect(
     config: &aw_config::Configuration,
-) -> Result<Vec<ProjectedOutStep>, aw_provider::Error> {
-    let agents =
-        config.as_value()["spec"]["agents"]
-            .as_object()
-            .ok_or(aw_provider::Error::Invalid(
-                "configuration agents must be an object",
-            ))?;
+) -> Result<Vec<ProjectedOutStep>, aw_core::admission::AdmissionError> {
+    let agents = config.as_value()["spec"]["agents"].as_object().ok_or(
+        aw_core::admission::AdmissionError::Rejected("configuration agents must be an object"),
+    )?;
     let mut steps = Vec::new();
     for target in agents.keys() {
-        for step in aw_provider::admission::projected_out_steps(config, target)? {
+        for step in aw_core::admission::projected_out_steps(config, target)? {
             steps.push(ProjectedOutStep {
                 target: target.clone(),
                 event: step.event,

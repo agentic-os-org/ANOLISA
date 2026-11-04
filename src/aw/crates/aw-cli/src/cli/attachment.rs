@@ -144,7 +144,7 @@ fn attach(
     )?;
     let capabilities = prepared.capabilities();
     aw_adapter::reload::supported(&capabilities)?;
-    let steps = aw_provider::admission::preflight(config, target, &capabilities)?;
+    let steps = aw_core::admission::preflight(config, target, &capabilities)?;
     prepared.validate_steps(&steps)?;
     let executable = std::env::current_exe()?;
     let deadline = Instant::now() + Duration::from_secs(30);

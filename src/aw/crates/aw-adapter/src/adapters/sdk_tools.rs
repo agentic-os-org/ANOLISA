@@ -4,7 +4,7 @@ use crate::{
     adapter::{HookEvent, NativeContext},
     Result,
 };
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdmittedStep, StepExecution};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -119,7 +119,7 @@ pub(super) fn invocation_uuid(value: &str) -> bool {
 /// Select Skill resolution only for an admitted check of that native tool.
 pub(crate) fn checks_skill(step: &AdmittedStep, adapter: &str) -> bool {
     step.event == "tool.before"
-        && matches!(&step.execution, aw_provider::admission::StepExecution::Provider { operation, .. } if operation == "check_skill")
+        && matches!(&step.execution, StepExecution::Provider { operation, .. } if operation == "check_skill")
         && step.matches_tool(&json!({"agent":{"adapter":adapter},
             "tool":{"name":"Skill","native_name":"Skill"}}))
 }
@@ -127,7 +127,6 @@ pub(crate) fn checks_skill(step: &AdmittedStep, adapter: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aw_provider::admission::StepExecution;
 
     #[test]
     fn skill_resolution_is_selected_only_for_its_operation_and_native_tool() {

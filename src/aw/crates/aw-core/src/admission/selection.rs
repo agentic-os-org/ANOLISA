@@ -1,7 +1,7 @@
 //! Conservative selector intersection for a fixed Adapter, before native tool data exists.
 
-use super::{string, tool_selectors};
-use crate::Error;
+use super::rules::{string, tool_selectors};
+use super::AdmissionError;
 
 /// An enabled step whose selectors cannot overlap for a configured target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,15 +23,15 @@ pub struct ProjectedOutStep {
 pub fn projected_out_steps(
     config: &aw_config::Configuration,
     target: &str,
-) -> Result<Vec<ProjectedOutStep>, Error> {
+) -> Result<Vec<ProjectedOutStep>, AdmissionError> {
     let spec = &config.as_value()["spec"];
     let agent = spec["agents"]
         .get(target)
-        .ok_or(Error::Invalid("unknown configured Agent target"))?;
+        .ok_or(AdmissionError::Rejected("unknown configured Agent target"))?;
     let adapter = string(&agent["adapter"])?;
-    let events = spec["events"]
-        .as_object()
-        .ok_or(Error::Invalid("configuration events must be an object"))?;
+    let events = spec["events"].as_object().ok_or(AdmissionError::Rejected(
+        "configuration events must be an object",
+    ))?;
     let mut excluded = Vec::new();
     for (event_name, event) in events {
         if event["enabled"] != true {
@@ -40,7 +40,7 @@ pub fn projected_out_steps(
         let event_tools = tool_selectors(event)?;
         for step in event["steps"]
             .as_array()
-            .ok_or(Error::Invalid("event steps must be an array"))?
+            .ok_or(AdmissionError::Rejected("event steps must be an array"))?
         {
             if step["enabled"] != false && !overlap(&event_tools, &tool_selectors(step)?, adapter) {
                 excluded.push(ProjectedOutStep {

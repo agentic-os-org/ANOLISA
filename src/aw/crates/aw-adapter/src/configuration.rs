@@ -4,7 +4,9 @@ use aw_config::{
     native::{source_report, NativeSource, SourceReport},
     Configuration,
 };
-use aw_provider::admission::{self, AdapterCapabilities, AdmittedStep, ProviderEvidence};
+use aw_core::admission::{
+    self, AdapterCapabilities, AdmissionError, AdmittedStep, ProviderEvidence,
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -112,7 +114,7 @@ impl<'a, T> LoadedConfiguration<'a, T> {
         &self,
         capabilities: &AdapterCapabilities,
         providers: &BTreeMap<String, ProviderEvidence>,
-    ) -> Result<ConfigurationCoverage<'a>, aw_provider::Error> {
+    ) -> Result<ConfigurationCoverage<'a>, AdmissionError> {
         let steps = admission::admit(
             self.input.config,
             self.input.target,
