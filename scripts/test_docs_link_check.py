@@ -66,6 +66,60 @@ class DocsLinkCheckTests(unittest.TestCase):
         doc.unlink()
         self.assertEqual(self.check_links().returncode, 0)
 
+    def test_reference_forms_are_checked_like_inline_links(self):
+        doc = self.root / "docs" / "source.md"
+        cases = [
+            ("[Install][guide]\n\n[guide]: missing-guide.md\n", "missing-guide.md"),
+            ("[Install][]\n\n[Install]: missing-collapsed.md\n", "missing-collapsed.md"),
+            ("[Install]\n\n[Install]: missing-shortcut.md\n", "missing-shortcut.md"),
+            ("![Diagram][img]\n\n[img]: missing-image.png\n", "missing-image.png"),
+        ]
+        for text, target in cases:
+            with self.subTest(target=target):
+                doc.write_text(text, encoding="utf-8")
+                result = self.check_links()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(target, result.stdout)
+
+    def test_valid_reference_targets_pass(self):
+        (self.root / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+        (self.root / "docs" / "diagram.png").write_bytes(b"\x89PNG")
+        (self.root / "docs" / "source.md").write_text(
+            "[Full][guide] [Collapsed][] [Shortcut] ![Image][img]\n\n"
+            "[Collapsed]: guide.md#usage\n"
+            "[Shortcut]: ./guide.md\n"
+            "[guide]: guide.md\n"
+            "[img]: diagram.png\n",
+            encoding="utf-8",
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unused_reference_definition_is_not_an_error(self):
+        (self.root / "docs" / "source.md").write_text(
+            "# Title\n\n[unused]: missing-guide.md\n", encoding="utf-8"
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_shared_definition_is_reported_once(self):
+        (self.root / "docs" / "source.md").write_text(
+            "[One][guide] and [Two][guide]\n\n[guide]: missing-guide.md\n", encoding="utf-8"
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("missing-guide.md"), 1, result.stdout)
+
+    def test_external_and_anchor_reference_targets_are_skipped(self):
+        (self.root / "docs" / "source.md").write_text(
+            "[Web][site] and [Anchor][part]\n\n"
+            "[site]: https://example.com/guide\n"
+            "[part]: #section\n",
+            encoding="utf-8",
+        )
+        result = self.check_links()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
