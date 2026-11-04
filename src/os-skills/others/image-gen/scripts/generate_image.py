@@ -56,14 +56,28 @@ def _compat(prompt, model, size, key, base):
     except urllib.error.HTTPError:
         return _wanx(prompt, model, size, key)
     d = res.get("data",[])
-    if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
+    if d:
+        url = d[0].get("url")
+        if url: return url
+        b64 = d[0].get("b64_json")
+        if b64: return "b64:"+b64
+        # 有些 OpenAI 兼容服务只回 revised_prompt；拼出 "b64:" 会让 _save 写出 0 字节文件
+        print(f"ERROR: response has no image payload: {json.dumps(d[0])[:200]}",file=sys.stderr); sys.exit(1)
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
 
 def _save(src, path):
     if src.startswith("b64:"):
-        data = base64.b64decode(src[4:])
+        payload = src[4:]
+        if not payload:
+            print(f"ERROR: empty image payload, nothing saved to {path}",file=sys.stderr); sys.exit(1)
+        try:
+            data = base64.b64decode(payload)
+        except ValueError:
+            print(f"ERROR: image payload is not valid base64, nothing saved to {path}",file=sys.stderr); sys.exit(1)
     else:
         with urllib.request.urlopen(urllib.request.Request(src,headers={"User-Agent":"Mozilla/5.0"}),timeout=60) as r: data = r.read()
+    if not data:
+        print(f"ERROR: image download returned no bytes from {src}",file=sys.stderr); sys.exit(1)
     os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
     with open(path,"wb") as f: f.write(data)
     print(f"Saved {path} ({len(data)/1024:.1f}KB)")
