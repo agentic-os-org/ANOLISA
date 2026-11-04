@@ -92,6 +92,10 @@ Look for these elements in the target `sheet*.xml` before editing:
 - `<mergeCell>` — merged cell ranges; row/column insertion shifts these
 - `<conditionalFormatting>` — condition ranges; row/column insertion shifts these
 - `<dataValidations>` — validation ranges; row/column insertion shifts these
+- `<hyperlink>` — anchors move with their row; internal-link `location`
+  targets shift too, EXCEPT locations that name a workbook definedName
+  (defined names are not updated by the script, so shifting them would
+  break the link)
 - `<tableParts>` — table definitions; row insertion inside a table needs `<tableColumn>` updates
 - `<sparklineGroups>` — sparklines; preserve without modification
 
@@ -499,6 +503,7 @@ Inserting a row at position N shifts all rows from N downward. Every reference t
 | `<mergeCell ref="...">` | Shift start and end rows | `A7:C7` → `A8:C8` |
 | `<conditionalFormatting sqref="...">` | Shift range | `A5:D20` → `A5:D21` |
 | `<dataValidations sqref="...">` | Shift range | `B6:B50` → `B7:B51` |
+| `<hyperlink ref="...">` | Shift anchor and A1-shaped `location` (definedName locations untouched) | `A5` + `Sheet1!A5` → `A6` + `Sheet1!A6` |
 | `xl/charts/chartN.xml` data source ranges | Shift series ranges | `Sheet1!$B$5:$B$20` → `Sheet1!$B$6:$B$21` |
 | `xl/pivotTables/*.xml` source ranges | Shift source data range | Handle with extreme care — see Section 7 |
 | `<dimension ref="...">` | Expand to include new extent | `A1:D20` → `A1:D21` |
@@ -514,7 +519,7 @@ python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 1
 python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ delete 8 1
 ```
 
-The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
+The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<hyperlink>` anchors and internal-link locations (definedName locations excepted), `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
 
 **After running the shift script, always repack and validate:**
 ```bash
@@ -524,6 +529,15 @@ python3 SKILL_DIR/scripts/formula_check.py output.xlsx
 
 **What the script does NOT update (review manually):**
 - Named ranges in `xl/workbook.xml` `<definedNames>` — check and update if they reference shifted rows.
+  Hyperlink `location` values that name a defined range are deliberately NOT
+  shifted, matched case-insensitively as Excel treats defined names (the
+  defined names themselves are not updated, so moving the link target would
+  break it).
+- Multi-area hyperlink `location` values (`"Sheet1!A5 Sheet1!B7"`) are
+  shifted only in their last reference; earlier references keep their
+  original coordinates — split and re-point such links manually.
+- Deleting a row relocates hyperlinks anchored on it to the row that slid
+  into its place instead of removing them — remove the stale ones manually.
 - Structured table references (`Table[@Column]`) inside formulas.
 - External workbook links in `xl/externalLinks/`.
 

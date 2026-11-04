@@ -18,6 +18,9 @@ What it updates in every XML file under <work_dir>:
   - <mergeCell ref="A5:C7"> ranges
   - <conditionalFormatting sqref="..."> ranges
   - <dataValidations sqref="..."> ranges
+  - <hyperlink ref="..."> anchors and internal-link locations (a
+    location that names a workbook definedName is left untouched, since
+    defined names themselves are not updated — see Limitations)
   - <dimension ref="A1:D20"> extent marker
   - Table <table ref="A1:D20"> in xl/tables/*.xml
   - Chart series <numRef><f> and <strRef><f> range references in xl/charts/*.xml
@@ -28,7 +31,16 @@ After running, repack with xlsx_pack.py and re-validate with formula_check.py.
 
 Limitations:
   - Named ranges in workbook.xml <definedNames> are NOT updated automatically.
-    Review them manually after running this script.
+    Review them manually after running this script. Hyperlink locations that
+    name a defined range are left untouched (matched case-insensitively, as
+    Excel treats defined names) for exactly this reason — shifting them would
+    point at a name that no longer resolves.
+  - Multi-area hyperlink locations ("Sheet1!A5 Sheet1!B7") are shifted
+    only in their last reference; the earlier references keep their original
+    coordinates. Split such links and re-point them manually after shifting.
+  - Deleting a row relocates hyperlinks anchored on it to the row that slid
+    into its place instead of removing them. Review hyperlinks around the
+    deleted row and remove the stale ones manually.
   - Structured table references (Table[@Column]) are NOT updated.
   - External workbook links in xl/externalLinks/ are NOT updated.
 """
@@ -155,7 +167,25 @@ def _tag(local: str) -> str:
     return f"{{{NS_MAIN}}}{local}"
 
 
-def process_worksheet(path: str, at: int, delta: int) -> int:
+def _load_defined_names(work_dir: str) -> set[str]:
+    '''Collect the definedName names from xl/workbook.xml (if any).
+    An internal-link location that IS a defined name must never be
+    shifted: the name itself is not updated by this script (see the
+    Limitation note), so rewriting it would point the link at a name
+    that no longer resolves.'''
+    wb_path = os.path.join(work_dir, "xl", "workbook.xml")
+    if not os.path.isfile(wb_path):
+        return set()
+    try:
+        tree = ET.parse(wb_path)
+    except ET.ParseError:
+        return set()
+    # Excel defined names are case-insensitive: normalize both sides so
+    # location="Q1" is exempted even when the workbook declares "q1".
+    return {el.get("name").upper() for el in tree.iter() if el.tag.endswith("definedName") and el.get("name")}
+
+
+def process_worksheet(path: str, at: int, delta: int, defined_names: set[str] = frozenset()) -> int:
     """Update row/cell references in a worksheet XML. Returns change count."""
     tree = ET.parse(path)
     root = tree.getroot()
@@ -223,6 +253,31 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
         if new != old:
             dv.set("sqref", new)
             changes += 1
+
+    # 6. <hyperlink ref="A5"> — a link left on the pre-shift coordinate ends up
+    # decorating whatever data slid into the old cell, so it must move like the
+    # merged-cell and validation ranges above.
+    # An A1-shaped location is ambiguous: FY2025/Q1/P50 are valid defined
+    # names AND valid A1 cell shapes. Only shift when the workbook does NOT
+    # define the name (this script deliberately leaves <definedNames>
+    # untouched, so a shifted name would point at nothing).
+    _A1_REF = re.compile(r"^\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?$")
+    for hl in root.iter(_tag("hyperlink")):
+        old = hl.get("ref", "")
+        new = shift_sqref(old, at, delta)
+        if new != old:
+            hl.set("ref", new)
+            changes += 1
+        loc = hl.get("location")
+        if loc:
+            sheet_part, _, ref_part = loc.rpartition("!")
+            if loc.upper() in defined_names or ref_part.upper() in defined_names:
+                continue
+            if _A1_REF.match(ref_part):
+                shifted = shift_sqref(ref_part, at, delta)
+                if shifted != ref_part:
+                    hl.set("location", sheet_part + "!" + shifted if sheet_part else shifted)
+                    changes += 1
 
     if changes > 0:
         _write_tree(tree, path)
@@ -336,13 +391,15 @@ def main() -> None:
 
     total_changes = 0
 
+    # Defined names resolve the A1-shape ambiguity in hyperlink locations
+    defined_names = _load_defined_names(work_dir)
     # Process all worksheets
     ws_dir = os.path.join(work_dir, "xl", "worksheets")
     if os.path.isdir(ws_dir):
         for fname in sorted(os.listdir(ws_dir)):
             if fname.endswith(".xml"):
                 fpath = os.path.join(ws_dir, fname)
-                n = process_worksheet(fpath, at, delta)
+                n = process_worksheet(fpath, at, delta, defined_names)
                 if n:
                     print(f"  Updated {n:3d} references in xl/worksheets/{fname}")
                     total_changes += n
