@@ -140,10 +140,8 @@ class DeliveryTests(unittest.TestCase):
         result = self.make("layout")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PREFIX=/usr/local\n", result.stdout)
-        self.assertIn("LIBDIR=/usr/local/lib/agent-sec-core\n", result.stdout)
-        self.assertIn(
-            "SKILLDIR=/usr/local/share/agent-sec-core/skills\n", result.stdout
-        )
+        self.assertIn("LIBDIR=/usr/local/lib/anolisa/agent-sec-core\n", result.stdout)
+        self.assertIn("SKILLDIR=/usr/local/share/anolisa/skills\n", result.stdout)
         self.assertNotIn("overriding recipe", result.stderr)
         result = self.make(
             "layout",
@@ -217,7 +215,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_stage_products_without_distribution_or_component_manifest(self):
         stage = self.base / "stage"
-        result = self.make("install", f"DESTDIR={stage}")
+        result = self.make("install", f"DESTDIR={stage}", "AWPRJ=")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for name in (
             "agent-sec-cli",
@@ -509,11 +507,14 @@ class DeliveryTests(unittest.TestCase):
         calls = self.base / "calls"
         for failure in (True, False):
             prefix = self.base / ("failed" if failure else "success")
+            layout = self.make("layout", f"PREFIX={prefix}")
+            self.assertEqual(layout.returncode, 0, layout.stdout + layout.stderr)
+            paths = dict(line.split("=", 1) for line in layout.stdout.splitlines())
             result = self.make("install-core", f"PREFIX={prefix}")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             cli = prefix / "bin/agent-sec-cli"
             unit = prefix / "lib/systemd/system/agent-sec-gateway.service"
-            addon = prefix / "share/agent-sec-core/gateway/asc_gateway_addon.py"
+            addon = Path(paths["DATADIR"]) / "gateway/asc_gateway_addon.py"
             cli.write_text(
                 "#!/bin/sh\n"
                 f"test -f {shlex.quote(str(unit))} || exit 92\n"
@@ -562,7 +563,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_namespaced_skills_install_uses_shared_root(self):
         stage = self.base / "anolisa-skills"
-        result = self.make("install-skills", f"DESTDIR={stage}", "AWPRJ=anolisa")
+        result = self.make("install-skills", f"DESTDIR={stage}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((stage / "usr/share/anolisa/skills/demo/SKILL.md").is_file())
         self.assertFalse((stage / "usr/share/anolisa/agent-sec-core/skills").exists())
