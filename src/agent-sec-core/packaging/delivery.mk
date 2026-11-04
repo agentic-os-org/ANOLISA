@@ -2,7 +2,7 @@
 # Legacy file defaults must not leak into the public file installation.
 delivery_input = $(if $(filter command line environment,$(origin $(1))),$($(1)),$(2))
 DELIVERY_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
-DELIVERY_AWPRJ := $(call delivery_input,AWPRJ,)
+DELIVERY_AWPRJ := $(call delivery_input,AWPRJ,anolisa)
 DELIVERY_INSTALL_PROFILE := $(call delivery_input,INSTALL_PROFILE,system)
 DELIVERY_PREFIX := $(call delivery_input,PREFIX,/usr/local)
 delivery_trim_slashes = $(if $(filter %/,$(1)),$(call delivery_trim_slashes,$(patsubst %/,%,$(1))),$(1))

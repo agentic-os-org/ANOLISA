@@ -86,7 +86,7 @@ class ComponentDeliveryInterface(unittest.TestCase):
         namespaces = {
             "cosh-ng": "anolisa",
             "tokenless": "anolisa",
-            "agent-sec-core": "",
+            "agent-sec-core": "anolisa",
             "agentsight": "",
             "skillfs": "",
             "ws-ckpt": "",
