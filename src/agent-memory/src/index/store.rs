@@ -1405,18 +1405,21 @@ fn make_snippet(body: &str, needle: &str, radius: usize) -> String {
     s
 }
 
-/// Normalize raw query terms, retaining dots in filenames and version numbers.
-/// The returned terms must be quoted before use in an FTS5 MATCH expression.
-/// `-` is dropped because FTS5 interprets a leading `-` as the NOT
-/// operator, so naïvely keeping it would silently invert match intent
-/// (`hello-world` → match docs containing "hello" but NOT "world").
+/// Normalize raw query terms, retaining dots in filenames and version numbers and
+/// interior hyphens in hyphenated terms such as `hello-world` and `v1.2.3-rc1`.
+///
+/// The returned terms must be quoted before use in an FTS5 MATCH expression, and that
+/// quoting is what makes a retained `-` a literal character rather than the NOT operator.
+/// A `-` at either edge is still dropped, so a term carrying only operator punctuation
+/// degrades exactly as before instead of becoming a phrase with no tokens.
 fn sanitize_fts_query(q: &str) -> String {
     q.split_whitespace()
         .map(|t| {
             t.chars()
-                .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '.'))
+                .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
                 .collect::<String>()
         })
+        .map(|t| t.trim_matches('-').to_string())
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
@@ -1568,6 +1571,49 @@ mod tests {
             assert_eq!(hits.len(), 1, "existing memory must match {query:?}");
             assert_eq!(hits[0].path, "notes/deployment.md");
         }
+    }
+
+    #[test]
+    fn literal_search_recalls_hyphenated_terms() {
+        let mut store = BM25Store::open_in_memory().unwrap();
+        store
+            .upsert(
+                "notes/release.md",
+                100,
+                90,
+                "deploy hello-world and v1.2.3-rc1 today",
+                None,
+            )
+            .unwrap();
+        for query in ["hello-world", "v1.2.3-rc1"] {
+            let hits = store.search(query, 10, true).unwrap();
+            assert_eq!(hits.len(), 1, "existing memory must match {query:?}");
+            assert_eq!(hits[0].path, "notes/release.md");
+        }
+
+        // Conflict detection shares the sanitizer, so it must recall them too.
+        let conflicts = store.detect_conflicts("v1.2.3-rc1", -2.0).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].0, "notes/release.md");
+
+        // A retained hyphen must not turn `a-b` into a match for `ab`.
+        store
+            .upsert("other.md", 100, 20, "deploy ab today", None)
+            .unwrap();
+        let hits = store.search("a-b", 10, true).unwrap();
+        assert!(
+            hits.iter().all(|hit| hit.path != "other.md"),
+            "a-b must not match text containing only ab"
+        );
+    }
+
+    #[test]
+    fn sanitizer_retains_interior_hyphens() {
+        assert_eq!(sanitize_fts_query("hello-world"), "hello-world");
+        assert_eq!(sanitize_fts_query("v1.2.3-rc1"), "v1.2.3-rc1");
+        // Edge hyphens still disappear, so operator-only terms degrade as before.
+        assert_eq!(sanitize_fts_query("-u"), "u");
+        assert_eq!(sanitize_fts_query("--"), "");
     }
 
     #[test]
