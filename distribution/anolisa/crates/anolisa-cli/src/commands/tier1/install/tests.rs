@@ -49,6 +49,7 @@ pub fn args(component: &str) -> InstallArgs {
     InstallArgs {
         component: Some(component.to_string()),
         all: false,
+        match_installed: None,
         fail_fast: false,
         no_deps: false,
         version: None,

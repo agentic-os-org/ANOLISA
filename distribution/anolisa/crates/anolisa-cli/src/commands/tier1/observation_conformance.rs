@@ -114,6 +114,7 @@ fn owned_installation(name: &str, scope: InstallationScope, files: Vec<OwnedFile
         scope,
         binding: ProviderBinding::Owned {
             artifact: OwnedArtifact {
+                repository: None,
                 version: "1.0.0".to_string(),
                 distribution_source: None,
                 raw_package: None,

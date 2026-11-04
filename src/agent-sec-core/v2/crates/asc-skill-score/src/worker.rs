@@ -36,33 +36,42 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    // Debug formatting keeps diagnostic paths quoted and escapes control characters.
+    #[allow(clippy::unnecessary_debug_formatting)]
     pub fn installed(prefix: &Path) -> Result<Self> {
-        let root = prefix.join("lib/anolisa/sec-core-skill-score");
+        let root = if prefix == Path::new("/usr") {
+            prefix.join("lib/agent-sec-core/skill-score")
+        } else {
+            prefix.join("lib/anolisa/sec-core-skill-score")
+        };
         let manifest_path = root.join("runtime-manifest.json");
-        if !manifest_path.is_file() {
-            return Err(Error::Runtime("dynamic assessment unavailable; explicitly install: sudo anolisa --install-mode system install sec-core-skill-score".into()));
+        let lock_path = root.join(".lifecycle.lock");
+        if !manifest_path.is_file()
+            || !lock_path
+                .try_exists()
+                .map_err(|e| Error::at_path("runtime.lock.inspect", &lock_path, e))?
+        {
+            let missing = if manifest_path.is_file() {
+                &lock_path
+            } else {
+                &manifest_path
+            };
+            return Err(Error::Runtime(format!(
+                "stage=runtime.prepare path={missing:?}: sec-core-skill-score is not prepared; run sudo agent-sec-cli skillsec score install-runtime"
+            )));
         }
         let lease = Lease::acquire(&root)?;
-        let bytes = std::fs::read(&manifest_path)?;
+        let bytes = std::fs::read(&manifest_path)
+            .map_err(|e| Error::at_path("runtime.manifest.read", &manifest_path, e))?;
         if bytes.len() > 1_048_576 {
             return Err(Error::Runtime("runtime manifest exceeds limit".into()));
         }
         let manifest: Value = serde_json::from_slice(&bytes)?;
         let digest = format!("{:x}", Sha256::digest(&bytes));
         let environment = root.join("environments").join(&digest);
-        let ready=read_json(&environment.join("ready.json"),1_048_576).map_err(|_|Error::Runtime("scoring runtime is damaged; run sudo anolisa --install-mode system repair sec-core-skill-score".into()))?;
-        let base = std::fs::read_to_string(
-            prefix.join("share/anolisa/components/sec-core/component.toml"),
-        )?;
-        let base_version = base
-            .lines()
-            .find_map(|line| {
-                line.trim()
-                    .strip_prefix("version")
-                    .and_then(|s| s.trim_start().strip_prefix('='))
-                    .map(|s| s.trim().trim_matches('"'))
-            })
-            .ok_or_else(|| Error::Runtime("installed base component version is missing".into()))?;
+        let ready_path = environment.join("ready.json");
+        let ready=read_json(&ready_path,1_048_576).map_err(|error|Error::Runtime(format!("stage=runtime.ready.read path={ready_path:?}: {error}; scoring runtime is not ready; use sudo agent-sec-cli skillsec score install-runtime or repair the installed component")))?;
+        let base_version = base_version(prefix)?;
         if text(&manifest, "schema") != "agent-sec-skill-score/runtime-v2"
             || text(&manifest, "component") != "sec-core-skill-score"
             || text(&manifest, "protocol_version") != PROTOCOL
@@ -91,16 +100,20 @@ impl Runtime {
             ));
         }
         let mut receipt_bytes = Vec::new();
-        File::open(environment.join("image-build.json"))?
+        let receipt_path = environment.join("image-build.json");
+        File::open(&receipt_path)
+            .map_err(|e| Error::at_path("runtime.image-receipt.read", &receipt_path, e))?
             .take(1_048_577)
-            .read_to_end(&mut receipt_bytes)?;
+            .read_to_end(&mut receipt_bytes)
+            .map_err(|e| Error::at_path("runtime.image-receipt.read", &receipt_path, e))?;
         let receipt = verify_image_build(&manifest, &ready, &digest, &receipt_bytes)?;
         let python = environment.join("python/bin/python3.12");
         let entry = environment.join("worker-entry.py");
         if !python.is_file() || !entry.is_file() {
-            return Err(Error::Runtime(
-                "installed scoring worker is missing; repair sec-core-skill-score".into(),
-            ));
+            let missing = if python.is_file() { &entry } else { &python };
+            return Err(Error::Runtime(format!(
+                "stage=runtime.worker.inspect path={missing:?}: installed scoring worker is missing; repair sec-core-skill-score"
+            )));
         }
         require_system_docker()?;
         let deadline = Instant::now() + Duration::from_secs(45);
@@ -126,7 +139,7 @@ impl Runtime {
             Ok(process) => process,
             Err(error) => {
                 self.lease.complete(&request.id)?;
-                return Err(error.into());
+                return Err(Error::at_path("worker.spawn", &self.python, error));
             }
         };
         let readers = [
@@ -182,7 +195,8 @@ impl Runtime {
     }
 
     fn prepare_request(&mut self, call: &Invocation<'_>) -> Result<Request> {
-        std::fs::create_dir_all(call.root)?;
+        std::fs::create_dir_all(call.root)
+            .map_err(|e| Error::at_path("worker.request.directory", call.root, e))?;
         let id = uuid::Uuid::new_v4().simple().to_string();
         let project = format!("asc-score-{id}__env");
         let remaining = call
@@ -237,6 +251,23 @@ impl Runtime {
         }
         Ok(command)
     }
+}
+
+fn base_version(prefix: &Path) -> Result<String> {
+    if prefix == Path::new("/usr") {
+        return Ok(env!("CARGO_PKG_VERSION").to_owned());
+    }
+    let path = prefix.join("../../var/lib/anolisa/component-manifests/sec-core/component.toml");
+    let base = std::fs::read_to_string(&path)
+        .map_err(|e| Error::at_path("runtime.base-manifest.read", &path, e))?;
+    base.lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("version")
+                .and_then(|s| s.trim_start().strip_prefix('='))
+                .map(|s| s.trim().trim_matches('"').to_owned())
+        })
+        .ok_or_else(|| Error::Runtime("installed base component version is missing".into()))
 }
 
 fn require_system_docker() -> Result<()> {
@@ -411,11 +442,13 @@ fn await_worker(
 }
 
 fn collect_logs(root: &Path, model: &RemoteModel, readers: [Option<LogReceiver>; 2]) -> Result<()> {
+    let path = root.join("worker.log");
     let mut log = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(root.join("worker.log"))?;
+        .open(&path)
+        .map_err(|e| Error::at_path("worker.log.write", &path, e))?;
     for reader in readers {
         let bytes = reader
             .ok_or_else(|| Error::Runtime("worker log pipe unavailable".into()))?
@@ -425,18 +458,30 @@ fn collect_logs(root: &Path, model: &RemoteModel, readers: [Option<LogReceiver>;
             })??;
         log.write_all(
             crate::redaction::text(&model.redact(&String::from_utf8_lossy(&bytes))).as_bytes(),
-        )?;
+        )
+        .map_err(|e| Error::at_path("worker.log.write", &path, e))?;
     }
     Ok(())
 }
 
+// Debug formatting keeps diagnostic paths quoted and escapes control characters.
+#[allow(clippy::unnecessary_debug_formatting)]
 fn read_response(
     request: &Request,
     status: std::process::ExitStatus,
     model: &RemoteModel,
 ) -> Result<Value> {
-    let response = read_json(&request.output, 32 * 1024 * 1024)
-        .map_err(|_| Error::Runtime("worker returned no valid bounded response".into()))?;
+    let response = read_json(&request.output, 32 * 1024 * 1024).map_err(|error| {
+        // Do not echo rejected JSON or change an invalid worker response into an input error.
+        let cause = match error {
+            Error::File { source, .. } | Error::Io(source) => source.to_string(),
+            _ => "worker returned no valid bounded response".into(),
+        };
+        Error::Runtime(model.redact_diagnostic(&format!(
+            "stage=worker.response.read path={:?}: {cause}",
+            request.output
+        )))
+    })?;
     if text(&response, "schema_version") != PROTOCOL || text(&response, "request_id") != request.id
     {
         return Err(Error::Runtime(
@@ -938,6 +983,174 @@ mod tests {
                 ),
             ]),
         )?)
+    }
+
+    #[test]
+    fn rpm_recipe_alone_reports_the_explicit_install_command() -> Result<()> {
+        let prefix = tempfile::tempdir()?;
+        let root = prefix.path().join("lib/anolisa/sec-core-skill-score");
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join("runtime-manifest.json"), b"{}")?;
+        let Err(error) = Runtime::installed(prefix.path()) else {
+            panic!("a base-only installation cannot execute a worker");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("sudo agent-sec-cli skillsec score install-runtime")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_installation_identifies_the_exact_missing_file() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let prefix = directory.path().join("usr/local");
+        let root = prefix.join("lib/anolisa/sec-core-skill-score");
+        std::fs::create_dir_all(&root)?;
+        let manifest = json!({"schema":"agent-sec-skill-score/runtime-v2",
+            "component":"sec-core-skill-score","protocol_version":PROTOCOL,
+            "version":"fixture-version"});
+        let bytes = serde_json::to_vec(&manifest)?;
+        std::fs::write(root.join("runtime-manifest.json"), &bytes)?;
+        drop(Lease::fixture(&root)?);
+        std::fs::remove_dir(root.join("requests"))?;
+        let assert_missing = |stage: &str, path: &Path| {
+            let Err(error) = Runtime::installed(&prefix) else {
+                panic!("incomplete runtime must fail before worker execution");
+            };
+            assert!(
+                matches!(&error, Error::File { source, .. } if source.raw_os_error() == Some(2)),
+                "{error}"
+            );
+            let text = error.to_string();
+            assert!(text.contains(&format!("stage={stage}")), "{text}");
+            assert!(text.contains(&format!("path={path:?}")), "{text}");
+        };
+        assert_missing("runtime.requests.open", &root.join("requests"));
+        drop(Lease::fixture(&root)?);
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let environment = root.join("environments").join(&digest);
+        std::fs::create_dir_all(&environment)?;
+        let mut ready = manifest.clone();
+        ready["schema"] = json!("agent-sec-skill-score/ready-v1");
+        ready["manifest_sha256"] = json!(digest);
+        std::fs::write(environment.join("ready.json"), serde_json::to_vec(&ready)?)?;
+        let base = prefix.join("../../var/lib/anolisa/component-manifests/sec-core/component.toml");
+        assert_missing("runtime.base-manifest.read", &base);
+        std::fs::create_dir_all(base.parent().unwrap())?;
+        std::fs::write(&base, "[component]\nversion = \"fixture-version\"\n")?;
+        assert_missing(
+            "runtime.image-receipt.read",
+            &environment.join("image-build.json"),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_worker_executable_reports_spawn_path_and_releases_request() -> Result<()> {
+        if std::env::var_os("ASC_SCORE_WORKER_SPAWN_TEST_CHILD").is_none() {
+            // Isolate runner Docker settings without mutating the parallel test process.
+            let output = Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "worker::tests::missing_worker_executable_reports_spawn_path_and_releases_request",
+                    "--nocapture",
+                ])
+                .env("ASC_SCORE_WORKER_SPAWN_TEST_CHILD", "1")
+                .env_remove("DOCKER_HOST")
+                .env_remove("DOCKER_CONTEXT")
+                .output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout} {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+            return Ok(());
+        }
+        let directory = tempfile::tempdir()?;
+        let python = directory.path().join("missing python");
+        let mut runtime = Runtime {
+            lease: Lease::fixture(directory.path())?,
+            python: python.clone(),
+            entry: directory.path().join("worker-entry.py"),
+            image_ids: json!({"work":"unused", "egress":"unused"}),
+            cleanup_status: "complete".into(),
+            resources: Vec::new(),
+        };
+        let model = model()?;
+        let error = runtime
+            .invoke(Invocation {
+                operation: "environment",
+                snapshot: directory.path(),
+                probe: None,
+                root: &directory.path().join("environment"),
+                model: &model,
+                deadline: Instant::now() + Duration::from_secs(5),
+                cancelled: &AtomicBool::new(false),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::File { stage: "worker.spawn", source, .. }
+            if source.raw_os_error() == Some(2)),
+            "{error}"
+        );
+        assert!(error.to_string().contains(&format!("path={python:?}")));
+        assert!(!error.to_string().contains("worker-test-key-value"));
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("requests"))?.count(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_worker_outputs_identify_paths_without_echoing_rejected_content() -> Result<()> {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("missing environment");
+        let model = model()?;
+        let error = collect_logs(&root, &model, [None, None]).unwrap_err();
+        assert!(
+            matches!(&error, Error::File { stage: "worker.log.write", source, .. }
+            if source.raw_os_error() == Some(2)),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("path={:?}", root.join("worker.log")))
+        );
+
+        let request = Request {
+            id: "fixture-request".into(),
+            project: "fixture-project".into(),
+            input: directory.path().join("worker-input.json"),
+            output: directory.path().join("worker-output.json"),
+        };
+        let error =
+            read_response(&request, std::process::ExitStatus::from_raw(256), &model).unwrap_err();
+        assert!(matches!(&error, Error::Runtime(_)), "{error}");
+        let text = error.to_string();
+        assert!(text.contains("stage=worker.response.read"), "{text}");
+        assert!(
+            text.contains(&format!("path={:?}", request.output)),
+            "{text}"
+        );
+        assert!(text.contains("os error 2"), "{text}");
+
+        std::fs::write(&request.output, "private rejected response")?;
+        let error =
+            read_response(&request, std::process::ExitStatus::from_raw(256), &model).unwrap_err();
+        assert!(matches!(&error, Error::Runtime(_)), "{error}");
+        let text = error.to_string();
+        assert!(text.contains("stage=worker.response.read"), "{text}");
+        assert!(!text.contains("private rejected response"), "{text}");
+        assert!(text.contains("no valid bounded response"), "{text}");
+        Ok(())
     }
 
     #[test]

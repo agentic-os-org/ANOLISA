@@ -43,7 +43,10 @@ def main() -> None:
             )
         assert path.stat().st_size == artifact["bytes"]
     contract = tomllib.loads(
-        (args.prefix / "share/anolisa/components/sec-core/component.toml").read_text()
+        (
+            args.prefix.parents[1]
+            / "var/lib/anolisa/component-manifests/sec-core/component.toml"
+        ).read_text()
     )
     assert contract["component"]["version"] == release["version"]
     assert not (args.prefix / "lib/anolisa/sec-core/skill-score").exists()
@@ -64,7 +67,7 @@ def main() -> None:
         environment["AGENT_SEC_MODEL_CONFIG"] = str(
             Path(directory) / "absent-model-config.json"
         )
-        for stage in ("plan", "run"):
+        for stage in ("plan", "run", "install-runtime"):
             result = run(
                 [str(cli), "skillsec", "score", stage, "--help"], env=environment
             )
@@ -104,7 +107,7 @@ def main() -> None:
         assert (
             planned.returncode != 0 and "model" in planned.stderr.lower()
         ), planned.stderr
-        assert "install sec-core-skill-score" not in planned.stderr, planned.stderr
+        assert "install-runtime" not in planned.stderr, planned.stderr
         checks["native_plan_reaches_shared_model_configuration"] = True
         checks["invalid_task_exit_2"] = True
     root = args.prefix / "lib/anolisa/sec-core-skill-score"
@@ -138,7 +141,14 @@ def main() -> None:
         assert lock.is_file() and not lock.is_symlink() and lock.stat().st_nlink == 1
         requests = root / "requests"
         assert requests.is_dir() and not requests.is_symlink()
-        assert requests.stat().st_mode & 0o7777 == 0o1777
+        socket = Path("/var/run/docker.sock").stat()
+        if socket.st_mode & 0o020:
+            assert requests.stat().st_mode & 0o7777 == 0o1770
+            assert lock.stat().st_mode & 0o777 == 0o640
+            assert lock.stat().st_gid == requests.stat().st_gid == socket.st_gid
+        else:
+            assert requests.stat().st_mode & 0o7777 == 0o1700
+            assert lock.stat().st_mode & 0o777 == 0o600
         assert not list(requests.iterdir()), "unconfirmed worker cleanup remains"
         generated = json.loads(
             (root / "environments" / identity / ".generated.json").read_text()

@@ -289,6 +289,7 @@ mod tests {
 
     fn artifact(version: &str) -> OwnedArtifact {
         OwnedArtifact {
+            repository: None,
             version: version.to_string(),
             distribution_source: Some("https://repo.example/cosh.tar.gz".to_string()),
             raw_package: None,

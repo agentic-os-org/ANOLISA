@@ -11,6 +11,7 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -189,7 +190,7 @@ def run(
     return result.stdout
 
 
-def require_local_docker() -> None:
+def require_local_docker() -> int | None:
     # Preparation and execution must address the same system daemon. Changing
     # this process's environment does not modify the user's saved Docker context.
     os.environ["DOCKER_HOST"] = "unix:///var/run/docker.sock"
@@ -199,6 +200,10 @@ def require_local_docker() -> None:
     if "rootless" in run(["docker", "info", "--format", "{{json .SecurityOptions}}"]):
         raise ValueError("rootless Docker is not a supported optional worker host")
     run(["docker", "compose", "version"])
+    socket = Path("/var/run/docker.sock").stat()
+    if not stat.S_ISSOCK(socket.st_mode):
+        raise ValueError("system Docker endpoint must be a Unix socket")
+    return socket.st_gid if socket.st_mode & stat.S_IWGRP else None
 
 
 def network_check(image_ids: dict[str, str]) -> None:
@@ -308,15 +313,24 @@ def validate_manifest(manifest: dict[str, Any], payload: Path, prefix: Path) -> 
         or manifest.get("harbor_version") != "0.22.0"
     ):
         raise ValueError("unsupported optional runtime manifest")
-    contract = prefix / "share/anolisa/components/sec-core/component.toml"
-    text = contract.read_text()
-    component = re.search(r"(?ms)^\[component\]\s*$(.*?)(?=^\[|\Z)", text)
-    version = (
-        re.search(r'^version\s*=\s*"([^"]+)"\s*$', component[1], re.M)
-        if component
-        else None
-    )
-    if version is None or version[1] != manifest["version"]:
+    if prefix == Path("/usr"):
+        version = run(
+            ["/usr/bin/rpm", "-q", "--qf", "%{VERSION}", "agent-sec-core"]
+        ).strip()
+    else:
+        contract = (
+            prefix.parents[1]
+            / "var/lib/anolisa/component-manifests/sec-core/component.toml"
+        )
+        text = contract.read_text()
+        component = re.search(r"(?ms)^\[component\]\s*$(.*?)(?=^\[|\Z)", text)
+        match = (
+            re.search(r'^version\s*=\s*"([^"]+)"\s*$', component[1], re.M)
+            if component
+            else None
+        )
+        version = match[1] if match else None
+    if version != manifest["version"]:
         raise ValueError(
             "install the matching sec-core version before sec-core-skill-score"
         )
@@ -584,11 +598,16 @@ def build_environment(
     python_check(candidate, manifest)
 
 
+def runtime_root(prefix: Path) -> Path:
+    if prefix == Path("/usr"):
+        return prefix / "lib/agent-sec-core/skill-score"
+    return prefix / "lib/anolisa/sec-core-skill-score"
+
+
 def prepare(payload: Path, prefix: Path, cache_root: Path) -> Path:
-    root = prefix / "lib/anolisa/sec-core-skill-score"
+    root = runtime_root(prefix)
     with exclusive(root, create=True):
         pending_cleanup(root)
-        request_directory(root)
         return prepare_locked(payload, prefix, cache_root)
 
 
@@ -599,7 +618,7 @@ def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
     manifest = json.loads(manifest_path.read_text())
     manifest_digest = digest(manifest_path)
     validate_manifest(manifest, payload, prefix)
-    require_local_docker()
+    request_directory(runtime_root(prefix), require_local_docker())
     cache = cache_root / "sec-core-skill-score"
     cache.mkdir(parents=True, exist_ok=True)
     source_value = os.environ.get("ANOLISA_SKILL_SCORE_SOURCE_DIR")
@@ -608,7 +627,7 @@ def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
         os.environ.get("ANOLISA_SKILL_SCORE_OFFLINE") == "1"
         or os.environ.get("ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE") == "1"
     )
-    environments = prefix / "lib/anolisa/sec-core-skill-score/environments"
+    environments = runtime_root(prefix) / "environments"
     environments.mkdir(parents=True, exist_ok=True)
     target = environments / manifest_digest
     if ready_matches(target, manifest_digest, manifest):
@@ -701,17 +720,21 @@ def main() -> None:
         payload = Path(__file__).resolve().parent
         prefix = args.prefix.absolute()
         if args.check:
-            root = prefix / "lib/anolisa/sec-core-skill-score"
+            root = runtime_root(prefix)
             with exclusive(root):
                 pending_cleanup(root)
                 manifest_path = payload / "runtime-manifest.json"
                 manifest = json.loads(manifest_path.read_text())
                 validate_manifest(manifest, payload, prefix)
-                require_local_docker()
+                request_directory(root, require_local_docker(), verify_only=True)
                 identity = digest(manifest_path)
                 environment = root / "environments" / identity
                 receipt = image_build.load(environment, manifest, identity)
                 image_ids = images_ready(receipt)
+                if not image_build.matches_override(receipt):
+                    raise ValueError(
+                        "prepared business base image or recipe differs; explicitly repair sec-core-skill-score"
+                    )
                 if image_ids is None or not ready_matches(
                     environment, identity, manifest
                 ):

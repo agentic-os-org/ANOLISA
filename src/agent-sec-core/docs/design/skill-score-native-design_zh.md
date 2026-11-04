@@ -122,6 +122,8 @@ agent-sec-cli skillsec score run /absolute/path/to/task.json \
 
 内容摘要覆盖实际交付给 Agent 的全部文件、相对路径、类型和影响执行的权限位，包括依赖目录与二进制；模型审阅文本的长度限制不再等于执行内容摘要的范围。首版拒绝符号链接、特殊文件、越界路径和超出限制的输入，并指出具体路径；不静默遗漏文件后继续评估。后续若支持链接，需定义物化和摘要规则并独立测试。
 
+源码索引最多接受 32,768 行，逐行引用键与文本合计最多 4 MiB。超限时输入校验失败，模型调用尚未开始。
+
 模型可能只审阅其中一部分；报告分别记录完整执行输入摘要与模型审阅覆盖范围。截断、扫描失败和关键上下文缺失不得解释为“未发现风险”。
 
 源码视图使用不碰撞的不透明占位值及 `source_redaction` 来源说明。相同的受保护源码拼写共享占位值，但不据此推断语言转义、长度、子串、编码或正则行为；原始执行字节和摘要保持不变。规划阶段拒绝把插入的占位值放进执行输入或业务预期。证据中序列化为字符串的 JSON 按深度与大小上限递归脱敏，无法支持的重复视图省略，不原样暴露。
@@ -172,6 +174,8 @@ Rust 根据自身发布清单寻找固定 worker 与 Python，校验代码、协
 
 安全判定、动态完成和资源清理不能合并成一个布尔值。SkillEval 的外层 `cleanup_pending` 继续表示平台实例清理，另行消费 ASC 内层状态；外层实例删除不应把内层失败记录改成成功。
 
+Harbor 将 Agent 日志、验证器日志及制品写入本次请求的暂存目录。转换轨迹或读取验证结果前，worker 对普通文件做有界快照，存入宿主专用目录。最终轨迹只由宿主转换器写入。生成最终报告时若已收到取消信号，公开报告记录 `execution_status=cancelled`、`failure_stage=cancellation`，退出码为 1。
+
 ## 5. 超时、取消与失败处理
 
 `run` 的顺序是：校验输入与输出路径 → 检查安装与执行环境 → 启动探针 → 采证与验证 → 模型裁决 → 确定性计分 → 收尾清理与报告定稿。
@@ -206,13 +210,15 @@ Compose project 名与所有权标签由 request ID 预先确定，创建前写�
 
 运行环境按清单摘要保存；CLI 使用自己的清单找到对应环境，不使用全局“最新 worker”。准备成功才写 ready 状态；运行时仍做能力检查，因为 Docker 或内核环境可能变化。
 
-改动前，raw 首次安装有 hook，更新路径只进行依赖 preflight。本分支在 `distribution/anolisa` 中为 install/update 接入候选包准备生命周期，在移除旧文件之前完成耗时准备。通用安装器只处理已验证组件步骤、超时、取消与事务记录；Python/Harbor/镜像知识放在 ASC helper。相应提高 `min_anolisa_version` 至 `0.3.20`，使缺少该能力的正式 `0.3.19` 及更旧安装器明确拒绝新包。预览附带匹配安装器，并绑定其归档摘要。
+改动前，raw 首次安装有 hook，更新路径只进行依赖 preflight。本分支在 `distribution/anolisa` 中为 install/update 接入候选包准备生命周期，在移除旧文件之前完成耗时准备。通用安装器只处理已验证组件步骤、超时、取消与事务记录；Python/Harbor/镜像知识放在 ASC helper。基础 raw 包要求 ANOLISA 0.3.21，由安装器管理组件发现目录。可选 raw 包要求 0.3.22，由该版本在登记前完成候选包准备，并在安装或重放基础包时记录原始仓库。公开安装记录只保存索引的 SHA256，管理器通过仅所有者可读的仓库文件解析原地址。Skill Score 读取已安装主包的契约快照来核对版本。预览包绑定了支持候选包准备流程的安装器归档摘要。
 
 准备步骤从已验证候选包的 staging 目录执行新版本 helper，不能依赖初装时尚不存在或升级时仍为旧版的安装路径。该步骤与后续激活共同受现有组件安装锁和事务记录约束，避免并发安装互相覆盖。
 
 同版本安装/更新当前可能直接 NoOp，因此依赖被清理后不能只建议“重装同版本”。扩展既有 repair 生命周期，让 `anolisa repair sec-core-skill-score` 按该组件已安装清单重建缺失环境或镜像；基础 `anolisa repair sec-core` 不安装它。可选组件从未安装时应提示 install，repair 不隐式启用新能力。本分支已实现该组件目标及依赖修复；`run` 只给出建议，不自行下载。
 
 基础包与可选组件使用同一 ASC 发布版本及兼容清单，安装和运行均核对。首版不新增跨组件版本求解或原子升级框架；分别显式更新，版本暂不兼容时 `run` 明确拒绝并提示更新匹配组件。更新基础包不能自动获取此前未选择的动态执行依赖，仍可使用基础能力。
+
+重复安装 raw 可选包时，明确指定的业务基础镜像和配方必须与已保存的收据一致，才会报告就绪。系统 Docker 套接字所属组可以获取共享租约并创建私有请求记录。安装、修复和卸载获取独占租约，保留未确认清理的请求。与完整 worker 记录不匹配的目录项不会阻断这些操作。旧版共享目录中，若完整记录的写入者现无 Docker 权限，管理器会查询本机的容器、网络和卷。仍有匹配的 Compose 项目或无法核对资源时，需要管理员确认清理。
 
 基础包拥有唯一公共 CLI；可选组件拥有自己的 worker、版本化环境、ready 状态和安装记录，两包不得重复拥有文件或覆盖彼此入口。卸载可选组件保留基础 ASC，仅回收它拥有且没有活动任务使用的资源，不做全局镜像清理。
 
@@ -305,6 +311,6 @@ SkillEval 提交 `145ab88d27ca35405fef4278a705d25045dc3d36` 已在兼容旧 `ANT
 - [公共 CLI 接入](../../v2/apps/asc-cli/src/commands/skill_score.rs)、[共享模型客户端](../../v2/crates/asc-model-client/src/lib.rs)。
 - [现有 Python 评分管线](../../agent-sec-cli/src/agent_sec_cli/skill_score/pipeline.py)、[输入读取](../../agent-sec-cli/src/agent_sec_cli/skill_score/io.py)、[百炼适配](../../agent-sec-cli/src/agent_sec_cli/skill_score/provider/bailian.py)。
 - [worker 依赖声明](../../skill-score-runtime/pyproject.toml)、[Harbor 执行适配](../../skill-score-runtime/src/agent_sec_skill_score_runtime/harbor_runtime.py)、[证据归一化](../../skill-score-runtime/src/agent_sec_skill_score_runtime/observations.py)。
-- [组件清单](../../.anolisa/component.toml)、[安装计划器](../../../../distribution/anolisa/crates/anolisa-core/src/planner.rs)、[raw 更新操作](../../../../distribution/anolisa/crates/anolisa-cli/src/commands/tier1/install/owned_ops.rs)。
+- [组件清单](../../packaging/anolisa/component.toml)、[安装计划器](../../../../distribution/anolisa/crates/anolisa-core/src/planner.rs)、[raw 更新操作](../../../../distribution/anolisa/crates/anolisa-cli/src/commands/tier1/install/owned_ops.rs)。
 - [已有 GHCR 发布流水线](../../../../.github/workflows/docker-nightly.yaml)、[当前评分归档发布及安装验证](../../../../.github/workflows/sec-core-skill-score.yaml)。
 - [现有 Skill Score 用户契约](../../../../docs/user-guide/zh/agent-sec-core/skill-score.md)、[SkillEval 集成 PR](https://code.alibaba-inc.com/chengshuyi.csy/skilleval/codereview/30699594)。

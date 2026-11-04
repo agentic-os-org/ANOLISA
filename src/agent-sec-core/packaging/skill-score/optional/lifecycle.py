@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -37,13 +40,11 @@ def exclusive(root: Path, *, create: bool = False) -> Iterator[None]:
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     if create:
         flags |= os.O_CREAT
-    descriptor = os.open(root / LOCK, flags, 0o644)
+    descriptor = os.open(root / LOCK, flags, 0o600)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ValueError("component lifecycle lock is not a private regular file")
-        if create:
-            os.fchmod(descriptor, 0o644)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -58,26 +59,164 @@ def exclusive(root: Path, *, create: bool = False) -> Iterator[None]:
         os.close(descriptor)
 
 
+def pending_request_owner(path: Path) -> int | None:
+    # A worker syncs this complete record before launching anything. Ignore partial
+    # writes and junk in a directory that older installations made world-writable.
+    if not re.fullmatch(r"[a-f0-9]{32}\.json", path.name):
+        return None
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            meta = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(meta.st_mode)
+                or meta.st_nlink != 1
+                or meta.st_mode & 0o077
+            ):
+                return None
+            data = stream.read(1025)
+    except (FileNotFoundError, IsADirectoryError):
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+    if len(data) > 1024:
+        return None
+    try:
+        valid = json.loads(data) == {
+            "schema": "agent-sec-skill-score/pending-request-v1",
+            "request_id": path.stem,
+            "compose_project": f"asc-score-{path.stem}__env",
+        }
+        return meta.st_uid if valid else None
+    except (ValueError, RecursionError):
+        return None
+
+
+def docker_writer(uid: int) -> bool:
+    try:
+        endpoint = Path("/var/run/docker.sock").stat()
+        if not stat.S_ISSOCK(endpoint.st_mode):
+            return False
+        if uid == endpoint.st_uid:
+            return bool(endpoint.st_mode & stat.S_IWUSR)
+        user = pwd.getpwuid(uid)
+        return bool(
+            endpoint.st_mode & stat.S_IWGRP
+        ) and endpoint.st_gid in os.getgrouplist(user.pw_name, user.pw_gid)
+    except (FileNotFoundError, KeyError):
+        return False
+
+
+def retained_projects() -> set[str]:
+    # A revoked or deleted account may still own resources from before the access
+    # change. Query the daemon once per resource kind, including stopped containers.
+    projects: set[str] = set()
+    label = "com.docker.compose.project"
+    for kind in ("container", "network", "volume"):
+        args = [
+            "docker",
+            kind,
+            "ls",
+            "--filter",
+            f"label={label}",
+            "--format",
+            '{{.Label "' + label + '"}}',
+        ]
+        if kind == "container":
+            args.append("--all")
+        result = subprocess.run(
+            args,
+            check=True,
+            timeout=5,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env={
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "DOCKER_HOST": "unix:///var/run/docker.sock",
+            },
+        )
+        # Even a conflicting ownership label leaves cleanup unconfirmed for the project.
+        projects.update(
+            line
+            for line in result.stdout.splitlines()
+            if re.fullmatch(r"asc-score-[a-f0-9]{32}__env", line)
+        )
+    return projects
+
+
 def pending_cleanup(root: Path) -> None:
-    for name in ("requests", "recovery"):
+    writers = {root.stat().st_uid: True}
+    projects = None
+    for name in ("recovery", "requests"):
         path = root / name
         if not path.exists() and not path.is_symlink():
             continue
         directory(path)
-        if any(path.iterdir()):
-            raise RuntimeError(
-                f"unconfirmed scoring cleanup retained at {path}; recover before retrying"
-            )
+        with os.scandir(path) as entries:
+            for item in entries:
+                if name == "requests":
+                    record = Path(item.path)
+                    uid = pending_request_owner(record)
+                    if uid is None:
+                        continue
+                    if uid not in writers:
+                        writers[uid] = docker_writer(uid)
+                    if not writers[uid]:
+                        if projects is None:
+                            try:
+                                projects = retained_projects()
+                            except (OSError, subprocess.SubprocessError):
+                                raise RuntimeError(
+                                    f"cannot verify legacy scoring cleanup at {path}; recover before retrying"
+                                ) from None
+                        if f"asc-score-{record.stem}__env" not in projects:
+                            continue
+                raise RuntimeError(
+                    f"unconfirmed scoring cleanup retained at {path}; recover before retrying"
+                )
 
 
-def request_directory(root: Path) -> None:
+def request_directory(
+    root: Path, docker_gid: int | None, *, verify_only: bool = False
+) -> None:
     path = root / "requests"
-    directory(path, create=True)
-    if path.stat().st_uid != root.stat().st_uid:
-        raise ValueError("request recovery directory has an unexpected owner")
-    # System installation remains callable by users with Docker access. Records
-    # are private files; sticky mode prevents users removing each other's records.
-    path.chmod(0o1777)
+    directory(path, create=not verify_only)
+    # Root and users in the local Docker socket group can actually start worker
+    # resources. Other users must not be able to hold a lease or forge records.
+    for item, mode in (
+        (root / LOCK, 0o600 if docker_gid is None else 0o640),
+        (path, 0o1700 if docker_gid is None else 0o1770),
+    ):
+        meta = item.lstat()
+        if meta.st_uid != root.stat().st_uid:
+            raise ValueError("request registry has an unexpected owner")
+        if verify_only:
+            if stat.S_IMODE(meta.st_mode) != mode or (
+                docker_gid is not None and meta.st_gid != docker_gid
+            ):
+                raise ValueError(
+                    "request registry permissions changed; explicitly repair sec-core-skill-score"
+                )
+        else:
+            if docker_gid is not None:
+                os.chown(item, -1, docker_gid)
+            item.chmod(mode)
+
+
+def remove_empty_directory(path: Path) -> None:
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        # Older world-writable registries may contain unrelated user files.
+        if path.name != "requests" or exc.errno != errno.ENOTEMPTY:
+            raise
 
 
 def record_environment(path: Path, identity: str) -> None:
@@ -161,9 +300,7 @@ def uninstall(root: Path) -> None:
             and not (root / "environments").is_symlink()
         ):
             for name in ("requests", "recovery"):
-                path = root / name
-                if path.exists():
-                    path.rmdir()
+                remove_empty_directory(root / name)
             return
     with exclusive(root):
         pending_cleanup(root)
@@ -181,9 +318,7 @@ def uninstall(root: Path) -> None:
         for target in targets:
             shutil.rmtree(target)
         for name in ("environments", "requests", "recovery"):
-            path = root / name
-            if path.exists():
-                path.rmdir()
+            remove_empty_directory(root / name)
         # No future Runtime may acquire a valid lease. A waiter holding the old
         # inode must reject it; installer-owned files can now be removed safely.
         (root / LOCK).unlink()

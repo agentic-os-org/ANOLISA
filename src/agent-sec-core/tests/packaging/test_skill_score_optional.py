@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -71,6 +72,105 @@ class OptionalInstallTests(unittest.TestCase):
         receipt["manifest_sha256"] = identity
         (candidate / "image-build.json").write_text(json.dumps(receipt))
         return receipt
+
+    def test_rpm_recipe_is_lightweight_and_repeated_prepare_reuses_the_environment(
+        self,
+    ) -> None:
+        prefix = self.root / "usr/local"
+        payload = prefix / "lib/anolisa/sec-core-skill-score"
+        contract = (
+            self.root / "var/lib/anolisa/component-manifests/sec-core/component.toml"
+        )
+        contract.parent.mkdir(parents=True)
+        contract.write_bytes((ROOT / "packaging/anolisa/component.toml").read_bytes())
+        version = tomllib.loads(contract.read_text())["component"]["version"]
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "packaging/skill-score/package-optional.py"),
+                str(payload),
+                "--rpm-stage",
+                "--version",
+                version,
+                "--source-commit",
+                "a" * 40,
+            ],
+            check=True,
+        )
+        self.assertFalse((payload / "environments").exists())
+        self.assertFalse((payload / ".lifecycle.lock").exists())
+        manifest = json.loads((payload / "runtime-manifest.json").read_text())
+        # The registry can advertise a different release from the installed base.
+        registry = prefix / "share/anolisa/components/sec-core/component.toml"
+        registry.parent.mkdir(parents=True)
+        registry.write_text('[component]\nversion = "0.0.0"\n')
+        INSTALL.validate_manifest(manifest, payload, prefix)
+        with self.assertRaisesRegex(ValueError, "matching sec-core version"):
+            INSTALL.validate_manifest(dict(manifest, version="0.0.0"), payload, prefix)
+        self.assertEqual(
+            INSTALL.runtime_root(Path("/usr")),
+            Path("/usr/lib/agent-sec-core/skill-score"),
+        )
+        with patch.object(INSTALL, "run", return_value=version) as rpm:
+            INSTALL.validate_manifest(manifest, payload, Path("/usr"))
+            rpm.assert_called_once_with(
+                ["/usr/bin/rpm", "-q", "--qf", "%{VERSION}", "agent-sec-core"]
+            )
+            rpm.return_value = "0.0.0"
+            with self.assertRaisesRegex(ValueError, "matching sec-core version"):
+                INSTALL.validate_manifest(manifest, payload, Path("/usr"))
+
+        def build(_payload, candidate, _manifest, identity, _cancelled, _cache):
+            receipt = dict(
+                self.built_receipt(), version=version, manifest_sha256=identity
+            )
+            (candidate / "image-build.json").write_text(json.dumps(receipt))
+            return receipt
+
+        with (
+            patch.object(INSTALL.platform, "system", return_value="Linux"),
+            patch.object(INSTALL.platform, "machine", return_value="x86_64"),
+            patch.object(INSTALL, "require_local_docker", return_value=os.getgid()),
+            patch.object(INSTALL.image_build, "build", side_effect=build) as images,
+            patch.object(INSTALL, "build_environment") as dependencies,
+            patch.object(
+                INSTALL,
+                "images_ready",
+                return_value={"work": "work", "egress": "egress"},
+            ),
+            patch.object(INSTALL, "network_check"),
+            patch.object(INSTALL, "environment_check"),
+            patch.object(INSTALL, "python_check"),
+        ):
+            environment = INSTALL.prepare(payload, prefix, self.cache)
+            receipt = (environment / "ready.json").read_bytes()
+            self.assertEqual(INSTALL.prepare(payload, prefix, self.cache), environment)
+            self.assertEqual((environment / "ready.json").read_bytes(), receipt)
+            configured = self.built_receipt()["work_base_image"]["reference"]
+            with (
+                patch.object(INSTALL, "__file__", str(payload / "install.py")),
+                patch.object(
+                    sys, "argv", ["install.py", "--check", "--prefix", str(prefix)]
+                ),
+                patch.dict(os.environ, {"ANOLISA_SKILL_SCORE_BASE_IMAGE": configured}),
+                patch("builtins.print") as output,
+            ):
+                INSTALL.main()
+                self.assertEqual(
+                    json.loads(output.call_args.args[0])["actual_image_ids"],
+                    {"work": "work", "egress": "egress"},
+                )
+                os.environ["ANOLISA_SKILL_SCORE_BASE_IMAGE"] = (
+                    "registry.example/base@sha256:" + "0" * 64
+                )
+                with self.assertRaisesRegex(SystemExit, "base image or recipe differs"):
+                    INSTALL.main()
+                self.assertEqual((environment / "ready.json").read_bytes(), receipt)
+            images.assert_called_once()
+            dependencies.assert_called_once()
+        subprocess.run([sys.executable, str(payload / "uninstall.py")], check=True)
+        self.assertFalse(environment.exists())
+        self.assertTrue((payload / "runtime-manifest.json").is_file())
 
     def test_fresh_offline_build_fails_before_starting_any_process(self) -> None:
         with (
@@ -407,6 +507,9 @@ class OptionalInstallTests(unittest.TestCase):
             patch.object(
                 INSTALL, "run", side_effect=["linux", "[]", "Docker Compose v2"]
             ),
+            patch.object(
+                Path, "stat", return_value=Mock(st_mode=0o140660, st_gid=os.getgid())
+            ),
         ):
             INSTALL.require_local_docker()
             self.assertEqual(os.environ["DOCKER_HOST"], "unix:///var/run/docker.sock")
@@ -448,7 +551,7 @@ class OptionalInstallTests(unittest.TestCase):
             patch.object(INSTALL.platform, "system", return_value="Linux"),
             patch.object(INSTALL.platform, "machine", return_value="x86_64"),
             patch.object(INSTALL, "validate_manifest"),
-            patch.object(INSTALL, "require_local_docker"),
+            patch.object(INSTALL, "require_local_docker", return_value=os.getgid()),
             patch.object(INSTALL, "images_ready", return_value={}),
             patch.object(INSTALL, "ready_matches", return_value=False),
             patch.object(INSTALL, "build_environment"),
@@ -492,7 +595,7 @@ class OptionalInstallTests(unittest.TestCase):
             patch.object(INSTALL.platform, "system", return_value="Linux"),
             patch.object(INSTALL.platform, "machine", return_value="x86_64"),
             patch.object(INSTALL, "validate_manifest"),
-            patch.object(INSTALL, "require_local_docker"),
+            patch.object(INSTALL, "require_local_docker", return_value=os.getgid()),
             patch.object(INSTALL, "images_ready", return_value={}),
             patch.object(INSTALL, "ready_matches", return_value=False),
             patch.object(INSTALL.image_build, "build", side_effect=self.fake_build),

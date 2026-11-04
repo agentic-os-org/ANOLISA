@@ -206,10 +206,9 @@ pub(crate) struct RawPin {
     /// Version of the resolved distribution entry (equals
     /// `requested_version`, restated for an unambiguous JSON contract).
     resolved_version: String,
-    /// Exact artifact URL the pinned entry downloads from — the raw analog
-    /// of the delegated pin's NEVRA.
+    /// Public label for the selected artifact. Receipt-based addresses are fingerprinted.
     artifact: String,
-    /// Repository base URL the distribution index was fetched from.
+    /// Public label or fingerprint of the distribution index source.
     source_repo: String,
 }
 
@@ -226,8 +225,8 @@ impl RawPin {
         Self {
             requested_version: requested.to_string(),
             resolved_version: resolution.entry.version.clone(),
-            artifact: resolution.artifact_url.clone(),
-            source_repo: resolution.base_url.clone(),
+            artifact: resolution.public_url_label(&resolution.artifact_url),
+            source_repo: resolution.public_url_label(&resolution.base_url),
         }
     }
 }
@@ -691,6 +690,22 @@ pub(super) fn execute_planned(
     // planning refusal is independent of the raw repo being reachable.
     let (steps, preview, resolution) = match (route, prepared) {
         (PlannedRoute::AlreadyInstalled { version, .. }, PreparedExecution::NoOp { reason }) => {
+            if args.match_installed.is_some() {
+                let _lock = (!ctx.dry_run)
+                    .then(|| InstallLock::acquire(&layout.lock_file))
+                    .transpose()
+                    .map_err(|err| CliError::Runtime {
+                        command: command.clone(),
+                        reason: format!("failed to acquire install lock: {err}"),
+                    })?;
+                let current =
+                    StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
+                        .map_err(|err| CliError::Runtime {
+                        command: command.clone(),
+                        reason: format!("failed to check matched installation records: {err}"),
+                    })?;
+                super::verify_matched_install(&current, args, &component, true)?;
+            }
             reporter.finish();
             return Ok(InstallApplicationOutcome::NoOp {
                 subject: InstallSubject {
@@ -825,6 +840,7 @@ pub(super) fn execute_planned(
             &command,
             reporter,
             InstallApply::Owned {
+                args,
                 validated: Box::new(validated),
                 raw_pin: raw_pin.as_ref(),
                 native_package: native_package.as_deref(),
@@ -959,10 +975,16 @@ fn resolve_owned_artifact(
                 normalize_override_url(override_url).map_err(|err| repo_config_err(err, true))?;
             if normalized.starts_with("http://") {
                 warnings.push(format!(
-                    "--repo uses plaintext http ({normalized}) — artifacts are still sha256-verified on the raw backend, but the index itself is unauthenticated",
+                    "--repo uses plaintext http ({}) — artifacts are still sha256-verified on the raw backend, but the index itself is unauthenticated",
+                    common::repository_url_label(&normalized),
                 ));
             }
-            (normalized, Some(RawRepositoryOrigin::CliOverride))
+            let origin = if args.match_installed.is_some() {
+                RawRepositoryOrigin::Installed
+            } else {
+                RawRepositoryOrigin::CliOverride
+            };
+            (normalized, Some(origin))
         }
         None => {
             let host = HostVars {
@@ -1316,6 +1338,7 @@ fn pin_error_to_cli(
 
 enum InstallApply<'a> {
     Owned {
+        args: &'a InstallArgs,
         validated: Box<ValidatedInstall>,
         raw_pin: Option<&'a RawPin>,
         native_package: Option<&'a str>,
@@ -1386,6 +1409,9 @@ fn install_applied(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
+    if let InstallApply::Owned { args, .. } = &apply {
+        super::verify_matched_install(&store, args, target, false)?;
+    }
     let locked_steps = locked_install_steps(
         target,
         scope,
@@ -2511,8 +2537,42 @@ mod tests {
         RawPin {
             requested_version: "0.1.0".to_string(),
             resolved_version: "0.1.0".to_string(),
-            artifact: "https://example.com/anolisa/agentsight-0.1.0.tar.gz".to_string(),
-            source_repo: "https://example.com/anolisa".to_string(),
+            artifact: "https://cdn.example.com".to_string(),
+            source_repo: "https://example.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn recorded_repository_and_artifact_are_never_published_as_urls() {
+        for base in [
+            "file:///private/secret-token/v1",
+            "https://user:secret-token@example.test/v1",
+        ] {
+            let mut resolution = RawResolution {
+                component: "base".into(),
+                package: "base".into(),
+                base_url: base.into(),
+                artifact_url: format!("{base}/payload"),
+                recorded_repository: true,
+                warnings: Vec::new(),
+                entry: serde_json::from_value(serde_json::json!({
+                    "component": "base", "version": "1.0", "channel": "stable",
+                    "os":"linux","arch":"x86_64","backend":"raw","artifact_type":"tar_gz"
+                }))
+                .unwrap(),
+            };
+            let pin = RawPin::from_resolution("1.0", &resolution);
+            assert_eq!(
+                pin.source_repo,
+                format!("sha256:{}", super::super::raw::repository_fingerprint(base))
+            );
+            assert!(pin.artifact.starts_with("sha256:") && !pin.artifact.contains("secret-token"));
+            if base.starts_with("https:") {
+                resolution.recorded_repository = false;
+                let explicit = RawPin::from_resolution("1.0", &resolution);
+                assert_eq!(explicit.source_repo, "https://example.test");
+                assert_eq!(explicit.artifact, "https://example.test");
+            }
         }
     }
 
@@ -2520,7 +2580,7 @@ mod tests {
     fn raw_pinned_payload_json_exposes_requested_resolved_repo_and_artifact() {
         // The owned pin must fill the same additive envelope fields as the
         // delegated pin: requested/resolved version, source repo, and the
-        // exact artifact (the URL, the raw analog of a NEVRA). `version`
+        // artifact display label. `version`
         // remains the resolved distribution version for compatibility.
         let pin = sample_raw_pin();
         let payload = InstallResultPayload {
@@ -2542,11 +2602,8 @@ mod tests {
         assert_eq!(json["backend"], "raw");
         assert_eq!(json["requested_version"], "0.1.0");
         assert_eq!(json["resolved_version"], "0.1.0");
-        assert_eq!(json["source_repo"], "https://example.com/anolisa");
-        assert_eq!(
-            json["artifact"],
-            "https://example.com/anolisa/agentsight-0.1.0.tar.gz"
-        );
+        assert_eq!(json["source_repo"], "https://example.com");
+        assert_eq!(json["artifact"], "https://cdn.example.com");
         // `version` was None going in — the pin must fill the compatible
         // field with the resolved entry version.
         assert_eq!(json["version"], "0.1.0");
@@ -2577,8 +2634,8 @@ mod tests {
             vec![
                 "requested version: 0.1.0".to_string(),
                 "resolved version: 0.1.0".to_string(),
-                "artifact: https://example.com/anolisa/agentsight-0.1.0.tar.gz".to_string(),
-                "repository: https://example.com/anolisa".to_string(),
+                "artifact: https://cdn.example.com".to_string(),
+                "repository: https://example.com".to_string(),
             ]
         );
     }

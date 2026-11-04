@@ -22,7 +22,7 @@ class ScoreRawPackageTest(unittest.TestCase):
         self.stage = self.root / "stage"
         (self.stage / ".anolisa").mkdir(parents=True)
         shutil.copyfile(
-            COMPONENT / ".anolisa/component.toml",
+            COMPONENT / "packaging/anolisa/component.toml",
             self.stage / ".anolisa/component.toml",
         )
         self.base = tomllib.loads((self.stage / ".anolisa/component.toml").read_text())[

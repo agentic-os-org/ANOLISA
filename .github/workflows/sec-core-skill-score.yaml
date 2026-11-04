@@ -141,7 +141,8 @@ jobs:
       - name: Install the release-bound preparation-capable ANOLISA installer
         run: |
           mkdir -p "$RUNNER_TEMP/anolisa-installer"
-          tar -xzf "$RUNNER_TEMP/score-release/anolisa-cli-0.3.20-linux-x86_64.tar.gz" \
+          installer=$(jq -r .installer.file "$RUNNER_TEMP/score-release/release-manifest.json")
+          tar -xzf "$RUNNER_TEMP/score-release/$installer" \
             -C "$RUNNER_TEMP/anolisa-installer" anolisa
           sudo install -m 0755 "$RUNNER_TEMP/anolisa-installer/anolisa" /usr/local/bin/anolisa
           /usr/local/bin/anolisa --version
@@ -161,8 +162,9 @@ jobs:
           tar -xzf "$RUNNER_TEMP/score-release/bundles/skill-score-bundle-$version-linux-x86_64.tar.gz" \
             -C "$RUNNER_TEMP/score-repo"
           sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
-            /usr/local/bin/anolisa --install-mode system install sec-core-skill-score --backend raw \
-            --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
+            /usr/local/bin/agent-sec-cli skillsec score install-runtime
+          # A second invocation validates the ready installation without its build inputs.
+          sudo env ANOLISA_SKILL_SCORE_OFFLINE=1 /usr/local/bin/agent-sec-cli skillsec score install-runtime
           sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
             "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/install.json"
           digest="$(sha256sum /usr/local/lib/anolisa/sec-core-skill-score/runtime-manifest.json | cut -d' ' -f1)"
@@ -208,8 +210,7 @@ jobs:
           python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
             "$RUNNER_TEMP/score-release" --base-only --output "$RUNNER_TEMP/score-evidence/uninstalled.json"
           sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
-            /usr/local/bin/anolisa --install-mode system install sec-core-skill-score --backend raw \
-            --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
+            /usr/local/bin/agent-sec-cli skillsec score install-runtime
           sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
             "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/clean-reinstall.json"
           sudo /usr/local/bin/anolisa --install-mode system uninstall sec-core-skill-score \
@@ -267,7 +268,7 @@ jobs:
           Download only \`sec-core-bundle-$version-linux-x86_64.tar.gz\` and its checksum
           for a lightweight installation. Verify with \`sha256sum --check <archive>.sha256\`,
           then extract into an empty local directory. Its \`v1/\` contains the base raw
-          package, indexes and release-bound ANOLISA 0.3.20 installer; no scoring runtime
+          package, indexes and release-bound ANOLISA installer; no scoring runtime
           or container images are included. Use that installer with system mode, raw backend,
           \`--repo file:///absolute/path/to/asc-preview/v1 --version $version\`.
 

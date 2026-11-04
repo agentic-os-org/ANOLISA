@@ -13,14 +13,16 @@
 //! migration bug never loses the original bytes. Read-only commands on a
 //! legacy file keep reading (and re-migrating) the v4 bytes forever.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anolisa_platform::fs_layout::{FsLayout, InstallMode as LayoutInstallMode};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::claim::AdapterClaim;
-use crate::domain::{Installation, InstallationScope};
+use crate::domain::{Installation, InstallationScope, OwnedArtifact, ProviderBinding};
 use crate::planner::RecordFacts;
 use crate::state::{
     BackupRecord, InstallMode, InstalledState, ObjectKind, OperationRecord, OwnedFile, StateError,
@@ -28,6 +30,88 @@ use crate::state::{
 };
 use crate::state_identity::repair_known_installation_identities;
 use crate::state_migration::{MigrationRule, QuarantinedObject, migrate_state};
+use sha2::{Digest, Sha256};
+
+// Installation records are visible across scopes. Keep the exact repository addresses
+// in a separate owner-only file and bind each address to its public fingerprint.
+const RAW_REPOSITORIES: &str = "raw-repositories.json";
+type RawRepositories = BTreeMap<String, String>;
+
+fn read_repositories(path: &Path) -> io::Result<RawRepositories> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        result => result?,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata()?;
+        if !meta.is_file()
+            || meta.mode() & 0o077 != 0
+            || meta.nlink() != 1
+            || meta.uid() != nix::unistd::geteuid().as_raw()
+        {
+            return Err(io::Error::other("unsafe repository credentials file"));
+        }
+    }
+    serde_json::from_reader(file)
+        .map_err(|_| io::Error::other("invalid repository credentials file"))
+}
+
+fn write_repositories(path: &Path, values: &RawRepositories) -> io::Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing state directory"))?;
+    anolisa_platform::fs_layout::create_install_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    serde_json::to_writer(file.as_file_mut(), values)?;
+    file.flush()?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+impl OwnedArtifact {
+    /// Fingerprint exposed by status, including for records from the preview which stored a URL.
+    pub fn repository_sha256(&self) -> Option<String> {
+        self.repository.as_deref().map(|source| {
+            source.strip_prefix("sha256:").map_or_else(
+                || format!("{:x}", Sha256::digest(source.as_bytes())),
+                str::to_owned,
+            )
+        })
+    }
+
+    /// Resolve the original repository for a manager operation using owner-only state.
+    pub fn repository_url(&self, state_dir: &Path) -> io::Result<Option<String>> {
+        let Some(source) = &self.repository else {
+            return Ok(None);
+        };
+        let Some(key) = source.strip_prefix("sha256:") else {
+            return Ok(Some(source.clone()));
+        };
+        let url = read_repositories(&state_dir.join(RAW_REPOSITORIES))?
+            .remove(key)
+            .filter(|value| format!("{:x}", Sha256::digest(value.as_bytes())) == key)
+            .ok_or_else(|| {
+                io::Error::other("original raw repository is unavailable or mismatched")
+            })?;
+        Ok(Some(url))
+    }
+}
 
 /// Baseline schema version: what this store writes when no schema-v6
 /// feature is in use, and the newest version pre-anchor readers accept.
@@ -342,7 +426,7 @@ impl StateStore {
     pub fn save(&self, path: &Path) -> Result<(), StateError> {
         self.backup_legacy_file(path)?;
 
-        let file = StateFileV5 {
+        let mut file = StateFileV5 {
             schema_version: if self.adapter_trust_roots.is_empty() {
                 STORE_SCHEMA_VERSION
             } else {
@@ -359,11 +443,49 @@ impl StateStore {
             adapter_claims: self.adapter_claims.clone(),
             adapter_trust_roots: self.adapter_trust_roots.clone(),
         };
+        let private_path = path.with_file_name(RAW_REPOSITORIES);
+        let private_error = |source| StateError::Io {
+            path: private_path.clone(),
+            source,
+        };
+        let mut repositories = read_repositories(&private_path).map_err(private_error)?;
+        let mut active = BTreeSet::new();
+        let mut changed = false;
+        for installation in &mut file.installations {
+            if let ProviderBinding::Owned { artifact } = &mut installation.binding
+                && let Some(key) = artifact.repository_sha256()
+            {
+                if let Some(url) = &artifact.repository
+                    && !url.starts_with("sha256:")
+                {
+                    changed |= repositories.get(&key) != Some(url);
+                    repositories.insert(key.clone(), url.clone());
+                }
+                artifact.repository = Some(format!("sha256:{key}"));
+                active.insert(key);
+            }
+        }
+        // Publish new addresses first. A failed public commit can still resolve all previous pins.
+        if changed {
+            write_repositories(&private_path, &repositories).map_err(private_error)?;
+        }
         let content = toml::to_string_pretty(&file)?;
         write_atomic(path, content.as_bytes()).map_err(|source| StateError::Io {
             path: path.to_path_buf(),
             source,
         })?;
+        if repositories.keys().any(|key| !active.contains(key)) {
+            repositories.retain(|key, _| active.contains(key));
+            let cleanup = if repositories.is_empty() {
+                fs::remove_file(&private_path)
+            } else {
+                write_repositories(&private_path, &repositories)
+            };
+            // The public commit is durable. A cleanup failure cannot roll it back.
+            if let Err(error) = cleanup {
+                eprintln!("warning: could not retire unused private raw repositories: {error}");
+            }
+        }
         Ok(())
     }
 
@@ -660,6 +782,7 @@ source_repo = "anolisa"
             scope: InstallationScope::System,
             binding: ProviderBinding::Owned {
                 artifact: OwnedArtifact {
+                    repository: None,
                     version: version.to_string(),
                     distribution_source: None,
                     raw_package: None,
@@ -677,6 +800,56 @@ source_repo = "anolisa"
             enabled_features: Vec::new(),
             health: Vec::new(),
         }
+    }
+
+    #[test]
+    fn raw_repository_credentials_are_private_bound_and_retired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("installed.toml");
+        let private = tmp.path().join(RAW_REPOSITORIES);
+        let mut store = StateStore::empty();
+        let mut base = owned_installation("base", "1.0");
+        let ProviderBinding::Owned { artifact } = &mut base.binding else {
+            unreachable!()
+        };
+        let url = "https://user:synthetic-token@example.test/private-index-secret";
+        artifact.repository = Some(url.into());
+        artifact.distribution_source = Some("https://cdn.example.test/public.tar.gz".into());
+        let expected = artifact.repository_sha256().unwrap();
+        store.upsert(base);
+        store.save(&path).unwrap();
+        let public = fs::read_to_string(&path).unwrap();
+        assert!(public.contains(&expected));
+        assert!(!public.contains("synthetic-token") && !public.contains("private-index-secret"));
+        assert_eq!(
+            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // A mutating operation migrates a preview installation previously storing the URL inline.
+        fs::write(&path, public.replace(&format!("sha256:{expected}"), url)).unwrap();
+        fs::remove_file(&private).unwrap();
+        let store = StateStore::load(&path, 0).unwrap();
+        store.save(&path).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains(url));
+
+        let mut loaded = StateStore::load(&path, 0).unwrap();
+        let ProviderBinding::Owned { artifact } = &loaded.installations[0].binding else {
+            unreachable!()
+        };
+        assert_eq!(
+            artifact.repository_url(tmp.path()).unwrap().as_deref(),
+            Some(url)
+        );
+        let mut corrupted = read_repositories(&private).unwrap();
+        corrupted.insert(expected, "https://different.example.test".into());
+        write_repositories(&private, &corrupted).unwrap();
+        assert!(artifact.repository_url(tmp.path()).is_err());
+        loaded.installations.clear();
+        loaded.save(&path).unwrap();
+        assert!(!private.exists());
     }
 
     #[test]
