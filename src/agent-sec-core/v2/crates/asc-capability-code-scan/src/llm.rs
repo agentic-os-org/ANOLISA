@@ -339,11 +339,15 @@ fn error(language: Language, start: Instant, error: &CodeScanError) -> ScanResul
 
 fn extract_verdict(content: &str) -> Result<bool, String> {
     let text = content.trim();
+    let mut saw_verdict_field = false;
     for candidate in json_candidates(text) {
         if let Ok(value) = serde_json::from_str::<Value>(candidate) {
-            match value
-                .get("verdict")
-                .and_then(Value::as_str)
+            let Some(verdict) = value.get("verdict") else {
+                continue;
+            };
+            saw_verdict_field = true;
+            match verdict
+                .as_str()
                 .map(str::trim)
                 .map(str::to_uppercase)
                 .as_deref()
@@ -353,6 +357,13 @@ fn extract_verdict(content: &str) -> Result<bool, String> {
                 _ => {}
             }
         }
+    }
+    // A reply that carries a `verdict` field outside the PASS/DENY contract is
+    // unparsable: its free-text words come from the model's reason, which may
+    // quote the scanned code (`{"verdict":"拒绝DENY","reason":"... PASS ..."}`),
+    // so guessing from them would fail open.
+    if saw_verdict_field {
+        return Err(text.chars().take(120).collect());
     }
     let uppercase = text.to_uppercase();
     match (
@@ -494,6 +505,22 @@ mod tests {
         ] {
             assert_eq!(extract_verdict(content), Ok(expected), "{content}");
         }
+    }
+
+    #[test]
+    fn v1_invalid_json_verdict_does_not_fall_back_to_quoted_words() {
+        let content = r#"{"verdict":"拒绝DENY","reason":"代码中的 PASS 只是输出文本；cat /etc/shadow 命中 A.1"}"#;
+        assert!(extract_verdict(content).is_err(), "{content}");
+    }
+
+    #[test]
+    fn v1_json_without_verdict_field_keeps_the_word_fallback() {
+        // A quoted object carrying no verdict field is not a verdict envelope,
+        // so the word-boundary fallback still decides.
+        assert_eq!(
+            extract_verdict(r#"{"note":"abc"} Verdict: PASS"#),
+            Ok(false)
+        );
     }
 
     #[test]
