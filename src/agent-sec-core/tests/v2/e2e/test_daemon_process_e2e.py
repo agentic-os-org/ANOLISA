@@ -231,8 +231,22 @@ def test_default_start_and_restart_do_not_activate_gateway(
     for phase in ("before_start", "after_start", "after_restart"):
         if phase != "before_start":
             daemon = start_daemon()
-            status = daemon.request("gateway", "status")
-            assert status == {"enabled": False, "ready": False, "scopes": []}
+            result = daemon.cli("gateway", "status")
+            if result.returncode == 0:
+                assert result.stderr == ""
+                assert json.loads(result.stdout) == {
+                    "enabled": False,
+                    "ready": False,
+                    "scopes": [],
+                }
+            else:
+                assert nft_unavailable is not None, result.stderr
+                assert result.returncode == 1
+                assert result.stdout == ""
+                assert json.loads(result.stderr)["error"] == {
+                    "code": "unavailable",
+                    "message": "the credential gateway is not configured in this daemon",
+                }
         if nft is None:
             nft_unavailable = "nft is not installed"
         else:
