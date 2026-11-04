@@ -88,7 +88,7 @@ class ComponentDeliveryInterface(unittest.TestCase):
             "tokenless": "anolisa",
             "agent-sec-core": "anolisa",
             "agentsight": "",
-            "skillfs": "",
+            "skillfs": "anolisa",
             "ws-ckpt": "",
             "agent-memory": "anolisa",
         }
