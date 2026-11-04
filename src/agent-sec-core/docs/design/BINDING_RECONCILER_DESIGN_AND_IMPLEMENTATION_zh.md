@@ -450,7 +450,7 @@ validate-only 调用；编译拒绝由 Apply 响应报告。因此 update 仍可
 本次移除 Adapter 的 `ACTPLANE_COMPILER_REJECTED_GENERATED_DSL` 本地故障路径；
 计划格式及 frozen DSL 输出不变，现有语义拒绝测试继续作为 Adapter 验收依据。
 此变更的验收类型为内部 Adapter 契约调整：Adapter、Client、PCP 三个 crate 的
-`cargo test -p asc-policy-adapter-agentsight -p asc-agentsight-client -p asc-pcp --locked --offline`
+`cargo test -p asc-policy-translator-agentsight -p asc-agentsight-client -p asc-pcp --locked --offline`
 应覆盖完整 Adapter golden、直接消费者及 loopback HTTP mock 组合测试；
 具体结果见验收报告，不代表真实部署版本的编译兼容性。回退须一起恢复编译器调用、依赖、lockfile 和
 编译断言，无 wire/state 格式迁移；不得恢复仅凭本地编译成功宣称目标兼容的结论。

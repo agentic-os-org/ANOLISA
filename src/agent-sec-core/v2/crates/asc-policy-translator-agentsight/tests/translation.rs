@@ -4,10 +4,10 @@ include!(concat!(
     "/../../fixtures/policy.rs"
 ));
 
-use asc_policy_adapter_agentsight::{
+use asc_policy_translator_agentsight::{
     ACTPLANE_POLICY_MEDIA_TYPE, AGENTSIGHT_BINDING_PLAN_FORMAT,
-    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AgentSightAdapter, AgentSightBindingPlan,
-    AgentSightScopePlan,
+    AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AgentSightBindingPlan, AgentSightScopePlan,
+    AgentSightTranslator,
 };
 use asc_policy_types::Validate;
 use asc_policy_types::authoring::{Action, Effect, Resource};
@@ -48,7 +48,7 @@ fn complete_binding_translates_to_the_frozen_agentsight_output() {
     binding.validate().unwrap();
     assert_eq!(serde_json::to_value(&binding).unwrap(), fixture_json);
 
-    let outcome = AgentSightAdapter.translate(&binding).unwrap();
+    let outcome = AgentSightTranslator.translate(&binding).unwrap();
     let TranslationOutcome::Translated(plan) = outcome else {
         panic!("expected translated target plan");
     };
@@ -87,15 +87,15 @@ fn complete_binding_translates_to_the_frozen_agentsight_output() {
 #[test]
 fn translation_is_deterministic_for_the_complete_binding() {
     let binding = complete_binding_fixture();
-    let first = AgentSightAdapter.translate(&binding).unwrap();
-    let second = AgentSightAdapter.translate(&binding).unwrap();
+    let first = AgentSightTranslator.translate(&binding).unwrap();
+    let second = AgentSightTranslator.translate(&binding).unwrap();
     assert_eq!(first, second);
 }
 
 #[test]
 fn source_preserves_assignment_and_pinned_instance() {
     let binding = complete_binding_fixture();
-    let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&binding).unwrap()
+    let TranslationOutcome::Translated(plan) = AgentSightTranslator.translate(&binding).unwrap()
     else {
         panic!("expected plan")
     };
@@ -115,7 +115,7 @@ fn unsupported_scope_is_rejected_without_a_target_plan() {
     let mut binding = complete_binding_fixture();
     binding.scope.selector = ScopeSelector::CgroupId { cgroup_id: 42 };
 
-    let outcome = AgentSightAdapter.translate(&binding).unwrap();
+    let outcome = AgentSightTranslator.translate(&binding).unwrap();
     let TranslationOutcome::Rejected(rejection) = outcome else {
         panic!("unsupported Scope must not produce a target plan");
     };
@@ -131,7 +131,7 @@ fn invalid_rules_produce_no_plan() {
         let mut binding = complete_binding_fixture();
         binding.policy.template = template;
         let TranslationOutcome::Rejected(rejection) =
-            AgentSightAdapter.translate(&binding).unwrap()
+            AgentSightTranslator.translate(&binding).unwrap()
         else {
             panic!("invalid template must not produce a plan");
         };
@@ -159,7 +159,7 @@ fn unsupported_rule_rejects_the_entire_policy_with_its_position() {
         }
         binding.validate().unwrap();
         let TranslationOutcome::Rejected(rejection) =
-            AgentSightAdapter.translate(&binding).unwrap()
+            AgentSightTranslator.translate(&binding).unwrap()
         else {
             panic!("must not produce a partial plan");
         };
@@ -181,7 +181,7 @@ fn explanations_are_preserved_and_cannot_inject_dsl() {
     native_template(&mut binding.policy.template).rules[0].because = Some("保护配置文件".into());
     native_template(&mut binding.policy.template).rules[1].because =
         Some("Independent reason".into());
-    let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&binding).unwrap()
+    let TranslationOutcome::Translated(plan) = AgentSightTranslator.translate(&binding).unwrap()
     else {
         panic!("expected a complete plan");
     };
@@ -193,7 +193,7 @@ fn explanations_are_preserved_and_cannot_inject_dsl() {
         native_template(&mut binding.policy.template).rules[1].because = Some(reason.into());
         binding.validate().unwrap();
         assert_eq!(
-            AgentSightAdapter.translate(&binding).unwrap(),
+            AgentSightTranslator.translate(&binding).unwrap(),
             TranslationOutcome::Rejected(asc_policy_types::target::TranslationRejection {
                 code: "RULE_1_UNSUPPORTED_ACTPLANE_REASON".into()
             })
@@ -246,7 +246,7 @@ fn target_pattern_rejections_preserve_input_validation_and_dsl_limits() {
         let binding = binding_with_files(paths);
         binding.validate().unwrap();
         let TranslationOutcome::Rejected(rejection) =
-            AgentSightAdapter.translate(&binding).unwrap()
+            AgentSightTranslator.translate(&binding).unwrap()
         else {
             panic!("unsupported pattern must not produce a target plan");
         };
@@ -273,7 +273,7 @@ fn supported_patterns_at_the_actplane_limits_are_translated() {
         let binding = binding_with_files(paths);
         binding.validate().unwrap();
         assert!(matches!(
-            AgentSightAdapter.translate(&binding).unwrap(),
+            AgentSightTranslator.translate(&binding).unwrap(),
             TranslationOutcome::Translated(_)
         ));
     }
@@ -282,13 +282,13 @@ fn supported_patterns_at_the_actplane_limits_are_translated() {
 #[test]
 fn rule_order_is_preserved_and_changed_rules_change_the_plan() {
     let original = complete_binding_fixture();
-    let expected = AgentSightAdapter.translate(&original).unwrap();
+    let expected = AgentSightTranslator.translate(&original).unwrap();
     let mut reversed = original.clone();
     native_template(&mut reversed.policy.template)
         .rules
         .reverse();
-    assert_ne!(AgentSightAdapter.translate(&reversed).unwrap(), expected);
-    let TranslationOutcome::Translated(plan) = AgentSightAdapter.translate(&reversed).unwrap()
+    assert_ne!(AgentSightTranslator.translate(&reversed).unwrap(), expected);
+    let TranslationOutcome::Translated(plan) = AgentSightTranslator.translate(&reversed).unwrap()
     else {
         panic!("expected plan");
     };
@@ -298,7 +298,7 @@ fn rule_order_is_preserved_and_changed_rules_change_the_plan() {
         "source AGENT = exec \"**\"\nrule agentseccore-unlink-0000:\n  block unlink file \"{path}\""
     )));
     assert_ne!(
-        AgentSightAdapter
+        AgentSightTranslator
             .translate(&binding_with_files(vec!["/new-policy".into()]))
             .unwrap(),
         expected
@@ -315,7 +315,7 @@ fn cedar_unconstrained_operations_are_rejected_without_a_partial_plan() {
         }
     }))
     .unwrap();
-    let TranslationOutcome::Rejected(rejection) = AgentSightAdapter.translate(&binding).unwrap()
+    let TranslationOutcome::Rejected(rejection) = AgentSightTranslator.translate(&binding).unwrap()
     else {
         panic!("unconstrained operations must not produce a partial plan");
     };
@@ -347,7 +347,7 @@ fn broader_writes_logical_predicates_and_history_never_lower_to_unconditional_un
         let binding: PreparedBinding = serde_json::from_value(wire).unwrap();
         binding.validate().unwrap();
         let TranslationOutcome::Rejected(rejection) =
-            AgentSightAdapter.translate(&binding).unwrap()
+            AgentSightTranslator.translate(&binding).unwrap()
         else {
             panic!("unsupported predicate must not disappear during translation")
         };

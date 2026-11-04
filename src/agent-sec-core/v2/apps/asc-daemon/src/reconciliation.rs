@@ -4,9 +4,9 @@ use asc_pcp::{
     BindingReconciler, RetryPolicy, StoreError, TargetDeploymentClient,
     TargetDeploymentClientFactory,
 };
-use asc_policy_adapter_agentsight::AgentSightAdapter;
 use asc_policy_repository::{BindingReconcileCatalog, BindingStateRepository};
 use asc_policy_runtime::reconciliation::{MonotonicClock, ReconciliationRuntime, RuntimeConfig};
+use asc_policy_translator_agentsight::AgentSightTranslator;
 use asc_policy_types::binding::PreparedBinding;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -46,10 +46,10 @@ fn start_policy_reconciliation_with_factory<
     factory: Arc<dyn TargetDeploymentClientFactory>,
 ) -> Result<ReconciliationRuntime, StoreError> {
     let clock = Arc::new(MonotonicClock::default());
-    let adapter = |binding: &PreparedBinding| AgentSightAdapter.translate(binding);
+    let translator = |binding: &PreparedBinding| AgentSightTranslator.translate(binding);
     let core = Arc::new(BindingReconciler::new(
         repository.clone(),
-        Arc::new(adapter),
+        Arc::new(translator),
         BTreeMap::from([("agentsight".into(), factory)]),
         "agentsight".into(),
         clock,

@@ -19,4 +19,4 @@ pub use plan::{
     AGENTSIGHT_BINDING_PLAN_SCHEMA_VERSION, AgentSightBindingPlan, AgentSightPolicyPlan,
     AgentSightScopePlan, AgentSightSourceBinding, FILE_PROTECTION_POLICY_MEDIA_TYPE,
 };
-pub use translate::AgentSightAdapter;
+pub use translate::AgentSightTranslator;

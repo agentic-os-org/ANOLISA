@@ -1,6 +1,6 @@
 [package]
-name = "asc-policy-adapter-agentsight"
-description = "AgentSight and ActPlane target Adapter for AgentSecCore V2"
+name = "asc-policy-translator-agentsight"
+description = "AgentSight and ActPlane policy Translator for AgentSecCore V2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -8,7 +8,7 @@ Deployment Client and backend enforcement limits.
 AgentSecCore translates Cedar file-deletion and ordinary-write restrictions into
 AgentSight's structured file-protection payload. This extends the Cedar admission
 and persistence implementation at `af1bc18a9`; native JSON policies retain their
-existing DSL path. The production daemon already registers `AgentSightAdapter`
+existing DSL path. The production daemon already registers `AgentSightTranslator`
 and `AgentSightClientFactory`, so both sources use the same deployment lifecycle.
 
 ## 1. Contracts and versions
@@ -66,7 +66,7 @@ Paths must be absolute literal paths without NUL, `* ? [ ] { } \\`, duplicate
 separators, `.` or `..` components, or a trailing slash except `/`. No working
 directory, shell expansion, case folding or PAP-host filesystem resolution is
 used. A path equality does not denote a directory tree or Cedar entity UID.
-Deployment uses the existing process-tree Scope; the Adapter still rejects a
+Deployment uses the existing process-tree Scope; the Translator rejects a
 `CgroupId` selector.
 
 Exclusions belong to their target, not to the entire policy. Any other matching
@@ -213,7 +213,7 @@ Reconciler and SQLite storage formats are unchanged.
 From `v2`, run:
 
 ```sh
-cargo test -p asc-policy-adapter-agentsight -p asc-agentsight-client -p asc-pcp --locked
+cargo test -p asc-policy-translator-agentsight -p asc-agentsight-client -p asc-pcp --locked
 ```
 
 Translator tests compare supported path/operation conditions with Cedar decisions
@@ -235,11 +235,11 @@ or policy-source conversion is introduced.
 
 ## 6. Native JSON translation boundary
 
-`AgentSightAdapter::translate` reads the complete Binding snapshot. It validates
+`AgentSightTranslator::translate` reads the complete Binding snapshot. It validates
 the whole input, lowers its rules to ActPlane DSL and packages a target plan.
 It does not query the latest template, evaluate a request or perform target I/O.
 
-| AST property | Adapter accepts | Otherwise |
+| AST property | Translator accepts | Otherwise |
 |---|---|---|
 | Effect | `block` | `RULE_<index>_UNSUPPORTED_EFFECT` |
 | Category/action | `file` / `write` | `RULE_<index>_UNSUPPORTED_ACTION` |
@@ -286,9 +286,9 @@ An explicit `because` replaces the fallback reason. SecCore emits a
 `TargetBindingPlan` with format `agentsight.actplane.binding.v2`, containing source
 IDs/revisions, the DSL and the pinned process-tree attachment.
 
-Sources: [translator](../../v2/crates/asc-policy-adapter-agentsight/src/translate.rs),
-[plan](../../v2/crates/asc-policy-adapter-agentsight/src/plan.rs),
-[translation tests](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs).
+Sources: [translator](../../v2/crates/asc-policy-translator-agentsight/src/translate.rs),
+[plan](../../v2/crates/asc-policy-translator-agentsight/src/plan.rs),
+[translation tests](../../v2/crates/asc-policy-translator-agentsight/tests/translation.rs).
 
 ## 7. AgentSight backend deployment details
 
