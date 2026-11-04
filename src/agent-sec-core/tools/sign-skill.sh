@@ -151,7 +151,8 @@ generate_manifest() {
             continue
         fi
 
-        local file_hash=$(compute_file_hash "$file")
+        local file_hash
+        file_hash=$(compute_file_hash "$file")
 
         # Add comma if not first element
         if [[ "$first" == true ]]; then
