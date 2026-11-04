@@ -386,12 +386,15 @@ build_agent_sec_core_v2() {
     cp -p "${SEC_DIR}/packaging/systemd/agent-sec-core-v2.service.in" \
         "$pkg_dir/packaging/systemd/"
 
-    # V2 layer: the Rust workspace replaces agent-sec-cli/ and the two Python
-    # wrapper scripts, which are therefore absent from this tarball.
+    # Include the Rust workspace and the source inputs for the optional runtime recipe.
     tar -cf - -C "${SEC_DIR}" \
         --exclude='target' \
+        --exclude='.venv' --exclude='__pycache__' \
         v2/ \
+        skill-score-runtime/ \
+        agent-sec-cli/src/agent_sec_cli/{__init__.py,skill_score,code_scanner,model_service} \
         packaging/systemd/skillsec.json | tar -xf - -C "$pkg_dir/"
+    git -C "$ROOT_DIR" rev-parse HEAD > "$pkg_dir/packaging/skill-score/rpm-source-commit"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
 

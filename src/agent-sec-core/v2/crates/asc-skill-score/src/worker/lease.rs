@@ -47,7 +47,13 @@ impl Lease {
         .map_err(|e| Error::at_path("runtime.requests.open", &root.join("requests"), e))?
         .into();
         let records = requests.metadata()?;
-        if records.mode() & 0o7777 != 0o1777 || records.uid() != directory.metadata()?.uid() {
+        let lock_meta = lock.metadata()?;
+        let access = (records.mode() & 0o7777, lock_meta.mode() & 0o7777);
+        if records.uid() != directory.metadata()?.uid()
+            || lock_meta.uid() != records.uid()
+            || !(access == (0o1700, 0o600)
+                || (access == (0o1770, 0o640) && lock_meta.gid() == records.gid()))
+        {
             return Err(Error::Runtime(
                 "scoring request recovery directory is unsafe; repair the component".into(),
             ));
@@ -140,12 +146,31 @@ mod tests {
 
     pub(super) fn fixture(root: &Path) -> Result<Lease> {
         std::fs::write(root.join(".lifecycle.lock"), "")?;
+        std::fs::set_permissions(
+            root.join(".lifecycle.lock"),
+            std::fs::Permissions::from_mode(0o640),
+        )?;
         std::fs::create_dir(root.join("requests"))?;
         std::fs::set_permissions(
             root.join("requests"),
-            std::fs::Permissions::from_mode(0o1777),
+            std::fs::Permissions::from_mode(0o1770),
         )?;
         Lease::acquire(&root.canonicalize()?)
+    }
+
+    #[test]
+    fn owner_only_docker_is_supported_and_world_access_requires_repair() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        drop(fixture(root.path())?);
+        let requests = root.path().join("requests");
+        let lock = root.path().join(".lifecycle.lock");
+        std::fs::set_permissions(&requests, std::fs::Permissions::from_mode(0o1700))?;
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600))?;
+        drop(Lease::acquire(&root.path().canonicalize()?)?);
+        std::fs::set_permissions(&requests, std::fs::Permissions::from_mode(0o1777))?;
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644))?;
+        assert!(Lease::acquire(&root.path().canonicalize()?).is_err());
+        Ok(())
     }
 
     #[test]

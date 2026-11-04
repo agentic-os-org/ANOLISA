@@ -1,5 +1,7 @@
 //! Explicit local native assessment; only dynamic execution uses the optional worker.
 
+mod install;
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,8 @@ pub struct SkillScoreCommand {
 
 #[derive(Debug, Subcommand)]
 enum ScoreAction {
+    /// Install the optional execution runtime using the system package owner.
+    InstallRuntime,
     /// Plan an assessment of one local Skill directory.
     Plan {
         skill_dir: PathBuf,
@@ -38,6 +42,15 @@ enum ScoreAction {
 impl SkillScoreCommand {
     /// Execute the explicitly requested native local assessment without a daemon fallback.
     pub fn execute(&self) -> u8 {
+        if matches!(self.action, ScoreAction::InstallRuntime) {
+            return match install::install() {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("skill-score: {error}");
+                    1
+                }
+            };
+        }
         match self.run_native() {
             Ok(code) => code,
             Err(error) => {
@@ -66,6 +79,9 @@ impl SkillScoreCommand {
     ) -> asc_skill_score::Result<Input<'_>> {
         use std::io::Read as _;
         let (task, skill, output_file, evidence_dir) = match &self.action {
+            ScoreAction::InstallRuntime => {
+                unreachable!("installation is dispatched before assessment")
+            }
             ScoreAction::Plan {
                 skill_dir,
                 output_file,
