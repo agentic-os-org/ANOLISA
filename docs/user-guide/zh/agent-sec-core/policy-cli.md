@@ -129,6 +129,8 @@ agent-sec-cli intent propose \
 - 路径使用 `resource.path`、`context.input.program/cwd`，不使用 File UID。
   前端接受规范绝对字符串的 `==`/`!=`，或仅在目录末尾含 `/*` 通配符的 `like`。
   动态或非规范路径、未绑定模板、模型自报 Subject/File 身份及可选 `@id` 之外的注解均被拒绝。
+  路径属性只能从上述接收者直接读取，`{r: resource}.r.path` 这类 record 投影会被拒绝；
+  与资源类型不匹配的 action 也会校验失败，与 Policy admission 保持一致。
 - 提示词要求将无法表达的必要身份、条件、审批或义务保留于 `unresolved`，不能改成
   无条件 permit。工具调用不能替换为程序启动，裸程序名不能通过 PATH 猜测。
   这是模型指令，不是确定性的完整性或冲突检查。
@@ -143,6 +145,7 @@ agent-sec-cli intent propose \
 
 `--format text` 为默认值，输出原任务、模型 Cedar 草稿、`unresolved`、已校验 Cedar、
 安全提示及有效期。`--format cedar` 输出待审 Cedar，注释中附未解决要求；
+仅当 stdout 是终端时转义 Cedar 中的控制字符，重定向或管道输出保留模型原文；
 `--format json` 输出完整结果。
 模型 policy 为空时，`artifact.text` 为空。任何模式都不会读取键盘输入，也不发起审批。
 默认通信预算为 45 秒；模型调用最多 30 秒，调大 `--timeout-ms` 不会延长模型预算。

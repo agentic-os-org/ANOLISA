@@ -135,7 +135,7 @@ impl Propose {
         if self.task.trim().is_empty() || self.task.len() > INTENT_TASK_BYTES {
             return Err(IntentFailure::Limit);
         }
-        let result = self.propose(socket, timeout, &self.task)?;
+        let result = self.propose(socket, timeout, interrupted, &self.task)?;
         check_interrupt(interrupted)?;
         if let IntentProposeResult::Candidate { candidate } = &result {
             render::validate(candidate, &self.task, self.ttl)?;
@@ -153,6 +153,7 @@ impl Propose {
         &self,
         socket: &Path,
         timeout: Duration,
+        interrupted: &AtomicBool,
         task: &str,
     ) -> Result<IntentProposeResult, IntentFailure> {
         let params = IntentProposeParams {
@@ -178,8 +179,15 @@ impl Propose {
             io::stderr(),
             "The task text will be sent to the configured model and may incur charges; file contents are never read or sent."
         )?;
-        let response = asc_daemon_client::call(socket, &request, timeout)
-            .map_err(|_| IntentFailure::Transport)?;
+        // The call polls the SIGINT flag, so Ctrl-C ends the wait instead of waiting for the
+        // response or the whole timeout.
+        let response = asc_daemon_client::call_interruptible(socket, &request, timeout, || {
+            interrupted.load(Ordering::Relaxed)
+        })
+        .map_err(|error| match error {
+            asc_daemon_client::ClientError::Interrupted => IntentFailure::Interrupted,
+            _ => IntentFailure::Transport,
+        })?;
         let value = match response {
             DaemonResponse::Success(response) => response.result,
             DaemonResponse::Error(response) => {

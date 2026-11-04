@@ -159,7 +159,10 @@ back to a local model.
   The frontend accepts canonical absolute literals with `==`/`!=`, or `like`
   patterns whose only wildcard is the trailing directory `/*`. Dynamic and
   noncanonical path expressions, unbound templates, model-supplied Subject/File
-  identities and annotations other than optional `@id` are rejected.
+  identities and annotations other than optional `@id` are rejected. Path
+  attributes must be read directly from those receivers; a record projection such
+  as `{r: resource}.r.path` is rejected, and an action that cannot apply to the
+  resource type fails validation, matching policy admission.
 - The prompt requires necessary identities, conditions, approvals and obligations
   that cannot be expressed to remain in `unresolved`, without unconditional permits
   replacing them. Tool invocation must not be substituted with program execution;
@@ -181,7 +184,8 @@ back to a local model.
 Default `--format text` displays the original task, model Cedar draft, `unresolved`,
 validated Cedar, safety notes and expiry. `--format cedar`
 prints the candidate Cedar with unresolved requirements in comments; `--format json` prints
-the complete result. If the model policy is empty,
+the complete result. Cedar control characters are escaped only while stdout is a terminal;
+redirected or piped output keeps the model text unchanged. If the model policy is empty,
 `artifact.text` is empty. No format prompts for input or requests approval.
 Communication defaults to 45 seconds; the model has at most 30 seconds, unaffected
 by increasing `--timeout-ms`. `--ttl` accepts `1..=1800` seconds, default `1800`,

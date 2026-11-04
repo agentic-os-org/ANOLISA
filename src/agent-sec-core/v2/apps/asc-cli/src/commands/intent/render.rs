@@ -8,7 +8,8 @@ use asc_intent::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use std::io::{self, Write as _};
+use std::borrow::Cow;
+use std::io::{self, IsTerminal as _, Write as _};
 
 use super::{Format, IntentFailure};
 
@@ -112,9 +113,16 @@ pub(super) fn render(
         (Format::Cedar, IntentProposeResult::Candidate { candidate }) => {
             writeln!(
                 out,
-                "// CANDIDATE: not approved; not effective.\n// unresolved: {}\n{}",
-                terminal_json(&candidate["draft"]["unresolved"])?,
-                cedar_text(candidate)?
+                "// CANDIDATE: not approved; not effective.\n// unresolved: {}",
+                terminal_json(&candidate["draft"]["unresolved"])?
+            )?;
+            // Cedar comments may carry ESC/OSC sequences that the parser ignores but a terminal
+            // executes, including clipboard writes. Only a display surface is escaped; pipes and
+            // files keep the export byte-for-byte.
+            writeln!(
+                out,
+                "{}",
+                display(cedar_text(candidate)?, out.is_terminal())
             )?;
         }
         (Format::Cedar, _) => writeln!(
@@ -247,6 +255,14 @@ fn terminal_json(value: &Value) -> Result<String, IntentFailure> {
         })
         .collect())
 }
+/// Returns model text unchanged for pipes and files, escaped when a terminal would interpret it.
+fn display(text: &str, terminal: bool) -> Cow<'_, str> {
+    if terminal {
+        Cow::Owned(escape(text))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
 fn direction_control(ch: char) -> bool {
     matches!(ch, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
@@ -334,6 +350,16 @@ mod tests {
         let encoded = terminal_json(&original).unwrap();
         assert!(!encoded.contains('\u{202e}'));
         assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), original);
+    }
+
+    #[test]
+    fn model_text_is_escaped_only_for_a_terminal() {
+        let forged = "permit(principal, action, resource); // \x1b]52;c;Zm9v\x07\u{202e}";
+        assert_eq!(display(forged, false), forged);
+        let shown = display(forged, true);
+        assert!(!shown.chars().any(char::is_control));
+        assert!(!shown.contains('\u{202e}'));
+        assert!(shown.contains("\\u{1b}") && shown.contains("\\u{202e}"));
     }
 
     #[test]

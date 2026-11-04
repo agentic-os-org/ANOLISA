@@ -1,6 +1,8 @@
 //! Validates model-generated Cedar; it appends no rules and does not enforce policies.
 
-use cedar_policy::{PolicySet, PrincipalConstraint, Schema, ValidationMode, Validator};
+use cedar_policy::{
+    PolicySet, PrincipalConstraint, Schema, ValidationMode, ValidationWarning, Validator,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -75,10 +77,13 @@ pub fn prepare_policy(model_text: &str) -> Result<Artifact, PolicyError> {
     }
     let (schema, _) =
         Schema::from_cedarschema_str(CEDAR_SCHEMA).map_err(|_| PolicyError::Validation)?;
-    if !Validator::new(schema)
-        .validate(&policies, ValidationMode::Strict)
-        .validation_passed()
-    {
+    let validation = Validator::new(schema).validate(&policies, ValidationMode::Strict);
+    // Policy admission rejects an action that cannot apply to the resource type; the SDK reports
+    // it as a warning, so `validation_passed` alone would emit a forbid that restricts nothing.
+    let inapplicable_action = validation
+        .validation_warnings()
+        .any(|warning| matches!(warning, ValidationWarning::InvalidActionApplication(_)));
+    if !validation.validation_passed() || inapplicable_action {
         return Err(PolicyError::Validation);
     }
     Ok(Artifact {
@@ -136,6 +141,21 @@ fn path_attribute(value: &Value) -> bool {
 fn check_expression(value: &Value, depth: usize) -> Result<(), PolicyError> {
     if depth > 128 {
         return Err(PolicyError::TooLarge);
+    }
+    // A path-carrying attribute must be read from its canonical receiver. A record projection
+    // such as `{r: resource}.r.path` reaches the same string while hiding it from the checks
+    // below, so any other receiver is rejected instead of being compared by shape.
+    if let Some(attribute) = value["."]["attr"].as_str() {
+        let canonical = match attribute {
+            "path" => value["."]["left"] == json!({"Var": "resource"}),
+            "cwd" | "program" => {
+                value["."]["left"] == json!({".": {"left": {"Var": "context"}, "attr": "input"}})
+            }
+            _ => true,
+        };
+        if !canonical {
+            return Err(PolicyError::InvalidPath);
+        }
     }
     for op in ["==", "!="] {
         if let Some(binary) = value.get(op) {

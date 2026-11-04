@@ -33,6 +33,23 @@ pub fn call(
     request: &DaemonRequest,
     timeout: Duration,
 ) -> Result<DaemonResponse, ClientError> {
+    call_interruptible(socket, request, timeout, || false)
+}
+
+/// [`call`] with an interrupt check while waiting for the response.
+///
+/// `cancelled` is polled between reads, so a signal handler can end the wait without a second
+/// timeout. The request may already be executing when it fires: the caller must neither retry
+/// nor treat the interruption as proof that the request was not applied.
+///
+/// # Errors
+/// As [`call`], plus [`ClientError::Interrupted`].
+pub fn call_interruptible(
+    socket: &Path,
+    request: &DaemonRequest,
+    timeout: Duration,
+    cancelled: impl Fn() -> bool,
+) -> Result<DaemonResponse, ClientError> {
     let parent = request
         .trace_context
         .as_ref()
@@ -78,7 +95,7 @@ pub fn call(
         } else {
             None
         };
-        let result = call_wire(socket, &wire, timeout);
+        let result = call_wire(socket, &wire, timeout, &cancelled);
         if result.is_err() {
             asc_observability::mark_error("client_failed");
         } else {
@@ -97,9 +114,13 @@ fn call_wire(
     socket: &Path,
     request: &DaemonRequest,
     timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<DaemonResponse, ClientError> {
     if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
         return Err(ClientError::InvalidTimeout);
+    }
+    if cancelled() {
+        return Err(ClientError::Interrupted);
     }
     let mut payload = serde_json::to_vec(request).map_err(ClientError::Encode)?;
     payload.push(b'\n');
@@ -125,6 +146,9 @@ fn call_wire(
     let mut write_started = false;
     let mut pending = payload.as_slice();
     while !pending.is_empty() {
+        if cancelled() {
+            return Err(ClientError::Interrupted);
+        }
         stream
             .set_write_timeout(Some(remaining(deadline, write_started)?))
             .map_err(|error| transport_error(error, write_started))?;
@@ -137,7 +161,7 @@ fn call_wire(
             Err(error) => return Err(transport_error(error, true)),
         }
     }
-    read_response(&mut stream, deadline)
+    read_response(&mut stream, deadline, cancelled)
 }
 
 #[cfg(target_os = "linux")]
@@ -197,6 +221,7 @@ fn transport_error(error: io::Error, request_may_have_executed: bool) -> ClientE
 fn read_response(
     stream: &mut UnixStream,
     deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<DaemonResponse, ClientError> {
     let mut frame = Vec::new();
     let mut chunk = [0_u8; 8192];
@@ -207,6 +232,9 @@ fn read_response(
     // platform without touching socket options after the response begins.
     stream.set_nonblocking(true).map_err(ClientError::Io)?;
     loop {
+        if cancelled() {
+            return Err(ClientError::Interrupted);
+        }
         let count = match stream.read(&mut chunk) {
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -267,6 +295,9 @@ pub enum ClientError {
         /// True once any request write has been attempted.
         request_may_have_executed: bool,
     },
+    /// The caller interrupted the wait; the request may have executed.
+    #[error("daemon call interrupted; request may have executed; not retried")]
+    Interrupted,
     /// Write/read failures do not prove the operation failed to execute.
     #[error("daemon I/O failed; request may have executed; not retried: {0}")]
     Io(io::Error),

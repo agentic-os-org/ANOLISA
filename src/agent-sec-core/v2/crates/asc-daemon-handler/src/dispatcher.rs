@@ -298,8 +298,24 @@ impl RequestDispatcher for DaemonDispatcher {
         }
 
         let peer = PeerCredentials::new(request.peer.uid(), request.peer.gid(), request.peer.pid());
-        let decoded = serde_json::from_slice::<DaemonRequest>(&request.payload);
-        let Some(decoded) = decoded.ok().filter(|_| {
+        let decoded = serde_json::from_slice::<DaemonRequest>(&request.payload).ok();
+        // Intent carries its own byte budget, which has to be classified before the shared frame
+        // budget: the shared budget counts the LF the transport strips, so a frame that only
+        // exceeds the intent limit would otherwise be reported as a malformed envelope.
+        if decoded
+            .as_ref()
+            .is_some_and(|decoded| exceeds_intent_budget(&request.payload, &decoded.method))
+        {
+            return write_response(
+                response,
+                &DaemonResponse::<serde_json::Value>::error(
+                    request_id,
+                    error_code::RESOURCE_EXHAUSTED,
+                    "intent request exceeds byte limit",
+                ),
+            );
+        }
+        let Some(decoded) = decoded.filter(|_| {
             // After strict decoding, a small frame fits both independent budgets.
             // Transport strips LF, so reserve one byte even on this fast path.
             request.payload.len() < asc_daemon_protocol::CONTEXT_FRAME_BYTES
@@ -316,18 +332,6 @@ impl RequestDispatcher for DaemonDispatcher {
                 )
             });
         };
-        if decoded.method == method::INTENT_PROPOSE
-            && request.payload.len() >= asc_daemon_protocol::intent::INTENT_REQUEST_BYTES
-        {
-            return write_response(
-                response,
-                &DaemonResponse::<serde_json::Value>::error(
-                    request_id,
-                    error_code::RESOURCE_EXHAUSTED,
-                    "intent request exceeds byte limit",
-                ),
-            );
-        }
         let parent = request_parent(&decoded);
         let method = decoded.method.clone();
         request_scope(parent, &method, || {
@@ -357,6 +361,13 @@ impl RequestDispatcher for DaemonDispatcher {
 pub(crate) fn new_request_id() -> RequestId {
     RequestId::new(uuid::Uuid::new_v4().to_string())
         .expect("UUID request identities are always non-empty")
+}
+
+/// Intent's own byte budget, counted exactly as the transport budget counts the stripped LF.
+fn exceeds_intent_budget(payload: &[u8], method_name: &str) -> bool {
+    method_name == method::INTENT_PROPOSE
+        && payload.len() + usize::from(payload.last() != Some(&b'\n'))
+            > asc_daemon_protocol::intent::INTENT_REQUEST_BYTES
 }
 
 pub(crate) fn write_response<T: serde::Serialize>(
@@ -446,5 +457,24 @@ fn record_result(result: &DaemonResponse) {
             };
             asc_observability::mark_error(category);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intent_budget_is_counted_including_the_stripped_line_feed() {
+        let budget = asc_daemon_protocol::intent::INTENT_REQUEST_BYTES;
+        let at_limit = vec![b' '; budget - 1];
+        assert!(!exceeds_intent_budget(&at_limit, method::INTENT_PROPOSE));
+        let mut over = at_limit;
+        over.push(b' ');
+        assert!(exceeds_intent_budget(&over, method::INTENT_PROPOSE));
+        assert!(!exceeds_intent_budget(&over, "health"));
+        over.pop();
+        over.push(b'\n');
+        assert!(!exceeds_intent_budget(&over, method::INTENT_PROPOSE));
     }
 }
