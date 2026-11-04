@@ -81,8 +81,8 @@ class PackagingLayout(unittest.TestCase):
             {
                 "usr/bin/agent-memory",
                 "usr/lib/systemd/user/anolisa-memory@.service",
-                "usr/share/agent-memory/default.toml",
-                "usr/share/agent-memory/mcp-servers/agent-memory.json",
+                "usr/share/anolisa/agent-memory/default.toml",
+                "usr/share/anolisa/agent-memory/mcp-servers/agent-memory.json",
                 "usr/share/doc/agent-memory/LICENSE",
             },
         )
@@ -107,6 +107,25 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse((self.destination / "usr/libexec").exists())
         self.assertNotIn("unexpected-activation-or-build", result.stderr)
 
+    def test_install_preserves_other_channels_adapter_files(self) -> None:
+        adapter = self.destination / "usr/share/anolisa/adapters/agent-memory"
+        dist = adapter / "openclaw/dist"
+        dist.mkdir(parents=True)
+        metadata = dist / "build-meta.json"
+        metadata.write_text('{"provenance":"installed-by-anolisa-cli"}\n')
+        extra = adapter / "openclaw/CLI-OWNED.txt"
+        extra.write_text("keep CLI-owned data\n")
+        index = dist / "index.js"
+        index.write_text("old bundle\n")
+
+        result = self.make("install")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(metadata.read_text(), '{"provenance":"installed-by-anolisa-cli"}\n')
+        self.assertEqual(extra.read_text(), "keep CLI-owned data\n")
+        self.assertEqual(index.read_text(), "export default {};\n")
+        self.assertTrue((adapter / "manifest.json").is_file())
+
     def test_missing_plugin_input_blocks_complete_install_before_core_writes(self) -> None:
         (self.source / "adapters/agent-memory/openclaw/dist/index.js").unlink()
         result = self.make("install")
@@ -125,7 +144,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
     def test_core_ignores_unselected_plugin_destination_links(self) -> None:
-        adapter = self.destination / "usr/libexec/agent-memory/adapters"
+        adapter = self.destination / "usr/share/anolisa/adapters/agent-memory"
         adapter.parent.mkdir(parents=True)
         outside = self.work / "outside-plugin"
         outside.mkdir()
@@ -147,7 +166,7 @@ class PackagingLayout(unittest.TestCase):
         self.assertTrue(binary.is_symlink())
         self.assertEqual(outside.read_text(), "preserve")
         self.assertTrue(
-            (self.destination / "usr/libexec/agent-memory/adapters/manifest.json").is_file()
+            (self.destination / "usr/share/anolisa/adapters/agent-memory/manifest.json").is_file()
         )
 
     def test_selected_groups_preserve_destination_validation(self) -> None:
@@ -291,6 +310,46 @@ class PackagingLayout(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_direct_adapter_staging_rejects_linked_payload_paths_before_writing(self) -> None:
+        for kind in ("leaf", "directory", "ancestor"):
+            with self.subTest(kind=kind):
+                outside = self.work / f"outside-{kind}"
+                outside.mkdir()
+                sentinel = outside / "index.js"
+                sentinel.write_text("preserve outside data\n")
+                destination = self.work / f"direct-{kind}"
+                if kind == "ancestor":
+                    destination.symlink_to(outside, target_is_directory=True)
+                    destination /= "adapters"
+                else:
+                    linked = destination / "openclaw/dist"
+                    if kind == "leaf":
+                        linked /= "index.js"
+                    linked.parent.mkdir(parents=True)
+                    linked.symlink_to(
+                        sentinel if kind == "leaf" else outside,
+                        target_is_directory=kind == "directory",
+                    )
+                before = set(destination.rglob("*"))
+
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(self.source / "packaging/stage-adapter.py"),
+                        str(self.source / "adapters/agent-memory"),
+                        str(destination),
+                    ],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("symlink", result.stderr)
+                self.assertEqual(sentinel.read_text(), "preserve outside data\n")
+                self.assertEqual(set(outside.iterdir()), {sentinel})
+                self.assertEqual(set(destination.rglob("*")), before)
+
     def test_shared_destination_ignores_other_components_links(self) -> None:
         binary_directory = self.destination / "usr/bin"
         binary_directory.mkdir(parents=True)
@@ -393,12 +452,13 @@ class PackagingLayout(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"PREFIX={home}/.local", result.stdout)
-                self.assertIn(f"DATADIR={home}/.local/share/agent-memory", result.stdout)
+                self.assertIn(f"DATADIR={home}/.local/share/anolisa/agent-memory", result.stdout)
                 staged_home = self.destination / str(home).lstrip("/")
                 self.assertTrue((staged_home / ".local/bin/agent-memory").is_file())
                 self.assertTrue(
                     (
-                        staged_home / ".local/share/agent-memory/adapters/openclaw/dist/index.js"
+                        staged_home
+                        / ".local/share/anolisa/adapters/agent-memory/openclaw/dist/index.js"
                     ).is_file()
                 )
                 self.assertTrue(
@@ -462,7 +522,11 @@ class PackagingLayout(unittest.TestCase):
             {
                 "INSTALL_PROFILE": "system",
                 "PREFIX": "/usr/local",
-                "AWPRJ": "anolisa",
+            },
+            {
+                "INSTALL_PROFILE": "system",
+                "PREFIX": "/usr/local",
+                "AWPRJ": "",
             },
             {
                 "INSTALL_PROFILE": "system",
@@ -474,7 +538,12 @@ class PackagingLayout(unittest.TestCase):
                 "INSTALL_PROFILE": "user",
                 "PREFIX": str(self.work / "home/.local"),
                 "XDG_DATA_HOME": str(data),
-                "AWPRJ": "anolisa",
+            },
+            {
+                "INSTALL_PROFILE": "user",
+                "PREFIX": str(self.work / "home/.local"),
+                "XDG_DATA_HOME": str(data),
+                "AWPRJ": "",
             },
             {
                 "INSTALL_PROFILE": "system",
@@ -515,20 +584,32 @@ class PackagingLayout(unittest.TestCase):
                 self.assertTrue(other_link.is_symlink())
                 for path in installed:
                     self.assertFalse(path.exists(), path)
+                remaining = {
+                    path
+                    for path in self.destination.rglob("*")
+                    if path.is_file() or path.is_symlink()
+                }
+                self.assertEqual(remaining, {user_file, other_link, sentinel})
                 shutil.rmtree(self.destination)
 
     def test_uninstall_rejects_linked_plugin_ancestor_before_removing_core(self) -> None:
-        result = self.make("install-core")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        adapter = self.destination / "usr/libexec/agent-memory/adapters"
-        adapter.parent.mkdir(parents=True)
-        outside = self.work / "outside"
-        outside.mkdir()
-        adapter.symlink_to(outside, target_is_directory=True)
-        result = self.make("uninstall")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertTrue((self.destination / "usr/bin/agent-memory").is_file())
-        self.assertTrue(adapter.is_symlink())
+        for namespace, relative in (
+            ("anolisa", "usr/share/anolisa/adapters/agent-memory"),
+            ("", "usr/libexec/agent-memory/adapters"),
+        ):
+            with self.subTest(namespace=namespace):
+                result = self.make("install-core", AWPRJ=namespace)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                adapter = self.destination / relative
+                adapter.parent.mkdir(parents=True)
+                outside = self.work / f"outside-{namespace or 'legacy'}"
+                outside.mkdir()
+                adapter.symlink_to(outside, target_is_directory=True)
+                result = self.make("uninstall", AWPRJ=namespace)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue((self.destination / "usr/bin/agent-memory").is_file())
+                self.assertTrue(adapter.is_symlink())
+                shutil.rmtree(self.destination)
 
     def test_system_install_ignores_user_xdg_roots(self) -> None:
         home = self.work / "home"
@@ -546,7 +627,9 @@ class PackagingLayout(unittest.TestCase):
             (self.destination / "usr/lib/systemd/user/anolisa-memory@.service").is_file()
         )
         self.assertTrue(
-            (self.destination / "usr/share/agent-memory/mcp-servers/agent-memory.json").is_file()
+            (
+                self.destination / "usr/share/anolisa/agent-memory/mcp-servers/agent-memory.json"
+            ).is_file()
         )
         self.assertFalse((self.destination / str(data).lstrip("/")).exists())
         self.assertFalse(home.exists())
@@ -596,9 +679,9 @@ class PackagingLayout(unittest.TestCase):
                     selected = explicit or ("system" if uid == 0 else "user")
                     prefix = "/usr/local" if selected == "system" else str(home / ".local")
                     resource = (
-                        "/usr/local/share/agent-memory"
+                        "/usr/local/share/anolisa/agent-memory"
                         if selected == "system"
-                        else str(data / "agent-memory")
+                        else str(data / "anolisa/agent-memory")
                     )
                     self.assertIn(f"INSTALL_PROFILE={selected}\n", result.stdout)
                     self.assertIn(f"PREFIX={prefix}\n", result.stdout)
@@ -694,7 +777,7 @@ class PackagingLayout(unittest.TestCase):
             else Path("/usr/local/bin")
         )
         self.assertTrue((self.destination / str(legacy_bin).lstrip("/") / COMPONENT.name).is_file())
-        self.assertIn("DATADIR=/usr/local/share/" + COMPONENT.name, result.stdout)
+        self.assertIn("DATADIR=/usr/local/share/anolisa/" + COMPONENT.name, result.stdout)
 
     def test_root_entry_works_from_archived_source_without_monorepo(self) -> None:
         archive = self.work / "source.tar"

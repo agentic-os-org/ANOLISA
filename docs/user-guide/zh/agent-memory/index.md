@@ -74,6 +74,10 @@ make install       # install to ~/.local
 
 以普通用户运行上述命令，可执行文件安装到 `~/.local/bin/agent-memory`。
 
+源码安装默认使用 `anolisa` 命名空间。旧源码安装的文件仍保留在原布局中；
+使用 `make install AWPRJ=` 继续管理原布局，或先带上原安装的路径覆盖参数运行
+`make uninstall AWPRJ=`，再安装到新的默认布局。
+
 构建依赖：Rust ≥ 1.85（edition 2024；CI 钉到 1.89 与 monorepo 共享 toolchain）、cmake（libgit2 vendored 构建）、systemd-devel（journald 审计 fan-out）。
 
 ### 跨平台开发
@@ -108,14 +112,18 @@ make remote-test    # 同上 + 跑测试 + clippy
 }
 ```
 
-`/usr/share/anolisa/mcp-servers/agent-memory.json` 描述符列出工具名，支持自动发现的客户端可直接识别。
+描述符列出工具名，支持自动发现的客户端可直接识别。普通用户源码安装的路径为
+`${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/agent-memory/mcp-servers/agent-memory.json`；
+系统级源码安装默认使用
+`/usr/local/share/anolisa/agent-memory/mcp-servers/agent-memory.json`。
+RPM 使用 `/usr/share/anolisa/mcp-servers/agent-memory.json`。
 
 ### OpenClaw
 
 以普通用户从源码安装后，使用以下命令注册插件，替换下文的 RPM 路径：
 
 ```bash
-bash "${XDG_DATA_HOME:-$HOME/.local/share}/agent-memory/adapters/openclaw/scripts/install.sh"
+bash "${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/adapters/agent-memory/openclaw/scripts/install.sh"
 openclaw gateway restart
 ```
 

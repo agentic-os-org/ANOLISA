@@ -90,7 +90,7 @@ class ComponentDeliveryInterface(unittest.TestCase):
             "agentsight": "",
             "skillfs": "",
             "ws-ckpt": "",
-            "agent-memory": "",
+            "agent-memory": "anolisa",
         }
         for component in COMPONENTS:
             with self.subTest(component=component):

@@ -16,11 +16,13 @@ Without an explicit `INSTALL_PROFILE`, effective UID 0 selects system installati
 with `PREFIX=/usr/local`; other UIDs select user installation with
 `PREFIX=$HOME/.local`. User resources, documentation and the MCP descriptor use
 `${XDG_DATA_HOME:-$HOME/.local/share}` and the user unit under its `systemd/user/`.
-The standalone user plugin bundle defaults to `DATADIR/adapters`; standalone
-system installations use `LIBEXECDIR/adapters`. With `AWPRJ`, both profiles use
-`<AWPRJ>/adapters/agent-memory` under their data root when `DATADIR` uses its
-default value; a different `DATADIR` places the bundle under `DATADIR/adapters`.
-An explicit `ADAPTERDIR` overrides the default.
+`AWPRJ` defaults to `anolisa`. With explicit `AWPRJ=`, user plugin bundles use
+`DATADIR/adapters` and system installations use
+`<PREFIX>/libexec/agent-memory/adapters` through the default `LIBEXECDIR`.
+With a nonempty `AWPRJ`, both profiles use `<AWPRJ>/adapters/agent-memory` under
+their data root when `DATADIR` uses its default value; a different `DATADIR`
+places the bundle under `DATADIR/adapters`. An explicit `ADAPTERDIR` overrides
+the default.
 Explicit path variables take precedence. Keep `PREFIX` independent of the XDG
 data root; `DESTDIR` only prepends a temporary root. RPM installs retain `/usr`; package staging must explicitly select `INSTALL_PROFILE=system`.
 Do not infer profiles from `PREFIX`, migrate runtime paths, or treat
@@ -59,6 +61,11 @@ installation time for both user and system layouts. The raw MCP descriptor uses
 input. The complete raw contract requires ANOLISA 0.3.21 or later. Keep the unit
 identity, session/config paths and opt-in activation policy unchanged when
 adjusting delivery paths.
+
+The standalone source layout intentionally keeps the MCP descriptor under
+`DATADIR/mcp-servers` (`<data_root>/anolisa/agent-memory/mcp-servers` by default).
+RPM, raw and `PROFILE=legacy-anolisa` use the shared
+`<data_root>/anolisa/mcp-servers` directory. `MCPDIR` can override the source path.
 
 ## Raw builds and integration metadata
 
