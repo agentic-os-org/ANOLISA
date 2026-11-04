@@ -218,7 +218,7 @@ stage_sec_core_payload() {
         packaging/ | tar -xf - -C "$pkg_dir/"
     # linux-sandbox uses these path dependencies in both V1 and V2 builds.
     tar -cf - -C "${SEC_DIR}" --exclude='target' \
-        v2/Cargo.toml v2/crates/asc-policy-types v2/crates/asc-foundation-types \
+        v2/Cargo.toml v2/crates/asc-os-permission-types v2/crates/asc-sandbox-types v2/crates/asc-foundation-types \
         | tar -xf - -C "$pkg_dir/"
     [ -f "${SEC_DIR}/LICENSE" ] && cp "${SEC_DIR}/LICENSE" "$pkg_dir/"
     [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"

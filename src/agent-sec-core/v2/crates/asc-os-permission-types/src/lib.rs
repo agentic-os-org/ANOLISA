@@ -1,6 +1,8 @@
-//! Fixed OS permissions for one sandbox lifetime.
+//! OS permissions shared by authorization and enforcement.
 
-use crate::{Validate, ValidationError};
+#![forbid(unsafe_code)]
+
+pub use asc_foundation_types::{Validate, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Versioned permissions shared by requests and execution backends.

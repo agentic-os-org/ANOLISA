@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
 use crate::error::{Result, SandboxError};
-use asc_policy_types::{
+use asc_sandbox_types::{
     BackendStatus, ExecutionSpec, FileRight, NetworkMode, PathFact, RuleEffect, Validate,
 };
 

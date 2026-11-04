@@ -32,6 +32,7 @@ tracing.workspace = true
 asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
+asc-os-permission-types = { workspace = true }
 asc-policy-types = { workspace = true }
 asc-security-events = { workspace = true }
 clap = { workspace = true }

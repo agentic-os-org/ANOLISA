@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::PathBuf;
 
-use asc_policy_types::permissions::os::OsPermissionSet;
+use asc_os_permission_types::OsPermissionSet;
 use clap::{Args, Subcommand};
 
 const MAX_PERMISSION_BYTES: u64 = 4 * 1024 * 1024;

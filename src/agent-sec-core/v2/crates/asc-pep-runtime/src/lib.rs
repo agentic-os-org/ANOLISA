@@ -10,7 +10,7 @@ pub use linux_sandbox::{SandboxBackend, execute, prepare_launch, prepare_path_fa
 pub enum PepError {
     /// Invalid or unsupported permission contract.
     #[error("invalid sandbox input: {0}")]
-    Validation(#[from] asc_policy_types::ValidationError),
+    Validation(#[from] asc_sandbox_types::ValidationError),
     /// Local preparation or process-control failure.
     #[error("sandbox I/O failed: {0}")]
     Io(#[from] std::io::Error),

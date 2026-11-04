@@ -243,6 +243,7 @@ dependencies = [
  "asc-foundation-types",
  "asc-model-client",
  "asc-observability",
+ "asc-os-permission-types",
  "asc-pap",
  "asc-pep-runtime",
  "asc-persistence-sqlite",
@@ -472,6 +473,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-os-permission-types"
+version = "1.1.2"
+dependencies = [
+ "asc-foundation-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "asc-pap"
 version = "1.1.2"
 dependencies = [
@@ -508,7 +518,7 @@ dependencies = [
 name = "asc-pep-runtime"
 version = "1.1.2"
 dependencies = [
- "asc-policy-types",
+ "asc-sandbox-types",
  "linux-sandbox",
  "rustix",
  "serde_json",
@@ -623,6 +633,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "asc-sandbox-types"
+version = "1.1.2"
+dependencies = [
+ "asc-os-permission-types",
+ "serde",
 ]
 
 [[package]]
@@ -1753,7 +1771,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "linux-sandbox"
 version = "0.0.0"
 dependencies = [
- "asc-policy-types",
+ "asc-sandbox-types",
  "clap",
  "dirs",
  "libc",

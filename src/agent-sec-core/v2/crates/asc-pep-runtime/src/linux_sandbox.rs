@@ -1,7 +1,7 @@
 //! Converts explicit permissions to a strict backend invocation without a PDP.
 
 use crate::PepError;
-use asc_policy_types::{
+use asc_sandbox_types::{
     ExecutionResult, ExecutionSpec, LaunchSpec, OsPermissionSet, PathFact, Validate,
     ValidationError,
 };

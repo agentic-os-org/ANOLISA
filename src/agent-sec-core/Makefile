@@ -183,7 +183,7 @@ test-rust-v2-sandbox-coverage: ## Cover V2 sandbox contracts, execution and CLI 
 	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo llvm-cov --locked --no-fail-fast \
 		--cobertura --output-path ../rust-v2-coverage.xml \
 		--features asc-daemon-client/testing \
-		-p asc-policy-types -p asc-pep-runtime -p asc-cli
+		-p asc-os-permission-types -p asc-sandbox-types -p asc-pep-runtime -p asc-cli
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.

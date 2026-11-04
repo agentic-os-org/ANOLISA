@@ -1,7 +1,7 @@
 //! Supervises the helper process group and verifies its installation handshake.
 
 use crate::PepError;
-use asc_policy_types::{ExecutionResult, ExecutionSpec};
+use asc_sandbox_types::{ExecutionResult, ExecutionSpec};
 use std::path::Path;
 
 /// Waits for the isolated process tree without changing host signal handlers.
@@ -25,7 +25,7 @@ pub fn run(_helper: &Path, _spec: &ExecutionSpec) -> Result<ExecutionResult, Pep
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{ExecutionResult, ExecutionSpec, Path, PepError};
-    use asc_policy_types::BackendStatus;
+    use asc_sandbox_types::BackendStatus;
     use rustix::fs::{MemfdFlags, SealFlags};
     use rustix::process::{Pid, Signal, kill_process, kill_process_group};
     use std::fs::File;

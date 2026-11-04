@@ -1,0 +1,16 @@
+[package]
+name = "asc-sandbox-types"
+description = "Sandbox invocation and backend handshake contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-os-permission-types = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true
