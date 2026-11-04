@@ -89,7 +89,7 @@ class ComponentDeliveryInterface(unittest.TestCase):
             "agent-sec-core": "anolisa",
             "agentsight": "",
             "skillfs": "anolisa",
-            "ws-ckpt": "",
+            "ws-ckpt": "anolisa",
             "agent-memory": "anolisa",
         }
         for component in COMPONENTS:

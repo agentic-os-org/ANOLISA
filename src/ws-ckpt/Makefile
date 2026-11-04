@@ -53,4 +53,4 @@ help:
 	@echo "Variables:"
 	@echo "  INSTALL_PROFILE=user|system"
 	@echo "  DESTDIR= optional temporary installation root"
-	@echo "  PREFIX=/usr/local AWPRJ= install prefix and optional namespace"
+	@echo "  PREFIX=/usr/local AWPRJ=anolisa install prefix and namespace"
