@@ -161,6 +161,71 @@ fn long_invalid_email_domains_do_not_hide_later_addresses() {
 }
 
 #[test]
+fn candidate_search_preserves_python_boundaries_and_redacted_spans() {
+    let scanner = PiiScanner::new().unwrap();
+    let padding = "x".repeat(8192);
+    let token = "İabcdefghijklmno";
+    let key = "LTAIabcdefghijkl";
+    let id = "１１０１０５１９４９１２３１００２Ｘ";
+    let phone = "13800138000";
+    for (kind, left, value, right, masked) in [
+        (
+            "bearer_token",
+            "🙂bEaReR\u{1c}",
+            token,
+            "",
+            Some("İabc...[REDACTED]...lmno"),
+        ),
+        ("bearer_token", "中Bearer ", token, "", None),
+        (
+            "aliyun_access_key_id",
+            "\u{11f02}",
+            key,
+            "!",
+            Some("LTAI...[REDACTED]...ijkl"),
+        ),
+        ("aliyun_access_key_id", "_", key, "", None),
+        ("aliyun_access_key_id", "", key, "中", None),
+        ("cn_id", "中", id, "!", Some("１１０***********００２Ｘ")),
+        ("cn_id", "９", id, "", None),
+        ("cn_id", "", id, "_", None),
+        // Reject the country-prefixed candidate, then retry inside it.
+        ("phone_cn", "０86-", phone, "中", Some("138****8000")),
+        ("phone_cn", "", phone, "９", None),
+    ] {
+        let prefix = format!("{padding}\n{left}");
+        let text = format!("{prefix}{value}{right}");
+        let report = scanner
+            .scan(
+                &text,
+                &PiiScanOptions {
+                    redact_output: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+        assert_eq!(
+            report.findings.len(),
+            usize::from(masked.is_some()),
+            "{kind}: {left}{value}{right}"
+        );
+        if let Some(finding) = report.findings.first() {
+            let start = prefix.chars().count();
+            assert_eq!(finding.pii_type, kind);
+            assert_eq!(
+                (finding.span.start, finding.span.end),
+                (start, start + value.chars().count())
+            );
+        }
+        assert_eq!(
+            report.redacted_text.unwrap(),
+            format!("{prefix}{}{right}", masked.unwrap_or(value))
+        );
+    }
+}
+
+#[test]
 fn mixed_unicode_positions_and_overlapping_credentials_are_redacted() {
     let scanner = PiiScanner::new().unwrap();
     let text = "🙂e\u{301} 密码=abcdefghijklmnop api_key=sk-abcdefghijklmnopqrstuvwxyz123456";
