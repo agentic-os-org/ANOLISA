@@ -194,11 +194,20 @@ def process_worksheet(path: str, at: int, delta: int) -> int:
             # Also update formulas in every row (formulas can reference any row)
             for cell_el in row_el:
                 f_el = cell_el.find(_tag("f"))
-                if f_el is not None and f_el.text:
-                    new_f = shift_formula(f_el.text, at, delta)
-                    if new_f != f_el.text:
-                        f_el.text = new_f
-                        changes += 1
+                if f_el is not None:
+                    if f_el.text:
+                        new_f = shift_formula(f_el.text, at, delta)
+                        if new_f != f_el.text:
+                            f_el.text = new_f
+                            changes += 1
+                    # 共享/数组公式的 ref 声明了 master 覆盖的范围；消费单元格随行移动后
+                    # 必须一起移动，否则它们落在声明范围之外，Excel 会提示修复文件。
+                    ref = f_el.get("ref")
+                    if ref:
+                        new_ref = shift_sqref(ref, at, delta)
+                        if new_ref != ref:
+                            f_el.set("ref", new_ref)
+                            changes += 1
 
     # 3. <mergeCell ref="A5:C7">
     for mc in root.iter(_tag("mergeCell")):
