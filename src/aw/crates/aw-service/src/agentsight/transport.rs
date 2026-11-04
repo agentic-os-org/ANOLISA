@@ -133,6 +133,12 @@ impl Transport {
             300..=399 => return Err(Error::Redirect),
             _ => return Err(Error::Http(status)),
         }
+        // A 404 from this API conflates source absence and missing data, and its body is not
+        // evidence: neither its declared type nor its length may decide the outcome, and it is
+        // never charged against the remaining budget.
+        if status == 404 {
+            return Ok((status, Value::Null));
+        }
         if response
             .content_length()
             .is_some_and(|len| len > *remaining as u64)
@@ -163,12 +169,7 @@ impl Transport {
             return Err(Error::Limit);
         }
         *remaining -= bytes.len();
-        // A 404 from this API conflates source absence and missing data. Its body is not evidence.
-        let value = if status == 404 {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?
-        };
+        let value = serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?;
         Ok((status, value))
     }
 }

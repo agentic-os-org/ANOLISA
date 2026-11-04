@@ -23,6 +23,7 @@ struct Reply {
     status: u16,
     body: String,
     headers: String,
+    content_type: Option<String>,
     delay: Duration,
     body_delay: Duration,
     omit_length: bool,
@@ -34,6 +35,7 @@ impl Reply {
             status: 200,
             body: value.to_string(),
             headers: String::new(),
+            content_type: Some("application/json".into()),
             delay: Duration::ZERO,
             body_delay: Duration::ZERO,
             omit_length: false,
@@ -92,7 +94,14 @@ impl Fixture {
                 } else {
                     format!("Content-Length: {}\r\n", reply.body.len())
                 };
-                let header = format!("HTTP/1.1 {} Fixture\r\nContent-Type: application/json\r\n{}Connection: close\r\n{}\r\n", reply.status, length, reply.headers);
+                let content_type = match reply.content_type.as_deref() {
+                    Some(value) => format!("Content-Type: {value}\r\n"),
+                    None => String::new(),
+                };
+                let header = format!(
+                    "HTTP/1.1 {} Fixture\r\n{}{}Connection: close\r\n{}\r\n",
+                    reply.status, content_type, length, reply.headers
+                );
                 let _ = stream.write_all(header.as_bytes());
                 let until = Instant::now() + reply.body_delay;
                 while Instant::now() < until {
@@ -234,6 +243,46 @@ fn empty_content_is_available_but_missing_record_or_store_is_unknown() {
                 reason_code: "record_or_store_unavailable"
             }
         ));
+    }
+}
+
+#[test]
+fn a_404_body_is_not_parsed_or_charged_as_source_evidence() {
+    // A detail-API 404 means "missing record or store", so its body must not decide the
+    // outcome: an HTML body, a missing content type and a length past the budget all have
+    // to reach the same unknown outcome instead of a failure or a limit gap.
+    let mut html = replies(json!({}));
+    html[1].status = 404;
+    html[1].body = "<html><body>not found</body></html>".into();
+    html[1].content_type = Some("text/html".into());
+
+    let mut untyped = replies(json!({}));
+    untyped[1].status = 404;
+    untyped[1].body = "not found".into();
+    untyped[1].content_type = None;
+
+    let mut oversized = replies(json!({}));
+    oversized[1].status = 404;
+    oversized[1].body = "x".repeat(4096);
+    oversized[1].content_type = None;
+
+    for responses in [html, untyped, oversized] {
+        let fixture = Fixture::new(responses);
+        let result = fixture
+            .client()
+            .trajectory_until("s", Instant::now() + Duration::from_secs(5), 512)
+            .unwrap();
+        assert!(matches!(
+            result.outcome,
+            Outcome::Unknown {
+                reason_code: "record_or_store_unavailable"
+            }
+        ));
+        assert_eq!(
+            fixture.requests.lock().unwrap().len(),
+            2,
+            "one startup probe and one query, never a retry"
+        );
     }
 }
 
