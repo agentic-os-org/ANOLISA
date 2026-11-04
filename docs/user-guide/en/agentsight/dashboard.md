@@ -31,6 +31,10 @@ Token authentication is on by default.
 Saved Tokenless record lists require the Dashboard credential even on loopback. This changes
 metadata access control; the existing page, login flow and statistics calculation remain unchanged.
 
+`GET /api/preferences?llm=true` also requires the Dashboard credential on loopback because it uses
+the server-saved LLM credential. Rule-only preference queries, `/api/preferences/export`, and
+`/api/preferences/turns` keep their existing access behavior.
+
 ![Dashboard login screen](../../../images/agentsight/en/dashboard-login.png)
 
 The token is generated on the first `serve` start (64 hex characters) and stored next to the
