@@ -153,10 +153,12 @@ fn list_skips_symlinked_task_entries() {
 }
 
 #[test]
-fn close_refuses_traversal_task_id() {
-    // save_task derives the destination from task.id, parsed off disk and
-    // never re-validated: a traversal id is a write-out-of-sandbox primitive
-    // that needs no symlink at all.
+fn close_normalizes_a_traversal_frontmatter_id() {
+    // save_task derives its destination from task.id, and read_task now takes
+    // that id from the file name, so a traversal id in the frontmatter never
+    // reaches the write path: the write lands on the real file instead of
+    // escaping the mount. The escape assertion below stays, because the
+    // property it protects is the one this test exists for.
     let (_tmp, svc) = setup();
     let tasks = svc.mount.root.join("tasks");
     std::fs::create_dir_all(&tasks).unwrap();
@@ -169,8 +171,8 @@ fn close_refuses_traversal_task_id() {
 
     let result = agent_memory::tools::memory_task_close(&svc, "planted", Some("done"));
     assert!(
-        result.is_err(),
-        "close must refuse a task id that traverses out of the mount, got: {:?}",
+        result.is_ok(),
+        "close must act on the real file, got: {:?}",
         result.as_ref().map_err(|e| e.to_string())
     );
     assert!(
@@ -178,6 +180,12 @@ fn close_refuses_traversal_task_id() {
         "nothing may be written outside mount.root, found {:?}",
         marker
     );
+    let written = std::fs::read_to_string(tasks.join("planted.md")).unwrap();
+    assert!(
+        written.contains("id: planted"),
+        "frontmatter id not normalised: {written}"
+    );
+    assert!(written.contains("status: done"));
 }
 
 #[test]
