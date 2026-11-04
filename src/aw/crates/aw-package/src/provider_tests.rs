@@ -233,6 +233,60 @@ fn unmanaged_configuration_needs_no_raw_registration_or_installed_core() {
 }
 
 #[test]
+fn configuration_rejects_symlinked_state_spellings_before_publication() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path().canonicalize().unwrap();
+    let state = root.join("state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&state, &link).unwrap();
+    let config = root.join("aw.yaml");
+    for suffix in ["", "/", "///", "/.", "/missing"] {
+        let selected = PathBuf::from(format!("{}{suffix}", link.display()));
+        let error = crate::configure(&Settings {
+            prefix: &fixture.prefix,
+            config: &config,
+            state: &selected,
+            policy: Policy::None,
+            qoder: Some(std::path::Path::new("/bin/true")),
+            node: None,
+            openclaw: None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("symlink in installation path"));
+        assert!(!config.exists());
+        assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+    }
+    crate::configure(&Settings {
+        prefix: &fixture.prefix,
+        config: &config,
+        state: &state,
+        policy: Policy::None,
+        qoder: Some(std::path::Path::new("/bin/true")),
+        node: None,
+        openclaw: None,
+    })
+    .unwrap();
+    assert!(config.is_file());
+}
+
+#[test]
+fn provider_plans_reject_symlinked_prefix_spellings_without_mutation() {
+    let fixture = Fixture::new();
+    fs::create_dir(&fixture.prefix).unwrap();
+    let link = fixture.directory.path().join("link");
+    std::os::unix::fs::symlink(&fixture.prefix, &link).unwrap();
+    for suffix in ["", "/", "///", "/.", "/missing"] {
+        let selected = PathBuf::from(format!("{}{suffix}", link.display()));
+        assert!(plan::install(&fixture.paths, &fixture.bundle, &selected).is_err());
+        assert!(plan::uninstall(&fixture.paths, &selected, &[]).is_err());
+        assert!(!fixture.paths.root.exists());
+        assert_eq!(fs::read_dir(&fixture.prefix).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn checked_planning_binds_admission_to_the_descriptor_used_for_execution() {
     let fixture = Fixture::new();
     let addition = crate::store::plan::install_checked(

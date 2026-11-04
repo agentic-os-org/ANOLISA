@@ -14,6 +14,9 @@ use std::{
 
 /// Validate an absolute path without symbolic ancestors.
 pub fn absolute(path: &Path) -> Result<()> {
+    // Normalize separators before lstat: a trailing slash makes lstat follow a
+    // final symlink, which would hide it from the ancestor check.
+    let path = path.components().as_path();
     require(
         path.is_absolute() && !path.components().any(|p| matches!(p, Component::ParentDir)),
         format!("expected absolute path without '..': {}", path.display()),
@@ -155,6 +158,44 @@ pub fn verify_payload_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{os::unix::fs::symlink, path::PathBuf};
+
+    #[test]
+    fn trailing_separators_do_not_hide_final_or_ancestor_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let real = root.join("real");
+        fs::create_dir_all(real.join("child")).unwrap();
+        let link = root.join("link");
+        symlink(&real, &link).unwrap();
+        for suffix in ["", "/", "///", "/.", "/./", "/child", "/child/", "/missing"] {
+            let path = PathBuf::from(format!("{}{suffix}", link.display()));
+            let error = absolute(&path).unwrap_err();
+            assert!(error.to_string().contains("symlink in installation path"));
+        }
+    }
+
+    #[test]
+    fn absolute_paths_preserve_directory_and_parent_traversal_rules() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        for suffix in ["", "/", "///", "/.", "/./", "/real//.", "/missing"] {
+            let path = PathBuf::from(format!("{}{suffix}", root.display()));
+            absolute(&path).unwrap();
+        }
+        absolute(Path::new("/")).unwrap();
+        for path in [
+            root.join(".."),
+            root.join("real/../real"),
+            PathBuf::from("real/"),
+        ] {
+            let error = absolute(&path).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("expected absolute path without '..'"));
+        }
+    }
 
     #[test]
     fn failed_lock_acquisition_or_validation_leaves_no_published_lock() {
