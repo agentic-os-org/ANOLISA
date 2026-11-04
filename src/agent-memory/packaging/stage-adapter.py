@@ -48,16 +48,21 @@ def stage(source: Path, destination: Path) -> None:
     if destination == source or destination in source.parents or source in destination.parents:
         raise ValueError("adapter source and destination must not overlap")
     files = runtime_files(source)
-    if destination.is_symlink():
-        raise ValueError("adapter destination must not be a symlink")
-    if destination.exists():
-        shutil.rmtree(destination)
+    for relative in files:
+        target = destination / relative
+        for path in (target, *target.parents):
+            if path.is_symlink():
+                raise ValueError(f"adapter payload path must not be a symlink: {path}")
+    # Without an installation manifest, undeclared files may belong to another
+    # installer or an older payload and must not be pruned.
+    directories = {destination}
     for relative, source_file in files.items():
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_file, target)
         target.chmod(0o755 if source_file.suffix == ".sh" else 0o644)
-    for directory in [destination, *(path for path in destination.rglob("*") if path.is_dir())]:
+        directories.update(destination / parent for parent in relative.parents)
+    for directory in directories:
         directory.chmod(0o755)
 
 

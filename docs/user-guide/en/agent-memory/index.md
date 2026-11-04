@@ -76,6 +76,11 @@ make install       # install to ~/.local
 Run these commands as your normal user; the executable is installed to
 `~/.local/bin/agent-memory`.
 
+Source installs default to the `anolisa` namespace. Existing files from an
+earlier source installation stay in the previous layout; use `make install AWPRJ=`
+to keep managing that layout, or run `make uninstall AWPRJ=` with the original
+path overrides before installing into the new default layout.
+
 Build deps: Rust ≥ 1.85 (edition 2024; CI pins 1.89 to share the monorepo toolchain), cmake (libgit2 vendored), systemd-devel (journald audit fan-out).
 
 ### Cross-platform development
@@ -110,7 +115,12 @@ Add to your MCP config:
 }
 ```
 
-`/usr/share/anolisa/mcp-servers/agent-memory.json` lists tool names for auto-discovering clients.
+The descriptor lists tool names for auto-discovering clients. A source
+installation for your user places it at
+`${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/agent-memory/mcp-servers/agent-memory.json`;
+a system source installation uses
+`/usr/local/share/anolisa/agent-memory/mcp-servers/agent-memory.json` by default.
+RPM uses `/usr/share/anolisa/mcp-servers/agent-memory.json`.
 
 ### OpenClaw
 
@@ -118,7 +128,7 @@ For a source installation for your user, register the plugin with this
 command instead of the RPM path shown below:
 
 ```bash
-bash "${XDG_DATA_HOME:-$HOME/.local/share}/agent-memory/adapters/openclaw/scripts/install.sh"
+bash "${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/adapters/agent-memory/openclaw/scripts/install.sh"
 openclaw gateway restart
 ```
 

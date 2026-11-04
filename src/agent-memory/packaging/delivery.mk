@@ -10,7 +10,7 @@ delivery-input = $(if $(filter command line environment override,$(origin $(1)))
 # Installation profiles affect delivered files, never runtime config/data paths.
 DELIVERY_PROFILE := $(call delivery-input,PROFILE,standalone)
 DELIVERY_INSTALL_PROFILE := $(call delivery-input,INSTALL_PROFILE,$(if $(filter 0,$(shell id -u)),system,user))
-DELIVERY_AWPRJ := $(call delivery-input,AWPRJ,$(if $(filter legacy-anolisa,$(DELIVERY_PROFILE)),anolisa,))
+DELIVERY_AWPRJ := $(call delivery-input,AWPRJ,anolisa)
 ifeq ($(DELIVERY_INSTALL_PROFILE),user)
 DELIVERY_PREFIX := $(call delivery-input,PREFIX,$(HOME)/.local)
 DELIVERY_DATA_ROOT := $(if $(strip $(XDG_DATA_HOME)),$(XDG_DATA_HOME),$(HOME)/.local/share)
