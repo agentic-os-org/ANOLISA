@@ -18,13 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 SYSTEMCTL = r"""import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
-args = sys.argv[2:]
+unit = sys.argv[2]
+args = sys.argv[3:]
 state = json.loads(path.read_text())
 state['calls'].append(args)
 command = args[0]
 result = 0
 output = ''
-if command == 'is-enabled':
+if command in ('is-enabled', 'is-active') and args[-1] != unit:
+    output = 'not-found' if command == 'is-enabled' else 'inactive'
+    result = 4 if command == 'is-enabled' else 3
+elif any(arg.endswith('.service') and arg != unit for arg in args):
+    pass
+elif command == 'is-enabled':
     output = state['enabled']
     result = 1 if output in ('disabled', 'masked', 'masked-runtime') else 0
 elif command == 'is-active':
@@ -127,7 +133,7 @@ class RollbackTransactions(unittest.TestCase):
         self.systemctl = self.base / "bin/systemctl"
         (self.base / "systemctl.py").write_text(SYSTEMCTL)
         self.systemctl.write_text(
-            f'#!/bin/sh\nexec "{sys.executable}" "{self.base}/systemctl.py" "{self.state}" "$@"\n'
+            f'#!/bin/sh\nexec "{sys.executable}" "{self.base}/systemctl.py" "{self.state}" "{self.unit}" "$@"\n'
         )
         self.systemctl.chmod(0o755)
         self.rpm = self.base / "bin/rpm"
@@ -146,11 +152,11 @@ class RollbackTransactions(unittest.TestCase):
                 "rpmspec",
                 "-P",
                 "--define",
-                "systemd_post() systemctl preset agent-sec-core.service || :",
+                "systemd_post() systemctl preset %1 || :",
                 "--define",
-                'systemd_preun() if [ "$1" -eq 0 ]; then systemctl disable --now agent-sec-core.service; fi',
+                'systemd_preun() if [ "$1" -eq 0 ]; then systemctl disable --now %1; fi',
                 "--define",
-                'systemd_postun_with_restart() systemctl daemon-reload; if [ "$1" -ge 1 ]; then systemctl try-restart agent-sec-core.service || :; fi',
+                'systemd_postun_with_restart() systemctl daemon-reload; if [ "$1" -ge 1 ]; then systemctl try-restart %1 || :; fi',
                 str(spec),
             ]
         )
