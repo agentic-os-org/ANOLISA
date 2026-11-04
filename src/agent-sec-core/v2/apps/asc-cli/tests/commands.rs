@@ -726,17 +726,63 @@ fn scope_create_encodes_name_and_path_assignments() {
     );
 }
 
+#[test]
+fn gateway_transport_and_invalid_secret_paths_fail_without_reading_credentials() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let directory = common::Directory::new();
+    let socket = directory.0.join("absent.sock");
+    for arguments in [
+        vec![OsString::from("status")],
+        vec![
+            "key".into(),
+            "add".into(),
+            "github".into(),
+            "--secret-file".into(),
+            OsString::from_vec(b"/unread-secret-\xff".to_vec()),
+        ],
+    ] {
+        let mut args = vec![
+            OsString::from("--socket"),
+            socket.as_os_str().into(),
+            "gateway".into(),
+        ];
+        args.extend(arguments);
+        let cli =
+            Cli::parse_from(std::iter::once(OsString::from("agent-sec-cli")).chain(args.clone()))
+                .unwrap();
+        assert!(matches!(cli.request(), Err(InputError::Gateway(_))));
+        let output = common::run(&args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.starts_with("agent-sec-cli: "), "{error}");
+        let expected = if args.last().unwrap() == "status" {
+            "connection unavailable"
+        } else {
+            "--secret-file must be UTF-8"
+        };
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("unread-secret"), "{error}");
+    }
+    assert!(!socket.exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_cli_preserves_minimal_results_and_conflicts() {
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
-    // The real client authenticates the server UID; do not add a test bypass.
-    if rustix::process::geteuid().as_raw() != 0 {
+    if !cfg!(target_os = "linux")
+        || (rustix::process::geteuid().as_raw() != 0
+            && std::env::var_os("AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK").as_deref()
+                != Some(std::ffi::OsStr::new("1")))
+    {
         return;
     }
     let directory = common::Directory::new();
     let socket = directory.0.join("gateway.sock");
+    let relative_secret = std::path::absolute("gateway token").unwrap();
     let cases: &[(&[&str], &str, Value, Value)] = &[
         (&["enable"], "gateway.enable", json!({}), json!({})),
         (&["disable"], "gateway.disable", json!({}), json!({})),
@@ -756,6 +802,12 @@ async fn gateway_cli_preserves_minimal_results_and_conflicts() {
             &["key", "add", "github", "--secret-file", "/root/a b"],
             "gateway.key.add",
             json!({"credential":"github","secretFile":"/root/a b"}),
+            json!({"credential":"github"}),
+        ),
+        (
+            &["key", "add", "github", "--secret-file", "gateway token"],
+            "gateway.key.add",
+            json!({"credential":"github","secretFile":relative_secret}),
             json!({"credential":"github"}),
         ),
         (
@@ -811,22 +863,26 @@ async fn gateway_cli_preserves_minimal_results_and_conflicts() {
         .await
         .unwrap();
         let output = cli.await.unwrap();
-        if result.is_null() {
-            assert_eq!(output.status.code(), Some(1));
-            assert!(output.stdout.is_empty());
-            assert_eq!(
-                serde_json::from_slice::<Value>(&output.stderr).unwrap(),
-                response
-            );
-        } else {
-            assert_eq!(output.status.code(), Some(0));
-            assert!(output.stderr.is_empty());
-            assert_eq!(
-                serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-                *result
-            );
-        }
+        assert_gateway_output(&output, result, &response);
         drop(listener);
         std::fs::remove_file(&socket).unwrap();
+    }
+}
+
+fn assert_gateway_output(output: &std::process::Output, result: &Value, response: &Value) {
+    if result.is_null() {
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+            *response
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            *result
+        );
     }
 }
