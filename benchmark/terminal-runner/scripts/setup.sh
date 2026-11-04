@@ -19,7 +19,7 @@
 # Environment variables (all optional):
 #   HARBOR_URL     Harbor upstream Git URL
 #                  (default: https://github.com/harbor-framework/harbor.git)
-#   HARBOR_REF     Harbor branch/tag (default: main)
+#   HARBOR_REF     Harbor branch/tag (default: v0.15.0)
 #   DATASET_URL    Dataset Git URL
 #                  (default: https://huggingface.co/datasets/harborframework/terminal-bench-2.0)
 #   DATASET_REF    Dataset branch/tag (default: main)
