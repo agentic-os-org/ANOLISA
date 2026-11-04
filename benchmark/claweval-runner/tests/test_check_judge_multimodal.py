@@ -15,14 +15,19 @@
 """Tests for scripts/check_judge_multimodal.py.
 
 Covers:
-- check_multimodal returns True when model responds with a color name
-- check_multimodal returns False on NO_IMAGE / empty / None responses
-- Embedded probe PNG is valid and 1x1
+- the probe image decodes to a single opaque red pixel
+- only the single-word ``red`` reply counts as seeing the image
+- wrong colors, refusals, empty replies and prose fail
+- the CLI exits 0/PASS only for that reply, and sends the fixture in the request
 """
 from __future__ import annotations
 
+import base64
+import struct
 import sys
+import zlib
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,86 +35,141 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from check_judge_multimodal import TINY_RED_PNG_B64, check_multimodal  # noqa: E402
+import check_judge_multimodal
+
+# Referenced through the module so a missing helper fails the test that needs it
+# instead of aborting collection for the whole file.
+probe = check_judge_multimodal
+
+
+def _mock_client(response_text: str | None) -> tuple[object, MagicMock]:
+    """Build a client factory that returns *response_text*."""
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock()]
+    mock_resp.choices[0].message.content = response_text
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_resp
+
+    def factory(model: str, base_url: str, api_key: str) -> MagicMock:
+        return mock_client
+
+    return factory, mock_client
 
 
 class TestCheckMultimodal:
-    """Unit tests for check_multimodal using mocked OpenAI client."""
+    """The verdict follows the single-word reply contract of the prompt."""
 
-    @staticmethod
-    def _mock_client(response_text: str):
-        """Build a mock client factory that returns *response_text*."""
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock()]
-        mock_resp.choices[0].message.content = response_text
+    @pytest.mark.parametrize("response_text", ["red", "Red", "RED", "  red  ", "red.", "\nRed\n"])
+    def test_single_word_red_is_vision_capable(self, response_text: str) -> None:
+        factory, _ = _mock_client(response_text)
 
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_resp
-
-        def factory(model, base_url, api_key):
-            return mock_client
-
-        return factory, mock_client
-
-    # ── Success cases ──────────────────────────────────────────────
+        assert probe.check_multimodal("test-model", "http://x", "k", factory) is True
 
     @pytest.mark.parametrize("response_text", [
-        "red",
-        "Red",
-        "RED",
-        "  red  ",
-        "the color is red",
+        "blue",  # wrong color for an opaque red pixel
+        "OK",  # unrelated acknowledgement
+        "the color is red",  # prose, not the requested single word
         "I see red",
+        "I cannot see images",  # explicit refusal
+        "NO_IMAGE",
+        "no_image because I'm text-only",
+        "",
+        None,
+        "   \n  ",
     ])
-    def test_model_sees_image(self, response_text):
-        """Model returns a color name -> vision capable."""
-        factory, mock_client = self._mock_client(response_text)
-        assert check_multimodal("test-model", "http://x", "k", factory) is True
+    def test_everything_else_is_not_vision_capable(self, response_text: str | None) -> None:
+        factory, _ = _mock_client(response_text)
 
-    # ── Failure cases ──────────────────────────────────────────────
+        assert probe.check_multimodal("test-model", "http://x", "k", factory) is False
 
-    def test_model_reports_no_image(self):
-        """Model explicitly reports NO_IMAGE -> not vision capable."""
-        factory, _ = self._mock_client("NO_IMAGE")
-        assert check_multimodal("test-model", "http://x", "k", factory) is False
+    def test_request_carries_the_probe_image_and_prompt(self) -> None:
+        factory, mock_client = _mock_client("red")
 
-    def test_model_reports_no_image_lowercase(self):
-        """Case-insensitive NO_IMAGE detection."""
-        factory, _ = self._mock_client("no_image because I'm text-only")
-        assert check_multimodal("test-model", "http://x", "k", factory) is False
+        probe.check_multimodal("test-model", "http://x", "k", factory)
 
-    def test_empty_response(self):
-        """Empty response -> not vision capable."""
-        factory, _ = self._mock_client("")
-        assert check_multimodal("test-model", "http://x", "k", factory) is False
+        kwargs = mock_client.chat.completions.create.call_args.kwargs
+        parts = kwargs["messages"][0]["content"]
+        assert parts[0]["text"] == probe.PROBE_PROMPT
+        assert parts[1]["image_url"]["url"] == (
+            f"data:image/png;base64,{probe.TINY_RED_PNG_B64}"
+        )
 
-    def test_none_response(self):
-        """None response (content is None) -> not vision capable."""
-        factory, _ = self._mock_client(None)
-        assert check_multimodal("test-model", "http://x", "k", factory) is False
 
-    # ── Edge cases ─────────────────────────────────────────────────
+class TestReplyContract:
+    """The reply helper is exercised on its own as well."""
 
-    def test_whitespace_only_response(self):
-        """Whitespace-only response -> not vision capable."""
-        factory, _ = self._mock_client("   \n  ")
-        assert check_multimodal("test-model", "http://x", "k", factory) is False
+    @pytest.mark.parametrize("reply", ["red", " RED ", "red.", "Red!"])
+    def test_accepts_the_single_color_word(self, reply: str) -> None:
+        assert probe.reply_confirms_image(reply) is True
+
+    @pytest.mark.parametrize("reply", ["reddish", "red blue", "no_image", "", None, "  "])
+    def test_rejects_anything_else(self, reply: str | None) -> None:
+        assert probe.reply_confirms_image(reply) is False
 
 
 class TestProbeImage:
-    """Verify the embedded test image is valid."""
+    """The embedded fixture is a valid opaque red pixel."""
 
-    def test_image_is_valid_base64(self):
-        import base64
-        data = base64.b64decode(TINY_RED_PNG_B64)
-        # PNG magic bytes
-        assert data[:8] == b'\x89PNG\r\n\x1a\n', "Embedded probe image is not a valid PNG"
+    @staticmethod
+    def _chunks(data: bytes) -> dict[bytes, bytes]:
+        chunks: dict[bytes, bytes] = {}
+        offset = 8
+        while offset < len(data):
+            length = struct.unpack(">I", data[offset:offset + 4])[0]
+            kind = data[offset + 4:offset + 8]
+            payload = data[offset + 8:offset + 8 + length]
+            crc = struct.unpack(">I", data[offset + 8 + length:offset + 12 + length])[0]
+            assert crc == zlib.crc32(kind + payload) & 0xFFFFFFFF, f"bad CRC for {kind!r}"
+            chunks[kind] = payload
+            offset += 12 + length
+        return chunks
 
-    def test_image_is_1x1(self):
-        import base64
-        import struct
-        data = base64.b64decode(TINY_RED_PNG_B64)
-        # IHDR starts at byte 16 (8-byte signature + 4-byte length + 4-byte 'IHDR')
-        width, height = struct.unpack('>II', data[16:24])
-        assert width == 1
-        assert height == 1
+    def test_image_is_a_valid_1x1_rgba_png(self) -> None:
+        data = base64.b64decode(probe.TINY_RED_PNG_B64)
+
+        assert data[:8] == b"\x89PNG\r\n\x1a\n"
+        chunks = self._chunks(data)
+        width, height, depth, color_type = struct.unpack(">IIBB", chunks[b"IHDR"][:10])
+        assert (width, height, depth, color_type) == (1, 1, 8, 6)
+
+    def test_pixel_is_opaque_red(self) -> None:
+        data = base64.b64decode(probe.TINY_RED_PNG_B64)
+        raw = zlib.decompress(self._chunks(data)[b"IDAT"])
+
+        assert raw[0] == 0, "expected filter type 0 on the only scanline"
+        assert tuple(raw[1:5]) == (255, 0, 0, 255)
+
+
+class TestCli:
+    """The CLI reports PASS/FAIL for the verdict it computed."""
+
+    @staticmethod
+    def _run(monkeypatch: pytest.MonkeyPatch, reply: str) -> int:
+        _factory, mock_client = _mock_client(reply)
+        fake_openai = ModuleType("openai")
+        fake_openai.OpenAI = lambda api_key, base_url: mock_client  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "openai", fake_openai)
+        monkeypatch.setattr(sys, "argv", [
+            "check_judge_multimodal.py",
+            "--model", "test-model",
+            "--base-url", "http://x",
+            "--api-key", "k",
+        ])
+        with pytest.raises(SystemExit) as excinfo:
+            probe.main()
+        return int(excinfo.value.code or 0)
+
+    def test_cli_passes_for_red(self, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        assert self._run(monkeypatch, "red") == 0
+        assert "PASS" in capsys.readouterr().out
+
+    def test_cli_fails_for_a_wrong_color(self, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        assert self._run(monkeypatch, "blue") == 1
+        assert "FAIL" in capsys.readouterr().out
+
+    def test_cli_fails_for_an_explicit_refusal(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        assert self._run(monkeypatch, "I cannot see images") == 1
+        assert "FAIL" in capsys.readouterr().out
