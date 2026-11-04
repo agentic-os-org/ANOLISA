@@ -1,5 +1,8 @@
 //! Native watcher fixtures exercise real install/remove commands and service admission.
 
+#[path = "attachment_evidence.rs"]
+mod evidence;
+
 #[path = "attachment_profiles.rs"]
 mod profiles;
 
@@ -227,7 +230,9 @@ fn external_install_rejects_wrong_pid_and_shared_profile_without_writes() {
 #[test]
 fn cancelled_unconfirmed_install_retains_bridge_until_confirmed_cleanup() {
     let fixture = Fixture::new();
-    let document = fixture.document();
+    let mut document = fixture.document();
+    fixture.observation(&mut document, "qoder");
+    document["spec"]["agents"]["qoder"]["evidence"]["mode"] = json!("off");
     let service = Service::start(&fixture, &document);
     // Prepare the native fixture, then start its unconfirmed counterpart.
     let (process, _) = native(&fixture);
