@@ -226,26 +226,47 @@ async fn run(
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
+    let shutdown = ShutdownToken::new();
+    let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
     report_startup("gateway", startup_started);
-    let gateway = match asc_daemon::gateway::GatewayAdapter::system(
-        &gateway_data_dir(),
-        repository.clone(),
-    ) {
-        Ok(gateway) => Some(Arc::new(gateway)),
+    let gateway_repository = repository.clone();
+    let gateway = match tokio::task::spawn_blocking(move || {
+        asc_daemon::gateway::GatewayAdapter::system(&gateway_data_dir(), gateway_repository).map(
+            |gateway| {
+                let recovery = gateway.service().recover();
+                (Arc::new(gateway), recovery)
+            },
+        )
+    })
+    .await
+    {
+        Ok(Ok((gateway, recovery))) => {
+            if let Err(error) = recovery {
+                report_error(telemetry, &error);
+            }
+            Some(gateway)
+        }
+        Ok(Err(problem)) => {
+            report_error(telemetry, &problem);
+            None
+        }
         Err(problem) => {
             report_error(telemetry, &problem);
             None
         }
     };
+    if shutdown.is_requested() {
+        let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
+        signal_task.abort();
+        return (
+            ExitCode::SUCCESS,
+            Some(sinks::ShutdownPlan::full(durable_sinks)),
+        );
+    }
     let gateway_service = gateway.as_ref().map(|gateway| gateway.service());
     let scope_execution = gateway_service
         .as_ref()
         .map(|service| service.clone() as Arc<dyn asc_pap::ScopeExecution>);
-    if let Some(service) = &gateway_service
-        && let Err(error) = service.recover()
-    {
-        report_error(telemetry, &error);
-    }
     report_startup("policy_runtime", startup_started);
     let mut policy_runtime = match asc_daemon::start_policy_reconciliation_with_gateway(
         repository.clone(),
@@ -255,6 +276,7 @@ async fn run(
         Err(error) => {
             report_error(telemetry, &error);
             let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
+            signal_task.abort();
             return (
                 ExitCode::FAILURE,
                 Some(sinks::ShutdownPlan::full(durable_sinks)),
@@ -276,6 +298,7 @@ async fn run(
         report_error(telemetry, &error);
         let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
         drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop).await;
+        signal_task.abort();
         return (
             ExitCode::FAILURE,
             Some(sinks::ShutdownPlan::full(durable_sinks)),
@@ -291,6 +314,7 @@ async fn run(
         report_error(telemetry, &error);
         let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
         drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop).await;
+        signal_task.abort();
         return (
             ExitCode::FAILURE,
             Some(sinks::ShutdownPlan::full(durable_sinks)),
@@ -313,14 +337,7 @@ async fn run(
         skillfs.clone(),
     ));
 
-    let shutdown = ShutdownToken::new();
     let health_task = watch_policy_health(policy_runtime.enqueuer(), telemetry.reporter());
-    // The signal task is spawned before the retention catch-up so a stop
-    // signal arriving during the (unbounded) startup pass is observed at
-    // once: the catch-up then abandons admission and the daemon goes
-    // straight to the shutdown flow instead of making systemd wait out
-    // `TimeoutStopSec` and SIGKILL the process mid-catch-up.
-    let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
     // The retention lifecycle: the startup catch-up pass runs to completion
     // before `serve` admits requests (a stop signal abandons admission
     // instead), and the periodic task owns the rest. This is the

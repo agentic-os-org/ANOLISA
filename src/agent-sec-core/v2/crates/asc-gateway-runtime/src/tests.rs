@@ -66,6 +66,7 @@ struct HostLog {
     account: bool,
     account_uid: Option<u32>,
     active: bool,
+    installed_rules: Option<String>,
     processes: BTreeMap<u32, TestProcess>,
     moves: Vec<u32>,
     rules: Vec<String>,
@@ -149,6 +150,9 @@ impl Host for FakeHost {
     fn unit_active(&self, _: &str) -> bool {
         self.log().active
     }
+    fn routing_active(&self) -> Result<bool, GatewayError> {
+        Ok(self.log().installed_rules.is_some())
+    }
     fn apply_nft(&self, rules: &str) -> Result<(), GatewayError> {
         let mut log = self.log();
         log.rules.push(rules.into());
@@ -158,6 +162,7 @@ impl Host for FakeHost {
                 return Err(GatewayError::unavailable("unroute failed"));
             }
         }
+        log.installed_rules = (rules != crate::nft::render_delete()).then(|| rules.into());
         Ok(())
     }
     fn attach_to_scope(
@@ -566,6 +571,62 @@ fn initialization_and_empty_recovery_are_pure_and_import_does_not_authorize_or_i
     );
     assert!(fixture.host.log().moves.is_empty() && fixture.host.log().operations.is_empty());
 }
+#[test]
+fn missing_projection_withdraws_old_runtime_before_new_admission() {
+    for (remove_directory, remove_runtime, fail_first_withdrawal) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.old_publication();
+        let store_file = fixture.config.store_dir.join("store.json");
+        let store = fs::read(&store_file).unwrap();
+        if remove_directory {
+            fs::remove_dir_all(&fixture.config.state_dir).unwrap();
+        } else {
+            fs::remove_file(fixture.config.state_dir.join("state.json")).unwrap();
+        }
+        if remove_runtime {
+            fs::remove_dir_all(&fixture.config.runtime_dir).unwrap();
+            fixture.host.log().active = false;
+        }
+        if fail_first_withdrawal {
+            fixture.host.log().failed_operation = Some("unroute");
+            let error = GatewayService::new(
+                fixture.config.clone(),
+                Box::new(fixture.host.clone()),
+                fixture.repository.clone(),
+            )
+            .err()
+            .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cleanup responsibility retained")
+            );
+            assert!(!fixture.host.log().active);
+            assert!(!fixture.config.runtime_dir.exists());
+            assert!(fixture.host.log().installed_rules.is_some());
+            fixture.host.log().failed_operation = None;
+        }
+        let error = GatewayService::new(
+            fixture.config.clone(),
+            Box::new(fixture.host.clone()),
+            fixture.repository.clone(),
+        )
+        .err()
+        .expect("missing projection must withdraw old authorization");
+        assert!(error.to_string().contains("projection is missing"));
+        assert!(!fixture.host.log().active);
+        assert_eq!(fixture.rules(), crate::nft::render_delete());
+        assert!(!fixture.config.runtime_dir.exists());
+        assert_eq!(fs::read(&store_file).unwrap(), store);
+        assert!(!fixture.service().status(0).enabled);
+    }
+}
+
 #[test]
 fn initialization_failure_withdraws_old_publication_without_changing_state_or_store() {
     for projection_fault in ["corrupt", "unsupported", "unreadable"] {

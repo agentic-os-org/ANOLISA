@@ -802,6 +802,44 @@ impl ReconcileAttempt for RepeatedOutcome {
 }
 
 #[test]
+fn admission_deferral_preserves_budget_and_leaves_other_bindings_running() {
+    let repo =
+        Arc::new(SqlitePolicyRepository::with_binding_states(vec![record(1), record(2)]).unwrap());
+    let clock = Arc::new(TestClock::default());
+    let attempt = Arc::new(RepeatedOutcome {
+        core: core(repo.clone(), Arc::new(Client::default()), clock.clone()),
+        result: Ok(Disposition::DeferredAt { at: 0 }),
+        calls: Mutex::new(vec![]),
+    });
+    let runtime = ReconciliationRuntime::start(
+        repo.clone(),
+        attempt,
+        RuntimeConfig {
+            workers: 1,
+            max_auto_retries: 0,
+            tick_interval: Duration::from_secs(60),
+            ..RuntimeConfig::default()
+        },
+    )
+    .unwrap();
+    let queue = runtime.enqueuer();
+    for now in 0..6 {
+        wait_until(|| {
+            queue.state.lock().unwrap().entries.get(&id(1))
+                == Some(&Entry::WaitingRetry {
+                    retry_at: now + 1,
+                    retries: 0,
+                })
+                && status(&repo, 2) == Some(BindingStatus::Ready)
+        });
+        assert_eq!(repo.get_binding_state(&id(1)).unwrap(), Some(record(1)));
+        clock.0.store(now + 1, Ordering::SeqCst);
+        queue.tick(now + 1);
+    }
+    runtime.shutdown().unwrap();
+}
+
+#[test]
 fn automatic_retries_wait_and_stop_at_budget_without_blocking_other_bindings() {
     for result in [
         Ok(Disposition::Superseded),

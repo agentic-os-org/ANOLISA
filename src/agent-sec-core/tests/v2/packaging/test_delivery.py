@@ -498,6 +498,45 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((stage / "usr/share/suite/extensions/agent-sec-core").exists())
 
+    def test_gateway_uninstall_withdraws_before_removal_and_retains_files_on_failure(self):
+        commands = self.base / "commands"
+        commands.mkdir()
+        systemctl = commands / "systemctl"
+        systemctl.write_text("#!/bin/sh\nexit 0\n")
+        systemctl.chmod(0o755)
+        calls = self.base / "calls"
+        for failure in (True, False):
+            prefix = self.base / ("failed" if failure else "success")
+            result = self.make("install-core", f"PREFIX={prefix}")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            cli = prefix / "bin/agent-sec-cli"
+            unit = prefix / "lib/systemd/system/agent-sec-gateway.service"
+            addon = prefix / "share/agent-sec-core/gateway/asc_gateway_addon.py"
+            cli.write_text(
+                "#!/bin/sh\n"
+                f"test -f {shlex.quote(str(unit))} || exit 92\n"
+                f"test -f {shlex.quote(str(addon))} || exit 93\n"
+                f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}\n"
+                f"exit {1 if failure else 0}\n"
+            )
+            cli.chmod(0o755)
+            result = self.make(
+                "uninstall",
+                "-j4",
+                f"PREFIX={prefix}",
+                f"SOURCE_SYSTEMD_SYSTEM_UNIT_DIR={prefix}/lib/systemd/system",
+                env_overrides={"PATH": str(commands) + os.pathsep + os.environ["PATH"]},
+            )
+            self.assertEqual(
+                result.returncode == 0, not failure, result.stdout + result.stderr
+            )
+            self.assertEqual(cli.exists(), failure)
+            self.assertEqual(unit.exists(), failure)
+            self.assertEqual(addon.exists(), failure)
+        self.assertEqual(
+            calls.read_text().splitlines(), ["gateway disable", "gateway disable"]
+        )
+
     def test_skills_install_requires_no_core_or_plugin_inputs(self):
         for path in self.build.iterdir():
             if path.name != "skills":

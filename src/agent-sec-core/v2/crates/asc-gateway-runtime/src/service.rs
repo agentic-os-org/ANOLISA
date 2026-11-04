@@ -158,6 +158,24 @@ impl GatewayService {
     ) -> Result<Self, GatewayError> {
         let state = State::load(&config.state_dir, &config.ports)
             .map_err(|error| withdraw_on_failure(&config, host.as_ref(), error))?;
+        if !config
+            .state_dir
+            .join(crate::state::STATE_FILE_NAME)
+            .exists()
+            && (std::fs::symlink_metadata(&config.runtime_dir).is_ok()
+                || host.unit_active(&config.unit)
+                || host
+                    .routing_active()
+                    .map_err(|error| withdraw_on_failure(&config, host.as_ref(), error))?)
+        {
+            return Err(withdraw_on_failure(
+                &config,
+                host.as_ref(),
+                GatewayError::internal(
+                    "gateway projection is missing while an old data plane remains",
+                ),
+            ));
+        }
         Ok(Self {
             config,
             host,

@@ -294,8 +294,23 @@ install-gateway: ## Install prebuilt gateway assets without activation or mitmpr
 	install -m 0644 "$(GATEWAY_SOURCE_DIR)/gateway.conf" \
 		"$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d/gateway.conf"
 
-.PHONY: uninstall-gateway
-uninstall-gateway: ## Remove gateway files while retaining the standalone installation and credentials
+.PHONY: gateway-pre-uninstall uninstall-gateway
+gateway-pre-uninstall:
+	@if [ -z "$(DESTDIR)" ]; then \
+		if [ -e /run/agent-sec-gateway/active.json ] || \
+			systemctl is-active --quiet agent-sec-gateway.service 2>/dev/null || \
+			nft list table inet agent_sec_gateway >/dev/null 2>&1; then \
+			"$(BINDIR)/agent-sec-cli" gateway disable || { \
+				echo "Cannot withdraw gateway routing; run gateway disable before retrying removal." >&2; exit 1; \
+			}; \
+		fi; \
+	fi
+
+uninstall-cli-v2-source uninstall-systemd-system-source uninstall-source-v2-sandbox \
+	uninstall-source-v2-cosh-extension uninstall-codex-plugin uninstall-qoder-plugin \
+	uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-qwen-code-extension uninstall-skills: gateway-pre-uninstall
+
+uninstall-gateway: gateway-pre-uninstall ## Remove gateway files while retaining the standalone installation and credentials
 	rm -f "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-gateway.service"
 	rm -f "$(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service.d/gateway.conf"
 	rm -rf "$(DESTDIR)$(GATEWAY_DATADIR)"
