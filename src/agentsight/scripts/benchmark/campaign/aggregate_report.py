@@ -386,7 +386,14 @@ def write_recovery(
         defaultdict(dict)
     )
     for path, run in scenario_runs(items, "recovery"):
-        grouped[(run["version"], run["repetition"])][run["label"]] = (path, run)
+        version = run.get("version")
+        repetition = run.get("repetition")
+        label = run.get("label")
+        if not isinstance(version, str) or not isinstance(label, str):
+            continue
+        if not isinstance(repetition, int) or isinstance(repetition, bool):
+            continue
+        grouped[(version, repetition)][label] = (path, run)
     lines = [
         "# AgentSight 过载恢复报告",
         "",
