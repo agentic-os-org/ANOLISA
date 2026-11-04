@@ -267,6 +267,62 @@ mod tests {
     }
 
     #[test]
+    fn custom_namespace_discovers_rpm_security_extension() {
+        use crate::extension::config::flatten_hook_groups;
+        use crate::extension::{ExtensionManager, ExtensionSourceKind};
+
+        let standard = resource_dirs_for(
+            Some(Path::new("/usr/local/libexec/vendor/cosh-ng/cosh-core")),
+            None,
+            None,
+            None,
+        );
+        assert!(standard
+            .system_extensions
+            .contains(&PathBuf::from("/usr/share/anolisa/extensions")));
+
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let package = root_path.join("usr/share/anolisa/extensions/agent-sec-core");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("cosh-extension.json"),
+            r#"{
+                "name": "agent-sec-core",
+                "version": "1.1.2",
+                "hooks": {"PreToolUse": [{"hooks": [{
+                    "type": "command",
+                    "name": "sandbox-guard",
+                    "command": "python3 ${extensionPath}/hooks/sandbox-guard.py"
+                }]}]}
+            }"#,
+        )
+        .unwrap();
+        let executable = root_path.join("usr/local/libexec/vendor/cosh-ng/cosh-core");
+        let roots = resource_dirs_for(Some(&executable), None, None, None);
+        let mut extensions = Vec::new();
+        for directory in roots.system_extensions {
+            assert!(directory.starts_with(&root_path));
+            let mut manager = ExtensionManager::new_isolated(
+                root_path.join("project"),
+                Some(root_path.join("empty-user")),
+                Some(directory),
+            );
+            manager.refresh();
+            extensions.extend(manager.list().iter().cloned());
+        }
+        assert_eq!(extensions.len(), 1);
+        let extension = &extensions[0];
+        assert_eq!(extension.name, "agent-sec-core");
+        assert_eq!(extension.path, package);
+        assert_eq!(extension.source, ExtensionSourceKind::System);
+        assert!(extension.is_active);
+        let hooks = flatten_hook_groups(&extension.config.hooks.pre_tool_use);
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name.as_deref(), Some("sandbox-guard"));
+    }
+
+    #[test]
     fn recorded_standard_system_roots_keep_their_discovery_order() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("usr/libexec/anolisa/cosh-ng");
