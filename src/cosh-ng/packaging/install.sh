@@ -18,7 +18,7 @@ cosh_resolve_layout() {
         user) ;;
         *) cosh_layout_error 'INSTALL_PROFILE must be system or user'; return 1 ;;
     esac
-    AWPRJ="${AWPRJ-}"
+    AWPRJ="${AWPRJ-anolisa}"
     case "$AWPRJ" in
         '' | [a-zA-Z0-9]*) ;;
         *) cosh_layout_error 'AWPRJ must be empty or start with a letter or digit'; return 1 ;;

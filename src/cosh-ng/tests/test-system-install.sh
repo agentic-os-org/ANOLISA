@@ -29,11 +29,11 @@ layout() {
     env -u AWPRJ -u PREFIX -u INSTALL_PROFILE make --no-print-directory -s -C "$ROOT" layout "$@"
 }
 default_layout="$(layout INSTALL_PROFILE=system)"
-grep -Fxq 'AWPRJ=' <<< "$default_layout"
-grep -Fxq 'LIBEXECDIR=/usr/local/libexec/cosh-ng' <<< "$default_layout"
-grep -Fxq 'DATADIR=/usr/local/share/cosh-ng' <<< "$default_layout"
-grep -Fxq 'SKILLDIR=/usr/local/share/cosh-ng/skills' <<< "$default_layout"
-grep -Fxq 'EXTENSIONDIR=/usr/local/share/cosh-ng/extensions' <<< "$default_layout"
+grep -Fxq 'AWPRJ=anolisa' <<< "$default_layout"
+grep -Fxq 'LIBEXECDIR=/usr/local/libexec/anolisa/cosh-ng' <<< "$default_layout"
+grep -Fxq 'DATADIR=/usr/local/share/anolisa/cosh-ng' <<< "$default_layout"
+grep -Fxq 'SKILLDIR=/usr/local/share/anolisa/skills' <<< "$default_layout"
+grep -Fxq 'EXTENSIONDIR=/usr/local/share/anolisa/extensions' <<< "$default_layout"
 distribution_layout="$(layout INSTALL_PROFILE=system AWPRJ=anolisa PREFIX=/opt/vendor/)"
 grep -Fxq 'LIBEXECDIR=/opt/vendor/libexec/anolisa/cosh-ng' <<< "$distribution_layout"
 grep -Fxq 'SKILLDIR=/opt/vendor/share/anolisa/skills' <<< "$distribution_layout"
@@ -41,10 +41,10 @@ grep -Fxq 'EXTENSIONDIR=/opt/vendor/share/anolisa/extensions' <<< "$distribution
 mkdir -p "$TMP/user-home"
 user_layout="$(HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" layout INSTALL_PROFILE=user)"
 grep -Fxq "PREFIX=$TMP/user-home/.local" <<< "$user_layout"
-grep -Fxq "LIBEXECDIR=$TMP/user-home/.local/libexec/cosh-ng" <<< "$user_layout"
-grep -Fxq "DATADIR=$TMP/xdg-data/cosh-ng" <<< "$user_layout"
+grep -Fxq "LIBEXECDIR=$TMP/user-home/.local/libexec/anolisa/cosh-ng" <<< "$user_layout"
+grep -Fxq "DATADIR=$TMP/xdg-data/anolisa/cosh-ng" <<< "$user_layout"
 fallback_layout="$(HOME="$TMP/user-home" XDG_DATA_HOME= layout INSTALL_PROFILE=user)"
-grep -Fxq "DATADIR=$TMP/user-home/.local/share/cosh-ng" <<< "$fallback_layout"
+grep -Fxq "DATADIR=$TMP/user-home/.local/share/anolisa/cosh-ng" <<< "$fallback_layout"
 XDG_DATA_HOME=relative layout INSTALL_PROFILE=system PREFIX=/usr >/dev/null
 if HOME="$TMP/user-home" XDG_DATA_HOME=relative layout INSTALL_PROFILE=user >/dev/null 2>&1; then
     printf 'ERROR: relative XDG data root accepted\n' >&2; exit 1
@@ -81,23 +81,23 @@ for uid in 0 1001; do
     if [ "$uid" = 0 ]; then
         grep -Fxq 'INSTALL_PROFILE=system' <<< "$detected"
         grep -Fxq 'PREFIX=/usr/local' <<< "$detected"
-        grep -Fxq 'DATADIR=/usr/local/share/cosh-ng' <<< "$detected"
+        grep -Fxq 'DATADIR=/usr/local/share/anolisa/cosh-ng' <<< "$detected"
     else
         grep -Fxq 'INSTALL_PROFILE=user' <<< "$detected"
         grep -Fxq "PREFIX=$TMP/user-home/.local" <<< "$detected"
-        grep -Fxq "DATADIR=$TMP/xdg-data/cosh-ng" <<< "$detected"
+        grep -Fxq "DATADIR=$TMP/xdg-data/anolisa/cosh-ng" <<< "$detected"
     fi
     system_override="$(PATH="$UID_TOOLS:$PATH" DELIVERY_TEST_UID="$uid" XDG_DATA_HOME=relative layout INSTALL_PROFILE=system PREFIX=/usr)"
-    grep -Fxq 'DATADIR=/usr/share/cosh-ng' <<< "$system_override"
+    grep -Fxq 'DATADIR=/usr/share/anolisa/cosh-ng' <<< "$system_override"
     user_override="$(PATH="$UID_TOOLS:$PATH" DELIVERY_TEST_UID="$uid" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" layout INSTALL_PROFILE=user PREFIX=/opt/programs)"
     grep -Fxq 'PREFIX=/opt/programs' <<< "$user_override"
-    grep -Fxq "DATADIR=$TMP/xdg-data/cosh-ng" <<< "$user_override"
+    grep -Fxq "DATADIR=$TMP/xdg-data/anolisa/cosh-ng" <<< "$user_override"
     direct_layout="$(env -u INSTALL_PROFILE -u PREFIX -u AWPRJ PATH="$UID_TOOLS:$PATH" DELIVERY_TEST_UID="$uid" HOME="$TMP/user-home" XDG_DATA_HOME="$TMP/xdg-data" bash "$ROOT/packaging/install.sh" --print-layout)"
     test "$direct_layout" = "$detected"
 done
 
 # Explicit system staging remains independent of the caller's XDG environment.
-export INSTALL_PROFILE=system PREFIX=/usr
+export INSTALL_PROFILE=system PREFIX=/usr AWPRJ=
 SOURCE="$TMP/source"
 mkdir -p "$SOURCE/skills/manage-task-checkpoints" "$TMP/bin"
 cp -R "$ROOT/packaging" "$SOURCE/packaging"
@@ -146,9 +146,13 @@ test -x "$TMP/direct/bin/cosh-cli"
 test -x "$TMP/direct/libexec/cosh-ng/cosh-core"
 test -f "$TMP/direct/share/cosh-ng/skills/manage-task-checkpoints/SKILL.md"
 make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/direct"
-make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/namespaced" AWPRJ=anolisa
+env -u AWPRJ make -s -C "$SOURCE" install BIN_DIR="$TMP/bin" PREFIX="$TMP/namespaced"
 test -x "$TMP/namespaced/libexec/anolisa/cosh-ng/cosh-core"
 test -f "$TMP/namespaced/share/anolisa/skills/manage-task-checkpoints/SKILL.md"
+grep -Fxq "skill_dir=$TMP/namespaced/share/anolisa/skills" \
+    "$TMP/namespaced/libexec/anolisa/cosh-ng/resources.conf"
+grep -Fxq "extension_dir=$TMP/namespaced/share/anolisa/extensions" \
+    "$TMP/namespaced/libexec/anolisa/cosh-ng/resources.conf"
 
 for target in stage-package stage-package-core stage-package-plugin stage-package-skills build-core install-core install-skills install-plugins; do
     if make -s -n -C "$SOURCE" "$target" >/dev/null 2>&1; then

@@ -82,14 +82,25 @@ class ComponentDeliveryInterface(unittest.TestCase):
                 self.assertFalse((source / "packaging/Makefile").exists())
                 self.layout(component, "INSTALL_PROFILE=system")
 
-    def test_standalone_defaults_do_not_inherit_legacy_file_values(self) -> None:
+    def test_install_defaults_keep_local_prefix_and_component_namespace(self) -> None:
+        namespaces = {
+            "cosh-ng": "anolisa",
+            "tokenless": "",
+            "agent-sec-core": "",
+            "agentsight": "",
+            "skillfs": "",
+            "ws-ckpt": "",
+            "agent-memory": "",
+        }
         for component in COMPONENTS:
             with self.subTest(component=component):
                 layout = self.layout(component, "INSTALL_PROFILE=system")
-                self.assertEqual(layout["AWPRJ"], "")
+                namespace = namespaces[component]
+                self.assertEqual(layout["AWPRJ"], namespace)
                 self.assertEqual(layout["PREFIX"], "/usr/local")
                 self.assertEqual(layout["BINDIR"], "/usr/local/bin")
-                self.assertEqual(layout["DATADIR"], f"/usr/local/share/{component}")
+                data = Path("/usr/local/share") / namespace / component
+                self.assertEqual(layout["DATADIR"], str(data))
 
     def test_explicit_namespace_and_prefix_apply_across_components(self) -> None:
         for component in COMPONENTS:
