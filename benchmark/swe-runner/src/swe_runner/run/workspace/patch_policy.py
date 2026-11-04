@@ -120,6 +120,10 @@ PATCH_DIFF_EXCLUDE_PATHSPECS: tuple[str, ...] = (
 
 _BINARY_MARKER_RE = re.compile(r"(?m)^Binary files .+ differ\s*$")
 _DIFF_HEADER_RE = re.compile(r"(?m)^diff --git a/(.*?) b/(.*?)$")
+# Git writes a C-quoted header ("a/..." "b/...") when a path holds non-ASCII
+# bytes, a tab, a quote or a newline, so the unquoted pattern above misses it.
+_QUOTED_DIFF_HEADER_RE = re.compile(r'(?m)^diff --git ("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")$')
+_C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
 _HUNK_RE = re.compile(r"(?m)^@@ ")
 _NEW_FILE_RE = re.compile(r"(?m)^new file mode ")
 _ROOT_HELPER_NAMES: frozenset[str] = frozenset(
@@ -157,6 +161,46 @@ def _strip_binary_only_sections(diff_text: str) -> str:
     return "".join(kept)
 
 
+def _unquote_git_path(value: str) -> str:
+    """Decode a Git C-quoted path such as ``"verify_\\345\\267\\245.py"``."""
+    if len(value) < 2 or not value.startswith('"') or not value.endswith('"'):
+        return value
+    body = value[1:-1]
+    decoded = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            decoded.extend(char.encode("utf-8"))
+            index += 1
+            continue
+        escape = body[index + 1:index + 2]
+        if escape in _C_ESCAPES:
+            decoded.append(_C_ESCAPES[escape])
+            index += 2
+            continue
+        octal = body[index + 1:index + 4]
+        if len(octal) == 3 and all(digit in "01234567" for digit in octal):
+            decoded.append(int(octal, 8))
+            index += 4
+            continue
+        decoded.extend(escape.encode("utf-8"))
+        index += 2
+    return decoded.decode("utf-8", errors="surrogateescape")
+
+
+def _diff_destination_path(part: str) -> str | None:
+    """Return the decoded destination path of a section's ``diff --git`` header."""
+    header = _DIFF_HEADER_RE.search(part)
+    if header:
+        return header.group(2)
+    quoted = _QUOTED_DIFF_HEADER_RE.search(part)
+    if quoted:
+        path = _unquote_git_path(quoted.group(2))
+        return path[2:] if path.startswith("b/") else path
+    return None
+
+
 def _is_root_helper_path(path: str) -> bool:
     """Return true for common ad-hoc root-level verification script names."""
     if "/" in path:
@@ -175,8 +219,8 @@ def _strip_new_root_helper_sections(diff_text: str) -> str:
     for part in parts:
         if not part.strip():
             continue
-        header = _DIFF_HEADER_RE.search(part)
-        if header and _NEW_FILE_RE.search(part) and _is_root_helper_path(header.group(2)):
+        path = _diff_destination_path(part)
+        if path is not None and _NEW_FILE_RE.search(part) and _is_root_helper_path(path):
             continue
         kept.append(part)
     return "".join(kept)
