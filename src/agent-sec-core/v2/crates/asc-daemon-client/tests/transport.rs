@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use asc_daemon_client::{ClientError, MAX_FRAME_BYTES, call};
+use asc_daemon_client::{ClientError, MAX_FRAME_BYTES, call, call_interruptible};
 use asc_daemon_protocol::{DaemonRequest, DaemonResponse};
 use serde_json::json;
 // Only the Linux-gated connect-queue test builds a socket by hand.
@@ -432,4 +432,37 @@ fn explicit_carrier_is_preserved_without_an_injectable_context() {
             stream
         })
         .unwrap();
+}
+
+#[test]
+fn an_interrupt_ends_the_wait_without_waiting_for_the_response() {
+    let endpoint = Endpoint::new();
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = Instant::now();
+    let result = thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            // Hold the peer open without answering, so only the interrupt can end the wait.
+            let (_stream, _frame) = read_request(endpoint.accept());
+            thread::sleep(Duration::from_millis(400));
+        });
+        let setter = std::sync::Arc::clone(&cancelled);
+        scope.spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            setter.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let result = call_interruptible(&endpoint.path, &request(), Duration::from_secs(3), || {
+            cancelled.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        server.join().unwrap();
+        result
+    });
+    assert!(
+        matches!(result, Err(ClientError::Interrupted)),
+        "{result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
 }

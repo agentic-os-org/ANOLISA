@@ -196,6 +196,11 @@ fn proposal_error(error: &ProposalError) -> IntentServiceError {
             IntentError::DeadlineExceeded | IntentError::Provider(ProviderError::DeadlineExceeded),
         ) => IntentServiceError::DeadlineExceeded,
         ProposalError::Intent(IntentError::InvalidInput) => IntentServiceError::InvalidArgument,
+        // The model answered past its content budget; that is an exhausted budget, not a missing
+        // or broken service.
+        ProposalError::Intent(IntentError::Provider(ProviderError::ResponseTooLarge)) => {
+            IntentServiceError::ResourceExhausted
+        }
         ProposalError::Intent(_) => IntentServiceError::Unavailable,
         ProposalError::Policy(PolicyError::TooLarge) => IntentServiceError::ResourceExhausted,
         ProposalError::InvalidContext | ProposalError::Policy(_) => IntentServiceError::Internal,
@@ -337,6 +342,12 @@ mod tests {
         assert!(service.executing.lock().unwrap().is_empty());
         assert_eq!(
             proposal_error(&ProposalError::Policy(PolicyError::TooLarge)),
+            IntentServiceError::ResourceExhausted
+        );
+        assert_eq!(
+            proposal_error(&ProposalError::Intent(IntentError::Provider(
+                ProviderError::ResponseTooLarge
+            ))),
             IntentServiceError::ResourceExhausted
         );
         let clock = std::sync::atomic::AtomicI64::new(2_000_000_000);

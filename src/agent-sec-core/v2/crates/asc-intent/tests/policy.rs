@@ -368,6 +368,9 @@ fn invalid_and_unsupported() {
         "[\"/a\"].contains(resource.path)",
         "resource.path == \"/a/\"",
         "resource.path == \"/a\\\\b\"",
+        // A record projection reads the same string without the canonical receiver.
+        "{r: resource}.r.path like \"/a/*\"",
+        "{r: resource}.r.path == \"/a\"",
     ] {
         let policy = format!(
             "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when {{ {expression} }};"
@@ -402,6 +405,20 @@ fn invalid_and_unsupported() {
     ));
     assert!(matches!(
         prepare_policy("permit(principal, action == SecCore::Action::\"tool.call\", resource);"),
+        Err(PolicyError::Validation)
+    ));
+    // Policy admission rejects these as well: the action can never apply to the resource type, so
+    // the forbid restricts nothing.
+    assert!(matches!(
+        prepare_policy(
+            "forbid(principal, action == SecCore::Action::\"network.use\", resource is SecCore::File);"
+        ),
+        Err(PolicyError::Validation)
+    ));
+    assert!(matches!(
+        prepare_policy(
+            "permit(principal, action == SecCore::Action::\"file.read\", resource is SecCore::Network);"
+        ),
         Err(PolicyError::Validation)
     ));
     assert!(matches!(

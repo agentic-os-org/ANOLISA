@@ -117,6 +117,7 @@ log = "0.4"
 miette = "7.6"
 nix = { version = "0.31", default-features = false, features = ["user", "fs", "socket"] }
 regex = "1.10"
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 rustix = { version = "1.1", features = ["fs", "process", "net", "pipe"] }

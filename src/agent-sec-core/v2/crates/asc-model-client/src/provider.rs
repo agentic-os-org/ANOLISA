@@ -118,17 +118,11 @@ impl OpenAiCompatibleProvider {
         self
     }
 
-    fn agent_builder(deadline: Instant) -> Result<ureq::AgentBuilder, ProviderError> {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|duration| !duration.is_zero())
-            .ok_or(ProviderError::DeadlineExceeded)?;
-        Ok(ureq::AgentBuilder::new()
-            .redirects(0)
-            .try_proxy_from_env(false)
-            // ureq's default connect timeout overrides its overall request timeout.
-            .timeout_connect(remaining)
-            .timeout(remaining))
+    fn client_builder() -> reqwest::blocking::ClientBuilder {
+        reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .retry(reqwest::retry::never())
     }
 }
 
@@ -156,28 +150,35 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if self.disable_thinking {
             payload["enable_thinking"] = Value::Bool(false);
         }
-        // shortcut: system DNS is blocking; use a cancellable resolver for a hard deadline.
-        let response = Self::agent_builder(deadline)?
+        let request = Self::client_builder()
             .build()
+            .map_err(|_| ProviderError::Transport)?
             .post(&self.endpoint)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .send_json(&payload)
-            .map_err(|error| match error {
-                ureq::Error::Status(status, _) => ProviderError::Http(status),
-                ureq::Error::Transport(_) if Instant::now() >= deadline => {
-                    ProviderError::DeadlineExceeded
-                }
-                ureq::Error::Transport(_) => ProviderError::Transport,
-            })?;
+            .bearer_auth(&self.api_key)
+            .json(&payload);
+        // Follow OpenAI Codex's ReqwestTransport with a per-request timeout; use blocking here
+        // to preserve the synchronous provider interface.
+        // https://github.com/openai/codex/blob/main/codex-rs/http-client/src/transport.rs
+        // This covers TLS negotiation and the response body without resetting on each fragment.
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or(ProviderError::DeadlineExceeded)?;
+        let response = request.timeout(remaining).send().map_err(|error| {
+            if error.is_timeout() || Instant::now() >= deadline {
+                ProviderError::DeadlineExceeded
+            } else {
+                ProviderError::Transport
+            }
+        })?;
         if Instant::now() >= deadline {
             return Err(ProviderError::DeadlineExceeded);
         }
-        if response.status() != 200 {
-            return Err(ProviderError::Http(response.status()));
+        if response.status().as_u16() != 200 {
+            return Err(ProviderError::Http(response.status().as_u16()));
         }
         let mut bytes = Vec::new();
         response
-            .into_reader()
             .take(MAX_RESPONSE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| {
@@ -522,24 +523,81 @@ mod tests {
     }
 
     #[test]
-    fn connect_budget_expires_during_blocking_resolution_without_opening_a_socket() {
+    fn connect_budget_expires_during_resolution_without_opening_a_socket() {
+        struct SlowResolver(std::net::SocketAddr);
+        impl reqwest::dns::Resolve for SlowResolver {
+            fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                let address = self.0;
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs)
+                })
+            }
+        }
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
-        let deadline = Instant::now() + Duration::from_millis(50);
-        let agent = OpenAiCompatibleProvider::agent_builder(deadline)
-            .unwrap()
-            .resolver(move |_: &str| {
-                std::thread::sleep(Duration::from_millis(80));
-                Ok(vec![address])
-            })
-            .build();
-        assert!(agent.post(&format!("http://{address}/")).call().is_err());
-        assert!(Instant::now() >= deadline);
+        let client = OpenAiCompatibleProvider::client_builder()
+            .dns_resolver(std::sync::Arc::new(SlowResolver(address)))
+            .build()
+            .unwrap();
+        let start = Instant::now();
+        let error = client
+            .post(format!("http://slow-model.test:{}/", address.port()))
+            .timeout(Duration::from_millis(50))
+            .send()
+            .unwrap_err();
+        assert!(error.is_timeout());
+        assert!(start.elapsed() < Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn slow_tls_fragments_stop_at_the_request_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut header = [0; 5];
+            stream.read_exact(&mut header).unwrap();
+            assert_eq!(header[0], 22);
+            let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            // An incomplete TLS record forces repeated reads, each before the socket timeout.
+            stream.write_all(&[22, 3, 3, 0x10, 0]).unwrap();
+            let mut fragments = 0;
+            for _ in 0..50 {
+                std::thread::sleep(Duration::from_millis(20));
+                if stream.write_all(&[0]).is_err() {
+                    break;
+                }
+                fragments += 1;
+            }
+            fragments
+        });
+        let provider =
+            OpenAiCompatibleProvider::new(&format!("https://{address}/v1"), "test-key".into())
+                .unwrap();
+        let start = Instant::now();
+        let error = provider
+            .complete(
+                "model",
+                "system",
+                "input",
+                start + Duration::from_millis(200),
+            )
+            .unwrap_err();
+        assert_eq!(error, ProviderError::DeadlineExceeded);
+        assert!(start.elapsed() < Duration::from_millis(800));
+        // Verify the underlying connection is cancelled, not just the caller's wait.
+        assert!(handle.join().unwrap() < 50);
     }
 
     #[test]
