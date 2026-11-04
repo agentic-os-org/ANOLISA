@@ -184,9 +184,7 @@ def grade_trace(trace_path: str, task_yaml_path: str, judge_config: dict | None 
     for ev in _existing:
         if ev.get("type") == "trace_end":
             # Preserve the existing score merge policy during atomic publication.
-            merged_scores = dict(ev.get("scores") or {})
-            merged_scores.update(real_scores)
-            ev["scores"] = merged_scores
+            ev["scores"] = merge_trace_end_scores(ev.get("scores"), real_scores)
             ev["task_score"] = task_score
             ev["passed"] = passed
     _publish_graded_trace(trace_path, [*_existing, grading_result])
@@ -203,6 +201,22 @@ def grade_trace(trace_path: str, task_yaml_path: str, judge_config: dict | None 
     }
 
     return result
+
+
+def merge_trace_end_scores(existing: dict[str, Any] | None, graded: dict[str, Any]) -> dict[str, Any]:
+    """Merge the grader's rubric scores into an existing trace_end.scores.
+
+    ``efficiency_*`` values are derived by the converter from the session (turn
+    count, token sums, wall time). The grader cannot supply them — it never
+    receives the session totals — so its copy is always the dataclass default
+    and must not overwrite the converter's values.
+    """
+    merged = dict(existing or {})
+    for key, value in graded.items():
+        if key.startswith("efficiency_"):
+            continue
+        merged[key] = value
+    return merged
 
 
 def main():
