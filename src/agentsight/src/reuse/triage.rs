@@ -444,4 +444,26 @@ mod tests {
         let trajectory: AtifTrajectory = serde_json::from_str(json).unwrap();
         assert_eq!(TriageMetrics::measure(&trajectory).max_agent_len, 3);
     }
+
+    #[test]
+    fn content_parts_follow_the_calibration_message_length_contract() {
+        // The calibration script must measure the same shared ATIF decoding:
+        // compact Unicode JSON for content parts, not the number of parts.
+        for text in ["x".repeat(2500), "中".repeat(2500)] {
+            let document = serde_json::json!({
+                "schema_version":"ATIF-v1.7", "agent":{"name":"fixture"},
+                "steps":[
+                    {"step_id":1,"source":"user","message":"question"},
+                    {"step_id":2,"source":"agent","message":[{"type":"text","text":text}]}
+                ]
+            });
+            let trajectory: AtifTrajectory = serde_json::from_value(document).unwrap();
+            let measured = TriageMetrics::measure(&trajectory);
+            assert_eq!(measured.max_agent_len, 2527);
+            assert_eq!(
+                classify(&measured, &clean(), &TriageConfig::default()).label,
+                TrajectoryLabel::Good
+            );
+        }
+    }
 }
