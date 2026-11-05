@@ -4,7 +4,7 @@ use agentsight_audit::{
     AuditError as SecurityStoreError, AuditEventFilter as SecurityEventFilter,
     AuditMaintenancePolicy, AuditStore as SecurityStore, ContainmentAction,
     ContainmentActivationResult, ContainmentClaimResult, ContainmentFailureStage,
-    ContainmentLifecycle, RiskCase, RiskCaseStatus, RiskSeverity,
+    ContainmentLifecycle, RiskCase, RiskCaseStatus, RiskSeverity, event_result,
 };
 use agentsight_enforcement_protocol::{
     DestinationClass, Effect, EventIdentity, FileAction, NetworkAction, NetworkDirection,
@@ -1532,4 +1532,91 @@ fn case_index_maps_agent_policy_revision_triplet_to_latest_case() {
         )),
         Some(&other_id)
     );
+}
+
+fn result_fixture(event_id: Uuid, succeeded: bool, errno: Option<i32>, at: u64) -> SecurityEvent {
+    SecurityEvent {
+        event_id,
+        occurred_at_ns: at,
+        observed_at_ns: at,
+        identity: EventIdentity {
+            binding_id: Uuid::new_v4(),
+            agent_id: "agent".into(),
+            agent_name: None,
+            session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
+            pid: 42,
+            process_start_time: 420,
+            ppid: Some(1),
+            cgroup_id: None,
+            protocol_version: 1,
+            enforcer_version: "test".into(),
+            actplane_revision: "test".into(),
+        },
+        kind: SecurityEventKind::FileAction(FileAction {
+            policy_id: "file-deletion-policy".into(),
+            policy_revision: 1,
+            operation: "unlink".into(),
+            path: "~/reports".into(),
+            resource_class: "protected_path".into(),
+            succeeded,
+            errno,
+            rule_id: Some("deny-delete".into()),
+        }),
+    }
+}
+
+#[test]
+fn a_policy_denied_file_operation_is_stored_as_blocked() {
+    // The backend reports a policy denial as `EPERM` on the file action itself.
+    // Labelling that `failed` kept denied deletions out of the blocked filter
+    // and out of the blocked totals, so an operator looking for blocked file
+    // operations never saw them.
+    let store = SecurityStore::open_in_memory().expect("in-memory store should open");
+    let denied = result_fixture(Uuid::new_v4(), false, Some(1), 100);
+    let io_error = result_fixture(Uuid::new_v4(), false, Some(2), 200);
+    let allowed = result_fixture(Uuid::new_v4(), true, None, 300);
+    for event in [&denied, &io_error, &allowed] {
+        store.insert_event(event).expect("event should persist");
+    }
+
+    let blocked = store
+        .list_events(&SecurityEventFilter {
+            result: Some("blocked".into()),
+            ..SecurityEventFilter::default()
+        })
+        .expect("filtered query should work");
+    assert_eq!(
+        blocked
+            .items
+            .iter()
+            .map(|item| item.event_id)
+            .collect::<Vec<_>>(),
+        vec![denied.event_id],
+        "a denied file operation must be filterable as blocked"
+    );
+
+    // A genuine I/O failure is not a policy denial and must stay distinct.
+    let failed = store
+        .list_events(&SecurityEventFilter {
+            result: Some("failed".into()),
+            ..SecurityEventFilter::default()
+        })
+        .expect("filtered query should work");
+    assert_eq!(
+        failed
+            .items
+            .iter()
+            .map(|item| item.event_id)
+            .collect::<Vec<_>>(),
+        vec![io_error.event_id],
+        "an ordinary file error must not masquerade as a policy denial"
+    );
+
+    // The label the API returns is the label the filter matched, so the two
+    // cannot drift apart the way two separate derivations would.
+    assert_eq!(event_result(&denied), "blocked");
+    assert_eq!(event_result(&io_error), "failed");
+    assert_eq!(event_result(&allowed), "allowed");
 }

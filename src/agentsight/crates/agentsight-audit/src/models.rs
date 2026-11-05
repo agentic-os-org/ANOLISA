@@ -1,6 +1,6 @@
 //! Query and risk-case types shared by storage, APIs, and correlation.
 
-use agentsight_enforcement_protocol::SecurityEvent;
+use agentsight_enforcement_protocol::{SecurityEvent, SecurityEventKind};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -257,4 +257,56 @@ pub struct ContainmentAction {
     pub created_at_ns: u64,
     /// Most recent lifecycle update timestamp.
     pub updated_at_ns: u64,
+}
+
+/// `EPERM`, the errno the enforcement backend reports for a policy denial.
+///
+/// Spelled out rather than pulling `libc` into this crate for one value; the
+/// backend and the kernel agree on 1 for `EPERM` on every supported platform.
+const EPERM: i32 = 1;
+
+/// Result label for one event, shared by the stored column and the API view.
+///
+/// `result` is a query key: [`AuditEventFilter::result`] matches this label and
+/// the summary aggregates count it. Deriving the label a second time for the
+/// response let a filtered page and its own rows disagree, so both read it here.
+///
+/// A file operation the kernel refused with `EPERM` is a policy denial, not an
+/// I/O failure: labelling it `failed` hid it from the blocked filter and from the
+/// blocked totals. Any other errno stays `failed`, because those operations were
+/// not denied by policy.
+pub fn event_result(event: &SecurityEvent) -> &'static str {
+    match &event.kind {
+        SecurityEventKind::FileAction(action) => {
+            if action.succeeded {
+                "allowed"
+            } else if action.errno == Some(EPERM) {
+                "blocked"
+            } else {
+                "failed"
+            }
+        }
+        SecurityEventKind::TaintTransition(_) => "changed",
+        SecurityEventKind::NetworkAction(action) => {
+            if action.succeeded {
+                "allowed"
+            } else {
+                "blocked"
+            }
+        }
+        SecurityEventKind::PolicyDecision(decision) => {
+            if decision.blocked {
+                "blocked"
+            } else {
+                "allowed"
+            }
+        }
+        SecurityEventKind::EnforcementState(state) => {
+            if state.ready {
+                "ready"
+            } else {
+                "degraded"
+            }
+        }
+    }
 }
