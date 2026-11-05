@@ -286,7 +286,7 @@ pub(crate) fn tool_busy_secs(traj: &AtifTrajectory) -> f64 {
     let Some(origin) = traj.origin_ts() else {
         return 0.0;
     };
-    let mut windows: Vec<_> = traj
+    let windows: Vec<_> = traj
         .steps
         .iter()
         .enumerate()
@@ -296,6 +296,11 @@ pub(crate) fn tool_busy_secs(traj: &AtifTrajectory) -> f64 {
             Some((start, start + tool_window_secs(traj, index)))
         })
         .collect();
+    busy_window_secs(windows)
+}
+
+/// Wall time covered by any of the supplied activity windows.
+pub(crate) fn busy_window_secs(mut windows: Vec<(f64, f64)>) -> f64 {
     windows.sort_by(|left, right| left.0.total_cmp(&right.0));
     let mut end = f64::NEG_INFINITY;
     let mut total = 0.0;

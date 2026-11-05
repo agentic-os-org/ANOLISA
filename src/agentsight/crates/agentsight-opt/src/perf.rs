@@ -14,7 +14,7 @@ mod prompts;
 use anyhow::Result;
 
 use crate::atif::AtifTrajectory;
-use crate::trace::{collect_tool_calls_with, tool_busy_secs, tool_window_secs};
+use crate::trace::{busy_window_secs, collect_tool_calls_with, tool_busy_secs, tool_window_secs};
 use crate::types::{CacheTurn, IdleGap, PerfCandidateSet, PerfStats, ToolAggStats, ToolCallRecord};
 
 /// Default threshold (seconds) for detecting idle gaps between turns.
@@ -104,9 +104,13 @@ pub fn compute_stats(trajectory: &AtifTrajectory) -> Result<PerfStats> {
 /// 0..wall domain (observed: tool+model = 2× wall on start-less traces).
 /// When all of that previous step's tool completions are recorded, inference
 /// can instead be estimated from their latest result to this step's end.
-/// Returns (total_secs, per_step_vec).
+/// Returns (union of inference windows, individual request durations).
+/// Parallel requests consume wall time once but retain their own duration
+/// for per-turn cache analysis.
 fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
     let mut turns: Vec<f64> = Vec::new();
+    let mut windows = Vec::new();
+    let origin = traj.origin_ts();
     let mut prev_ts = None;
     let mut prev_agent_had_calls = false;
     let mut prev_tool_end = None;
@@ -126,6 +130,10 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
                 let dur = (e - s).as_seconds_f64();
                 if dur > 0.0 {
                     turns.push(dur);
+                    if let Some(origin) = origin {
+                        windows
+                            .push(((s - origin).as_seconds_f64(), (e - origin).as_seconds_f64()));
+                    }
                 }
             }
             prev_agent_had_calls = !step.calls().is_empty();
@@ -144,7 +152,7 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
         }
     }
 
-    let total: f64 = turns.iter().sum();
+    let total = busy_window_secs(windows);
     (total, turns)
 }
 
