@@ -137,20 +137,25 @@ def test_final_report_excludes_unusable_checks_from_the_denominator(
 ) -> None:
     import aggregate_report
 
-    regression = {
-        "full": True,
-        "checks": [
-            {"command": "a", "exit_code": 0},
-            {"command": "b", "exit_code": 0},
-            {"command": "c", "exit_code": 0},
-            {"command": "d", "exit_code": 0},
-            {"command": "e"},
-            {"exit_code": 0},
-            "not-an-object",
-        ],
-    }
+    settings, items, capacities, recovery, faults, regression = (
+        complete_formal_evidence(1)
+    )
+    config = json.loads((BENCHMARK / "campaign/campaign.example.json").read_text())
+    for section, values in settings.items():
+        config[section].update(values)
+    config["thresholds"] = thresholds()
+    config["recovery"].update(tolerance_ratio=0.1, recovery_window_seconds=2)
+    config["fault"]["repetitions_per_case"] = 1
+    # Four readable checks plus three entries that are not evidence either way;
+    # an unreadable entry must leave the denominator alone.
+    regression["checks"] = regression["checks"] + [
+        {"command": "no-exit-code"},
+        {"exit_code": 0},
+        "not-an-object",
+    ]
+    (tmp_path / "manifest.json").write_text("{}")
     aggregate_report.write_final(
-        tmp_path, {}, [], {}, [], {}, {}, regression
+        tmp_path, config, [], capacities, items, recovery, faults, regression
     )
     report = (tmp_path / "final-report.md").read_text()
     assert "| 通过命令 | 4/4 |" in report
