@@ -834,11 +834,17 @@ def write_final(
         )
     regression_checks = regression.get("checks", [])
     regression_checks = regression_checks if isinstance(regression_checks, list) else []
-    regression_passed = sum(
-        check["exit_code"] == 0
+    # An entry that cannot be read as a check (not an object, or a missing or
+    # non-integer exit_code) is not evidence either way, so it must leave both
+    # the numerator and the denominator alone. Counting it only in the
+    # denominator rendered "4/5" for four usable passing checks plus one
+    # unreadable record.
+    usable_checks = [
+        check
         for check in regression_checks
         if campaign_evidence.usable_regression_check(check)
-    )
+    ]
+    regression_passed = sum(check["exit_code"] == 0 for check in usable_checks)
     lines = [
         (
             "# AgentSight A/A 全量校准报告"
@@ -930,7 +936,7 @@ def write_final(
         "| 项目 | 结果 |",
         "| --- | --- |",
         f"| 完整门禁 | {'是' if regression.get('full') else '否'} |",
-        f"| 通过命令 | {regression_passed}/{len(regression_checks)} |",
+        f"| 通过命令 | {regression_passed}/{len(usable_checks)} |",
         "| 详细日志 | `regression-report.md` 和 `regression.json` |",
         "",
         "## 7. 可追溯产物",
