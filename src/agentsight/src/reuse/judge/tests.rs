@@ -7,6 +7,70 @@
 
 use super::*;
 
+fn interpret_in_round(
+    response: &JudgeResponse,
+    doc: &AtifTrajectory,
+    round: std::ops::Range<usize>,
+) -> Result<JudgeVerdict, JudgeError> {
+    interpret_visible(response, &prompt_with_evidence(doc, round).1)
+}
+
+fn long_round() -> AtifTrajectory {
+    let steps: Vec<_> = (100..144)
+        .map(|id| {
+            serde_json::json!({
+                "step_id":id, "source":if id == 100 {"user"} else {"agent"},
+                "message":format!("fixture message {id}")
+            })
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({"schema_version":"ATIF-v1.7",
+        "agent":{"name":"fixture"}, "steps":steps}))
+    .unwrap()
+}
+
+#[test]
+fn a_bad_citing_only_an_elided_step_is_downgraded() {
+    let doc = long_round();
+    let prompt = build_messages(&doc, 0..doc.steps.len());
+    assert!(!prompt[1].content.contains("step121"));
+    assert!(!prompt[1].content.contains("fixture message 121"));
+    for ids in [vec![121], vec![100, 121]] {
+        let result = interpret_in_round(&response("bad", ids), &doc, 0..doc.steps.len()).unwrap();
+        assert_eq!(result.label, TrajectoryLabel::Unknown);
+        assert!(result.downgraded);
+        assert!(result.cited_steps.is_empty());
+    }
+}
+
+#[test]
+fn visible_head_tail_and_grounded_tool_facts_remain_citable() {
+    let mut doc = long_round();
+    doc.steps[21].tool_calls = Some(vec![agentsight_atif::ToolCall {
+        tool_call_id: "call".into(),
+        function_name: "bash".into(),
+        arguments: serde_json::json!({"command":"false"}),
+        extra: None,
+    }]);
+    doc.steps[21].observation = Some(agentsight_atif::Observation {
+        results: vec![agentsight_atif::ObservationResult {
+            source_call_id: Some("call".into()),
+            content: Some(serde_json::json!("Exit code 1")),
+            subagent_trajectory_ref: None,
+            extra: None,
+        }],
+    });
+    let prompt = build_messages(&doc, 0..doc.steps.len());
+    assert!(prompt[1].content.contains("step121"));
+    assert!(!prompt[1].content.contains("fixture message 121"));
+    for id in [100, 119, 121, 124, 143] {
+        let result =
+            interpret_in_round(&response("bad", vec![id]), &doc, 0..doc.steps.len()).unwrap();
+        assert_eq!(result.label, TrajectoryLabel::Bad);
+        assert!(!result.downgraded);
+    }
+}
+
 fn trajectory(steps: &str) -> AtifTrajectory {
     serde_json::from_str(&format!(
         r#"{{"atif_version": "1.7", "agent": {{"name": "t", "version": "1"}},

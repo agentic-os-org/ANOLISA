@@ -22,6 +22,7 @@
 use agentsight_atif::{AtifTrajectory, Step, StepSource};
 use agentsight_opt::llm::{ChatMessage, LlmClient};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use super::label::TrajectoryLabel;
 use crate::grounding::evidence::build_index;
@@ -58,9 +59,9 @@ pub struct JudgeVerdict {
     pub label: TrajectoryLabel,
     pub reason: String,
     pub cited_steps: Vec<usize>,
-    /// Set when a `bad` arrived with no cited step, or only with steps the
-    /// judged round does not contain, and was reduced to `unknown`. Reported
-    /// rather than applied quietly, so the rate stays visible.
+    /// Set when a `bad` has no citations or cites evidence not supplied in
+    /// the prompt, and is reduced to `unknown`. Reported rather than applied
+    /// quietly, so the rate stays visible.
     pub downgraded: bool,
 }
 
@@ -103,15 +104,24 @@ const SYSTEM_PROMPT: &str = "\
 /// Separated from the call so the prompt can be checked in tests. Since a
 /// request needs an API key, this is the only place its wording is verified.
 pub fn build_messages(doc: &AtifTrajectory, round: std::ops::Range<usize>) -> Vec<ChatMessage> {
+    prompt_with_evidence(doc, round).0
+}
+
+fn prompt_with_evidence(
+    doc: &AtifTrajectory,
+    round: std::ops::Range<usize>,
+) -> (Vec<ChatMessage>, HashSet<usize>) {
     let index = build_index(doc, round.clone());
     let steps = &doc.steps[round];
 
     let mut facts = String::new();
+    let mut visible: HashSet<_> = visible_steps(steps).map(|step| step.step_id).collect();
     for verdict in index
         .call_verdicts
         .iter()
         .filter(|v| v.step_id >= index.round_start_step)
     {
+        visible.insert(verdict.step_id);
         let status = match verdict.verdict.status {
             CallStatus::Ok => "成功",
             CallStatus::OkProbe => "成功（属预期探测）",
@@ -133,12 +143,21 @@ pub fn build_messages(doc: &AtifTrajectory, round: std::ops::Range<usize>) -> Ve
     }
 
     let transcript = render_window(steps).join("\n");
-    vec![
+    let messages = vec![
         ChatMessage::system(SYSTEM_PROMPT),
         ChatMessage::user(format!(
             "确定性检查结论（已核实，不得推翻）：\n{facts}\n对话记录：\n{transcript}"
         )),
-    ]
+    ];
+    (messages, visible)
+}
+
+/// The same head/tail selection drives rendering and citation validation.
+fn visible_steps(steps: &[Step]) -> impl Iterator<Item = &Step> {
+    let half = MAX_STEPS_PER_ROUND / 2;
+    steps.iter().enumerate().filter_map(move |(i, step)| {
+        (steps.len() <= MAX_STEPS_PER_ROUND || i < half || i >= steps.len() - half).then_some(step)
+    })
 }
 
 /// Renders the round, keeping both ends when it is long.
@@ -166,15 +185,16 @@ fn render_window(steps: &[Step]) -> Vec<String> {
     };
 
     if steps.len() <= MAX_STEPS_PER_ROUND {
-        return steps.iter().map(render).collect();
+        return visible_steps(steps).map(render).collect();
     }
     let half = MAX_STEPS_PER_ROUND / 2;
-    let mut out: Vec<String> = steps[..half].iter().map(render).collect();
+    let mut visible = visible_steps(steps);
+    let mut out: Vec<String> = visible.by_ref().take(half).map(render).collect();
     out.push(format!(
         "…（省略 {} 步）",
         steps.len() - MAX_STEPS_PER_ROUND
     ));
-    out.extend(steps[steps.len() - half..].iter().map(render));
+    out.extend(visible.map(render));
     out
 }
 
@@ -236,24 +256,21 @@ pub fn interpret(response: &JudgeResponse) -> Result<JudgeVerdict, JudgeError> {
     }
 }
 
-/// Applies the citation rule against the steps actually present in the round.
+/// Applies the citation rule against evidence actually included in the prompt.
 ///
 /// [`interpret`] can only tell whether the model cited anything, not whether
-/// the id exists: a `bad` citing a step outside the judged round (a previous
-/// round's step, `0`, or an invented number) is as unsupported as one citing
-/// nothing. Letting it through would display a fabricated citation as the
-/// evidence behind an accusation. Kept separate from [`judge_last_round`] so
-/// the check is exercisable without a model call.
-fn interpret_in_round(
+/// the id was shown: a `bad` citing an omitted transcript step without a
+/// rendered deterministic fact is unsupported, even when that step exists
+/// in the round. Previous-round and invented ids are also rejected. Kept
+/// separate from [`judge_last_round`] so the check needs no model call.
+fn interpret_visible(
     response: &JudgeResponse,
-    doc: &AtifTrajectory,
-    round: std::ops::Range<usize>,
+    present: &HashSet<usize>,
 ) -> Result<JudgeVerdict, JudgeError> {
     let verdict = interpret(response)?;
     if verdict.label != TrajectoryLabel::Bad {
         return Ok(verdict);
     }
-    let present: Vec<usize> = doc.steps[round].iter().map(|step| step.step_id).collect();
     if verdict
         .cited_steps
         .iter()
@@ -264,7 +281,7 @@ fn interpret_in_round(
     Ok(JudgeVerdict {
         label: TrajectoryLabel::Unknown,
         reason: format!(
-            "模型判为 bad 但引用的步骤不在本轮记录中，按证据不足处理：{}",
+            "模型判为 bad 但引用的步骤不在本轮提供的证据中，按证据不足处理：{}",
             response.reason
         ),
         cited_steps: Vec::new(),
@@ -286,11 +303,12 @@ pub async fn judge_last_round(
     doc: &AtifTrajectory,
 ) -> Result<JudgeVerdict, JudgeError> {
     let round = last_round(doc).ok_or(JudgeError::NothingToJudge)?;
+    let (messages, visible) = prompt_with_evidence(doc, round);
     let response: JudgeResponse = client
-        .chat_json_parsed(build_messages(doc, round.clone()))
+        .chat_json_parsed(messages)
         .await
         .map_err(|error| JudgeError::Call(format!("{error:#}")))?;
-    interpret_in_round(&response, doc, round)
+    interpret_visible(&response, &visible)
 }
 
 /// Range of the final round.
