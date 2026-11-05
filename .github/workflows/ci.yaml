@@ -531,11 +531,17 @@ jobs:
               echo "### ⚠️ ${label} Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
               return 0
             fi
-            local line_rate lines_valid lines_covered line_pct
-            line_rate=$(grep -oP 'line-rate="\K[^"]+' "$cov_file" | head -1)
-            lines_valid=$(grep -oP 'lines-valid="\K[^"]+' "$cov_file" | head -1)
-            lines_covered=$(grep -oP 'lines-covered="\K[^"]+' "$cov_file" | head -1)
-            line_pct=$(echo "$line_rate * 100" | bc -l | xargs printf '%.1f')
+            local stats lines_valid lines_covered line_pct
+            stats=$(python3 - "$cov_file" <<'PYTHON'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          coverage = ET.parse(sys.argv[1]).getroot().attrib
+          print(f"{float(coverage['line-rate']) * 100:.1f}",
+                coverage['lines-valid'], coverage['lines-covered'])
+          PYTHON
+            )
+            read -r line_pct lines_valid lines_covered <<< "$stats"
             {
               echo "### 🧪 ${label} (Rust) Test Coverage"
               echo ""
