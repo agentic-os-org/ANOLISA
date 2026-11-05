@@ -9,7 +9,28 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
-## [0.9.2] - Unreleased
+## [0.9.3] - 2026-11-05
+
+### Added
+
+- `tokenless rtk` runs RTK v0.49.0 with the Tokenless patches from inside the `tokenless` executable; `tokenless rtk --version` reports the bundled version ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+
+### Changed
+
+- **Breaking:** The npm, RPM (`tokenless-core`), ANOLISA raw, Windows ZIP, and Python wheel packages ship only `tokenless` and no longer install a separate `rtk`. PreTool rewrites commands to `tokenless rtk <command>`, naming the running `tokenless` by absolute path, so a rewrite and its execution use the same RTK build; it no longer looks for `rtk` on `PATH`. Scripts that call `rtk` directly must call `tokenless rtk` instead. Upgrades remove the `rtk` helper and link that earlier Tokenless releases installed and keep an RTK installed separately ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- **Breaking for Rust callers:** `TokenlessRuntime::pre_tool` has been removed. Short-lived processes keep `dispatch_with_store`; long-running hosts run `tokenless compress` instead, because RTK expects one process per command ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- The Python SDK's `pre_tool()` runs the bundled `tokenless compress` instead of `rtk rewrite`. A timeout or child failure now logs one warning and returns the original arguments as passthrough instead of raising `TokenlessError`, so the tool call still runs ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- A PreTool rewrite still has 5 seconds. On timeout, the processes RTK started, such as a stalled `git`, now end with it ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- Every framework integration runs RTK through the single `tokenless` executable. Claude Code, Qwen Code, Qoder CLI, QwenWork, OpenCode, Cosh-NG, OpenClaw, and Hermes already rewrote through `tokenless compress` and now receive `tokenless rtk` commands. The Codex PreToolUse hook, which ran `rtk rewrite` directly, now rewrites through `tokenless compress` as well, and QwenPaw and AgentScope do so through the Python SDK. Claude Code and Qwen Code detection and QwenWork installation no longer require `rtk`. Hermes treats `tokenless rtk` wrappers as RTK-owned output and no longer recognizes bare `rtk` wrappers. DeepSeek Harness only compresses tool results and is unaffected ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- Building from source, including the curl installer's source-build path, needs Rust 1.91 or later plus `git` and `patch` to fetch and patch the pinned RTK source. An existing `third_party/rtk` checkout made from other patches is rejected; run `just clean-rtk` once to recreate it ([#9279](https://github.com/agentic-os-org/ANOLISA/pull/9279), [#9281](https://github.com/agentic-os-org/ANOLISA/pull/9281), [#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- ANOLISA raw packages require ANOLISA 0.3.21 or later, which provides the Tokenless discovery registry ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)).
+
+### Fixed
+
+- HTML rendering handles long backtick runs in code blocks without rescanning them for each possible fence length, which could exhaust the PostTool time budget. Rendered content and recovery are unchanged ([#9396](https://github.com/agentic-os-org/ANOLISA/pull/9396)).
+- PreTool and PostTool recognize QwenWork's qualified workspace Shell name `mcp__qw-builtin__mcp__workspace__bash`, so its plain-text results reach the existing compression path, including TOON for JSON bodies ([#9459](https://github.com/agentic-os-org/ANOLISA/pull/9459)).
+
+## [0.9.2] - 2026-11-05
 
 ### Changed
 

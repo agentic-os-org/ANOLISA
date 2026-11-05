@@ -9,7 +9,28 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
-## [0.9.2] - 未发布
+## [0.9.3] - 2026-11-05
+
+### 新增
+
+- `tokenless rtk` 在 `tokenless` 可执行文件内运行带 Tokenless 补丁的 RTK v0.49.0；`tokenless rtk --version` 输出内置的版本（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+
+### 变更
+
+- **不兼容变更：** npm、RPM（`tokenless-core`）、ANOLISA raw、Windows ZIP 和 Python Wheel 软件包只提供 `tokenless`，不再安装单独的 `rtk`。PreTool 将命令改写为 `tokenless rtk <命令>`，并以绝对路径指向正在运行的 `tokenless`，因此改写和执行使用同一个 RTK 构建；它不再在 `PATH` 中查找 `rtk`。直接调用 `rtk` 的脚本需改为调用 `tokenless rtk`。升级会删除早期 Tokenless 版本安装的 `rtk` 辅助程序及其链接，保留单独安装的 RTK（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- **Rust 调用方的不兼容变更：** 移除 `TokenlessRuntime::pre_tool`。短生命周期进程继续使用 `dispatch_with_store`；长期运行的宿主改为运行 `tokenless compress`，因为 RTK 假定每条命令对应一个进程（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- Python SDK 的 `pre_tool()` 改为运行内置的 `tokenless compress`，不再运行 `rtk rewrite`。超时或子进程失败时，现在记录一条警告并原样返回参数，不再抛出 `TokenlessError`，工具调用仍会执行（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- PreTool 改写的时限仍为 5 秒。超时时，RTK 启动的进程（例如卡住的 `git`）现在随改写一起结束（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- 所有框架集成都通过单一的 `tokenless` 可执行文件运行 RTK。Claude Code、Qwen Code、Qoder CLI、QwenWork、OpenCode、Cosh-NG、OpenClaw 和 Hermes 原本就通过 `tokenless compress` 改写，现在得到的是 `tokenless rtk` 命令。Codex PreToolUse Hook 原先直接运行 `rtk rewrite`，现在同样通过 `tokenless compress` 改写；QwenPaw 和 AgentScope 则经 Python SDK 完成改写。Claude Code 和 Qwen Code 的检测以及 QwenWork 的安装不再要求 `rtk`。Hermes 将 `tokenless rtk` 包装视为 RTK 产生的输出，不再识别单独的 `rtk` 包装。DeepSeek Harness 只压缩工具结果，不受影响（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- 从源码构建（包括 curl 安装器的源码构建路径）需要 Rust 1.91 或更高版本，还需要 `git` 和 `patch` 来获取固定版本的 RTK 源码并打补丁。已有的 `third_party/rtk` 检出若来自其他补丁集会被拒绝，执行一次 `just clean-rtk` 即可重新创建（[#9279](https://github.com/agentic-os-org/ANOLISA/pull/9279)、[#9281](https://github.com/agentic-os-org/ANOLISA/pull/9281)、[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- ANOLISA raw 软件包要求 ANOLISA 0.3.21 或更高版本，由它提供 Tokenless 的发现注册表（[#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)）。
+
+### 修复
+
+- HTML 渲染处理代码块中较长的反引号序列时，不再为每种可能的围栏长度重复扫描，避免耗尽 PostTool 的时间预算。渲染内容和恢复行为不变（[#9396](https://github.com/agentic-os-org/ANOLISA/pull/9396)）。
+- PreTool 和 PostTool 识别 QwenWork 的限定工作区 Shell 名称 `mcp__qw-builtin__mcp__workspace__bash`，其纯文本结果可进入现有压缩路径，JSON 正文也可使用 TOON（[#9459](https://github.com/agentic-os-org/ANOLISA/pull/9459)）。
+
+## [0.9.2] - 2026-11-05
 
 ### 变更
 
