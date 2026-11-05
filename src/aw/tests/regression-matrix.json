@@ -1010,6 +1010,14 @@
     "claude-http-mcp-projection": {
       "target": "aw-adapter/lib/aw_adapter",
       "test": "projection::tests::claude_mcp_projection_replaces_the_model_visible_string"
+    },
+    "claude-submission": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "submission::submission_provider_faults_and_rejection_close_before_recovery"
+    },
+    "claude-submission-cleanup": {
+      "target": "aw-cli/test/claude_sdk",
+      "test": "submission::submission_client_checks_and_cleanup_contracts"
     }
   },
   "agents": {
@@ -1069,6 +1077,16 @@
             "scope-sdk-result",
             "claude-http-mcp-projection"
           ]
+        },
+        "input.submit": {
+          "observe": [
+            "claude-submission",
+            "claude-submission-cleanup"
+          ],
+          "block": [
+            "claude-submission",
+            "claude-submission-cleanup"
+          ]
         }
       },
       "lifecycle": [
@@ -1098,12 +1116,14 @@
         "resident-bridge-generation",
         "python-scope-validity",
         "claude-native-configuration",
-        "claude-native-model-settings"
+        "claude-native-model-settings",
+        "claude-submission-cleanup"
       ],
       "security": [
         "security-retry",
         "scope-native-skips",
-        "coverage-native-identity"
+        "coverage-native-identity",
+        "claude-submission"
       ],
       "tokenless": [
         "final-replacement",

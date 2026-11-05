@@ -210,7 +210,7 @@
         "mcp==1.26.0",
         "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection. input.submit checks foreground/resident text factories before native dispatch; rejection/cancellation closes the event before reuse, preserves native UserPromptSubmit hooks, and covers real sec-core prompt/PII scans with controlled model requests.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -990,8 +990,210 @@
               }
             }
           ]
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "tests/claude_submission.py",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "foreground-block",
+                  "foreground-report",
+                  "resident-block",
+                  "resident-report"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/cleanup.json",
+              "values": {
+                "backend_removed": true,
+                "processes_stopped": true
+              }
+            },
+            {
+              "file": "fixtures/input-submission/foreground-block/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/foreground-report/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/resident-block/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery",
+                  "connect-denial",
+                  "connect-pass"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/resident-report/result.json",
+              "values": {
+                "passed": true,
+                "sdk": "0.2.88",
+                "native_config_unchanged": true,
+                "sdk_processes_stopped": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "string",
+                  "async-text",
+                  "async-blocks",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "exit",
+                  "exit-recovery",
+                  "invalid",
+                  "invalid-recovery",
+                  "timeout",
+                  "timeout-recovery",
+                  "native-veto",
+                  "cancel",
+                  "cancel-recovery",
+                  "blank",
+                  "oversize",
+                  "media",
+                  "iterator-recovery",
+                  "connect-denial",
+                  "connect-pass"
+                ],
+                "values": {
+                  "status": "passed",
+                  "events": 0
+                }
+              }
+            }
+          ]
         }
-      ]
+      ],
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
     },
     "hermes": {
       "owner": "@kongche-jbw",

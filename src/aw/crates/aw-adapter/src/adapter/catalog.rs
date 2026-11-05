@@ -82,7 +82,11 @@ pub(crate) const PI: Profile = Profile {
 pub(crate) const CLAUDE_SDK: Profile = Profile {
     name: "claude-sdk",
     adapter: &super::super::adapters::claude_sdk::ClaudeSdk,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const AGENTSCOPE: Profile = Profile {

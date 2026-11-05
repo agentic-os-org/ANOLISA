@@ -25,7 +25,15 @@ pub(super) fn callback(args: &Arguments) -> Exit {
         Ok(exit) => exit,
         Err(error) => {
             eprintln!("aw hook failed: {error}");
-            if args.flags.contains_key("--close-event")
+            if (args
+                .flags
+                .get("--adapter")
+                .is_some_and(|v| v == "claude-sdk")
+                && args
+                    .flags
+                    .get("--event")
+                    .is_some_and(|v| v == "input.submit"))
+                || args.flags.contains_key("--close-event")
                 || args
                     .flags
                     .get("--on-error")

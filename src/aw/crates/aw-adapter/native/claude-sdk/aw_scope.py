@@ -46,6 +46,8 @@ async def exchange(
     ]
     if hook is not None:
         args += ["--event", hook["event"], "--step", hook["step"], "--on-error", hook["on_error"]]
+        if hook.get("close_event"):
+            args += ["--close-event", "true"]
     process = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,

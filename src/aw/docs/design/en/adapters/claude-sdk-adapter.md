@@ -28,6 +28,38 @@ that binary and rejects caller `cli_path` overrides or missing bundled executabl
 there is no PATH fallback. Model configuration and credentials remain SDK-owned.
 The worker options cwd must equal the AW launch cwd.
 
+## Submission admission and recovery
+
+Configured `input.submit` routes wrap factory `query` and resident `connect(prompt)`
+before calling the SDK. `aw_submission` freezes a supported text message, creates
+one UUID turn, and reuses `submission::normalize`. The event's session identity is
+the SDK input envelope's `session_id` (or the `query` argument, whose native default
+is `default`). It is a submission label; the CLI creates its conversation UUID later.
+AW's binding instance and unique turn keep clients and sequential inputs separate.
+Tool Hooks continue using the CLI's native session and tool-use IDs.
+
+The input task occupies the client during iterator validation and policy calls.
+Resident tool invocation accounting begins only after all submission steps and
+`CloseInputEvent` cleanup succeed. Every step shares the same immutable input and
+Service deadline. A `finally` closes the input event through the existing CLI
+close-event bridge, including unvisited steps after rejection and in-flight steps
+after cancellation. Cleanup is shielded and acknowledged before the input-task
+marker is released. Admission rejection never creates model/tool ledger entries.
+
+Recoverable, audited Provider faults reuse the existing Claude callback fault
+classification. `block` returns input denial and `report` returns neutral output;
+risk denial remains terminal for this input under either policy. Scope, identity,
+protocol, audit and uncertain cleanup errors retain their failure fences. A failed
+initial input after resident initialization keeps the connected client available;
+startup failures still close the SDK, relay and scope. Foreground checked clients
+also serialize accepted responses and reject reconnects. Unconfigured foreground
+clients retain the native SDK class and input modes.
+
+Native `UserPromptSubmit` Hooks run after this factory boundary and retain their
+vetoes and added context. AW does not scan their later transformations. See the
+[Claude integration guide](../../../../../../docs/developer-guide/en/aw/agents/claude-sdk.md#check-user-text-before-submission)
+for exact accepted shapes, limits and application recovery.
+
 ## Tool policy and identity
 
 The private `aw hook` transport carries an explicit block reason as a JSON string
@@ -145,3 +177,11 @@ The `resident-model-settings` acceptance covers inline/file settings, user,
 project/local and default sources, credentials, two turns and concurrent clients.
 
 The explicit resident [MCP handler factory](claude-mcp.md) additionally supports reliable MCP success/error classification and single-text replacement. It uses Adapter-owned correlation and suppresses duplicate AW native callbacks for claimed tools.
+
+`tests/claude_submission.py` combines the pinned SDK/CLI, real AW and sec-core
+Provider/backend with a recording local Anthropic endpoint. It covers foreground
+and resident clients, resident initial inputs, strings and async text, prompt/PII
+risks, Provider exit/timeout/invalid-response faults under block/report, cancellation,
+iterator errors, native submit veto, subsequent inputs and released resources.
+Provider transport faults are injected by a test wrapper; ordinary scans reach the
+real backend. Hosted models and production images require separate acceptance.

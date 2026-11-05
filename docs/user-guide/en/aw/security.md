@@ -68,6 +68,8 @@ in YAML through its absolute `transport.argv`.
 
 ## Check user submissions
 
+Claude SDK applications can use the [Claude submission example](../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml) in foreground or resident mode. It enables the same two scanners and rejects before native submission. See the [Claude input shapes and recovery rules](../../../developer-guide/en/aw/agents/claude-sdk.md#check-user-text-before-submission).
+
 For Qoder SDK and QwenPaw applications, start from the
 [SDK security example](../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
 and replace its executable/socket paths. Keep your existing Agent factory or App

@@ -12,7 +12,7 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
 | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
@@ -24,8 +24,9 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
 Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点限制见各 Agent 页。
 
-普通 resident Qoder SDK 和 QwenPaw 在模型请求前支持 `input.submit` 观察与阻断，
-检查完整文本并关联会话和轮次。受限 reloadable 模式及其他 Adapter 拒绝该事件。
+普通 resident Qoder SDK、QwenPaw 及 Claude SDK 前台/常驻工厂在模型请求前支持
+`input.submit` 观察与阻断，检查文本并关联会话和轮次。Claude 支持字符串或单条异步
+文本消息，拒绝或取消后完成清理再复用。受限 reloadable 模式及其他 Adapter 拒绝该事件。
 配置与验收方法见[用户提交检查](security.md#检查用户提交)。
 
 工具 PII 已在 Qoder SDK 1.0.56 / Worker 1.1.78 普通常驻 Query，以及 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App 回复中验收。输入检查先于工具执行；输出检查扫描完整结果，检查保留字段后替换一个获准文本槽，必需检查失败时停止交付。QwenPaw 对选中工具的流在 SSE/模型交付前缓冲。Qoder SDK 的受限 `--reloadable` 模式拒绝结果替换。多文本块、媒体、托管 MCP 与后台 PII 结果交付需分别验收。参见 [PII 配置](security.md#在-qoder-sdk-或-qwenpaw-中检查工具-pii)和[原生验收用例](../../../../contribute/zh/aw/testing.md#工具-pii-验收)。
@@ -39,7 +40,7 @@ Qoder SDK 前台 `Read` 的文本结果支持 PII 内容替换，并保留文件
 | Hook | 状态 |
 | --- | --- |
 | `session.start` | 规划中 |
-| `input.submit` | 普通 resident Qoder SDK 与 QwenPaw 文本输入已实现 |
+| `input.submit` | 普通 resident Qoder SDK / QwenPaw 文本及 Claude SDK 前台/常驻文本工厂已实现 |
 | `tool.before` | 已实现 |
 | `tool.after` | 已实现 |
 | `permission.request` | 规划中 |

@@ -129,9 +129,11 @@ class ManagedTransport(Transport):
                         tracked = kind in {"hook_callback", "can_use_tool"}
                         if kind == "hook_callback":
                             callback = "hook:" + request["callback_id"]
-                            call_id = request.get("tool_use_id") or request.get("input", {}).get(
-                                "tool_use_id"
-                            )
+                            payload = request.get("input", {})
+                            # UserPromptSubmit carries a native input identifier in
+                            # the callback envelope, outside the tool-call ledger.
+                            if payload.get("hook_event_name") != "UserPromptSubmit":
+                                call_id = request.get("tool_use_id") or payload.get("tool_use_id")
                         elif kind == "can_use_tool":
                             call_id = request.get("tool_use_id")
                         elif kind == "mcp_message":
