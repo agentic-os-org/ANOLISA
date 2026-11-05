@@ -1,7 +1,8 @@
 # 示例策略
 
-每个 `.cedar` 文件是一份独立的规则集，也可以按需要拼成同一份 policy set：
-permit 叠加授权，forbid 优先覆盖；排他要求需要同动作的补集 forbid。
+每个 `.cedar` 文件是一份独立的规则集，可以单份使用。组合时必须按动作重新合并条件，不能把
+两个文件直接叠在一起：同动作的两份“只允许”各自带补集 forbid，范围 A 的请求会命中范围 B 的
+补集，最终两个范围都被拒。规则见下面的“怎么组合”。
 
 这些文件全部写在官方校验接受的子集里：裸 `principal`、无注解、规范绝对路径。
 示例中的 `/work/...`、`/usr/bin/git` 都是占位值，实际使用时必须换成任务里的真实路径。
@@ -10,6 +11,40 @@ permit 叠加授权，forbid 优先覆盖；排他要求需要同动作的补集
 [`语言参考`](../references/cedar-policy-language.md) 的"下游提交格式"。
 
 下面的 Allow / Deny 只指 Cedar Authorizer 对构造请求的策略判定，不是操作系统实际读写或拦截结果。
+
+## 怎么组合
+
+- 同动作多个允许范围：先并成一条联合条件，只写一组 permit + 补集 forbid。
+
+  ```cedar
+  permit(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+  when {
+    (resource.path == "/work/project" || resource.path like "/work/project/*") ||
+    (resource.path == "/work/vendor" || resource.path like "/work/vendor/*")
+  };
+  forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+  unless {
+    (resource.path == "/work/project" || resource.path like "/work/project/*") ||
+    (resource.path == "/work/vendor" || resource.path like "/work/vendor/*")
+  };
+  ```
+
+- 不同动作：各写各的，`file.read` 的补集拦不住 `file.write`，反之亦然。
+- 已有一份全局 permit：补集 forbid 保证“只允许”仍然只允许，这也是这些示例自带补集的原因。
+- 想同时用两个示例：先确认范围是否重叠；不重叠（如两个不同目录的只读范围）就先合并再落盘，
+  否则会互相拒绝。
+
+## 路径边界只到字符串
+
+示例里的 permit / forbid 都只比较字符串，不折叠 `..`、`.`，不解析符号链接：
+
+```text
+/work/project/../../etc/shadow   matches like "/work/project/*"   -> Allow
+/work/config/./important.txt     != "/work/config/important.txt"    -> forbid does not fire
+```
+
+所以“范围外读取被拒”“这个文件被保护”只在路径已经是规范化字面量时成立。物理路径边界属于
+unresolved：需要可信请求构造层先折叠 `..`/`.` 并解析符号链接，否则不要把词法边界说成物理边界。
 
 ## 每个示例怎么触发
 
@@ -24,7 +59,8 @@ Agent 验收：如果它给出的规则和"产出"对不上，就说明 Step 1 �
   是完整 Cedar policy set；下游提交时按参考说明包装。
 - 仍被拒绝：范围外读取以及一切写、执行、联网；与全局 read permit 拼接仍拒绝范围外读取。
 - 验收：读取 `/work/project`、`/work/project/src/main.rs` 为 Allow，
-  `/home/user/.ssh/id_ed25519` 为 Deny。目录内按路径授权，不能自动区分代码与秘密。
+  `/home/user/.ssh/id_ed25519` 为 Deny。目录内按路径授权，不能自动区分代码与秘密；
+  未规范化的路径仍会命中，见“路径边界只到字符串”。
 
 ### `allow-read-subtree.cedar` —— 只开一个目录的读取
 
@@ -48,6 +84,8 @@ Agent 验收：如果它给出的规则和"产出"对不上，就说明 Step 1 �
 - 产出：1 条 `file.write` forbid，条件 `resource.path == "/work/config/important.txt"`，
   与一个子树写 permit 配合使用。
 - 关键点：forbid 覆盖 permit，只影响这个路径。
+- 边界：等值比较是字符串比较，`/work/config/./important.txt` 不等于
+  `/work/config/important.txt`，不会命中这条 forbid；见“路径边界只到字符串”。
 - 仍被拒绝：该文件的一切写操作。
 
 ### `allow-program-exec.cedar` —— 只许一个程序在一个目录执行
