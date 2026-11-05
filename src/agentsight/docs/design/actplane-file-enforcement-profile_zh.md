@@ -36,6 +36,26 @@ alias；metadata 缺失或不匹配会被视为需要显式迁移的错误。
 数据流 tracepoint 和文件 hook。网络拦截、进程执行拦截、taint 传递和时序策略
 执行仍属于后续 profile，不能宣称已由本 profile 启用。
 
+## 精确文件禁读
+
+结构化契约增加可选的 `protections.read`，默认 false，仅支持 `exact_file`。
+HTTP 模板通过独立的 `POST /api/enforcement/file-read-bindings` 接口选择该保护，
+旧服务端会返回 404，而不是忽略未知字段后只下发禁止打开的策略；目录树禁读目标会被拒绝，
+避免宣告尚未支持的覆盖。协议保持 v5，策略 schema 版本不变：省略 false 字段保留旧载荷，
+旧后端遇到值为 true 的未知字段会拒绝策略。
+
+激活时对已持有的设备/inode 身份安装 `INODE_GUARD_READ`。文件打开、权限、
+mmap 和 mprotect 钩子在深层策略求值前检查守卫，事件操作号 9 映射为 `read`。
+`agent-file-guard` pinned marker 提升到 v6，并预留映射钩子；仅在全部所需 link
+存在时，上报 `file_read_protection`。守卫覆盖别名及已打开的只读 FD，不影响未绑定
+进程，也不隐含禁止删除或写入。
+
+准入检查使用目标拓扑解析出的身份，拒绝已有的全部文件映射，包括私有映射与
+PROT_NONE 映射。检查无法撤回已读取的内存，也不提供进程树或文件访问并发变化
+期间的原子隔离保证。外部文件替换或密钥轮换后需重新下发；动态拓扑及 io_uring/AIO
+仍在覆盖范围外。实测在 ALinux 6.6 上使用模拟文件及独立 enforcer、HTTP 服务、
+UDS 和 pin root。
+
 ## 构建约定
 
 `make build-enforcer` 会调用 `scripts/build-enforcer.sh`。该脚本：

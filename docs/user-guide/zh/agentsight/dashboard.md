@@ -173,6 +173,13 @@ Skill 数量分布，以及按周的热度排行。统计单位是一次 LLM 调
 
 ![系统审计页面](../../../images/agentsight/zh/dashboard-system-audit.png)
 
+## 密钥文件禁读模板
+
+装了 enforcer 后，在风险拦截页的「策略模板」中选择「禁止读取密钥文件」，填写 Agent ID、根 PID
+和普通文件绝对路径，然后下发。该策略固定使用拦截模式，不需要配置可信网络端点；读取拒绝记录
+显示为 `read`。后端不支持 `file_read_protection` 或未就绪时，下发按钮不可用。
+原有凭证外发模板仍保留。文件身份、已有映射及密钥轮换的边界见[禁读说明](integrations.md#禁止读取密钥文件)。
+
 ## 轨迹查看
 
 把任意会话或对话加载为 ATIF v1.7 轨迹：Agent 元信息、步骤与 Token 汇总、Tokenless 对比，以及完整的

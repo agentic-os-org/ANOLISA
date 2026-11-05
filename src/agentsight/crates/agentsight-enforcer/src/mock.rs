@@ -621,6 +621,7 @@ mod tests {
                 protections: FileProtections {
                     delete: true,
                     ordinary_write: false,
+                    read: false,
                 },
                 exclusions: Vec::new(),
             }],

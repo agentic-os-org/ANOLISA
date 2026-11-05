@@ -159,6 +159,30 @@ Protocol v5 adds a versioned `file_protection_policy` payload, mutually exclusiv
 `policy_dsl`. The mock backend still rejects structured policies. Existing DSL semantics are
 retained, but v4 clients must upgrade with the enforcer because protocol v4 frames are rejected.
 
+### Deny secret file reads
+
+On the Risk Enforcement page select **Deny secret file reads**, then enter the Agent ID, root PID,
+and absolute secret-file path. The template calls `POST /api/enforcement/file-read-bindings` with
+the same `agent_id`, `root_pid`, and `path` fields as `POST /api/enforcement/file-bindings`, producing
+a structured `exact_file` policy with `protections.read: true` and fixed `enforce` mode. The separate
+route makes an older `agentsight serve` answer 404 instead of applying an open-only policy; the
+existing file-binding route rejects `deny_read: true` with `file_read_route_required`. Omitting
+`protections.read` in old policies means false.
+Apply and detach retain Dashboard authentication: even loopback calls require a valid token or login session.
+
+- Requires the `agent-file-guard` profile and BPF LSM; health must advertise
+  `file_read_protection: true`. Older enforcers reject the new policy field instead of silently allowing access.
+- Denies reads, reads through previously opened read-only descriptors, and file mappings for the bound process
+  tree. Hard links and symlinks to the same protected file are denied too. `O_PATH` identity handles remain
+  allowed. Unbound processes are unaffected; detaching restores read access.
+- Existing private or shared file mappings reject activation; restart the affected processes. Previously
+  read memory cannot be revoked. Keep file access and process-tree changes quiescent during Apply;
+  atomic isolation for concurrent activation is not guaranteed.
+- Protects the regular-file identity held at Apply, not a directory tree. Re-apply after external file
+  replacement or secret rotation. Read protection does not imply write or delete protection; combine
+  `ordinary_write` and `delete` independently when needed.
+- This is not a complete sandbox: io_uring/AIO, process-memory access, and dynamic mounts are outside coverage.
+
 ### Structured file protection: phase-one boundaries
 
 The `file_protection_policy` payload protects exact file entries or directory trees, including

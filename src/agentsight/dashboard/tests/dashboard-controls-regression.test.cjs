@@ -408,6 +408,43 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
     'the clamped page must not be empty: it must fall back to the remaining row');
 });
 
+test('read-denial template is capability-gated and submits a file read binding', async () => {
+  for (const supported of [false, true]) {
+    const driver = createHooksDriver();
+    const requests = [];
+    const page = loadPageModule('src/pages/RiskEnforcementPage.tsx', {
+      'react-router-dom': { useSearchParams: () => [new URLSearchParams(), () => {}] },
+      '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+      '../utils/apiClient': {
+        fetchEnforcementHealth: async () => ({ ready: true, capabilities: { file_read_protection: supported } }),
+        fetchEnforcementBindings: async () => ({ bindings: [] }),
+        fetchEnforcementViolations: async () => ({ violations: [] }),
+        enforcementSupportsMode: () => false,
+        enforcementViolationTotal: () => 0,
+        createFileReadBinding: async (request) => requests.push(request),
+        createCredentialBinding: async () => assert.fail('read denial must not apply a credential policy'),
+      },
+      '../utils/enforcementMode': { effectiveBindingMode: () => 'enforce' },
+      '../components/Pagination': componentStub('Pagination'),
+    }, driver).RiskEnforcementPage;
+    let rendered = driver.render(page);
+    rendered.effects[0]();
+    await settle();
+    rendered = driver.render(page);
+    const template = collectElements(rendered.element, (node) => node.type === 'select')[0];
+    template.props.onChange({ target: { value: 'deny_read' } });
+    rendered = driver.render(page);
+    const required = collectElements(rendered.element, (node) => node.type === 'input' && node.props.required);
+    ['fixture', '123', '/tmp/secret.key'].forEach((value, index) => required[index].props.onChange({ target: { value } }));
+    rendered = driver.render(page);
+    const submit = collectElements(rendered.element, (node) => node.type === 'button' && node.props.type === 'submit')[0];
+    assert.equal(submit.props.disabled, !supported);
+    await collectElements(rendered.element, (node) => node.type === 'form')[0].props.onSubmit({ preventDefault() {} });
+    assert.equal(requests.length, supported ? 1 : 0);
+    if (supported) assert.deepEqual(requests[0], { agent_id: 'fixture', root_pid: 123, path: '/tmp/secret.key', session_id: undefined });
+  }
+});
+
 async function renderRiskEnforcementCapabilities(capabilities) {
   const { calls, stubs } = deferredFetchStubs([
     'fetchEnforcementHealth',

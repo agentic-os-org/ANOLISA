@@ -26,7 +26,8 @@ use ebpf_ifc_engine::capability::{
     AUTH_REQUIRE_GATE, CapState, TARGET_CHILD, TARGET_SELF,
 };
 use ebpf_ifc_engine::{
-    GLOBAL_ACTIVE_DOMAIN_ID, INODE_GUARD_WRITE, PinnedEngine, ReloadHandle, Violation,
+    GLOBAL_ACTIVE_DOMAIN_ID, INODE_GUARD_READ, INODE_GUARD_WRITE, PinnedEngine, ReloadHandle,
+    Violation,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -335,6 +336,12 @@ impl ActPlaneBackend {
                     .into(),
             ));
         }
+        let requires_read = normalized
+            .as_ref()
+            .is_some_and(|policy| policy.targets.iter().any(|target| target.read));
+        if requires_read && !self.engine.supports_file_read_guard() {
+            return Err(BackendError::CompileFailure("file read protection requires attached file_open, file_permission, mmap_file and file_mprotect hooks".into()));
+        }
         if requires_ordinary_write && !self.structured_ordinary_write_ready() {
             return Err(BackendError::CompileFailure(
                 "ordinary write protection requires the attached file_permission hook".into(),
@@ -368,6 +375,19 @@ impl ActPlaneBackend {
                 request.root_pid,
                 request.process_start_time,
             )?;
+            let read_entries: Vec<_> = topology
+                .direct_targets
+                .iter()
+                .filter(|record| policy.targets[record.target_id as usize - 1].read)
+                .map(|record| preexisting_maps::ProtectedEntry {
+                    path: record.path.authored_path.clone(),
+                    scope: preexisting_maps::ProtectedScope::Exact {
+                        dev: record.path.identity.dev,
+                        ino: record.path.identity.ino,
+                    },
+                })
+                .collect();
+            preexisting_maps::reject_preexisting_read_mappings(request.root_pid, &read_entries)?;
             return Ok(PreparedBinding {
                 request,
                 credential_policy,
@@ -421,15 +441,15 @@ impl ActPlaneBackend {
         } = prepared;
         let label = source_label(compiled.as_ref())?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
-        // Exact-file ordinary-write protection rides the inode-guard fast
-        // path: writable opens, writes and truncates of the held inode are
-        // denied in every mediation hook without adding classification stack
-        // depth to the hooks. Identities are collected before staging, but the
-        // guards are installed only after staging succeeds: main's contract is
-        // that a staging failure returns without kernel state, and the guard
-        // stays inert until the domain is seeded below. Detach clears it with
-        // the other inode guards.
-        let write_guard_identities: Vec<(u64, u32, u32)> = file_protection
+        // Exact-file ordinary-write and read protection ride the inode-guard
+        // fast path: guarded opens, reads, writes, truncates and mappings of the
+        // held inode are denied in every mediation hook without adding
+        // classification stack depth to the hooks. Identities are collected
+        // before staging, but the guards are installed only after staging
+        // succeeds: main's contract is that a staging failure returns without
+        // kernel state, and the guard stays inert until the domain is seeded
+        // below. Detach clears it with the other inode guards.
+        let guard_identities: HashMap<(u64, u32), (u32, u32)> = file_protection
             .as_ref()
             .map(|prepared| {
                 prepared
@@ -438,16 +458,19 @@ impl ActPlaneBackend {
                     .iter()
                     .filter(|record| {
                         let target = &prepared.policy.targets[record.target_id as usize - 1];
-                        target.ordinary_write && target.kind == FileProtectionTargetKind::ExactFile
+                        (target.ordinary_write || target.read)
+                            && target.kind == FileProtectionTargetKind::ExactFile
                     })
-                    .map(|record| {
-                        (
-                            record.path.identity.ino,
-                            record.path.identity.dev,
-                            record.target_id,
-                        )
+                    .fold(HashMap::new(), |mut guards, record| {
+                        let target = &prepared.policy.targets[record.target_id as usize - 1];
+                        let flags = (u32::from(target.ordinary_write) * INODE_GUARD_WRITE)
+                            | (u32::from(target.read) * INODE_GUARD_READ);
+                        let entry = guards
+                            .entry((record.path.identity.ino, record.path.identity.dev))
+                            .or_insert((record.target_id, 0));
+                        entry.1 |= flags;
+                        guards
                     })
-                    .collect()
             })
             .unwrap_or_default();
         let structured_target_count = file_protection
@@ -462,12 +485,13 @@ impl ActPlaneBackend {
             )?),
             None => None,
         };
-        for (ino, dev, target_id) in write_guard_identities {
+        for ((ino, dev), (target_id, flags)) in guard_identities {
             self.engine
-                .guard_inode(ino, dev, INODE_GUARD_WRITE, id, target_id)
+                .guard_inode(ino, dev, flags, id, target_id)
                 .map_err(|error| {
                     let cleanup = self.cleanup_binding(&request, id, None);
-                    kernel_error_with_cleanup("guard exact-file write inode", error, cleanup)
+                    let context = format!("guard exact-file inode (flags {flags:#x})");
+                    kernel_error_with_cleanup(&context, error, cleanup)
                 })?;
         }
         self.engine
@@ -720,6 +744,8 @@ impl EnforcementBackend for ActPlaneBackend {
         capabilities.file_entry_delete_protection = file_guard_ready;
         capabilities.directory_tree_delete_protection = file_guard_ready;
         capabilities.ordinary_write_protection = self.structured_ordinary_write_ready();
+        capabilities.file_read_protection =
+            file_guard_ready && self.engine.supports_file_read_guard();
         capabilities.static_mount_topology = file_guard_ready;
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
@@ -1495,6 +1521,7 @@ fn operation_name(operation: u32) -> &'static str {
         6 => "rename",
         7 => "rmdir",
         8 => "ordinary_write",
+        9 => "read",
         _ => "unknown",
     }
 }
@@ -1752,6 +1779,7 @@ mod tests {
                     protections: FileProtections {
                         delete: true,
                         ordinary_write: false,
+                        read: false,
                     },
                     exclusions: Vec::new(),
                 }],
@@ -1951,7 +1979,8 @@ mod tests {
             (3, "connect"),
             (4, "recv"),
             (8, "ordinary_write"),
-            (9, "unknown"),
+            (9, "read"),
+            (10, "unknown"),
         ] {
             assert_eq!(operation_name(op), name);
         }

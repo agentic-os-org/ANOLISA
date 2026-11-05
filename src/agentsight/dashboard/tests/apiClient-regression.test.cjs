@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const {
   containmentTargetCandidates,
+  createFileReadBinding,
   defaultContainmentTargetPid,
   enforcementSupportsContainment,
   enforcementSupportsMode,
@@ -462,6 +463,25 @@ test('audit-only backends report all observed violations instead of blocked-only
   const violations = [{ blocked: false }, { blocked: false }, { blocked: true }];
 
   assert.equal(enforcementViolationTotal(violations, health), 3);
+});
+
+test('read-denial bindings use a dedicated route without a selector field', async () => {
+  let submitted;
+  global.fetch = async (url, options) => {
+    submitted = { url, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({ binding_id: 'fixture' }), { status: 200 });
+  };
+  await createFileReadBinding({ agent_id: 'fixture', root_pid: 123, path: '/tmp/secret.key' });
+  assert.equal(new URL(submitted.url).pathname, '/api/enforcement/file-read-bindings');
+  assert.equal('deny_read' in submitted.body, false);
+  assert.equal(submitted.body.path, '/tmp/secret.key');
+});
+
+test('read-denial backends count only blocked violations', () => {
+  const health = enforcementHealth(false);
+  health.capabilities.credential_enforce = false;
+  health.capabilities.file_read_protection = true;
+  assert.equal(enforcementViolationTotal([{ blocked: false }, { blocked: true }], health), 1);
 });
 
 test('alternate PID candidates require an explicit backend capability', () => {

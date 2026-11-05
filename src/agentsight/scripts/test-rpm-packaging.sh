@@ -99,6 +99,11 @@ def rename_dispatcher(data, arch):
 engine = pathlib.Path(sys.argv[1])
 constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
                            (engine.parents[1] / "scripts/build-enforcer.sh").read_text(), re.M))
+for relative, key in (("build.rs", "BPF_BUILD"), ("src/lib.rs", "BPF_LIB"),
+                      ("src/file_protection_pinned_maps.rs", "FILE_PROTECTION_PINNED_MAPS"),
+                      ("file_read_guard.bpf.h", "FILE_READ_GUARD")):
+    assert git_blob((engine / relative).read_bytes()) == constants[f"ACTPLANE_STAGED_{key}_BLOB"], \
+        f"stale source inventory: {relative}"
 for arch, opposite in (("x86_64", "aarch64"), ("aarch64", "x86_64")):
     for name in ("process.bpf.o", "process-inode-only.bpf.o"):
         path = engine / "prebuilt" / arch / name
@@ -262,7 +267,7 @@ constants = dict(re.findall(r'^(ACTPLANE_\w+)="([^"]+)"',
 (root / "Cargo.toml").write_text(f'rev = "{constants["ACTPLANE_REVISION"]}"\n' * 2)
 engine = root / "crates/ebpf-ifc-engine"
 (engine / "prebuilt").mkdir(parents=True)
-for name in ("process.bpf.c", "process.h", "taint.h", "taint_engine.bpf.h",
+for name in ("process.bpf.c", "process.h", "file_read_guard.bpf.h", "taint.h", "taint_engine.bpf.h",
              "capability.bpf.h", "channel.bpf.h"):
     (engine / name).write_text(name)
 (engine / "build.rs").write_bytes(b"staged-build")
@@ -292,6 +297,8 @@ elif command == "checkout":
 elif command == "hash-object":
     path = pathlib.Path(source) / args[0]
     key = {"Makefile": "PATCHED_BPF_MAKEFILE"}.get(path.name)
+    if path.name == "file_read_guard.bpf.h" and path.read_bytes() == b"file_read_guard.bpf.h":
+        key = "STAGED_FILE_READ_GUARD"
     if path.suffix == ".rs" and path.name != "build.rs":
         data = path.read_bytes()
         if path.name == "lib.rs":
@@ -335,6 +342,9 @@ for name in ("lib.rs", "file_protection_generation.rs", "file_protection_generat
     assert path.read_bytes() == f"staged-{name}".encode()
     if os.environ.get("FIXTURE_MUTATE_SOURCE") == name:
         path.write_bytes(b"mutation during build")
+assert (source / "file_read_guard.bpf.h").read_bytes() == b"file_read_guard.bpf.h"
+if os.environ.get("FIXTURE_MUTATE_SOURCE") == "file_read_guard.bpf.h":
+    (source / "file_read_guard.bpf.h").write_bytes(b"mutation during build")
 objects = source / "prebuilt" / arch
 assert (objects / "process.bpf.o").read_bytes() == f"{arch}-full-object".encode()
 assert (objects / "process-inode-only.bpf.o").read_bytes() == f"{arch}-inode-object".encode()
@@ -397,7 +407,7 @@ for failure in CARGO_BUILD_TARGET=other-target ACTPLANE_REBUILD_BPF=1 FIXTURE_BA
 done
 
 for source_file in lib.rs file_protection_generation.rs file_protection_generation_tests.rs \
-    file_protection_map_writer.rs file_protection_pinned_maps.rs; do
+    file_protection_map_writer.rs file_protection_pinned_maps.rs file_read_guard.bpf.h; do
     if "${fixture_env[@]}" "FIXTURE_MUTATE_SOURCE=$source_file" \
         "$fixture_root/scripts/build-enforcer.sh" >"$tmp_dir/failed-path" 2>"$tmp_dir/failed-build.err"; then
         printf 'attested build accepted a mutation of %s\n' "$source_file" >&2

@@ -105,6 +105,33 @@ hooks are attached. Unlinked files still render in `/proc` with a
 access to a removed tree file rejects the apply; this fail-closed behavior is
 kept because `linkat(AT_EMPTY_PATH)` can re-attach such an inode.
 
+## Exact-file read protection
+
+The structured contract adds optional `protections.read`, defaulting to false,
+for `exact_file` targets only. The HTTP-owned template selects it through the
+dedicated `POST /api/enforcement/file-read-bindings` route, so an older server
+answers 404 instead of ignoring an unknown field and applying an open-only
+policy; directory-tree read targets are rejected instead of claiming
+unsupported coverage. Protocol v5 and the policy schema version
+remain unchanged: omitted false fields preserve old payloads, while old
+backends reject the unknown true field.
+
+Activation installs `INODE_GUARD_READ` on the held device/inode identity.
+The file-open, permission, mmap and mprotect hooks check this guard before
+deep policy evaluation, reporting event operation 9 as `read`. The
+`agent-file-guard` pinned marker advances to v6 and reserves mapping hooks;
+health advertises `file_read_protection` only when every required link exists.
+The read guard applies to aliases and previously opened read-only descriptors
+without affecting unbound processes or implying delete/write protection.
+
+Preflight uses identities resolved in the target topology to reject all
+existing file mappings, including private and PROT_NONE mappings. This scan
+cannot revoke previously read memory or provide atomic isolation against
+concurrent process-tree/file-access changes. External file replacement or
+secret rotation requires re-apply; dynamic topology and io_uring/AIO remain
+outside coverage. Validation used synthetic files on ALinux 6.6 with an
+isolated enforcer, HTTP server, UDS and pin root.
+
 ## Build Contract
 
 `make build-enforcer` invokes `scripts/build-enforcer.sh`. The script:

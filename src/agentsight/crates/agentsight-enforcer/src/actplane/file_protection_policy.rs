@@ -29,6 +29,8 @@ pub(super) struct NormalizedFileProtectionTarget {
     pub(super) delete: bool,
     /// Whether ordinary-write protection was requested by any identical target.
     pub(super) ordinary_write: bool,
+    /// Whether read protection was requested by any identical target.
+    pub(super) read: bool,
     /// Deduplicated exclusions sorted by lexical path and exclusion kind.
     pub(super) exclusions: Vec<NormalizedFileProtectionExclusion>,
 }
@@ -116,6 +118,7 @@ pub(super) fn normalize(
             }
             existing.target.delete |= normalized.delete;
             existing.target.ordinary_write |= normalized.ordinary_write;
+            existing.target.read |= normalized.read;
         } else {
             if targets.len() == MAX_STRUCTURED_TARGETS {
                 return Err(target_error(
@@ -150,6 +153,13 @@ fn normalize_target(
 ) -> Result<NormalizedFileProtectionTarget, FileProtectionNormalizationError> {
     validate_path(&target.path)
         .map_err(|reason| target_error(target_index, &target.path, reason))?;
+    if target.protections.read && target.kind != FileProtectionTargetKind::ExactFile {
+        return Err(target_error(
+            target_index,
+            &target.path,
+            "read protection requires an exact_file target",
+        ));
+    }
     if target.kind == FileProtectionTargetKind::ExactFile
         && let Some(exclusion) = target.exclusions.first()
     {
@@ -218,6 +228,7 @@ fn normalize_target(
         kind: target.kind,
         delete: target.protections.delete,
         ordinary_write: target.protections.ordinary_write,
+        read: target.protections.read,
         exclusions,
     })
 }
