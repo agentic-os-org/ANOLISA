@@ -590,6 +590,66 @@ describe("scan-code", () => {
   // Dimension 5: Self-Protect Forced Block
   // =========================================================================
   describe("self-protect forced block", () => {
+    for (const tool of ["plugins", "tool_call:plugins", "tool_call:openclaw:core:plugins"]) {
+      for (const action of ["disable", "uninstall"]) {
+        it(`${tool} ${action} blocks the security plugin without invoking the CLI`, async () => {
+          const { handler, logs } = registerAndGetHandler();
+          let cliCalls = 0;
+          _setCliMock(async () => {
+            cliCalls++;
+            throw new Error("native operations must not invoke the shell scanner");
+          });
+          const params = { action: ` ${action} `, pluginId: " agent-sec " };
+          const event = tool === "plugins"
+            ? { toolName: tool, params }
+            : { toolName: "tool_call", params: { id: tool.slice("tool_call:".length), args: params } };
+
+          const result = await handler(event, { runId: "native-run", toolCallId: "native-call" });
+
+          assert.equal(result?.block, true);
+          assert.ok(result.blockReason.includes(`openclaw plugins ${action} agent-sec`));
+          assert.equal(cliCalls, 0);
+          const record = JSON.parse(logs[0].slice("[scan-code] ".length));
+          assert.equal(record.policy, "observe");
+          assert.equal(record.decision, "block");
+          assert.equal(record.outcome, "self-protect-native");
+          assert.equal(record.run_id, "native-run");
+          assert.equal(record.tool_call_id, "native-call");
+          assert.ok(record.message.includes("SELF-PROTECT block"));
+        });
+      }
+    }
+
+    for (const event of [
+      { toolName: "plugins", params: { action: "disable", pluginId: "agent-sec-extra" } },
+      { toolName: "plugins", params: { action: "uninstall", pluginId: "another-plugin" } },
+      { toolName: "plugins", params: { action: "enable", pluginId: "agent-sec" } },
+      { toolName: "plugins", params: { action: "inspect", pluginId: "agent-sec" } },
+      { toolName: "plugins", params: { action: "disable", name: "agent-sec" } },
+      { toolName: "plugins", params: { action: "disable", pluginId: 123 } },
+      { toolName: "tool_call", params: { id: "another-tool", args: { action: "disable", pluginId: "agent-sec" } } },
+      { toolName: "tool_call", params: { id: "third-party:plugins", args: { action: "disable", pluginId: "agent-sec" } } },
+      { toolName: "tool_call", params: { id: "plugins", args: [] } },
+      { toolName: "tool_call", params: { id: "plugins", args: null } },
+    ]) {
+      it(`does not self-protect unrelated or invalid native input ${JSON.stringify(event)}`, async () => {
+        const { handler, logs } = registerAndGetHandler();
+        mockCliNoCall();
+        assert.equal(await handler(event, {}), undefined);
+        assert.equal(lastCliArgs, undefined);
+        assert.deepEqual(logs, []);
+      });
+    }
+
+    it("native self-protect respects the disabled hook switch", async () => {
+      process.env.CODE_SCANNER_HOOK_ENABLED = "false";
+      const { handler, logs } = registerAndGetHandler();
+      mockCliNoCall();
+      assert.equal(await handler({ toolName: "plugins", params: { action: "disable", pluginId: "agent-sec" } }, {}), undefined);
+      assert.equal(lastCliArgs, undefined);
+      assert.deepEqual(logs, []);
+    });
+
     it("self-protect-openclaw finding forces block regardless of config", async () => {
       const { handler } = registerAndGetHandler(); // default: codeScanRequireApproval=false
       mockCli({
