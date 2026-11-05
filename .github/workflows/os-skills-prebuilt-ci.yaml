@@ -26,6 +26,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install test dependencies
+        # openpyxl is undeclared anywhere in the repo; the xlsx skill tests
+        # under src/os-skills/tests build and read back real workbooks with
+        # it, and skipUnless would silently turn them into zero-coverage
+        # skips without the install.
+        run: pip install openpyxl
       - name: Verify raw package and action
         run: |
           python3 -m unittest discover -s src/os-skills/tests
