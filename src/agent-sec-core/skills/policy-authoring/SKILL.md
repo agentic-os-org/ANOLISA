@@ -96,6 +96,10 @@ Scope/Binding 选择，策略里不写主体条件。文件类动作的 `resourc
   forbid，不要指望下游追加或改写。
 - **不猜身份、路径和存在性。** 裸程序名（`git`、`python3`）不是绝对路径；PATH 解析、DNS、
   符号链接和文件是否存在都不归策略管。
+- **路径边界是词法的。** 规则只按字面量比较请求里的路径字符串，不折叠 `..`、`.`，也不解析
+  符号链接：`/work/project/../../etc/shadow` 仍匹配 `like "/work/project/*"`，
+  `/work/config/./important.txt` 不等于 `/work/config/important.txt`。要求物理路径边界时，
+  规范化与 symlink 解析列入 unresolved，必须由可信请求构造层先做。
 - **工具调用不等于程序启动。** 不要把"禁止调用某个工具"写成 `file.exec`，agent hook 动作尚未定义。
 - **通过自检不等于理解正确，也不等于已生效。** 自检不证明实际校验通过；候选仍需人工批准、
   绑定和下发。
@@ -138,7 +142,8 @@ Scope/Binding 选择，策略里不写主体条件。文件类动作的 `resourc
    把它记进 unresolved，不要用全网络许可冒充。
 7. **身份、时间、频率、审批。** "只允许张三""每小时最多 6 次""需二次确认"都无法表达 → unresolved。
 8. **边界。** 路径比较是精确相等，子路径和同前缀邻居都不匹配；`like` 只允许末尾 `/*`，且
-   不匹配目录自身；属性值要请求侧就带齐，缺字段时规则不匹配。
+   不匹配目录自身；比较的是字符串本身，`..`、`.` 和符号链接都不会被规范化。属性值要请求侧
+   就带齐，缺字段时规则不匹配。
 
 **别漏了 Agent 自身跑起来的权限。** 业务权限写对、Agent 自己却启动不了，是常见结果：确认它用
 哪个模型端点、凭据放在哪个文件、需要执行哪些工具，再判断这些是否已被现有 Scope/Binding 覆盖。
@@ -171,7 +176,8 @@ when { resource.path == "/work/project" || resource.path like "/work/project/*" 
 书写清单：
 
 - 头部只写 `principal, action, resource`，条件全部放 `when` / `unless`。
-- 不写注解、不写模板，不留空策略集。
+- 不写注解、不写模板；交付的文本至少一条规则。没有任何可表达要求时不交付 policy（见 2c），
+  而不是交一段空文本。
 - 路径只和规范绝对字面量比较：`==`、`!=`，或末尾 `/*` 的 `like`。
 - 每条规则以 `;` 结尾；同一文件里的规则按动作分组，便于和交付说明对应。
 
@@ -192,11 +198,36 @@ forbid(principal, action == SecCore::Action::"file.exec", resource is SecCore::F
 unless { resource.path == "/usr/bin/git" && context.input.cwd == "/work" };
 ```
 
+同一个动作有多个允许范围时，先并成一条联合条件，再写一组 permit + 补集 forbid。两份各自带
+补集 forbid 的"只允许"不能直接拼进同一份 policy set：范围 A 的请求会命中范围 B 的补集，
+最终两个范围都被拒绝。
+
+```cedar
+permit(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+when {
+  (resource.path == "/work/project" || resource.path like "/work/project/*") ||
+  (resource.path == "/work/vendor" || resource.path like "/work/vendor/*")
+};
+forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+unless {
+  (resource.path == "/work/project" || resource.path like "/work/project/*") ||
+  (resource.path == "/work/vendor" || resource.path like "/work/vendor/*")
+};
+```
+
 ### 2c 表达不了的事实
 
 不是所有要求都能落成规则。历史（"最近""连续三次"）、计数与频率、计算事实（正则、风险评分、
 语义分类）、主体身份、审批和精确到 host/port 的网络限制，schema 里都没有对应字段。遇到就写进
 unresolved 并说明缺什么，**不要编一条近似规则充数**——那会让用户以为约束已经生效。
+
+- **必要限制不可表达时，不生成那条 permit。** 限制是许可成立的前提，就不能把限制留在
+  unresolved 而交付一条更宽的许可。例："这次会话、接下来一小时可以读 `/secret`"不写成永久
+  read permit，而是整条记进 unresolved。
+- **全部要求都不可表达时，只返回 unresolved。** 不交付任何 policy 原文；"不交付"不等于
+  "交付空策略集"，空文本仍然不是交付物。
+- **停下来等用户回答是合法终点。** 缺关键信息时把问题交回用户，等回答再继续，不要先给一份
+  带假设的 policy 兜底。
 
 ### 2d 收尾
 
@@ -235,7 +266,8 @@ unresolved 并说明缺什么，**不要编一条近似规则充数**——那�
 1. 一句话复述你的理解。
 2. 你做的假设：路径、operation 集合、子树还是单文件、`cwd` 与参数。
 3. 校验状态：已过自检清单的哪几段，以及仍然不确定、需要人工确认的判定。
-4. Cedar 原文，不包装为 JSON；包装和提交由下游完成。
+4. Cedar 原文；没有可表达要求时明确说明本次不交付 policy。不包装为 JSON，包装和提交由下游
+   完成。
 5. 每条规则的中文说明，以及**哪些操作仍然被拒绝**。
 6. 无法表达、需要交回用户和下游的清单（unresolved）。
 7. Agent 自身运行所需的权限（模型端点、凭据、工具）是否被这份 policy 或现有 Binding 覆盖；
@@ -260,10 +292,13 @@ unresolved 并说明缺什么，**不要编一条近似规则充数**——那�
 
 - 不要发明动作、字段、类型；只有 `file.read`、`file.write`、`file.exec`、`network.use`。
 - 不要写 principal 约束或条件，不要把 `context` 放进策略头部。
-- 不要写注解（含 `@id`、`@description`、`@advice`）、模板或空策略集。
+- 不要写注解（含 `@id`、`@description`、`@advice`）或模板，也不要交出空策略集充当交付物。
 - 不要在 `like` 里用中间通配（`/a/*/b`）、裸前缀（`/a*`）、相对路径、`..`、重复 `/`、
   尾部 `/` 或路径中的真实反斜杠；`like` 模式中的 `\*` 是转义，不是路径反斜杠。
 - 不要把资源类型和动作配错，也不要靠 SDK 的动作适用性 warning 过关——策略校验会拒。
 - 不要把"禁止删除"扩大成"禁止全部修改"，也不要用全网络许可冒充 host 级限制。
 - 不要交出没过自检清单的 policy。
 - 不要把自检说成"已校验"或"已生效"；自检不证明实际校验通过或语义正确。
+- 不要把不可表达的必要限制留在 unresolved 而交付更宽的 permit，也不要先交一版带假设的 policy
+  再改；等用户确认是合法终点。
+- 不要把同动作的多个排他范围写成两组 permit 加补集 forbid；先合并成联合条件。
