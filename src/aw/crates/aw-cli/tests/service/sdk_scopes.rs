@@ -1,4 +1,4 @@
-//! Private SDK CLI transport preserves task ownership and never converts failures to allow.
+//! Private SDK CLI transport preserves task ownership and classified report recovery.
 
 use super::*;
 use aw_service::Binding;
@@ -240,11 +240,9 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
                 after,
             );
             if scenario == "malformed" {
-                // Only the Pi scope CLI converts a tool.after report fault
-                // into a neutral reply; other resident adapters keep
-                // surfacing the failure. Before-tool faults stay fail-closed
-                // for every adapter.
-                if after && adapter == "pi" {
+                // Audited after-report faults recover for Pi and Claude;
+                // before-tool faults stay fail-closed for every adapter.
+                if after && matches!(adapter, "pi" | "claude-sdk") {
                     assert!(
                         response.status.success(),
                         "{}: {}",

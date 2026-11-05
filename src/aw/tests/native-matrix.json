@@ -933,6 +933,63 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-report",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "report",
+            "--output",
+            "{output}/resident-report",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-report/result.json",
+              "values": {
+                "passed": true,
+                "tasks": 15,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "http-allow",
+                  "http-tokenless-error",
+                  "http-after-error",
+                  "http-after-timeout",
+                  "http-after-invalid",
+                  "http-structured-allow",
+                  "http-structured-tokenless-error",
+                  "http-structured-after-error",
+                  "http-structured-after-timeout",
+                  "http-structured-after-invalid",
+                  "bash-allow",
+                  "bash-tokenless-error",
+                  "bash-after-error",
+                  "bash-after-timeout",
+                  "bash-after-invalid"
+                ],
+                "values": {
+                  "passed": true,
+                  "turns": 2
+                }
+              }
+            }
+          ]
         }
       ]
     },

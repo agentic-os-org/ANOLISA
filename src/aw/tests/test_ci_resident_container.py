@@ -119,7 +119,7 @@ class ResidentContainerTests(GateFixture):
         with patch("resident_contract.verify_case") as check:
             result = verify(self.root, self.manifest, "a" * 40)
             self.assertEqual(check.call_count, len(result["suites"]))
-            self.assertEqual(len(result["suites"]), 25)
+            self.assertEqual(len(result["suites"]), 26)
         for shard, (directory, report, cleanup) in reports.items():
             for field, value in (("passed", False), ("candidate_sha", "b" * 40),
                                  ("shard", "unknown"), ("suites", report["suites"][:-1])):

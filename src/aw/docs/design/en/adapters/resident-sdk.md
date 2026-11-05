@@ -224,8 +224,19 @@ count and reason counters. Memory for AW correlation grows with active work;
 audit disk and SDK conversation history require separate retention. Limits need
 production concurrency measurements; increasing them does not add lifetime turns.
 
-For Pi and Claude, callback/Provider/identity faults stop resident execution even
-under `on_error: report`. Normal policy denial and Tokenless retry suggestions remain native denials;
+Claude resident `tool.after` report steps recover from completed Provider nonzero
+exits, incomplete input, Provider error replies, protocol errors and verified
+executor deadlines. The service retains the coarse `failure: transport` category
+and adds `failure_detail` (`deadline_exceeded`, `cancelled`, `cleanup`, or `other`)
+to its terminal audit and response. Response adoption permits only the deadline
+subtype of transport faults; unknown or missing details remain failures. A neutral
+reply retains the original result for native HTTP MCP and built-in tools, then the
+resident callback acknowledges invocation completion before model delivery. The
+same drained client accepts the next task. Scope, identity, cancellation,
+cleanup, malformed native directives and before-Hook failures retain fail-stop.
+Pi retains its existing audited after-report recovery.
+
+Normal policy denial and Tokenless retry suggestions remain native denials;
 fresh retries traverse native permissions and PreTool again. Unsupported compression
 classified successfully preserves the result. Security denial keeps precedence.
 Pi fences callbacks/model sends before awaiting abort during close or public

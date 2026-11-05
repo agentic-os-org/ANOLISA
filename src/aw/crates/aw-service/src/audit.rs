@@ -215,6 +215,17 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
     let skipped = matches!(value.result, Ok(StepOutput::Skipped));
     let native = !skipped && value.record.method == Method::NativeHook;
     let mut native_output = Value::Null;
+    // Preserve the executor distinction needed for report recovery. Cleanup
+    // errors take precedence in aw-exec, and cancellation never authorizes delivery.
+    let failure_detail = match &value.result {
+        Err(Failure::Transport(error)) => Some(match error {
+            aw_exec::Error::DeadlineExceeded => "deadline_exceeded",
+            aw_exec::Error::Cancelled => "cancelled",
+            aw_exec::Error::Cleanup { .. } => "cleanup",
+            _ => "other",
+        }),
+        _ => None,
+    };
     let (status, effects, failure) = match value.result {
         Ok(StepOutput::Skipped) => ("ok", json!([]), None),
         Ok(StepOutput::Provider(outcome)) => ("ok", outcome.as_value()["effects"].clone(), None),
@@ -253,9 +264,9 @@ pub(crate) fn invocation(value: Invocation) -> (Value, Value) {
         "provider"
     };
     let record = json!({"kind": kind, "phase": "completed", "call": metadata, "status": status, "failure": failure,
-        "failure_action": action, "policy_block": if native { None } else { Some(blocked) }});
+        "failure_detail": failure_detail, "failure_action": action, "policy_block": if native { None } else { Some(blocked) }});
     let mut result = json!({"kind": kind, "status": status, "failure": failure,
-        "failure_action": action, "call": metadata});
+        "failure_detail": failure_detail, "failure_action": action, "call": metadata});
     if native {
         result["native"] = native_output;
     } else {
@@ -282,12 +293,57 @@ mod tool_matching;
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::{
         collections::BTreeMap,
         sync::Arc,
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn transport_details_preserve_deadline_cancellation_and_cleanup() {
+        for (error, detail) in [
+            (aw_exec::Error::DeadlineExceeded, "deadline_exceeded"),
+            (aw_exec::Error::Cancelled, "cancelled"),
+            (
+                aw_exec::Error::Cleanup {
+                    pid: 1,
+                    source: std::io::Error::other("fixture"),
+                },
+                "cleanup",
+            ),
+            (
+                aw_exec::Error::InputLimit {
+                    limit: 1,
+                    actual: 2,
+                },
+                "other",
+            ),
+        ] {
+            let (record, response) = invocation(Invocation {
+                record: CallRecord {
+                    config_revision: "fixture".into(),
+                    binding_id: "fixture".into(),
+                    provider: "fixture".into(),
+                    request_id: "fixture".into(),
+                    method: Method::Invoke,
+                    event_id: Some("fixture".into()),
+                    step_id: Some("fixture".into()),
+                    elapsed: std::time::Duration::ZERO,
+                    process: None,
+                },
+                result: Err(Failure::Transport(error)),
+                failure_action: Some(FailureAction::Report),
+            });
+            for value in [record, response] {
+                assert_eq!(value["failure"], "transport");
+                assert_eq!(value["failure_detail"], detail);
+                assert_eq!(value["status"], "error");
+                assert_eq!(value["failure_action"], "report");
+            }
+        }
+    }
 
     #[test]
     fn cancellation_fences_hook_opens_blocked_in_initial_audit_claim() {
