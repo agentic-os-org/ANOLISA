@@ -65,11 +65,13 @@ Explicit Adapters can use `aw instance` to register, confirm Ready, query and re
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Pi `runWorker` factories also support literal user text checks before model dispatch; see the [Pi submission guide](../../docs/developer-guide/en/aw/agents/pi.md#check-user-submissions).
 
 Ordinary resident Qoder SDK and QwenPaw can check submitted text before model
 requests through `input.submit`. The sec-core Provider supports fast prompt

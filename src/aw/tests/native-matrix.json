@@ -1296,7 +1296,7 @@
       "mode": "automated",
       "versions": {},
       "npm_fixture": "crates/aw-cli/tests/fixtures/pi",
-      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup.",
+      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch.",
       "cases": [
         {
           "name": "public-factory",
@@ -1699,6 +1699,54 @@
                 ],
                 "values": {
                   "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/submission-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/input-submission"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "normal-block",
+                  "error-block",
+                  "error-report",
+                  "invalid-block",
+                  "invalid-report",
+                  "timeout-block",
+                  "timeout-report",
+                  "abort-block",
+                  "dispose-block",
+                  "tools-report-block",
+                  "transforms-block"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
                 }
               }
             }

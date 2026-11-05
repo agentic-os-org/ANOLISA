@@ -65,11 +65,13 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Pi `runWorker` 工厂支持模型派发前的字面量用户文本检查，接入方式见 [Pi 输入检查指南](../../docs/developer-guide/zh/aw/agents/pi.md#检查用户输入)。
 
 普通 resident Qoder SDK 和 QwenPaw 可通过 `input.submit` 在模型请求前检查用户文本。
 sec-core Provider 支持 fast 提示词注入扫描，风险与故障分别按策略处理，见

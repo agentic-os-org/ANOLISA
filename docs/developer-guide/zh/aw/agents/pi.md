@@ -55,3 +55,47 @@ AW 每次生成 invocation UUID 配对，原工具 ID 保留于 `native`，提�
 精确 callback、身份、取消、容量与可
 复现的 SDK 验收见 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/pi-adapter.md)。
 修改策略前退出 Agent 并停止原服务；审计状态按同样的本地服务清理流程保留或删除。
+
+## 检查用户输入
+
+[Pi 输入检查示例](../../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)
+使用导出 `runWorker` 的常驻工厂。替换可执行文件及 sec-core socket 路径，保留应用的
+模型与认证配置，再运行 `aw run --config /absolute/aw.pi-submission.yaml --agent pi -- 'Your task'`。
+应用保留现有工厂，并导出以下 worker 入口：
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd, agentDir: "/absolute/existing-pi-agent-directory" });
+}
+
+export async function runWorker({ args, withSession }) {
+  await withSession({ cwd: process.cwd() }, async (session) => {
+    await session.prompt(args.join(" "));
+  });
+}
+```
+
+`session.prompt(text, options)` 等待已配置的 `scan_prompt` 和 `scan_user_input`
+步骤完成后，才进入原生 prompt 执行。中文、空白和空字符串均原样交给 Pi。
+策略拒绝或 `on_error: block` 故障会使 Promise 拒绝；应用捕获后，可在同一会话提交
+下一条输入。`on_error: report` 记录失败检查后继续。提供 `preflightResult` 时，
+被检查拒绝的输入会收到 `false`。
+
+启用检查后支持 interactive 来源的文本。图像/附件、`input`、`context` 和
+`before_provider_request` 扩展处理器、展开的斜杠命令、
+`steer`、`followUp`、`sendUserMessage`、`sendCustomMessage`、直接 Agent 提交及
+并发 prompt 均被拒绝。使用 `expandPromptTemplates: false` 可提交字面量斜杠文本。
+其余合法 prompt options 保留；模型续跑和工具重试属于既有执行，不生成新的用户提交。
+最终 Agent prompt 中的用户文本必须与检查内容一致。context 和 provider-request
+变换会在该检查之后改写文本，因此启用输入检查时拒绝这两类扩展。
+使用上述未支持入口的应用需移除
+输入事件配置，或使用支持的纯文本工厂。直接设置的 `Agent.transformContext` 和
+`Agent.convertToLlm` 回调必须保留用户消息内容及顺序，包括既有历史；
+`Agent.onPayload` 必须保留序列化请求。AW 隔离回调输入和输出，并在交付前拒绝改写。
+受管会话的这些回调槽位固定。会新增用户消息的转换（包括 custom/summary 消息）
+需要使用未开启输入检查的工厂。未配置 `input.submit` 时保留 Pi 原生输入模式和回调。
+
+等待 `session.abort()`、`session.dispose()` 或工厂返回的 `close()`，即可取消并释放
+受管任务。取消后的会话不可继续使用，后续请求需创建新工厂会话。清理最多等待 12 秒，
+覆盖原生 abort、在途 prompt/检查和 dispose，随后释放 AW scope。清理失败需要重启
+worker。扫描结果迟到不会触发模型请求。

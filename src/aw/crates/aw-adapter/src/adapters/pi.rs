@@ -74,7 +74,13 @@ impl Adapter for Pi {
         }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
-        if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
+        if native["event"] != event {
+            return Err("Pi event does not match binding".into());
+        }
+        if event == "input.submit" {
+            return super::submission::normalize(binding, native, "pi", "text");
+        }
+        if !matches!(event, "tool.before" | "tool.after") {
             return Err("Pi event does not match binding".into());
         }
         let identifier = |value: &Value| -> Result<String> {
@@ -145,6 +151,10 @@ impl PreparedLaunch for Prepared {
             .write("bridge.mjs", include_bytes!("../../native/pi/bridge.mjs"))?;
         for (name, bytes) in [
             (
+                "submission.mjs",
+                include_bytes!("../../native/pi/submission.mjs").as_slice(),
+            ),
+            (
                 "transport.mjs",
                 include_bytes!("../../native/shared/transport.mjs").as_slice(),
             ),
@@ -192,7 +202,7 @@ fn routes(
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
-    for event in ["tool.before", "tool.after"] {
+    for event in ["input.submit", "tool.before", "tool.after"] {
         let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
         if selected.is_empty() {
             continue;

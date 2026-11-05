@@ -64,6 +64,9 @@ if (process.env.AW_PI_PROBE === "1") {
     const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
     await runWorker(app, sdk, core, args);
   } else {
+  const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
+  if (configuration().hooks.some(hook => hook.event === "input.submit"))
+    throw new Error("AW Pi input.submit requires the runWorker factory");
   const installations = new Map();
   // All new/resume/fork/import replacements must use this common application factory.
   const createSession = async (options = {}) => {

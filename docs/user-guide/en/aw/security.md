@@ -91,6 +91,11 @@ in force. Select one manager for each PII/Prompt check to avoid duplicate scans.
 Only text and fast L1 rules are covered; ML and conversation-level detection
 require separate acceptance.
 
+Pi workers use the [Pi submission example](../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)
+and a managed `runWorker` factory. It enables the same prompt/PII operations.
+The [Pi guide](../../../developer-guide/en/aw/agents/pi.md#check-user-submissions)
+explains literal text, unsupported input paths, refusal recovery and cancellation.
+
 ## Verify checks
 
 Ask the native Agent to execute these commands in separate requests, keeping native permission

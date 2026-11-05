@@ -31,6 +31,35 @@ Agent 生命周期结束，重新绑定使用新的工厂结果。直接调用 S
 退出时 worker 恢复 callbacks 并 dispose 所有受管会话；AW 释放 binding 并删除
 生成文件。共享 daemon 和持久 journal 保留，直到显式停止或删除。
 
+## 用户输入边界
+
+配置 `input.submit` 时要求 `runWorker`；传统 `run` 应用会在执行工厂前报错。
+常驻包装器开始一次执行，为提交生成独立 AW turn UUID，并读取原生 session ID。
+`submission::normalize` 生成 `input.text`、`session_id` 和 `turn_id`，不构造工具调用。
+所有输入步骤复用已准入任务路由和共享事件预算，工具调用账本保持原有职责。
+策略拒绝或 block 故障后排空当前执行，同一会话可继续 prompt；report 故障保留原文继续。
+输入事件沿用 Service 已有的有界关联历史。
+
+支持边界为传给 `session.prompt` 的 interactive 字面量文本。`input`、`context` 和
+`before_provider_request` 扩展处理器、媒体、
+队列和其他输入入口、展开的斜杠命令均在原生 prompt 执行前拒绝。
+受保护的 `agent.prompt` 核验 Pi 最终用户消息与已扫描文本一致。context 和 payload
+处理器在此边界之后执行，因此异步扫描前后均检查并拒绝这些处理器。`agent.continue`
+仅在该次授权执行内可用。工具结果、模型续跑和重试不生成用户输入事件。
+支持的选项与生命周期调用见 [Pi 接入指南](../../../../../../docs/developer-guide/zh/aw/agents/pi.md#检查用户输入)。
+
+直接设置的 Agent 回调同样在 prompt 校验后执行。边界包装并固定 `transformContext`、
+`convertToLlm` 和 `onPayload`，隔离传入值和返回值。消息回调必须保留用户内容及顺序，
+payload 回调必须保留完整 Provider 请求，覆盖返回替换、原地修改和保留引用后的修改。
+违规记录会跨越原生 assistant 错误转换保留，即使 Pi 消费回调异常，外层 prompt 也会拒绝。
+调用模型 stream 前，AW 再次将用户内容与授权时的 prompt/历史快照比较，并要求使用
+受保护的 payload 回调。
+
+abort/dispose 先封锁 scope 并取消输入传输，再等待原生清理。worker 等待在途 prompt
+结束后释放 scope，清理失败则要求重启。scope 释放会回收 callback 在确认前被中断的输入
+事件。迟到结果无法通过 scope/执行检查进入模型传输。普通策略拒绝不修改原生会话，
+排空后可以提交下一条 prompt。
+
 ## 工具语义
 
 原 before callback 先执行，其异常与拒绝保留 Pi 原生语义；AW 不授予原生权限。
@@ -71,7 +100,9 @@ block/withhold 故障、取消、身份与清理失败仍停止任务。SDK 取�
 AW 生成的 binding/config 文件属于前台启动的私有资源。Callback 用字面参数执行
 `aw hook --adapter pi`，限制 stdin、stdout、stderr 和等待时间；取消会终止并等待
 自己创建的进程组。原生命令输出可为空，或仅包含布尔 `block` 与可选字符串
-`reason` 的 JSON 对象，只有 before 可阻断。审批、输入改写、原生结果改写均拒绝。
+`reason` 的 JSON 对象，`input.submit` 和 `tool.before` 可阻断。常驻输入通过
+`aw scope --action invoke` 携带私有任务句柄，复用相同回复方言。审批、输入改写、
+原生结果改写均拒绝。
 非零/信号退出、非法输出按配置的失败动作处理。native Hook 不得伪造
 `aw_replacement`；只有通过准入的最后结构化替换步骤通过受保护 AW 配置输出。
 
@@ -115,3 +146,19 @@ RTK 生成。模型 stream、bash 工具及 scanner backend 使用确定性 fixt
 shell 命令。验证选中的压缩进入模型上下文、新重试重新通过 sec-core、RTK 已处理结果
 保持不变。两个遥测 sink 均关闭，状态只位于指定测试 root。8 个 Bridge 授权与
 结果字段边界用例也通过默认 Rust Pi 门禁运行。
+
+## 输入验收
+
+```bash
+cargo build --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
+python3 crates/aw-cli/tests/fixtures/pi/submission-smoke.py \
+  --aw target/debug/aw --root target/pi-sdk-validation \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/pi-submission
+```
+
+此入口运行 Pi 0.84.2、AW 和真实 sec-core Provider，模型使用本地 HTTP 端点，扫描使用
+受控 CLI。覆盖原文保留、风险/PII 拒绝与恢复、Provider 非零退出/超时/非法输出的
+block/report 语义、input/context/provider-request 扩展拒绝、其他输入入口、并行会话/并发 prompt、abort/dispose
+及资源回收。模型端点独立断言被拒输入不得到达。扫描夹具不代表 sec-core 规则效果或
+业务镜像验收。
