@@ -186,7 +186,8 @@ async def task(index, mode, consumer="response", settings_origin=None):
             (directory / "sdk-process.json").write_text(
                 json.dumps({"pid": cli_pid, "owner": os.getpid()})
             )
-            turns = 1 if mode.endswith("error") else 2
+            fatal = mode == "before-error"
+            turns = 1 if fatal else 2
             for turn in range(turns):
                 await client.query("Run the fixture tool")
                 try:
@@ -198,7 +199,7 @@ async def task(index, mode, consumer="response", settings_origin=None):
                 except Exception:
                     failed = True
                 assert client._transport.delegate._process.pid == cli_pid
-            if mode.endswith("error"):
+            if fatal:
                 try:
                     await client.query("failed client must remain stopped")
                 except RuntimeError:
@@ -221,8 +222,8 @@ async def task(index, mode, consumer="response", settings_origin=None):
         assert all(item["tenant"] == str(index) for item in events)
         assert len({item["event"]["agent"]["instance_id"] for item in events}) == 1
         assert (directory / "effect").exists() == (mode in {"allow", "after-error"}), mode
-        assert failed == mode.endswith("error"), (mode, failed)
-        if mode.endswith("error"):
+        assert failed == fatal, (mode, failed)
+        if fatal:
             assert len(requests) == 1, (mode, "model continued after Hook failure", len(requests))
             assert fixture.ORIGINAL not in json.dumps(requests)
         else:
@@ -261,6 +262,11 @@ async def main():
             await eof_stop_failure(ROOT, config)
         else:
             await run(ROOT, config, task)
+        return
+    if scenario == "report":
+        from claude_report import run
+
+        await run(ROOT, SOURCE)
         return
     if scenario == "denial":
         from claude_denial import run

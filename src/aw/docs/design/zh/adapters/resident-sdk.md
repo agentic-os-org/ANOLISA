@@ -167,7 +167,14 @@ aw status --config aw.yaml 展示 limits、bindings/invocations/correlations/cal
 当前用量、单 binding 活动 invocation 峰值、拒绝总数与原因计数。AW 关联内存随活动工作量增长，
 审计磁盘和 SDK 会话历史需要独立保留策略。生产并发数需实测，调大这些配置只增加并发容量。
 
-Pi 和 Claude 的回调/Provider/身份错误会停止常驻 execution，即使步骤配置 on_error: report。
+Claude 常驻 `tool.after` 的 report 步骤可恢复已完成的 Provider 非零退出、输入未写完、
+Provider 错误响应、协议错误及已验证清理的执行超时。服务保留 `failure: transport` 分类，
+在终态审计和响应中补充 `failure_detail`（`deadline_exceeded`、`cancelled`、`cleanup`、
+`other`）；响应采用层仅放行其中的超时，未知或缺失详情仍作为故障。中性回复保留原生
+HTTP MCP 和内置工具的原始结果，常驻回调在结果进入模型前确认调用完成；排空后的同一
+客户端可接收下一任务。scope、身份、取消、清理、非法原生指令及前置 Hook 故障继续停止任务。
+Pi 沿用已有的后置 report 审计故障恢复行为。
+
 正常策略拒绝与 Tokenless 重试建议保留拒绝语义，新调用重新经过原生权限和 PreTool；成功分类
 为不支持压缩的结果保持原样，安全拒绝保留优先级。Pi 关闭或调用公开 `session.abort()` 时，
 先拦截回调/模型发送，再等待 abort。显式 abort 使该 session 失效，应关闭后创建新 session；

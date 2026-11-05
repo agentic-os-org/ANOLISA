@@ -138,13 +138,22 @@ pub fn response(
         return Err("invalid failure action".into());
     }
     if output["status"] != "ok" {
-        // A Pi report-configured failure is already recorded in the instance
-        // audit; the resident bridge continues with the unchecked native
-        // result instead of stopping the task, matching the legacy hook
-        // command. Other resident adapters keep failing the callback: their
-        // managed-MCP report exception is owned by the native bridge, not by
-        // this shared CLI path.
-        if adapter_id == "pi" && output["failure_action"] == "report" && event == "tool.after" {
+        // Claude recovery requires a completed, audited Provider fault. Scope/RPC,
+        // native directive, cancellation and cleanup errors remain failures.
+        let claude_report = adapter_id == "claude-sdk"
+            && output["status"] == "error"
+            && output["kind"] == "provider"
+            && output["effects"] == serde_json::json!([])
+            && on_error == "report"
+            && (matches!(
+                output["failure"].as_str(),
+                Some("exit" | "incomplete_input" | "provider" | "protocol")
+            ) || (output["failure"] == "transport"
+                && output["failure_detail"] == "deadline_exceeded"));
+        if (adapter_id == "pi" || claude_report)
+            && output["failure_action"] == "report"
+            && event == "tool.after"
+        {
             let failure = output["failure"].as_str().unwrap_or("unknown");
             writeln!(
                 diagnostics,
@@ -335,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn report_faults_return_a_neutral_reply_only_for_pi() {
+    fn report_faults_return_a_neutral_reply_for_pi_and_claude() {
         let adapter = adapter::select("pi").unwrap();
         let fault = json!({"kind":"provider", "status":"error",
             "failure":"provider", "failure_action":"report",
@@ -354,23 +363,84 @@ mod tests {
         .unwrap();
         assert!(matches!(output.exit, Exit::Code(0)));
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
-        // Resident Claude SDK report faults keep stopping the callback; the
-        // managed-MCP report exception lives in the native Python bridge.
         let claude = adapter::select("claude-sdk").unwrap();
-        let mut diagnostics = Vec::new();
-        assert!(response(
-            claude,
-            "tool.after",
-            "report",
-            json!({"kind":"provider", "status":"error",
-                "failure":"provider", "failure_action":"report",
-                "effects":[], "call":{"process":null}}),
-            "claude-sdk",
-            &json!({"tool_call":{"name":"read_file","input":"{}"},
-                "tool_response":{"content":[{"type":"text","text":"original"}]}}),
-            &mut diagnostics,
-        )
-        .is_err());
+        for failure in [
+            "exit",
+            "incomplete_input",
+            "provider",
+            "protocol",
+            "transport",
+        ] {
+            let fault = json!({"kind":"provider", "status":"error",
+                "failure":failure, "failure_action":"report", "effects":[],
+                "failure_detail":"deadline_exceeded"});
+            let output = response(
+                claude,
+                "tool.after",
+                "report",
+                fault.clone(),
+                "claude-sdk",
+                &json!({}),
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(matches!(output.exit, Exit::Code(0)));
+            assert!(output.stdout.is_empty());
+            for (key, value) in [
+                ("failure_action", json!("block")),
+                ("failure_action", json!("withhold_result")),
+                ("status", json!("unknown")),
+                ("kind", json!("native")),
+                ("effects", json!([{"type":"block"}])),
+                ("failure", json!("native_environment")),
+                ("failure", json!("unknown")),
+            ] {
+                let mut invalid = fault.clone();
+                invalid[key] = value;
+                assert!(response(
+                    claude,
+                    "tool.after",
+                    "report",
+                    invalid,
+                    "claude-sdk",
+                    &json!({}),
+                    &mut Vec::new()
+                )
+                .is_err());
+            }
+            for (event, action) in [("tool.before", "report"), ("tool.after", "block")] {
+                assert!(response(
+                    claude,
+                    event,
+                    action,
+                    fault.clone(),
+                    "claude-sdk",
+                    &json!({}),
+                    &mut Vec::new()
+                )
+                .is_err());
+            }
+        }
+        for detail in [
+            Value::Null,
+            json!("cancelled"),
+            json!("cleanup"),
+            json!("other"),
+        ] {
+            assert!(response(
+                claude,
+                "tool.after",
+                "report",
+                json!({
+                    "kind":"provider", "status":"error", "failure":"transport",
+                    "failure_detail":detail, "failure_action":"report", "effects":[]
+                }),
+                "claude-sdk",
+                &json!({}),
+                &mut Vec::new()
+            )
+            .is_err());
+        }
         // Before-tool and block/withhold faults stay fail-closed.
         let mut diagnostics = Vec::new();
         assert!(response(

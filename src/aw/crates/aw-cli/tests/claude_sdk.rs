@@ -61,6 +61,23 @@ fn managed_response_iterators_close_before_native_teardown() {
 }
 
 #[test]
+fn resident_report_recovery_preserves_failure_fences() {
+    let fixture = Fixture::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut command = std::process::Command::new(&fixture.python);
+    command
+        .args(["-B"])
+        .arg(root.join("tests/fixtures/claude-sdk/report_contract.py"))
+        .arg(root.join("../aw-adapter/native/claude-sdk"));
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 7 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn managed_mcp_freezes_registered_tools_and_checked_results() {
     let fixture = Fixture::new();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

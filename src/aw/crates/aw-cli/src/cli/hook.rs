@@ -109,7 +109,7 @@ fn budget_deadline(started: Instant, budget_ms: u64, close: bool) -> Result<Inst
     Ok(deadline)
 }
 
-// Resident SDK callers keep transport/Provider errors visible and stop the task.
+// Resident SDK callers retain errors unless response adoption permits report recovery.
 // The legacy hook command retains its configured native failure reply above.
 pub(super) fn invoke_bound(
     args: &Arguments,
