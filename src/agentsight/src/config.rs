@@ -231,7 +231,7 @@ const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 /// At startup the on-disk config's `schema_version` is compared against this
 /// value. If the on-disk version is missing or older, the config file is
 /// backed up (`.bak`) and overwritten with the embedded default.
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 // ==================== TCP Target Configuration ====================
 
@@ -2321,10 +2321,29 @@ mod tests {
             vec![
                 "dashscope.aliyuncs.com",
                 "*.maas.aliyuncs.com",
-                "api.openai.com"
+                "api.openai.com",
+                "*.qoder.sh"
             ]
         );
         assert!(http_targets.is_empty());
+    }
+
+    /// `docs/user-guide/*/agentsight/{integrations,cli-reference,configuration}.md`
+    /// quote the shipped rule count as allow rules only, which is what
+    /// `discover --list-known` prints (deny rules build no listing matcher).
+    /// Neither may drift from the file without the other.
+    #[test]
+    fn test_default_agents_json_rule_count_matches_docs() {
+        let (cmdline_rules, https_rules, _) = parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
+        assert_eq!(cmdline_rules.len(), 36);
+        let allow = cmdline_rules.iter().filter(|r| r.allow).count();
+        assert_eq!(allow, 35);
+        assert_eq!(https_rules.len(), 4);
+        let qoder = cmdline_rules
+            .iter()
+            .filter(|r| r.agent_name.as_deref() == Some("QoderCLI"))
+            .count();
+        assert_eq!(qoder, 3);
     }
 
     #[test]

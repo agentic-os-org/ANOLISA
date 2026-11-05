@@ -7,7 +7,7 @@ components when they happen to be installed. Nothing on this page is required to
 
 ## Supported Agents
 
-Any process matched by a discovery rule is traced. The shipped rule set (31 rules) covers:
+Any process matched by a discovery rule is traced. The shipped rule set (35 rules) covers:
 
 | Agent | Reported name |
 |---|---|
@@ -19,6 +19,7 @@ Any process matched by a discovery rule is traced. The shipped rule set (31 rule
 | OpenClaw (gateway) | `OpenClaw` |
 | Hermes | `Hermes` |
 | AgentScope | `AgentScope` |
+| Qoder CLI | `QoderCLI` |
 | Runloop Node server | `Runloop` |
 
 Anything else works too — add a rule, as described in

@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
     "max_total_size_mb": 2200
@@ -72,7 +72,8 @@
     },
     {
       "rule": [
-        "api.openai.com"
+        "api.openai.com",
+        "*.qoder.sh"
       ]
     }
   ],
@@ -304,6 +305,18 @@
           "*agent_scope*"
         ],
         "agent_name": "AgentScope"
+      },
+      {
+        "rule": ["qodercli*"],
+        "agent_name": "QoderCLI"
+      },
+      {
+        "rule": ["*/qodercli*"],
+        "agent_name": "QoderCLI"
+      },
+      {
+        "rule": ["*node*", "*qodercli*"],
+        "agent_name": "QoderCLI"
       }
     ],
     "deny": [

@@ -61,6 +61,17 @@ pub fn extract_token_data(
     if has_content { Some(token_data) } else { None }
 }
 
+/// OpenAI sends `arguments` as JSON text. Only inside a Qoder envelope does the
+/// gateway also send a complete object there; every other provider keeps the
+/// previous text-only read so its estimate is unchanged.
+fn tool_arguments(func: &Value, is_qoder: bool) -> String {
+    match func.get("arguments") {
+        Some(Value::String(text)) => text.clone(),
+        Some(object) if is_qoder => object.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// Extract response content from OpenAI format response JSON
 ///
 /// Returns a tuple of (content, reasoning_content, tool_calls)
@@ -71,6 +82,9 @@ pub fn extract_response_content(
     response_json: Option<&Value>,
 ) -> Option<(String, Option<String>, Vec<String>)> {
     let resp = response_json?;
+    let envelope = crate::parser::llm::unwrap_qoder_envelope(resp);
+    let is_qoder = envelope.is_some();
+    let resp = envelope.as_ref().unwrap_or(resp);
 
     let mut content = String::new();
     let mut reasoning = None;
@@ -119,8 +133,7 @@ pub fn extract_response_content(
                     for tool_call in calls {
                         if let Some(func) = tool_call.get("function") {
                             let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let arguments =
-                                func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                            let arguments = tool_arguments(func, is_qoder);
                             let tool_content = format!("{name}: {arguments}");
                             if !tool_content.is_empty() {
                                 tool_calls.push(tool_content);
@@ -2406,5 +2419,41 @@ mod tests {
         assert_eq!(content, "the answer");
         assert_eq!(tool_calls.len(), 1);
         assert!(tool_calls[0].starts_with("get_weather: "));
+    }
+
+    /// Qoder's gateway sends the tool-call arguments as a complete object
+    /// inside its `statusCode`/`body` envelope. The estimate used to read only
+    /// text arguments, so a fallback estimate counted `name: ` and dropped the
+    /// parameter text. Only the enveloped path gains the object read: a plain
+    /// OpenAI body keeps the text-only behaviour, so no other provider's
+    /// estimate moves.
+    #[test]
+    fn test_qoder_envelope_object_arguments_join_the_estimate() {
+        let inner = serde_json::json!({
+            "choices": [{"message": {
+                "content": "",
+                "tool_calls": [{"function": {
+                    "name": "lookup",
+                    "arguments": {"city": "Paris"}
+                }}]
+            }}]
+        });
+        let enveloped = serde_json::json!({
+            "statusCode": 200,
+            "statusCodeValue": 200,
+            "body": inner.to_string()
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&enveloped)).expect("an enveloped call must extract");
+        assert_eq!(tool_calls, vec![r#"lookup: {"city":"Paris"}"#.to_string()]);
+
+        let plain = serde_json::json!({
+            "choices": [{"message": {"tool_calls": [{"function": {
+                "name": "lookup", "arguments": {"city": "Paris"}
+            }}]}}]
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&plain)).expect("the call name still extracts");
+        assert_eq!(tool_calls, vec!["lookup: ".to_string()]);
     }
 }

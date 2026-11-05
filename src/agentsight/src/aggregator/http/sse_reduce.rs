@@ -42,6 +42,7 @@ pub(super) struct SseReducer {
     slot_bytes: usize,
     /// Missing request metadata keeps the legacy prefix-detection behavior.
     pub(super) native_incremental: Option<bool>,
+    pub(super) retain_raw: bool,
     payload_bytes: usize,
     pub(super) count: usize,
 }
@@ -49,9 +50,10 @@ pub(super) struct SseReducer {
 impl SseReducer {
     pub(super) fn push(&mut self, frame: SseFrame<'_>, capture: &SslEvent) -> bool {
         self.count += 1;
-        let mut value = needs_json(&frame.data)
+        let mut value = (!self.retain_raw && needs_json(&frame.data))
             .then(|| serde_json::from_slice::<Value>(&frame.data).ok())
-            .flatten();
+            .flatten()
+            .map(|value| crate::parser::llm::unwrap_qoder_envelope(&value).unwrap_or(value));
         let done = frame.event.as_deref() == Some("message_stop")
             || (value.is_none() && text_is_done(&frame.data))
             || ParsedSseEvent::json_is_done(value.as_ref());

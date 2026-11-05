@@ -658,12 +658,16 @@ impl Analyzer {
         }
         match result {
             AggregatedResult::HttpComplete(pair) => {
-                let req_body = pair.request.json_body();
+                let req_body = pair.request.json_body().or_else(|| {
+                    MessageParser::decode_request_body(&pair.request.path, pair.request.body())
+                });
                 let resp_body = pair.response.parsed.json_body();
                 self.analyze_message(&pair.request.path, req_body.as_ref(), resp_body.as_ref())
             }
             AggregatedResult::SseComplete(pair) => {
-                let req_body = pair.request.json_body();
+                let req_body = pair.request.json_body().or_else(|| {
+                    MessageParser::decode_request_body(&pair.request.path, pair.request.body())
+                });
                 // For SSE responses, parse from SSE events
                 self.analyze_message_with_sse(
                     &pair.request.path,
@@ -672,7 +676,9 @@ impl Analyzer {
                 )
             }
             AggregatedResult::RequestOnly { request, .. } => {
-                let req_body = request.json_body();
+                let req_body = request
+                    .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&request.path, request.body()));
                 self.analyze_message(&request.path, req_body.as_ref(), None)
             }
             AggregatedResult::Http2StreamComplete(stream) => {
@@ -680,7 +686,9 @@ impl Analyzer {
                 if path.is_empty() {
                     return None;
                 }
-                let req_body = stream.request_json_body();
+                let req_body = stream.request_json_body().or_else(|| {
+                    MessageParser::decode_request_body(&path, stream.request_body_str()?.as_bytes())
+                });
                 if let Some(sse_json) = stream.response_sse_json_array() {
                     return self
                         .message
@@ -1062,6 +1070,7 @@ impl Analyzer {
 
                 let request_body = req
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&req.path, req.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
@@ -1111,6 +1120,7 @@ impl Analyzer {
 
                 let request_body = req
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&req.path, req.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
@@ -1152,6 +1162,7 @@ impl Analyzer {
             AggregatedResult::RequestOnly { request, .. } => {
                 let request_body = request
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&request.path, request.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = request.body();
@@ -1180,7 +1191,10 @@ impl Analyzer {
                 })
             }
             AggregatedResult::Http2StreamComplete(stream) => {
-                let request_body = stream.request_body_str();
+                let request_body = stream.request_body_str().map(|body| {
+                    MessageParser::decode_request_body(&stream.path(), body.as_bytes())
+                        .map_or(body, |value| value.to_string())
+                });
 
                 // Try SSE parsing first, fallback to regular text if it fails
                 // This is more robust than checking content-type header (which may fail due to HPACK)

@@ -364,7 +364,7 @@ $ sudo agentsight discover
 总计: 1 个 Agent
 
 $ sudo agentsight discover --list-known | head -12
-已知 AI Agent（共 31 条规则）:
+已知 AI Agent（共 35 条规则）:
 ============================================================
 
   Hermes (custom)

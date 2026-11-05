@@ -7,7 +7,7 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
 
 ## 支持的 Agent
 
-只要被发现规则命中的进程都会被追踪。随包发布的规则集（31 条）覆盖：
+只要被发现规则命中的进程都会被追踪。随包发布的规则集（35 条）覆盖：
 
 | Agent | 上报名称 |
 |---|---|
@@ -19,6 +19,7 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
 | OpenClaw（gateway） | `OpenClaw` |
 | Hermes | `Hermes` |
 | AgentScope | `AgentScope` |
+| Qoder CLI | `QoderCLI` |
 | Runloop Node 服务 | `Runloop` |
 
 其他 Agent 也能支持——按 [Agent 发现规则](configuration.md#agent-发现规则)加一条规则即可。需要注意的集成细节：

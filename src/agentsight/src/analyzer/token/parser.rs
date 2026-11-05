@@ -187,6 +187,10 @@ impl TokenParser {
 
     /// Internal method to parse JSON and extract token usage
     pub fn parse_json(&self, json: &serde_json::Value) -> Option<TokenUsage> {
+        if let Some(inner) = crate::parser::llm::unwrap_qoder_envelope(json) {
+            let usage = inner.get("usage")?;
+            return extract_usage_object(usage, detect_provider_from_usage(usage), &inner);
+        }
         // 1. Check for message_start event (Anthropic streaming)
         if json.get("type").and_then(|v| v.as_str()) == Some("message_start") {
             if let Some(message) = json.get("message") {

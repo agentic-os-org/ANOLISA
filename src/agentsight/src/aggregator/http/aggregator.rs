@@ -481,6 +481,12 @@ impl HttpConnectionAggregator {
             response.set_sse_events(sse_events);
         }
         response.sse_continuation_bytes = self.sse_continuation_buffers.pop(&connection_id);
+        if request
+            .as_ref()
+            .is_some_and(|request| crate::parser::llm::is_qoder_path(&request.path))
+        {
+            response.recover_fragmented_gateway_events();
+        }
         self.sse_read_state.pop(&connection_id);
 
         if let Some(req) = request {

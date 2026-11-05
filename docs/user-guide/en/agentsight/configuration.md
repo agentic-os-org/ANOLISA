@@ -18,7 +18,7 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "storage": {
     "base_path": "/var/log/sysak/.agentsight",
     "max_total_size_mb": 2200,
@@ -122,7 +122,7 @@ does not run `VACUUM`, so freed pages remain on the SQLite freelist for later wr
 
 `check_interval_inserts` is no longer supported. When `schema_version` is missing or older than the
 current version, AgentSight backs up the file, overlays its top-level keys on the current defaults,
-and sets `schema_version` to `5`. This is a shallow merge: an existing section such as `storage`
+and sets `schema_version` to `6`. This is a shallow merge: an existing section such as `storage`
 replaces the corresponding default section in full, so removed nested keys are not migrated
 automatically. Start custom files from the shipped `agentsight.json` and do not copy obsolete keys
 into the merged file.
@@ -243,7 +243,14 @@ of command-line tokens with `*` wildcards; all tokens must match in order.
 matches a process whose first argument contains `node` and whose next argument contains `claude`.
 
 The shipped file covers Hermes, Codex, Runloop, cosh (`Cosh`), cosh-ng (`CoshNG`), OpenClaw,
-Claude Code, Qwen Code, and AgentScope — 31 rules in total.
+Claude Code, Qwen Code, AgentScope, and Qoder CLI — 35 rules in total.
+
+Qoder CLI rules cover native/versioned binaries and Node launchers. Its legacy
+`*.qoder.sh` gateway is included in `https`. Existing configurations retain their
+own `cmdline` and `https` sections during migration; append the Qoder rules from
+the shipped file if those sections are customized. Linux tracing requires root
+or the documented BPF capabilities. Protocol support covers the encoded HTTP/SSE
+chat endpoint; it does not imply support for every Qoder product or transport.
 
 To add your own Agent, append a rule and reload:
 
@@ -331,7 +338,7 @@ this table. If a new Codex release is not captured, regenerate the entry with
 
 ## schema_version and upgrades
 
-`schema_version` (currently `5`) marks the config format. On start, AgentSight compares it with the
+`schema_version` (currently `6`) marks the config format. On start, AgentSight compares it with the
 built-in version:
 
 - equal or newer → your file is left untouched;
