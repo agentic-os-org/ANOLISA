@@ -133,6 +133,7 @@ impl RuntimeHandle for BrokeredHandle {
                 brokered: self.brokered.clone(),
                 request: Box::new(self.request.clone()),
                 operation: self.operation.clone(),
+                requires_explicit_approval: false,
                 summary: ToolSummary {
                     name: BoundedName::new("workspace_checkpoint_create").unwrap(),
                     summary: BoundedText::new("Create a governed workspace checkpoint").unwrap(),
@@ -1573,3 +1574,6 @@ fn test_contract_error(message: impl Into<String>) -> ContractError {
     )
     .unwrap()
 }
+
+#[path = "reapproval_tests.rs"]
+mod reapproval_tests;

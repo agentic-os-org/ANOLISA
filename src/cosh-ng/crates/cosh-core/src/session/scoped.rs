@@ -500,7 +500,7 @@ impl ScopedStorage {
     }
 }
 
-fn directory_matches_path(directory: &File, path: &Path) -> bool {
+pub(super) fn directory_matches_path(directory: &File, path: &Path) -> bool {
     let Ok(pinned) = directory.metadata() else {
         return false;
     };
@@ -514,7 +514,7 @@ fn session_filename(session_id: &ProviderSessionId) -> String {
     format!("{}.json", session_id.as_str())
 }
 
-/// Activity-lease file for a session. Zero length: only its flock carries state.
+/// Activity lease; its optional byte retains unresolved side-effect approval.
 fn live_lease_filename(session_id: &ProviderSessionId) -> String {
     format!(".{}.live", session_id.as_str())
 }

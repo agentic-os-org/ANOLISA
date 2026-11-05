@@ -314,6 +314,14 @@ impl SessionStore {
         Ok(())
     }
 
+    pub(crate) fn reapproval_checkpoint(
+        &self,
+        id: &ProviderSessionId,
+        lease: std::sync::Arc<SessionLock>,
+    ) -> Result<super::ReapprovalCheckpoint, SessionError> {
+        super::ReapprovalCheckpoint::new(self.base_dir.clone(), id, lease)
+    }
+
     fn has_session_data(
         &self,
         directory: &File,
@@ -1229,6 +1237,7 @@ impl SessionStore {
                 messages,
                 compaction: None,
                 compaction_revision: 0,
+                failed_side_effect_pending_approval: false,
                 was_loaded: true,
             });
         }

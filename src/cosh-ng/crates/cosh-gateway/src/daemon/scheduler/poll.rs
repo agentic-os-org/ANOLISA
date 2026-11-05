@@ -317,9 +317,15 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                 request,
                 operation,
                 summary,
-            } => {
-                self.admit_brokered_execution(brokered, *request, operation, summary, polled_at_ms)
-            }
+                requires_explicit_approval,
+            } => self.admit_brokered_execution(
+                brokered,
+                *request,
+                operation,
+                summary,
+                requires_explicit_approval,
+                polled_at_ms,
+            ),
             RuntimePoll::InputRequested { sequence, request } => {
                 let active = self.active.as_ref().ok_or_else(no_active_run)?;
                 if request.run_id() != &active.scheduled.run_id

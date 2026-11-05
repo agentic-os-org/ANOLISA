@@ -691,6 +691,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
         tool_use_id,
         request,
         operation,
+        requires_explicit_approval,
         ..
     } = requested.event
     else {
@@ -698,6 +699,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
     };
     assert_eq!(requested_turn, turn_id);
     assert_eq!(tool_use_id, Some(snapshot.tool_use_id));
+    assert!(requires_explicit_approval);
     assert_eq!(request.task_id, identity.task_id);
     assert_eq!(request.run_id, identity.run_id);
     assert_eq!(request.actor.actor_id, identity.actor_id.unwrap());

@@ -5,6 +5,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         request: CapabilityRequest,
         operation: BrokeredOperation,
         summary: ToolSummary,
+        requires_explicit_approval: bool,
         now_ms: u64,
     ) -> Result<SchedulerTick, GatewayDaemonError> {
         let (scheduled, binding, lease) = {
@@ -156,7 +157,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             approval: plan.approval.clone(),
             resolution: None,
         });
-        if scheduled.launch.approval == ApprovalPolicy::AllowAll {
+        if scheduled.launch.approval == ApprovalPolicy::AllowAll && !requires_explicit_approval {
             let key = IdempotencyKey::new(format!(
                 "task-allow-all-brokered-{}",
                 plan.approval.approval_id.as_str()
@@ -306,5 +307,4 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         let task = self.coordinator.store.load_task(&approval.task_id)?;
         Ok(SchedulerTick::Progressed(TaskView::from(&task)))
     }
-
 }

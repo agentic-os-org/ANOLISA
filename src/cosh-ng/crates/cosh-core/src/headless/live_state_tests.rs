@@ -61,7 +61,9 @@ fn background_compaction_fixture() -> (tempfile::TempDir, SessionRuntime, CoshCo
         Message::user("original command api_key=sk-explicit-historical-secret"),
         Message::assistant("original completed answer"),
     ];
-    runtime.persist(&engine).expect("persist completed turn");
+    runtime
+        .persist(&mut engine)
+        .expect("persist completed turn");
     (root, runtime, engine)
 }
 

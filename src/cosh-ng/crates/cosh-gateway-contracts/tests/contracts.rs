@@ -465,6 +465,7 @@ fn brokered_checkpoint_runtime_event_round_trips_without_an_authority_override()
     let event = AgentRuntimeEvent::BrokeredExecutionRequested {
         turn_id: TurnId::new(),
         tool_use_id: Some(ToolUseId::new()),
+        requires_explicit_approval: false,
         summary: cosh_gateway_contracts::runtime::ToolSummary {
             name: BoundedName::new("workspace_checkpoint_create_v1")
                 .expect("test operation name is bounded"),
@@ -499,6 +500,24 @@ fn brokered_checkpoint_runtime_event_round_trips_without_an_authority_override()
     let value = serde_json::to_value(&event).expect("brokered event serializes");
     assert_eq!(value["event"], "brokered_execution_requested");
     assert!(value.get("authority").is_none());
+    assert!(value.get("requires_explicit_approval").is_none());
+    let mut mandatory = value.clone();
+    mandatory["requires_explicit_approval"] = serde_json::json!(true);
+    let mandatory: AgentRuntimeEvent = serde_json::from_value(mandatory).unwrap();
+    assert!(matches!(
+        &mandatory,
+        AgentRuntimeEvent::BrokeredExecutionRequested {
+            requires_explicit_approval: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        serde_json::to_value(mandatory).unwrap()["requires_explicit_approval"],
+        true
+    );
+    let mut invalid_flag = value.clone();
+    invalid_flag["requires_explicit_approval"] = serde_json::json!("true");
+    assert!(serde_json::from_value::<AgentRuntimeEvent>(invalid_flag).is_err());
     assert_eq!(
         serde_json::from_value::<AgentRuntimeEvent>(value.clone())
             .expect("brokered event deserializes"),

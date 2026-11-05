@@ -751,12 +751,14 @@ fn brokered_callback_is_fenced_acknowledged_and_delivered_once() {
         request: observed,
         operation: observed_operation,
         summary,
+        requires_explicit_approval,
     } = started.handle.poll()
     else {
         panic!("brokered request must be returned to the scheduler")
     };
     assert_eq!(*observed, request);
     assert_eq!(observed_operation, operation);
+    assert!(!requires_explicit_approval);
     assert_eq!(brokered.binding_id, fixture.binding.binding_id);
     assert_eq!(
         brokered.runtime_generation,
@@ -1176,6 +1178,7 @@ impl AgentRuntimePort for TurnAwarePort {
                     tool_use_id: None,
                     request,
                     operation,
+                    requires_explicit_approval: false,
                     summary: cosh_gateway_contracts::runtime::ToolSummary {
                         name: BoundedName::new("workspace_checkpoint_create").unwrap(),
                         summary: BoundedText::new("Create a governed checkpoint").unwrap(),

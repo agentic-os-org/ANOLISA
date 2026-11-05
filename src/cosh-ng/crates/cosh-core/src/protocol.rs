@@ -465,6 +465,7 @@ pub enum CoreControlRequest {
         tool_use_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         audit_ref: Option<String>,
+        /// Requires an explicit client decision even when it would otherwise auto-approve.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         hook_requires_approval: bool,
     },

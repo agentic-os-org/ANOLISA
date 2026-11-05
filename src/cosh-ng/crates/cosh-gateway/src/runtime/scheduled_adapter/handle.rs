@@ -173,6 +173,7 @@ impl ScheduledAgentRuntimeHandle {
                 request,
                 operation,
                 summary,
+                requires_explicit_approval,
             } if self.turn_started
                 && turn_id == self.turn_id
                 && request.task_id == self.task_id
@@ -202,6 +203,7 @@ impl ScheduledAgentRuntimeHandle {
                     request: Box::new(request),
                     operation,
                     summary,
+                    requires_explicit_approval,
                 }
             }
             AgentRuntimeEvent::Completed { turn_id, outcome }

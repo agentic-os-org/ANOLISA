@@ -23,7 +23,7 @@ use crate::hook::{HookDecision, HookNotification, HookSystem, PreToolUseResult};
 use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
 use crate::protocol::{
-    ClientControlCapabilities, ControlResponseBody, HostExecutedCheckpointCreateOutcome,
+    ClientControlCapabilities, HostExecutedCheckpointCreateOutcome,
     HostExecutedCheckpointCreateResult, HostExecutedCheckpointError,
     HostExecutedCheckpointErrorOutcome, InputMessage, OutputMessage, ShellContext,
     ShellControlRequest,
@@ -43,9 +43,23 @@ use self::tool_execution::{
     InvalidArgumentStreak, MAX_INVALID_ARGUMENT_ATTEMPTS,
 };
 
+mod approval_response;
 mod auth;
 mod extensions;
+mod reapproval;
 mod tool_execution;
+
+fn side_effecting_tool(kind: ToolKind) -> bool {
+    matches!(
+        kind,
+        ToolKind::ShellExec
+            | ToolKind::FileEdit
+            | ToolKind::Network
+            | ToolKind::Mcp
+            | ToolKind::External
+            | ToolKind::HostedSideEffect
+    )
+}
 
 fn is_sensitive_write(tool_name: &str, params: &serde_json::Value) -> bool {
     tool_name == "write_file"
@@ -101,6 +115,8 @@ pub struct CoshCore {
     // receipt-based handoff keep their existing semantics.
     approval_response_timeout_default: Duration,
     approval_timed_out: AtomicBool,
+    pub(crate) failed_side_effect_pending_approval: bool,
+    pub(crate) reapproval_checkpoint: Option<crate::session::ReapprovalCheckpoint>,
     /// First control-transport failure of this process, if any.
     ///
     /// Set from `&self` paths (`handle_ask_user`, `handle_shell_evidence`), so
@@ -313,6 +329,10 @@ impl CoshCore {
             };
         }
 
+        if self.failed_side_effect_pending_approval && side_effecting_tool(tool.kind()) {
+            return Outcome::RequireApproval;
+        }
+
         let mode = self.config.agent.approval_mode;
 
         if mode == ApprovalMode::Trust {
@@ -455,6 +475,8 @@ impl CoshCore {
             // Checked like every other request the core then blocks on (#1994):
             // nothing has been appended to the transcript yet, so this one can
             // fail the turn immediately.
+            let mut approval_exposure = None;
+            self.begin_approval_exposure(&mut approval_exposure)?;
             if let Err(error) = self.emit_control_request_checked(
                 writer,
                 &OutputMessage::can_use_tool_with_audit_ref(
@@ -479,6 +501,8 @@ impl CoshCore {
             }
 
             let approval = self.wait_for_approval(&request_id, None, reader).await;
+            let approval_exposure = approval_exposure.as_mut().expect("approval exposure armed");
+            approval_exposure.observe(&approval);
             let (approval_status, approval_decision) = approval_audit_outcome(&approval);
             self.audit.record_approval_resolved(
                 approval_scope,
@@ -488,9 +512,10 @@ impl CoshCore {
                 approval_decision,
                 None,
             )?;
+            self.restore_unexecuted_exposure(approval_exposure)?;
             match approval {
                 ApprovalResult::Allowed => { /* user confirmed, continue */ }
-                ApprovalResult::Denied(reason) => {
+                ApprovalResult::Denied(reason) | ApprovalResult::Unconfirmed(reason) => {
                     self.emit(
                         writer,
                         &OutputMessage::assistant_text(
@@ -511,11 +536,11 @@ impl CoshCore {
                         writer,
                         &OutputMessage::assistant_text(
                             &self.session_id,
-                            "Prompt approval timed out before reaching a decision surface. Nothing was executed; please retry.",
+                            "Prompt approval timed out; execution is unconfirmed and approval protection is retained. Please retry.",
                         ),
                     );
                     return Err(format!(
-                        "prompt approval timed out before reaching a decision surface (request_id={request_id}); nothing was executed and the turn ends here so a late decision cannot split state"
+                        "prompt approval timed out before reaching a decision surface (request_id={request_id}); execution is unconfirmed and approval protection is retained; the turn ends here so a late decision cannot split state"
                     ));
                 }
                 ApprovalResult::Interrupted
@@ -1342,14 +1367,26 @@ impl CoshCore {
                 };
 
                 let params_for_post_hook = params.clone();
+                let side_effecting_call = self
+                    .tools
+                    .get(&tc.name)
+                    .is_some_and(|tool| side_effecting_tool(tool.kind()));
+
+                if side_effecting_call && outcome == Outcome::Allow {
+                    self.arm_reapproval_checkpoint()?;
+                }
+                let mut approval_exposure = None;
 
                 let mut tool_result_already_emitted = false;
+                let mut side_effect_failed = None;
+                let mut side_effect_approved = false;
                 let tool_start = Instant::now();
                 let result = match outcome {
                     Outcome::Allow => {
                         self.audit
                             .record_tool_execution_started(tool_scope, &tc.name, &tool_data)?;
                         let result = self.execute_tool(&tc.name, params, &ctx).await;
+                        side_effect_failed = Some(result.is_error);
                         self.emit_provider_native_tool_result(writer, &tc.id, &result);
                         tool_result_already_emitted = true;
                         result
@@ -1357,6 +1394,10 @@ impl CoshCore {
                     Outcome::RequireApproval => {
                         let hook_requires_approval =
                             matches!(hook_result.decision, HookDecision::Ask);
+                        let failed_effect_requires_approval =
+                            self.failed_side_effect_pending_approval && side_effecting_call;
+                        let requires_explicit_approval =
+                            hook_requires_approval || failed_effect_requires_approval;
                         let request_id = self.next_request_id();
                         let approval_scope = CoreAuditScope::request(
                             &run_id,
@@ -1369,6 +1410,8 @@ impl CoshCore {
                             &tc.name,
                             if hook_requires_approval {
                                 "hook_ask"
+                            } else if failed_effect_requires_approval {
+                                "failed_side_effect_reapproval"
                             } else if self.config.agent.approval_mode == ApprovalMode::Trust {
                                 // In trust mode a non-hook RequireApproval is
                                 // the capable-client shell handoff reroute.
@@ -1381,6 +1424,7 @@ impl CoshCore {
                         // Checked, not fire-and-forget: waiting for a decision
                         // on a request that may never have arrived is the silent
                         // permanent hang from #1994.
+                        self.begin_approval_exposure(&mut approval_exposure)?;
                         if let Err(error) = self.emit_control_request_checked(
                             writer,
                             &OutputMessage::can_use_tool_with_audit_ref(
@@ -1388,7 +1432,7 @@ impl CoshCore {
                                 &tc.name,
                                 params.clone(),
                                 &tc.id,
-                                hook_requires_approval,
+                                requires_explicit_approval,
                                 audit_ref,
                             ),
                         ) {
@@ -1428,6 +1472,10 @@ impl CoshCore {
                             let approval_result = self
                                 .wait_for_approval(&request_id, accepted_tool_kind, reader)
                                 .await;
+                            approval_exposure
+                                .as_mut()
+                                .expect("approval exposure armed")
+                                .observe(&approval_result);
                             let approval_wait_ms = approval_start.elapsed().as_millis() as u64;
                             let (approval_status, approval_decision) =
                                 approval_audit_outcome(&approval_result);
@@ -1457,11 +1505,19 @@ impl CoshCore {
                                             "brokered side effect rejected generic allow; a typed Gateway result is required",
                                         )
                                     } else {
+                                        if side_effecting_call {
+                                            approval_exposure
+                                                .as_mut()
+                                                .expect("approval exposure armed")
+                                                .executing();
+                                        }
                                         self.audit.record_tool_execution_started(
                                             tool_scope, &tc.name, &tool_data,
                                         )?;
                                         let result =
                                             self.execute_tool(&tc.name, params, &ctx).await;
+                                        side_effect_failed = Some(result.is_error);
+                                        side_effect_approved = side_effecting_call;
                                         self.emit_provider_native_tool_result(
                                             writer, &tc.id, &result,
                                         );
@@ -1474,6 +1530,8 @@ impl CoshCore {
                                     exit_code,
                                 } => {
                                     self.metrics.approval_allow += 1;
+                                    side_effect_failed = Some(exit_code != Some(0));
+                                    side_effect_approved = true;
                                     let is_error = exit_code.is_some_and(|c| c != 0);
                                     ToolResult {
                                         output: llm_content,
@@ -1482,6 +1540,8 @@ impl CoshCore {
                                 }
                                 ApprovalResult::HostExecutedCheckpoint { result } => {
                                     self.metrics.approval_allow += 1;
+                                    side_effect_failed = Some(result.is_error);
+                                    side_effect_approved = true;
                                     result
                                 }
                                 ApprovalResult::Denied(reason) => {
@@ -1489,6 +1549,13 @@ impl CoshCore {
                                     ToolResult::error(format!(
                                         "Tool call denied: {}",
                                         reason.unwrap_or_else(|| "no reason given".to_string())
+                                    ))
+                                }
+                                ApprovalResult::Unconfirmed(reason) => {
+                                    self.metrics.approval_deny += 1;
+                                    ToolResult::error(format!(
+                                        "Tool result unconfirmed: {}",
+                                        reason.unwrap_or_else(|| "unknown response".to_string())
                                     ))
                                 }
                                 ApprovalResult::Interrupted => {
@@ -1518,6 +1585,10 @@ impl CoshCore {
                         ToolResult::error(format!("Tool '{}' denied by security policy", tc.name))
                     }
                 };
+                if side_effecting_call && side_effect_failed == Some(true) {
+                    self.failed_side_effect_pending_approval = true;
+                }
+
                 // ─── SLS: tool call total/duration/success/fail ───
                 self.metrics.tool_calls_total += 1;
                 self.metrics.tool_calls_duration_ms += tool_start.elapsed().as_millis() as u64;
@@ -1572,6 +1643,10 @@ impl CoshCore {
                 } else {
                     result
                 };
+
+                if side_effecting_call && side_effect_failed.is_some() && result.is_error {
+                    self.failed_side_effect_pending_approval = true;
+                }
 
                 // ─── Hook: PostToolUseFailure ───
                 if result.is_error {
@@ -1648,6 +1723,7 @@ impl CoshCore {
                         // unsent bypass panel must not become a blocking
                         // read. The sandbox failure stays as the tool result,
                         // exactly as for a denied bypass.
+                        self.begin_approval_exposure(&mut approval_exposure)?;
                         if let Err(error) = self.emit_control_request_checked(
                             writer,
                             &OutputMessage::can_use_tool_with_audit_ref(
@@ -1684,6 +1760,10 @@ impl CoshCore {
                             let approval_result = self
                                 .wait_for_approval(&request_id, Some(ToolKind::ShellExec), reader)
                                 .await;
+                            approval_exposure
+                                .as_mut()
+                                .expect("approval exposure armed")
+                                .observe(&approval_result);
                             let (approval_status, approval_decision) =
                                 approval_audit_outcome(&approval_result);
                             if !matches!(
@@ -1703,6 +1783,12 @@ impl CoshCore {
 
                             match approval_result {
                                 ApprovalResult::Allowed => {
+                                    if side_effecting_call {
+                                        approval_exposure
+                                            .as_mut()
+                                            .expect("approval exposure armed")
+                                            .executing();
+                                    }
                                     self.audit.record_tool_execution_started(
                                         tool_scope, &tc.name, &tool_data,
                                     )?;
@@ -1715,6 +1801,11 @@ impl CoshCore {
                                     // operation. execute_tool returns ToolResult (infallible),
                                     // so this line is always reached.
                                     self.hook_system.set_hook_disabled("sandbox-guard", false);
+                                    side_effect_failed = Some(retry.is_error);
+                                    if side_effecting_call && retry.is_error {
+                                        self.failed_side_effect_pending_approval = true;
+                                    }
+                                    side_effect_approved = side_effecting_call;
                                     self.emit_provider_native_tool_result(writer, &tc.id, &retry);
                                     result = retry;
                                 }
@@ -1722,12 +1813,15 @@ impl CoshCore {
                                     llm_content,
                                     exit_code,
                                 } => {
+                                    side_effect_failed = Some(exit_code != Some(0));
+                                    side_effect_approved = true;
                                     let is_error = exit_code.is_some_and(|c| c != 0);
                                     result = ToolResult {
                                         output: llm_content,
                                         is_error,
                                     };
                                 }
+                                ApprovalResult::Denied(_) => {}
                                 ApprovalResult::HostExecutedCheckpoint { .. } => {
                                     // Sandbox bypass can only resolve a legacy shell tool.
                                 }
@@ -1738,8 +1832,25 @@ impl CoshCore {
                                 ApprovalResult::TimedOut => {
                                     hold_approval_timeout_fatal(&mut fatal_turn, &request_id);
                                 }
-                                _ => { /* denied / interrupted: keep original error */ }
+                                _ => { /* interrupted / unconfirmed: keep original error */ }
                             }
+                        }
+                    }
+                }
+
+                if let Some(exposure) = approval_exposure.as_ref() {
+                    self.restore_unexecuted_exposure(exposure)?;
+                }
+                if side_effecting_call
+                    || approval_exposure
+                        .as_ref()
+                        .is_some_and(|exposure| !exposure.known_unexecuted)
+                {
+                    if let Some(failed) = side_effect_failed {
+                        if failed || result.is_error {
+                            self.failed_side_effect_pending_approval = true;
+                        } else if side_effect_approved {
+                            self.failed_side_effect_pending_approval = false;
                         }
                     }
                 }
@@ -2146,143 +2257,14 @@ impl CoshCore {
                 continue;
             }
 
-            let msg: InputMessage = match serde_json::from_str(&line) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            match msg {
-                InputMessage::ApprovalReceipt { request_id } => {
-                    // Disarm only the request this wait owns; a receipt for a
-                    // different id (a concurrent approval observed while this
-                    // wait holds the reader) is dropped, and that request
-                    // simply keeps its residual guard.
-                    if request_id == expected_request_id {
-                        deadline = None;
-                    }
+            match self.normalize_approval_frame(&line, expected_request_id, accepted_tool_kind) {
+                approval_response::ApprovalFrameOutcome::Ignore => {}
+                approval_response::ApprovalFrameOutcome::Receipt => deadline = None,
+                approval_response::ApprovalFrameOutcome::Interrupted => {
+                    self.provider.cancel();
+                    return ApprovalResult::Interrupted;
                 }
-                InputMessage::ControlResponse { response } => {
-                    if response.request_id != expected_request_id {
-                        continue;
-                    }
-                    match response.response.behavior.as_deref() {
-                        Some("allow") => {
-                            if self.execution_profile.is_brokered()
-                                && accepted_tool_kind == Some(ToolKind::HostedSideEffect)
-                            {
-                                return ApprovalResult::Denied(Some(
-                                    "brokered side effect rejected generic allow; a typed Gateway result is required"
-                                        .to_string(),
-                                ));
-                            }
-                            return ApprovalResult::Allowed;
-                        }
-                        Some("deny") => return ApprovalResult::Denied(response.response.message),
-                        Some("host_executed_shell") => {
-                            if accepted_tool_kind != Some(ToolKind::ShellExec)
-                                || self.execution_profile.is_brokered()
-                            {
-                                return ApprovalResult::Denied(Some(
-                                    "host_executed_shell is only valid for shell tools".to_string(),
-                                ));
-                            }
-                            let Some(result) = response.response.result else {
-                                return ApprovalResult::Denied(Some(
-                                    "host_executed_shell response missing result".to_string(),
-                                ));
-                            };
-                            let exit_code = result
-                                .metadata
-                                .as_ref()
-                                .and_then(|m| m.get("exit_code"))
-                                .and_then(|v| v.as_i64())
-                                .map(|v| v as i32);
-                            return ApprovalResult::HostExecutedShell {
-                                llm_content: result.llm_content,
-                                exit_code,
-                            };
-                        }
-                        Some("host_executed_checkpoint_create") => {
-                            if !self.execution_profile.hosts_checkpoint() {
-                                return ApprovalResult::Denied(Some(
-                                    "unknown response".to_string(),
-                                ));
-                            }
-                            if accepted_tool_kind != Some(ToolKind::HostedSideEffect)
-                                || response_has_unrelated_checkpoint_fields(
-                                    &response.response,
-                                    false,
-                                )
-                            {
-                                return ApprovalResult::Denied(Some(
-                                    "typed checkpoint result is not valid for this request"
-                                        .to_string(),
-                                ));
-                            }
-                            let Some(result) = response.response.checkpoint_result else {
-                                return ApprovalResult::Denied(Some(
-                                    "typed checkpoint response missing checkpointResult"
-                                        .to_string(),
-                                ));
-                            };
-                            let result =
-                                match serde_json::from_value(result) {
-                                    Ok(result) => result,
-                                    Err(_) => return ApprovalResult::Denied(Some(
-                                        "typed checkpoint response has an invalid checkpointResult"
-                                            .to_string(),
-                                    )),
-                                };
-                            return match hosted_checkpoint_result(result) {
-                                Ok(result) => ApprovalResult::HostExecutedCheckpoint { result },
-                                Err(reason) => ApprovalResult::Denied(Some(reason)),
-                            };
-                        }
-                        Some("host_executed_checkpoint_error") => {
-                            if !self.execution_profile.hosts_checkpoint() {
-                                return ApprovalResult::Denied(Some(
-                                    "unknown response".to_string(),
-                                ));
-                            }
-                            if accepted_tool_kind != Some(ToolKind::HostedSideEffect)
-                                || response_has_unrelated_checkpoint_fields(
-                                    &response.response,
-                                    true,
-                                )
-                            {
-                                return ApprovalResult::Denied(Some(
-                                    "typed checkpoint error is not valid for this request"
-                                        .to_string(),
-                                ));
-                            }
-                            let Some(error) = response.response.checkpoint_error else {
-                                return ApprovalResult::Denied(Some(
-                                    "typed checkpoint response missing checkpointError".to_string(),
-                                ));
-                            };
-                            let error =
-                                match serde_json::from_value(error) {
-                                    Ok(error) => error,
-                                    Err(_) => return ApprovalResult::Denied(Some(
-                                        "typed checkpoint response has an invalid checkpointError"
-                                            .to_string(),
-                                    )),
-                                };
-                            return match hosted_checkpoint_error(error) {
-                                Ok(result) => ApprovalResult::HostExecutedCheckpoint { result },
-                                Err(reason) => ApprovalResult::Denied(Some(reason)),
-                            };
-                        }
-                        _ => return ApprovalResult::Denied(Some("unknown response".to_string())),
-                    }
-                }
-                InputMessage::ControlRequest { request, .. } => {
-                    if matches!(request, ShellControlRequest::Interrupt) {
-                        self.provider.cancel();
-                        return ApprovalResult::Interrupted;
-                    }
-                }
-                _ => {}
+                approval_response::ApprovalFrameOutcome::Decision(result) => return result,
             }
         }
     }
@@ -2387,28 +2369,6 @@ fn control_transport_turn_error(
     }
 }
 
-fn response_has_unrelated_checkpoint_fields(
-    response: &ControlResponseBody,
-    expects_error: bool,
-) -> bool {
-    response.result.is_some()
-        || !response.unknown_fields.is_empty()
-        || response.tool_use_id.is_some()
-        || response.updated_permissions.is_some()
-        || response.answer.is_some()
-        || response.selected_options.is_some()
-        || response.provider_id.is_some()
-        || response.provider_type.is_some()
-        || response.values.is_some()
-        || response.persist.is_some()
-        || response.message.is_some()
-        || if expects_error {
-            response.checkpoint_result.is_some()
-        } else {
-            response.checkpoint_error.is_some()
-        }
-}
-
 fn hosted_checkpoint_result(
     result: HostExecutedCheckpointCreateResult,
 ) -> Result<ToolResult, String> {
@@ -2469,6 +2429,7 @@ fn validate_bounded_gateway_text(value: &str, max_bytes: usize, field: &str) -> 
 enum ApprovalResult {
     Allowed,
     Denied(Option<String>),
+    Unconfirmed(Option<String>),
     HostExecutedShell {
         llm_content: String,
         exit_code: Option<i32>,
@@ -2562,6 +2523,7 @@ fn approval_audit_outcome(approval: &ApprovalResult) -> (AuditOutcomeStatus, &'s
         | ApprovalResult::HostExecutedShell { .. }
         | ApprovalResult::HostExecutedCheckpoint { .. } => (AuditOutcomeStatus::Allowed, "allow"),
         ApprovalResult::Denied(_) => (AuditOutcomeStatus::Denied, "deny"),
+        ApprovalResult::Unconfirmed(_) => (AuditOutcomeStatus::Failed, "unconfirmed"),
         ApprovalResult::TimedOut => (AuditOutcomeStatus::Denied, "timeout"),
         ApprovalResult::Interrupted => (AuditOutcomeStatus::Cancelled, "interrupted"),
     }

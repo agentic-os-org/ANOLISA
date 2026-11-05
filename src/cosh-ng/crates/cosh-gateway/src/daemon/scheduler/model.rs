@@ -272,6 +272,8 @@ pub enum RuntimePoll {
         operation: BrokeredOperation,
         /// Provider-facing operation description sanitized for actor review.
         summary: ToolSummary,
+        /// Requires a fresh actor decision even under AllowAll.
+        requires_explicit_approval: bool,
     },
     /// A side-effect-free Runtime question is paused on durable actor input.
     InputRequested {

@@ -90,6 +90,9 @@ pub enum AgentRuntimeEvent {
         request: CapabilityRequest,
         /// Closed typed operation executed only by a COSH target.
         operation: BrokeredOperation,
+        /// Requires a fresh actor decision even under an AllowAll launch policy.
+        #[serde(default, skip_serializing_if = "is_false")]
+        requires_explicit_approval: bool,
     },
     /// Runtime asked Gateway to durably coordinate bounded user input.
     InputRequested {
@@ -113,4 +116,8 @@ pub enum AgentRuntimeEvent {
         /// Safe bounded transport error.
         error: ContractError,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
