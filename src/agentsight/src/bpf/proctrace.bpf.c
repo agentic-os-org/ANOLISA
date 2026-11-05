@@ -11,6 +11,8 @@
 #include "common.h"
 #include "cgroup_helper.h"
 
+#define SIGNAL_GROUP_EXIT 0x00000004
+
 // Target uid filter (optional, -1 means trace all uids)
 const volatile uid_t targ_uid = -1;
 
@@ -327,16 +329,28 @@ int trace_process_exit(void *ctx)
     u32 pid = pid_tgid >> 32;
     u32 tid = (u32)pid_tgid;
 
-    if (pid != tid)
-        return 0;
-
-    u32 uid = bpf_get_current_uid_gid();
-    u64 ts = bpf_ktime_get_ns();
-    
     // Gate on traced_processes (covers both BPF-inserted and user-space-inserted PIDs)
     u32 *in_traced = bpf_map_lookup_elem(&traced_processes, &pid);
     if (!in_traced)
         return 0;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    // do_exit() decrements live before this tracepoint. Only the final thread
+    // completes the process; earlier exits must leave both tracking maps intact.
+    if (BPF_CORE_READ(task, signal, live.counter) != 0)
+        return 0;
+
+    // Match wait_task_zombie(): group_exit_code records exit_group and fatal
+    // signals; otherwise wait uses the group leader's raw status. The leader
+    // remains a zombie until the thread group empties, even if it exited first.
+    s32 raw_exit_status;
+    if (BPF_CORE_READ(task, signal, flags) & SIGNAL_GROUP_EXIT)
+        raw_exit_status = BPF_CORE_READ(task, signal, group_exit_code);
+    else
+        raw_exit_status = BPF_CORE_READ(task, group_leader, exit_code);
+
+    u32 uid = bpf_get_current_uid_gid();
+    u64 ts = bpf_ktime_get_ns();
     u64 cg_id = get_cgroup_id_compat();
 
     // Clean up both maps unconditionally (delete on missing key is a no-op)
@@ -344,15 +358,15 @@ int trace_process_exit(void *ctx)
     bpf_map_delete_elem(&child_pids, &pid);
     // Reserve space in ring buffer for exit event (fixed size)
     struct proc_event_header *event = bpf_ringbuf_reserve(
-        &rb, 
-        sizeof(struct proc_event_header) + sizeof(struct proc_exit_data), 
+        &rb,
+        sizeof(struct proc_event_header) + sizeof(struct proc_exit_data),
         0
     );
     if (!event) {
         record_ring_buffer_drop();
         return 0;
     }
-    
+
     // Fill header
     event->source = EVENT_SOURCE_PROC;
     event->timestamp_ns = ts;
@@ -364,11 +378,11 @@ int trace_process_exit(void *ctx)
     event->data_len = sizeof(struct proc_exit_data);
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
     event->cgroup_id = cg_id;
-    
+
     // Fill exit_data
     struct proc_exit_data *exit_data = (void *)(event + 1);
-    exit_data->exit_code = 0;  // TODO: Get actual exit code from sched_process_exit
-    
+    exit_data->raw_exit_status = raw_exit_status;
+
     bpf_ringbuf_submit(event, 0);
     return 0;
 }

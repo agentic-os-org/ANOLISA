@@ -205,6 +205,7 @@ impl AuditAnalyzer {
 
     /// Extract a process action audit record from an aggregated process
     fn extract_process_action(&self, process: &AggregatedProcess) -> AuditRecord {
+        let (exit_code, signal) = decode_process_termination(process.raw_exit_status);
         AuditRecord {
             id: None,
             event_type: AuditEventType::ProcessAction,
@@ -216,10 +217,24 @@ impl AuditAnalyzer {
             extra: AuditExtra::ProcessAction {
                 filename: process.filename.clone(),
                 args: process.args.clone(),
-                exit_code: None,
+                exit_code,
+                signal,
             },
             session_id: process.session_id.clone(),
         }
+    }
+}
+
+fn decode_process_termination(raw: Option<i32>) -> (Option<i32>, Option<i32>) {
+    let Some(raw) = raw else {
+        return (None, None);
+    };
+    let raw = raw as u32;
+    let signal = (raw & 0x7f) as i32;
+    if signal == 0 {
+        (Some(((raw >> 8) & 0xff) as i32), None)
+    } else {
+        (None, Some(signal))
     }
 }
 
@@ -272,6 +287,15 @@ mod tests {
         let record = analyzer.extract_process_action(&proc);
 
         assert_eq!(record.session_id, None);
+    }
+
+    #[test]
+    fn process_termination_decodes_wait_status_without_inventing_unknowns() {
+        assert_eq!(decode_process_termination(Some(0)), (Some(0), None));
+        assert_eq!(decode_process_termination(Some(0x700)), (Some(7), None));
+        assert_eq!(decode_process_termination(Some(0x0f)), (None, Some(15)));
+        assert_eq!(decode_process_termination(Some(0x8f)), (None, Some(15)));
+        assert_eq!(decode_process_termination(None), (None, None));
     }
 
     fn make_http_record(path: &str, is_sse: bool, response_body: Option<&str>) -> HttpRecord {

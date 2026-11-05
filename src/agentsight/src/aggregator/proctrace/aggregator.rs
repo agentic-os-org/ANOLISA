@@ -87,11 +87,15 @@ impl ProcessEventAggregator {
                 }
                 None
             }
-            VariableEvent::Exit { header, .. } => {
+            VariableEvent::Exit {
+                header,
+                raw_exit_status,
+            } => {
                 let pid = header.pid;
                 self.session_map.remove(&pid);
                 if let Some(mut aggregated) = self.aggregates.remove(&pid) {
                     aggregated.mark_complete(header.timestamp_ns);
+                    aggregated.raw_exit_status = Some(*raw_exit_status);
                     Some(aggregated)
                 } else {
                     None
@@ -177,6 +181,7 @@ impl ProcessEventAggregator {
                 self.session_map.remove(&event.pid);
                 if let Some(mut aggregated) = self.aggregates.remove(&event.pid) {
                     aggregated.mark_complete(event.timestamp_ns);
+                    aggregated.raw_exit_status = event.raw_exit_status;
                     Some(aggregated)
                 } else {
                     None
@@ -234,6 +239,7 @@ mod tests {
             args: Some(args.to_string()),
             stdout_data: None,
             fd: None,
+            raw_exit_status: None,
         }
     }
 
@@ -250,6 +256,7 @@ mod tests {
             args: None,
             stdout_data: None,
             fd: None,
+            raw_exit_status: None,
         }
     }
 
@@ -376,6 +383,7 @@ mod tests {
             args: None,
             stdout_data: Some("boom\n".to_string()),
             fd: Some(2),
+            raw_exit_status: None,
             filename: None,
         };
         agg.process_parsed_event(&stderr);
@@ -408,6 +416,7 @@ mod tests {
             args: None,
             stdout_data: Some(data.to_string()),
             fd: Some(1),
+            raw_exit_status: None,
             filename: None,
         }
     }

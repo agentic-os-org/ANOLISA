@@ -54,6 +54,7 @@ pub enum AuditExtra {
         filename: Option<String>,
         args: Option<String>,
         exit_code: Option<i32>,
+        signal: Option<i32>,
     },
 }
 
@@ -90,4 +91,33 @@ pub struct AuditSummary {
     pub total_output_tokens: u64,
     pub providers: Vec<(String, u64)>,
     pub top_commands: Vec<(String, u64)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_process_action_deserializes_without_signal() {
+        let extra: AuditExtra =
+            serde_json::from_str(r#"{"filename":null,"args":null,"exit_code":7}"#)
+                .expect("legacy process action remains compatible");
+
+        let AuditExtra::ProcessAction {
+            exit_code, signal, ..
+        } = extra
+        else {
+            panic!("expected process action");
+        };
+        assert_eq!(exit_code, Some(7));
+        assert_eq!(signal, None);
+        let encoded = serde_json::to_value(AuditExtra::ProcessAction {
+            filename: None,
+            args: None,
+            exit_code: None,
+            signal: None,
+        })
+        .expect("serialize process action");
+        assert!(encoded["signal"].is_null());
+    }
 }
