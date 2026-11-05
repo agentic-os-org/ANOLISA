@@ -283,7 +283,12 @@ fn context(result: &AggregatedResult, parse_sse: bool) -> Option<HttpContext> {
             };
             return Some(HttpContext {
                 retain_raw: false,
-                request: stream.request_json_body(),
+                request: stream.request_json_body().or_else(|| {
+                    super::super::MessageParser::decode_request_body(
+                        &stream.path(),
+                        stream.request_body_str()?.as_bytes(),
+                    )
+                }),
                 response,
                 http: HttpRecord {
                     timestamp_ns: stream.start_timestamp_ns,
@@ -309,7 +314,9 @@ fn context(result: &AggregatedResult, parse_sse: bool) -> Option<HttpContext> {
     };
     Some(HttpContext {
         retain_raw: false,
-        request: request.json_body(),
+        request: request.json_body().or_else(|| {
+            super::super::MessageParser::decode_request_body(&request.path, request.body())
+        }),
         response: response.and_then(|response| {
             if sse {
                 parse_sse.then(|| Value::Array(response.json_body()))

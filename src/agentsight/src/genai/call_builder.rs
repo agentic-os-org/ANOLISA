@@ -70,7 +70,9 @@ impl GenAIBuilder {
         let path_match = crate::parser::llm::is_llm_api_path(&http.path);
         let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
         let is_llm = path_match || body_match;
-        if !is_llm && !http.is_sse {
+        if http.path.split('?').next() == Some("/api/v1/qcs/config/stream")
+            || (!is_llm && !http.is_sse)
+        {
             return None;
         }
 
@@ -270,6 +272,25 @@ impl GenAIBuilder {
                     .and_then(|context| context.request.as_ref()?.get("metadata"))
                     .and_then(crate::analyzer::message::types::session_id_from_metadata)
             });
+        let metadata_session = metadata_session.or_else(|| {
+            if !crate::parser::llm::is_qoder_path(&http.path) {
+                return None;
+            }
+            let raw;
+            let request = match context.and_then(|context| context.request.as_ref()) {
+                Some(request) => request,
+                None => {
+                    raw = serde_json::from_str::<serde_json::Value>(http.request_body.as_deref()?)
+                        .ok()?;
+                    &raw
+                }
+            };
+            request
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|session| !session.trim().is_empty())
+                .map(str::to_owned)
+        });
         let parsed_response_id = parsed_message
             .as_ref()
             .and_then(|m| m.response_id())

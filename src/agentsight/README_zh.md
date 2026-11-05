@@ -452,6 +452,11 @@ sudo agentsight trace
 
 AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路径 `/etc/agentsight/config.json`，若不存在则使用内嵌默认值）。
 
+默认配置包含 Qoder CLI 发现规则和旧版 `*.qoder.sh` 网关。
+在 Linux 上，现有 TLS 探针将解码后的请求、原生 session ID、工具调用及
+封装 SSE 中的 Token 用量交给观测流水线。已有配置的迁移方法和协议覆盖边界
+见[配置指南](../../docs/user-guide/zh/agentsight/configuration.md)。
+
 ### SQLite 存储（`storage`）
 
 `agentsight.json` schema v5 为每个 AgentSight 自有 SQLite 存储统一使用 `retention_days`、

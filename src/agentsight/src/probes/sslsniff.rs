@@ -1154,6 +1154,10 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
     ) {
         return Some(SslLibKind::Static);
     }
+    // Bun-packaged Qoder CLI embeds BoringSSL, including versioned executables.
+    if name.starts_with("qodercli") {
+        return Some(SslLibKind::Static);
+    }
     // Codex CLI statically links OpenSSL 3.x (via openssl-sys / native-tls).
     if name.starts_with("codex") && !name.contains('.') {
         return Some(SslLibKind::Static);
@@ -2298,6 +2302,9 @@ mod tests {
 
     #[test]
     fn classify_keeps_existing_kinds_unchanged() {
+        for path in ["/usr/bin/qodercli", "/opt/qoder/qodercli-1.0.14"] {
+            assert_eq!(classify_ssl_lib(path), Some(SslLibKind::Static));
+        }
         // Guards against the rustls arm shadowing an established classification.
         assert_eq!(
             classify_ssl_lib("/usr/lib64/libssl.so.3"),

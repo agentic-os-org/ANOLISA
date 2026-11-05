@@ -461,6 +461,12 @@ See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) fo
 
 AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/config.json`; falls back to embedded defaults if absent).
 
+Defaults include Qoder CLI discovery and its legacy `*.qoder.sh` gateway.
+On Linux, the existing TLS probes feed decoded requests, native session IDs,
+tool calls, and wrapped SSE token usage into the observation pipeline.
+See the [configuration guide](../../docs/user-guide/en/agentsight/configuration.md)
+for existing-config migration and protocol coverage limits.
+
 ### SQLite Storage (`storage`)
 
 `agentsight.json` schema v5 gives every AgentSight-owned SQLite store the same three policy keys:

@@ -12,6 +12,22 @@
 
 use serde_json::Value;
 
+/// Recognize the Qoder chat endpoint without matching query-string lookalikes.
+pub(crate) fn is_qoder_path(path: &str) -> bool {
+    path.split('?')
+        .next()
+        .unwrap_or(path)
+        .ends_with("/algo/api/v2/service/pro/sse/agent_chat_generation")
+}
+
+/// Read the gateway's inner chunk only when an envelope marker is present.
+pub(crate) fn unwrap_qoder_envelope(value: &Value) -> Option<Value> {
+    if value.get("statusCode").is_none() && value.get("statusCodeValue").is_none() {
+        return None;
+    }
+    serde_json::from_str(value.get("body")?.as_str()?).ok()
+}
+
 /// Path suffixes of the DashScope/Bailian **native** protocol.
 ///
 /// Full form: `POST https://{WorkspaceId}.{region}.maas.aliyuncs.com
@@ -59,6 +75,7 @@ pub fn is_llm_api_path(path: &str) -> bool {
         || path.contains("/api/v1/copilot/generate_copilot")
         || is_gemini_generation_path(path)
         || is_dashscope_native_path(path)
+        || is_qoder_path(path)
 }
 
 /// Gemini's inference endpoints: `:generateContent` and
