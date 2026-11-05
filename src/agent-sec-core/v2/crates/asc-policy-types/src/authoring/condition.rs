@@ -123,6 +123,25 @@ fn count_node(path: &str, depth: usize, nodes: &mut usize) -> Result<(), Validat
     Ok(())
 }
 
+/// Charges one array operand against the shared node budget.
+///
+/// A comparison node counts as one node by itself, but its operand arrays
+/// are the fan-out dimension of a condition: an `in` list or an
+/// `argsPrefix` equality sequence multiplies the work every consumer of the
+/// template performs per node. Charging each element keeps the documented
+/// "4096 total nodes" bound a bound on authored-policy complexity instead
+/// of a bound that one array can silently exceed.
+fn count_operand(path: &str, nodes: &mut usize) -> Result<(), ValidationError> {
+    *nodes += 1;
+    if *nodes > 4096 {
+        return Err(ValidationError::new(
+            path,
+            "condition exceeds depth 16 or 4096 total nodes",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate(
     condition: &Condition,
     action: Action,
@@ -175,7 +194,7 @@ pub(super) fn validate(
                     "attribute is not defined for this action",
                 ));
             }
-            validate_comparison(comparison, name, &field)
+            validate_comparison(comparison, name, &field, nodes)
         }
     }
 }
@@ -184,6 +203,7 @@ fn validate_comparison(
     comparison: &Comparison,
     attribute: &str,
     path: &str,
+    nodes: &mut usize,
 ) -> Result<(), ValidationError> {
     let numeric = matches!(attribute, "mode" | "ownerUid" | "ownerGid");
     let prefix = attribute == "argsPrefix";
@@ -222,6 +242,7 @@ fn validate_comparison(
                 return Err(invalid());
             }
             for value in values {
+                count_operand(path, nodes)?;
                 validate_scalar(value)?;
             }
         }
@@ -234,6 +255,7 @@ fn validate_comparison(
                     return Err(invalid());
                 }
                 for value in values {
+                    count_operand(path, nodes)?;
                     validate_scalar(value)?;
                 }
             } else {

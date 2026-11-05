@@ -132,3 +132,39 @@ fn recursive_predicates_have_a_depth_and_total_node_budget() {
     value["where"] = json!({"or":vec![json!({"operation":{"eq":"delete"}});4096]});
     assert!(policy(&value).validate().is_err());
 }
+
+#[test]
+fn operand_arrays_share_the_total_node_budget() {
+    // An `in` list with 4096 elements plus its comparison node exceeds the
+    // 4096-node budget: operands are the fan-out dimension of a condition,
+    // so they are charged like nodes instead of riding inside one.
+    let mut value = rule();
+    let programs: Vec<Json> = (0..4096)
+        .map(|index| json!(format!("/opt/tool-{index}")))
+        .collect();
+    value["where"] = json!({"program":{"in":programs}});
+    assert!(policy(&value).validate().is_err());
+
+    // The same shape with an `argsPrefix` equality sequence (empty-string
+    // tokens are legal operands, so a transport-sized frame packs millions).
+    let mut value = rule();
+    value["action"] = json!("exec");
+    let tokens: Vec<Json> = (0..4096).map(|_| json!("")).collect();
+    value["where"] = json!({"argsPrefix":{"eq":tokens}});
+    assert!(policy(&value).validate().is_err());
+
+    // Bounded operand lists stay valid, alone and alongside other nodes.
+    let mut value = rule();
+    value["action"] = json!("exec");
+    value["where"] = json!({"and":[
+        {"argsPrefix":{"eq":["push","--force"]}},
+        {"not":{"cwd":{"in":["/tmp","/workspace"]}}},
+    ]});
+    policy(&value).validate().unwrap();
+
+    // A single-scalar comparison still costs exactly its own node; a large
+    // logical group of scalar comparisons keeps the pre-existing budget.
+    let mut value = rule();
+    value["where"] = json!({"or":vec![json!({"operation":{"eq":"delete"}});4000]});
+    assert!(policy(&value).validate().is_ok());
+}
