@@ -247,6 +247,7 @@ dependencies = [
  "asc-pap",
  "asc-pep-runtime",
  "asc-persistence-sqlite",
+ "asc-policy-cedar",
  "asc-policy-repository-sqlite",
  "asc-policy-types",
  "asc-security-events",

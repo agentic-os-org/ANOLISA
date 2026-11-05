@@ -21,6 +21,7 @@ use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
 pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
 pub(crate) use self::gateway::GatewayCommand;
+pub use self::policy::DefaultPolicy;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
@@ -183,6 +184,14 @@ impl Command {
     pub(crate) const fn local(&self) -> Option<&CapabilitiesCommand> {
         match self {
             Self::Capabilities(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    /// Returns the baseline command when it prints embedded content locally.
+    pub(crate) const fn policy_default(&self) -> Option<&DefaultPolicy> {
+        match self {
+            Self::Policy(PolicyCommand::Default(command)) => Some(command),
             _ => None,
         }
     }

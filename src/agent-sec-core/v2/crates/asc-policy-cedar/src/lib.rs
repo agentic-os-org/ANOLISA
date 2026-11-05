@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod default_policy;
 pub mod schema;
 mod validation;
 

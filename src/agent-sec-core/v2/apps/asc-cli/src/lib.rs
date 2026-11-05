@@ -16,8 +16,8 @@ use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
 use clap::Parser;
 use commands::Command;
 pub use commands::{
-    CapabilitiesCommand, EventsCommand, EventsRunError, EventsTransport, PiiOutputFormat,
-    PromptScanPlan, ScanPromptInputError,
+    CapabilitiesCommand, DefaultPolicy, EventsCommand, EventsRunError, EventsTransport,
+    PiiOutputFormat, PromptScanPlan, ScanPromptInputError,
 };
 
 /// Parsed invocation for one CLI command.
@@ -37,6 +37,8 @@ pub enum Plan<'a> {
     Sandbox(&'a sandbox::SandboxCommand),
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
+    /// Rendered from the embedded default policy without any daemon involvement.
+    PolicyDefault(&'a DefaultPolicy),
     /// Generate the observability record schema without a daemon endpoint.
     ObservabilitySchema,
     /// Sent to the daemon listening on `socket`.
@@ -128,7 +130,8 @@ impl Cli {
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
             None if arguments.command.is_observability_schema()
-                || arguments.command.sandbox().is_some() =>
+                || arguments.command.sandbox().is_some()
+                || arguments.command.policy_default().is_some() =>
             {
                 None
             }
@@ -169,6 +172,9 @@ impl Cli {
         }
         if self.command.is_observability_schema() {
             return Plan::ObservabilitySchema;
+        }
+        if let Some(command) = self.command.policy_default() {
+            return Plan::PolicyDefault(command);
         }
         match (self.command.local(), self.socket.as_deref()) {
             (Some(command), _) => Plan::Local(command),
