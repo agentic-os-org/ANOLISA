@@ -266,13 +266,13 @@ case "$MODE" in
     ;;
 esac
 
-# 覆盖率报告只在测试真的跑通时才有意义：失败的套件和 tarpaulin 的
-# 非零退出都不能被 "N/A" 掩盖成一次成功。
+# A coverage report is only meaningful when the suites actually pass: failing
+# suites and a non-zero tarpaulin exit must not be masked as success.
 if [ "$FAILED_SUITES" -ne 0 ]; then
-  echo -e "${RED}前端套件失败，覆盖率汇总不可信${NC}" >&2
+  echo -e "${RED}frontend suites failed; the coverage summary is not trustworthy${NC}" >&2
 fi
 if [ "$RUST_STATUS" -ne 0 ]; then
-  echo -e "${RED}cargo tarpaulin 退出码 ${RUST_STATUS}，Rust 覆盖率不可信${NC}" >&2
+  echo -e "${RED}cargo tarpaulin exited ${RUST_STATUS}; Rust coverage is not trustworthy${NC}" >&2
 fi
 if [ "$FAILED_SUITES" -ne 0 ] || [ "$RUST_STATUS" -ne 0 ]; then
   exit 1
