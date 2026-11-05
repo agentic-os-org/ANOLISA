@@ -70,6 +70,35 @@ impl Fixture {
 }
 
 #[test]
+fn default_policy_denies_certbot_private_keys_but_allows_public_certificates() {
+    let fixture = Fixture::load();
+    let read = json!({ "program": "/usr/bin/cat" });
+
+    for path in [
+        "/etc/letsencrypt/archive/example.com/privkey1.pem",
+        "/etc/letsencrypt/archive/example.com/privkey2.pem",
+        "/etc/letsencrypt/live/example.com/privkey.pem",
+    ] {
+        assert_eq!(
+            fixture.file("file.read", path, &read),
+            Decision::Deny,
+            "{path}"
+        );
+    }
+    for path in [
+        "/etc/letsencrypt/archive/example.com/cert1.pem",
+        "/etc/letsencrypt/archive/example.com/chain1.pem",
+        "/etc/letsencrypt/live/example.com/fullchain.pem",
+    ] {
+        assert_eq!(
+            fixture.file("file.read", path, &read),
+            Decision::Allow,
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn default_policy_grants_the_baseline_and_denies_everything_else() {
     let fixture = Fixture::load();
     let read = json!({ "program": "/usr/bin/cat" });
