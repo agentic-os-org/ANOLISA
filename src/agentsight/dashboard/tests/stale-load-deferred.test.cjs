@@ -750,7 +750,7 @@ test('security overview: a failed card must not keep the previous range payload'
 //
 // Hook-slot map: 0 complaint · 1 loading · 2 error · 3 caseData · 4 cached
 // 5 history · 6 selectedAltIdx · 7 stageIdx · 8 elapsed · 9 requestVersion ref
-// Effect per render: [history load + request-version bump].
+// 10 runTimer ref. Effect per render: [history load + request-version bump].
 
 function findNode(node, predicate) {
   if (node == null || typeof node !== 'object') return null;
@@ -791,6 +791,42 @@ function renderCausalPanel() {
   return { calls, driver, panel, rendered };
 }
 
+test('causal attribution: an empty round must clear the previous panel state', () => {
+  const { driver, panel } = renderCausalPanel();
+  driver.slots[0].setter('round 1 complaint');
+  driver.slots[1].setter(true);
+  driver.slots[2].setter('round 1 error');
+  driver.slots[3].setter({
+    id: 'case-round-1',
+    title: 'round 1',
+    verdict: 'round 1 verdict',
+    outcome: 'fail',
+    nodes: [],
+    edges: [],
+  });
+  driver.slots[4].setter(true);
+  driver.slots[6].setter(2);
+  driver.slots[7].setter(1);
+  driver.slots[8].setter(73);
+
+  const rendered = driver.render(panel, {
+    sessionId: 'sess-1',
+    roundIndex: 1,
+    roundLabel: '第 2 轮',
+  });
+  rendered.effects[0]();
+
+  assert.equal(driver.slots[0].value, '', 'the complaint must belong to the selected round');
+  assert.equal(driver.slots[1].value, false, 'the old loading state must not survive');
+  assert.equal(driver.slots[2].value, null, 'the old error must not survive');
+  assert.equal(driver.slots[3].value, null, 'the old verdict must not survive');
+  assert.equal(driver.slots[4].value, false, 'the old cached flag must not survive');
+  assert.deepEqual(driver.slots[5].value, [], 'the empty round must have empty history');
+  assert.equal(driver.slots[6].value, null, 'the old alternative selection must not survive');
+  assert.equal(driver.slots[7].value, 0, 'the progress stage must reset');
+  assert.equal(driver.slots[8].value, 0, 'the elapsed time must reset');
+});
+
 test('causal attribution: a run superseded by a round switch must discard its result', async () => {
   // The attribution call takes seconds. If the user switches rounds while it
   // is in flight, the late response used to write its case, cache flag,
@@ -799,8 +835,21 @@ test('causal attribution: a run superseded by a round switch must discard its re
   // be bound to the request version of the (session, round) it was started
   // for and drop its result once that version is superseded.
   const previousWindow = global.window;
-  global.window = { setInterval: global.setInterval, clearInterval: global.clearInterval };
+  const activeTimers = new Set();
+  let nextTimer = 1;
+  global.window = {
+    setInterval: () => {
+      const timer = nextTimer;
+      nextTimer += 1;
+      activeTimers.add(timer);
+      return timer;
+    },
+    clearInterval: (timer) => {
+      activeTimers.delete(timer);
+    },
+  };
   let calls;
+  let runPromise;
   try {
     const setup = renderCausalPanel();
     const { driver, panel } = setup;
@@ -824,9 +873,10 @@ test('causal attribution: a run superseded by a round switch must discard its re
     assert.equal(typeof runButton.props.onClick, 'function');
 
     // Round 1's run starts and stays in flight.
-    const runPromise = runButton.props.onClick();
+    runPromise = runButton.props.onClick();
     assert.equal(calls.runCausalAttribution.length, 1, 'the run must issue one request');
     assert.equal(calls.runCausalAttribution[0].args[0].round_index, 0);
+    assert.equal(activeTimers.size, 1, 'the run must start one progress timer');
 
     // The user switches to round 2 while round 1's attribution is pending.
     rendered = driver.render(panel, {
@@ -835,6 +885,9 @@ test('causal attribution: a run superseded by a round switch must discard its re
       roundLabel: '第 2 轮',
     });
     rendered.effects[0](); // the prop change bumps the request version
+
+    assert.equal(activeTimers.size, 0, 'the round switch must stop the old progress timer');
+    assert.equal(driver.slots[0].value, '', 'the old complaint must not leak into round 2');
 
     // Round 1's slow response lands last with a distinctive case.
     calls.runCausalAttribution[0].resolve({
@@ -864,11 +917,10 @@ test('causal attribution: a run superseded by a round switch must discard its re
     );
     assert.equal(driver.slots[1].value, false, 'round 2 must not be left loading by round 1');
   } finally {
-    // An assertion before the deferred lands must not leave the run's
-    // interval keeping the test process alive.
     (calls ? calls.runCausalAttribution : []).forEach((call) =>
       call.resolve({ case: null, cached: false }),
     );
+    if (runPromise) await runPromise;
     if (previousWindow === undefined) delete global.window;
     else global.window = previousWindow;
   }
