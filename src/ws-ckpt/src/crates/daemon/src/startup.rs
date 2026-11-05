@@ -14,27 +14,15 @@ use crate::state::DaemonState;
 
 /// Resolve the daemon state at startup.
 ///
-/// Loads state.json (with parse-failure downgrade to fresh start), then either
-/// restores from persisted state or performs fresh backend detection + optional
-/// legacy index migration.
+/// Restores state.json or performs first-install detection when it is absent.
+/// Unreadable state must not silently select a different storage root.
 pub(crate) async fn resolve_state(
     config: &DaemonConfig,
     state_dir: &Path,
 ) -> anyhow::Result<Arc<DaemonState>> {
-    // 1. Attempt to load state.json (parse failure downgrades to fresh start,
-    //    to avoid corrupt file causing daemon infinite restart)
-    let persisted = match persist::load_state(state_dir) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(
-                "Failed to load state.json, treating as fresh start: {:#}. \
-                 To recover, fix or remove {:?}.",
-                e,
-                state_dir.join(ws_ckpt_common::STATE_FILE)
-            );
-            None
-        }
-    };
+    let persisted = persist::load_state(state_dir).with_context(|| {
+        format!("Failed to load {:?}; refusing fresh backend detection. Repair or explicitly reset the state file before restarting", state_dir.join(ws_ckpt_common::STATE_FILE))
+    })?;
 
     // 2. Determine startup path according to state.json existence
     let state: Arc<DaemonState> = if let Some(ref state_file) = persisted {
@@ -53,42 +41,62 @@ async fn resolve_from_persisted(
     state_file: &ws_ckpt_common::persist::DaemonStateFile,
 ) -> anyhow::Result<Arc<DaemonState>> {
     // Determine the final backend type: config override vs persisted
-    let (effective_backend_type, selection_method) =
-        if let Some(config_type) = config.parse_backend_type() {
-            if config_type != state_file.backend.backend_type {
-                warn!(
-                "Config overrides persisted backend_type: {:?} -> {:?} (config is authoritative)",
-                state_file.backend.backend_type, config_type
+    let (effective_backend_type, selection_method) = if let Some(config_type) =
+        config.parse_backend_type()
+    {
+        if config_type != state_file.backend.backend_type {
+            warn!(
+                "Config overrides persisted backend_type: {:?} -> {:?}. Previous backend snapshots \
+                 are not adopted; startup reconciliation can prune unpinned index records under {:?}. \
+                 Switching back does not recover pruned index records.",
+                state_file.backend.backend_type, config_type, state_dir
             );
-            }
-            (config_type, "config-override")
-        } else {
-            // config is "auto" → keep the record in state.json
-            (state_file.backend.backend_type, "persisted")
-        };
+        }
+        (config_type, "config-override")
+    } else {
+        // config is "auto" → keep the record in state.json
+        (state_file.backend.backend_type, "persisted")
+    };
 
     info!(
         "Restoring from persisted state (backend={:?})",
         effective_backend_type
     );
 
-    let backend = backend_detect::create_backend(effective_backend_type, config)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to create {:?} backend. \
+    let persisted_btrfs_root = if effective_backend_type
+        == ws_ckpt_common::backend::BackendType::BtrfsBase
+        && effective_backend_type == state_file.backend.backend_type
+    {
+        match &state_file.paths {
+            persist::BackendPaths::BtrfsBase { data_root, .. } => Some(data_root.as_path()),
+            _ => anyhow::bail!("Persisted BtrfsBase identity has incompatible backend paths; refusing storage selection"),
+        }
+    } else {
+        None
+    };
+    let backend = backend_detect::create_backend_from_persisted(
+        effective_backend_type,
+        config,
+        persisted_btrfs_root,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to create {:?} backend. \
                  To change backend type, edit [backend] type in /etc/ws-ckpt/config.toml. \
                  To reset all state, remove {:?}.",
-                effective_backend_type,
-                state_dir.join(ws_ckpt_common::STATE_FILE)
-            )
-        })?;
+            effective_backend_type,
+            state_dir.join(ws_ckpt_common::STATE_FILE)
+        )
+    })?;
 
     // BtrfsLoop restore invariant: img data must pre-exist somewhere. Either the
     // canonical FHS path or the pre-FHS legacy path counts — backend creation has
     // already attempted migration / fallback, so this only catches the truly
     // catastrophic "both files gone but state.json still claims data" case.
-    if backend.backend_type() == ws_ckpt_common::backend::BackendType::BtrfsLoop {
+    if backend.backend_type() == ws_ckpt_common::backend::BackendType::BtrfsLoop
+        && state_file.backend.backend_type == ws_ckpt_common::backend::BackendType::BtrfsLoop
+    {
         let target = std::path::Path::new(ws_ckpt_common::BTRFS_IMG_PATH);
         let legacy = std::path::Path::new(ws_ckpt_common::LEGACY_BTRFS_IMG_PATH);
         if !target.exists() && !legacy.exists() {
@@ -103,6 +111,18 @@ async fn resolve_from_persisted(
                 state_dir.join(ws_ckpt_common::STATE_FILE)
             );
         }
+    }
+    if let Some(previous_root) = persisted_btrfs_root
+        .filter(|root| config.btrfs_mount.is_some() && *root != backend.data_root())
+    {
+        warn!(
+            previous_root = ?previous_root,
+            new_root = ?backend.data_root(),
+            state_dir = ?state_dir,
+            "Configured btrfs_mount changes the storage root. Previous snapshots become invisible; \
+             startup reconciliation can prune unpinned index records from the state directory. \
+             Pointing back to the previous root does not recover pruned index records."
+        );
     }
     backend
         .bootstrap(config)
@@ -194,3 +214,9 @@ async fn resolve_fresh(
 
     Ok(state)
 }
+
+#[cfg(test)]
+mod native_btrfs_tests;
+
+#[cfg(test)]
+mod native_btrfs_config_tests;

@@ -113,7 +113,7 @@ Losing the `ws-state` volume loses the loop image and its data.
    container layer, a Pod restart removes the image while leaving host-level
    loop devices or mounts behind.
 
-4. Point `--mount-path` to a shared volume mounted at the same path in
+4. For BtrfsLoop, point `--mount-path` to a shared volume mounted at the same path in
    both containers. Use `Bidirectional` propagation for the daemon and
    `HostToContainer` for the app. A root filesystem directory is private
    to the daemon's mount namespace, so the app would receive a dangling symlink
@@ -127,10 +127,18 @@ Losing the `ws-state` volume loses the loop image and its data.
    application processes while rollback, recovery, and image shrinking check
    whether a mount is busy.
 
-7. Backend selection is automatic. When the filesystem containing
-   `/var/lib` is btrfs, `auto_detect` selects `BtrfsBase` and
-   operates on subvolumes without a loop device. Filesystems such as ext4 and
-   XFS use the `BtrfsLoop` overmount path.
+7. Automatic backend selection applies to a fresh installation. It chooses the
+   first writable physical btrfs mount, otherwise BtrfsLoop; it does not depend
+   only on the filesystem containing `/var/lib`. For a predictable BtrfsBase
+   deployment, explicitly set `backend.type = "btrfs-base"` and
+   `[backend.btrfs-base] btrfs_mount = "/shared-btrfs"` in the shared config.
+   This must be an existing writable btrfs mount visible at the same path in
+   both containers; data lives in `/shared-btrfs/ws-ckpt-data`. `--mount-path`
+   does not configure BtrfsBase. An unpinned restart uses the mount recorded
+   in `state.json` and fails if it is missing, unmounted, non-btrfs or read-only,
+   rather than choosing another mount. Changing the pin requires a restart and
+   can make old snapshots invisible and prune unpinned index records; switching
+   back does not restore them. Back up state and data before intentional changes.
 
 8. Share `/etc/ws-ckpt` between both containers.
    `ws-ckpt config --global` writes

@@ -128,7 +128,7 @@ struct ConfigArgs {
 enum Commands {
     /// Start the ws-ckpt daemon (manual mode)
     Daemon {
-        /// btrfs filesystem mount point
+        /// BtrfsLoop image mount point. BtrfsBase uses backend.btrfs-base.btrfs_mount.
         #[arg(long, default_value = DEFAULT_MOUNT_PATH)]
         mount_path: PathBuf,
 
@@ -376,6 +376,56 @@ async fn main() {
     }
 }
 
+fn load_daemon_config(
+    config_path: &std::path::Path,
+    mount_path: PathBuf,
+    socket: PathBuf,
+    log_level: String,
+) -> Result<DaemonConfig> {
+    let file_config = load_config_file(config_path).with_context(|| {
+        format!(
+            "Failed to load {}; refusing default backend selection",
+            config_path.display()
+        )
+    })?;
+    Ok(DaemonConfig {
+        mount_path,
+        socket_path: socket,
+        log_level,
+        auto_cleanup: file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP),
+        auto_cleanup_keep: file_config
+            .auto_cleanup_keep
+            .clone()
+            .unwrap_or_else(default_auto_cleanup_keep),
+        auto_cleanup_interval_secs: file_config
+            .auto_cleanup_interval_secs
+            .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS),
+        health_check_interval_secs: file_config
+            .health_check_interval_secs
+            .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS),
+        backend_type: file_config.backend.r#type.clone(),
+        btrfs_mount: file_config
+            .backend
+            .btrfs_base
+            .as_ref()
+            .and_then(|b| b.btrfs_mount.clone()),
+        img_size: file_config
+            .backend
+            .btrfs_loop
+            .as_ref()
+            .and_then(|b| b.img_size)
+            .unwrap_or(DEFAULT_IMG_SIZE_GB),
+        img_max_percent: file_config
+            .backend
+            .btrfs_loop
+            .as_ref()
+            .and_then(|b| b.img_max_percent)
+            .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0),
+        min_free_bytes: 512 * 1024 * 1024,
+        min_free_percent: 1.0,
+    })
+}
+
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Daemon {
@@ -383,41 +433,12 @@ async fn run(cli: Cli) -> Result<()> {
             socket,
             log_level,
         } => {
-            // Refuse to start on an invalid config: falling back to defaults
-            // would silently drop the operator's other valid settings.
-            let file_config = load_config_file(std::path::Path::new(CONFIG_FILE_PATH))
-                .with_context(|| format!("failed to load {}", CONFIG_FILE_PATH))?;
-            let config = DaemonConfig {
+            let config = load_daemon_config(
+                std::path::Path::new(CONFIG_FILE_PATH),
                 mount_path,
-                socket_path: socket,
+                socket,
                 log_level,
-                auto_cleanup: file_config.auto_cleanup.unwrap_or(DEFAULT_AUTO_CLEANUP),
-                auto_cleanup_keep: file_config
-                    .auto_cleanup_keep
-                    .clone()
-                    .unwrap_or_else(default_auto_cleanup_keep),
-                auto_cleanup_interval_secs: file_config
-                    .auto_cleanup_interval_secs
-                    .unwrap_or(DEFAULT_AUTO_CLEANUP_INTERVAL_SECS),
-                health_check_interval_secs: file_config
-                    .health_check_interval_secs
-                    .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS),
-                backend_type: file_config.backend.r#type.clone(),
-                img_size: file_config
-                    .backend
-                    .btrfs_loop
-                    .as_ref()
-                    .and_then(|b| b.img_size)
-                    .unwrap_or(DEFAULT_IMG_SIZE_GB),
-                img_max_percent: file_config
-                    .backend
-                    .btrfs_loop
-                    .as_ref()
-                    .and_then(|b| b.img_max_percent)
-                    .unwrap_or(DEFAULT_IMG_MAX_PERCENT * 100.0),
-                min_free_bytes: 512 * 1024 * 1024,
-                min_free_percent: 1.0,
-            };
+            )?;
             ws_ckpt_daemon::run_daemon(config).await?;
         }
         Commands::Init { workspace } => {
@@ -2240,6 +2261,23 @@ fn unlanded_global_settings(
     }
     let saved_loop = saved.backend.btrfs_loop.as_ref();
     let landed_loop = landed.backend.btrfs_loop.as_ref();
+    let saved_mount = saved
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|base| base.btrfs_mount.as_deref());
+    let landed_mount = landed
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|base| base.btrfs_mount.as_deref());
+    if saved_mount != landed_mount {
+        unlanded.push(format!(
+            "backend btrfs_mount: file has {}, daemon has {}",
+            shown(saved_mount.map(|path| path.display())),
+            shown(landed_mount.map(|path| path.display()))
+        ));
+    }
     let (saved_size, landed_size) = (
         saved_loop.and_then(|b| b.img_size),
         landed_loop.and_then(|b| b.img_size),
@@ -2513,6 +2551,71 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
 
 #[cfg(test)]
 mod tests {
+    struct ConfigFixture(std::path::PathBuf);
+
+    impl ConfigFixture {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ws-ckpt-daemon-config-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("config.toml"));
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn daemon_entry_loads_mount_pin_and_preserves_explicit_runtime_arguments() {
+        let temp = ConfigFixture::new();
+        let path = temp.0.join("config.toml");
+        std::fs::write(&path, "[backend]\ntype = 'btrfs-base'\n[backend.btrfs-base]\nbtrfs_mount = '/mnt/chosen mount'\n[backend.btrfs-loop]\nimg_size = 16\n").unwrap();
+        let config = super::load_daemon_config(
+            &path,
+            "/loop-override".into(),
+            "/socket-override".into(),
+            "debug".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            config.btrfs_mount.as_deref(),
+            Some(std::path::Path::new("/mnt/chosen mount"))
+        );
+        assert_eq!(config.backend_type, "btrfs-base");
+        assert_eq!(config.mount_path, std::path::Path::new("/loop-override"));
+        assert_eq!(config.socket_path, std::path::Path::new("/socket-override"));
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.img_size, 16);
+    }
+
+    #[test]
+    fn daemon_entry_defaults_only_when_config_is_missing() {
+        let temp = ConfigFixture::new();
+        let path = temp.0.join("config.toml");
+        let load =
+            || super::load_daemon_config(&path, "/loop".into(), "/socket".into(), "info".into());
+        assert!(load().unwrap().btrfs_mount.is_none());
+        for content in [
+            "invalid = [toml",
+            "[backend.btrfs-base]\nbtrfs_mount = 'relative'\n",
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert!(
+                format!("{:#}", load().unwrap_err()).contains("refusing default backend selection")
+            );
+        }
+    }
+
     use super::*;
     use clap::Parser;
 
@@ -4349,6 +4452,34 @@ mod tests {
             health_check_interval_secs: Some(30),
             ..Default::default()
         };
+        assert!(unlanded_global_settings(&saved, &saved).is_empty());
+    }
+
+    #[test]
+    fn btrfs_pin_only_difference_names_saved_and_daemon_values() {
+        let pin = |path: &str| ws_ckpt_common::FileConfig {
+            backend: ws_ckpt_common::BackendConfig {
+                btrfs_base: Some(ws_ckpt_common::BtrfsBaseConfig {
+                    btrfs_mount: Some(PathBuf::from(path)),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let saved = pin("/data mount");
+        let unset = ws_ckpt_common::FileConfig::default();
+        assert_eq!(
+            unlanded_global_settings(&saved, &unset),
+            ["backend btrfs_mount: file has /data mount, daemon has unset"]
+        );
+        assert_eq!(
+            unlanded_global_settings(&unset, &saved),
+            ["backend btrfs_mount: file has unset, daemon has /data mount"]
+        );
+        assert_eq!(
+            unlanded_global_settings(&saved, &pin("/old")),
+            ["backend btrfs_mount: file has /data mount, daemon has /old"]
+        );
         assert!(unlanded_global_settings(&saved, &saved).is_empty());
     }
 
