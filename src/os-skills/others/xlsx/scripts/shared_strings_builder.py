@@ -24,11 +24,17 @@ Notes:
       where each string is used in exactly one cell). If a string appears in multiple cells,
       manually increment 'count' by the number of extra references.
     - Special characters (&, <, >) are automatically XML-escaped.
+    - Characters XML cannot carry in element content are written as the
+      `_xHHHH_` escapes the format expects, so a string holding a control
+      character no longer produces a table no parser can read. A literal `_x`
+      in the text is written `_x005F_x` so it is not read back as an escape.
+      Tab and newline are valid XML and are stored as they are.
     - Leading/trailing spaces are preserved with xml:space="preserve".
 """
 
 import sys
 import html
+import re
 import argparse
 
 
@@ -36,12 +42,21 @@ HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 SST_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
+# XML 1.0 cannot carry these in element content, and a parser rejects the table
+# outright, so the format stores them as `_xHHHH_` escapes instead.
+UNSTORABLE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\r]")
+# A literal `_x` must not be mistaken for the start of one of those escapes.
+LITERAL_ESCAPE_RE = re.compile(r"_x")
+
+
 def escape_text(s: str) -> tuple[str, bool]:
     """
     Return (escaped_text, needs_preserve).
     needs_preserve is True if the string has leading or trailing whitespace.
     """
-    escaped = html.escape(s, quote=False)
+    encoded = LITERAL_ESCAPE_RE.sub("_x005F_x", s)
+    encoded = UNSTORABLE_RE.sub(lambda m: f"_x{ord(m.group()):04X}_", encoded)
+    escaped = html.escape(encoded, quote=False)
     needs_preserve = s != s.strip()
     return escaped, needs_preserve
 
