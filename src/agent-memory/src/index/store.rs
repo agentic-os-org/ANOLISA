@@ -695,7 +695,19 @@ impl BM25Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let cutoff_ms = now_ms - (cold_after_days as i64 * 86_400_000);
+        // `cold_after_days` comes from configuration and is a `u64`, while the
+        // epoch is an `i64`: the cast wrapped for values above `i64::MAX` and
+        // turned the cutoff into a future instant (marking every never-accessed
+        // file cold), and the multiplication plus subtraction overflowed for
+        // large values. An age that cannot be represented means no file is old
+        // enough, so nothing is compacted.
+        let Some(cutoff_ms) = i64::try_from(cold_after_days)
+            .ok()
+            .and_then(|days| days.checked_mul(86_400_000))
+            .and_then(|age_ms| now_ms.checked_sub(age_ms))
+        else {
+            return Ok(0);
+        };
 
         let tx = self.conn.transaction()?;
 
@@ -2641,6 +2653,44 @@ mod tests {
         let hits2 = s.search("python", 5, true).unwrap();
         assert_eq!(hits2.len(), 1);
         assert_eq!(hits2[0].path, "new.md");
+    }
+
+    #[test]
+    fn compact_rejects_an_unrepresentable_cold_age() {
+        // `cold_after_days` is configuration, not a trusted constant. A value
+        // above `i64::MAX` used to wrap the cast and move the cutoff into the
+        // future, marking a never-accessed file cold; a large value also
+        // overflowed the day-to-millisecond product. Neither may panic, and
+        // neither may compact anything.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert(
+            "old.md",
+            now_ms - 60 * 86_400_000,
+            20,
+            "ancient wisdom",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.compact(u64::MAX).unwrap(),
+            0,
+            "an age that cannot be represented must not compact"
+        );
+        assert_eq!(
+            s.compact(i64::MAX as u64).unwrap(),
+            0,
+            "an age whose milliseconds overflow must not compact"
+        );
+        let (warm, cold) = s.warm_cold_counts().unwrap();
+        assert_eq!((warm, cold), (1, 0), "the file stays warm");
+
+        // The ordinary value still compacts the same file.
+        assert_eq!(s.compact(30).unwrap(), 1);
     }
 
     #[test]
