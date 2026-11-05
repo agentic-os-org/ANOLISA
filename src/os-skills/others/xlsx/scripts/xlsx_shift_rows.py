@@ -39,6 +39,8 @@ import re
 import xml.etree.ElementTree as ET
 import xml.dom.minidom
 
+import xlsx_namespaces
+
 
 def col_letter(n: int) -> str:
     """Convert 1-based column number to Excel column letter(s)."""
@@ -288,19 +290,24 @@ def process_pivot_cache(path: str, at: int, delta: int) -> int:
 
 
 def _write_tree(tree: ET.ElementTree, path: str) -> None:
-    """Write ElementTree back to file with pretty-printing."""
+    """Writes an edited part back, keeping the namespaces it already used."""
+    # Capture before writing: serialization is what drops a declaration whose
+    # prefix only appears inside an attribute value, such as mc:Ignorable.
+    declarations = xlsx_namespaces.capture_file(path)
+    xlsx_namespaces.register(declarations)
     tree.write(path, encoding="unicode", xml_declaration=False)
-    # Re-pretty-print for readability
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()
     try:
         dom = xml.dom.minidom.parseString(raw.encode("utf-8"))
         pretty = dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
         lines = [line for line in pretty.splitlines() if line.strip()]
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+        raw = "\n".join(lines) + "\n"
     except Exception:
-        pass  # If pretty-print fails, leave the file as-is
+        pass  # If pretty-print fails, keep the ElementTree output
+    restored = xlsx_namespaces.restore(raw, declarations)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(restored)
 
 
 # ---------------------------------------------------------------------------
