@@ -1278,8 +1278,13 @@ mod tests {
         let mut aggregator = Aggregator::new();
 
         // Sibling 1: ResponsePending — headers captured, body never read.
+        // u32::MAX is above /proc/sys/kernel/pid_max, so the kernel can never
+        // assign it; a real pid such as 6160 can belong to the runner or a
+        // child spawned by a parallel test and suppress the dead-pid drain.
+        let dead_pid = u32::MAX;
+        assert!(!crate::utils::procfs::proc_pid(dead_pid).exists());
         let p1 = ConnectionId {
-            pid: 6160,
+            pid: dead_pid,
             ssl_ptr: 0xaaaa,
         };
         let body = br#"{"ok":true}"#;
@@ -1310,7 +1315,7 @@ mod tests {
         // Sibling 2: RequestBodyPending — a chunked request whose body never
         // completed (no request evidence, but still exit-drain material).
         let p2 = ConnectionId {
-            pid: 6160,
+            pid: dead_pid,
             ssl_ptr: 0xbbbb,
         };
         let chunked = "POST /v1/chat/completions HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
