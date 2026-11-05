@@ -13,6 +13,8 @@ keeps replay fences until release, and is reclaimed when its owner exits.
 Native factories remain Adapter responsibilities. See
 [task scope lifecycle](runtime/local-service.md#resident-hosts-and-task-scopes).
 
+Application-owned processes enter the Service registration transaction through `aw instance`. Service verifies the Unix peer, owner start identity and Ready, reuses production preparation and task scopes, and releases only owned AW resources. See [independent registration](runtime/local-service.md#independent-registration).
+
 ## User workflow
 
 ![AW user workflow and component architecture](../../../../../docs/images/aw/architecture.png)

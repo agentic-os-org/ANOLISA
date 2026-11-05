@@ -28,6 +28,7 @@ mod invocations;
 mod limits;
 mod policy;
 pub(crate) mod process;
+mod registration;
 mod scopes;
 
 const MAX_STEPS: usize = 64;
@@ -84,6 +85,7 @@ pub(crate) struct Runtime {
     calls: AtomicU64,
     contexts: evidence::Contexts,
     owners: Mutex<BTreeMap<String, scopes::Owner>>,
+    registrations: Mutex<BTreeMap<String, Arc<registration::Record>>>,
 }
 
 impl Runtime {
@@ -107,6 +109,7 @@ impl Runtime {
             limits,
             resources: limits::Resources::default(),
             owners: Mutex::new(BTreeMap::new()),
+            registrations: Mutex::new(BTreeMap::new()),
             identity: Identity {
                 generation,
                 config_revision: revision,

@@ -22,7 +22,25 @@ impl Runtime {
         deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
-        let instance_id = self.identifier()?;
+        self.bind_id(
+            self.identifier()?,
+            target,
+            capabilities,
+            context,
+            deadline,
+            cancelled,
+        )
+    }
+
+    pub(super) fn bind_id(
+        &self,
+        instance_id: String,
+        target: String,
+        capabilities: Capabilities,
+        context: ProcessContext,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<Value> {
         {
             let mut instances = self
                 .instances
@@ -48,6 +66,7 @@ impl Runtime {
             {
                 Err(rejected("binding_cancelled"))
             } else {
+                self.contexts.activate(&instance_id)?;
                 Ok(host)
             }
         });
@@ -57,7 +76,6 @@ impl Runtime {
             .map_err(|_| rejected("state_poisoned"))?;
         match result {
             Ok(host) => {
-                self.contexts.activate(&instance_id)?;
                 instances.insert(
                     instance_id.clone(),
                     Some(Instance::prepared(self.bytes.clone(), context, host)),

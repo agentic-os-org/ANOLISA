@@ -50,6 +50,7 @@ aw config init --help
 | `aw recover` | 恢复中断的本地包操作 |
 | `aw commands` | 枚举公开命令，可输出机器可读的参数信息 |
 | `aw completion` | 打印 Shell 补全脚本 |
+| `aw instance` | 使用 JSON 登记、确认、查询和释放业务自管实例 |
 | `aw request` | 将 stdin JSON 操作发送给服务，供集成与诊断使用 |
 | `aw policy` | 运行 AW 的 command Provider 协议，供自定义规则集成使用 |
 
@@ -288,3 +289,14 @@ aw completion bash > aw.bash
 | `aw scope` | 必填 `--adapter`、`--binding`、`--action`；调用路由使用 `--event`、`--step`、`--on-error`、`--close-event true` |
 
 内部生命周期动作和消息是随版本变化的实现细节。应用集成使用 [Agent 指南](../../../developer-guide/zh/aw/native-agents.md)中的托管工厂，由工厂管理这些调用与清理。
+
+## `aw instance`
+
+供显式 Adapter 连接已有同用户 daemon，首期支持 Qoder SDK / QwenPaw 普通路由。`--socket PATH` 必填；`--connect` 只发现服务身份，不读取 stdin。其余调用从 stdin 接收登记、Ready、查询或释放请求，始终输出 JSON。`--timeout-ms` 默认 30000，范围 1–60000，覆盖输入、连接和请求。
+
+```bash
+AW_SOCKET=/absolute/private/state/aw.sock
+aw instance --socket "$AW_SOCKET" --connect
+```
+
+成功发现返回 `result.connected: true` 与服务 identity。业务继续管理自身进程；释放实例保留其他实例和 daemon。请求字段、Ready 接线、任务 Scope 与失败恢复见[独立实例接入](../../../developer-guide/zh/aw/deployment/independent-instances.md)。

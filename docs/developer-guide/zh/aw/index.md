@@ -13,6 +13,7 @@
 
 ## 部署与验证
 
+- [独立实例](deployment/independent-instances.md) · 业务自管进程的登记、Ready、查询与释放。
 - [常驻 SDK](deployment/resident.md) · 任务工厂、MCP 与客户端清理。
 - [服务与容器](deployment/lifecycle.md) · 持久化、退出、升级和容量。
 - [策略更新](deployment/policy-updates.md) · 预热、排空、激活和失败恢复。

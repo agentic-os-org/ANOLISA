@@ -55,3 +55,7 @@ aw doctor --prefix "$AW_PREFIX" --json
 `aw commands --json` 返回 `format`、`name`、`version` 和 `commands`，每项列出命令路径和可见参数。
 `required` 仅标记无条件必需参数。补全使用同一声明，支持 bash、zsh、fish、powershell、elvish。
 帮助和发现命令离线运行。`aw -V` 报告 CLI crate 版本。
+
+## 独立实例 JSON
+
+`aw instance` 使用 `aw-instance/v1` 信封，区分 `result.state`、操作错误和准备审计键。完整字段、确认期限与重复请求规则见[独立实例接入](../deployment/independent-instances.md)。

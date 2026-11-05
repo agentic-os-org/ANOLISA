@@ -50,6 +50,7 @@ aw config init --help
 | `aw recover` | Recover interrupted local package operations |
 | `aw commands` | Enumerate public commands; optionally include machine-readable argument metadata |
 | `aw completion` | Print a shell completion script |
+| `aw instance` | Register, confirm, query and release application-owned instances through JSON |
 | `aw request` | Send a service operation from stdin JSON; for integration and diagnostics |
 | `aw policy` | Run AW's command Provider protocol; for custom rule integration |
 
@@ -288,3 +289,14 @@ The following hidden commands are generated and called by Adapters, not user set
 | `aw scope` | Required `--adapter`, `--binding`, `--action`; invocation routes use `--event`, `--step`, `--on-error`, `--close-event true` |
 
 Internal lifecycle actions and payloads are versioned implementation details. Application integrations use the managed factories in the [Agent guides](../../../developer-guide/en/aw/native-agents.md), which own these calls and their cleanup.
+
+## `aw instance`
+
+Explicit Adapters connect to an existing same-user daemon; the first contract supports ordinary Qoder SDK / QwenPaw routes. `--socket PATH` is required. `--connect` discovers service identity without reading stdin. Other calls read registration, Ready, query or release JSON from stdin and always return JSON. `--timeout-ms` defaults to 30000 and accepts 1–60000, covering input, connection and request.
+
+```bash
+AW_SOCKET=/absolute/private/state/aw.sock
+aw instance --socket "$AW_SOCKET" --connect
+```
+
+Successful discovery returns `result.connected: true` and the service identity. The application retains its process lifecycle; releasing an instance preserves sibling instances and the daemon. See [independent instances](../../../developer-guide/en/aw/deployment/independent-instances.md) for request fields, native Ready, task scopes and recovery.

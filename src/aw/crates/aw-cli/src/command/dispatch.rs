@@ -139,6 +139,9 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ),
             ]),
         ),
+        Command::Instance(value) => {
+            crate::cli::instance::run(&value.socket, value.connect, value.timeout_ms)
+        }
         Command::Policy => crate::runtime("policy", &Arguments::default()),
         Command::Hook(value) => crate::runtime(
             "hook",

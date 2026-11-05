@@ -6,6 +6,11 @@ use serde_json::Value;
 use std::{collections::BTreeMap, ffi::OsString};
 
 mod environment;
+mod registration;
+pub use registration::{
+    RegistrationCommand, RegistrationHandle, RegistrationKey, RegistrationOwner,
+    RegistrationRequest, REGISTRATION_VERSION,
+};
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
 pub const VERSION: &str = "aw-service/v1alpha7";
@@ -157,6 +162,11 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    /// Coordinate an application-owned instance through an authenticated peer.
+    Registration {
+        /// Versioned independent lifecycle action.
+        command: RegistrationCommand,
+    },
     /// Discover identity and current bounded resource counts.
     Status,
     /// Read at most 20 completed step metadata entries from this service start.
