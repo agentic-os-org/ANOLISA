@@ -42,6 +42,99 @@ impl SecurityEvent {
     }
 }
 
+/// Inputs for the evidence pair describing one evaluated file operation.
+///
+/// A blocked `unlink` or `rename` is both the operation and the thing the
+/// policy decided about, so the two events are described together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDecision {
+    /// Product policy identifier.
+    pub policy_id: String,
+    /// Immutable numeric policy revision.
+    pub policy_revision: u64,
+    /// Normalized operation such as `unlink` or `rename`.
+    pub operation: String,
+    /// Redacted path; file contents are never included.
+    pub path: String,
+    /// Stable resource class such as `protected_path`.
+    pub resource_class: String,
+    /// Backend rule identifier when available.
+    pub rule_id: Option<String>,
+    /// Progressive rollout mode used for the decision.
+    pub mode: PolicyMode,
+    /// Effect requested by the compiled policy.
+    pub requested_effect: Effect,
+    /// Whether the kernel actually rejected the operation.
+    pub blocked: bool,
+    /// Whether the kernel actually terminated the process.
+    pub killed: bool,
+    /// Observed errno when the operation failed.
+    pub errno: Option<i32>,
+    /// Deterministic prioritization score; it does not independently deny.
+    pub risk_score: u8,
+    /// Sanitized explanation of the matched conditions.
+    pub reason: String,
+}
+
+impl SecurityEvent {
+    /// Builds the file event and the decision event for one file operation.
+    ///
+    /// The audit service correlates only [`SecurityEventKind::PolicyDecision`]
+    /// into a risk case, and it requires both referenced events to be stored
+    /// first, so the pair must be published in the returned order.
+    ///
+    /// The decision names the file event as both source and sink. A blocked
+    /// `unlink` or `rename` has no separate taint origin, and reusing that one
+    /// id is what lets a violation row carrying it resolve through
+    /// `case_ids_for_events` to the case built from it.
+    pub fn file_operation_decision(
+        identity: EventIdentity,
+        occurred_at_ns: u64,
+        observed_at_ns: u64,
+        decision: FileDecision,
+    ) -> [Self; 2] {
+        let file_event_id = Uuid::new_v4();
+        let decision_event_id = Uuid::new_v4();
+        [
+            Self {
+                event_id: file_event_id,
+                occurred_at_ns,
+                observed_at_ns,
+                identity: identity.clone(),
+                kind: SecurityEventKind::FileAction(FileAction {
+                    policy_id: decision.policy_id.clone(),
+                    policy_revision: decision.policy_revision,
+                    operation: decision.operation,
+                    path: decision.path,
+                    resource_class: decision.resource_class,
+                    succeeded: !decision.blocked,
+                    errno: decision.errno,
+                    rule_id: decision.rule_id,
+                }),
+            },
+            Self {
+                event_id: decision_event_id,
+                occurred_at_ns,
+                observed_at_ns,
+                identity,
+                kind: SecurityEventKind::PolicyDecision(PolicyDecision {
+                    policy_id: decision.policy_id,
+                    policy_revision: decision.policy_revision,
+                    source_event_id: file_event_id,
+                    sink_event_id: file_event_id,
+                    mode: decision.mode,
+                    requested_effect: decision.requested_effect,
+                    blocked: decision.blocked,
+                    killed: decision.killed,
+                    errno: decision.errno,
+                    risk_score: decision.risk_score,
+                    reason: decision.reason,
+                }),
+            },
+        ]
+    }
+}
+
 /// Explicit event discriminator and its typed payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "event", rename_all = "snake_case")]
