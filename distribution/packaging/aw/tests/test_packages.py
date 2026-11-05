@@ -190,6 +190,38 @@ class ArchiveTests(Fixture):
             any(path.name in {".local-packages", "installed.json"} for path in self.repo.rglob("*"))
         )
 
+    def test_readme_rewrites_every_relative_link_the_page_ships(self) -> None:
+        """Every link in the shipped README must be absolute.
+
+        README.md at the archive root is the only documentation the archive
+        carries, so any relative target that survives `_readme()` is dead by
+        construction -- it points at a tree that was not extracted. The page
+        links to a sibling page, to the contribute build guide and to a
+        reference guide three levels up, and all three have to leave as URLs.
+        """
+        for language, locale in (("en", ""), ("zh", "/zh")):
+            page = (
+                "[a](configuration.md) "
+                "[b](../../../../contribute/%s/aw/building.md) "
+                "[c](../../../developer-guide/%s/aw/reference/packages.md)"
+            ) % (language, language)
+            self.file(f"docs/user-guide/{language}/aw/installation.md", page.encode())
+            with self.subTest(language=language):
+                readme = package._readme(self.repo, language)
+                for route in (
+                    "user-guide/aw/configuration",
+                    "contribute/aw/building",
+                    "developer-guide/aw/reference/packages",
+                ):
+                    self.assertIn(
+                        f"](https://agentic-os.sh{locale}/docs/{route}/)", readme
+                    )
+                self.assertEqual(
+                    re.findall(r"\]\((?!https?://|#)[^)\s]*\)", readme),
+                    [],
+                    "a relative link survived into the shipped README",
+                )
+
     def test_templates_require_external_backend_paths_without_a_separate_rtk(self) -> None:
         tokenless = (package.TEMPLATES / "tokenless.json").read_text()
         security = (package.TEMPLATES / "sec-core.json").read_text()
