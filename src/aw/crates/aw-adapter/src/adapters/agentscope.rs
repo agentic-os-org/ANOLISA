@@ -88,7 +88,7 @@ impl Adapter for AgentScope {
             exit: Exit::Code(if blocked { 2 } else { 0 }),
             stdout: Vec::new(),
             stderr: if blocked {
-                b"Tool blocked by AW policy\n".to_vec()
+                b"Input or tool blocked by AW policy\n".to_vec()
             } else {
                 Vec::new()
             },
@@ -146,6 +146,10 @@ impl PreparedLaunch for Prepared {
             "aw_scope_ledger.py",
             include_bytes!("../../native/agentscope/aw_scope_ledger.py"),
         )?;
+        context.files.write(
+            "aw_submission.py",
+            include_bytes!("../../native/agentscope/aw_submission.py"),
+        )?;
         let mut command = self.input.command.clone();
         let inherited = command.environment.get(std::ffi::OsStr::new("PYTHONPATH"));
         let mut paths = vec![context.files.directory().to_path_buf()];
@@ -185,7 +189,7 @@ fn event_routes(
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
     // After wrappers are outermost, so they also observe an inner before denial.
-    for event in ["tool.after", "tool.before"] {
+    for event in ["input.submit", "tool.after", "tool.before"] {
         let selected: Vec<_> = steps.iter().filter(|step| step.event == event).collect();
         if selected.is_empty() {
             continue;
@@ -233,6 +237,9 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 }
 
 fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+    if event == "input.submit" && native["event"] == event {
+        return super::submission::normalize(binding, native, "agentscope", "input_text");
+    }
     if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
         return Err("AgentScope callback event does not match the binding".into());
     }
@@ -332,6 +339,45 @@ mod tests {
             target: "sdk".into(),
             cwd: PathBuf::from("/cwd"),
         }
+    }
+
+    #[test]
+    fn submission_routes_preserve_text_identity_and_step_order() {
+        let native = json!({"event":"input.submit", "session_id":"session",
+            "aw_turn_id":"turn", "input_text":"first\nsecond"});
+        let event = normalize(&binding(), "input.submit", &native).unwrap();
+        assert_eq!(event["input"]["text"], "first\nsecond");
+        assert_eq!(event["turn_id"], "turn");
+        assert!(event.get("tool").is_none());
+        for field in ["session_id", "aw_turn_id", "input_text"] {
+            let mut invalid = native.clone();
+            invalid[field] = Value::Null;
+            assert!(normalize(&binding(), "input.submit", &invalid).is_err());
+        }
+        let steps: Vec<_> = ["prompt", "pii"]
+            .into_iter()
+            .map(|id| AdmittedStep {
+                event: "input.submit".into(),
+                step_id: id.into(),
+                provider: "security".into(),
+                event_tools: vec!["*".into()],
+                step_tools: vec!["*".into()],
+                on_error: "block".into(),
+                execution: StepExecution::Provider {
+                    operation: id.into(),
+                    effects: vec!["observe".into(), "block".into()],
+                },
+            })
+            .collect();
+        let (events, hooks) = event_routes(
+            &json!({"spec":{"events":{},"execution":{"default_event_budget_ms":5000}}}),
+            &steps,
+        )
+        .unwrap();
+        assert_eq!(events["input.submit"].steps.len(), 2);
+        assert_eq!(hooks[0]["step"], "prompt");
+        assert_eq!(hooks[1]["step"], "pii");
+        assert!(normalize(&binding(), "tool.before", &native).is_err());
     }
 
     #[test]

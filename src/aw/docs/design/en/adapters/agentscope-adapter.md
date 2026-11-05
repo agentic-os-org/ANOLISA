@@ -47,6 +47,35 @@ middleware; the before event then receives the final `tool_call.input`. Middlewa
 placed after AW can still rewrite arguments and lies outside this contract.
 No native permission gate is replaced or relaxed.
 
+## Submission and turn ownership
+
+With `input.submit` configured, the factory constructs `AwSubmissionAgent`, a
+public `Agent` subclass. Its `reply` and `reply_stream` wrap the native entry in
+one turn lifetime; `AwSubmissionMiddleware.on_reply` checks the effective user
+text after existing middleware and before native memory/model work. The Adapter
+normalizes `session_id`, `aw_turn_id` and `input_text` through the shared submission
+contract, without a synthetic tool identity. All input steps use one deadline.
+Denials raise `SubmissionDenied`; ordinary scan failures adopt block/report.
+
+The existing `AwTaskScope` opens and acknowledges a Service child binding before
+checking input and enables its invocation ledger. A context-local scope lets
+native tool tasks share the turn while concurrent Agent instances stay isolated.
+Callers explicitly close partial streams in their consuming task. The factory
+drives native stream iteration in one owned task, advancing once per requested
+event. Early close resumes that task through the SDK cancellation path and
+drains its interruption results, so sequential and concurrent tool teardown
+finishes in the original context. Cleanup is shielded against repeated
+cancellation; the scope and ledger remain live until teardown settles.
+Completed tool results are delivered after invocation retirement, so native
+interruption stops leave no pending AW middleware teardown. Unconfirmed closes
+remain pending and fence new allocation.
+Same-Agent overlap, nested reply dispatch and inherited factory objects after
+fork are rejected. No shared Service contract changes are required.
+
+See the [input contract](../../../../../../docs/developer-guide/en/aw/agents/agentscope.md#check-user-input-before-a-reply)
+for message shapes, native resumes and stream ownership. Without an input route,
+the existing factory and process-wide scope behavior remain in use.
+
 ## Native tool semantics
 
 The bridge has three invariants: accepted policy inputs preserve SDK-decoded
@@ -179,7 +208,7 @@ success is separate from business failure encoded in returned content.
 This first contract supports one foreground Python worker, not a forking
 Gunicorn supervisor, automatic attachment in child workers or remote sandboxes.
 A long-lived business service needs explicit per-worker/session launch and
-binding ownership. The bridge opens one task scope and enables the
+binding ownership. Without `input.submit`, the bridge opens one task scope and enables the
 invocation ledger before its first hook event, closing it at process exit:
 each tool call registers under its invocation id with a strictly increasing
 sequence and finishes when its phases complete, so correlation capacity is
@@ -216,6 +245,23 @@ tool names and input pointers in the sec-core mapping. `aw config init` continue
 to target Qoder/OpenClaw.
 
 ## Validation
+
+The submission suite runs the pinned SDK factory against a local HTTP model,
+checks both block/report failure policies, and exercises the real sec-core Provider
+with a controlled scanner CLI. It asserts zero model/tool dispatch on denial,
+per-turn scope release, recovery, message mapping, native permissions, strict
+completed-result withholding and early stream closure during an active tool.
+Both sequential and concurrent tools finish asynchronous teardown before a new
+reply is admitted.
+The scanner CLI is a fixture; this suite does not certify a deployed scanner daemon.
+
+```bash
+python -B crates/aw-cli/tests/agentscope_submission.py \
+  --aw target/debug/aw \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/agentscope-submission
+```
+
 
 Standard `aw-service` tests check preflight rejection, callback normalization and
 failure to adopt a version-only process without a factory/readiness receipt.

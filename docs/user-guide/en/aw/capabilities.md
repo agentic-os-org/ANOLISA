@@ -11,7 +11,7 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
@@ -26,13 +26,15 @@ Qoder CLI has no failed-tool Post callback integration. See each Agent page for 
 
 `input.submit` supports observation and blocking before model dispatch in ordinary
 resident Qoder SDK and QwenPaw launches, Claude SDK foreground/resident factories,
-and Pi workers. Submission policy uses complete text and session/turn identities.
+Pi workers and AgentScope factory replies. Submission policy uses complete text and session/turn identities.
 Claude accepts strings or a single async text message and closes rejected/cancelled
 inputs before reuse. Pi requires a `runWorker` factory and literal interactive text;
 media, `input`/`context`/`before_provider_request` extension handlers, expanded slash
 commands and queued/alternate ingress are rejected when checking is enabled.
 Pi also rejects direct callback rewrites of user messages or serialized provider
 requests. Restricted reloadable mode and other Adapters reject this event.
+AgentScope 2.0.6 accepts native user `Msg` text via `reply` / `reply_stream`; see its
+[input contract](../../../developer-guide/en/aw/agents/agentscope.md#check-user-input-before-a-reply).
 See [submission checks](security.md#check-user-submissions).
 
 Tool PII is verified with Qoder SDK 1.0.56 / Worker 1.1.78 ordinary resident
@@ -54,7 +56,7 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | Hook | Status |
 | --- | --- |
 | `session.start` | Planned |
-| `input.submit` | Implemented for ordinary resident Qoder SDK / QwenPaw text, Claude SDK foreground/resident text factories and Pi worker text input |
+| `input.submit` | Implemented for ordinary resident Qoder SDK / QwenPaw text, Claude SDK foreground/resident text factories, Pi worker text input and AgentScope factory text replies |
 | `tool.before` | Implemented |
 | `tool.after` | Implemented |
 | `permission.request` | Planned |
