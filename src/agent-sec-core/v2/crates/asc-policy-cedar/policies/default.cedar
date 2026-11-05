@@ -47,6 +47,8 @@ when {
     resource.path == "/etc/ssl/private" || resource.path like "/etc/ssl/private/*" ||
     resource.path == "/etc/pki/tls/private" ||
     resource.path like "/etc/pki/tls/private/*" ||
+    // Certbot keeps numbered archive keys and live aliases beside public certificates.
+    resource.path like "/etc/letsencrypt/*/privkey*.pem" ||
     resource.path like "/etc/ssh/ssh_host_*" ||
     // Private keys stay unreadable even if an author grants a home directory.
     resource.path like "/*/.ssh/*" ||
