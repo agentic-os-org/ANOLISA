@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::os::fd::AsFd;
+use std::path::Path;
 
 use serde::Serialize;
 use walkdir::WalkDir;
@@ -326,7 +327,21 @@ fn write_consent(config: &ConsentConfig, svc: &MemoryService) -> Result<()> {
         .map_err(|e| MemoryError::Other(format!("serialize consent: {e}")))?;
     // Write via safe_fs (openat2 + RESOLVE_BENEATH) for sandbox consistency.
     let rel = std::path::Path::new(".anolisa/consent.toml");
-    crate::safe_fs::write(svc.mount.root_fd.as_fd(), rel, content.as_bytes())?;
+    // Settings are rewritten as a whole, so a short write used to leave an
+    // unparsable TOML file behind. Stage the replacement and rename it.
+    match crate::safe_fs::write_create_new(svc.mount.root_fd.as_fd(), rel, content.as_bytes()) {
+        Err(MemoryError::AlreadyExists(_)) => {
+            crate::safe_fs::write_atomic(
+                svc.mount.root_fd.as_fd(),
+                Path::new(svc.mount.meta_dir_name()),
+                rel,
+                content.as_bytes(),
+            )?;
+        }
+        result => {
+            result?;
+        }
+    }
 
     // Update cache
     let mut cache = svc.consent_cache.lock().unwrap_or_else(|e| e.into_inner());

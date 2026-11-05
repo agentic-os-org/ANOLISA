@@ -315,10 +315,13 @@ not atomic publication: concurrent readers can see a write in progress, and a
 process crash can leave a partial file. Serialize external replacements of the
 same destination against these operations.
 
-`mem_edit` and `mem_write` with `overwrite=true` prepare a complete
-replacement for an existing regular file before publishing it. A write failure
-before publication leaves the original content intact. New files retain normal
-exclusive-create behavior and their destination parent's default ACL and group.
+`mem_edit`, `mem_write` with `overwrite=true`, `mem_revert`, merge-mode
+`memory_import` and the consent save for `.anolisa/consent.toml` prepare a
+complete replacement for an existing regular file before publishing it. A write
+failure before publication leaves the original content intact. `mem_revert` also
+restores a file that is no longer in the working tree; that path creates the file
+instead of replacing it. New files retain normal exclusive-create behavior and
+their destination parent's default ACL and group.
 
 Replacement requires readable/writable destination and metadata directories on
 the same filesystem, Linux procfs, and enough free space for the complete new
