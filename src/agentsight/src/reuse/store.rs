@@ -326,12 +326,35 @@ impl ReuseStore {
         session_id: &str,
         verdict: &super::judge::JudgeVerdict,
     ) -> Result<SessionLabel> {
+        self.record_judgement_inner(session_id, verdict, None)?
+            .ok_or_else(|| ReuseStoreError::UnknownSession(session_id.to_string()))
+    }
+
+    /// Apply an asynchronous verdict only to the source revision it describes.
+    pub(crate) fn record_judgement_if_current(
+        &self,
+        session_id: &str,
+        verdict: &super::judge::JudgeVerdict,
+        source_hash: &str,
+    ) -> Result<Option<SessionLabel>> {
+        self.record_judgement_inner(session_id, verdict, Some(source_hash))
+    }
+
+    fn record_judgement_inner(
+        &self,
+        session_id: &str,
+        verdict: &super::judge::JudgeVerdict,
+        expected_hash: Option<&str>,
+    ) -> Result<Option<SessionLabel>> {
         let now = now_ns();
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
 
         let mut label = read_label(&tx, session_id)?
             .ok_or_else(|| ReuseStoreError::UnknownSession(session_id.to_string()))?;
+        if expected_hash.is_some_and(|hash| hash != label.source_content_hash) {
+            return Ok(None);
+        }
         let before = label.effective_label();
         let kind = label.apply_judgement(
             verdict.label,
@@ -352,7 +375,7 @@ impl ReuseStore {
             now,
         )?;
         tx.commit()?;
-        Ok(label)
+        Ok(Some(label))
     }
 
     /// Applies a human decision to an existing row.

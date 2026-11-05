@@ -563,18 +563,39 @@ pub async fn run_judgements(
             report.skipped += 1;
             continue;
         };
+        let source_hash = content_hash(&atif_json);
+        if labels
+            .get_label(&session_id)?
+            .is_none_or(|label| label.source_content_hash != source_hash)
+        {
+            report.skipped += 1;
+            continue;
+        }
         match super::judge::judge_last_round(client, &doc).await {
             Ok(verdict) => {
-                if verdict.downgraded {
-                    report.downgraded += 1;
+                // Collection can replace the document during the network wait.
+                // The store's transaction also guards against a concurrent
+                // triage write between this read and persisting the verdict.
+                let still_current = trajectories
+                    .get_atif_json(&session_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|json| content_hash(&json) == source_hash);
+                if !still_current {
+                    report.skipped += 1;
+                    continue;
                 }
-                match verdict.label {
-                    TrajectoryLabel::Good => report.judged_good += 1,
-                    TrajectoryLabel::Bad => report.judged_bad += 1,
-                    _ => report.judged_unclear += 1,
-                }
-                match labels.record_judgement(&session_id, &verdict) {
-                    Ok(_) => report.judged += 1,
+                match labels.record_judgement_if_current(&session_id, &verdict, &source_hash) {
+                    Ok(Some(_)) => {
+                        report.judged += 1;
+                        report.downgraded += usize::from(verdict.downgraded);
+                        match verdict.label {
+                            TrajectoryLabel::Good => report.judged_good += 1,
+                            TrajectoryLabel::Bad => report.judged_bad += 1,
+                            _ => report.judged_unclear += 1,
+                        }
+                    }
+                    Ok(None) => report.skipped += 1,
                     Err(error) => {
                         log::warn!("reuse: storing a judgement for {session_id} failed: {error}");
                         report.failed += 1;
