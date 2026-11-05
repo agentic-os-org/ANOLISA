@@ -389,6 +389,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Nov 05 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.3-1
+- Link RTK into tokenless as tokenless rtk and stop shipping a separate rtk
+- Require Rust 1.91, git and patch for source builds
+- Bound HTML code fence scanning and accept the QwenWork workspace shell alias
+
+* Thu Nov 05 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.2-1
+- Split the CLI and framework integrations into tokenless-core and tokenless-plugins
+
 * Thu Oct 29 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.1-1
 - Preserve Qoder result envelopes and native head/tail line windows
 - Honor QwenWork data directories and report sandbox persistence limits

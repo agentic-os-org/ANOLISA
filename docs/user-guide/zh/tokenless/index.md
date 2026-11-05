@@ -109,7 +109,7 @@ npm uninstall -g anolisa-tokenless
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
 | Windows | x86_64 | `@anolisa/tokenless-win32-x64` |
 
-Tokenless 0.9.1 为这五个目标构建软件包。准备 0.9.1 发布时，npm registry 中主包以及 Intel Mac 和 Windows 平台包的最新版本均为 0.9.0。生成发布产物不会自动将其发布到 npm：npm 安装需要主包与同版本的平台包。可用 `npm view anolisa-tokenless version` 以及 `npm view @anolisa/tokenless-darwin-x64 version` 或 `npm view @anolisa/tokenless-win32-x64 version` 确认发布状态。可用的安装路径详见[平台适配性](#平台适配性)。
+Tokenless 0.9.3 为这五个目标构建软件包。准备 0.9.3 发布时，npm registry 中主包和各平台包的最新版本均为 0.9.1。生成发布产物不会自动将其发布到 npm：npm 安装需要主包与同版本的平台包。可用 `npm view anolisa-tokenless version` 以及 `npm view @anolisa/tokenless-darwin-x64 version` 或 `npm view @anolisa/tokenless-win32-x64 version` 确认发布状态。可用的安装路径详见[平台适配性](#平台适配性)。
 
 #### 方式 C：curl 独立安装
 
