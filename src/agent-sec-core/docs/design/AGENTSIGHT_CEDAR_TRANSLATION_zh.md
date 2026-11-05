@@ -44,8 +44,8 @@ permit；通用前端仍保留 permit 供其他消费者使用。不补隐含 pe
 | `context.input.operation == SecCore::WriteOperation::"delete"` | `delete: true` |
 | `context.input.operation == SecCore::WriteOperation::"write"` | `ordinary_write: true` |
 | operation 的 OR 或字面集合 contains | 保留操作与路径关联；目标及排除项相同时合并开关 |
-| `resource.path == "/data/a"` | `exact_file`；部署时必须是已存在的普通文件 |
-| `path == "/data" || path like "/data/*"` | `directory_tree`；部署时根必须是已存在的目录 |
+| `resource.path == "/data/a"` | `exact_file`；执行时按单一路径匹配 |
+| `path == "/data" || path like "/data/*"` | `directory_tree`；以该路径为根按子树匹配 |
 | 路径字面集合 contains、路径 OR | 展开为多个目标 |
 | 有界范围内的 `!=`、`!`、`unless` | 能表达时转为条目或子目录树排除项 |
 | `&&`、`||`、布尔常量 | 有界布尔转换，保留交集、并集及操作与路径关系 |
@@ -59,6 +59,11 @@ permit；通用前端仍保留 permit 供其他消费者使用。不补隐含 pe
 外不能有末尾斜杠。不补 cwd，不做 shell 展开或大小写折叠，不在 PAP 主机解析文件系统。
 路径相等不代表整个目录树，也不等于 Cedar 实体 ID 相等。
 部署沿用现有进程树 Scope；Translator 拒绝 `CgroupId` selector。
+
+因为这里完全不解析主机文件系统，翻译与策略保存都不检查目标是否存在、是否为普通文件：
+尚不存在的路径与指向目录的路径都可以被接受。`exact_file` 与 `directory_tree` 描述的是执行侧
+比较观测路径的方式，不是本阶段校验的前置条件；规则最终能否作用于某个目标，取决于消费
+翻译结果的对应后端能力。
 
 排除项只属于所在目标，其他目标仍可以保护该条目。相同目标及相同排除项可合并操作开关；
 相同路径的目标类型或排除列表不同时直接拒绝，不引入隐含优先级。只排除目录根、保留其
