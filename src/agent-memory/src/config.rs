@@ -60,10 +60,12 @@ pub struct MemoryConfig {
     /// Consolidation: auto-extract facts from session audit logs on shutdown.
     #[serde(default)]
     pub consolidation: ConsolidationConfig,
-    /// Snapshot artefact reclaim: at mount open, remove orphaned snapshot
-    /// artefacts (stale `*.partial`, sidecar-less `*.tar.gz`, orphan
-    /// `*.json`) older than `min_artifact_age_secs`. The age guard keeps
-    /// an in-flight snapshot from another process out of the sweep.
+    /// Artefact reclaim: at mount open, remove orphaned snapshot artefacts
+    /// (stale `*.partial`, sidecar-less `*.tar.gz`, orphan `*.json`,
+    /// crashed-restore `.<id>.staging` dirs) and atomic-write staging
+    /// tempfiles (`.memory-write-*.tmp` in the meta dir) older than
+    /// `min_artifact_age_secs`. The age guard keeps an in-flight snapshot or
+    /// an in-flight rewrite from another process out of the sweep.
     #[serde(default)]
     pub snapshot_reclaim: SnapshotReclaimConfig,
     /// Agent memory scope: "shared" (default, all agents see all memories),

@@ -1,4 +1,5 @@
-//! Reclaim orphaned snapshot artefacts under `<mount>/.anolisa/snapshots/`.
+//! Reclaim orphaned snapshot and atomic-write artefacts under
+//! `<mount>/.anolisa/`.
 //!
 //! Artefact shapes that can accumulate without any code path reclaiming
 //! them:
@@ -33,6 +34,16 @@
 //!    so past the age guard the directory can be removed wholesale —
 //!    via `remove_restore_staging`, since a crashed extraction
 //!    reproduces archived (possibly read-only) directory modes.
+//! 6. `.memory-write-*.tmp` files in the meta directory — staged by
+//!    `write_atomic` for `mem_write`, `mem_edit` and sidecar repair
+//!    before the `persist`/rename. A hard kill between creation and
+//!    publication leaves one behind, and it lives one level above
+//!    `snapshots/`, so the sweeps below (which enumerate the snapshot
+//!    directory) never saw it.
+//!
+//! Rule 6 is swept before the snapshot listing, because that listing
+//! returns early when `snapshots/` does not exist — a mount whose first
+//! atomic write crashed has no snapshot to find the staging file from.
 //!
 //! The sweeper is age-guarded: an artefact younger than
 //! `min_artifact_age_secs` is never touched, so an in-flight snapshot in
@@ -187,6 +198,65 @@ fn archive_is_valid(root: std::os::fd::BorrowedFd<'_>, archive_rel: &Path) -> bo
     std::io::copy(&mut tar.into_inner(), &mut std::io::sink()).is_ok()
 }
 
+/// Reclaim orphaned `safe_fs::write_atomic` staging files from the meta
+/// directory root.
+///
+/// `write_atomic` stages `<meta>/.memory-write-*.tmp` and publishes it by
+/// renaming over the destination. A hard kill between the two leaves the
+/// staging file behind, one level *above* `snapshots/`, where the snapshot
+/// sweep never looks. The meta directory is excluded from listings, git status
+/// and tar export, so nothing else reports it: age is the only signal that it
+/// belongs to no live writer.
+///
+/// Best-effort like the rest of the sweep — failures are counted, not
+/// propagated.
+fn reclaim_meta_staging(
+    mount: &MountPoint,
+    min_age: Duration,
+    now: std::time::SystemTime,
+    report: &mut ReclaimReport,
+) {
+    let entries = match std::fs::read_dir(&mount.meta_dir) {
+        Ok(entries) => entries,
+        // No meta directory (or unreadable): nothing to reclaim.
+        Err(_) => return,
+    };
+    let meta_rel = Path::new(mount.meta_dir_name());
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // Staging is always a regular file created by `tempfile`. A symlink
+        // planted under that name must not be followed, and the age probe
+        // below stays anchored at the mount root like every other listed name.
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !(name.starts_with(".memory-write-") && name.ends_with(".tmp")) {
+            continue;
+        }
+        let rel = meta_rel.join(&name);
+        if !older_than_anchored(mount.root_fd.as_fd(), &rel, min_age, now) {
+            report.kept_young += 1;
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => report.partials_removed += 1,
+            Err(e) => {
+                tracing::warn!(
+                    "snapshot reclaim: could not remove staging file {}: {e}",
+                    path.display()
+                );
+                report.removal_failures += 1;
+            }
+        }
+    }
+}
+
 /// One bounded sweep over the snapshots directory. Best-effort: individual
 /// removal failures are logged and counted, never propagated — reclaim
 /// must not turn a mount open into a hard failure.
@@ -198,13 +268,63 @@ fn archive_is_valid(root: std::os::fd::BorrowedFd<'_>, archive_rel: &Path) -> bo
 pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport {
     let _restore_guard = super::tar::restore_lock();
     let mut report = ReclaimReport::default();
+    let now = std::time::SystemTime::now();
+    // Before the snapshots listing, which returns early when the directory is
+    // absent: a crash on the very first atomic write leaves staging behind with
+    // no snapshot to find it from.
+    reclaim_meta_staging(mount, min_age, now, &mut report);
     let dir = snapshots_dir(mount);
+
+    // Failures and tampering escalate to warn: neither resolves on its own (a
+    // read-only staging dir, an unremovable orphan, planted links) and would
+    // otherwise grow silently at info level. One message body, two call sites —
+    // the macros need a literal level for callsite registration, so the branch
+    // selects the macro rather than duplicating the format string. Emitted on
+    // every return path: the meta sweep can reclaim without a snapshots/
+    // directory existing, and a silent removal is the defect this guards against.
+    macro_rules! summary {
+        ($level:ident) => {
+            tracing::$level!(
+                "snapshot reclaim: removed {} partial, {} orphaned archive, {} orphaned sidecar \
+                 file(s), repaired {} truncated sidecar(s), removed {} stale staging dir(s) \
+                 in {} or the meta dir ({} below the age guard, {} removal failures, {} tampered \
+                 pair(s))",
+                report.partials_removed,
+                report.archives_removed,
+                report.sidecars_removed,
+                report.sidecars_repaired,
+                report.staging_dirs_removed,
+                dir.display(),
+                report.kept_young,
+                report.removal_failures,
+                report.tampered_pairs
+            );
+        };
+    }
+    macro_rules! emit_summary {
+        () => {
+            if report.total_removed() > 0
+                || report.sidecars_repaired > 0
+                || report.removal_failures + report.tampered_pairs > 0
+            {
+                if report.removal_failures + report.tampered_pairs > 0 {
+                    summary!(warn);
+                } else {
+                    summary!(info);
+                }
+            }
+        };
+    }
+
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        // No snapshots directory (or unreadable): nothing to reclaim.
-        Err(_) => return report,
+        // No snapshots directory (or unreadable): nothing left to reclaim there,
+        // but the meta sweep above may have removed staging, so report it.
+        Err(_) => {
+            emit_summary!();
+            return report;
+        }
     };
-    let now = std::time::SystemTime::now();
 
     // Collect file paths first; the archive/sidecar cross-checks below then
     // call `.exists()` against the live filesystem rather than the collected
@@ -243,10 +363,10 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         }
         match path.extension().and_then(|s| s.to_str()) {
             Some("partial") => partials.push(path),
-            // Atomic-write staging (`safe_fs::write_atomic`'s tempfiles,
-            // created under the meta directory) — a hard kill between
-            // staging and publication leaves one behind; no listing ever
-            // shows it, so it is reclaimed purely on age like `*.partial`.
+            // Atomic-write staging that landed inside `snapshots/` itself.
+            // The ones `tools::write`/`tools::edit` produce sit in the meta
+            // directory root and are covered by `reclaim_meta_staging`; both
+            // are invisible to listings, so age is the only signal.
             Some("tmp") => {
                 if path
                     .file_name()
@@ -645,39 +765,6 @@ pub fn reclaim_artifacts(mount: &MountPoint, min_age: Duration) -> ReclaimReport
         }
     }
 
-    if report.total_removed() > 0
-        || report.sidecars_repaired > 0
-        || report.removal_failures + report.tampered_pairs > 0
-    {
-        // Failures and tampering escalate to warn: neither resolves on its
-        // own (a read-only staging dir, an unremovable orphan, planted
-        // links) and would otherwise grow silently at info level. One
-        // message body, two call sites — the macros need a literal level
-        // for callsite registration, so the branch selects the macro
-        // rather than duplicating the format string.
-        macro_rules! summary {
-            ($level:ident) => {
-                tracing::$level!(
-                    "snapshot reclaim: removed {} partial, {} orphaned archive, {} orphaned sidecar \
-                     file(s), repaired {} truncated sidecar(s), removed {} stale staging dir(s) \
-                     under {} ({} below the age guard, {} removal failures, {} tampered pair(s))",
-                    report.partials_removed,
-                    report.archives_removed,
-                    report.sidecars_removed,
-                    report.sidecars_repaired,
-                    report.staging_dirs_removed,
-                    dir.display(),
-                    report.kept_young,
-                    report.removal_failures,
-                    report.tampered_pairs
-                );
-            };
-        }
-        if report.removal_failures + report.tampered_pairs > 0 {
-            summary!(warn);
-        } else {
-            summary!(info);
-        }
-    }
+    emit_summary!();
     report
 }

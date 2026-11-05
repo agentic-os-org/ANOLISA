@@ -614,7 +614,10 @@ min_artifact_age_secs = 86400
 With reclaim enabled, a mount-open sweep also removes crash leftovers under
 `.anolisa/snapshots/` once they exceed the age guard: incomplete `*.partial`
 archives, archives without a sidecar, sidecars without an archive, and hidden
-`.<id>.staging` directories left by an interrupted restore. A crashed restore's
+`.<id>.staging` directories left by an interrupted restore. It also removes
+`.memory-write-*.tmp` staging tempfiles left directly under `.anolisa/` by an
+interrupted `mem_write`, `mem_edit` or sidecar repair; those live one level above
+the snapshot directory and used to survive every sweep. A crashed restore's
 staging directory contains a full copy of the mount tree, so reclaim is also
 what keeps that failure mode from consuming disk.
 
