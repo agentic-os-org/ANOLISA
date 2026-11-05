@@ -78,7 +78,8 @@ impl MemoryService {
         let mount = MountPoint::ensure_with(ns.clone(), &base, picked.strategy.as_ref())?;
 
         // Reclaim orphaned snapshot artefacts (stale `*.partial`, sidecar-less
-        // archives, orphan sidecars, crashed-restore staging dirs) before
+        // archives, orphan sidecars, crashed-restore staging dirs, and
+        // atomic-write staging tempfiles in the meta dir) before
         // anything lists or quota-checks them. Age-guarded so an in-flight
         // snapshot in another process is never touched; best-effort so a
         // failed sweep never blocks open.
