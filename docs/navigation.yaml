@@ -180,6 +180,11 @@ website:
         en: Deployment
         zh: 部署
       items:
+      - id: independent-instances
+        label:
+          en: Independent Instances
+          zh: 独立实例
+        doc: developer-guide/aw/deployment/independent-instances
       - id: resident
         label:
           en: Resident SDKs

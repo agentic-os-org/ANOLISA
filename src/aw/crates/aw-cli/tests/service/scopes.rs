@@ -1,5 +1,8 @@
 //! Task scopes release independent contexts and fail closed across owner death and teardown.
 
+#[path = "registration.rs"]
+mod registration;
+
 use super::*;
 use aw_service::Binding;
 

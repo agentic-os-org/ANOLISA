@@ -52,6 +52,8 @@ sec-core Provider 可在 Qoder SDK 和 QwenPaw 加载本地 Skill 指令前校�
 core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
 工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
 
+显式 Adapter 可通过 `aw instance` 向已有同用户 daemon 独立登记、确认 Ready、查询和释放业务自管实例。首期支持 Qoder SDK / QwenPaw 普通路由，使用固定配置；语言包和原生工厂迁移另行交付。见[独立实例接入](../../docs/developer-guide/zh/aw/deployment/independent-instances.md)。
+
 ## Hook 支持矩阵
 
 ✓ 已声明且有契约测试覆盖，× 尚不支持。矩阵从[回归清单](tests/regression-matrix.json)生成。结果替换的原生限制与 MCP、更新范围见[完整能力表](../../docs/user-guide/zh/aw/capabilities.md)。

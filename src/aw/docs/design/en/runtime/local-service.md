@@ -442,3 +442,45 @@ The [policy reload design](policy-reload.md) defines the lifecycle, process
 association, pinned entrypoints, manual acceptance and later attach/steer scope.
 
 Owned roots may use observation while no scopes exist. Task scopes and roots with preparing or active scopes reject observation; active root observation rejects opening a scope.
+
+## Independent registration
+
+`Operation::Registration` adds authenticated registration, query, Ready and release
+without transferring application process ownership. Its types live in
+`wire/registration.rs`; `runtime/registration.rs` coordinates the transaction.
+The stable CLI envelope and integration sequence are defined in the
+[independent instance contract](../../../../../../docs/developer-guide/en/aw/deployment/independent-instances.md).
+
+The request key binds the application PID/start identity and client request ID.
+Service authenticates direct-owner or direct-child Unix peers and retains a digest
+of the complete registration input. A changed target, capability, cwd or environment
+under that key is a conflict. Each fresh key uses the same `bind_id` preparation
+as `Bind`: Core preflight, Host discovery, Core admission and Host construction
+consume the matching preparation evidence/resources. Configuration digest equality
+does not share prepared resources across instances. The ordinary Adapter route
+projection validates wiring constraints before Provider discovery.
+
+An owned reservation is visible during preparation. Cancellation, owner loss and
+connection loss reach its preparation flag. Successful preparation starts a
+30-second native confirmation window; reply delivery does not confer Ready or
+release the reservation. A failed response write leaves the registration queryable.
+Ready commits under the instance/owner locks after a durable lifecycle record and
+checks the exact immutable policy revision. Repeating the same registration or
+Ready cannot renew its original deadline. Audit failure keeps admission closed
+and the daemon retains its existing fail-stop behavior.
+
+Independent roots only admit task scopes after Ready. Scope workers must descend
+from the root, and Service authenticates the exact worker/direct CLI child for
+every existing instance operation. This check also covers legacy RPC paths, so a
+forwarded handle cannot bypass the independent entrypoint. Fixed scope routes use
+the ordinary resident projection without enabling policy reload. Existing `aw run`
+and attachment contracts retain their admission paths.
+
+Release fences admission and reuses `release_instance`: cancel sibling scopes,
+wait for Provider workers and descendants, then drop Host resources. Maintenance
+uses the same path for owner death and unconfirmed expiry. Clients retain original
+native task ownership until their native work drains; Service never signals the
+application process. Retained terminal records prevent duplicate preparation for
+the entire daemon generation. The bounded 4,096-key registry rejects new keys at
+capacity and does not evict replay fences. A new daemon generation requires an
+explicit new registration.

@@ -75,7 +75,11 @@ impl Runtime {
             .get(parent)
             .and_then(Option::as_ref)
             .is_some_and(|root| {
-                !root.closing && root.reload.as_ref().is_some_and(|reload| reload.resident)
+                !root.closing
+                    && (root.reload.as_ref().is_some_and(|reload| reload.resident)
+                        || owners.get(parent).is_some_and(|owner| {
+                            owner.independent && owner.acknowledge_by.is_none()
+                        }))
             })
         {
             return Err(rejected("scope_reload_unsupported"));

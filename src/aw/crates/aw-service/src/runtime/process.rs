@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::{fs, os::unix::fs::MetadataExt};
 
 /// Same-user process identity pinned to PID, start time and PID namespace.
+#[derive(Clone)]
 pub struct Process {
     pid: u32,
     start: String,
@@ -47,6 +48,38 @@ impl Process {
             uid,
             namespace,
         })
+    }
+
+    /// Require the exact start identity supplied by an independent client.
+    pub(super) fn registration_owner(&self, owner: &crate::RegistrationOwner) -> Result<()> {
+        self.check()?;
+        if self.pid != owner.pid || self.start != owner.start_ticks {
+            return Err(rejected("registration_owner_mismatch"));
+        }
+        Ok(())
+    }
+
+    /// Authenticate a direct caller or its immediately spawned CLI transport.
+    pub(super) fn caller(&self, peer: &Self) -> Result<()> {
+        self.check()?;
+        peer.check()?;
+        if peer.namespace != self.namespace
+            || fs::read_link("/proc/self/ns/pid")?.to_string_lossy() != self.namespace
+        {
+            return Err(rejected("registration_peer_mismatch"));
+        }
+        if peer.pid != self.pid {
+            let stat = fs::read_to_string(format!("/proc/{}/stat", peer.pid))?;
+            let parent = stat
+                .rsplit_once(") ")
+                .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<u32>().ok());
+            if parent != Some(self.pid) {
+                return Err(rejected("registration_peer_mismatch"));
+            }
+        }
+        peer.check()?;
+        self.check()
     }
 
     /// Reject exit, PID reuse or namespace changes.
@@ -100,6 +133,15 @@ impl Process {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_caller_rejects_a_reused_peer_identity() {
+        let owner = Process::read(std::process::id()).unwrap();
+        let mut peer = owner.clone();
+        owner.caller(&peer).unwrap();
+        peer.start.push('0');
+        assert!(owner.caller(&peer).is_err());
+    }
 
     #[test]
     fn start_time_and_namespace_changes_invalidate_process_association() {

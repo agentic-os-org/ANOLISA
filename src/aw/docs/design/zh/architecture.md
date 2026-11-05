@@ -10,6 +10,8 @@ AW 在原生 Agent 的工具调用前后执行策略。Adapter 接收原生回�
 每个任务固定独立 cwd 和环境，保留重放阻断记录到释放，所属进程退出后执行回收。
 原生工厂继续由 Adapter 负责，见[任务生命周期](runtime/local-service.md#常驻宿主与任务-scope)。
 
+业务自管进程通过 CLI `aw instance` 进入 Service 的登记事务。Service 核验 Unix peer、owner 启动身份和 Ready，复用生产准备与任务 Scope，释放时仅清理所属 AW 资源。见[独立登记机制](runtime/local-service.md#独立登记)。
+
 ## 使用流程
 
 ![AW 用户流程与组件架构](../../../../../docs/images/aw/architecture_zh.png)

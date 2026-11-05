@@ -6,6 +6,7 @@ mod bridge;
 pub(crate) mod connection;
 mod dispatch;
 mod hook;
+pub(crate) mod instance;
 mod policy;
 mod readiness;
 mod run;

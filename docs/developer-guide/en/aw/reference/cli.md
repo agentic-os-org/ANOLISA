@@ -12,7 +12,7 @@ Use `aw commands --json` for command and argument discovery, and command-specifi
 | Entrypoint | Output |
 | --- | --- |
 | `install`, `uninstall`, `list --installed`, `doctor`, `recover`, `config init/validate/add-*/remove-*` | Optional local `--json` |
-| `service status/stop`, `request`, `config show`, `update` | Always JSON; do not add `--json` |
+| `service status/stop`, `instance`, `request`, `config show`, `update` | Always JSON; do not add `--json` |
 | `inspect` | Requires `--json` |
 | `run` | Preserves native Agent output; forwards arguments after `--` unchanged |
 
@@ -55,3 +55,7 @@ See [package management](packages.md) for `needs_recovery`, `package_in_use`, `p
 `aw commands --json` returns `format`, `name`, `version` and `commands`, with command paths and visible arguments.
 `required` marks unconditional requirements only. Completion uses the same declarations and supports bash, zsh, fish, powershell and elvish.
 Help and discovery run offline. `aw -V` reports the CLI crate version.
+
+## Independent instance JSON
+
+`aw instance` uses the `aw-instance/v1` envelope, separating `result.state`, operation errors and preparation audit keys. See [independent instances](../deployment/independent-instances.md) for fields, confirmation deadlines and duplicate-request handling.
