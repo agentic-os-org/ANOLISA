@@ -29,6 +29,8 @@ DASHBOARD_COVERAGE=""
 DASHBOARD_TESTS=0
 RUST_COVERAGE=""
 RUST_TESTS=0
+FAILED_SUITES=0
+RUST_STATUS=0
 
 # 前端套件以 node:test 编写，并通过 dashboard/package.json 的 npm scripts 串联。
 # 这里曾调用 vitest，但它不是本包的依赖（只有 package-lock.json 里残留着一条记录），
@@ -75,6 +77,7 @@ run_dashboard() {
   if [ -n "$failures" ]; then
     echo -e "${RED}失败的前端套件:${failures}${NC}"
     DASHBOARD_COVERAGE="N/A"
+    FAILED_SUITES=1
   else
     # 前端没有配置覆盖率工具。如实报告，而不是让一个已删除的运行器给出数字。
     DASHBOARD_COVERAGE="N/A"
@@ -163,7 +166,7 @@ run_rust() {
       "src/analyzer/message/openai.rs" \
       "src/analyzer/message/anthropic.rs" \
       "src/lib.rs" \
-    2>&1 || true)
+    2>&1) || RUST_STATUS=$?
 
   END_TIME=$(date +%s)
   ELAPSED=$((END_TIME - START_TIME))
@@ -262,3 +265,15 @@ case "$MODE" in
     exit 1
     ;;
 esac
+
+# 覆盖率报告只在测试真的跑通时才有意义：失败的套件和 tarpaulin 的
+# 非零退出都不能被 "N/A" 掩盖成一次成功。
+if [ "$FAILED_SUITES" -ne 0 ]; then
+  echo -e "${RED}前端套件失败，覆盖率汇总不可信${NC}" >&2
+fi
+if [ "$RUST_STATUS" -ne 0 ]; then
+  echo -e "${RED}cargo tarpaulin 退出码 ${RUST_STATUS}，Rust 覆盖率不可信${NC}" >&2
+fi
+if [ "$FAILED_SUITES" -ne 0 ] || [ "$RUST_STATUS" -ne 0 ]; then
+  exit 1
+fi
