@@ -1038,6 +1038,10 @@
     "pi-submission-projection": {
       "target": "aw-cli/test/pi",
       "test": "submission::submission_boundary_rejects_changed_messages_and_retains_native_continuations"
+    },
+    "submit-agentscope": {
+      "target": "aw-cli/test/agentscope",
+      "test": "submission_boundary_cleans_turns_and_preserves_failure_policy"
     }
   },
   "agents": {
@@ -1058,12 +1062,27 @@
           "replace_result": [
             "final-replacement"
           ]
+        },
+        "input.submit": {
+          "observe": [
+            "submit-contract",
+            "submit-host",
+            "submit-service",
+            "submit-agentscope"
+          ],
+          "block": [
+            "submit-contract",
+            "submit-host",
+            "submit-service",
+            "submit-agentscope"
+          ]
         }
       },
       "lifecycle": [
         "agentscope-lifecycle",
         "cancel-initialization",
-        "scope-native-skips"
+        "scope-native-skips",
+        "submit-agentscope"
       ],
       "security": [
         "security-retry",

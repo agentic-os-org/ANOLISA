@@ -61,7 +61,7 @@ Explicit Adapters can use `aw instance` to register, confirm Ready, query and re
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |

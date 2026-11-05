@@ -41,6 +41,26 @@ Bridge 不 monkeypatch SDK，也不自动发现应用里的任意 Agent。**每�
 最终 `tool_call.input`。AW 后面的 middleware 仍可改写参数，属于此合同以外的路径。
 不替换或放宽原生权限门禁。
 
+## 输入提交与轮次归属
+
+配置 `input.submit` 后，工厂构造公共 `Agent` 子类 `AwSubmissionAgent`，以
+`reply`、`reply_stream` 包围原生入口并管理完整轮次。`AwSubmissionMiddleware.on_reply`
+在业务中间件之后、原生 memory/模型操作之前检查实际用户文本。Adapter 通过共享
+submission 合同归一化 `session_id`、`aw_turn_id`、`input_text`，输入事件没有工具身份。
+全部输入步骤使用同一截止时间；拒绝抛出 `SubmissionDenied`，普通扫描故障遵循 block/report。
+
+已有 `AwTaskScope` 在检查前打开并确认 Service 子 binding、启用 invocation ledger。
+上下文局部 Scope 供本轮原生工具任务复用，并发 Agent 实例保持隔离。
+部分消费的流须由调用方在消费任务内显式关闭。工厂用一个自有任务驱动原生流，
+每次消费请求只推进一个事件。提前关闭通过 SDK 取消路径恢复该任务并消费中断结果，
+让顺序工具和并发工具在原上下文中完成收尾。清理抵御重复取消，Scope 和调用账本
+保留到工具收尾完成后再释放。完整工具结果在调用记录回收后交付，原生中断停止
+迭代时，AW 中间件已完成收尾。未确认关闭继续保留待清理状态，并阻止新分配。同 Agent 重叠回复、嵌套派发和 fork 后
+继承的工厂对象明确拒绝。本实现复用现有 Service 合同。
+
+消息形状、原生续跑与流所有权见[输入合同](../../../../../../docs/developer-guide/zh/aw/agents/agentscope.md#在回复前检查用户输入)。
+未配置输入路由时继续使用原有工厂与进程级 Scope。
+
 ## 原生工具语义
 
 Bridge 保持三条约束：被接受的策略输入保留 SDK 解码后的参数值和类型；每个阶段使用同一
@@ -131,7 +151,7 @@ dispatch 旁路不经过这里，需要独立接点。框架终态成功与内�
 
 首版支持一个前台 Python worker，不支持 fork 型 Gunicorn supervisor、子 worker
 自动接线或远端沙箱。常驻业务服务需要显式处理每个 worker/会话的 launch 与 binding
-归属。Bridge 在首个 hook 事件前打开一个 task scope 并启用 invocation
+归属。未配置 `input.submit` 时，Bridge 在首个 hook 事件前打开一个 task scope 并启用 invocation
 ledger，进程退出时关闭：每次工具调用以 invocation id 按严格递增序列
 register、各 phase 完成后 finish，关联容量按调用回收，长调用历史不再向
 1024 事件实例上限累积。注册使用与 hook 求值相同的解码后 SDK 生效参数，
@@ -157,6 +177,20 @@ sec-core 映射必须匹配 Toolkit 的准确工具名和参数指针。
 `aw config init` 仍面向 Qoder/OpenClaw。
 
 ## 验证
+
+输入验收用锁定 SDK 工厂访问本地 HTTP 模型，覆盖 block/report 故障策略，并让
+真实 sec-core Provider 调用受控扫描 CLI。断言包括拒绝时模型与工具执行为零、
+逐轮 Scope 释放及恢复、消息映射、原生权限、完成结果严格拦截，以及工具运行中
+提前关闭回复流；顺序工具与并发工具均验证异步收尾完成后才允许下一轮。扫描 CLI
+为夹具；该验收不代表已部署扫描 daemon 的业务验收。
+
+```bash
+python -B crates/aw-cli/tests/agentscope_submission.py \
+  --aw target/debug/aw \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/agentscope-submission
+```
+
 
 标准 `aw-service` 测试覆盖 preflight 拒绝、事件归一化，以及只声称版本但没有
 工厂/readiness 的进程不会被采纳；无需安装 SDK。

@@ -39,8 +39,8 @@ Before waits and can block before a tool side effect. After awaits one final
 stream chunks. Native parameter/permission rejections before `on_acting`, direct
 Toolkit calls and external execution requests need separate integration. The
 launcher supports one foreground worker; forking Gunicorn supervisors and
-multi-worker/remote deployment are outside this contract. Long-lived processes
-must manage the service's 1024 event-correlation limit per instance explicitly.
+multi-worker/remote deployment are outside this contract. Tool invocation records are retired after each call; input-enabled replies also
+release their Scope at turn completion.
 
 For PreTool retry suggestions and final PostTool compression, copy the
 [SDK lifecycle example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml),
@@ -58,3 +58,55 @@ each new attempt passes native permissions and sec-core again. An attributed RTK
 retry avoids double compression even with a new call ID. See [Tokenless behavior](../../../../user-guide/en/aw/tokenless.md)
 for text-slot eligibility, failure handling and telemetry configuration. Invalid
 final-response replacement directives report failure and retain the original result.
+
+## Check user input before a reply
+
+Enable `input.submit` in the [lifecycle configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)
+to run sec-core `scan_prompt` and `scan_user_input` before memory insertion or
+model dispatch. The factory uses AgentScope 2.0.6's native `on_reply` middleware
+and a public `Agent` subclass for reply lifetime. Existing application middleware
+keeps its order; AW checks the effective input passed by that middleware.
+
+| Input to `reply` / `reply_stream` | Input check |
+| --- | --- |
+| Native `Msg` with role `user` | All `TextBlock.text` values, joined with newlines |
+| `list[Msg]` | All user text blocks, in message order |
+| System and assistant messages (including tool results); existing state/memory | Excluded from new user text |
+| `None`, native confirmation, interruption and external-result events | Native continuation; no new submission |
+| Strings, arbitrary objects, user media or non-text blocks | Rejected before execution with `ValueError` |
+
+Keep history in the Agent state; a user message explicitly passed again counts
+as a new submission. Direct private `_reply` calls and nested sub-Agent dispatch
+are unsupported when checks are enabled. Concurrent replies on the same Agent
+raise `CallbackFailure`; distinct Agent instances may run concurrently in one
+foreground worker with isolated turn scopes. With no input route, the factory
+retains the previous native input and process-scope behavior.
+
+A policy denial raises `aw_submission.SubmissionDenied`; it makes no model
+request and inserts no input into memory. Provider errors obey `on_error: block`
+or `report`. Unsupported input shapes always fail before execution. After cleanup,
+the same Agent can accept another input. Each public reply call creates one AW
+turn ID and Scope, including pure model replies. All input steps share that turn
+and budget; tool calls use its ledger. Normal return, denial, exceptions and
+cancellation release it. An unconfirmed close blocks further scope allocation
+until the bounded cleanup retry succeeds.
+
+Consume `reply_stream` fully or explicitly close it in the consuming task when
+stopping early. Wrap it with `contextlib.aclosing`:
+
+```python
+from contextlib import aclosing
+from agentscope.message import UserMsg
+from aw_submission import SubmissionDenied
+
+try:
+    async with aclosing(agent.reply_stream(UserMsg("user", "hello"))) as stream:
+        async for event in stream:
+            handle(event)
+except SubmissionDenied as error:
+    show_rejection(str(error))
+```
+
+A parked native reply and its later continuation are separate AW turns. Completed
+`ToolResponse` checks retain strict withholding; intermediate `ToolChunk` output
+remains outside that completed-result guarantee.

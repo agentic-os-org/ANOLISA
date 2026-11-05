@@ -75,3 +75,19 @@ fn no_factory_attachment_never_reports_ready_and_releases_binding_files() {
         service.released(&fixture);
     }
 }
+
+#[test]
+fn submission_boundary_cleans_turns_and_preserves_failure_policy() {
+    let fixture = Fixture::new();
+    let mut command = Command::new(&fixture.python);
+    command.arg(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/agentscope/submission_unit.py"
+    ));
+    let result = fixture.run(command);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

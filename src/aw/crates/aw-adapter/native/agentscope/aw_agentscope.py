@@ -46,6 +46,7 @@ from aw_scope_ledger import (  # noqa: E402
     AwTaskScope,
     CallbackFailure,
     _ensure_task_scope,
+    turn_scope,
 )
 
 _invocation_scope: ContextVar[AwTaskScope | None] = ContextVar(
@@ -90,6 +91,11 @@ class AwInvocationMiddleware(MiddlewareBase):
         withheld_token = _withheld.set(False)
         scope_token = _invocation_scope.set(None)
         registered = False
+        final_response = None
+        owner = turn_scope.get()
+        task = asyncio.current_task()
+        if owner is not None and task is not None and task is not owner.owner_task:
+            owner.tasks.add(task)
         call = input_kwargs.get("tool_call")
         try:
             # Enable the ledger before the first OpenHookEvent. The process
@@ -113,7 +119,12 @@ class AwInvocationMiddleware(MiddlewareBase):
                 # the original response it was correlated against.
                 if isinstance(item, ToolResponse) and _withheld.get():
                     item = _withheld_response()
-                yield item
+                if owner is not None and isinstance(item, ToolResponse):
+                    # Sequential interruption stops native iteration at the final
+                    # result. Retire this invocation before publishing that result.
+                    final_response = item
+                else:
+                    yield item
         finally:
             try:
 
@@ -158,10 +169,14 @@ class AwInvocationMiddleware(MiddlewareBase):
                     if interrupted is not None:
                         raise interrupted
             finally:
+                if owner is not None and task is not None:
+                    owner.tasks.discard(task)
                 _withheld.reset(withheld_token)
                 _pending_closes.reset(cleanup_token)
                 _invocation_scope.reset(scope_token)
                 _invocation_id.reset(token)
+        if final_response is not None:
+            yield final_response
 
 
 def _encode_payload(payload: dict[str, Any]) -> bytearray:
@@ -462,7 +477,7 @@ class AwBridge:
         if not isinstance(hooks, list):
             raise ValueError("AW bridge configuration requires hooks")
         for hook in hooks:
-            if hook.get("event") not in {"tool.before", "tool.after"}:
+            if hook.get("event") not in {"input.submit", "tool.before", "tool.after"}:
                 raise ValueError("Unsupported AW native event")
             if not isinstance(hook.get("step"), str) or not hook["step"]:
                 raise ValueError("AW step must be a nonempty string")
@@ -490,11 +505,20 @@ class AwBridge:
         )
         additions = [
             AwToolMiddleware(self.config, hook, last_before=hook is last_before)
-            for hook in self.config["hooks"]
+            for hook in self.config["hooks"] if hook["event"] != "input.submit"
         ]
-        agent = Agent(
+        factory = Agent
+        extra = {}
+        if any(hook["event"] == "input.submit" for hook in self.config["hooks"]):
+            from aw_submission import AwSubmissionAgent, AwSubmissionMiddleware
+
+            factory = AwSubmissionAgent
+            extra["aw_config"] = self.config
+            additions.insert(0, AwSubmissionMiddleware(self.config))
+        agent = factory(
             *args,
             middlewares=[*(middlewares or []), AwInvocationMiddleware(self.config), *additions],
+            **extra,
             **kwargs,
         )
         if not self._ready:

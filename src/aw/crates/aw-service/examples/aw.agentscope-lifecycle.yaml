@@ -25,6 +25,8 @@ spec:
       config:
         version: 1
         mode: block
+        prompt: {mode: block, scan_mode: fast}
+        pii: {input_mode: block, output_mode: observe}
         # Map the exact tool names and argument fields exposed by your Toolkit.
         tools:
           exec: {language: bash, input_pointer: /command}
@@ -38,6 +40,20 @@ spec:
       max_output_bytes: 1048576
       config: {version: 1}
   events:
+    input.submit:
+      enabled: true
+      required: true
+      steps:
+        - id: scan-prompt
+          provider: security
+          operation: scan_prompt
+          effects: [observe, block]
+          on_error: block
+        - id: scan-user-input
+          provider: security
+          operation: scan_user_input
+          effects: [observe, block]
+          on_error: block
     tool.before:
       enabled: true
       required: true

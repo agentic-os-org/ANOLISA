@@ -61,7 +61,7 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 <!-- aw-regression-matrix:start -->
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |

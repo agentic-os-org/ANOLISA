@@ -96,7 +96,11 @@ pub(crate) const CLAUDE_SDK: Profile = Profile {
 pub(crate) const AGENTSCOPE: Profile = Profile {
     name: "agentscope",
     adapter: &super::super::adapters::agentscope::AgentScope,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const PROFILES: &[Profile] = &[

@@ -1,4 +1,4 @@
-"""Task scope over the AW invocation ledger for one bridge process."""
+"""AW invocation ledger scopes for replies and the legacy process lifetime."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import atexit
 import json
 import os
 import signal
+from contextvars import ContextVar
 from typing import Any
 
 
@@ -14,7 +15,7 @@ class CallbackFailure(RuntimeError):
     """A fixed adapter failure code, separate from a native policy denial."""
 
 
-# One task scope per bridge process, opened before the first hook event and
+# Legacy task scope per bridge process, opened before the first hook event and
 # closed at process exit; the invocation ledger recycles correlation capacity
 # per call instead of per instance release.
 _task_scope: "AwTaskScope | None" = None
@@ -25,6 +26,7 @@ _task_scope_lock_pid: int | None = None
 # until a bounded retry or process-exit cleanup confirms the close.
 _unclosed_scopes: "set[AwTaskScope]" = set()
 _atexit_registered = False
+turn_scope: ContextVar["AwTaskScope | None"] = ContextVar("aw_agentscope_turn_scope", default=None)
 
 
 def _drop_closed_scopes() -> None:
@@ -60,6 +62,8 @@ async def _retry_unclosed_scopes() -> None:
         if scope.handle is None or scope.closed:
             _drop_closed_scopes()
             continue
+        if any(not task.done() for task in scope.tasks):
+            continue
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             break
@@ -91,8 +95,12 @@ def _exit_cleanup() -> None:
 
 
 async def _ensure_task_scope(config: dict[str, Any]) -> "AwTaskScope":
-    """Open the process scope once; forks open their own on first use."""
+    """Reuse the current reply scope or lazily open the legacy process scope."""
     global _task_scope, _task_scope_pid, _task_scope_lock, _task_scope_lock_pid, _atexit_registered
+    scope = turn_scope.get()
+    if scope is not None:
+        scope._check()
+        return scope
     scope = _active_scope()
     if scope is not None:
         return scope
@@ -124,8 +132,51 @@ async def _ensure_task_scope(config: dict[str, Any]) -> "AwTaskScope":
     return scope
 
 
+async def wait_owned(task: asyncio.Task) -> asyncio.CancelledError | None:
+    """Remember cancellation while a bounded owned delivery finishes."""
+    interrupted = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            interrupted = error
+        except Exception:
+            # The owner retrieves and handles the operation's original error.
+            break
+    return interrupted
+
+
+async def open_turn_scope(config: dict[str, Any]) -> "AwTaskScope":
+    """Allocate a reply scope through the existing Service lifecycle."""
+    global _atexit_registered
+    await _retry_unclosed_scopes()
+    scope = AwTaskScope(config)
+    if not _atexit_registered:
+        atexit.register(_exit_cleanup)
+        _atexit_registered = True
+    try:
+        # An open may commit before its subprocess response is collected.
+        # Settle it and retain the handle before honouring cancellation.
+        opening = asyncio.create_task(scope.open())
+        interrupted = await wait_owned(opening)
+        if interrupted is not None:
+            if not opening.cancelled():
+                opening.exception()
+            cleanup = asyncio.create_task(scope.close())
+            await wait_owned(cleanup)
+            cleanup.result()
+            raise interrupted
+        opening.result()
+    except BaseException:
+        if scope.handle is not None and not scope.closed:
+            _unclosed_scopes.add(scope)
+        raise
+    scope.owner_task = asyncio.current_task()
+    return scope
+
+
 class AwTaskScope:
-    """Task scope over the AW invocation ledger for one bridge process."""
+    """Own an AW child binding and its tool invocation ledger."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
@@ -136,6 +187,8 @@ class AwTaskScope:
         self.sequence = 0
         self.invocations: dict[str, int] = {}
         self.invocation_limit = 0
+        self.owner_task: asyncio.Task | None = None
+        self.tasks: set[asyncio.Task] = set()
         # Serializes ledger deliveries: the server accepts only the strict
         # next sequence, so concurrent register/finish subprocesses must not
         # reorder or interleave their sequence bookkeeping.
@@ -375,7 +428,10 @@ class AwTaskScope:
             code, _, _ = await self._command("close", self.handle, timeout)
         except (OSError, TimeoutError, CallbackFailure):
             # Undelivered: closed stays False so atexit retries the close.
+            _unclosed_scopes.add(self)
             return
+        if code != 0:
+            _unclosed_scopes.add(self)
         if code == 0:
             self.closed = True
             # A confirmed close releases the pending-cleanup registration and
@@ -403,6 +459,20 @@ class AwTaskScope:
         """Retire outstanding invocations and close the scope best-effort."""
         if self.handle is None or self.closed:
             return
+        # The SDK can leave concurrent tool tasks running when a consumer
+        # closes a suspended reply stream. Retire those tasks before the ledger.
+        tasks = [task for task in self.tasks if not task.done()]
+        for task in tasks:
+            # A stream owner may already be awaiting asynchronous tool teardown.
+            # Repeated cancellation must not interrupt those finally blocks.
+            if not task.cancelling():
+                task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=6)
+            if pending:
+                self.failed = True
+                _unclosed_scopes.add(self)
+                return
         # Exit teardown runs on a fresh event loop after the runtime loop is
         # gone; a lock bound to that dead loop would refuse every finish.
         self.lock = asyncio.Lock()
