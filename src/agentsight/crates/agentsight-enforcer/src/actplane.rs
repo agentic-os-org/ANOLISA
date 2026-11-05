@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use actplane_ifc_compiler::{Compiled, compile_str};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction,
+    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction, FileDecision,
     FileProtectionExclusionKind, FileProtectionTargetKind, HealthStatus, NetworkAction,
     NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode, ReplaceFailureCode,
     ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy, SecurityEvent,
@@ -959,10 +959,23 @@ fn spawn_poller(
 /// evidence ids stored in `risk_evidence_links`, so the raw violation and its
 /// normalized sink evidence must carry the same `event_id`.
 fn publish_raw_violation(raw: Violation, active: &ActiveBinding, state: &RuntimeState) {
-    let event_id = Uuid::new_v4();
+    // A file-deletion violation and the audit evidence it stands for must share
+    // one id; otherwise the violation row cannot resolve to the case built from
+    // that evidence and the UI has nothing to link to.
+    let file_evidence = file_deletion_events(&raw, active, state);
+    let event_id = file_evidence
+        .as_ref()
+        .map_or_else(Uuid::new_v4, |events| events[0].event_id);
     state
         .events
         .publish(convert_violation(raw.clone(), active, event_id));
+    if let Some(events) = file_evidence {
+        // Correlation fails closed while referenced evidence is missing, so the
+        // decision keeps its place behind the file event on the hub.
+        for event in events {
+            state.security_events.publish(event);
+        }
+    }
     if raw.op == 3
         && raw.provenance.is_some()
         && let Some(policy) = active.credential_policy.as_ref()
@@ -1463,6 +1476,84 @@ fn trusted_endpoint_covers(trusted: &str, destination: &str) -> bool {
         return false;
     }
     destination_port.is_none_or(|port| trusted_port.is_none_or(|trusted| trusted == port))
+}
+
+/// Operations whose denial the file-deletion policy reports.
+const FILE_DELETION_OPS: [u32; 3] = [5, 6, 7];
+
+/// Builds the file event and the decision event for a file-deletion match.
+///
+/// Returns `None` for other operations and when the binding cannot yield a
+/// numeric policy revision: a violation without a case is still honest, while a
+/// case carrying an invented revision would be evidence that cannot be audited.
+fn file_deletion_events(
+    raw: &Violation,
+    active: &ActiveBinding,
+    state: &RuntimeState,
+) -> Option<[SecurityEvent; 2]> {
+    if !FILE_DELETION_OPS.contains(&raw.op) {
+        return None;
+    }
+    let policy_revision = match active.binding.request.policy_revision.parse::<u64>() {
+        Ok(revision) => revision,
+        Err(_) => {
+            let message = format!(
+                "policy revision '{}' is not numeric",
+                active.binding.request.policy_revision
+            );
+            log::error!("{message}");
+            *state.runtime_error() = Some(message);
+            return None;
+        }
+    };
+    let rule_index = raw.rule_id as usize;
+    let operation = operation_name(raw.op);
+    let observed_at_ns = now_ns();
+    let occurred_at_ns = monotonic_now_ns()
+        .map(|monotonic_now_ns| {
+            monotonic_to_epoch_ns(raw.timestamp_ns, monotonic_now_ns, observed_at_ns)
+        })
+        .unwrap_or(observed_at_ns);
+    let identity = event_identity(
+        active,
+        raw.pid,
+        Some(raw.ppid),
+        process_start_time(active, raw.pid),
+    );
+    Some(SecurityEvent::file_operation_decision(
+        identity,
+        occurred_at_ns,
+        observed_at_ns,
+        FileDecision {
+            policy_id: active.binding.request.policy_id.clone(),
+            policy_revision,
+            operation: operation.into(),
+            path: redact_home_path(&raw.target),
+            resource_class: "protected_path".into(),
+            rule_id: active
+                .rule_names
+                .get(rule_index)
+                .cloned()
+                .or_else(|| Some(raw.rule_id.to_string())),
+            // An unset product mode still records the case; only an explicit
+            // Observe skips case creation.
+            mode: active
+                .binding
+                .request
+                .policy_mode
+                .unwrap_or(PolicyMode::Audit),
+            requested_effect: effect(raw.effect),
+            blocked: raw.blocked,
+            killed: raw.killed,
+            errno: raw.blocked.then_some(libc::EPERM),
+            risk_score: if raw.blocked { 90 } else { 60 },
+            reason: active
+                .reasons
+                .get(rule_index)
+                .cloned()
+                .unwrap_or_else(|| format!("file deletion policy matched {operation}")),
+        },
+    ))
 }
 
 fn convert_violation(raw: Violation, active: &ActiveBinding, event_id: Uuid) -> ViolationEvent {
@@ -2255,6 +2346,74 @@ mod tests {
             violation.event_id, sink.event_id,
             "the raw violation and its normalized sink evidence describe one kernel event; \
              /api/enforcement/violations resolves case_id through the evidence id"
+        );
+    }
+
+    #[test]
+    fn a_file_deletion_violation_publishes_its_decision_under_one_identity() {
+        let now = monotonic_now_ns().expect("monotonic clock should be readable");
+        let mut raw = raw_violation(now);
+        // 5, 6 and 7 are the delete operations the file-deletion policy reports.
+        raw.op = 5;
+        raw.target = "/root/.ssh/id_rsa".into();
+        raw.blocked = true;
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let state = RuntimeState::new();
+        let violations = state
+            .events
+            .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+        let evidence = state.security_events.subscribe();
+
+        publish_raw_violation(raw, &active, &state);
+
+        let violation = violations
+            .try_recv()
+            .expect("the raw violation must be published");
+        let pair: Vec<_> = evidence.try_iter().collect();
+        assert_eq!(
+            pair.len(),
+            2,
+            "a file-deletion match publishes the file event and its decision"
+        );
+        assert!(matches!(pair[0].kind, SecurityEventKind::FileAction(_)));
+        assert!(matches!(pair[1].kind, SecurityEventKind::PolicyDecision(_)));
+        for event in &pair {
+            assert_eq!(
+                event.event_id, violation.event_id,
+                "the violation row resolves its case through the evidence id, so a \
+                 separate id here leaves the UI with nothing to link to"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_deletion_violation_without_a_numeric_revision_publishes_no_case() {
+        // `active_binding` keeps the non-numeric revision from the request. A
+        // case carrying an invented revision would be evidence that cannot be
+        // audited, so the decision is dropped and the error is made visible.
+        let now = monotonic_now_ns().expect("monotonic clock should be readable");
+        let mut raw = raw_violation(now);
+        raw.op = 6;
+        let state = RuntimeState::new();
+        let violations = state
+            .events
+            .subscribe(Uuid::new_v4(), SubscriberClass::BestEffort);
+        let evidence = state.security_events.subscribe();
+
+        publish_raw_violation(raw, &active_binding(), &state);
+
+        assert!(
+            violations.try_recv().is_ok(),
+            "the raw violation is still published"
+        );
+        assert!(
+            evidence.try_iter().next().is_none(),
+            "no case evidence is published without a numeric revision"
+        );
+        assert!(
+            state.runtime_error().is_some(),
+            "the dropped case must leave a visible error"
         );
     }
 

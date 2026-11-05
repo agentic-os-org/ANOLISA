@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use agentsight_audit::{AuditService, AuditStore, RiskCase, RiskCaseStatus, RiskSeverity};
 use agentsight_enforcement_protocol::{
-    DestinationClass, Effect, EventIdentity, FileAction, NetworkAction, NetworkDirection,
-    PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind, TaintTransition,
-    TaintTransitionKind,
+    DestinationClass, Effect, EventIdentity, FileAction, FileDecision, NetworkAction,
+    NetworkDirection, PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind,
+    TaintTransition, TaintTransitionKind,
 };
 use uuid::Uuid;
 
@@ -217,4 +217,144 @@ fn ingest_keeps_every_chained_transition_beyond_one_page() {
     }
     assert_eq!(evidence_ids.first(), Some(&source.event_id));
     assert_eq!(evidence_ids.last(), Some(&decision_id));
+}
+
+fn file_guard_decision() -> FileDecision {
+    FileDecision {
+        policy_id: "file-deletion-policy".into(),
+        policy_revision: 4,
+        operation: "unlink".into(),
+        path: "~/reports".into(),
+        resource_class: "protected_path".into(),
+        rule_id: Some("deny-delete".into()),
+        mode: PolicyMode::Enforce,
+        requested_effect: Effect::Block,
+        blocked: true,
+        killed: false,
+        errno: Some(1),
+        risk_score: 90,
+        reason: "protected path deletion denied".into(),
+    }
+}
+
+fn guard_identity(binding_id: Uuid) -> EventIdentity {
+    EventIdentity {
+        binding_id,
+        agent_id: "agent".into(),
+        agent_name: None,
+        session_id: None,
+        conversation_id: None,
+        tool_call_id: None,
+        pid: 42,
+        process_start_time: 420,
+        ppid: Some(1),
+        cgroup_id: None,
+        protocol_version: 1,
+        enforcer_version: "test".into(),
+        actplane_revision: "test".into(),
+    }
+}
+
+#[test]
+fn ingest_maps_a_blocked_file_operation_to_a_risk_case() {
+    // A file-deletion guard hit used to stay inside the enforcement stream, so
+    // the audit store never correlated it into a risk case and the violation
+    // row had no `case_id` to link to. The emitted pair must close that gap:
+    // the file event is the evidence a violation carries, and the decision
+    // event is what the correlation turns into a case.
+    let store = Arc::new(AuditStore::open_in_memory().expect("in-memory audit store should open"));
+    let service = AuditService::new(Arc::clone(&store));
+
+    let [file_event, decision_event] = SecurityEvent::file_operation_decision(
+        guard_identity(Uuid::new_v4()),
+        1_000,
+        1_000,
+        file_guard_decision(),
+    );
+    let file_event_id = file_event.event_id;
+    let case_id = decision_event.event_id;
+
+    service
+        .ingest(file_event)
+        .expect("file evidence should persist");
+    // Ingestion fails closed while the referenced evidence is missing, so the
+    // pair is only correlatable in this order.
+    service
+        .ingest(decision_event)
+        .expect("decision should correlate into a case");
+
+    let links = service
+        .case_ids_for_events(&[file_event_id])
+        .expect("evidence links should load");
+    assert_eq!(
+        links.get(&file_event_id),
+        Some(&case_id),
+        "the violation's event id must resolve to the case it opened"
+    );
+
+    let detail = service.case(case_id).expect("case detail should load");
+    let evidence: Vec<Uuid> = detail.evidence.iter().map(|item| item.event_id).collect();
+    assert!(
+        evidence.contains(&file_event_id),
+        "the blocked file operation must be immutable case evidence: {evidence:?}"
+    );
+}
+
+#[test]
+fn a_blocked_file_operation_needs_its_file_event_first() {
+    // The decision alone is not evidence: correlating it without the file event
+    // must fail loudly rather than open a case that cannot be traced back.
+    let store = Arc::new(AuditStore::open_in_memory().expect("in-memory audit store should open"));
+    let service = AuditService::new(store);
+
+    let [_, decision_event] = SecurityEvent::file_operation_decision(
+        guard_identity(Uuid::new_v4()),
+        1_000,
+        1_000,
+        file_guard_decision(),
+    );
+
+    let error = service
+        .ingest(decision_event)
+        .expect_err("missing evidence must not open a case");
+    assert!(
+        format!("{error}").contains("missing source event"),
+        "the error must name the missing evidence role and id: {error}"
+    );
+}
+
+#[test]
+fn a_file_operation_without_its_decision_opens_no_case() {
+    // Only a policy decision correlates into a risk case. A file event on its
+    // own — the shape the enforcement stream produced for a blocked unlink
+    // before this change — therefore leaves the case table empty, which is why
+    // the dashboard had no evidence to link to.
+    let store = Arc::new(AuditStore::open_in_memory().expect("in-memory audit store should open"));
+    let service = AuditService::new(Arc::clone(&store));
+
+    let [file_event, _] = SecurityEvent::file_operation_decision(
+        guard_identity(Uuid::new_v4()),
+        1_000,
+        1_000,
+        file_guard_decision(),
+    );
+    let file_event_id = file_event.event_id;
+    service
+        .ingest(file_event)
+        .expect("file evidence should persist");
+
+    assert_eq!(
+        service
+            .case_count(None, None, None)
+            .expect("count should load"),
+        0,
+        "a file event alone must not fabricate a case"
+    );
+    assert!(
+        service
+            .case_ids_for_events(&[file_event_id])
+            .expect("evidence links should load")
+            .is_empty(),
+        "no case means no link for a violation to follow"
+    );
 }

@@ -301,6 +301,12 @@ export const RiskEnforcementPage: React.FC = () => {
   const bindingPath = (binding: EnforcementBinding): string =>
     binding.request.file_protection_policy?.targets.map((target) => target.path).join(', ')
       || policyFilePath(binding.request.policy_dsl || '');
+  const allowsCredentialEnforcement = health?.capabilities.credential_enforce === true;
+  // Only violations correlated into a risk case have evidence to show. A
+  // generic link would otherwise send the operator to an empty System Audit,
+  // and the case has to come from `filteredViolations`: an unfiltered hit would
+  // hand the operator evidence for an agent the table is not showing.
+  const firstViolationCaseId = filteredViolations.find((event) => event.case_id)?.case_id;
 
   return (
     <div className="mx-auto w-full max-w-screen-xl space-y-6 p-6">
@@ -578,9 +584,14 @@ export const RiskEnforcementPage: React.FC = () => {
         <div className="border-b border-gray-200 px-5 py-4">
           <div className="flex items-center justify-between gap-4">
             <h2 className="font-semibold text-gray-900">{t('risk.violations.title')}</h2>
-            <a href="#/audit" className="text-sm font-medium text-blue-600">
-              {t('risk.violations.linkToAudit')}
-            </a>
+            {firstViolationCaseId && (
+              <a
+                href={`#/audit?case_id=${firstViolationCaseId}`}
+                className="text-sm font-medium text-blue-600"
+              >
+                {t('risk.violations.linkToAudit')}
+              </a>
+            )}
           </div>
           {violationsError && <p className="mt-1 text-sm text-red-600">{violationsError}</p>}
         </div>
