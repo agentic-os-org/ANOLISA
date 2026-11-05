@@ -22,6 +22,7 @@ const PRIVATE: &str = "fixture-private-body";
 struct Reply {
     status: u16,
     body: String,
+    content_type: Option<&'static str>,
     headers: String,
     delay: Duration,
     body_delay: Duration,
@@ -33,6 +34,7 @@ impl Reply {
         Self {
             status: 200,
             body: value.to_string(),
+            content_type: Some("application/json"),
             headers: String::new(),
             delay: Duration::ZERO,
             body_delay: Duration::ZERO,
@@ -92,7 +94,14 @@ impl Fixture {
                 } else {
                     format!("Content-Length: {}\r\n", reply.body.len())
                 };
-                let header = format!("HTTP/1.1 {} Fixture\r\nContent-Type: application/json\r\n{}Connection: close\r\n{}\r\n", reply.status, length, reply.headers);
+                let content_type = reply
+                    .content_type
+                    .map(|value| format!("Content-Type: {value}\r\n"))
+                    .unwrap_or_default();
+                let header = format!(
+                    "HTTP/1.1 {} Fixture\r\n{}{}Connection: close\r\n{}\r\n",
+                    reply.status, content_type, length, reply.headers
+                );
                 let _ = stream.write_all(header.as_bytes());
                 let until = Instant::now() + reply.body_delay;
                 while Instant::now() < until {
@@ -234,6 +243,44 @@ fn empty_content_is_available_but_missing_record_or_store_is_unknown() {
                 reason_code: "record_or_store_unavailable"
             }
         ));
+    }
+}
+
+#[test]
+fn missing_records_ignore_body_format_and_remaining_evidence_budget() {
+    for (content_type, body, remaining) in [
+        (Some("text/html"), "<html>not found</html>", 1024),
+        (None, "not found", 1024),
+        (Some("application/json"), "not found", 1),
+        (Some("application/json"), "{}", 0),
+    ] {
+        let mut responses = replies(json!({}));
+        let bytes = responses[0].body.len() + remaining;
+        responses[1].status = 404;
+        responses[1].content_type = content_type;
+        responses[1].body = body.into();
+        let fixture = Fixture::new(responses);
+        let result = fixture
+            .client()
+            .trajectory_until("s", Instant::now() + Duration::from_secs(2), bytes)
+            .unwrap();
+        assert!(matches!(
+            result.outcome,
+            Outcome::Unknown {
+                reason_code: "record_or_store_unavailable"
+            }
+        ));
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn successful_responses_still_require_json_content_type() {
+    for content_type in [None, Some("text/html")] {
+        let mut responses = replies(trajectory("s", 0));
+        responses[1].content_type = content_type;
+        let fixture = Fixture::new(responses);
+        assert!(matches!(fixture.query("s"), Err(Error::InvalidResponse)));
     }
 }
 
