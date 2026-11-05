@@ -267,18 +267,36 @@ Run the following commands as the user who normally runs Qoder to create a new
 trial backend in the security guide. If you are connecting to another existing
 security backend, set `AW_SEC_SOCKET` to that service's actual socket path.
 
+`config init` selects Providers through a template, not a `--provider` flag, so
+enabling both is done by choosing the combined template and passing the values it
+requires:
+
 ```bash
 export AW_HOME="$HOME/aw"
-export AW_SEC_SOCKET=/run/aw-preview-sec/daemon.sock
+export AW_TEMPLATE_DIR="$PWD/<security-and-tokenless-bundle>/templates"
+export AW_PROVIDERS_DIR="$AW_PREFIX/libexec/aw/providers"
+export AW_SEC_CLI="$(command -v agent-sec-cli)"
+export AW_SEC_SOCKET=/run/agent-sec-core/daemon.sock
+export AW_TOKENLESS_CLI="$(command -v tokenless)"
 install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
 aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/anolisa.yaml" --state-dir "$AW_HOME/anolisa-state" \
   --qoder "$(command -v qodercli)" \
-  --provider sec-core+tokenless --socket "$AW_SEC_SOCKET"
+  --template "$AW_TEMPLATE_DIR/sec-core-tokenless.json" \
+  --template-var "PROVIDERS_DIR=$AW_PROVIDERS_DIR" \
+  --template-var "SEC_CORE_CLI=$AW_SEC_CLI" \
+  --template-var "SOCKET=$AW_SEC_SOCKET" \
+  --template-var "STATE=$AW_HOME/anolisa-state" \
+  --template-var "TOKENLESS_CLI=$AW_TOKENLESS_CLI"
 aw validate --config "$AW_HOME/anolisa.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/anolisa.yaml" --agent qoder
 ```
+
+`sec-core-tokenless.json` requires all five values. The
+[security](https://agentic-os.sh/docs/user-guide/aw/security/) and
+[Tokenless](https://agentic-os.sh/docs/user-guide/aw/tokenless/) guides describe
+each Provider on its own template and how to obtain the two CLIs.
 
 For tool calls covered by the configuration, sec-core performs safety checks
 before the tool executes. After a tool succeeds, Tokenless attempts to compress
