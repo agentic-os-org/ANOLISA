@@ -81,7 +81,8 @@ raise SystemExit(result.returncode)
         "agents": {"pi": {"adapter": "pi", "argv": [node, str(root / "application.mjs")]}},
         "providers": {
             "scan": provider([scanner_provider, "--cli", str(scanner), "--socket", str(state / "unused-scanner.sock")],
-                             {"version": 1, "mode": "block", "tools": {"bash": {"language": "bash", "input_pointer": "/command"}}}),
+                             {"version": 1, "mode": "block", "tools": {
+                                 name: {"language": "bash", "input_pointer": "/command"} for name in ["bash", "test"]}}),
             "tokenless": provider([tokenless, "--cli", str(cli_wrapper), "--data-dir", str(state / "tokenless")], {"version": 1}),
             "record": {"transport": {"type": "stdio", "location": "agent", "argv": [python, str(fixture / "policy.py"), str(state), "normal"]},
                        "timeout_ms": 2000, "max_output_bytes": 32},
@@ -101,7 +102,8 @@ raise SystemExit(result.returncode)
     env = {**os.environ, "PI_TEST_ROOT": str(state), "PI_METADATA": "1", "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0",
            "PATH": os.pathsep.join(["/usr/bin", "/bin"])}
     if case == "json-selected-output":
-        env["PI_PRETTY_JSON"] = "1"
+        # The custom test tool records this command and returns controlled JSON.
+        env.update(PI_PRETTY_JSON="1", PI_COMMAND="printf fixture")
     else:
         env.update(PI_TOOL_NAME="bash", PI_COMMAND="git status", PI_TOKENLESS_RETRY="1")
         if case == "rtk-retry-rescanned-denied":
@@ -116,6 +118,9 @@ raise SystemExit(result.returncode)
         result = json.loads(out)
         tool_results = [message for message in result["messages"] if message["role"] == "toolResult"]
         if case == "json-selected-output":
+            assert tool_results[0]["isError"] is False, (case, tool_results[0], err)
+            scanned = [json.loads(line) for line in (state / "scanned.jsonl").read_text().splitlines()]
+            assert scanned == result["executedCommands"] == [env["PI_COMMAND"]]
             output = tool_results[0]["content"][0]["text"]
             assert len(output) < len(result["prettyJson"]), (len(output), len(result["prettyJson"]), err)
             wires = [json.loads(line) for line in (state / "tokenless-wire.jsonl").read_text().splitlines()]
@@ -125,7 +130,6 @@ raise SystemExit(result.returncode)
             assert selected[0]["response"]["result"]["disposition"] == "applied"
             assert output == selected[0]["response"]["result"]["output"]
             assert result["modelToolResults"][-1]["content"][0]["text"] == output
-            assert tool_results[0]["isError"] is False
             assert tool_results[0]["details"] == {"native": True, "id": "call-0"}
             assert tool_results[0]["usage"]["totalTokens"] == 0
         else:
