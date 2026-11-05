@@ -75,6 +75,8 @@ pub struct AggregatedProcess {
     pub end_timestamp_ns: u64,
     /// Session ID read from process environment at exec time
     pub session_id: Option<String>,
+    /// Raw wait(2) status kept internal until the audit layer decodes it.
+    pub(crate) raw_exit_status: Option<i32>,
 }
 
 impl AggregatedProcess {
@@ -97,6 +99,7 @@ impl AggregatedProcess {
             start_timestamp_ns: timestamp_ns,
             end_timestamp_ns: timestamp_ns,
             session_id,
+            raw_exit_status: None,
         }
     }
 

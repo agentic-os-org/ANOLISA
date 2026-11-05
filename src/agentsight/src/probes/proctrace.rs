@@ -65,7 +65,7 @@ pub enum VariableEvent {
     },
     Exit {
         header: ProcEventHeader,
-        exit_code: i32,
+        raw_exit_status: i32,
     },
     Unknown(u32),
 }
@@ -205,7 +205,7 @@ impl VariableEvent {
 
         Some(VariableEvent::Exit {
             header: *header,
-            exit_code: exit_data.exit_code,
+            raw_exit_status: exit_data.raw_exit_status,
         })
     }
 

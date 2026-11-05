@@ -208,6 +208,75 @@ fn native_event_clock_reaches_semantic_output() {
     assert!(calls[0].end_timestamp_ns >= calls[0].start_timestamp_ns);
 }
 
+#[test]
+fn process_wait_status_reaches_audit_output() {
+    use agentsight::analyzer::AuditExtra;
+    use agentsight::probes::proctrace::{ProcEventHeader, VariableEvent};
+
+    for (index, (raw_exit_status, expected_code, expected_signal)) in [
+        (0, Some(0), None),
+        (0x700, Some(7), None),
+        (0x0f, None, Some(15)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pid = 6_000 + index as u32;
+        let header = ProcEventHeader {
+            source: 0,
+            timestamp_ns: 100,
+            pid,
+            tid: pid,
+            ppid: 1,
+            ptid: 1,
+            uid: 0,
+            event_type: 0,
+            data_len: 0,
+            comm: [0; 16],
+            cgroup_id: 0,
+        };
+        let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
+        assert!(
+            core.process_event(Event::Proc(VariableEvent::Exec {
+                header,
+                filename: "/bin/fixture".into(),
+                args: "fixture".into(),
+            }))
+            .is_empty()
+        );
+
+        let aggregated = core.process_event(Event::Proc(VariableEvent::Exit {
+            header: ProcEventHeader {
+                timestamp_ns: 450,
+                tid: pid + 1,
+                ..header
+            },
+            raw_exit_status,
+        }));
+        assert_eq!(aggregated.len(), 1);
+        let analysis = core.analyze_for_owned_delivery(
+            aggregated
+                .into_iter()
+                .next()
+                .expect("one completed process"),
+            false,
+        );
+        assert_eq!(analysis.len(), 1);
+        let AnalysisResult::Audit(record) = &analysis[0] else {
+            panic!("process completion must produce an audit record");
+        };
+        let AuditExtra::ProcessAction {
+            exit_code, signal, ..
+        } = &record.extra
+        else {
+            panic!("expected process action");
+        };
+        assert_eq!(*exit_code, expected_code);
+        assert_eq!(*signal, expected_signal);
+        assert_eq!(record.duration_ns, 350);
+    }
+}
+
 /// Run a sequence of SslEvents through the full pipeline, return any GenAI events produced.
 fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISemanticEvent> {
     let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
