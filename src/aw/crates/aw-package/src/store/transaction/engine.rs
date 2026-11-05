@@ -226,11 +226,10 @@ fn execute(
         journal::current_database(paths)? == entry.before_database,
         "package database changed before commit",
     )?;
-    let (database_file, identity) =
-        fs::write_bytes(&entry.directory(), &entry.after_database, 0o644)?;
-    entry.database_stage = Some(identity);
+    let staged = fs::write_bytes(&entry.directory(), &entry.after_database, 0o644)?;
+    entry.database_stage = Some(staged.identity.clone());
     entry.write()?;
-    fs::publish(&database_file, &entry.directory().join("database.after"))?;
+    fs::publish(&staged, &entry.directory().join("database.after"))?;
     journal::checkpoint("precommit");
     journal::check_cancel(cancel)?;
     require(

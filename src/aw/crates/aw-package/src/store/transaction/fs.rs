@@ -4,7 +4,7 @@ use aw_exec::PackageLock;
 #[cfg(test)]
 mod faults;
 #[cfg(test)]
-pub(super) use faults::fail_database_sync;
+pub(super) use faults::{fail_database_sync, fail_tmpfile};
 
 use crate::store::{require, Error, Payload, Result};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use std::{
         unix::{ffi::OsStrExt, fs::MetadataExt},
     },
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 pub(super) const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -333,26 +334,31 @@ fn lock_flags(path: &Path, extra: i32) -> Result<PackageLock> {
     Ok(file)
 }
 
+pub(super) struct Staged {
+    pub(super) identity: Identity,
+    file: File,
+    // Present only when the filesystem rejects O_TMPFILE: the named staging
+    // file and the directory handle that holds it. publish renames the name
+    // into place; dropping an unpublished staged file removes it again.
+    fallback: Option<(File, CString)>,
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some((directory, name)) = &self.fallback {
+            // SAFETY: name is one child of the anchored parent; unlinkat never follows symlinks.
+            let _ = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+        }
+    }
+}
+
 pub(super) fn anonymous(
     parent: &Path,
     mode: u32,
     write: impl FnOnce(&mut File) -> Result<()>,
-) -> Result<(File, Identity)> {
+) -> Result<Staged> {
     let directory = directory(parent)?;
-    let mut file = opened(
-        &directory,
-        OsStr::new("."),
-        libc::O_TMPFILE | libc::O_RDWR,
-        mode,
-    )
-    .map_err(|error| match error {
-        Error::Io(source) => Error::Filesystem {
-            operation: "openat(O_TMPFILE) for anonymous package staging",
-            path: parent.to_owned(),
-            source,
-        },
-        error => error,
-    })?;
+    let (mut file, fallback) = anonymous_file(&directory, parent, mode)?;
     write(&mut file)?;
     // SAFETY: the file descriptor is live; mode contains only ordinary permission bits.
     if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
@@ -364,16 +370,127 @@ pub(super) fn anonymous(
     file.seek(SeekFrom::Start(0))?;
     let mut hash = Sha256::new();
     std::io::copy(&mut file, &mut hash)?;
-    Ok((
+    Ok(Staged {
+        identity: from_metadata(&metadata, format!("{:x}", hash.finalize())),
         file,
-        from_metadata(&metadata, format!("{:x}", hash.finalize())),
-    ))
+        fallback,
+    })
 }
 
-pub(super) fn publish(file: &File, destination: &Path) -> Result<()> {
+// overlayfs and a few other filesystems reject O_TMPFILE; the caller falls
+// back to a named staging file that publish moves into place with a rename.
+fn unsupported_tmpfile(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EOPNOTSUPP | libc::EINVAL | libc::ENOSYS | libc::EISDIR)
+    )
+}
+
+fn anonymous_file(
+    directory: &File,
+    parent: &Path,
+    mode: u32,
+) -> Result<(File, Option<(File, CString)>)> {
+    let attempt = opened(
+        directory,
+        OsStr::new("."),
+        libc::O_TMPFILE | libc::O_RDWR,
+        mode,
+    );
+    // When armed, the fault stands in for a filesystem that rejects O_TMPFILE,
+    // so the fallback runs even on filesystems that support it.
+    #[cfg(test)]
+    let attempt = faults::check_tmpfile().and(attempt);
+    match attempt {
+        Ok(file) => Ok((file, None)),
+        Err(Error::Io(source)) if unsupported_tmpfile(&source) => {
+            let (file, name) = named_anonymous(directory, parent)?;
+            let held = directory.try_clone()?;
+            Ok((file, Some((held, name))))
+        }
+        Err(Error::Io(source)) => Err(Error::Filesystem {
+            operation: "openat(O_TMPFILE) for anonymous package staging",
+            path: parent.to_owned(),
+            source,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+static ANONYMOUS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Stage without O_TMPFILE: claim a fresh private name and return it together
+/// with the descriptor. The name is removed again when the staged file is
+/// dropped, or consumed by the rename that publishes it.
+fn named_anonymous(directory: &File, parent: &Path) -> Result<(File, CString)> {
+    for _ in 0..64 {
+        let sequence = ANONYMOUS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = cstring(OsStr::new(&format!(
+            ".aw-anon-{}-{}",
+            std::process::id(),
+            sequence
+        )))?;
+        // SAFETY: parent is a live directory and name is one fresh child;
+        // O_EXCL claims it without following symlinks.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_CREAT
+                    | libc::O_EXCL
+                    | libc::O_RDWR
+                    | libc::O_CLOEXEC
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EEXIST) {
+                continue;
+            }
+            return Err(Error::Filesystem {
+                operation: "create named staging file (O_TMPFILE fallback)",
+                path: parent.to_owned(),
+                source: error,
+            });
+        }
+        // SAFETY: successful openat transferred ownership of a new descriptor.
+        return Ok((unsafe { File::from_raw_fd(fd) }, name));
+    }
+    Err(Error::Filesystem {
+        operation: "create named staging file (O_TMPFILE fallback)",
+        path: parent.to_owned(),
+        source: std::io::Error::from_raw_os_error(libc::EEXIST),
+    })
+}
+
+pub(super) fn publish(staged: &Staged, destination: &Path) -> Result<()> {
     let (parent, name) = parent(destination)?;
     let name = cstring(name)?;
-    link_descriptor(file, &parent, &name)?;
+    match &staged.fallback {
+        Some((directory, source_name)) => {
+            // The named staging file keeps its private name until this point;
+            // renameat2 moves it into place without needing privileges, unlike
+            // linking a file that no directory references.
+            // SAFETY: both names are one-component children of live anchored directory fds.
+            if unsafe {
+                libc::renameat2(
+                    directory.as_raw_fd(),
+                    source_name.as_ptr(),
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            directory.sync_all()?;
+        }
+        None => link_descriptor(&staged.file, &parent, &name)?,
+    }
     parent.sync_all()?;
     Ok(())
 }
@@ -559,9 +676,46 @@ pub(super) fn bytes_payload(bytes: &[u8], mode: u32) -> Payload {
     }
 }
 
-pub(super) fn write_bytes(parent: &Path, bytes: &[u8], mode: u32) -> Result<(File, Identity)> {
+pub(super) fn write_bytes(parent: &Path, bytes: &[u8], mode: u32) -> Result<Staged> {
     anonymous(parent, mode, |file| {
         file.write_all(bytes)?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anonymous_staging_falls_back_when_tmpfile_is_unsupported() {
+        let root = tempfile::tempdir_in("/tmp").expect("tempdir");
+        let parent = root.path().join("staging");
+        std::fs::create_dir_all(&parent).expect("staging directory");
+        let _fault = fail_tmpfile();
+        let staged =
+            write_bytes(&parent, b"fallback payload", 0o644).expect("staging must fall back");
+        assert_eq!(staged.identity.mode, 0o644);
+        assert_eq!(
+            staged.identity.sha256,
+            format!("{:x}", Sha256::digest(b"fallback payload"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(format!("/proc/self/fd/{}", staged.file.as_raw_fd()))
+                .expect("read staged bytes"),
+            "fallback payload"
+        );
+        publish(&staged, &parent.join("published")).expect("publish must move the staged file");
+        assert_eq!(
+            std::fs::read(parent.join("published")).expect("published bytes"),
+            b"fallback payload"
+        );
+        assert_eq!(
+            std::fs::read_dir(&parent)
+                .expect("list staging directory")
+                .count(),
+            1,
+            "staging file must leave no residue behind"
+        );
+    }
 }
