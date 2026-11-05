@@ -173,6 +173,28 @@ def test_generated_resource_report_is_accepted(tmp_path: Path, summary: dict[str
     assert check_resource_limits.evaluate(generated)[0]
 
 
+@pytest.mark.parametrize("rss", ["", "nan", "-1"])
+def test_missing_rss_evidence_cannot_pass_the_resource_gate(
+    tmp_path: Path, summary: dict[str, Any], rss: str
+) -> None:
+    # Establish a fully valid, below-limit report before corrupting only RSS.
+    test_generated_resource_report_is_accepted(tmp_path, summary)
+    metrics = tmp_path / "run/metrics.csv"
+    with metrics.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[1]["rss_mb"] = rss
+    with metrics.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    assert not resource_report.report(tmp_path, {"run": {}})
+    generated = json.loads((tmp_path / "resource-summary.json").read_text())
+    assert generated["runs"]["run"]["rss_peak_mib"] == 260
+    passed, reason = check_resource_limits.evaluate(generated)
+    assert not passed
+    assert "Benchmark is INVALID" in reason
+
+
 @pytest.mark.parametrize("case", ["pass", "exceeded", "missing", "malformed", "invalid"])
 def test_cli_exit_status_and_job_summary(
     tmp_path: Path, summary: dict[str, Any], case: str
