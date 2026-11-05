@@ -32,7 +32,7 @@ fn observed_within_deadline(observe: impl Fn() -> bool, deadline: std::time::Dur
     }
 }
 
-/// Report whether this process holds SQLite's WAL deadman lock on `name`.
+/// Report whether this process holds `SQLite`'s WAL deadman lock on `name`.
 fn holds_deadman_lock(dir: &std::path::Path, name: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
 
