@@ -410,6 +410,7 @@ fn is_credential_required_path(method: &actix_web::http::Method, path: &str) -> 
                 "/api/enforcement/bindings"
                     | "/api/tokenless/refresh"
                     | "/api/enforcement/file-bindings"
+                    | "/api/enforcement/file-read-bindings"
                     | "/api/enforcement/credential-bindings"
                     | "/api/optimize/config"
                     // Rewrites the hookless runtime configuration file: the
@@ -1041,6 +1042,10 @@ mod tests {
                     actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
                 )
                 .route(
+                    "/api/enforcement/file-read-bindings",
+                    actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
                     "/api/enforcement/bindings/{binding_id}",
                     actix_web::web::delete().to(|| async { HttpResponse::Ok().finish() }),
                 ),
@@ -1053,6 +1058,13 @@ mod tests {
             .peer_addr(loopback)
             .to_request();
         let response = actix_web::test::call_service(&app, unauthenticated_apply).await;
+        assert_eq!(response.status(), 401);
+
+        let unauthenticated_read_apply = actix_web::test::TestRequest::post()
+            .uri("/api/enforcement/file-read-bindings")
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, unauthenticated_read_apply).await;
         assert_eq!(response.status(), 401);
 
         let unauthenticated_detach = actix_web::test::TestRequest::delete()

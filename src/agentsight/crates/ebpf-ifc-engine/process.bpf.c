@@ -203,6 +203,7 @@ struct {
 #define INODE_GUARD_RENAME  2
 #define INODE_GUARD_WRITE   4
 #define INODE_GUARD_TREE    8
+#define INODE_GUARD_READ    16
 
 /* Returns the guard entry when the inode is guarded for guard_flag in the
  * caller's domain, NULL otherwise. */
@@ -2568,6 +2569,8 @@ static __always_inline void te_inode_guard_violation(
 		      op, /*blocked=*/1, /*killed=*/0, TEFFECT_BLOCK);
 }
 
+#include "file_read_guard.bpf.h"
+
 static __always_inline int te_handle_file_permission(struct file *file,
 						     __u32 access, __u32 mode)
 {
@@ -3025,6 +3028,13 @@ int BPF_PROG(enforce_bprm_check_security, struct linux_binprm *bprm)
 SEC("lsm/file_open")
 int BPF_PROG(enforce_file_open, struct file *file)
 {
+	unsigned int flags = BPF_CORE_READ(file, f_flags);
+	/* O_PATH holds identity only and cannot read file contents. */
+	if (!(flags & 010000000) && (flags & O_ACCMODE) != O_WRONLY) {
+		int rc = te_deny_file_read(file);
+		if (rc)
+			return rc;
+	}
 #ifdef INODE_GUARD_ONLY
 	return te_handle_file_permission(file,
 		te_access_from_open_flags(BPF_CORE_READ(file, f_flags)), TE_MODE_BLOCK);
@@ -3052,6 +3062,14 @@ int BPF_PROG(enforce_mmap_file, struct file *file, unsigned long reqprot,
 	(void)reqprot;
 	if (!file)
 		return 0;
+	int rc = te_deny_file_read(file);
+	if (rc)
+		return rc;
+#ifdef INODE_GUARD_ONLY
+	/* File guards need no taint propagation; credential policies keep existing behavior. */
+	if (!(policy_features & TE_POLICY_FILE_FLOW))
+		return 0;
+#endif
 	return te_handle_file_permission(file, te_access_from_mmap(prot, flags),
 					 TE_MODE_BLOCK);
 }
@@ -3071,6 +3089,13 @@ int BPF_PROG(enforce_file_mprotect, struct vm_area_struct *vma,
 		return 0;
 	vm_flags = BPF_CORE_READ(vma, vm_flags);
 	map_flags = (vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE;
+	int rc = te_deny_file_read(file);
+	if (rc)
+		return rc;
+#ifdef INODE_GUARD_ONLY
+	if (!(policy_features & TE_POLICY_FILE_FLOW))
+		return 0;
+#endif
 	return te_handle_file_permission(file,
 					 te_access_from_mmap(prot, map_flags),
 					 TE_MODE_BLOCK);
@@ -3095,7 +3120,10 @@ int BPF_PROG(enforce_file_permission, struct file *file, int mask, int ret)
 {
 	if (ret)
 		return ret;
-	int rc = te_policy_handle_file_permission(file, mask);
+	int rc = (mask & MAY_READ) ? te_deny_file_read(file) : 0;
+	if (rc)
+		return rc;
+	rc = te_policy_handle_file_permission(file, mask);
 	if (rc)
 		return rc;
 	return te_handle_file_permission(file, te_access_from_perm_mask(mask),

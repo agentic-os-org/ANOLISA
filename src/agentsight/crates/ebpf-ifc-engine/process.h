@@ -10,6 +10,8 @@
 #define TE_EVENT_OP_RENAME 6
 #define TE_EVENT_OP_RMDIR 7
 #define TE_EVENT_OP_ORDINARY_WRITE 8
+/* Read denials are reported separately from open and write denials. */
+#define TE_EVENT_OP_READ 9
 
 #define TE_POLICY_PATH_CONTAINS (1U << 0)
 #define TE_POLICY_PATH_SUFFIX   (1U << 1)

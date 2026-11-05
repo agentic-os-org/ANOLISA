@@ -135,6 +135,26 @@ hook 并未挂载——引擎仍会以 `effect=block` 且 `blocked=false` 的 vi
 协议 v5 新增带版本的 `file_protection_policy` 载荷，与 `policy_dsl` 互斥。mock 后端仍然拒绝
 结构化策略。旧 DSL 语义不变，但协议 v4 帧会被拒绝，因此客户端需与 enforcer 一起升级。
 
+### 禁止读取密钥文件
+
+在风险拦截页选择「禁止读取密钥文件」模板，填写 Agent ID、根 PID 和密钥文件绝对路径。
+该模板调用 `POST /api/enforcement/file-read-bindings`，请求字段与 `POST /api/enforcement/file-bindings`
+相同（`agent_id`、`root_pid`、`path`），生成 `protections.read: true` 的结构化 `exact_file` 策略，
+模式固定为 `enforce`。使用独立接口后，旧版 `agentsight serve` 会返回 404，而不是只下发禁止打开的策略；
+原文件拦截接口收到 `deny_read: true` 时返回 `file_read_route_required` 错误。旧策略省略
+`protections.read` 等同于 false。
+下发和解除沿用 Dashboard 身份认证，即使本机调用也需要有效令牌或登录会话。
+
+- 启用条件仍为 `agent-file-guard` profile 和 BPF LSM；健康接口必须报告
+  `file_read_protection: true`。旧 enforcer 不支持新字段时会拒绝策略，不会静默降级为放行。
+- 对绑定进程树拒绝读取、使用已有只读 FD 读取和文件映射；硬链接、软链接访问同一受保护文件也被拒绝。
+  `O_PATH` 只持有文件身份，允许使用。未绑定进程不受影响，解除策略后恢复读取。
+- 下发前已有的私有或共享文件映射会导致下发被拒绝，需重启相关进程；已经读取到内存中的内容无法撤回。
+  Apply 期间需暂停目标进程的文件访问及进程树变化，不提供并发下发的原子隔离保证。
+- 禁读按 Apply 时的普通文件身份生效，不保护整个目录树；外部程序替换文件或轮换密钥后需重新 Apply。
+  禁读不自动禁止写入或删除，需要时可独立组合 `ordinary_write` 和 `delete`。
+- 这不是完整沙箱：io_uring/AIO、进程内存访问及动态挂载不在覆盖保证内。
+
 ### 结构化文件保护：一期边界
 
 `file_protection_policy` 支持保护精确文件目录项或整个目录树（含未来子项），并按目标排除精确目录项

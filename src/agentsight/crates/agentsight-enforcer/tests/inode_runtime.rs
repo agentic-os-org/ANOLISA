@@ -21,6 +21,7 @@ const WORKER: &str = r#"
 import errno, os, socket, sys
 path = sys.argv[1]
 fd = os.open(path, os.O_RDONLY)
+heldmaps = []
 print('ready', flush=True)
 for line in sys.stdin:
     op = line.strip()
@@ -32,9 +33,21 @@ for line in sys.stdin:
         elif op == 'readfd':
             os.lseek(fd, 0, os.SEEK_SET)
             os.read(fd, 4096)
-        elif op == 'read':
-            with open(path, 'rb') as f:
+        elif op in ('read', 'hardlink', 'symlink'):
+            readpath = path if op == 'read' else path + '.' + op
+            with open(readpath, 'rb') as f:
                 f.read()
+        elif op == 'writeonly':
+            out = os.open(path, os.O_WRONLY)
+            os.close(out)
+        elif op == 'readchild':
+            import subprocess
+            child = subprocess.run(['cat', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if child.returncode != 0:
+                raise OSError(errno.EPERM, 'child denied')
+        elif op == 'holdmap':
+            import mmap
+            heldmaps.append(mmap.mmap(fd, 0, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ))
         elif op == 'mmap':
             import mmap
             with mmap.mmap(fd, 0, access=mmap.ACCESS_READ) as m:
@@ -402,6 +415,123 @@ impl Drop for TreeFiles {
     }
 }
 
+fn read_policy(worker: &Worker, path: &str) -> ApplyPolicy {
+    ApplyPolicy {
+        binding_id: Uuid::new_v4(),
+        agent_id: "file-read-test".into(),
+        session_id: None,
+        root_pid: worker.pid(),
+        process_start_time: worker.start_time(),
+        policy_id: "file-deny-read".into(),
+        policy_revision: "1".into(),
+        policy_dsl: String::new(),
+        policy_mode: Some(PolicyMode::Enforce),
+        file_protection_policy: Some(FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![FileProtectionTarget {
+                path: path.into(),
+                kind: FileProtectionTargetKind::ExactFile,
+                protections: FileProtections {
+                    delete: false,
+                    ordinary_write: false,
+                    read: true,
+                },
+                exclusions: vec![],
+            }],
+        }),
+    }
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn exact_file_read_protection_blocks_read_aliases_mapping_and_children() {
+    let files = Files::new("agent-file-guard");
+    let path = files.source();
+    fs::hard_link(&path, format!("{path}.hardlink")).expect("hardlink fixture");
+    std::os::unix::fs::symlink(&path, format!("{path}.symlink")).expect("symlink fixture");
+    let mut worker = Worker::spawn(&path);
+    let backend = ActPlaneBackend::open().expect("real kernel backend");
+    assert!(
+        backend
+            .health()
+            .expect("health")
+            .capabilities
+            .file_read_protection
+    );
+    let subscription = Uuid::new_v4();
+    let events = backend.subscribe(subscription, SubscriberClass::Required);
+    let binding = backend
+        .apply(read_policy(&worker, &path))
+        .expect("apply read policy");
+    for operation in ["read", "readfd", "mmap", "hardlink", "symlink", "readchild"] {
+        assert_eq!(
+            worker.run(operation),
+            "errno=1",
+            "{operation} must be denied"
+        );
+    }
+    assert_eq!(
+        worker.run("writeonly"),
+        "ok",
+        "read-only restriction must not silently deny writing"
+    );
+    assert!(fs::read(&path).is_ok(), "unbound process retains access");
+    let event = events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("read violation evidence");
+    assert_eq!(event.operation, "read");
+    assert!(event.blocked);
+    backend.detach(binding.request.binding_id).expect("detach");
+    assert_eq!(worker.run("read"), "ok");
+    let mut readonly = read_policy(&worker, &path);
+    readonly.file_protection_policy.as_mut().unwrap().targets[0].protections = FileProtections {
+        delete: true,
+        ordinary_write: true,
+        read: false,
+    };
+    let readonly_binding = backend
+        .apply(readonly)
+        .expect("existing readonly/delete policy");
+    assert_eq!(worker.run("read"), "ok", "readonly still permits reads");
+    for operation in ["writeonly", "unlink", "rename"] {
+        assert_eq!(
+            worker.run(operation),
+            "errno=1",
+            "existing protection must deny {operation}"
+        );
+    }
+    backend
+        .detach(readonly_binding.request.binding_id)
+        .expect("detach readonly");
+    backend.unsubscribe(subscription);
+    backend.shutdown().expect("shutdown");
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn read_protection_rejects_preexisting_private_mapping() {
+    let files = Files::new("agent-file-guard");
+    let path = files.source();
+    let mut worker = Worker::spawn(&path);
+    assert_eq!(worker.run("holdmap"), "ok");
+    let backend = ActPlaneBackend::open().expect("real kernel backend");
+    let error = backend
+        .apply(read_policy(&worker, &path))
+        .expect_err("mapping must reject apply");
+    assert!(
+        error.to_string().contains("pre-existing mapping"),
+        "{error}"
+    );
+    assert!(backend.bindings().expect("bindings").is_empty());
+    assert_eq!(
+        worker.run("read"),
+        "ok",
+        "rejected apply must not mutate kernel state"
+    );
+    backend.shutdown().expect("shutdown");
+}
+
 fn structured_write_only_policy_allows_deep_deletes() {
     let files = TreeFiles::new();
     let write_target = files.root.join("write-only-target");
@@ -450,6 +580,7 @@ fn structured_write_only_policy_allows_deep_deletes() {
                     protections: FileProtections {
                         delete: false,
                         ordinary_write: true,
+                        read: false,
                     },
                     exclusions: vec![],
                 }],
@@ -623,6 +754,7 @@ fn structured_policy_classifier() {
             protections: FileProtections {
                 delete,
                 ordinary_write,
+                read: false,
             },
             exclusions,
         };

@@ -61,6 +61,7 @@ fn target_with(
         protections: FileProtections {
             delete,
             ordinary_write,
+            read: false,
         },
         exclusions,
     }

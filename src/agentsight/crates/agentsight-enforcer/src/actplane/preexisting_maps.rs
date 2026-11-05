@@ -75,6 +75,40 @@ pub(super) fn reject_preexisting_write_access(
     Ok(())
 }
 
+/// Rejects existing file mappings: private and `PROT_NONE` mappings can expose the secret later.
+pub(super) fn reject_preexisting_read_mappings(
+    root_pid: i32,
+    protected: &[ProtectedEntry],
+) -> Result<(), BackendError> {
+    if protected.is_empty() {
+        return Ok(());
+    }
+    for pid in process_tree(root_pid) {
+        let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
+            Ok(maps) => maps,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && pid != root_pid => {
+                continue;
+            }
+            Err(error) => {
+                return Err(BackendError::CompileFailure(format!(
+                    "cannot inspect read protection mappings for process {pid}: {error}"
+                )));
+            }
+        };
+        for line in maps.lines() {
+            if let Some(mapping) = parse_file_mapping(line, false)
+                && protected.iter().any(|entry| matches_entry(&mapping, entry))
+            {
+                return Err(BackendError::CompileFailure(format!(
+                    "process {pid} holds a pre-existing mapping of {}; restart it without the mapping before applying read protection",
+                    mapping.path
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn reject_writable_shared_mappings(
     pid: i32,
     protected: &[ProtectedEntry],
@@ -199,6 +233,10 @@ fn matches_entry(mapping: &Mapping, entry: &ProtectedEntry) -> bool {
 /// and fail open on tree-prefix matches. The four kernel octal escapes are
 /// reversed by `unescape_maps_path`.
 fn parse_shared_mapping(line: &str) -> Option<Mapping> {
+    parse_file_mapping(line, true)
+}
+
+fn parse_file_mapping(line: &str, shared_only: bool) -> Option<Mapping> {
     let mut fields = line.splitn(6, ' ');
     let _range = fields.next()?;
     let perms = fields.next()?;
@@ -207,7 +245,7 @@ fn parse_shared_mapping(line: &str) -> Option<Mapping> {
     let ino = fields.next()?;
     let path = fields.next()?.trim_end();
     let perms = perms.as_bytes();
-    if perms.len() < 4 || perms[3] != b's' {
+    if perms.len() < 4 || (shared_only && perms[3] != b's') {
         return None;
     }
     if path.is_empty() || path.starts_with('[') {
@@ -423,6 +461,15 @@ mod tests {
         let mut tree = walk_tree(100, &children);
         tree.sort_unstable();
         assert_eq!(tree, vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn read_protection_also_detects_private_and_inaccessible_mappings() {
+        for perms in ["r--p", "rw-p", "---p", "--xp", "r--s"] {
+            let line =
+                format!("7f0000000000-7f0000001000 {perms} 00000000 103:02 1 /srv/secret.key");
+            assert!(parse_file_mapping(&line, false).is_some(), "{perms}");
+        }
     }
 
     #[test]

@@ -111,7 +111,7 @@ const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
 const PINNED_FULL_PROFILE_MARKER: &str =
     "agentsight_profile_full_v5_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v5_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v6_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -239,6 +239,8 @@ pub const INODE_GUARD_RENAME: u32 = 2;
 pub const INODE_GUARD_WRITE: u32 = 4;
 /// Reserved ABI flag for directory-tree guards, separate from per-target operation flags.
 pub const INODE_GUARD_TREE: u32 = 8;
+/// Denies reading or mapping the protected regular file.
+pub const INODE_GUARD_READ: u32 = 16;
 
 /// Must match BPF `struct inode_guard_val` layout.
 #[repr(C)]
@@ -2185,7 +2187,9 @@ fn lsm_needed_for_budget(
     // inode-only profile denies writable opens instead, which keeps these
     // hooks out of its verifier stack budget.
     if matches!(name, "enforce_mmap_file" | "enforce_file_mprotect") {
-        return budget.advanced_tracepoints && block_file;
+        return (budget.advanced_tracepoints
+            || budget.features == HookReserve::agent_file_guard().policy_features)
+            && block_file;
     }
     lsm_needed(name, block_exec, block_file, block_connect, recv_flow)
 }
@@ -4914,7 +4918,7 @@ mod tests {
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v5"));
+        assert!(marker.contains("agent_file_guard_v6"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());

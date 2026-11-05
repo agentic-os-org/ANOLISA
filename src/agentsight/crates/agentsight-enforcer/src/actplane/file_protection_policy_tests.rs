@@ -17,6 +17,7 @@ fn target(
         protections: FileProtections {
             delete,
             ordinary_write,
+            read: false,
         },
         exclusions,
     }
@@ -35,6 +36,33 @@ fn policy(targets: Vec<FileProtectionTarget>) -> FileProtectionPolicy {
         topology_mode: FileProtectionTopologyMode::StaticAtApply,
         targets,
     }
+}
+
+#[test]
+fn read_only_targets_normalize_and_merge_without_affecting_write_semantics() {
+    let mut read = target(
+        "/srv/secret.key",
+        FileProtectionTargetKind::ExactFile,
+        false,
+        false,
+        vec![],
+    );
+    read.protections.read = true;
+    let write = target(
+        "/srv/secret.key",
+        FileProtectionTargetKind::ExactFile,
+        false,
+        true,
+        vec![],
+    );
+    let normalized = normalize(&policy(vec![read.clone(), write])).expect("merged protection");
+    assert!(normalized.targets[0].read);
+    assert!(normalized.targets[0].ordinary_write);
+    read.kind = FileProtectionTargetKind::DirectoryTree;
+    assert!(
+        normalize(&policy(vec![read])).is_err(),
+        "tree reads must not silently become a no-op"
+    );
 }
 
 #[test]

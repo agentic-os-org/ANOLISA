@@ -58,6 +58,9 @@ pub struct FileProtections {
     pub delete: bool,
     /// Requests protection from ordinary content-writing operations.
     pub ordinary_write: bool,
+    /// Denies reads of the exact regular file; omission preserves existing policy semantics.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read: bool,
 }
 
 /// One path excluded from its owning target's protection scope.
@@ -106,4 +109,24 @@ pub enum ApplyPolicyValidationError {
         /// Zero-based position of the invalid target in the wire payload.
         target_index: usize,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_protections_round_trip_without_read_field() {
+        let protections: FileProtections =
+            serde_json::from_str(r#"{"delete":true,"ordinary_write":false}"#)
+                .expect("legacy policy");
+        assert!(!protections.read);
+        let encoded = serde_json::to_value(protections).expect("serialize");
+        assert!(encoded.get("read").is_none());
+        let read: FileProtections =
+            serde_json::from_str(r#"{"delete":false,"ordinary_write":false,"read":true}"#)
+                .expect("read policy");
+        assert!(read.read);
+        assert_eq!(serde_json::to_value(read).unwrap()["read"], true);
+    }
 }

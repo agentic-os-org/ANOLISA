@@ -253,6 +253,7 @@ export interface EnforcementCapabilities {
   test_development: boolean;
   file_delete_guard?: boolean;
   file_delete_guard_mode?: string | null;
+  file_read_protection?: boolean;
 }
 
 export interface EnforcementBinding {
@@ -266,6 +267,7 @@ export interface EnforcementBinding {
     policy_revision: string;
     policy_dsl: string;
     policy_mode?: EnforcementPolicyMode | null;
+    file_protection_policy?: { targets: Array<{ path: string; protections: { read?: boolean } }> };
   };
   state: 'pending' | 'enforced' | 'failed' | 'degraded' | 'detaching' | 'detached';
   message: string | null;
@@ -326,7 +328,7 @@ export function enforcementViolationTotal(
   violations: ReadonlyArray<Pick<EnforcementViolation, 'blocked'>>,
   health: EnforcementHealth | null,
 ): number {
-  if (health?.capabilities.credential_enforce === true) {
+  if (health?.capabilities.credential_enforce === true || health?.capabilities.file_read_protection === true) {
     return violations.filter((event) => event.blocked).length;
   }
   return violations.length;
@@ -416,6 +418,15 @@ export const fetchEnforcementViolations = (limit = 100) =>
 
 export const createFileBinding = (input: FileBindingInput) =>
   enforcementRequest<EnforcementBinding>('/api/enforcement/file-bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+// A dedicated route makes servers without read protection answer 404 instead
+// of silently applying an open-only policy.
+export const createFileReadBinding = (input: FileBindingInput) =>
+  enforcementRequest<EnforcementBinding>('/api/enforcement/file-read-bindings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),

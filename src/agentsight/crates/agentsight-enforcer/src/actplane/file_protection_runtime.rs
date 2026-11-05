@@ -22,6 +22,7 @@ use crate::BackendError;
 const TARGET_DELETE: u32 = 1;
 const TARGET_TREE: u32 = 2;
 const TARGET_ORDINARY_WRITE: u32 = 4;
+const TARGET_READ: u32 = 8;
 const DELETE_GUARD_FLAGS: u32 = INODE_GUARD_UNLINK | INODE_GUARD_RENAME;
 
 /// Validated policy and held static topology, before any runtime mutation.
@@ -261,7 +262,8 @@ fn lower(
         targets.push(FileProtectionTargetValue {
             flags: (u32::from(target.delete) * TARGET_DELETE)
                 | (u32::from(target.kind == FileProtectionTargetKind::DirectoryTree) * TARGET_TREE)
-                | (u32::from(target.ordinary_write) * TARGET_ORDINARY_WRITE),
+                | (u32::from(target.ordinary_write) * TARGET_ORDINARY_WRITE)
+                | (u32::from(target.read) * TARGET_READ),
             target_id,
             guard: TreeGuard {
                 flags: DELETE_GUARD_FLAGS,
@@ -308,7 +310,7 @@ fn lower(
         .policy
         .targets
         .iter()
-        .position(|target| target.delete || target.ordinary_write)
+        .position(|target| target.delete || target.ordinary_write || target.read)
         .map(|index| index as u32 + 1)
         .ok_or_else(|| compile("structured policy has no protected target"))?;
     Ok(LoweredPolicy {

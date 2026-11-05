@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for file in [
             "process.bpf.c",
             "process.h",
+            "file_read_guard.bpf.h",
             "taint.h",
             "taint_engine.bpf.h",
             "capability.bpf.h",

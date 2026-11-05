@@ -192,6 +192,15 @@ you can review and, with the enforcer present, contain.
 
 ![System Audit page](../../../images/agentsight/en/dashboard-system-audit.png)
 
+## Secret-file read protection template
+
+With enforcer installed, select **Deny secret file reads** under **Policy template** on the Risk Enforcement
+page, enter the Agent ID, root PID, and absolute regular-file path, then submit. This policy always enforces;
+no trusted network endpoint is needed. Read denials appear as `read` violations. Submission is disabled when
+the backend does not advertise `file_read_protection` or is not ready. The credential exfiltration template
+remains available. See [read-protection boundaries](integrations.md#deny-secret-file-reads) for file identity,
+existing mappings, and secret rotation.
+
 ## Trajectory Viewer
 
 Loads any session or conversation as an ATIF v1.7 trajectory: Agent metadata, step and Token totals,

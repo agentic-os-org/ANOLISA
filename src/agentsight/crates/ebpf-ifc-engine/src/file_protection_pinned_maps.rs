@@ -23,6 +23,18 @@ pub struct PinnedFileProtectionMaps {
 }
 
 impl PinnedEngine {
+    /// Advertised only when every kernel hook required for read denial is attached.
+    pub fn supports_file_read_guard(&self) -> bool {
+        self.supports_file_permission_guard()
+            && [
+                "enforce_file_open",
+                "enforce_mmap_file",
+                "enforce_file_mprotect",
+            ]
+            .iter()
+            .all(|name| self.paths.link(name).try_exists().unwrap_or(false))
+    }
+
     /// Begins an inactive generation after checking live map usage and capacities.
     pub fn begin_file_protection_generation(
         &self,

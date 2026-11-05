@@ -309,6 +309,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(enforcement::health)
                 .service(enforcement::apply_binding)
                 .service(enforcement::apply_file_binding)
+                .service(enforcement::apply_file_read_binding)
                 .service(enforcement::apply_credential_binding)
                 .service(enforcement::preview_agent_protection)
                 .service(enforcement::list_bindings)
@@ -537,6 +538,11 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
         "POST",
         "/api/enforcement/file-bindings",
         "Apply file binding (token required)",
+    ),
+    (
+        "POST",
+        "/api/enforcement/file-read-bindings",
+        "Apply file read-denial binding (token required)",
     ),
     (
         "POST",
@@ -1642,6 +1648,26 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let binding = r#"{"agent_id":"qoder","root_pid":1,"path":"/tmp/secret","deny_read":true}"#;
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/file-bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(binding)
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "file_read_route_required");
+
+        // Without an enforcer the registered read route reports 503, never 404.
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/file-read-bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(binding)
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// Asserts the response is a 400 carrying the structured error envelope

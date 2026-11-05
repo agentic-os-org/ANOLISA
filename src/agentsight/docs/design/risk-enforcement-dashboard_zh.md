@@ -68,6 +68,9 @@ Content-Type: application/json
 服务端将该请求转换成现有的版本化 `ApplyPolicy` 协议。原始
 `POST /api/enforcement/bindings` 继续供可信集成方使用，但 Dashboard 不直接调用。
 
+禁读模板以相同请求体调用 `POST /api/enforcement/file-read-bindings`。独立接口使不支持禁读的
+服务端返回 404，而不是只下发禁止打开的策略。
+
 ## 服务端策略构造
 
 服务端在调用 coordinator 前执行：
