@@ -5,6 +5,46 @@
 use std::path::PathBuf;
 
 use super::*;
+
+#[test]
+fn stale_judgement_does_not_write_a_label_or_audit_event() {
+    let store = store("judge-source-guard");
+    for hash in ["old", "new"] {
+        store
+            .upsert_auto_label(
+                "s1",
+                identity(),
+                outcome(TrajectoryLabel::Unknown, &[]),
+                hash,
+                "v1",
+            )
+            .unwrap();
+    }
+    let before = store.get_label("s1").unwrap().unwrap();
+    let event_count = store.events("s1").unwrap().len();
+    let verdict = verdict(TrajectoryLabel::Bad, vec![2], false);
+    assert!(
+        store
+            .record_judgement_if_current("s1", &verdict, "old")
+            .unwrap()
+            .is_none()
+    );
+    let after = store.get_label("s1").unwrap().unwrap();
+    assert_eq!(after.updated_at_ns, before.updated_at_ns);
+    assert!(after.llm_label.is_none());
+    assert_eq!(store.events("s1").unwrap().len(), event_count);
+    assert!(
+        store
+            .record_judgement_if_current("s1", &verdict, "new")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store.get_label("s1").unwrap().unwrap().llm_label,
+        Some(TrajectoryLabel::Bad)
+    );
+    assert_eq!(store.events("s1").unwrap().len(), event_count + 1);
+}
 use crate::reuse::JudgeVerdict;
 use crate::reuse::label::{ConfirmState, LabelAction, TrajectoryIdentity, TrajectoryLabel};
 use crate::reuse::triage::{TriageMetrics, TriageOutcome};

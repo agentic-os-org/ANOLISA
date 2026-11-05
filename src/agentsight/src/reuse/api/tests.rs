@@ -9,6 +9,129 @@ use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 use super::*;
 use crate::reuse::label::LabelAction;
 
+#[actix_web::test]
+async fn a_delayed_model_response_cannot_replace_a_newer_trajectory_verdict() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    for change_source in [false, true] {
+        let (trajectories, labels) = stores(if change_source {
+            "judge-revision"
+        } else {
+            "judge-unchanged"
+        });
+        let trajectories = Arc::new(trajectories);
+        let labels = Arc::new(labels);
+        insert(&trajectories, "s1", &failing_atif());
+        run_triage(
+            Some(&trajectories),
+            &labels,
+            &TriageQuery::default(),
+            &TriageConfig::default(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let source = Arc::clone(&trajectories);
+        let destination = Arc::clone(&labels);
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "client did not send its request");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            while bytes.len() < header_end + length {
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+            let request: serde_json::Value = serde_json::from_slice(&bytes[header_end..]).unwrap();
+            assert!(request["messages"].to_string().contains("looking"));
+            // This happens after the old document was sent and before its answer.
+            if change_source {
+                insert(&source, "s1", &substantive_atif());
+                run_triage(
+                    Some(&source),
+                    &destination,
+                    &TriageQuery {
+                        session_id: Some("s1".into()),
+                        limit: None,
+                    },
+                    &TriageConfig::default(),
+                )
+                .unwrap();
+            }
+            let verdict = serde_json::json!({"label":"bad","reason":"fixture old response","cited_steps":[2]});
+            let body = serde_json::json!({"id":"fixture","object":"chat.completion","created":0,"model":"fixture",
+                "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":verdict.to_string()}}],
+                "usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let client = LlmClient::with_config(url, "fixture-placeholder", "fixture");
+        let report = actix_web::rt::time::timeout(
+            Duration::from_secs(15),
+            run_judgements(&trajectories, &labels, &client, &JudgeQuery::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.join().unwrap();
+        let row = labels.get_label("s1").unwrap().unwrap();
+        if change_source {
+            assert_eq!(report.judged, 0);
+            assert_eq!(report.skipped, 1);
+            assert_eq!(report.judged_bad, 0);
+            assert_eq!(row.auto_label, TrajectoryLabel::Good);
+            assert!(row.llm_label.is_none());
+            assert!(
+                labels
+                    .events("s1")
+                    .unwrap()
+                    .iter()
+                    .all(|e| e.action != "llm_judge")
+            );
+        } else {
+            assert_eq!(report.judged, 1);
+            assert_eq!(row.llm_label, Some(TrajectoryLabel::Bad));
+        }
+    }
+}
+
 fn tmp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("reuse-api-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
