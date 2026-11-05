@@ -194,7 +194,8 @@ for case, extra in cases.items():
         if extra.get("PI_WAIT"):
             assert (state / "tool.after-waited").exists()
         if extra.get("PI_AFTER_ERROR"):
-            assert tool_results[0]["isError"] is False and "aw hook failed" in err
+            assert tool_results[0]["isError"] is False
+            assert "aw step failed (exit); recorded as report in the instance audit" in err
         if extra.get("PI_NATIVE_AFTER_ERROR"):
             assert tool_results[0]["isError"] is True and tool_results[0]["content"][0]["text"] == "native after failed"
         if extra.get("PI_CHECK_LIVE"):
