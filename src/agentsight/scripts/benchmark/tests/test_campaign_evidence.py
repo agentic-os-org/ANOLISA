@@ -1446,7 +1446,17 @@ def test_invalid_regression_evidence_writes_inconclusive_reports(
     ):
         assert "regression evidence is missing cargo test" in final["issues"]
     expected_count = len(valid_checks) if isinstance(invalid_checks, list) else 0
-    total = len(regression["checks"]) if isinstance(regression["checks"], list) else 0
+    # The ratio counts only readable checks on both sides: an entry without a
+    # command and an integer exit_code is not evidence either way, so it must not
+    # pad the denominator (see write_final()).
+    readable = [
+        check
+        for check in (
+            regression["checks"] if isinstance(regression["checks"], list) else []
+        )
+        if campaign_evidence.usable_regression_check(check)
+    ]
+    total = len(readable)
     report = (tmp_path / "final-report.md").read_text(encoding="utf-8")
     assert f"| 通过命令 | {expected_count}/{total} |" in report
     assert (
