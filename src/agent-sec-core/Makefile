@@ -185,11 +185,18 @@ test-rust-v2: ## Run V2 Rust tests and verify daemon server identity separately
 	cd v2 && cargo test --locked -p asc-daemon-client --test transport untrusted_server_is_rejected_before_request_bytes_are_sent -- --exact
 
 .PHONY: test-rust-v2-sandbox-coverage
-test-rust-v2-sandbox-coverage: ## Cover V2 sandbox contracts, execution and CLI tests
+test-rust-v2-sandbox-coverage: ## Cover the whole V2 workspace
+	@echo "🧪 Running AgentSecCore V2 workspace coverage..."
+	@# Same package scope and test split as `test-rust-v2` above: the coverage
+	@# run measures every workspace crate, so a change in daemon, gateway or
+	@# runtime code is scored by the incremental gate instead of silently
+	@# reading as "no coverage record". The uid-rejection test stays split out:
+	@# under AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 it would pass vacuously,
+	@# and CI already runs it uninstrumented in the same job.
 	cd v2 && AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1 cargo llvm-cov --locked --no-fail-fast \
 		--cobertura --output-path ../rust-v2-coverage.xml \
 		--features asc-daemon-client/testing \
-		-p asc-os-permission-types -p asc-sandbox-types -p asc-pep-runtime -p asc-cli
+		--workspace -- --skip untrusted_server_is_rejected_before_request_bytes_are_sent
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
