@@ -23,15 +23,21 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
     cpu: list[float] = []
     cpu_seconds = covered = 0.0
     complete = True
+    rss_complete = True
     previous_end: float | None = None
     for index, row in enumerate(rows):
         timestamp = numeric(row.get("monotonic_timestamp"))
         if timestamp is None:
             complete = False
+            rss_complete = False
             continue
         value = numeric(row.get("rss_mb"))
-        if start <= timestamp < end and value is not None and value >= 0:
-            rss.append(value)
+        if start <= timestamp < end:
+            if value is not None and value >= 0:
+                rss.append(value)
+            else:
+                # A missing peak cannot be inferred from the remaining points.
+                rss_complete = False
         interval = numeric(row.get("cpu_interval_seconds"))
         if interval is None or interval <= 0:
             # The initial RSS sample establishes the CPU baseline and has no interval.
@@ -66,6 +72,7 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
         "rss_average_mib": sum(rss) / len(rss) if rss else None,
         "rss_peak_mib": max(rss) if rss else None,
         "samples": len(rss),
+        "rss_samples_valid": rss_complete and bool(rss),
         "cpu_average_pct": cpu_seconds / covered * 100 if covered else None,
         "cpu_p95_pct": percentile(cpu),
         "cpu_peak_pct": max(cpu) if cpu else None,
@@ -124,7 +131,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         resource_error = "missing or invalid load measurement window"
     elif invalid_counters:
         resource_error = "invalid internal counter samples: " + ", ".join(sorted(invalid_counters))
-    elif not resources["samples"] or not resources["cpu_samples_valid"]:
+    elif not resources["rss_samples_valid"] or not resources["cpu_samples_valid"]:
         resource_error = "missing or invalid RSS/CPU samples in the load window"
     elif resources["cpu_measurement_seconds"] < (end - start) * 0.95:
         resource_error = "CPU samples cover less than 95% of the load window"
