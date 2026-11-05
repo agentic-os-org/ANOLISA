@@ -9,9 +9,11 @@
 //! - the startup catch-up ([`run_startup_catchup`]) runs one gated pass
 //!   **before UDS admission begins**, so the potentially large first prune
 //!   over a historical backlog never overlaps request audit writes; a stop
-//!   signal that arrives while it is still running abandons admission (the
-//!   daemon never serves) instead of making systemd wait out `TimeoutStopSec`
-//!   and SIGKILL the process mid-catch-up;
+//!   signal that arrives while it is still running abandons admission at
+//!   once - the verdict is delivered while the pass may still be in
+//!   flight, so the shutdown flow (and its shared stop deadline) starts at
+//!   the signal instead of waiting out the catch-up and being SIGKILLed
+//!   by `TimeoutStopSec` mid-pass;
 //! - after admission, the task re-checks the shared cross-process gate once
 //!   per [`RetentionSchedule::check_interval`]; the gate still decides whether
 //!   anything actually runs;
@@ -139,9 +141,10 @@ impl RetentionTask {
     ///
     /// `admitted` resolves to `true` once the catch-up completed and the
     /// periodic loop is about to take over, and to `false` when shutdown won
-    /// the race (the composition root then skips `serve` entirely). In both
-    /// cases the in-flight pass stays owned by the task, so the terminal
-    /// join still covers it.
+    /// the race - delivered promptly, while the abandoned pass may still be
+    /// in flight (the composition root then skips `serve` entirely and arms
+    /// its shared stop deadline at once). In both cases the in-flight pass
+    /// stays owned by the task, so the terminal join still covers it.
     pub fn spawn_with_startup(
         pass: RetentionPass,
         schedule: RetentionSchedule,
@@ -243,11 +246,15 @@ pub async fn start(
 /// shutdown signal.
 ///
 /// Returns the task handle plus whether admission may begin. A stop signal
-/// during the catch-up does not abandon the in-flight pass: the task awaits
-/// it to the end (a `spawn_blocking` pass cannot be cancelled, and detaching
-/// it would leave the final pass able to contend with it for the store
-/// mutex), reports the abandonment, and ends without ever scheduling the
-/// periodic loop.
+/// during the catch-up delivers the abandonment verdict at once - while the
+/// pass may still be in flight - so the composition root enters its shutdown
+/// flow (and the shared stop deadline) without waiting out an unbounded
+/// catch-up. The in-flight pass itself is not abandoned: the task awaits it
+/// to the end (a `spawn_blocking` pass cannot be cancelled, and detaching it
+/// would leave the final pass able to contend with it for the store mutex),
+/// reports the abandonment, and ends without ever scheduling the periodic
+/// loop - the terminal join therefore still covers the pass, bounded by that
+/// deadline.
 pub async fn start_with_shutdown(
     pass: RetentionPass,
     schedule: RetentionSchedule,
@@ -331,16 +338,27 @@ async fn run_with_startup(
         }
         Some(MaintenanceOutcome::Ran | MaintenanceOutcome::NotDue) => schedule.check_interval,
         None => {
+            // Deliver the abandonment verdict before owning the in-flight
+            // pass: the composition root blocks on this verdict, and the
+            // shared stop deadline it arms next must start at the signal.
+            // Awaiting the pass first would stack the unbounded catch-up in
+            // front of the drain budget, and `systemctl stop` over a large
+            // backlog would then be SIGKILLed by `TimeoutStopSec`
+            // mid-catch-up.
+            let _ = admitted.send(false);
             report("agent-sec-daemon: sqlite retention catch-up abandoned: shutdown requested");
             // Own the in-flight pass through to its end: dropping the handle
             // here would detach it from the terminal join, and the final
-            // pass could then contend with it for the store mutex.
+            // pass could then contend with it for the store mutex. The
+            // terminal join is bounded by the shared stop deadline the
+            // composition root armed when the verdict arrived; a pass that
+            // outlives it degrades the final pass (skipped), never contends
+            // with it.
             if let Err(problem) = (&mut catchup).await {
                 report(&format!(
                     "agent-sec-daemon: sqlite retention catch-up panicked: {problem}"
                 ));
             }
-            let _ = admitted.send(false);
             return;
         }
     };
@@ -528,18 +546,20 @@ mod tests {
     }
 
     // DJOB-RET-014: a shutdown signal that arrives while the startup
-    // catch-up pass is still running abandons admission (the composition
-    // root never calls `serve`), and the in-flight pass stays owned: while
-    // the pass is still running the task has not terminated and the
-    // admission verdict has not been delivered, and once the pass completes
-    // the verdict is `false` and the terminal join succeeds - the final
-    // pass can never contend with the abandoned pass.
+    // catch-up pass is still running abandons admission at once: the
+    // verdict is delivered while the pass is still in flight, so the
+    // composition root enters its shutdown flow - and arms the shared
+    // stop deadline - at the signal instead of waiting out an unbounded
+    // catch-up. The in-flight pass stays owned: while the pass is still
+    // running the task has not terminated, and once it completes the
+    // terminal join succeeds - the final pass can never contend with the
+    // abandoned pass.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_shutdown_during_the_startup_catchup_abandons_admission_and_joins_the_pass() {
         let calls = Arc::new(AtomicUsize::new(0));
         let (pass, entered_rx, release_tx) = counting_pass(&calls);
         let shutdown = ShutdownToken::new();
-        let (admitted_tx, mut admitted_rx) = oneshot::channel::<bool>();
+        let (admitted_tx, admitted_rx) = oneshot::channel::<bool>();
         let task = RetentionTask::spawn_with_startup(
             pass,
             RetentionSchedule::default(),
@@ -553,11 +573,16 @@ mod tests {
 
         shutdown.request();
 
-        // The pass is still in flight, so the task still owns it: no verdict
-        // has been delivered and the task has not terminated.
+        // The abandonment verdict arrives while the pass is still in
+        // flight: the composition root is released into its shutdown flow
+        // at once, not after the (unbounded) catch-up pass completes.
+        let admitted = tokio::time::timeout(Duration::from_secs(2), admitted_rx)
+            .await
+            .expect("admission verdict while the pass is still in flight")
+            .expect("verdict channel");
         assert!(
-            admitted_rx.try_recv().is_err(),
-            "no admission verdict while the abandoned pass is still running"
+            !admitted,
+            "shutdown won the catch-up race: admission must be abandoned"
         );
         assert!(
             !task.is_finished(),
@@ -565,11 +590,6 @@ mod tests {
         );
 
         release_tx.send(()).expect("release the pass");
-        let admitted = admitted_rx.await.expect("admission verdict");
-        assert!(
-            !admitted,
-            "shutdown won the catch-up race: admission must be abandoned"
-        );
         let joined = task.shutdown_within(Duration::from_secs(2)).await;
         assert!(joined, "the terminal join covers the abandoned pass");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
