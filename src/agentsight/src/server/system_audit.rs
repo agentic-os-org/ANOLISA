@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, get, post, web};
-use agentsight_enforcement_protocol::{SecurityEvent, SecurityEventKind};
+use agentsight_audit::event_result;
+use agentsight_enforcement_protocol::SecurityEvent;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -424,40 +425,6 @@ fn event_view(event: &SecurityEvent) -> Value {
         fields.insert("result".into(), json!(event_result(event)));
     }
     value
-}
-
-fn event_result(event: &SecurityEvent) -> &'static str {
-    match &event.kind {
-        SecurityEventKind::FileAction(action) => {
-            if action.succeeded {
-                "allowed"
-            } else {
-                "failed"
-            }
-        }
-        SecurityEventKind::TaintTransition(_) => "changed",
-        SecurityEventKind::NetworkAction(action) => {
-            if action.succeeded {
-                "allowed"
-            } else {
-                "blocked"
-            }
-        }
-        SecurityEventKind::PolicyDecision(decision) => {
-            if decision.blocked {
-                "blocked"
-            } else {
-                "allowed"
-            }
-        }
-        SecurityEventKind::EnforcementState(state) => {
-            if state.ready {
-                "ready"
-            } else {
-                "degraded"
-            }
-        }
-    }
 }
 
 pub(super) fn response(status: StatusCode, state: &str, data: Value) -> HttpResponse {

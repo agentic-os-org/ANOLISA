@@ -18,6 +18,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::models::event_result;
+
 use super::{
     AuditCountBy, AuditEventFilter, AuditEventPage, AuditSession, AuditSessionPage, AuditSummary,
     RiskCase, RiskCaseDetail, RiskCaseStatus, RiskCaseSummary, RiskSeverity,
@@ -981,47 +983,35 @@ impl<'a> EventMetadata<'a> {
                 event_type: "file_action",
                 policy_id: Some(&action.policy_id),
                 policy_revision: Some(action.policy_revision),
-                result: if action.succeeded {
-                    "allowed"
-                } else {
-                    "failed"
-                },
+                result: event_result(event),
                 destination_class: None,
             },
             SecurityEventKind::TaintTransition(transition) => Self {
                 event_type: "taint_transition",
                 policy_id: Some(&transition.policy_id),
                 policy_revision: Some(transition.policy_revision),
-                result: "changed",
+                result: event_result(event),
                 destination_class: None,
             },
             SecurityEventKind::NetworkAction(action) => Self {
                 event_type: "network_action",
                 policy_id: Some(&action.policy_id),
                 policy_revision: Some(action.policy_revision),
-                result: if action.succeeded {
-                    "allowed"
-                } else {
-                    "blocked"
-                },
+                result: event_result(event),
                 destination_class: Some(destination_class(action.destination_class)),
             },
             SecurityEventKind::PolicyDecision(decision) => Self {
                 event_type: "policy_decision",
                 policy_id: Some(&decision.policy_id),
                 policy_revision: Some(decision.policy_revision),
-                result: if decision.blocked {
-                    "blocked"
-                } else {
-                    "allowed"
-                },
+                result: event_result(event),
                 destination_class: None,
             },
             SecurityEventKind::EnforcementState(state) => Self {
                 event_type: "enforcement_state",
                 policy_id: state.policy_id.as_deref(),
                 policy_revision: state.policy_revision,
-                result: if state.ready { "ready" } else { "degraded" },
+                result: event_result(event),
                 destination_class: None,
             },
         }
