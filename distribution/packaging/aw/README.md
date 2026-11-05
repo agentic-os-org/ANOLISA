@@ -17,6 +17,16 @@ sha256sum -c SHA256SUMS
 ```
 
 `COMPONENTS` accepts `core`, `sec-core` and `tokenless`, separated by spaces.
+Each command is terminated after 1200 seconds. Compiling the `aw-cli` crates on a
+two-core host can exceed that, so raise the limit for the whole run with
+`AW_BUILD_TIMEOUT` (seconds); an explicit per-command timeout in the scripts still
+wins over the environment:
+
+```bash
+AW_BUILD_TIMEOUT=5400 make -C distribution aw-packages VERSION=0.1.0 \
+  COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"
+```
+
 Each selection produces its own archive; `VERSION` labels those artifacts and
 does not select a source revision. Assembly verifies the checkout stays on one
 unchanged Git commit and records that source identity.
