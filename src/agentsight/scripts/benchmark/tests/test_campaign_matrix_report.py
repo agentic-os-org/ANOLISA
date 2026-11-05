@@ -130,3 +130,27 @@ def test_matrix_rows_skip_records_without_identity() -> None:
     ]
     rows = aggregate_report.matrix_rows(null_evaluation)
     assert rows[0]["pass_count"] == 0
+
+
+def test_final_report_excludes_unusable_checks_from_the_denominator(
+    tmp_path: Path,
+) -> None:
+    import aggregate_report
+
+    regression = {
+        "full": True,
+        "checks": [
+            {"command": "a", "exit_code": 0},
+            {"command": "b", "exit_code": 0},
+            {"command": "c", "exit_code": 0},
+            {"command": "d", "exit_code": 0},
+            {"command": "e"},
+            {"exit_code": 0},
+            "not-an-object",
+        ],
+    }
+    aggregate_report.write_final(
+        tmp_path, {}, [], {}, [], {}, {}, regression
+    )
+    report = (tmp_path / "final-report.md").read_text()
+    assert "| 通过命令 | 4/4 |" in report
