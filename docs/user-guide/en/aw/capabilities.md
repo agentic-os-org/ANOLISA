@@ -12,7 +12,7 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 | Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
 | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | × | × |
-| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
@@ -25,9 +25,10 @@ Configuration can [select steps by tool](configuration.md#select-tools-for-a-hoo
 Qoder CLI has no failed-tool Post callback integration. See each Agent page for result types and callback limits.
 
 `input.submit` supports observation and blocking before model dispatch in ordinary
-resident Qoder SDK and QwenPaw launches. Submission policy uses complete text and
-session/turn identities. Restricted reloadable mode and other Adapters reject
-this event. See [submission checks](security.md#check-user-submissions).
+resident Qoder SDK and QwenPaw launches, plus Claude SDK foreground/resident
+factories. Submission policy uses text and session/turn identities. Claude accepts
+strings or a single async text message and closes rejected/cancelled inputs before
+reuse. Restricted reloadable mode and other Adapters reject this event. See [submission checks](security.md#check-user-submissions).
 
 Tool PII is verified with Qoder SDK 1.0.56 / Worker 1.1.78 ordinary resident
 Queries and QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App replies. Input checks precede
@@ -48,7 +49,7 @@ Public Provider Hook status; see the matrix above for effects supported by each 
 | Hook | Status |
 | --- | --- |
 | `session.start` | Planned |
-| `input.submit` | Implemented for ordinary resident Qoder SDK and QwenPaw text input |
+| `input.submit` | Implemented for Qoder SDK / QwenPaw ordinary resident text and Claude SDK foreground/resident text factories |
 | `tool.before` | Implemented |
 | `tool.after` | Implemented |
 | `permission.request` | Planned |

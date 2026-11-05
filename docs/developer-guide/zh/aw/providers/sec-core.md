@@ -156,6 +156,8 @@ EOF 到达后，桥接从 invoke 预算（最多 60 秒）中扣除读取和解�
 
 ## 用户提交检查
 
+Claude SDK 0.2.88 / CLI 2.1.161 前台与常驻工厂复用相同操作。[Claude 示例](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml) 提供文本输入配置，[Agent 接入说明](../agents/claude-sdk.md#提交前检查用户文本) 定义支持的输入与恢复方式。
+
 [SDK 安全示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
 为普通 resident Qoder SDK 1.0.56 / Worker 1.1.78 和 QwenPaw 2.2.2.post1 /
 AgentScope 2.0.10 增加 `input.submit`。沿用原生应用的配置、权限、模型与初始化，

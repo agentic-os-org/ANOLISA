@@ -52,7 +52,7 @@ class Bridge:
             raise ValueError("AW configuration requires hooks")
         for hook in hooks:
             if (
-                hook.get("event") not in {"tool.before", "tool.after"}
+                hook.get("event") not in {"input.submit", "tool.before", "tool.after"}
                 or not isinstance(hook.get("step"), str)
                 or not hook["step"]
                 or hook.get("on_error") not in {"report", "block"}
@@ -66,6 +66,7 @@ class Bridge:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1024 * 1024:
             raise CallbackFailure("native_input_limit")
+        close = ["--close-event", "true"] if hook.get("close_event") else []
         proc = await asyncio.create_subprocess_exec(
             self.config["executable"],
             "hook",
@@ -79,6 +80,7 @@ class Bridge:
             hook["step"],
             "--on-error",
             hook["on_error"],
+            *close,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -309,7 +311,12 @@ async def _create_task_client(options: ClaudeAgentOptions) -> AsyncIterator[Clau
     bridge = Bridge()
     composed = bridge.options(options)
     _CLIENT_CREATED = True
-    async with ClaudeSDKClient(options=composed) as client:
+    if any(hook["event"] == "input.submit" for hook in bridge.config["hooks"]):
+        from aw_foreground import CheckedClient
+        client = CheckedClient(composed, bridge)
+    else:
+        client = ClaudeSDKClient(options=composed)
+    async with client:
         bridge.ready()
         yield client
 

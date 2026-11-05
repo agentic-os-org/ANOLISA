@@ -9,6 +9,9 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, time::Instant};
 use support::{Fixture, Service, TIMEOUT};
 
+#[path = "claude_sdk/submission.rs"]
+mod submission;
+
 #[test]
 fn native_configuration_preserves_sources_plugins_and_http_mcp() {
     let fixture = Fixture::new();
@@ -55,7 +58,7 @@ fn managed_response_iterators_close_before_native_teardown() {
     let output = fixture.run(command);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && stderr.contains("Ran 14 tests") && stderr.contains("\nOK\n"),
+        output.status.success() && stderr.contains("Ran 15 tests") && stderr.contains("\nOK\n"),
         "{stderr}"
     );
 }

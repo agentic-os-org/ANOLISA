@@ -23,6 +23,31 @@ Preflight 实际执行 bundled binary 的版本探测。工厂固定该 binary�
 `cli_path` 覆盖或缺失 bundled executable，不回退 PATH。模型配置与认证仍由 SDK
 管理。worker options cwd 必须等于 AW 启动 cwd。
 
+## 输入准入与恢复
+
+配置 `input.submit` 后，工厂在调用 SDK 前检查 `query` 和常驻 `connect(prompt)`。
+`aw_submission` 冻结受支持的文本消息，为本次输入生成一个 UUID turn，并复用
+`submission::normalize`。事件 session 身份来自 SDK 输入信封的 `session_id`，
+缺省使用 `query` 参数，其原生默认值为 `default`。这是提交标签；CLI 随后生成自身
+的会话 UUID。AW binding instance 与唯一 turn 隔离客户端和连续输入。
+工具 Hook 继续使用 CLI 原生 session 和 tool-use ID。
+
+输入任务在迭代器验证及策略调用期间占用客户端。全部提交步骤与 `CloseInputEvent`
+清理成功后，常驻客户端才启动工具调用账本。同次输入的步骤共享不可变内容与 Service
+期限。`finally` 通过现有 CLI close-event 桥关闭事件，覆盖拒绝后未访问的步骤及取消时
+正在执行的步骤。清理受到取消屏蔽，收到确认后才释放输入任务标记。输入准入拒绝不会
+建立模型或工具调用账本条目。
+
+已审计且可恢复的 Provider 故障复用现有 Claude callback 故障分类。`block` 返回输入
+拒绝，`report` 返回中性结果；两种策略下风险拒绝都会终止本次输入。scope、身份、
+协议、审计及无法确认的清理错误保留失败边界。常驻初始化成功后首条输入被拒绝时，
+客户端保持已连接；启动故障仍关闭 SDK、relay 和 scope。前台受检客户端同样要求顺序
+消费响应并拒绝重连。未配置输入检查的前台客户端沿用原生 SDK 类和输入模式。
+
+原生 `UserPromptSubmit` Hook 在工厂边界之后执行，保留拒绝及附加上下文能力。
+AW 不扫描其后续变换。准确的输入形状、限制和应用恢复方式见
+[Claude 接入说明](../../../../../../docs/developer-guide/zh/aw/agents/claude-sdk.md#提交前检查用户文本)。
+
 ## 工具策略与身份
 
 私有 `aw hook` 传输以退出码 2 和 stdout JSON 字符串携带明确阻断原因；
@@ -117,3 +142,9 @@ connect 才返回；配置控制和中继启动共用五秒截止时间。控制
 认证、两轮 query 及并发客户端。
 
 显式常驻 [MCP handler 工厂](claude-mcp.md) 进一步支持可靠 MCP 成功状态分类及单文本替换，使用 Adapter 所属调用关联，并抑制已认领工具重复的 AW 原生回调。
+
+`tests/claude_submission.py` 将固定 SDK/CLI、真实 AW、sec-core Provider/后端与记录请求
+的本地 Anthropic 端点组合，覆盖前台和常驻客户端、常驻首条输入、字符串与异步文本、
+Prompt/PII 风险、block/report 下的 Provider 非零/超时/无效响应、取消、迭代异常、
+原生提交拒绝、后续输入及资源释放。Provider 传输故障由测试包装器注入，普通扫描进入
+真实后端。外部模型和生产业务镜像需要分别验收。

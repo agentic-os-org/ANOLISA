@@ -66,6 +66,8 @@ aw run --config "$AW_HOME/security.yaml" --agent qoder
 
 ## 检查用户提交
 
+Claude SDK 应用可在前台或常驻模式使用 [Claude 提交示例](../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml)，启用相同的两个扫描器，在原生提交前拒绝输入。输入形状和拒绝后恢复方式见 [Claude 接入说明](../../../developer-guide/zh/aw/agents/claude-sdk.md#提交前检查用户文本)。
+
 Qoder SDK 和 QwenPaw 应用可从
 [SDK 安全示例](../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
 开始，替换程序及 socket 路径，沿用现有 Agent 工厂或 App 配置。普通 `aw run`

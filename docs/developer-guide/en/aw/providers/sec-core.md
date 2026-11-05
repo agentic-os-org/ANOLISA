@@ -176,6 +176,8 @@ limits. No stdin/file fallback is provided by this CLI contract.
 
 ## User submission checks
 
+Claude SDK 0.2.88 / CLI 2.1.161 foreground and resident factories use the same operations. The [Claude example](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml) contains the text-only configuration; the [Agent guide](../agents/claude-sdk.md#check-user-text-before-submission) specifies supported input and recovery.
+
 The [SDK security example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
 adds `input.submit` to ordinary resident Qoder SDK 1.0.56 / Worker 1.1.78 and
 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 launches. Keep the native application's

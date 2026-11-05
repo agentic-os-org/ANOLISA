@@ -138,6 +138,32 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.readers.append(reader)
         return reader
 
+    async def test_prompt_hook_identity_does_not_claim_a_tool_invocation(self):
+        from aw_invocations import Invocations
+
+        self.bridge.scope = SimpleNamespace(check=lambda: None, invocation_limit=256)
+        self.bridge.failure = None
+        ledger = self.bridge.invocations = Invocations(self.bridge)
+        ledger.begin()
+        prompt = {"type": "control_request", "request_id": "prompt-request", "request": {
+            "subtype": "hook_callback", "callback_id": "prompt-hook",
+            "tool_use_id": "native-input-id", "input": {"hook_event_name": "UserPromptSubmit"},
+        }}
+        tool = {"type": "control_request", "request_id": "tool-request", "request": {
+            "subtype": "hook_callback", "callback_id": "tool-hook",
+            "tool_use_id": "unissued-tool-id", "input": {"hook_event_name": "PreToolUse"},
+        }}
+        self.transport.delegate.messages = [prompt, tool, {"type": "result"}]
+        reader = self.reader()
+        self.assertEqual(await anext(reader), prompt)
+        async with ledger.callback() as ticket:
+            self.assertIsNone(ticket.call_id)
+        self.assertEqual(self.stops, [])
+        self.assertFalse(ledger.pending or ledger.active)
+        self.assertEqual(await anext(reader), {"type": "result"})
+        self.assertEqual(self.stops, ["failure", "stop"])
+        await self.transport.close()
+
     async def test_closed_transport_rejects_reconnect_before_native_launch(self):
         await self.transport.connect()
         reader = self.reader()
@@ -312,6 +338,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
                     client._aw_check = lambda: None
                     client._aw_state = "connected"
                     client._aw_receiving = False
+                    client._aw_input_task = None
                     client._aw_task_started = True
                     client._aw_query_finished = False
                     client.sdk_messages = [ResultMessage()]

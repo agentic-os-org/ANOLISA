@@ -17,7 +17,7 @@ pub fn correlation_source(event: &Value) -> Option<&'static str> {
 
 /// Whether the native bridge explicitly closes an abandoned event.
 pub fn supports_event_close(adapter: &str) -> bool {
-    adapter == "agentscope"
+    matches!(adapter, "agentscope" | "claude-sdk")
 }
 
 /// Normalize the callback and its optional completion frame without service state.
@@ -140,17 +140,23 @@ pub fn response(
     if output["status"] != "ok" {
         // Claude recovery requires a completed, audited Provider fault. Scope/RPC,
         // native directive, cancellation and cleanup errors remain failures.
-        let claude_report = adapter_id == "claude-sdk"
+        let claude_fault = adapter_id == "claude-sdk"
             && output["status"] == "error"
             && output["kind"] == "provider"
             && output["effects"] == serde_json::json!([])
-            && on_error == "report"
             && (matches!(
                 output["failure"].as_str(),
                 Some("exit" | "incomplete_input" | "provider" | "protocol")
             ) || (output["failure"] == "transport"
                 && output["failure_detail"] == "deadline_exceeded"));
-        if (adapter_id == "pi" || claude_report)
+        if claude_fault && event == "input.submit" && output["failure_action"] == on_error {
+            writeln!(
+                diagnostics,
+                "aw input check failed; recorded in the instance audit"
+            )?;
+            return Ok(adapter.reply(on_error == "block"));
+        }
+        if (adapter_id == "pi" || (claude_fault && on_error == "report"))
             && output["failure_action"] == "report"
             && event == "tool.after"
         {

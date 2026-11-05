@@ -43,7 +43,7 @@ target/debug/aw status --config /absolute/aw.claude-sdk.yaml
 target/debug/aw stop --config /absolute/aw.claude-sdk.yaml
 ```
 
-Claude SDK event budgets must be 1..55,000 ms. Each `tool.before` or `tool.after`
+Claude SDK event budgets must be 1..55,000 ms. Each `input.submit`, `tool.before` or `tool.after`
 route uses `events.<name>.budget_ms` when set, otherwise
 `execution.default_event_budget_ms`. `aw run` enforces this adapter-specific
 limit after static configuration validation.
@@ -92,8 +92,9 @@ The relay snapshots its upstream environment at connect; create a new client to
 apply endpoint, proxy or TLS changes.
 The current sec-core Provider exposes submission, tool PII and Skill operations.
 Provider operations and Adapter capabilities are admitted separately: `scan_code`
-and `scan_tool_input` check the Claude callback input, while `input.submit` and
-required output `on_error: withhold_result` are rejected before the worker starts.
+and `scan_tool_input` check the Claude callback input. `input.submit` supports the
+text factory paths below; required output `on_error: withhold_result` remains
+unsupported and is rejected before the worker starts.
 Native Skill discovery remains available; sec-core `check_skill` resolution is
 currently verified for Qoder SDK and QwenPaw, with no Claude resolution contract.
 See the [Provider guide](../providers/sec-core.md) before sharing its configuration.
@@ -127,3 +128,50 @@ the [managed MCP factory](../deployment/resident.md).
 
 Run pinned native tests through [contributing](../../../../../src/aw/CONTRIBUTING.md).
 See [resident deployment](../deployment/resident.md) for resident clients and managed MCP.
+
+## Check user text before submission
+
+Use [the Claude submission configuration](../../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml)
+to enable `scan_prompt` and `scan_user_input`. Replace the executable/socket paths,
+start sec-core separately, and keep the application's existing options. The example
+selects the resident entrypoint; a foreground worker can use its existing argv.
+The default configuration rejects risks and scan failures before native submission.
+Catch `aw_submission.SubmissionDenied` around `query` or resident `connect(prompt)`;
+after this exception returns, the same connected client can accept new input.
+A rejected input has no response stream to consume.
+
+| Factory path with checks enabled | Supported input |
+| --- | --- |
+| Foreground `async with create_client(options)` then `query` | String or one-message async iterable; one client per worker |
+| Resident `connect(prompt)` and `query` | String or one-message async iterable; clients keep their conversation between drained turns |
+| Async message content | A string or nonempty list of `{type: "text", text: "..."}` blocks |
+
+Async envelopes must have `type: "user"`, a `message` containing only `role: "user"`
+and `content`, and optional `session_id`, `uuid`, and null `parent_tool_use_id`.
+AW consumes and closes the iterator before scanning. Multiple messages, media,
+unknown fields, blank text and inputs exceeding 256 KiB of encoded AW input are
+rejected. Session labels must be nonblank and at most 512 UTF-8 bytes. Removing
+`input.submit` preserves the previously supported native input modes.
+
+All steps share one immutable snapshot, turn identity and service event budget.
+Text blocks are joined with newlines for scanning; the native message retains
+its original blocks. Strings are forwarded unchanged. Input checks run before
+native `UserPromptSubmit` Hooks; those Hooks, native vetoes and settings remain
+installed. Their added context or later rewrites are outside this input snapshot.
+The scan covers fresh user text, not the full conversation or final model prompt.
+
+Audited, recoverable Provider faults follow `on_error`: `block` rejects this input;
+`report` records the fault and continues while the event budget remains usable.
+Risk blocking applies with either failure policy. Protocol/identity/scope faults,
+audit failure and uncertain cleanup stop further submissions. Cancellation waits
+for scanner/event cleanup before propagating and allows another turn when cleanup
+succeeds. Drain each accepted response before another query; do not receive while
+input admission is running. Concurrent disconnect cancels and joins admission.
+
+Native `connect(str)` with `can_use_tool` retains the SDK restriction; connect first
+without a prompt and then call `query`, or supply the supported async message.
+
+The Service retains bounded replay-prevention records until client/binding release.
+A resident client can admit at most 1,024 checked submissions; create a fresh client
+before that limit. Foreground bindings share this capacity with legacy tool events.
+Completed input events and active scanner calls are released after each check.

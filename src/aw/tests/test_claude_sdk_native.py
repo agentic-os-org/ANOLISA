@@ -401,7 +401,9 @@ def run_case(
             "bash-compress-failure",
             "http-mcp-compress-failure",
         }:
-            assert "aw hook failed:" in stderr, stderr
+            diagnostic = ("aw hook failed:" if mode == "before-report-failure"
+                          else "recorded as report in the instance audit")
+            assert diagnostic in stderr, stderr
             assert any(
                 record.get("status") == "error" and record.get("failure_action") == "report"
                 for record in completed
