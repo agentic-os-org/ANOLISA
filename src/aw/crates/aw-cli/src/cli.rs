@@ -1,12 +1,15 @@
 //! Native launch commands share the daemon client; Agent arguments remain literal.
 
 mod adapter;
+mod attachment;
 mod bridge;
+pub(crate) mod connection;
 mod dispatch;
 mod hook;
 mod policy;
 mod readiness;
 mod run;
+mod scope;
 mod update;
 
 use std::{collections::BTreeMap, io::Read, path::Path, time::Instant};
@@ -31,7 +34,7 @@ impl Arguments {
             if !flag.starts_with("--") {
                 return Err("expected a named option (Agent arguments follow --)".into());
             }
-            let value = if matches!(flag.as_str(), "--json" | "--reloadable") {
+            let value = if matches!(flag.as_str(), "--json" | "--reloadable" | "--remove") {
                 "true".into()
             } else {
                 args.next().ok_or("option requires a value")?
@@ -102,6 +105,9 @@ pub(crate) fn connect_service(args: &Arguments, deadline: Instant) -> Result<aw_
         if args.flags.contains_key("--socket") {
             return Err("choose --config or --socket".into());
         }
+        if let Some(client) = connection::connect(Path::new(config), deadline)? {
+            return Ok(client);
+        }
         let bytes = read_file(config, aw_config::MAX_DOCUMENT_BYTES)?;
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty());
         Some(aw_service::launch_service::resolve(
@@ -130,6 +136,7 @@ pub(crate) fn dispatch(command: &str, args: &Arguments) -> Result<Exit> {
         "run" => run::launch(args),
         "update" => update::update(args),
         "bridge" => bridge::lifecycle(args),
+        "scope" => scope::run(args),
         "install" => adapter::install(args),
         "hook" => Ok(hook::callback(args)),
         "policy" => {

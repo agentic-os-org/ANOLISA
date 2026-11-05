@@ -4,7 +4,7 @@
 //! [`ExplicitExitTracker::observe_shell_bytes`] so the spawn loop can tell
 //! an explicit user exit apart from an EOF-driven teardown.
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(in super::super) struct ExplicitExitTracker {
     pending_line: Vec<u8>,
     saw_explicit_exit: bool,

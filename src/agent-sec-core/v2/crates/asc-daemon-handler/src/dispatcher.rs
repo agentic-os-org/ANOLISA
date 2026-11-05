@@ -9,12 +9,15 @@ use asc_daemon_protocol::{DaemonRequest, DaemonResponse, RequestId, error_code};
 use asc_daemon_service::{DispatchError, DispatchRequest, RequestDispatcher, ResponseDisposition};
 
 use crate::action::CodeScanHandler;
+use crate::gateway::GatewayHandler;
 use crate::pap::PapHandler;
 use crate::pii::PiiScanHandler;
 use crate::prompt_scan::PromptScanHandler;
 use crate::query::QueryHandler;
 
 const DEFAULT_DISPATCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+/// Gateway changes wait for the data plane to load a generation and for systemd jobs.
+const GATEWAY_DISPATCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Protocol router composed over daemon application use cases.
 pub struct DaemonDispatcher {
@@ -25,6 +28,7 @@ pub struct DaemonDispatcher {
     skill_sec: crate::skill_sec::SkillSecHandler,
     prompt_scan: PromptScanHandler,
     queries: QueryHandler,
+    gateway: GatewayHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
     observability: Option<asc_daemon_core::ObservabilityService>,
 }
@@ -50,6 +54,7 @@ impl DaemonDispatcher {
             skill_sec: crate::skill_sec::SkillSecHandler::new(Arc::clone(&actions)),
             prompt_scan: PromptScanHandler::new(actions),
             queries: QueryHandler::default(),
+            gateway: GatewayHandler::default(),
             principal_policy,
             observability: None,
         }
@@ -66,6 +71,16 @@ impl DaemonDispatcher {
     #[must_use]
     pub fn with_queries(mut self, queries: QueryHandler) -> Self {
         self.queries = queries;
+        self
+    }
+
+    /// Installs the secret-gateway control plane; without it `gateway.*` is unavailable.
+    #[must_use]
+    pub fn with_gateway(
+        mut self,
+        gateway: Arc<dyn asc_daemon_core::GatewayAdministration>,
+    ) -> Self {
+        self.gateway = GatewayHandler::new(gateway);
         self
     }
 
@@ -156,6 +171,10 @@ impl DaemonDispatcher {
                 self.queries
                     .handle(request_id, &principal, method, request.params)
             }
+            MethodId::Gateway(method) => {
+                self.gateway
+                    .handle(request_id, peer, method, request.params)
+            }
             MethodId::Action(method) => match method {
                 method::ActionMethod::SkillSec => {
                     self.skill_sec
@@ -211,6 +230,9 @@ impl RequestDispatcher for DaemonDispatcher {
                 .map(std::time::Duration::from_millis);
         }
         let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
+        if method::GATEWAY_METHODS.contains(&request.method.as_str()) {
+            return Some(GATEWAY_DISPATCH_BUDGET);
+        }
         // Prompt Scanner retains its existing fixed local-model budget.
         if request.method == method::ACTION_PROMPT_SCAN
             || request.method == method::ACTION_PROMPT_SCAN_WARMUP

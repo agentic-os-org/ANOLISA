@@ -20,9 +20,23 @@ request = json.loads(raw)
 (args.root / f"environment-bytes-{args.protocol}.json").write_text(
     json.dumps([(key.hex(), value.hex()) for key, value in sorted(os.environb.items())
                 if key.startswith(b"AW_TEST_BYTES")]))
-if args.protocol == "provider" and request["method"] == "describe" and os.environ.get("FAKE_PREPARE_BLOCK") == "1":
-    (args.root / "preparing.pid").write_text(str(os.getpid()))
+if (args.protocol == "provider" and request["method"] == "describe"
+        and os.environ.get("FAKE_PREPARE_BLOCK") == "1"
+        and not (args.root / "allow-prepare").exists()):
+    preparing = args.root / f"preparing-{os.getpid()}.tmp"
+    preparing.write_text(str(os.getpid()))
+    preparing.replace(args.root / "preparing.pid")
     time.sleep(8)
+if (args.protocol == "provider" and request["method"] == "describe"
+        and os.environ.get("FAKE_PREPARE_WAIT") == "1"):
+    preparing = args.root / f"preparing-{os.getpid()}.tmp"
+    preparing.write_text(str(os.getpid()))
+    preparing.replace(args.root / "preparing.pid")
+    deadline = time.monotonic() + 5
+    while not (args.root / "allow-prepare").exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("preparation release missing")
+        time.sleep(.01)
 if args.protocol == "provider":
     (args.root / f"qoder-version-{request['method']}.txt").write_text(
         os.environ.get("QODER_HOOK_VERSION", ""))
@@ -30,10 +44,16 @@ if args.protocol == "provider":
     reply = {"api_version": "aw-provider/v1alpha1", "request_id": request["request_id"], "status": "ok"}
     if request["method"] == "describe":
         reply["operations"] = [
-            {"name": "check", "events": ["tool.before"], "effects": ["observe", "block"]},
+            {"name": "check", "events": ["input.submit", "tool.before"], "effects": ["observe", "block"]},
             {"name": "record", "events": ["tool.after"], "effects": ["observe", "replace_result"]}]
     elif request["method"] == "invoke":
         reply["input_digest"] = request["input_digest"]
+        if request["event"]["name"] == "input.submit" and request["event"]["native"].get("scenario") == "error":
+            print(json.dumps({"api_version":reply["api_version"], "request_id":reply["request_id"],
+                              "status":"error", "error_code":"scanner_unavailable"}))
+            sys.exit(0)
+        if request["event"]["name"] == "input.submit" and request["event"]["native"].get("scenario") == "timeout":
+            time.sleep(2)
         if request["event"]["name"] == "tool.after":
             reply["effects"] = ([{"type": "replace_result", "text": "compact"}]
                 if args.behavior == "replace" else [{"type": "observe", "reason_code": "after_recorded"}])

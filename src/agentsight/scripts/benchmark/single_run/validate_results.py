@@ -7,6 +7,7 @@ import argparse
 import gzip
 import json
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -65,16 +66,22 @@ def load_ffi_captured(
 
 
 def json_lines(path: Path) -> Iterable[dict[str, Any]]:
-    """Yield valid JSON objects from a k6 JSON output file."""
+    """Yield UTF-8 JSON objects, isolating malformed records in plain/gzip logs."""
     opener = gzip.open if path.suffix == ".gz" else Path.open
-    with opener(path, mode="rt", encoding="utf-8") as handle:
+    skipped = 0
+    # Decode each record separately: TextIOWrapper can reject an entire read
+    # buffer when a later line contains a torn multibyte character.
+    with opener(path, mode="rb") as handle:
         for line in handle:
             try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
+                item = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                skipped += 1
                 continue
             if isinstance(item, dict):
                 yield item
+    if skipped:
+        logging.warning("Skipped %d malformed JSONL records in %s", skipped, path)
 
 
 def _coerce_optional_status(status: Any) -> int | None:
@@ -153,7 +160,7 @@ def load_captured(
 ) -> Captured:
     """Find captured IDs, narrowing indexed queries to the current run."""
     captured: dict[str, list[tuple[str, int | None]]] = {}
-    uri = f"file:{db_path}?mode=ro"
+    uri = db_path.resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
         tables = {
             row[0]
@@ -170,7 +177,7 @@ def load_captured(
                 if since_ns is not None and "timestamp_ns" in columns:
                     query += " AND timestamp_ns >= ?"
                     parameters.append(since_ns)
-                rows = connection.execute(query, parameters).fetchall()
+                rows = connection.execute(query, parameters)
                 for request_id, total in rows:
                     request_id = str(request_id)
                     if (not prefix or request_id.startswith(prefix)) and (
@@ -196,7 +203,7 @@ def load_captured(
                 if since_ns is not None and "start_timestamp_ns" in columns:
                     query += " WHERE start_timestamp_ns >= ?"
                     parameters.append(since_ns)
-                rows = connection.execute(query, parameters).fetchall()
+                rows = connection.execute(query, parameters)
                 for row in rows:
                     record = dict(zip(selected, row))
                     identifiers = {
@@ -242,7 +249,7 @@ def load_captured_incremental(
     next_genai_id = genai_after_id
     next_token_rowid = token_after_rowid
     next_pending_ids = set(pending_genai_ids)
-    uri = f"file:{db_path}?mode=ro"
+    uri = db_path.resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as connection:
         tables = {
             row[0]
@@ -293,29 +300,30 @@ def load_captured_incremental(
                         else " WHERE start_timestamp_ns >= ?"
                     )
                     parameters.append(since_ns)
-                rows = [
-                    row if has_id else (None, *row) for row in connection.execute(query, parameters)
-                ]
-                if has_id and pending_genai_ids:
-                    pending_rows = []
-                    remaining_ids = set(pending_genai_ids)
+
+                def rows() -> Iterable[tuple[Any, ...]]:
+                    # Keep payload memory bounded even when the capture database
+                    # contains a large backlog outside this benchmark's prefix.
+                    for row in connection.execute(query, parameters):
+                        yield row if has_id else (None, *row)
+                    if not has_id:
+                        return
                     pending_list = sorted(pending_genai_ids)
                     for start in range(0, len(pending_list), 500):
                         chunk = pending_list[start : start + 500]
+                        missing = set(chunk)
                         placeholders = ",".join("?" for _ in chunk)
-                        refreshed = list(
-                            connection.execute(
-                                f"SELECT id, {', '.join(selected)} "
-                                f"FROM genai_events WHERE id IN ({placeholders})",
-                                chunk,
-                            )
-                        )
-                        pending_rows.extend(refreshed)
-                        remaining_ids.difference_update(row[0] for row in refreshed)
-                    # Retention-deleted rows cannot receive a later completion.
-                    next_pending_ids.difference_update(remaining_ids)
-                    rows.extend(pending_rows)
-                for row in rows:
+                        for row in connection.execute(
+                            f"SELECT id, {', '.join(selected)} "
+                            f"FROM genai_events WHERE id IN ({placeholders})",
+                            chunk,
+                        ):
+                            missing.discard(row[0])
+                            yield row
+                        # Retention-deleted rows cannot receive a later completion.
+                        next_pending_ids.difference_update(missing)
+
+                for row in rows():
                     row_id = int(row[0]) if row[0] is not None else None
                     record = dict(zip(selected, row[1:]))
                     identifiers = {
@@ -611,8 +619,10 @@ def main() -> int:
         raise SystemExit(f"AgentSight database does not exist: {args.db}")
     if not 0 <= args.min_completeness <= 1:
         raise SystemExit("min-completeness must be between 0 and 1")
-    if args.wait_seconds < 0 or args.poll_interval <= 0:
-        raise SystemExit("wait-seconds must be non-negative and poll-interval positive")
+    if not math.isfinite(args.wait_seconds) or args.wait_seconds < 0:
+        raise SystemExit("wait-seconds must be finite and non-negative")
+    if not math.isfinite(args.poll_interval) or args.poll_interval <= 0:
+        raise SystemExit("poll-interval must be finite and positive")
     if args.since_ns is not None and args.since_ns < 0:
         raise SystemExit("since-ns must be non-negative")
     if args.completion_marker:

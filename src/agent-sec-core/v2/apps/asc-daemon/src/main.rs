@@ -6,7 +6,7 @@ use runtime_path::RuntimeLease;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod sinks;
 
@@ -18,7 +18,7 @@ use asc_daemon_core::{PrincipalPolicy, RootManagedPrincipalPolicy};
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder, QueryHandler};
 use asc_daemon_service::ShutdownToken;
 use asc_event_sink::ConfiguredSecurityEventSinks;
-use asc_pap::{PapRepository, PapService, ScopeDiscovery};
+use asc_pap::{PapRepository, PapService};
 use asc_policy_repository_sqlite::{SqlitePolicyRepository, select_policy_database_path};
 use asc_policy_runtime::reconciliation::ReconciliationRuntime;
 use asc_policy_types::scope::ScopeStatus;
@@ -53,6 +53,7 @@ const TELEMETRY_SHUTDOWN: Duration = Duration::from_secs(2);
 const FALLBACK_POLICY_DATABASE: &str = "/var/lib/agent-sec/policy/policy-state.db";
 
 fn main() -> ExitCode {
+    let startup_started = Instant::now();
     install_panic_hook();
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
     let outcome = match Cli::parse_from(std::env::args_os()) {
@@ -77,6 +78,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    report_startup("telemetry_ready", startup_started);
+    report_startup("runtime_directory", startup_started);
     let lease = match RuntimeLease::acquire(&cli.bootstrap.socket_path) {
         Ok(lease) => lease,
         Err(problem) => {
@@ -85,6 +88,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    report_startup("policy_storage", startup_started);
     let paths = asc_security_events::config::DaemonDataDirEnv::from_process();
     let data_dir = paths.override_dir.as_ref().unwrap_or(&paths.system_dir);
     let fallback = paths
@@ -110,9 +114,10 @@ fn main() -> ExitCode {
     };
     // Keep database ownership even if the outer Tokio drain times out.
     let _database_lease = repository.lease();
+    report_startup("tokio_runtime", startup_started);
     // Retain the singleton through the outer Tokio blocking-task shutdown window.
     let outcome = match run_with_shutdown_timeout(
-        run(*cli, &lease, &telemetry, repository),
+        run(*cli, &lease, &telemetry, repository, startup_started),
         RUNTIME_SHUTDOWN_TIMEOUT,
     ) {
         Ok((exit_code, shutdown_plan)) => {
@@ -130,6 +135,15 @@ fn main() -> ExitCode {
     outcome
 }
 
+fn report_startup(stage: &'static str, started: Instant) {
+    tracing::info!(
+        target: "asc_observability::diagnostic",
+        reason = "startup_stage",
+        stage,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
 // Keep startup admission and shutdown ordering visible together in the composition root.
 #[allow(clippy::too_many_lines)]
 async fn run(
@@ -137,11 +151,14 @@ async fn run(
     lease: &RuntimeLease,
     telemetry: &asc_observability::TelemetryRuntime,
     repository: Arc<SqlitePolicyRepository>,
+    startup_started: Instant,
 ) -> (ExitCode, Option<sinks::ShutdownPlan>) {
+    report_startup("socket_cleanup", startup_started);
     if let Err(problem) = lease.prepare_socket().await {
         report_error(telemetry, &problem);
         return (ExitCode::FAILURE, None);
     }
+    report_startup("signals", startup_started);
     let signals = match ProcessSignals::install() {
         Ok(signals) => signals,
         Err(problem) => {
@@ -149,6 +166,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("skillsec", startup_started);
     let (skill_sec, skillfs_config) = match skill_sec::start(cli.skillsec_config.as_deref()) {
         Ok(service) => service,
         Err(error) => {
@@ -156,6 +174,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("pii_rules", startup_started);
     let pii_rules = match load_pii_rules(cli.pii_rules.as_deref(), telemetry) {
         Ok(rules) => Arc::new(rules),
         Err(error) => {
@@ -163,6 +182,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("event_storage", startup_started);
     let (finalizer, durable_sinks, queries) = match event_finalizer(telemetry) {
         Ok(sinks) => sinks,
         Err(error) => {
@@ -172,6 +192,7 @@ async fn run(
             return (ExitCode::FAILURE, None);
         }
     };
+    report_startup("skillfs", startup_started);
     let skill_worker = Arc::new(asc_daemon::SkillWorker::default());
     let skillfs = match prepare_skillfs(skillfs_config, &skill_worker) {
         Ok(bridge) => bridge,
@@ -183,6 +204,7 @@ async fn run(
             );
         }
     };
+    report_startup("skill_worker", startup_started);
     let mut executor = asc_capability_skill_sec::executor::SkillSecExecutor::new(skill_sec.clone());
     if let Some(bridge) = &skillfs {
         executor = executor.with_environment(bridge.environment());
@@ -195,8 +217,8 @@ async fn run(
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
-    // Exclusive DB ownership proves no pre-crash discovery worker can still write.
-    if let Err(error) = recover_deleting_scopes(repository.as_ref()) {
+    report_startup("deleting_scope_recovery", startup_started);
+    if let Err(error) = recover_deleting_file_scopes(repository.as_ref()) {
         report_error(telemetry, &error);
         let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
         return (
@@ -204,55 +226,118 @@ async fn run(
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
-    let policy_runtime = match asc_daemon::start_policy_reconciliation(repository.clone()) {
+    let shutdown = ShutdownToken::new();
+    let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
+    report_startup("gateway", startup_started);
+    let gateway_repository = repository.clone();
+    let gateway = match tokio::task::spawn_blocking(move || {
+        asc_daemon::gateway::GatewayAdapter::system(&gateway_data_dir(), gateway_repository).map(
+            |gateway| {
+                let recovery = gateway.service().recover();
+                (Arc::new(gateway), recovery)
+            },
+        )
+    })
+    .await
+    {
+        Ok(Ok((gateway, recovery))) => {
+            if let Err(error) = recovery {
+                report_error(telemetry, &error);
+            }
+            Some(gateway)
+        }
+        Ok(Err(problem)) => {
+            report_error(telemetry, &problem);
+            None
+        }
+        Err(problem) => {
+            report_error(telemetry, &problem);
+            None
+        }
+    };
+    if shutdown.is_requested() {
+        let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
+        signal_task.abort();
+        return (
+            ExitCode::SUCCESS,
+            Some(sinks::ShutdownPlan::full(durable_sinks)),
+        );
+    }
+    let gateway_service = gateway.as_ref().map(|gateway| gateway.service());
+    let scope_execution = gateway_service
+        .as_ref()
+        .map(|service| service.clone() as Arc<dyn asc_pap::ScopeExecution>);
+    report_startup("policy_runtime", startup_started);
+    let mut policy_runtime = match asc_daemon::start_policy_reconciliation_with_gateway(
+        repository.clone(),
+        gateway_service.clone(),
+    ) {
         Ok(runtime) => runtime,
         Err(error) => {
             report_error(telemetry, &error);
             let _ = tokio::task::spawn_blocking(move || skill_worker.shutdown()).await;
+            signal_task.abort();
             return (
                 ExitCode::FAILURE,
                 Some(sinks::ShutdownPlan::full(durable_sinks)),
             );
         }
     };
-    let pap =
+    report_startup("scope_recovery", startup_started);
+    let mut pap =
         PapService::new(repository.clone()).with_reconcile_enqueuer(policy_runtime.enqueuer());
+    if let Some(execution) = scope_execution.clone() {
+        pap = pap.with_scope_execution(execution);
+    }
     // The sink clone has no registry, avoiding a worker/service ownership cycle.
     let discovery_registry = Arc::new(asc_daemon::ScopeDiscoveryRegistry::new(Arc::new(
         pap.clone(),
     )));
-    if let Err(error) = recover_active_scopes(repository.as_ref(), discovery_registry.as_ref()) {
+    let pap = pap.with_scope_discovery(discovery_registry.clone());
+    if let Err(error) = pap.recover_scopes() {
         report_error(telemetry, &error);
         let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
         drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop).await;
+        signal_task.abort();
         return (
             ExitCode::FAILURE,
             Some(sinks::ShutdownPlan::full(durable_sinks)),
         );
     }
-    let pap = pap.with_scope_discovery(discovery_registry.clone());
+    let cleanup = pap.clone();
+    if let Err(error) = policy_runtime.set_scope_cleanup(move || {
+        if let Err(error) = cleanup.sweep_deleting_scopes() {
+            tracing::warn!(target: "asc_process_diagnostic", %error,
+                "Scope cleanup remains pending; compensation will retry");
+        }
+    }) {
+        report_error(telemetry, &error);
+        let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;
+        drain_runtimes(skill_worker, discovery_registry, policy_runtime, stop).await;
+        signal_task.abort();
+        return (
+            ExitCode::FAILURE,
+            Some(sinks::ShutdownPlan::full(durable_sinks)),
+        );
+    }
     let principal_policy = Arc::new(RootManagedPrincipalPolicy::with_admin_uids(
         cli.policy_admin_uids,
     ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
-    let dispatcher = DaemonDispatcher::new(pap, policy_for_handler, actions)
+    let mut dispatcher = DaemonDispatcher::new(pap, policy_for_handler, actions)
         .with_observability(asc_daemon_core::ObservabilityService::new(Arc::new(
             sinks::ObservabilitySinkAdapter(Arc::clone(&durable_sinks.observability)),
         )))
         .with_queries(queries);
+    if let Some(gateway) = gateway {
+        dispatcher = dispatcher.with_gateway(gateway);
+    }
     let dispatcher = Arc::new(asc_daemon::skillfs::SkillFsDispatcher::new(
         dispatcher,
         skillfs.clone(),
     ));
 
-    let shutdown = ShutdownToken::new();
     let health_task = watch_policy_health(policy_runtime.enqueuer(), telemetry.reporter());
-    // The signal task is spawned before the retention catch-up so a stop
-    // signal arriving during the (unbounded) startup pass is observed at
-    // once: the catch-up then abandons admission and the daemon goes
-    // straight to the shutdown flow instead of making systemd wait out
-    // `TimeoutStopSec` and SIGKILL the process mid-catch-up.
-    let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
     // The retention lifecycle: the startup catch-up pass runs to completion
     // before `serve` admits requests (a stop signal abandons admission
     // instead), and the periodic task owns the rest. This is the
@@ -260,6 +345,7 @@ async fn run(
     // prune a large historical backlog, and request audit writes share the
     // same connection mutex (see `retention` module docs and
     // `DAEMON_JOB_CONTRACT_zh.md` section 11.5).
+    report_startup("retention_catchup", startup_started);
     let (retention_task, admitted) = start_retention(
         &durable_sinks.security,
         &durable_sinks.observability,
@@ -268,6 +354,7 @@ async fn run(
     )
     .await;
     let result = if admitted {
+        report_startup("transport", startup_started);
         Some(
             serve(
                 cli.bootstrap,
@@ -355,8 +442,20 @@ async fn start_retention(
             // Both gated passes run under one task: each store keeps its own
             // marker and lock, and the combined outcome schedules the failure
             // retry when either store needs it.
+            let started = Instant::now();
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "security", phase = "started");
             let security_outcome = security.run_sqlite_retention(now);
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "security", phase = "completed",
+                duration_ms = started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "observability", phase = "started");
             let observability_outcome = observability.run_sqlite_retention(now);
+            tracing::info!(target: "asc_observability::diagnostic",
+                reason = "retention_stage", store = "observability", phase = "completed",
+                duration_ms = started.elapsed().as_secs_f64() * 1000.0);
             asc_daemon::retention::combine_outcomes(security_outcome, observability_outcome)
         })
     };
@@ -368,12 +467,7 @@ async fn start_retention(
         .await
 }
 
-#[tracing::instrument(
-    skip_all,
-    target = "asc_daemon",
-    name = "policy.recovery.deleting_scopes"
-)]
-fn recover_deleting_scopes(repository: &dyn PapRepository) -> Result<(), asc_pap::PapError> {
+fn recover_deleting_file_scopes(repository: &dyn PapRepository) -> Result<(), asc_pap::PapError> {
     let mut cursor = None;
     loop {
         let scopes = repository.scan_scopes(cursor.as_ref(), 128)?;
@@ -382,40 +476,9 @@ fn recover_deleting_scopes(repository: &dyn PapRepository) -> Result<(), asc_pap
         }
         for scope in scopes {
             cursor = Some(scope.scope_id.clone());
-            if scope.status == ScopeStatus::Deleting {
+            if scope.status == ScopeStatus::Deleting && !scope.uses_credentials() {
+                // No pre-crash discovery survives exclusive database ownership.
                 repository.finish_scope_discovery(&scope.scope_id)?;
-                tracing::debug!(
-                    target: "asc_observability::diagnostic", component = "policy_recovery",
-                    scope_id = %scope.scope_id, "deleting scope recovery barrier committed"
-                );
-            }
-        }
-    }
-}
-
-#[tracing::instrument(
-    skip_all,
-    target = "asc_daemon",
-    name = "policy.recovery.active_scopes"
-)]
-fn recover_active_scopes(
-    repository: &dyn PapRepository,
-    discovery: &dyn ScopeDiscovery,
-) -> Result<(), asc_pap::PapError> {
-    let mut cursor = None;
-    loop {
-        let scopes = repository.scan_scopes(cursor.as_ref(), 128)?;
-        if scopes.is_empty() {
-            return Ok(());
-        }
-        for scope in scopes {
-            cursor = Some(scope.scope_id.clone());
-            if scope.status == ScopeStatus::Active {
-                discovery.start(&repository.scope_discovery_seed(&scope.scope_id)?)?;
-                tracing::debug!(
-                    target: "asc_observability::diagnostic", component = "policy_recovery",
-                    scope_id = %scope.scope_id, "active scope discovery restored"
-                );
             }
         }
     }
@@ -579,6 +642,14 @@ fn install_panic_hook() {
     }));
 }
 
+/// Gateway state and the credential store live under `/var/lib`, never the
+/// daemon's `/var/log` data directory, which log collection may harvest.
+fn gateway_data_dir() -> std::path::PathBuf {
+    asc_security_events::config::DaemonDataDirEnv::from_process()
+        .override_dir
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/agent-sec"))
+}
+
 fn report_error(telemetry: &asc_observability::TelemetryRuntime, problem: &dyn std::error::Error) {
     telemetry.report(&format!("asc-daemon: {problem}"));
     let mut source = problem.source();
@@ -613,6 +684,60 @@ fn watch_policy_health(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_scope_restart_retires_pending_apply_before_workers_start() {
+        use asc_pap::PapRepository;
+        use asc_policy_repository::BindingStateRepository;
+        use asc_policy_types::{
+            binding::{BindingStatus, PreparedBinding},
+            scope::{PreparedScope, ScopeStatus},
+        };
+
+        let repository = asc_policy_repository_sqlite::SqlitePolicyRepository::temporary().unwrap();
+        let binding: PreparedBinding = serde_json::from_str(include_str!(
+            "../../../crates/asc-policy-types/tests/fixtures/prepared-binding.json"
+        ))
+        .unwrap();
+        repository.put_policy(&binding.policy).unwrap();
+        repository
+            .put_scope(&PreparedScope {
+                scope_id: binding.scope.scope_id.clone(),
+                selector: binding.scope.selector.clone(),
+                policy_snapshots: vec![binding.policy],
+                owner_uid: None,
+                status: ScopeStatus::Active,
+            })
+            .unwrap();
+        let receipt = repository
+            .sync_scope_instances(&binding.scope.scope_id, &[binding.scope.process])
+            .unwrap()
+            .remove(0);
+        repository
+            .begin_scope_delete(&binding.scope.scope_id)
+            .unwrap();
+        assert_eq!(
+            repository
+                .get_binding_state(&receipt.spec.binding_id)
+                .unwrap()
+                .unwrap()
+                .binding
+                .status
+                .phase,
+            BindingStatus::PendingApply
+        );
+        super::recover_deleting_file_scopes(&repository).unwrap();
+        assert_eq!(
+            repository
+                .get_binding_state(&receipt.spec.binding_id)
+                .unwrap()
+                .unwrap()
+                .binding
+                .status
+                .phase,
+            BindingStatus::PendingDelete
+        );
+    }
+
     #[test]
     fn panic_hook_reports_location_without_payload() {
         const CHILD_ENV: &str = "ASC_PANIC_HOOK_TEST_CHILD";

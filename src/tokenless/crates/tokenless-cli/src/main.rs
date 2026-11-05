@@ -1,7 +1,9 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
 mod env_check;
+mod rewrite_deadline;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
@@ -47,6 +49,10 @@ enum Commands {
         /// Must remain under the real home or selected data directory.
         #[arg(long)]
         stash_db: Option<String>,
+        /// Set only for the child that `compress` starts for a PreTool rewrite;
+        /// that child leads a process group of its own.
+        #[arg(long = rewrite_deadline::CHILD_FLAG, hide = true)]
+        rewrite_child: bool,
     },
     /// Compress OpenAI Function Calling tool schemas
     CompressSchema {
@@ -178,7 +184,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run the embedded RTK command line (see `tokenless rtk --help`)
+    ///
+    /// Commands rewritten by PreTool run RTK through this subcommand.
+    #[command(disable_help_flag = true)]
+    Rtk {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
 }
+
+/// Subcommand that hands the remaining arguments to the embedded RTK.
+const RTK_SUBCOMMAND: &str = "rtk";
+/// Program name RTK prints in usage and recovery hints.
+const RTK_PROGRAM: &str = "tokenless rtk";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum DiffSortArg {
@@ -381,7 +400,7 @@ fn state_path_override(primary: &str, dsh_managed: &str) -> Option<String> {
 
 /// Resolve the directory containing tokenless SQLite databases.
 ///
-/// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only and may be an
+/// `TOKENLESS_DATA_DIR` affects statistics, stash and RTK receipts and may be an
 /// absolute directory outside the real home. DSH's managed shell supplies the
 /// same path through `DSH_TOKENLESS_DATA_DIR` because it removes inherited
 /// `TOKENLESS_*` variables. An invalid explicit override is returned as an
@@ -646,11 +665,39 @@ fn run() -> Result<(), (String, i32)> {
 
 fn run_command(command: Commands) -> Result<(), (String, i32)> {
     match command {
-        Commands::Compress { file, stash_db } => {
+        Commands::Compress {
+            file,
+            stash_db,
+            rewrite_child,
+        } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             // Undecodable or version-mismatched requests carry no content to
             // echo, so no fail-open response can be built: exit 2.
             let request = RequestEnvelope::from_json(&input).map_err(|e| (e.to_string(), 2))?;
+            let pre_tool = matches!(request.request, Request::PreTool(_));
+            let start_deadline = || {
+                rewrite_deadline::start()
+                    .map_err(|error| (format!("cannot bound the RTK rewrite: {error}"), 1))
+            };
+            #[cfg(unix)]
+            if !rewrite_child && pre_tool {
+                // The child reports its own errors; its status becomes this one's.
+                match rewrite_deadline::run_in_child(&input).map_err(|error| (error, 1))? {
+                    0 => return Ok(()),
+                    code => process::exit(code),
+                }
+            }
+            // A Windows job holds only this process and what it starts, never
+            // the caller's other processes, so the rewrite stays in this process.
+            #[cfg(not(unix))]
+            let _ = rewrite_child;
+            // Here a Unix PreTool runs in the rewrite child, which leads a group
+            // that the caller's cleanup never reaches. Its deadline therefore
+            // covers all it does: started before the configuration and stores
+            // are opened, and declared first so that it drops after they close.
+            // A response that the timeout cuts short is never relayed, as
+            // `compress` relays only a child that exits 0.
+            let _child_deadline = (cfg!(unix) && pre_tool).then(start_deadline).transpose()?;
 
             // PostTool dry-runs still open the configured store to verify that
             // recovery is available. The pipeline substitutes an in-memory
@@ -680,20 +727,50 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 None
             };
-            let rtk_path = matches!(&request.request, Request::PreTool(_))
-                .then(env_check::resolve_rtk_path)
-                .flatten()
-                .map(PathBuf::from);
-            let rtk_data_dir = if matches!(&request.request, Request::PreTool(_)) {
-                Some(
+            // The rewritten command runs later from the agent's working directory,
+            // so it names this executable by absolute path.
+            let rtk_launcher = match &request.request {
+                Request::PreTool(_) => Some(
+                    std::env::current_exe()
+                        .and_then(std::path::absolute)
+                        .map_err(|error| {
+                            (
+                                format!(
+                                    "cannot locate the tokenless executable for RTK commands: {error}"
+                                ),
+                                1,
+                            )
+                        })?,
+                ),
+                _ => None,
+            };
+            let rtk_data_dir = match &request.request {
+                Request::PreTool(_) => Some(
                     database_paths
                         .data_dir()
                         .map_err(|error| (error.to_owned(), 1))?
                         .to_path_buf(),
-                )
-            } else {
-                None
+                ),
+                Request::PostTool(value)
+                    if value.output_optimization == tokenless_protocol::OutputOptimization::Rtk =>
+                {
+                    match database_paths.data_dir() {
+                        Ok(path) => Some(path.to_path_buf()),
+                        Err(error) => {
+                            warn_soft(&format!(
+                                "tokenless: RTK receipt state unavailable: {error}; retaining RTK output ownership"
+                            ));
+                            None
+                        }
+                    }
+                }
+                _ => None,
             };
+            // In this process the deadline covers only the rewrite, so a
+            // response being written is never cut short. A caller that ends
+            // this process when anything else stalls also ends what RTK
+            // started, as the job ends with this process.
+            let deadline = (!cfg!(unix) && pre_tool).then(start_deadline).transpose()?;
             let outcome = dispatch_with_store(
                 &request,
                 &EntryOptions {
@@ -705,13 +782,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
                     html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", true),
                     stash_enabled: true,
-                    rtk_path,
+                    rtk_launcher,
                     rtk_data_dir,
                 },
                 stash.as_ref(),
                 recorder.as_ref(),
-            )
-            .map_err(|error| (error.to_string(), 1))?;
+            );
+            drop(deadline);
+            let outcome = outcome.map_err(|error| (error.to_string(), 1))?;
             if let Response::PostTool(response) = &outcome.response.response
                 && response.disposition == Disposition::NoSavings
             {
@@ -802,7 +880,19 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 input.clone()
             };
-            write_stdout(&emit_text)?;
+            // Byte-exact stdout, the contract `compress-toon` and `retrieve`
+            // already enforce: emit the payload verbatim so a dry-run or
+            // no-savings run reproduces the input byte-for-byte (the documented
+            // detection pattern compares stdout with the input) and a candidate
+            // that already ends in LF is not doubled. `println!` appended one,
+            // desyncing stdout from the recorded `after` text. That text equals
+            // the emitted bytes in active mode only: in dry-run `emit_text` is
+            // the original input while `output_text` below keeps the smaller
+            // predicted candidate, so the recorded `after_chars` is a prediction
+            // rather than a byte count of stdout. `write_stdout` would append
+            // that LF again, so this goes through the raw variant, which keeps
+            // the shared broken-pipe policy.
+            write_stdout_raw(&emit_text)?;
 
             record_compression_stats(
                 &config,
@@ -893,7 +983,20 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 
             let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
             let output_text = stats_after_text(&result, &input);
-            write_stdout(&result.output)?;
+            // Byte-exact stdout, the contract `compress-toon` and `retrieve`
+            // already enforce: emit the payload verbatim so a dry-run or
+            // no-savings run reproduces the input byte-for-byte (the documented
+            // detection pattern compares stdout with the input) and a compressed
+            // candidate that already ends in LF is not doubled. `println!`
+            // appended one, desyncing stdout from the recorded `after_text`.
+            // That text equals the emitted bytes in active mode only: in dry-run
+            // `result.output` is the original input while `stats_after_text`
+            // below returns `result.compressed_output` for
+            // `Disposition::DryRun`, so the recorded `after_chars` is a
+            // prediction rather than a byte count of stdout. `write_stdout`
+            // would append that LF again, so this goes through the raw variant,
+            // which keeps the shared broken-pipe policy.
+            write_stdout_raw(&result.output)?;
 
             record_compression_stats(
                 &config,
@@ -1175,29 +1278,41 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     };
                     (error.to_string(), code)
                 })?;
-            match result.disposition {
-                Disposition::Passthrough => {
-                    warn_soft(&format!(
-                        "tokenless: payload under the {min_toon_chars}-character TOON minimum ({} chars), skipping encoding and outputting original JSON",
-                        input.chars().count()
-                    ));
-                }
-                Disposition::NoSavings => {
-                    warn_soft(&format!(
-                        "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
-                        result.before_tokens, result.after_tokens
-                    ));
-                }
-                _ => {}
-            }
-
-            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
             // Byte-exact stdout: the documented detection contract compares
             // stdout with the input payload, so passthrough and no-savings
             // runs must reproduce the input verbatim. `println!` would append
             // a LF (added for inputs without one, doubled for inputs with
             // one) and break that comparison.
             write_stdout_raw(&result.output)?;
+
+            // Every advisory note is emitted only after the payload is on
+            // stdout and only through `warn_soft`, so a caller that redirects
+            // stderr somewhere unwritable — `/dev/full`, a full log
+            // filesystem — still gets the original JSON and exit code 0.
+            // Documented contract: the note is informational only.
+            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
+            match result.disposition {
+                Disposition::Passthrough => {
+                    // The Runtime reports one disposition for both reasons it
+                    // declines to encode. Length is the only other gate that
+                    // can fire here, so it also tells the two apart.
+                    if input.chars().count() < min_toon_chars {
+                        warn_soft(&format!(
+                            "tokenless: payload under the {min_toon_chars}-character TOON minimum ({} chars), skipping encoding and outputting original JSON",
+                            input.chars().count()
+                        ));
+                    } else {
+                        warn_soft(
+                            "tokenless: TOON cannot retain this payload's numbers exactly, skipping encoding and outputting original JSON",
+                        );
+                    }
+                }
+                Disposition::NoSavings => warn_soft(&format!(
+                    "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
+                    result.before_tokens, result.after_tokens
+                )),
+                _ => {}
+            }
 
             // Recorded `after` = the predicted TOON result (or original when
             // TOON did not reduce size), so dry-run captures the prediction.
@@ -1238,6 +1353,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
         }
+        // main() runs RTK before parsing so `--` and help flags reach it
+        // verbatim; a parsed `rtk` subcommand still runs RTK rather than relying
+        // on that.
+        Commands::Rtk { args } => process::exit(rtk::run(RTK_PROGRAM, args)),
     }
 
     Ok(())
@@ -1439,6 +1558,12 @@ fn report_fatal(message: &str) {
 }
 
 fn main() {
+    // RTK parses its own arguments, including `--` and help flags, so they pass
+    // through verbatim instead of through the Tokenless parser.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|arg| arg == RTK_SUBCOMMAND) {
+        process::exit(rtk::run(RTK_PROGRAM, args));
+    }
     if let Err((msg, code)) = run() {
         report_fatal(&msg);
         process::exit(code);

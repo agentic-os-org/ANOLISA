@@ -15,6 +15,7 @@ VERSION = "1.2.3"
 ACTION_DIR = Path(__file__).resolve().parent
 VERIFIER = ACTION_DIR / "verify-wheels.py"
 PLATFORMS = {
+    ("windows", "x86_64"): "win_amd64",
     ("linux", "x86_64"): "manylinux_2_17_x86_64.manylinux2014_x86_64",
     ("linux", "aarch64"): "manylinux_2_17_aarch64.manylinux2014_aarch64",
     ("macos", "aarch64"): "macosx_11_0_arm64",
@@ -23,6 +24,14 @@ PLATFORMS = {
 
 
 def binary_payload(os_name: str, architecture: str) -> bytes:
+    if os_name == "windows":
+        payload = bytearray(128)
+        payload[:2] = b"MZ"
+        struct.pack_into("<I", payload, 0x3C, 64)
+        payload[64:68] = b"PE\0\0"
+        struct.pack_into("<H", payload, 68, 0x8664 if architecture == "x86_64" else 0xAA64)
+        struct.pack_into("<H", payload, 88, 0x20B)
+        return bytes(payload)
     if os_name == "macos":
         payload = bytearray(32)
         payload[:4] = b"\xcf\xfa\xed\xfe"
@@ -49,6 +58,7 @@ def create_runtime(
     version: str = VERSION,
     platform: str | None = None,
     binary_architecture: str | None = None,
+    executables: tuple[str, ...] | None = None,
 ) -> Path:
     platform = platform or PLATFORMS[(os_name, architecture)]
     path = directory / f"anolisa_tokenless-{version}-cp311-abi3-{platform}.whl"
@@ -72,8 +82,13 @@ def create_runtime(
                 + "\n"
             ).encode(),
         )
-        add_member(archive, "anolisa_tokenless/_native.abi3.so", payload, 0o100755)
-        add_member(archive, "anolisa_tokenless/_bin/rtk", payload, 0o100755)
+        extension = "_native.pyd" if os_name == "windows" else "_native.abi3.so"
+        add_member(archive, f"anolisa_tokenless/{extension}", payload, 0o100755)
+        add_member(archive, "anolisa_tokenless/_bin/__init__.py", b"")
+        if executables is None:
+            executables = ("tokenless.exe",) if os_name == "windows" else ("tokenless",)
+        for executable in executables:
+            add_member(archive, f"anolisa_tokenless/_bin/{executable}", payload, 0o100755)
     return path
 
 
@@ -190,7 +205,7 @@ def main() -> int:
         wrong_version = root / "wrong-version"
         wrong_version.mkdir()
         populate_aggregate(wrong_version)
-        runtime = next(wrong_version.glob("anolisa_tokenless-*.whl"))
+        runtime = next(wrong_version.glob("anolisa_tokenless-*manylinux*x86_64.whl"))
         runtime.unlink()
         create_runtime(wrong_version, "linux", "x86_64", version="1.2.4")
         run_verifier(wrong_version, "--layout", "aggregate", expect_success=False)
@@ -205,25 +220,63 @@ def main() -> int:
         next(missing_intel.glob("*macosx_11_0_x86_64.whl")).unlink()
         run_verifier(missing_intel, "--layout", "aggregate", expect_success=False)
 
+        missing_windows = root / "missing-windows"
+        shutil.copytree(aggregate, missing_windows)
+        next(missing_windows.glob("*win_amd64.whl")).unlink()
+        run_verifier(missing_windows, "--layout", "aggregate", expect_success=False)
+
+        next(missing_intel.glob("*win_amd64.whl")).unlink()
+        # Historical trees predate both the shared matrix and the linked RTK library.
         historical_source = root / "historical-source"
         source_manifest = historical_source / "src/tokenless/Cargo.toml"
         source_manifest.parent.mkdir(parents=True)
-        source_manifest.touch()
+        source_manifest.write_text('[workspace]\nmembers = ["crates/tokenless-cli"]\n')
+        historical = root / "historical"
+        historical.mkdir()
+        for os_name, architecture in (("linux", "x86_64"), ("linux", "aarch64"), ("macos", "aarch64")):
+            create_runtime(historical, os_name, architecture, executables=("rtk",))
+        create_agentscope(historical)
         run_verifier(
-            missing_intel,
+            historical,
             "--layout",
             "aggregate",
             "--tokenless-source-root",
             str(historical_source),
         )
+        for wheels in (missing_intel, aggregate):
+            run_verifier(
+                wheels,
+                "--layout",
+                "aggregate",
+                "--tokenless-source-root",
+                str(historical_source),
+                expect_success=False,
+            )
+        historical_flat = root / "historical-flat"
+        historical_flat.mkdir()
+        create_runtime(historical_flat, "macos", "aarch64", executables=("rtk",))
+        flat_macos = ("--layout", "flat", "--os", "macos", "--arch", "aarch64")
+        run_verifier(historical_flat, *flat_macos, expect_success=False)
         run_verifier(
-            aggregate,
-            "--layout",
-            "aggregate",
+            historical_flat, *flat_macos, "--tokenless-source-root", str(historical_source)
+        )
+        linked_source = root / "linked-source"
+        source_manifest = linked_source / "src/tokenless/Cargo.toml"
+        source_manifest.parent.mkdir(parents=True)
+        source_manifest.write_text(
+            '[workspace.dependencies]\nrtk = { path = "third_party/rtk" }\n'
+        )
+        run_verifier(
+            historical_flat,
+            *flat_macos,
             "--tokenless-source-root",
-            str(historical_source),
+            str(linked_source),
             expect_success=False,
         )
+        linked_flat = root / "linked-flat"
+        linked_flat.mkdir()
+        create_runtime(linked_flat, "macos", "aarch64")
+        run_verifier(linked_flat, *flat_macos, "--tokenless-source-root", str(linked_source))
 
         duplicate = root / "duplicate"
         duplicate.mkdir()
@@ -256,6 +309,31 @@ def main() -> int:
                 "macos",
                 "--arch",
                 architecture,
+                expect_success=False,
+            )
+
+        bad_windows = root / "bad-windows"
+        bad_windows.mkdir()
+        create_runtime(bad_windows, "windows", "x86_64", binary_architecture="aarch64")
+        run_verifier(bad_windows, "--layout", "flat", "--os", "windows", "--arch", "x86_64", expect_success=False)
+
+        for os_name, executables in (
+            ("windows", ("tokenless",)),
+            ("macos", ("tokenless.exe",)),
+            # A binary left over from the separate RTK layout is stale.
+            ("macos", ("tokenless", "rtk")),
+        ):
+            wrong_executables = root / f"wrong-executables-{os_name}-{len(executables)}"
+            wrong_executables.mkdir()
+            create_runtime(wrong_executables, os_name, "x86_64", executables=executables)
+            run_verifier(
+                wrong_executables,
+                "--layout",
+                "flat",
+                "--os",
+                os_name,
+                "--arch",
+                "x86_64",
                 expect_success=False,
             )
 

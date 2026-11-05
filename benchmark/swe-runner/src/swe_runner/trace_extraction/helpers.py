@@ -18,7 +18,7 @@ import json
 import logging
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import floor
 from typing import Any
 
@@ -39,10 +39,20 @@ class ExtractionError(Exception):
 # ---------------------------------------------------------------------------
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 def ns_to_iso(ns: int) -> str:
     """Convert nanosecond timestamp to ISO-8601 UTC string."""
-    dt = datetime.fromtimestamp(ns / 1e9, tz=UTC)
-    return dt.isoformat()
+    seconds, remainder = divmod(ns, 1_000_000_000)
+    # Integer arithmetic only: ``datetime.fromtimestamp(ns / 1e9)`` rounds the
+    # value through a float whose resolution degrades with magnitude (~0.5 us in
+    # 2026 but ~10 us at epoch second 1e11) and turns the largest timestamp
+    # ``parse_time_value`` accepts into the next year. Building the instant from
+    # exact seconds plus a rounded microsecond keeps the existing half-up
+    # rounding, and ``timedelta`` carries a rounded-up microsecond forward.
+    micros = (remainder + 500) // 1_000
+    return (_EPOCH + timedelta(seconds=seconds, microseconds=micros)).isoformat()
 
 
 def parse_time_value(value: str) -> int:
@@ -121,7 +131,14 @@ def sanitize_path_component(value: str | None) -> str:
     """Make a string safe for use as a directory name."""
     if not value:
         return "__unknown__"
-    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    # ``.`` and ``..`` are valid directory names, so the substitution keeps
+    # them, and joining one under the trace root lands on the trace root or
+    # its parent: two instances then share a directory, or an instance id
+    # escapes the export tree. Treat every all-dot name as missing.
+    if not sanitized.strip("."):
+        return "__unknown__"
+    return sanitized
 
 
 def _safe_int(value: object) -> int:

@@ -1,5 +1,5 @@
 //! Interceptor wrappers (#3415): programs that must stay in the
-//! execution path because they interpose on the payload's output (rtk
+//! execution path because they interpose on the payload's output (RTK
 //! compresses it). Unlike launchers (`walk_launcher_chain`), which are
 //! peeled classification-only and discarded, an interceptor is peeled
 //! for assessment but kept for execution — the step spawns the trusted
@@ -22,6 +22,10 @@ use super::readonly_compound::{
 struct InterceptorSpec {
     /// Basename the wrapper path token must carry.
     name: &'static str,
+    /// Fixed subcommand tokens that must follow the wrapper path. They
+    /// select the interposing mode and are kept for execution; any other
+    /// subcommand of the same binary stays off the approval-free path.
+    subcommand: &'static [&'static str],
     /// Exact assignment keys accepted in front of the wrapper. The
     /// collected pairs are injected into the auto-executed step, so
     /// the set is explicit rather than a prefix: a future
@@ -36,20 +40,34 @@ struct InterceptorSpec {
     env_keys: &'static [&'static str],
 }
 
+/// Attribution keys Tokenless emits in front of its RTK wrapper.
+const TOKENLESS_RTK_ENV_KEYS: &[&str] = &[
+    "TOKENLESS_AGENT_ID",
+    "TOKENLESS_SESSION_ID",
+    "TOKENLESS_TOOL_USE_ID",
+    "TOKENLESS_DATA_DIR",
+];
+
 const INTERCEPTOR_WRAPPERS: &[InterceptorSpec] = &[
-    // tokenless rtk: `anchor_rtk_prefix` emits
-    // `env TOKENLESS_* <abs rtk> <payload>` when rtk rewrites with a
-    // bare name; when rtk already emits the absolute wrapper path the
-    // anchor adds nothing and the wrapped form is just
-    // `<abs rtk> <payload>`. Both shapes occur in the wild.
+    // Tokenless builds that link RTK anchor rewrites to their own
+    // executable: `env TOKENLESS_* <abs tokenless> rtk <payload>`.
+    // `tokenless rtk` forwards its arguments verbatim to the same RTK
+    // entry point the standalone binary below runs, so it adds no side
+    // effects of its own.
+    InterceptorSpec {
+        name: "tokenless",
+        subcommand: &["rtk"],
+        env_keys: TOKENLESS_RTK_ENV_KEYS,
+    },
+    // Releases that ship RTK as a standalone binary: `anchor_rtk_prefix`
+    // emits `env TOKENLESS_* <abs rtk> <payload>`
+    // when rtk rewrites with a bare name; when rtk already emits the
+    // absolute wrapper path the anchor adds nothing and the wrapped form
+    // is just `<abs rtk> <payload>`. Both shapes occur in the wild.
     InterceptorSpec {
         name: "rtk",
-        env_keys: &[
-            "TOKENLESS_AGENT_ID",
-            "TOKENLESS_SESSION_ID",
-            "TOKENLESS_TOOL_USE_ID",
-            "TOKENLESS_DATA_DIR",
-        ],
+        subcommand: &[],
+        env_keys: TOKENLESS_RTK_ENV_KEYS,
     },
 ];
 
@@ -63,10 +81,11 @@ struct InterceptorTokens<'a> {
 }
 
 /// Peels the interceptor wrapper template (`[env KEY=…] <wrapper path>
-/// <payload>`, env prefix optional) from command tokens. Pure parsing:
-/// every deviation — foreign env keys, an unrecognized wrapper
-/// basename — returns `None` before any filesystem probe, so these
-/// rejections hold on machines without the wrapper installed.
+/// [subcommand] <payload>`, env prefix optional) from command tokens.
+/// Pure parsing: every deviation — foreign env keys, an unrecognized
+/// wrapper basename, a missing or different subcommand — returns `None`
+/// before any filesystem probe, so these rejections hold on machines
+/// without the wrapper installed.
 fn parse_interceptor_tokens(tokens: &[String]) -> Option<InterceptorTokens<'_>> {
     let mut rest = tokens;
     // The env prefix is optional: when rtk emits the absolute wrapper
@@ -81,10 +100,19 @@ fn parse_interceptor_tokens(tokens: &[String]) -> Option<InterceptorTokens<'_>> 
         .position(|token| !is_env_assignment(token))
         .unwrap_or(rest.len());
     let (assignments, rest) = rest.split_at(assignment_end);
-    let (wrapper, payload) = rest.split_first()?;
+    let (wrapper, rest) = rest.split_first()?;
     let spec = INTERCEPTOR_WRAPPERS
         .iter()
         .find(|spec| Path::new(wrapper).file_name().and_then(|n| n.to_str()) == Some(spec.name))?;
+    let subcommand = rest.get(..spec.subcommand.len())?;
+    if subcommand
+        .iter()
+        .zip(spec.subcommand)
+        .any(|(token, expected)| token != expected)
+    {
+        return None;
+    }
+    let payload = &rest[spec.subcommand.len()..];
     let mut env = Vec::with_capacity(assignments.len());
     for token in assignments {
         let (key, value) = token.split_once('=')?;
@@ -118,7 +146,7 @@ pub(super) fn build_interceptor_step(parsed: &ParsedCommand) -> Option<ReadonlyC
     }
     let tokens = parse_interceptor_tokens(&parsed.stages[0])?;
     // The outer classifier gates auto-approval on the *wrapper's*
-    // stage assessment, whose program is rtk/env — payload-sensitive
+    // stage assessment, whose program is the wrapper — payload-sensitive
     // rules (e.g. the grep-family secret search, which keys on the
     // program identity) cannot fire there. Re-run the stage rules on
     // the payload and mirror the outer gate, so wrapping never
@@ -147,8 +175,9 @@ pub(super) fn build_interceptor_step(parsed: &ParsedCommand) -> Option<ReadonlyC
     // resolving it here as well keeps the eligibility verdict equal to
     // the executability verdict (no 127 at run time).
     resolve_trusted_executable(payload_program)?;
-    let mut argv = Vec::with_capacity(tokens.payload.len() + 1);
+    let mut argv = Vec::with_capacity(tokens.payload.len() + tokens.spec.subcommand.len() + 1);
     argv.push(tokens.spec.name.to_string());
+    argv.extend(tokens.spec.subcommand.iter().map(ToString::to_string));
     argv.extend(tokens.payload.iter().cloned());
     let mut env = tokens.env;
     merge_process_session_env(&mut env, tokenless_process_env());
@@ -189,7 +218,7 @@ fn tokenless_process_env() -> Vec<(String, String)> {
         .collect()
 }
 
-/// `TOKENLESS_DATA_DIR` has path semantics: rtk creates the directory
+/// `TOKENLESS_DATA_DIR` has path semantics: RTK creates the directory
 /// and writes its state databases there, so a caller-chosen value
 /// would turn a readonly grant into writes at arbitrary paths (#3436
 /// review). Every occurrence must match this session's trusted state

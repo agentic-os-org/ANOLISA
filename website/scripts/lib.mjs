@@ -51,3 +51,12 @@ export function kebabCase(value) {
     .replace(/[_\s]+/g, '-')
     .toLowerCase();
 }
+
+export function stripCopilotShellNavigation(markdown) {
+  // Preserve historical claims and integration details without navigation to the deprecated component.
+  return markdown
+    .replace(/(?<!!)\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) =>
+      /copilot-shell/i.test(target) ? label : match,
+    )
+    .replace(/^#{1,6}[ \t]+([^\n]*copilot[ -]shell[^\n]*)$/gim, '**$1**');
+}

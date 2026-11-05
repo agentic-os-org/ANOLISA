@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "topology_mode": "static_at_apply",
+  "targets": [
+    {
+      "path": "/config",
+      "kind": "exact_file",
+      "protections": { "delete": false, "ordinary_write": true },
+      "exclusions": []
+    },
+    {
+      "path": "/workspace",
+      "kind": "directory_tree",
+      "protections": { "delete": true, "ordinary_write": true },
+      "exclusions": [
+        { "path": "/workspace/cache", "kind": "directory_subtree" },
+        { "path": "/workspace/state", "kind": "exact_entry" }
+      ]
+    }
+  ]
+}

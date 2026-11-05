@@ -1822,6 +1822,72 @@ mod tests {
         })
     }
 
+    #[test]
+    fn concurrent_storage_config_requests_keep_the_config_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({"storage": {}, "fixture": "x".repeat(16 * 1024)}).to_string(),
+        )
+        .unwrap();
+        let mut state = test_app_state(0).into_inner();
+        Arc::get_mut(&mut state).unwrap().config_path = Some(config_path.clone());
+        let data = web::Data::from(state);
+        let barrier = std::sync::Barrier::new(4);
+
+        // Each in-process app models one worker with the same production
+        // application data. No listener, socket or background service starts.
+        let statuses = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|worker_index| {
+                    let data = data.clone();
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        actix_web::rt::System::new().block_on(async move {
+                            let app = awtest::init_service(
+                                App::new()
+                                    .app_data(data)
+                                    .service(super::storage_status::post_storage_config),
+                            )
+                            .await;
+                            barrier.wait();
+                            let mut statuses = Vec::new();
+                            for index in 0..16 {
+                                let request = awtest::TestRequest::post()
+                                    .uri("/storage/config")
+                                    .set_json(serde_json::json!({
+                                        "max_total_size_mb": 900 + worker_index * 100 + index % 4
+                                    }))
+                                    .to_request();
+                                statuses.push(awtest::call_service(&app, request).await.status());
+                            }
+                            statuses
+                        })
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert!(
+            statuses.iter().all(|status| *status == StatusCode::OK),
+            "valid concurrent settings requests must succeed: {statuses:?}"
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert!(
+            [903, 1003, 1103, 1203]
+                .contains(&saved["storage"]["max_total_size_mb"].as_u64().unwrap()),
+            "the last complete worker write must win"
+        );
+        assert_eq!(saved["fixture"], "x".repeat(16 * 1024));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
     fn test_app_state_with_trajectory_store(store: TrajectoryStore) -> web::Data<AppState> {
         let auth_config = ServerAuthConfig { enabled: false };
         let auth = Arc::new(DashboardAuth::init(

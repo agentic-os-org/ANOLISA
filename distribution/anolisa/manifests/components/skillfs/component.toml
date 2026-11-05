@@ -1,6 +1,6 @@
 [component]
 name = "skillfs"
-version = "0.5.2"
+version = "0.5.5"
 layer = "runtime"
 domain = "tools"
 display_name = "SkillFS"
@@ -11,7 +11,7 @@ repository = "https://github.com/agentic-os-org/ANOLISA"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.1.16"
+min_anolisa_version = "0.3.21"
 
 [backends.rpm]
 package = "skillfs"
@@ -29,19 +29,14 @@ packages = { rpm = "fuse3", deb = "fuse3" }
 modes = ["system"]
 
 [[component.layout.files]]
-source = ".anolisa/component.toml"
-target = "{datadir}/components/skillfs/component.toml"
-mode = "0644"
-
-[[component.layout.files]]
 source = "bin/skillfs"
 target = "{bindir}/skillfs"
 mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "share/anolisa/runtime/skills/skillfs/"
-target = "{datadir}/runtime/skills/skillfs"
+source = "share/anolisa/skills/skillfs-mount/"
+target = "{datadir}/skills/skillfs-mount"
 
 [component.health_check]
 type = "binary_version"

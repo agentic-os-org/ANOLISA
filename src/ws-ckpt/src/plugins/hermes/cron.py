@@ -5,6 +5,8 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import tempfile
 from typing import List, Optional
@@ -13,14 +15,14 @@ _LOCK_PATH = os.path.join(tempfile.gettempdir(), "ws-ckpt-cron.lock")
 
 # Match: ws-ckpt checkpoint ... -w '<path>' or -w <path>
 _CRON_RE = re.compile(r"^\S+\s+\S+\s+\S+\s+\S+\s+\S+$")
-_MARKER_RE = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+'([^']+)'")
-_MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt\s+checkpoint\s+.*-w\s+(\S+)")
+_MARKER_RE = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*-w\s+'([^']+)'")
+_MARKER_RE_UNQUOTED = re.compile(r"ws-ckpt['\"]?\s+checkpoint\s+.*-w\s+(\S+)")
 
 
-def _build_cron_line(workspace: str, schedule: str) -> str:
+def _build_cron_line(workspace: str, schedule: str, binary: str) -> str:
     quoted_ws = "'" + workspace.replace("'", "'\\''") + "'"
     return (
-        f"{schedule} /usr/local/bin/ws-ckpt checkpoint -w {quoted_ws}"
+        f"{schedule} {shlex.quote(binary)} checkpoint -w {quoted_ws}"
         f' -s "cron-$(date +\\%s)"'
         f' -m "scheduled snapshot"'
         f" --metadata '{{\"auto\":true,\"type\":\"cron\"}}'"
@@ -148,12 +150,22 @@ class CrontabManager:
                 "\n" in s or "\r" in s for s in schedules
             ):
                 return False
+            binary = ""
+            if schedules:
+                executable = shutil.which("ws-ckpt")
+                if executable is None:
+                    return False
+                # Save the discovered absolute command: cron has a restricted
+                # PATH, and resolving a launcher symlink would pin an old release.
+                binary = os.path.abspath(executable)
+                if any(character in binary for character in ("\n", "\r", "%")):
+                    return False
             lines = _read_crontab()
             if lines is None:
                 return False
             kept = [l for l in lines if not _match_workspace(l, workspace)]
             for s in schedules:
-                kept.append(_build_cron_line(workspace, s))
+                kept.append(_build_cron_line(workspace, s, binary))
             return _write_crontab(kept)
         return CrontabManager._with_lock(_do)
 

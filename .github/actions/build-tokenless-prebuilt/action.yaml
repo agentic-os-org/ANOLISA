@@ -12,7 +12,7 @@ inputs:
     description: Package target architecture.
     required: true
   profile:
-    description: Prepared Cross release profile.
+    description: Prepared Cross or Windows MSVC release profile.
     required: true
   tag:
     description: Exact Tokenless source tag to bind; empty uses the checked-out commit.
@@ -21,7 +21,7 @@ inputs:
 
 outputs:
   artifact-directory:
-    description: Directory containing the tar, checksums, and CycloneDX SBOM.
+    description: Directory containing the archive, checksums, and CycloneDX SBOM.
     value: ${{ steps.build.outputs.artifact-directory }}
   wheel-directory:
     description: Directory containing the Python wheels for this target.

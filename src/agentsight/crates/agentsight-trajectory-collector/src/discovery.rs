@@ -1,9 +1,9 @@
 //! Local agent session file discovery.
 //!
-//! Scans known local AI agent session roots and returns JSONL files that can be
-//! converted into ATIF. Qoder/QoderWork/Claude Code share the Claude-style JSONL
-//! schema; Codex/Cursor roots are discovered here so converter support can be
-//! added without changing the API surface.
+//! Scans known local AI agent session roots for JSONL and legacy Gemini JSON
+//! files to convert into ATIF. Qoder/QoderWork/Claude Code share the JSONL
+//! schema; Codex/Cursor/Gemini CLI roots are discovered here so converter
+//! support can be added without changing the API surface.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,9 @@ enum Layout {
     PerProject,
     /// `<root>/<session>.jsonl`.
     Flat,
+    /// Gemini sessions under `<root>/<project>/chats/`, with sub-agent
+    /// transcripts under `chats/<parent-session>/`; files use `.jsonl` or `.json`.
+    Chats,
 }
 
 /// Known local session roots relative to a home directory.
@@ -67,6 +70,12 @@ const SESSION_ROOTS: &[SessionRoot] = &[
         rel_dir: ".cursor/projects",
         source: "cursor",
         layout: Layout::PerProject,
+        scan_subdirs: &[],
+    },
+    SessionRoot {
+        rel_dir: ".gemini/tmp",
+        source: "gemini-cli",
+        layout: Layout::Chats,
         scan_subdirs: &[],
     },
 ];
@@ -293,15 +302,26 @@ fn root_from_path(dir: &Path) -> ScanRoot {
     }
 
     // Backward-compatible default: existing configs passed Qoder projects dirs.
+    // A `.gemini` config without the `tmp` segment is normalized onto the
+    // runtime root the CLI actually writes chats under (reaching this point
+    // means no known root — including `.gemini/tmp` — matched the path).
+    let dir = if path.contains(".gemini") {
+        dir.join("tmp")
+    } else {
+        dir.to_path_buf()
+    };
+    let source = source_from_path(&dir);
     ScanRoot {
-        dir: dir.to_path_buf(),
-        source: source_from_path(dir),
+        dir,
+        source,
         layout: if path.contains(".codex") {
             Layout::Flat
+        } else if path.contains(".gemini") {
+            Layout::Chats
         } else {
             Layout::PerProject
         },
-        scan_subdirs: if path.contains(".codex") {
+        scan_subdirs: if path.contains(".codex") || path.contains(".gemini") {
             &[]
         } else {
             &["transcript"]
@@ -322,6 +342,8 @@ fn source_from_path(dir: &Path) -> String {
         "codex".to_string()
     } else if path.contains(".cursor") {
         "cursor".to_string()
+    } else if path.contains(".gemini") {
+        "gemini-cli".to_string()
     } else {
         "qoder".to_string()
     }
@@ -332,6 +354,7 @@ fn discover_in_root(root: &ScanRoot) -> Vec<DiscoveredSession> {
     match root.layout {
         Layout::PerProject => discover_in_projects_dir(root),
         Layout::Flat => discover_in_flat_dir(root),
+        Layout::Chats => discover_in_chats_dir(root),
     }
 }
 
@@ -412,6 +435,141 @@ fn discover_in_flat_dir_recursive(
             source: source.to_string(),
         });
     }
+}
+
+/// Discover sessions within a Gemini CLI root: `<root>/<project>/chats/`.
+///
+/// Project directories carry a registry slug, not the project path; the
+/// sibling `.project_root` marker file holds the absolute path and yields a
+/// human-readable project name. Runtime directories without a `chats/`
+/// child (e.g. `bin/`) hold no sessions and are skipped by the join.
+fn discover_in_chats_dir(root: &ScanRoot) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+
+    let entries = match std::fs::read_dir(&root.dir) {
+        Ok(e) => e,
+        Err(err) => {
+            log::warn!(
+                "Trajectory scan: failed to read {}: {err}",
+                root.dir.display()
+            );
+            return sessions;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let chats = path.join("chats");
+        if !chats.is_dir() {
+            continue;
+        }
+        let project = chats_project_name(&path)
+            .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+        sessions.extend(discover_in_chats_project(&chats, &project, &root.source));
+    }
+
+    sessions
+}
+
+/// Read the project name from a Gemini CLI project directory's
+/// `.project_root` marker (the absolute project path).
+fn chats_project_name(project_dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(project_dir.join(".project_root")).ok()?;
+    let name = Path::new(content.trim())
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Discover session files inside one `<project>/chats/` directory.
+///
+/// Main sessions use `.jsonl` record streams or legacy `.json` documents.
+/// Any non-empty stem is accepted; subdirectories hold
+/// sub-agent transcripts named by their full session id.
+fn discover_in_chats_project(chats: &Path, project: &str, source: &str) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+
+    let entries = match std::fs::read_dir(chats) {
+        Ok(e) => e,
+        Err(err) => {
+            log::debug!("Trajectory scan: failed to read {}: {err}", chats.display());
+            return sessions;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+        if is_dir {
+            sessions.extend(discover_chats_subagents(&path, project, source));
+            continue;
+        }
+        let Some(stem) = name
+            .strip_suffix(".jsonl")
+            .or_else(|| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if stem.is_empty() {
+            continue;
+        }
+        sessions.push(DiscoveredSession {
+            path,
+            project: project.to_string(),
+            session_id: stem.to_string(),
+            is_subagent: false,
+            source: source.to_string(),
+        });
+    }
+
+    sessions
+}
+
+/// Discover sub-agent transcripts under `chats/<parent-session>/`.
+///
+/// Gemini nests sub-agents below the parent's full session id (not the
+/// parent's file stem), so the composite id keeps per-file uniqueness but
+/// does not join back to the parent's discovered row.
+fn discover_chats_subagents(
+    parent_dir: &Path,
+    project: &str,
+    source: &str,
+) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+    let parent = parent_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let Ok(entries) = std::fs::read_dir(parent_dir) else {
+        return sessions;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(stem) = name
+            .strip_suffix(".jsonl")
+            .or_else(|| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if stem.is_empty() {
+            continue;
+        }
+        sessions.push(DiscoveredSession {
+            path: entry.path(),
+            project: project.to_string(),
+            session_id: format!("{parent}:subagent:{stem}"),
+            is_subagent: true,
+            source: source.to_string(),
+        });
+    }
+    sessions
 }
 
 /// Discover sessions within a single project directory.
@@ -695,6 +853,71 @@ mod tests {
         assert_eq!(sessions.len(), 1, "recursive flat layout: {sessions:?}");
         assert_eq!(sessions[0].session_id, "rollout-abc123");
         assert_eq!(sessions[0].source, "codex");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_discover_gemini_chats_layout() {
+        let base = tmp_projects_dir("gemini");
+        let root = base.join(".gemini").join("tmp");
+        let project = root.join("demo-slug");
+        let chats = project.join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        // The registry slug maps to a real path via the `.project_root` marker.
+        std::fs::write(
+            project.join(".project_root"),
+            "/Users/alice/work/demo-app\n",
+        )
+        .unwrap();
+        std::fs::write(
+            chats.join("session-2026-08-03T10-00-ab12cd34.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        // Sub-agent transcripts nest under the parent's full session id.
+        let parent = "b7c9ed01-1234-4abc-9def-aabbccddeeff";
+        let sub = chats.join(parent);
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("c0ffee12-4abc-4def-9abc-112233445566.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        // Runtime directories without a `chats/` child hold no sessions.
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+
+        let sessions = discover_sessions(Some(std::slice::from_ref(&root)));
+        assert_eq!(sessions.len(), 2, "main + subagent: {sessions:?}");
+
+        let main = sessions.iter().find(|s| !s.is_subagent).unwrap();
+        assert_eq!(main.session_id, "session-2026-08-03T10-00-ab12cd34");
+        assert_eq!(main.project, "demo-app");
+        assert_eq!(main.source, "gemini-cli");
+
+        let sub = sessions.iter().find(|s| s.is_subagent).unwrap();
+        assert_eq!(
+            sub.session_id,
+            format!("{parent}:subagent:c0ffee12-4abc-4def-9abc-112233445566")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_gemini_config_root_normalizes_to_tmp() {
+        let base = tmp_projects_dir("gemini-norm");
+        let config = base.join(".gemini");
+        let chats = config.join("tmp").join("demo-slug").join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(chats.join("session-x.jsonl"), "{}\n").unwrap();
+
+        // A config path ending at `.gemini` (no `tmp` segment) is normalized
+        // onto the runtime root the CLI actually writes chats under.
+        let sessions = discover_sessions(Some(std::slice::from_ref(&config)));
+        assert_eq!(sessions.len(), 1, "normalized root: {sessions:?}");
+        assert_eq!(sessions[0].source, "gemini-cli");
+        assert_eq!(sessions[0].session_id, "session-x");
 
         let _ = std::fs::remove_dir_all(&base);
     }

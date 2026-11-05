@@ -142,8 +142,9 @@ fn call_wire(
 
 #[cfg(target_os = "linux")]
 fn verify_server(stream: &UnixStream) -> io::Result<()> {
-    // Authenticate this connection rather than a path that could be replaced.
-    let uid = rustix::net::sockopt::socket_peercred(stream)?.uid.as_raw();
+    // Authenticate the connected peer by UID; PID may be 0 across namespaces.
+    let uid =
+        nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)?.uid();
     if uid != 0 {
         #[cfg(feature = "testing")]
         if std::env::var_os("AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK").as_deref()

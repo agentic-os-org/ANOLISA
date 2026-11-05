@@ -1,5 +1,192 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+fn login_path_task_fixture(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let home = temp_shell_home(label);
+    let profile = home.join("shell-profile");
+    fs::create_dir(&profile).expect("create independent Shell profile");
+    let binary = profile.join("cosh-shell");
+    fs::copy(env!("CARGO_BIN_EXE_cosh-shell"), &binary).expect("copy actual Shell");
+    assert!(!profile.join("cosh-gateway").exists());
+    let bin = home.join("profile-bin");
+    fs::create_dir(&bin).expect("create login-only Gateway directory");
+    let gateway = TASK_GATEWAY.replace(
+        "printf '%s\\n' \"$*\" >> \"$TASK_GATEWAY_ARGV\"",
+        "printf '<%s>' \"$@\" >> \"$HOME/gateway-exact-argv\"\n\
+         printf '\\n' >> \"$HOME/gateway-exact-argv\"\n\
+         printf '%s\\n' \"$PATH\" >> \"$HOME/gateway-path\"\n\
+         printf '%s\\n' \"$*\" >> \"$TASK_GATEWAY_ARGV\"",
+    ).replace(
+        "  *)\n    printf '%s\\n' 'unexpected Task command'",
+        "  *' list '*)\n\
+         printf '%s\\n' '{\"tasks\":[{\"task_id\":\"login-task-123\",\"state\":\"succeeded\",\"revision\":1}]}'\n    ;;\n\
+         *' get login-task-123 '*)\n\
+         printf '%s\\n' '{\"task_id\":\"login-task-123\",\"state\":\"succeeded\",\"revision\":1}'\n    ;;\n\
+         *' events login-task-123 '*)\n\
+         printf '%s\\n' '{\"events\":[],\"has_more\":false}'\n    ;;\n\
+         *)\n    printf '%s\\n' 'unexpected Task command'",
+    );
+    write_executable(&bin.join("cosh-gateway"), &gateway);
+    fs::create_dir(home.join("relative-gateway")).expect("create untrusted relative directory");
+    write_executable(
+        &home.join("relative-gateway/cosh-gateway"),
+        "#!/bin/sh\nprintf spoof >> \"$HOME/spoof-gateway\"\nexit 2\n",
+    );
+    fs::write(
+        home.join(".bash_profile"),
+        "printf 'profile-hit\\n' >> \"$HOME/profile-hits\"\n\
+         export PATH=\"$HOME/profile-bin:relative-gateway:$PATH\"\n\
+         PS1='task-login$ '\n",
+    )
+    .expect("write login profile");
+    (home, binary)
+}
+
+#[cfg(target_os = "linux")]
+fn run_login_path_task(home: &Path, binary: &Path, steps: &[(&str, &[u8])]) -> String {
+    let home_text = home.display().to_string();
+    let argv = home.join("gateway.argv").display().to_string();
+    let goal = home.join("gateway.goal").display().to_string();
+    run_raw_cli_binary_with_args_env_current_dir_and_marker_input(
+        binary,
+        "fake",
+        &["--shell", "bash", "--login"],
+        &[
+            ("HOME", &home_text),
+            ("PATH", "/usr/bin:/bin"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_LOGIN_IDENTITY", "1"),
+            ("COSH_SHELL_BOOTSTRAP_PATH", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_GATEWAY_EXECUTABLE", RAW_CLI_UNSET_ENV),
+            ("COSH_GATEWAY_SOCKET", RAW_CLI_UNSET_ENV),
+            ("TASK_GATEWAY_ARGV", &argv),
+            ("TASK_GATEWAY_GOAL", &goal),
+        ],
+        home,
+        steps,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn assert_login_path_task_contract(home: &Path, output: &str) {
+    assert_eq!(
+        fs::read_to_string(home.join("profile-hits"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "{output}"
+    );
+    let paths = fs::read_to_string(home.join("gateway-path")).expect("actual Gateway PATH");
+    assert!(!paths.is_empty(), "{output}");
+    for path in paths.lines() {
+        assert!(
+            path.starts_with(&format!("{}:", home.join("profile-bin").display())),
+            "{path}\n{output}"
+        );
+        assert!(
+            !path
+                .split(':')
+                .any(|entry| entry == "relative-gateway" || entry.is_empty()),
+            "{path}"
+        );
+    }
+    assert!(!home.join("spoof-gateway").exists(), "{output}");
+    assert_eq!(
+        fs::read_to_string(home.join("fresh-input")).unwrap(),
+        "fresh\n",
+        "{output}"
+    );
+    assert!(!home.join("forbidden-effect").exists(), "{output}");
+    assert!(!output.contains("bash: /task"), "{output}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_task_queries_use_only_trusted_login_path_once() {
+    let (home, binary) = login_path_task_fixture("task-login-queries");
+    let output = run_login_path_task(
+        &home,
+        &binary,
+        &[
+            ("task-login$ ", b"/task list\n"),
+            ("Task", b""),
+            ("task-login$ ", b"/task show login-task-123\n"),
+            ("Task", b""),
+            (
+                "task-login$ ",
+                b"printf 'fresh\\n' >> \"$HOME/fresh-input\"; printf 'fresh-done\\n'\n",
+            ),
+            ("fresh-done", b""),
+            ("task-login$ ", b"exit\n"),
+        ],
+    );
+    eprintln!("task login query transcript:\n{output}");
+    assert!(output.contains("Persistent Tasks"), "{output}");
+    assert!(output.contains("Task result"), "{output}");
+    assert_login_path_task_contract(&home, &output);
+    let argv = fs::read_to_string(home.join("gateway-exact-argv")).unwrap();
+    assert_eq!(argv.lines().count(), 3, "{argv}");
+    assert!(
+        argv.contains("<task><--output><jsonl><list><--limit><20>"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("<task><--output><jsonl><get><login-task-123>"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("<task><--output><jsonl><events><login-task-123><--after><0><--limit><64>"),
+        "{argv}"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_task_submission_preserves_stdin_and_login_path_once() {
+    let (home, binary) = login_path_task_fixture("task-login-submit");
+    let output = run_login_path_task(
+        &home,
+        &binary,
+        &[
+            (
+                "task-login$ ",
+                b"/task goal; printf forbidden > forbidden-effect\n",
+            ),
+            ("Create persistent Task · Step 1 of 4 · Goal", b"\n"),
+            ("Create persistent Task · Step 2 of 4 · Runtime", b"\n"),
+            ("Create persistent Task · Step 3 of 4 · Checkpoint", b"\n"),
+            ("Create persistent Task · Step 4 of 4 · Review", b"\n"),
+            ("Persistent Task submitted", b""),
+            (
+                "task-login$ ",
+                b"printf 'fresh\\n' >> \"$HOME/fresh-input\"; printf 'fresh-done\\n'\n",
+            ),
+            ("fresh-done", b""),
+            ("task-login$ ", b"exit\n"),
+        ],
+    );
+    eprintln!("task login submission transcript:\n{output}");
+    assert_login_path_task_contract(&home, &output);
+    let argv = fs::read_to_string(home.join("gateway-exact-argv")).unwrap();
+    assert_eq!(
+        argv.lines()
+            .filter(|line| line.contains("<submit>"))
+            .count(),
+        1,
+        "{argv}"
+    );
+    assert!(argv.contains("<--runtime><core>"), "{argv}");
+    assert!(argv.contains("<--approval-policy><allow-all>"), "{argv}");
+    assert_eq!(
+        fs::read_to_string(home.join("gateway.goal")).unwrap(),
+        "goal; printf forbidden > forbidden-effect"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
 const TASK_GATEWAY: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$TASK_GATEWAY_ARGV"
 case " $* " in

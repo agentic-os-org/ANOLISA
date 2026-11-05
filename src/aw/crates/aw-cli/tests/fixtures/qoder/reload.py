@@ -60,6 +60,22 @@ def status(aw, config, cwd, environment, terminal):
     return run([aw, 'status', '--config', str(config)], cwd, environment, terminal)['result']
 
 
+def tui_environment(root: Path) -> dict[str, str]:
+    """Trust only this disposable workspace and explicitly select interactive mode."""
+    home = root / 'home'
+    profile = home / '.qoder'
+    home.mkdir(mode=0o700)
+    profile.mkdir(mode=0o700)
+    settings = profile / 'settings.json'
+    settings.write_text(json.dumps({'permissions': {'trustDirectories': [str(root)]}}))
+    settings.chmod(0o600)
+    # Qoder treats either runner flag as headless, even with a controlling PTY.
+    environment = {**os.environ, 'HOME': str(home), 'TERM': 'xterm-256color'}
+    for flag in ('CI', 'GITHUB_ACTIONS'):
+        environment.pop(flag, None)
+    return environment
+
+
 def exercise(binaries, output):
     token = os.environ.get('QODER_PERSONAL_ACCESS_TOKEN')
     if not token:
@@ -75,9 +91,7 @@ def exercise(binaries, output):
         finally:
             os.environ['QODER_PERSONAL_ACCESS_TOKEN'] = token
         (output / 'qoder-version.json').write_text(json.dumps(installed, indent=2)+'\n')
-        home = root / 'home'
-        home.mkdir(mode=0o700)
-        environment = {**os.environ, 'HOME': str(home), 'TERM': 'xterm-256color'}
+        environment = tui_environment(root)
         controls = {key: value for key, value in environment.items() if key != 'QODER_PERSONAL_ACCESS_TOKEN'}
         aw = str(binaries / 'aw')
         config = root / 'current.json'
@@ -96,7 +110,8 @@ def exercise(binaries, output):
         native = None
         record = {'command': command, 'cwd': str(root), 'pid': None, 'pgid': None,
                   'ports': [], 'expected_lifetime_seconds': 90, 'log': None,
-                  'output_policy': 'discard terminal bytes; metadata report only', 'stop': None}
+                  'output_policy': 'discard terminal bytes; metadata report only', 'stop': None,
+                  'ci': environment.get('CI'), 'trusted_workspace': str(root)}
         (output/'process.json').write_text(json.dumps(record, indent=2)+'\n')
         try:
             process = subprocess.Popen(command, cwd=root, env=environment, stdin=slave,

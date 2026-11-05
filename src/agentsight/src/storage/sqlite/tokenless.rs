@@ -195,6 +195,114 @@ impl TokenlessStatsStore {
         results
     }
 
+    /// Whether the `stats` table carries the RFC3339 `timestamp` column.
+    ///
+    /// The recorder has written it from the first stats.db releases, but a
+    /// foreign or stripped database may lack it; the windowed readers then
+    /// keep their historical unbounded behaviour instead of failing.
+    fn has_timestamp_column(&self) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = 'timestamp'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false)
+    }
+
+    /// Query optimization records for the given tool_use_ids whose recorded
+    /// timestamp falls within `[start_ns, end_ns]` (inclusive).
+    ///
+    /// Bounds the token-savings numerator to the same request window as the
+    /// denominator: without it, narrowing the dashboard window kept older
+    /// records in the reported savings and the rate could inflate past 100%.
+    /// Like `summary_in_window`, the RFC3339 `timestamp` column is normalised
+    /// to UTC epoch seconds inside SQLite as a prefilter (widened by a second
+    /// on each side because `strftime('%s', …)` truncates to the enclosing
+    /// second) and each surviving row is then compared against the nanosecond
+    /// bounds exactly. Legacy databases without the column keep every
+    /// matching row.
+    ///
+    /// Batches queries in groups of 500 to stay within SQLite variable limits.
+    /// Returns an empty Vec on SQLITE_BUSY or other transient errors.
+    pub fn get_stats_by_tool_use_ids_in_window(
+        &self,
+        ids: &[&str],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Vec<TokenlessStatRow> {
+        if !self.has_timestamp_column() {
+            return self.get_stats_by_tool_use_ids(ids);
+        }
+        let start_secs = start_ns.div_euclid(1_000_000_000);
+        let end_secs = end_ns.div_euclid(1_000_000_000);
+
+        let mut results = Vec::new();
+        for chunk in ids.chunks(500) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mode_filter = self.active_mode_filter();
+            let sql = format!(
+                "SELECT timestamp, session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation \
+                 FROM stats WHERE tool_use_id IN ({placeholders}){mode_filter} \
+                 AND CAST(strftime('%s', timestamp) AS INTEGER) BETWEEN ? AND ?"
+            );
+
+            let mut stmt = match self.conn.prepare(&sql) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("Failed to prepare windowed stats query by tool_use_id: {e}");
+                    return Vec::new();
+                }
+            };
+
+            let mut params: Vec<&dyn rusqlite::types::ToSql> = chunk
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+            let lower = start_secs.saturating_sub(1);
+            let upper = end_secs.saturating_add(1);
+            params.push(&lower);
+            params.push(&upper);
+            let rows = match stmt.query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    TokenlessStatRow {
+                        session_id: row.get(1)?,
+                        tool_use_id: row.get(2)?,
+                        before_tokens: row.get(3)?,
+                        after_tokens: row.get(4)?,
+                        before_text: row.get(5)?,
+                        after_text: row.get(6)?,
+                        operation: row.get(7)?,
+                    },
+                ))
+            }) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    log::warn!("Failed to query stats.db by tool_use_id in a window: {e}");
+                    return Vec::new();
+                }
+            };
+
+            for row in rows {
+                match row {
+                    // Rows inside the widened edge seconds are compared against
+                    // the nanosecond bounds exactly, as in summary_in_window.
+                    Ok((timestamp, record))
+                        if tokenless_timestamp_in_window(&timestamp, start_ns, end_ns) =>
+                    {
+                        results.push(record);
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::warn!("Error reading stats row: {e}"),
+                }
+            }
+        }
+
+        results
+    }
+
     /// Group stat rows by session_id for efficient lookup.
     pub fn group_by_session(rows: Vec<TokenlessStatRow>) -> HashMap<String, Vec<TokenlessStatRow>> {
         let mut map: HashMap<String, Vec<TokenlessStatRow>> = HashMap::new();
@@ -525,6 +633,133 @@ mod tests {
         assert_eq!(summary.before_tokens, 1000);
         assert_eq!(summary.after_tokens, 100);
         assert_eq!(summary.saved_tokens(), 900);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn windowed_tool_rows_are_bounded_by_the_record_timestamp() {
+        // The savings denominator is windowed by the request, so the numerator
+        // must be too: without the timestamp bound, older records kept landing
+        // in the reported savings and the rate could inflate past 100%.
+        let base_secs: i64 = 1_700_000_000;
+        let timestamp = |secs: i64, millis: u32| {
+            Utc.timestamp_opt(secs, millis * 1_000_000)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let path = std::env::temp_dir().join(format!(
+            "test_tokenless_window_{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE stats (
+                    timestamp TEXT NOT NULL,
+                    session_id TEXT,
+                    tool_use_id TEXT,
+                    before_tokens INTEGER NOT NULL,
+                    after_tokens INTEGER NOT NULL,
+                    before_text TEXT,
+                    after_text TEXT,
+                    operation TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            for (tool, secs, millis) in [
+                ("t-in", base_secs + 60, 0),
+                ("t-before", base_secs - 48 * 3600, 0),
+                ("t-after", base_secs + 48 * 3600, 0),
+                // Inside the widened edge second, but past the exact
+                // nanosecond bound — the second pass must drop it.
+                ("t-edge", base_secs + 3600, 500),
+            ] {
+                conn.execute(
+                    "INSERT INTO stats
+                     (timestamp, session_id, tool_use_id, before_tokens, after_tokens, operation)
+                     VALUES (?1, 's1', ?2, 1000, 100, 'compress')",
+                    rusqlite::params![timestamp(secs, millis), tool],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = TokenlessStatsStore::open_if_exists(&path).unwrap();
+        let ids = ["t-in", "t-before", "t-after", "t-edge"];
+        let start_ns = base_secs * 1_000_000_000;
+        let end_ns = (base_secs + 3600) * 1_000_000_000;
+        let windowed = store.get_stats_by_tool_use_ids_in_window(&ids, start_ns, end_ns);
+        assert_eq!(
+            windowed
+                .iter()
+                .map(|row| row.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            ["t-in"],
+            "only the in-window record may count"
+        );
+        // The full range keeps every row, including the edge one.
+        assert_eq!(
+            store
+                .get_stats_by_tool_use_ids_in_window(&ids, 0, i64::MAX)
+                .len(),
+            4
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn windowed_tool_rows_keep_legacy_databases_unbounded() {
+        // A stats table without the `timestamp` column cannot be bounded; the
+        // windowed read must keep the historical behaviour of returning every
+        // matching row (same degradation as the `mode` filter).
+        let path = std::env::temp_dir().join(format!(
+            "test_tokenless_window_legacy_{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE stats (
+                    session_id TEXT,
+                    tool_use_id TEXT,
+                    before_tokens INTEGER NOT NULL,
+                    after_tokens INTEGER NOT NULL,
+                    before_text TEXT,
+                    after_text TEXT,
+                    operation TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            for tool in ["t1", "t2"] {
+                conn.execute(
+                    "INSERT INTO stats
+                     (session_id, tool_use_id, before_tokens, after_tokens, operation)
+                     VALUES ('s1', ?1, 1000, 100, 'compress')",
+                    [tool],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = TokenlessStatsStore::open_if_exists(&path).unwrap();
+        // An empty window still returns every matching row: the table cannot
+        // be bounded, so the historical behaviour is preserved.
+        let windowed = store.get_stats_by_tool_use_ids_in_window(&["t1", "t2"], 0, 0);
+        assert_eq!(
+            windowed.len(),
+            2,
+            "a legacy database keeps every matching row"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

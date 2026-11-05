@@ -26,7 +26,7 @@ for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health; do
     test "$(stat -c %a "$STAGE/usr/bin/$binary")" = 755
     "$STAGE/usr/bin/$binary" --help > "$TEMP/$binary-help.txt"
 done
-grep -q skill-ledger "$TEMP/agent-sec-cli-help.txt"
+grep -q skillsec "$TEMP/agent-sec-cli-help.txt"
 test ! -e "$STAGE/usr/lib/systemd/user/agent-sec-core.service"
 test ! -e "$STAGE/usr/lib/systemd/system/multi-user.target.wants/agent-sec-core.service"
 test ! -e "$STAGE/var/lib/agent-sec/skillsec/signing-key.pk8"

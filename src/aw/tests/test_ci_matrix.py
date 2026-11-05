@@ -9,7 +9,7 @@ from unittest.mock import patch
 from test_ci_checks import GateFixture, gate
 from check_inventory import check_inventory, collect, inventory
 from check_layout import source_sizes
-from check_matrix import END, START, table, validate
+from check_matrix import CAPABILITY_DOCS, END, START, main, table, validate
 
 
 class InventoryTests(GateFixture):
@@ -95,12 +95,16 @@ class InventoryTests(GateFixture):
 class MatrixTests(GateFixture):
     def setUp(self) -> None:
         super().setUp()
+        self.root = self.root / "src/aw"
+        self.root.mkdir(parents=True)
         self.matrix = json.loads((gate.AW / "tests/regression-matrix.json").read_text())
         self.runnable = {target: {"fixture"} for target in self.matrix["required_targets"]}
         for case in self.matrix["cases"].values():
             self.runnable.setdefault(case["target"], set()).add(case["test"])
-        for name in ("README.md", "README_zh.md"):
-            (self.root / name).write_text(f"{START}\n{table(self.matrix)}\n{END}\n")
+        for name in CAPABILITY_DOCS:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{START}\n{table(self.matrix)}\n{END}\n")
 
     def test_complete_manifest_is_accepted(self) -> None:
         validate(self.matrix, self.runnable, self.root)
@@ -122,7 +126,7 @@ class MatrixTests(GateFixture):
             workspace({name}, self.root / name) for name in sorted(providers)
         ]
         (self.root / "tests").mkdir()
-        for mode in ("valid", "missing-provider", "duplicate-target", "unknown-opt-in"):
+        for mode in ("valid", "missing-provider", "missing-framework", "duplicate-target", "unknown-opt-in"):
             matrix = copy.deepcopy(self.matrix)
             if mode == "unknown-opt-in":
                 matrix["opt_in_targets"]["unknown/test/acceptance"] = "fixture"
@@ -131,7 +135,7 @@ class MatrixTests(GateFixture):
             def collected(root: Path, data: dict, run: object, opt_in: frozenset) -> dict:
                 owned = set(data["workspace_members"])
                 self.assertTrue(all(target.split("/", 1)[0] in owned for target in opt_in))
-                if mode == "missing-provider" and owned == {"aw-provider-tokenless"}:
+                if (mode == "missing-provider" and owned == {"aw-provider-tokenless"}) or (mode == "missing-framework" and "aw-cli" in owned):
                     return {}
                 result = {
                     target: tests for target, tests in self.runnable.items()
@@ -185,14 +189,42 @@ class MatrixTests(GateFixture):
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 validate(matrix, self.runnable, self.root)
 
-    def test_empty_target_and_stale_readme_fail(self) -> None:
+    def test_empty_target_and_stale_or_missing_guide_grids_fail(self) -> None:
         runnable = copy.deepcopy(self.runnable)
         runnable[self.matrix["required_targets"][0]] = set()
         with self.assertRaisesRegex(ValueError, "target is missing or empty"):
             validate(self.matrix, runnable, self.root)
-        (self.root / "README_zh.md").write_text(f"{START}\nstale\n{END}\n")
-        with self.assertRaisesRegex(ValueError, "update the grid"):
-            validate(self.matrix, self.runnable, self.root)
+        for name in CAPABILITY_DOCS:
+            path = self.root / name
+            original = path.read_text()
+            for text, error in (
+                (f"{START}\nstale\n{END}\n", "update the grid"),
+                ("no generated table", "missing unique matrix markers"),
+                (original + original, "missing unique matrix markers"),
+                (f"<details>\n{original}</details>\n", "keep the Hook grid expanded"),
+            ):
+                with self.subTest(document=name, content=text), self.assertRaisesRegex(
+                    ValueError, error
+                ):
+                    path.write_text(text)
+                    validate(self.matrix, self.runnable, self.root)
+            path.write_text(original)
+
+    def test_regeneration_updates_all_grids_without_changing_surrounding_text(self) -> None:
+        (self.root / "tests").mkdir()
+        (self.root / "tests/regression-matrix.json").write_text(json.dumps(self.matrix))
+        for name in CAPABILITY_DOCS:
+            (self.root / name).write_text(f"intro\n{START}\nstale\n{END}\nfooter\n")
+        with patch("check_matrix.__file__", str(self.root / "scripts/check_matrix.py")), patch(
+            "sys.argv", ["check_matrix.py", "--write-docs"]
+        ):
+            main()
+        validate(self.matrix, self.runnable, self.root)
+        for name in CAPABILITY_DOCS:
+            self.assertEqual(
+                (self.root / name).read_text(),
+                f"intro\n{START}\n{table(self.matrix)}\n{END}\nfooter\n",
+            )
 
 
 class ScriptLayoutTests(GateFixture):

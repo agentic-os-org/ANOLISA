@@ -2,8 +2,9 @@
 
 use crate::{
     audit::{self, Audit},
-    rejected, Capabilities, EventHandle, Identity, Operation, Result,
+    rejected, Capabilities, EventHandle, Identity, Result,
 };
+use aw_core::admission::{AdmissionEngine, AdmissionError};
 use aw_host::{Host, ProcessContext};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -20,24 +21,28 @@ use std::{
 };
 
 mod binding;
+mod dispatch;
 mod evidence;
 mod hooks;
+mod invocations;
+mod limits;
 mod policy;
+pub(crate) mod process;
+mod scopes;
 
-const MAX_BINDINGS: usize = 16;
-const MAX_EVENTS: usize = 32;
 const MAX_STEPS: usize = 64;
-const MAX_CALLS: usize = 64;
 
 struct Instance {
     bytes: Vec<u8>,
     context: ProcessContext,
     reload: Option<policy::Reload>,
     policy_update: Arc<Mutex<()>>,
+    release: Arc<Mutex<()>>,
     host: Arc<Host>,
     closing: bool,
     hooks: Arc<Mutex<BTreeMap<String, hooks::Lease>>>,
     hook_open: Arc<Mutex<()>>,
+    invocations: Arc<Mutex<invocations::State>>,
     observation: Option<Arc<evidence::Observation>>,
 }
 
@@ -67,6 +72,9 @@ enum Job {
 pub(crate) struct Runtime {
     pub(crate) identity: Identity,
     bytes: Vec<u8>,
+    admission: AdmissionEngine,
+    pub(crate) limits: limits::Limits,
+    pub(crate) resources: limits::Resources,
     pub(crate) stopped: Arc<AtomicBool>,
     pub(crate) audit: Audit,
     instances: Mutex<BTreeMap<String, Option<Instance>>>,
@@ -75,6 +83,7 @@ pub(crate) struct Runtime {
     next: AtomicU64,
     calls: AtomicU64,
     contexts: evidence::Contexts,
+    owners: Mutex<BTreeMap<String, scopes::Owner>>,
 }
 
 impl Runtime {
@@ -87,14 +96,23 @@ impl Runtime {
             .trim()
             .to_owned();
         let revision = format!("{:x}", Sha256::digest(&bytes));
+        let admission = AdmissionEngine::new().map_err(|error| match error {
+            AdmissionError::Configuration(error) => error.into(),
+            AdmissionError::Rejected(_) => rejected("binding_preflight"),
+        })?;
         let contexts = evidence::Contexts::new(&bytes)?;
+        let limits = limits::Limits::parse(&bytes)?;
         Ok(Arc::new(Self {
             contexts,
+            limits,
+            resources: limits::Resources::default(),
+            owners: Mutex::new(BTreeMap::new()),
             identity: Identity {
                 generation,
                 config_revision: revision,
             },
             bytes,
+            admission,
             stopped,
             audit: Audit::new(directory)?,
             instances: Mutex::new(BTreeMap::new()),
@@ -116,160 +134,6 @@ impl Runtime {
         ))
     }
 
-    pub(crate) fn handle(
-        self: &Arc<Self>,
-        operation: Operation,
-        deadline: Instant,
-        cancelled: &AtomicBool,
-    ) -> Result<Value> {
-        if Instant::now() >= deadline {
-            return Err(rejected("deadline_exceeded"));
-        }
-        if self.stopped.load(Ordering::Acquire) {
-            return Err(rejected("service_stopping"));
-        }
-        match operation {
-            Operation::RecentExecutions => self.audit.recent(),
-            Operation::Status => {
-                let observations = self.observation_status()?;
-                let policies = self.policy_status()?;
-                Ok(
-                    json!({"pid": std::process::id(), "bindings": self.instances.lock().map_err(|_| rejected("state_poisoned"))?.len(),
-                "events": self.events.lock().map_err(|_| rejected("state_poisoned"))?.len(), "audit_healthy": self.audit.healthy(),
-                "observations": observations, "instances": policies, "guarantee": "native_hook", "adoption": "unverified"}),
-                )
-            }
-            Operation::EnableReload { instance_id } => self.enable_reload(&instance_id),
-            Operation::AssociateProcess { instance_id, pid } => {
-                self.associate_process(&instance_id, pid)
-            }
-            Operation::BridgeLifecycle {
-                instance_id,
-                pid,
-                phase,
-                key,
-            } => self.lifecycle(&instance_id, pid, phase, &key),
-            Operation::HookPlan { instance_id, event } => self.hook_plan(&instance_id, &event),
-            Operation::UpdatePolicy { .. } => Err(rejected("policy_update_requires_peer")),
-            Operation::StartObservation { instance_id } => {
-                self.start_observation(&instance_id, deadline)
-            }
-            Operation::ReportRun {
-                instance_id,
-                outcome,
-            } => self.report_run(&instance_id, outcome),
-            Operation::ObserveHookEvent {
-                instance_id,
-                event,
-                native_input,
-            } => self.observe_hook(&instance_id, event, native_input, deadline),
-            Operation::Bind {
-                target,
-                capabilities,
-                cwd,
-                environment,
-            } => self.bind(
-                target,
-                capabilities,
-                ProcessContext {
-                    cwd: cwd.into(),
-                    environment,
-                    stderr_bytes: 64 * 1024,
-                },
-                deadline,
-                cancelled,
-            ),
-            Operation::OpenEvent { instance_id, event } => self.open(
-                instance_id,
-                event,
-                None,
-                deadline,
-                Arc::new(AtomicBool::new(false)),
-            ),
-            Operation::OpenHookEvent {
-                instance_id,
-                event,
-                native_input,
-            } => self.open_hook(instance_id, event, native_input, deadline),
-            Operation::CloseHookEvent {
-                instance_id,
-                event,
-                session_id,
-                call_id,
-            } => self.close_hook(&instance_id, &event, &session_id, &call_id, deadline),
-            Operation::InvokeStep {
-                event_id,
-                instance_id,
-                step_id,
-                native_environment,
-            } => {
-                let (sender, cancelled) = self.event_sender(&event_id, &instance_id)?;
-                let (reply, result) = mpsc::sync_channel(1);
-                sender
-                    .try_send(Job::Invoke {
-                        step: step_id,
-                        native_environment,
-                        reply,
-                    })
-                    .map_err(|_| rejected("event_busy_or_closed"))?;
-                result
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .map_err(|_| {
-                        cancelled.store(true, Ordering::Release);
-                        rejected("event_reply_unavailable")
-                    })?
-            }
-            Operation::CloseEvent {
-                event_id,
-                instance_id,
-            } => {
-                let (sender, _) = self.event_sender(&event_id, &instance_id)?;
-                let (reply, result) = mpsc::sync_channel(1);
-                sender
-                    .try_send(Job::Close { reply })
-                    .map_err(|_| rejected("event_busy_or_closed"))?;
-                result
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .map_err(|_| rejected("event_reply_unavailable"))?
-            }
-            Operation::Unbind { instance_id } => {
-                let mut instances = self
-                    .instances
-                    .lock()
-                    .map_err(|_| rejected("state_poisoned"))?;
-                if self
-                    .events
-                    .lock()
-                    .map_err(|_| rejected("state_poisoned"))?
-                    .values()
-                    .any(|entry| entry.instance_id == instance_id)
-                {
-                    return Err(rejected("instance_has_events"));
-                }
-                instances
-                    .get_mut(&instance_id)
-                    .and_then(Option::as_mut)
-                    .ok_or_else(|| rejected("unknown_instance"))?
-                    .closing = true;
-                drop(instances);
-                self.release_instance(&instance_id, deadline)
-            }
-            Operation::ReleaseInstance { instance_id } => {
-                self.release_instance(&instance_id, deadline)
-            }
-            Operation::Audit { key } => self.audit.read(&key),
-            Operation::FreezeContext {
-                event_id,
-                instance_id,
-                candidate_revision,
-            } => self.freeze_context(&event_id, &instance_id, &candidate_revision, deadline),
-            Operation::Stop => {
-                self.stopped.store(true, Ordering::Release);
-                Ok(json!({"stopping": true}))
-            }
-        }
-    }
-
     fn prepare(
         &self,
         bytes: &[u8],
@@ -287,16 +151,35 @@ impl Runtime {
         {
             return Err(rejected("binding_metadata_limit"));
         }
-        let config = aw_config::Validator::new()?.parse(bytes)?;
-        let capabilities = capabilities.into();
-        let steps = aw_provider::admission::preflight(&config, target, &capabilities)
-            .map_err(|_| rejected("binding_preflight"))?;
-        if steps.len() > MAX_STEPS {
+        let candidate = self
+            .admission
+            .preflight(bytes, target, capabilities.into())
+            .map_err(|error| match error {
+                AdmissionError::Configuration(error) => error.into(),
+                AdmissionError::Rejected(_) => rejected("binding_preflight"),
+            })?;
+        if candidate.requirements().len() > MAX_STEPS {
             return Err(rejected("step_limit"));
         }
         self.audit.claim(key, json!({"kind": "preparation", "identity": self.identity, "instance_id": key, "binding_id": target}))?;
         let result = (|| {
-            let host = Host::prepare(bytes, target, capabilities, context, deadline, cancelled);
+            let host =
+                Host::discover(&candidate, context, deadline, cancelled).and_then(|prepared| {
+                    let policy = match self.admission.admit(candidate, prepared.evidence()) {
+                        Ok(policy) => policy,
+                        Err(error) => return Err(prepared.into_failure(error.into())),
+                    };
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(prepared
+                            .into_failure(aw_host::Error::Execution(aw_exec::Error::Cancelled)));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(prepared.into_failure(aw_host::Error::Execution(
+                            aw_exec::Error::DeadlineExceeded,
+                        )));
+                    }
+                    Host::from_admitted(policy, prepared)
+                });
             match host {
                 Ok(host) => {
                     self.audit.append(key, json!({"phase": "closed", "status": "ok", "calls": host.preparation().iter().map(audit::call).collect::<Vec<_>>()}))?;
@@ -327,14 +210,25 @@ impl Runtime {
             .instances
             .lock()
             .map_err(|_| rejected("state_poisoned"))?;
-        let host = Arc::clone(
-            &instances
-                .get(&instance_id)
-                .and_then(Option::as_ref)
-                .filter(|instance| !instance.closing)
-                .ok_or_else(|| rejected("unknown_or_draining_instance"))?
-                .host,
-        );
+        self.check_scope_owner(&instance_id)?;
+        let instance = instances
+            .get(&instance_id)
+            .and_then(Option::as_ref)
+            .filter(|instance| !instance.closing)
+            .ok_or_else(|| rejected("unknown_or_draining_instance"))?;
+        if native_input.is_none() {
+            let mut state = instance
+                .invocations
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?;
+            if state.ledger.is_some() {
+                return Err(rejected("invocation_correlated_event_required"));
+            }
+            // Enable and legacy admission share the protocol lock. Once used,
+            // even a completed legacy event cannot switch to managed identity.
+            state.legacy_used = true;
+        }
+        let host = Arc::clone(&instance.host);
         if value["agent"]["instance_id"] != instance_id {
             return Err(rejected("event_instance_mismatch"));
         }
@@ -351,8 +245,8 @@ impl Runtime {
             if cancelled.load(Ordering::Acquire) {
                 return Err(rejected("event_cancelled"));
             }
-            if events.len() >= MAX_EVENTS {
-                return Err(rejected("event_limit"));
+            if events.len() >= self.limits.events {
+                return Err(self.overload("event_limit"));
             }
             events.insert(
                 key.clone(),
@@ -403,7 +297,7 @@ impl Runtime {
                             } else {
                                 let _ = ready.send(Ok(json!(handle)));
                             }
-                            runtime.event_loop(&thread_key, &event, (&cancelled, &context), receiver, automatic, ordered);
+                            runtime.event_loop((&thread_key, &instance_id), &event, (&cancelled, &context), receiver, automatic, ordered);
                         }
                         Err(error) => { let _ = ready.send(Err(error)); }
                     }
@@ -448,13 +342,14 @@ impl Runtime {
 
     fn event_loop(
         &self,
-        key: &str,
+        identity: (&str, &str),
         event: &aw_host::Event<'_>,
         lease: (&AtomicBool, &evidence::Cell),
         receiver: Receiver<Job>,
         automatic: bool,
         ordered: bool,
     ) {
+        let (key, instance_id) = identity;
         let (cancelled, context) = lease;
         let mut close = None;
         let mut claimed = BTreeSet::new();
@@ -523,13 +418,13 @@ impl Runtime {
                         if self
                             .calls
                             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                                (n < MAX_CALLS as u64).then_some(n + 1)
+                                (n < self.limits.calls as u64).then_some(n + 1)
                             })
                             .is_err()
                         {
                             completed_steps.fetch_add(1, Ordering::Release);
                             completed_mask.fetch_or(bit, Ordering::Release);
-                            let _ = reply.send(Err(rejected("call_limit")));
+                            let _ = reply.send(Err(self.overload("call_limit")));
                             continue;
                         }
                         let completed_steps = &completed_steps;
@@ -548,8 +443,11 @@ impl Runtime {
                                     }
                                     thread::sleep(std::time::Duration::from_millis(2));
                                 }
+                                self.check_scope_owner(instance_id)?;
                                 self.audit
                                     .append(key, json!({"phase": "started", "step_id": step}))?;
+                                // Queueing and durable audit can outlive the admitted owner.
+                                self.check_scope_owner(instance_id)?;
                                 let invocation = match native_environment {
                                     Some(environment) => {
                                         event.invoke_with_native_environment(&step, &environment)
@@ -589,6 +487,9 @@ impl Runtime {
     }
 
     pub(crate) fn maintain(&self, shutdown: bool) -> Result<()> {
+        if !shutdown {
+            self.maintain_scopes()?;
+        }
         if shutdown {
             self.stopped.store(true, Ordering::Release);
             let mut events = self.events.lock().map_err(|_| rejected("state_poisoned"))?;
@@ -630,6 +531,17 @@ impl Drop for CallGuard<'_> {
 }
 
 fn event_metadata(value: &Value) -> Result<Value> {
+    if value["name"] == "input.submit" {
+        let fields = [&value["session_id"], &value["turn_id"]];
+        if fields.iter().any(|field| {
+            !field
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 512)
+        }) {
+            return Err(rejected("event_metadata_limit"));
+        }
+        return Ok(json!({"name":"input.submit", "session_id":fields[0], "turn_id":fields[1]}));
+    }
     let fields = [
         &value["name"],
         &value["session_id"],
@@ -643,7 +555,11 @@ fn event_metadata(value: &Value) -> Result<Value> {
     {
         return Err(rejected("event_metadata_limit"));
     }
-    Ok(json!({"name": fields[0], "session_id": fields[1], "tool": {
+    let mut metadata = json!({"name": fields[0], "session_id": fields[1], "tool": {
         "name": fields[2], "native_name": fields[3], "call_id": fields[4],
-    }}))
+    }});
+    if let Some(source) = aw_adapter::callback::correlation_source(value) {
+        metadata["correlation_source"] = json!(source);
+    }
+    Ok(metadata)
 }

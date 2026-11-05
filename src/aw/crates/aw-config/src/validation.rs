@@ -19,7 +19,14 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     // Called only after schema validation; these conversions still propagate a
     // visible error if the bundled shape and semantic validator ever diverge.
     let spec = &document["spec"];
+    let mut adapters = BTreeSet::new();
     for (name, agent) in spec["agents"].as_object().ok_or(Error::InvalidSchema)? {
+        adapters.insert(agent["adapter"].as_str().ok_or(Error::InvalidSchema)?);
+        require(
+            agent.get("qoder_sdk").is_none() || agent["adapter"] == "qoder-sdk",
+            &format!("/spec/agents/{name}/qoder_sdk"),
+            "Qoder SDK grants require the Qoder SDK Adapter",
+        )?;
         require(
             agent.get("qoder").is_none() || agent["adapter"] == "qoder",
             &format!("/spec/agents/{name}/qoder"),
@@ -57,40 +64,12 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             &format!("{path}/required"),
             "a disabled event cannot be required",
         )?;
-        if let Some(tools) = event["match"]["tools"].as_array() {
-            require(
-                tools.len() == 1 || !tools.iter().any(|tool| tool == "*"),
-                &format!("{path}/match/tools"),
-                "the all-tools selector cannot be combined with exact selectors",
-            )?;
-            for (index, tool) in tools.iter().enumerate() {
-                let tool = tool.as_str().ok_or(Error::InvalidSchema)?;
-                let standard = matches!(tool, "*" | "bash" | "file_read" | "file_write");
-                let mut parts = tool.splitn(3, ':');
-                let native = parts.next() == Some("native")
-                    && matches!(
-                        parts.next(),
-                        Some(
-                            "pi" | "qwenpaw"
-                                | "qoder"
-                                | "openclaw"
-                                | "hermes"
-                                | "claude-sdk"
-                                | "agentscope"
-                        )
-                    )
-                    && parts.next().is_some_and(|name| {
-                        !name.is_empty()
-                            && !name.contains('*')
-                            && !name.chars().any(char::is_control)
-                    });
-                require(
-                    standard || native,
-                    &format!("{path}/match/tools/{index}"),
-                    "expected all tools, a standard tool or an exact native:<adapter>:<name>",
-                )?;
-            }
-        }
+        require(
+            name != "input.submit" || event.get("match").is_none(),
+            &path,
+            "input.submit has no tool selectors",
+        )?;
+        validate_tools(event, &path, &adapters)?;
         let mut ids = BTreeSet::new();
         for (index, step) in event["steps"]
             .as_array()
@@ -99,6 +78,12 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             .enumerate()
         {
             let path = format!("{path}/steps/{index}");
+            require(
+                name != "input.submit" || step.get("match").is_none(),
+                &path,
+                "input.submit has no tool selectors",
+            )?;
+            validate_tools(step, &path, &adapters)?;
             let id = step["id"].as_str().ok_or(Error::InvalidSchema)?;
             require(ids.insert(id), &format!("{path}/id"), "duplicate step ID")?;
             let provider = step["provider"].as_str().ok_or(Error::InvalidSchema)?;
@@ -158,7 +143,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                         matches!(effect, "observe" | "block" | "replace_input" | "ask")
                     }
                     "tool.after" => matches!(effect, "observe" | "replace_result"),
-                    "security.violation" => matches!(effect, "observe" | "block"),
+                    "input.submit" | "security.violation" => matches!(effect, "observe" | "block"),
                     _ => effect == "observe",
                 };
                 require(allowed, &path, "effect is not defined for this event")?;
@@ -172,7 +157,10 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             require(
                 match on_error {
                     "report" => true,
-                    "block" => matches!(name.as_str(), "tool.before" | "security.violation"),
+                    "block" => matches!(
+                        name.as_str(),
+                        "input.submit" | "tool.before" | "security.violation"
+                    ),
                     "withhold_result" => name == "tool.after",
                     _ => false,
                 },
@@ -199,4 +187,48 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
         "/spec/events/security.violation/enabled",
         "security.violation runs only as the guard of an active tool.before event",
     )
+}
+
+fn validate_tools(value: &Value, path: &str, adapters: &BTreeSet<&str>) -> Result<(), Error> {
+    if let Some(tools) = value["match"]["tools"].as_array() {
+        require(
+            tools.len() == 1 || !tools.iter().any(|tool| tool == "*"),
+            &format!("{path}/match/tools"),
+            "the all-tools selector cannot be combined with exact selectors",
+        )?;
+        for (index, tool) in tools.iter().enumerate() {
+            let tool = tool.as_str().ok_or(Error::InvalidSchema)?;
+            let standard = matches!(tool, "*" | "bash" | "file_read" | "file_write");
+            let mut parts = tool.splitn(3, ':');
+            let prefix = parts.next();
+            let adapter = parts.next();
+            let native = prefix == Some("native")
+                && matches!(
+                    adapter,
+                    Some(
+                        "pi" | "qwenpaw"
+                            | "qoder"
+                            | "openclaw"
+                            | "hermes"
+                            | "claude-sdk"
+                            | "qoder-sdk"
+                            | "agentscope"
+                    )
+                )
+                && parts.next().is_some_and(|name| {
+                    !name.is_empty() && !name.contains('*') && !name.chars().any(char::is_control)
+                });
+            require(
+                standard || native,
+                &format!("{path}/match/tools/{index}"),
+                "expected all tools, a standard tool or an exact native:<adapter>:<name>",
+            )?;
+            require(
+                !native || adapter.is_some_and(|adapter| adapters.contains(adapter)),
+                &format!("{path}/match/tools/{index}"),
+                "native tool selector requires an Adapter declared in spec.agents",
+            )?;
+        }
+    }
+    Ok(())
 }

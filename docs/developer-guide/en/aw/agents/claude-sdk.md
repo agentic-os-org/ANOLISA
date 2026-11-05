@@ -1,0 +1,129 @@
+# Claude SDK
+
+[中文版](../../../zh/aw/agents/claude-sdk.md)
+
+Run source examples from `src/aw`; build AW with the [integration tutorial](../integration.md) first.
+
+## Start a Claude SDK worker
+
+The verified baseline is Claude Agent SDK 0.2.88 with bundled CLI 2.1.161.
+Other releases are admitted through the same native client, Hook, identity and
+transport lifecycle checks. The Adapter records the installed SDK version and launches one
+foreground Python script or `-m` module and requires the worker's public factory
+to use `aw_claude.create_client(options)`. Model credentials remain SDK settings.
+AW supplies this module on `PYTHONPATH` for the launched worker; it does not
+inject hooks into an arbitrary SDK application automatically.
+
+For the source example, prepare the selected Python environment and run from
+`src/aw`. The MCP pin addresses a reproduced incompatibility with MCP 2.x:
+
+```bash
+python3 -m venv target/claude-sdk-venv
+target/claude-sdk-venv/bin/pip install -r tests/claude-sdk-requirements.txt
+```
+
+Copy `crates/aw-service/examples/aw.claude-sdk.yaml` to your configuration and set
+its Agent argv interpreter to the absolute `target/claude-sdk-venv/bin/python`
+path. Keep the foreground example worker path or replace it with your script.
+Its options factory should use this pattern after constructing its normal MCP
+tools, permissions, resume settings and existing hooks:
+
+```python
+from aw_claude import create_client
+
+async with create_client(options) as client:
+    await client.query(prompt)
+    async for message in client.receive_response():
+        handle_message(message)
+```
+
+```bash
+target/debug/aw run --config /absolute/aw.claude-sdk.yaml --agent claude -- 'Use echo to return hello.'
+target/debug/aw status --config /absolute/aw.claude-sdk.yaml
+target/debug/aw stop --config /absolute/aw.claude-sdk.yaml
+```
+
+Claude SDK event budgets must be 1..55,000 ms. Each `tool.before` or `tool.after`
+route uses `events.<name>.budget_ms` when set, otherwise
+`execution.default_event_budget_ms`. `aw run` enforces this adapter-specific
+limit after static configuration validation.
+
+The worker's options cwd must equal the launch cwd. Readiness is published after
+the real SDK initialization handshake accepts callbacks. AW observes or denies
+`PreToolUse`; `PostToolUse` and `PostToolUseFailure` both supply after observations.
+Denied tools do not produce a synthetic after. Existing hook vetoes and native
+permissions remain effective. Existing Python SDK pre-hook `updatedInput` and
+wrapped permission `updated_input` changes are denied. CLI-loaded settings and
+plugin Hooks run independently: they can rewrite ordinary tool arguments after
+AW's public `PreToolUse` check, and those final arguments are not checked again
+before execution. Before policies cover the input observed at that Hook only;
+applications requiring final-argument enforcement need another verified boundary.
+When `tool.before` is active, nonempty
+`PermissionRequest` matchers are rejected before initialization; use supported
+`PreToolUse` or `can_use_tool` callbacks instead. Caller-specified
+`permission_prompt_tool_name` is also rejected with `tool.before`; SDK-owned stdio
+permissions for the wrapped `can_use_tool` remain supported. Caller `cli_path` overrides and missing
+bundled binaries are rejected. The worker must not detach or start multiple
+SDK clients/tasks within one launcher binding; Gunicorn and business deployments
+need their own task lifecycle integration.
+
+Measured with SDK 0.2.88 and CLI 2.1.161, MCP tool failures (the SDK handler
+contract's `is_error`, mapped to the wire-level `isError`) reach hooks as
+`PostToolUseFailure`, like native Bash execution failures; after observation
+still does not classify every business failure.
+See the [Adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/en/adapters/claude-sdk-adapter.md)
+for identity, cancellation and validation limits.
+
+The factory preserves `setting_sources` (including native default discovery), inline or
+file-based `settings`, local `plugins`, and SDK/HTTP/stdio `mcp_servers`. The SDK
+loads the original sources in their native order and discovers project Skills;
+AW does not parse, copy or translate these configuration files. Existing callback
+composition and runtime restrictions above still apply. `extra_args` continues
+to allow only `strict-mcp-config: None`; use the SDK options for settings and MCP.
+Model/authentication options are unchanged. Native configuration compatibility
+does not expand the Hook effects or certify commands executed inside Skills/plugins.
+Resident clients resolve the CLI's effective settings before accepting queries.
+Their Anthropic Messages relay uses the merged model endpoint, proxy and TLS
+environment; native credentials stay with the CLI. A session-only settings overlay
+routes model responses through AW without changing configuration files. Connect
+fails if native settings controls or relay-route confirmation fail. This requires
+the verified SDK 0.2.88 / bundled CLI 2.1.161 settings-control interface.
+The relay snapshots its upstream environment at connect; create a new client to
+apply endpoint, proxy or TLS changes.
+The current sec-core Provider exposes submission, tool PII and Skill operations.
+Provider operations and Adapter capabilities are admitted separately: `scan_code`
+and `scan_tool_input` check the Claude callback input, while `input.submit` and
+required output `on_error: withhold_result` are rejected before the worker starts.
+Native Skill discovery remains available; sec-core `check_skill` resolution is
+currently verified for Qoder SDK and QwenPaw, with no Claude resolution contract.
+See the [Provider guide](../providers/sec-core.md) before sharing its configuration.
+
+The direct task-worker mode permits one client per worker. Use the [resident entrypoint](../deployment/resident.md) for multiple task clients.
+
+The `claude-sdk` adapter supports this restricted foreground worker factory;
+`aw agent connect` does not provide persistent installation for it, and all `--native-*`
+overrides are unsupported.
+
+### Enable Bash PreTool and PostTool optimization
+
+Use the [shared Tokenless configuration](https://github.com/agentic-os-org/ANOLISA/blob/main/providers/tokenless/examples/aw.yaml),
+select its `claude` target, and replace the absolute executable, worker and state
+paths. The source `claude-worker.py` example explicitly exposes and allows native
+Bash in addition to its echo tool. Keep your application's own permission policy
+when composing its factory. See the [Tokenless guide](../../../../user-guide/en/aw/tokenless.md) for Provider
+installation and statistics settings.
+
+PreTool blocks the original Bash attempt and returns retry arguments to the model;
+the new call passes all policies and native permissions again. PostTool replaces
+only completed, non-image, non-interrupted Bash stdout. Put completion observers
+and custom steps before the single final `replace_result` step. They see the
+original result; stderr and other native fields are retained. Failure/report keeps
+the original result. Native HTTP MCP tools project the model-visible string
+(the serialized structuredContent, or the single text block for plain-text
+results) and a replacement returns that string for the next model request;
+multi-block and media results stay unchanged. The native callback does not
+expose reliable business-error status, so MCP error classification still needs
+the [managed MCP factory](../deployment/resident.md).
+
+Run pinned native tests through [contributing](../../../../../src/aw/CONTRIBUTING.md).
+See [resident deployment](../deployment/resident.md) for resident clients and managed MCP.

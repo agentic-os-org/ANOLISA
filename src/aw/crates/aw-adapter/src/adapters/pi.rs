@@ -1,4 +1,4 @@
-//! Pi Coding Agent 0.84.2 public factory bridge in an owned foreground Node worker.
+//! Pi Coding Agent public factory bridge in an owned foreground Node worker.
 
 use crate::{
     adapter::{
@@ -7,15 +7,16 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf, time::Duration};
 
-const VERSION: &str = "0.84.2";
+use super::sdk_tools::invocation_uuid;
+
 pub(crate) struct Pi;
 struct Prepared {
     input: LaunchInput,
+    version: String,
     application: PathBuf,
 }
 
@@ -56,14 +57,21 @@ impl Adapter for Pi {
                 application.clone().into_os_string(),
             ],
         )?;
-        if result != format!("AW Pi SDK {VERSION}") {
-            return Err("Pi SDK metadata probe did not validate the required packages".into());
-        }
+        let version = crate::version::reported(
+            result
+                .strip_prefix("AW Pi SDK ")
+                .ok_or("Pi SDK metadata probe did not identify the required packages")?,
+            "Pi SDK",
+        )?;
         input
             .command
             .environment
             .remove(std::ffi::OsStr::new("AW_PI_PROBE"));
-        Ok(Box::new(Prepared { input, application }))
+        Ok(Box::new(Prepared {
+            input,
+            application,
+            version,
+        }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
@@ -115,7 +123,7 @@ impl Adapter for Pi {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::PI.capabilities(VERSION, "sdk")
+        super::super::adapter::catalog::PI.capabilities(&self.version, "sdk")
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         routes(&self.input.document, steps).map(|_| ())
@@ -126,7 +134,8 @@ impl PreparedLaunch for Prepared {
             .trim()
             .to_owned();
         let ready = context.files.directory().join("pi-ready.json");
-        let config=context.files.write("pi-hooks.json",&serde_json::to_vec(&json!({"executable":context.executable,"binding":context.binding_path,"ready_path":ready,"ready_token":token,"replacement_step":events.get("tool.after").and_then(|route|route.replacement_step.as_ref()),"hooks":hooks}))?)?;
+        let observe = adapter::observation_enabled(&self.input.document, &self.input.target);
+        let config=context.files.write("pi-hooks.json",&serde_json::to_vec(&json!({"executable":context.executable,"binding":context.binding_path,"ready_path":ready,"ready_token":token,"observation_enabled":observe,"replacement_step":events.get("tool.after").and_then(|route|route.replacement_step.as_ref()),"hooks":hooks}))?)?;
         let entrypoint = context.files.write(
             "pi-entrypoint.mjs",
             include_bytes!("../../native/pi/entrypoint.mjs"),
@@ -134,6 +143,26 @@ impl PreparedLaunch for Prepared {
         context
             .files
             .write("bridge.mjs", include_bytes!("../../native/pi/bridge.mjs"))?;
+        for (name, bytes) in [
+            (
+                "transport.mjs",
+                include_bytes!("../../native/shared/transport.mjs").as_slice(),
+            ),
+            (
+                "producer.mjs",
+                include_bytes!("../../native/pi/producer.mjs").as_slice(),
+            ),
+            (
+                "scope.mjs",
+                include_bytes!("../../native/shared/scope.mjs").as_slice(),
+            ),
+            (
+                "resident.mjs",
+                include_bytes!("../../native/pi/resident.mjs").as_slice(),
+            ),
+        ] {
+            context.files.write(name, bytes)?;
+        }
         let mut command = self.input.command.clone();
         command.args = std::iter::once(entrypoint.into_os_string())
             .chain(std::iter::once(self.application.clone().into_os_string()))
@@ -200,15 +229,6 @@ fn routes(
 
 // Model-issued tool IDs may recur in later turns; only this per-preparation UUID
 // binds AW before/after without changing the durable SDK session identity.
-fn invocation_uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, byte)| match i {
-            8 | 13 | 18 | 23 => byte == b'-',
-            14 => byte == b'4',
-            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
-            _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
-        })
-}
 
 #[cfg(test)]
 mod tests {

@@ -7,8 +7,8 @@ use crate::service::MemoryService;
 
 const TOOL: &str = "mem_revert";
 
-/// Restore `path` to the content currently at HEAD, then commit the
-/// revert. Useful for undoing the most recent uncommitted edit.
+/// Restore `path` in the working tree from HEAD without staging or committing.
+/// Returns the source commit's hash. Useful for undoing an uncommitted edit.
 pub fn mem_revert(svc: &MemoryService, path: &str) -> Result<String> {
     let git = match svc.git.as_ref() {
         Some(g) => g,

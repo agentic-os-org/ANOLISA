@@ -1,6 +1,6 @@
 //! Conversion from Hermes session rows to ATIF v1.7.
 
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use agentsight_atif::{
@@ -64,11 +64,12 @@ pub(crate) fn convert_session(
     messages: &[HermesMessage],
 ) -> AtifTrajectory {
     let mut steps = Vec::new();
+    let mut generated_ids = HashSet::new();
     for message in messages {
         match message.role.as_str() {
-            "tool" => attach_tool_result(&mut steps, message),
+            "tool" => attach_tool_result(&mut steps, message, &mut generated_ids),
             "user" | "system" | "assistant" => {
-                steps.push(message_step(steps.len() + 1, message));
+                steps.push(message_step(steps.len() + 1, message, &mut generated_ids));
             }
             _ => {}
         }
@@ -125,7 +126,11 @@ pub(crate) fn convert_session(
     }
 }
 
-fn message_step(step_id: usize, message: &HermesMessage) -> Step {
+fn message_step(
+    step_id: usize,
+    message: &HermesMessage,
+    generated_ids: &mut HashSet<String>,
+) -> Step {
     let source = match message.role.as_str() {
         "user" => StepSource::User,
         "system" => StepSource::System,
@@ -147,7 +152,7 @@ fn message_step(step_id: usize, message: &HermesMessage) -> Step {
             .reasoning_content
             .clone()
             .or_else(|| message.reasoning.clone()),
-        tool_calls: parse_tool_calls(message.tool_calls.as_deref(), message.id),
+        tool_calls: parse_tool_calls(message.tool_calls.as_deref(), message.id, generated_ids),
         observation: None,
         metrics: None,
         extra: Some(extra),
@@ -156,7 +161,11 @@ fn message_step(step_id: usize, message: &HermesMessage) -> Step {
     }
 }
 
-fn parse_tool_calls(raw: Option<&str>, message_id: i64) -> Option<Vec<ToolCall>> {
+fn parse_tool_calls(
+    raw: Option<&str>,
+    message_id: i64,
+    generated_ids: &mut HashSet<String>,
+) -> Option<Vec<ToolCall>> {
     let value = raw.and_then(|raw| serde_json::from_str::<Value>(raw).ok())?;
     let values = value.as_array().cloned().unwrap_or_else(|| vec![value]);
     let calls = values
@@ -173,7 +182,11 @@ fn parse_tool_calls(raw: Option<&str>, message_id: i64) -> Option<Vec<ToolCall>>
                 .or_else(|| call.get("tool_call_id"))
                 .and_then(Value::as_str)
                 .map(String::from)
-                .unwrap_or_else(|| format!("hermes-{message_id}-{index}"));
+                .unwrap_or_else(|| {
+                    let id = format!("hermes-{message_id}-{index}");
+                    generated_ids.insert(id.clone());
+                    id
+                });
             let arguments = function
                 .get("arguments")
                 .or_else(|| call.get("arguments"))
@@ -198,37 +211,37 @@ fn parse_arguments(value: Value) -> Value {
     }
 }
 
-fn attach_tool_result(steps: &mut Vec<Step>, message: &HermesMessage) {
+fn attach_tool_result(
+    steps: &mut Vec<Step>,
+    message: &HermesMessage,
+    generated_ids: &mut HashSet<String>,
+) {
     let result_id = message.tool_call_id.clone();
-    // An older explicit call outranks a newer call to the same tool. Name
-    // fallback remains necessary when Hermes omits the assistant's call ID.
-    let exact = result_id.as_deref().and_then(|id| {
-        steps.iter().rposition(|step| {
-            step.source == StepSource::Agent
-                && step
-                    .tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == id))
-        })
-    });
-    let target = exact.or_else(|| {
-        let name = message.tool_name.as_deref()?;
-        steps.iter().rposition(|step| {
-            step.source == StepSource::Agent
-                && step
-                    .tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| calls.iter().any(|call| call.function_name == name))
-        })
-    });
-    let result = ObservationResult {
+    let target = result_call(steps, message, generated_ids);
+    let mut result = ObservationResult {
         source_call_id: result_id.clone(),
         content: decode_content(message.content.as_deref()),
         subagent_trajectory_ref: None,
         extra: None,
     };
-    if let Some(step) = target.map(|index| &mut steps[index]) {
-        align_result_id(step, message, result_id.as_deref());
+    if let Some((step_index, call_index)) = target {
+        let step = &mut steps[step_index];
+        if let Some(call) = step
+            .tool_calls
+            .as_mut()
+            .and_then(|calls| calls.get_mut(call_index))
+        {
+            generated_ids.remove(&call.tool_call_id);
+            if let Some(id) = result_id {
+                call.tool_call_id = id;
+            }
+            result.source_call_id = Some(call.tool_call_id.clone());
+            if let Some(timestamp) = format_timestamp(message.timestamp) {
+                call.extra
+                    .get_or_insert_with(HashMap::new)
+                    .insert("result_timestamp".into(), Value::String(timestamp));
+            }
+        }
         step.observation
             .get_or_insert_with(|| Observation {
                 results: Vec::new(),
@@ -257,30 +270,52 @@ fn attach_tool_result(steps: &mut Vec<Step>, message: &HermesMessage) {
     });
 }
 
-fn align_result_id(step: &mut Step, message: &HermesMessage, result_id: Option<&str>) {
-    let (Some(id), Some(calls)) = (result_id, step.tool_calls.as_mut()) else {
-        return;
-    };
-    let position = calls
-        .iter()
-        .position(|call| call.tool_call_id == id)
-        .or_else(|| {
-            calls.iter().position(|call| {
-                message
-                    .tool_name
-                    .as_deref()
-                    .is_some_and(|name| call.function_name == name)
-            })
-        });
-    let Some(call) = position.map(|index| &mut calls[index]) else {
-        return;
-    };
-    call.tool_call_id = id.to_string();
-    let mut extra = call.extra.take().unwrap_or_default();
-    if let Some(timestamp) = format_timestamp(message.timestamp) {
-        extra.insert("result_timestamp".into(), Value::String(timestamp));
+fn result_call(
+    steps: &[Step],
+    message: &HermesMessage,
+    generated_ids: &HashSet<String>,
+) -> Option<(usize, usize)> {
+    if let Some(id) = message.tool_call_id.as_deref() {
+        for (step_index, step) in steps.iter().enumerate().rev() {
+            if step.source != StepSource::Agent {
+                continue;
+            }
+            if let Some(call_index) = step
+                .tool_calls
+                .as_ref()
+                .and_then(|calls| calls.iter().position(|call| call.tool_call_id == id))
+            {
+                return Some((step_index, call_index));
+            }
+        }
     }
-    call.extra = Some(extra);
+    let name = message.tool_name.as_deref()?;
+    let mut candidate = None;
+    for (step_index, step) in steps.iter().enumerate() {
+        if step.source != StepSource::Agent {
+            continue;
+        }
+        for (call_index, call) in step.tool_calls.as_deref().unwrap_or(&[]).iter().enumerate() {
+            // A missing echo may identify one unresolved call by name. An
+            // explicit, unmatched echo may only replace an ID we synthesized.
+            if call.function_name != name
+                || (message.tool_call_id.is_some() && !generated_ids.contains(&call.tool_call_id))
+                || step.observation.as_ref().is_some_and(|observation| {
+                    observation
+                        .results
+                        .iter()
+                        .any(|result| result.source_call_id.as_deref() == Some(&call.tool_call_id))
+                })
+            {
+                continue;
+            }
+            if candidate.is_some() {
+                return None;
+            }
+            candidate = Some((step_index, call_index));
+        }
+    }
+    candidate
 }
 
 fn decode_content(raw: Option<&str>) -> Option<Value> {

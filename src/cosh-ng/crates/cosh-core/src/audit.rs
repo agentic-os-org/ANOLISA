@@ -14,6 +14,8 @@ use cosh_types::audit::{
 use serde::Serialize;
 use uuid::Uuid;
 
+#[cfg(test)]
+mod budget_tests;
 mod orchestration;
 
 pub(crate) use orchestration::CoreAuditScope;
@@ -81,7 +83,11 @@ impl CoreAuditRecorder {
         } else {
             match resolve_audit_root() {
                 Ok(root) => {
-                    match AuditSegmentWriter::create(&root.path, AuditComponentName::CoshCore) {
+                    match AuditSegmentWriter::create_with_settings(
+                        &root.path,
+                        AuditComponentName::CoshCore,
+                        settings.clone(),
+                    ) {
                         Ok(writer) => (Some(root.path), CoreAuditSink::Real(writer)),
                         Err(error) => {
                             tracing::warn!(target: "cosh_audit", "audit writer unavailable: {error}");
@@ -481,7 +487,11 @@ impl CoreAuditRecorder {
             Some(root) => root,
             None => return,
         };
-        if let Ok(writer) = AuditSegmentWriter::create(&root, AuditComponentName::CoshCore) {
+        if let Ok(writer) = AuditSegmentWriter::create_with_settings(
+            &root,
+            AuditComponentName::CoshCore,
+            self.settings.clone(),
+        ) {
             self.root = Some(root);
             self.sink = CoreAuditSink::Real(writer);
         }

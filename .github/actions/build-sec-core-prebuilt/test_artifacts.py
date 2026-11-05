@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Validate sec-core's source/artifact names and its exact four release files."""
 
+import gzip
 import hashlib
 import io
 import json
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-
 
 COMMON = Path(__file__).resolve().parent.parent / "prebuilt-rust-common"
 VERIFIER = COMMON / "verify-artifacts.py"
@@ -69,15 +70,36 @@ def write_fixture(root: Path) -> Path:
     return directory
 
 
+def rebind_archive(archive: Path) -> None:
+    """Keep checksums and SBOM valid so only archive integrity can reject a fixture."""
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    Path(f"{archive}.sha256").write_text(f"{digest}  {archive.name}\n")
+    sbom = Path(f"{archive}.cdx.json")
+    document = json.loads(sbom.read_text())
+    document["metadata"]["component"]["hashes"][0]["content"] = digest
+    sbom.write_text(json.dumps(document))
+    digest = hashlib.sha256(sbom.read_bytes()).hexdigest()
+    Path(f"{sbom}.sha256").write_text(f"{digest}  {sbom.name}\n")
+
+
 def verify(root: Path) -> subprocess.CompletedProcess[str]:
     """Run the publisher's verifier against an Actions Artifact download."""
     return subprocess.run(
         [
-            "python3", str(VERIFIER), "--directory", str(root),
-            "--component", "agent-sec-core", "--version", VERSION,
-            "--layout", "actions",
+            sys.executable,
+            str(VERIFIER),
+            "--directory",
+            str(root),
+            "--component",
+            "agent-sec-core",
+            "--version",
+            VERSION,
+            "--layout",
+            "actions",
         ],
-        check=False, capture_output=True, text=True,
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -88,9 +110,48 @@ class SecCoreArtifactsTest(unittest.TestCase):
             write_fixture(root)
             self.assertEqual(verify(root).returncode, 0)
 
+    def test_gzip_integrity_is_checked_after_tar_end(self) -> None:
+        for corruption in ("crc", "size", "truncated", "trailing", "deflate"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = write_fixture(root)
+                archive = directory / ARCHIVE
+                data = bytearray(archive.read_bytes())
+                if corruption == "crc":
+                    data[-8] ^= 1
+                elif corruption == "size":
+                    data[-4] ^= 1
+                elif corruption == "truncated":
+                    del data[-8:]
+                elif corruption == "deflate":
+                    # A second gzip member with the reserved DEFLATE block type.
+                    data.extend(gzip.compress(b"")[:10] + b"\x07" + b"\0" * 8)
+                else:
+                    data.extend(b"invalid gzip trailer")
+                archive.write_bytes(data)
+                rebind_archive(archive)
+                result = verify(root)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("cannot read archive", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_valid_gzip_padding_and_concatenated_members(self) -> None:
+        for suffix in (b"\0" * 32, gzip.compress(b"\0" * 1024)):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = write_fixture(root)
+                archive = directory / ARCHIVE
+                with archive.open("ab") as stream:
+                    stream.write(suffix)
+                rebind_archive(archive)
+                result = verify(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_missing_file_is_rejected(self) -> None:
         for filename in (
-            ARCHIVE, f"{ARCHIVE}.sha256", f"{ARCHIVE}.cdx.json",
+            ARCHIVE,
+            f"{ARCHIVE}.sha256",
+            f"{ARCHIVE}.cdx.json",
             f"{ARCHIVE}.cdx.json.sha256",
         ):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:

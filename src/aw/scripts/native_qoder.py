@@ -13,14 +13,20 @@ import urllib.request
 
 
 def validate_pin(pin):
+    if not isinstance(pin, dict):
+        raise ValueError("Qoder native acceptance requires an object pin")
+    downloads = pin.get("downloads")
     if (
         not re.fullmatch(r"\d+\.\d+\.\d+", pin.get("version", ""))
         or tuple(map(int, pin["version"].split("."))) < (1, 1, 64)
-        or set(pin.get("downloads", {})) != {"x86_64", "aarch64"}
+        or not isinstance(downloads, dict)
+        or set(downloads) != {"x86_64", "aarch64"}
     ):
         raise ValueError("Qoder native acceptance requires an exact supported Linux release")
     for arch, suffix in [("x86_64", "x64"), ("aarch64", "arm64")]:
-        row = pin["downloads"][arch]
+        row = downloads[arch]
+        if not isinstance(row, dict):
+            raise ValueError("Qoder download must be an object")
         expected = (
             "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/releases/"
             f"{pin['version']}/qodercli-linux-{suffix}.tar.gz"

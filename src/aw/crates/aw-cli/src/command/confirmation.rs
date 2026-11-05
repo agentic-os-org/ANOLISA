@@ -6,7 +6,7 @@ use std::io::{IsTerminal, Write};
 pub(super) fn check(
     options: &super::package::Uninstall,
 ) -> crate::cli::Result<Option<NotConfirmed>> {
-    if options.yes {
+    if options.dry_run || options.yes {
         return Ok(None);
     }
     if options.prefix.output.json

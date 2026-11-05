@@ -372,6 +372,10 @@ class SecurityInventoryTests(GateFixture):
         for key in ("qoder_cli", "qoder_reload_cli"):
             pin = pins[key]
             validate_pin(pin)
+            for malformed in ([], {**pin, "downloads": {"x86_64": [], "aarch64": {}}}):
+                with self.subTest(key=key, malformed=malformed):
+                    with self.assertRaisesRegex(ValueError, "Qoder"):
+                        validate_pin(malformed)
             for mutation in ("checksum", "version", "url"):
                 edited = copy.deepcopy(pin)
                 if mutation == "version":

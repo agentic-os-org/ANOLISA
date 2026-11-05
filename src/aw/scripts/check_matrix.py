@@ -1,9 +1,15 @@
-"""Regression obligations and the README capability grid share one checked manifest."""
+"""Regression obligations and visible Hook grids share one checked manifest."""
 
 from pathlib import Path
 
 START = "<!-- aw-regression-matrix:start -->"
 END = "<!-- aw-regression-matrix:end -->"
+CAPABILITY_DOCS = (
+    "README.md",
+    "README_zh.md",
+    "../../docs/user-guide/en/aw/capabilities.md",
+    "../../docs/user-guide/zh/aw/capabilities.md",
+)
 SHARED_CASES = {
     "catalog": (
         "aw-adapter/lib/aw_adapter",
@@ -42,14 +48,14 @@ def table(matrix: dict) -> str:
     ]
     for agent, row in sorted(matrix["agents"].items()):
         cells = [
-            "✓" if effect in row["events"].get(event, {}) else "—" for event, effect in columns
+            "✓" if effect in row["events"].get(event, {}) else "×" for event, effect in columns
         ]
         rows.append(f"| `{agent}` | " + " | ".join(cells) + " |")
     return "\n".join(rows)
 
 
 def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
-    """Fail on missing/ignored tests, uncovered cells, schema drift or stale README grids."""
+    """Fail on missing/ignored tests, uncovered cells, schema drift or stale guide grids."""
     if matrix.get("version") != 1 or not matrix.get("agents") or not matrix.get("cases"):
         raise ValueError("missing or unsupported regression matrix")
     for name, (target, test) in SHARED_CASES.items():
@@ -87,12 +93,15 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
         raise ValueError("sec-core and Tokenless provider contracts are required")
     for provider, cases in matrix["providers"].items():
         covered(cases, provider)
-    for readme in ("README.md", "README_zh.md"):
-        text = (root / readme).read_text(encoding="utf-8")
+    for document in CAPABILITY_DOCS:
+        text = (root / document).read_text(encoding="utf-8")
         if text.count(START) != 1 or text.count(END) != 1:
-            raise ValueError(f"{readme}: missing unique matrix markers")
+            raise ValueError(f"{document}: missing unique matrix markers")
+        prefix = text.split(START)[0].lower()
+        if prefix.rfind("<details") > prefix.rfind("</details>"):
+            raise ValueError(f"{document}: keep the Hook grid expanded")
         if text.split(START)[1].split(END)[0].strip() != table(matrix):
-            raise ValueError(f"{readme}: update the grid from tests/regression-matrix.json")
+            raise ValueError(f"{document}: update the grid from tests/regression-matrix.json")
 
 
 def main() -> None:
@@ -101,15 +110,15 @@ def main() -> None:
     import json
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--write-readmes", action="store_true")
+    parser.add_argument("--write-docs", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     matrix = json.loads((root / "tests/regression-matrix.json").read_text(encoding="utf-8"))
     grid = table(matrix)
-    if not args.write_readmes:
+    if not args.write_docs:
         print(grid)
         return
-    for name in ("README.md", "README_zh.md"):
+    for name in CAPABILITY_DOCS:
         path = root / name
         text = path.read_text(encoding="utf-8")
         if text.count(START) != 1 or text.count(END) != 1:

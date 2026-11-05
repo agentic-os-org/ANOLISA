@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Related documents: [Design](../design/audit-log.md),
+Related documents: [Design](../design/en/audit-log.md),
 [ADR-009](../adr/ADR-009-audit-event-segment-and-sls-contract.md), and
 [ADR-010](../adr/ADR-010-audit-operations-retention-and-export-policy.md)
 

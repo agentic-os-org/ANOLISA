@@ -25,7 +25,8 @@ def capture() -> dict:
     os.close(writer)
     transcript = bytearray()
     acted = False
-    deadline = time.monotonic() + 4
+    # Accepted removal verifies the real CLI payload before durable deletion.
+    deadline = time.monotonic() + 20
     try:
         while True:
             if time.monotonic() >= deadline:

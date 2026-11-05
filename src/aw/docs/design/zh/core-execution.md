@@ -2,7 +2,7 @@
 
 [English](../en/core-execution.md)
 
-[设计索引](README.md) · [架构总览](../../../../../docs/developer-guide/zh/aw/architecture.md)
+[设计索引](README.md) · [架构总览](architecture.md)
 
 `aw-core` 通过可信接入端口执行已由策略确定的能力计划。它复用既有注册合同
 Schema 和校验器；`aw-contracts` 保持无副作用，也不依赖 Core。

@@ -2,7 +2,7 @@
 
 [English](../../en/runtime/provider-host.md)
 
-[设计索引](../README.md) · [架构总览](../../../../../../docs/developer-guide/zh/aw/architecture.md)
+[设计索引](../README.md) · [架构总览](../architecture.md)
 
 `aw-host` 将已校验的配置和 `aw-provider/v1alpha1` 协议接到 Linux 命令执行层。
 它执行真实的 Provider 进程，返回已检查的候选效果与可关联的调用报告。
@@ -13,9 +13,10 @@ Agent 启动、原生 Hook 安装、效果采用和审计持久化仍由接入�
 | 层 | 职责 |
 | --- | --- |
 | `aw-config` | 解析期望配置并校验静态引用 |
-| `aw-provider` | 检查协议消息、离线预检与能力准入 |
+| `aw-core::admission` | 执行离线预检、能力准入，并生成不可变的 `PolicyCandidate` 与 `AdmittedPolicy` 快照 |
+| `aw-provider` | 检查协议消息、Provider 证据与视图契约 |
 | `aw-exec` | 按字面参数执行命令，提供有界字节传输与所属进程清理 |
-| `aw-host` | 保留执行上下文，准备 Provider 并调用已准入的事件步骤 |
+| `aw-host` | 保留执行上下文，发现 Provider 并调用已准入的事件步骤 |
 | 接入 Adapter | 提供可信能力、归一化事件、调度步骤并应用原生效果 |
 
 Host 复用这些库，离线准入仍不执行命令，原始传输层仍不解释 Provider JSON。
@@ -26,7 +27,21 @@ Core 的最终执行约束。
 
 ## 准备固定上下文
 
-调用 `Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`。
+准备流程将无副作用的 Core 准入与 Provider 进程发现分离：
+
+1. `AdmissionEngine::preflight(bytes, target, capabilities)` 解析并校验配置文档，
+   计算原始字节的 SHA-256 修订摘要，返回包含静态步骤需求的 `PolicyCandidate`。
+2. `Host::discover(&candidate, context, deadline, cancelled)` 获取受管安装文件读锁，
+   直接复用候选快照中的配置对被引用的结构化 Provider 执行 `describe` 与
+   `validate_config`，返回 `PreparedProviders`。
+3. `AdmissionEngine::admit(candidate, prepared.evidence())` 核对发现阶段的
+   Provider 证据并生成不可变的 `AdmittedPolicy`。
+4. `Host::from_admitted(policy, prepared)` 核对配置版本、目标、Adapter 能力、发现
+   阶段的 Provider 证据及已准备的 Provider 命令一致后构建 `Host`。
+
+独立调用方也可直接调用
+`Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`，内部
+委托上述四个步骤。
 `bytes` 是完整配置文档；每次调用保留的 SHA-256 修订摘要由这些原始字节确定。
 `target` 选择配置中的 Agent。调用方提供实际版本及入口对应的
 `AdapterCapabilities`，Provider 声明不能提供或扩展这份可信证据。
@@ -37,8 +52,10 @@ Core 的最终执行约束。
 都需要创建新的 Host。这固定的是值，不是可执行文件或依赖内容；调用方仍需负责
 它们的可信性与稳定性。
 
-准备阶段先解析配置，并对全部启用需求调用 `admission::preflight`，之后才启动
-Provider。每个被引用的结构化 Provider 分别启动进程执行 `describe` 和
+准备阶段先解析完整配置，再对事件/步骤选择器交集可能匹配所选 Adapter 的启用
+需求调用 `admission::preflight`，之后才启动 Provider。确定不适用于当前目标的
+步骤不进入计划；无法确定的标准名/原生名交集继续严格准入。Host 准备和原生注册
+使用同一组步骤，revision 身份仍保留完整文档。每个被引用的结构化 Provider 分别启动进程执行 `describe` 和
 `validate_config`；原生命令按显式原生步骤合同准入，不执行这两项调用。布尔 Hook
 （省略 `protocol` 或填写 `aw-hook/v1alpha1`）同样跳过这两项调用，preflight 在本地
 准入配置的命中效果，不执行脚本。仅被禁用项
@@ -51,11 +68,12 @@ Agent 已采用策略。准入范围仍为：
 
 | 事件 | 候选效果 | 失败动作 |
 | --- | --- | --- |
+| `input.submit` | `observe`、`block` | `report`，或 Adapter 支持的 `block` |
 | `tool.before` | `observe`、`block` | `report`，或在 Adapter 支持时使用 `block` |
-| `tool.after` | `observe`, `replace_result` | `report` |
+| `tool.after` | `observe`, `replace_result` | `report`，或 Adapter 显式提供失败动作能力时使用 `withhold_result` |
 
-启用但不受支持的事件、精确工具选择器、guard、`ask`、输入替换效果及超出
-`native_hook` 的保证均被拒绝。完整准入合同见[协议设计](../providers/provider-protocol.md)。
+启用但不受支持的事件、guard、`ask`、输入替换效果及超出
+`native_hook` 的保证均被拒绝。完整准入合同见[协议设计](../../../../../../docs/developer-guide/zh/aw/providers/protocol.md)。
 
 ## Adapter 执行语义
 
@@ -116,8 +134,24 @@ deadline、取消、一次调用声明和失败处置沿用 Host 规则。显式
 拒绝非法键和 NUL，不改变事件身份或期限，也不进入 stdin 或执行报告。非法快照
 占用步骤执行权并返回明确故障。
 
-用 `Event::steps()` 选择保留的步骤，再调用 `Event::invoke(step_id)`。调用方可以
-取得配置顺序，按原生回调合同决定串行或并行调度。同一个 Event 内的并发调用仍
+用 `Event::steps()` 选择保留的步骤，再调用 `Event::invoke(step_id)`。
+迭代器按配置顺序保留全部已准入步骤，包括工具选择器未匹配的步骤。
+`invoke` 在回调归一化、绑定检查和步骤单次占用之后，对事件与步骤的 `match.tools`
+取交集。任一层省略或使用 `["*"]` 时选择全部工具。标准名称匹配规范化的
+`tool.name`；`native:<adapter>:<name>` 精确匹配 `agent.adapter` 和保留的
+`tool.native_name`。匹配区分大小写，不提供 glob 或正则模式。
+
+未匹配调用先校验规范化事件、检查取消和共享截止时间，再返回
+`StepOutput::Skipped`；不启动 Provider 或 Hook 调用进程，也不产生候选效果。
+启用的结构化 Provider 仍须完成准备阶段的发现和配置校验。跳过步骤保留单次占用、
+关联记录及正常完成路径，使后续步骤和终态清理继续执行。
+所有协议都在选择或执行前校验规范化事件，原生 Hook 同样适用。工具身份缺失时，
+已占用的调用按配置错误动作失败；格式错误的数据不会启动 Hook 进程。
+
+服务在完成元数据审计中记录 `kind: skipped`。非法、过期或已取消事件仍按配置的
+`on_error` 返回失败。
+
+调用方取得配置顺序，按原生回调合同决定串行或并行调度。同一个 Event 内的并发调用仍
 共享截止时间。每个步骤在每个 Event 中只能被占用一次，失败尝试也不例外；不会
 自动重试。创建另一个 Event 不会对原生回调去重。执行工具前，Adapter 必须收集
 其合同要求的结果。
@@ -131,7 +165,12 @@ deadline、取消、一次调用声明和失败处置沿用 Host 规则。显式
 
 ## 解释报告
 
-`Invocation.result` 保留 `StepOutput` 或原始 `Failure`。`StepOutput::Provider`
+`Invocation.result` 保留 `StepOutput` 或原始 `Failure`。
+`StepOutput::Skipped` 记录选择器未匹配，没有命令进程或效果；Adapter 返回中立的
+原生回复，保留待确认权限请求和拒绝。不受支持的输入改写仍被拒绝。Tokenless
+PreTool 建议须由新调用重新经过选中的安全步骤和原生权限检查；PostTool 替换仍只
+作用于末尾获准的文本槽，保留原生 envelope 与失败状态。
+`StepOutput::Provider`
 包含已校验的结构化结果，`StepOutput::Native` 包含 stdout、stderr 和原生进程状态。
 原生非零退出是交给 Adapter 解释的结果，不是结构化 Provider 错误。以下效果与
 响应校验规则适用于结构化 Provider 结果。成功的 `block` 效果属于

@@ -204,9 +204,10 @@ to prevent recovered output from being compressed again.
 
 `JsonCompressor` stashes complete record arrays, complete long strings, dropped
 non-record array windows, and depth-truncated subtrees when a trusted recovery
-path is available. Structural
-cleanup—blacklisted diagnostic fields, `null`, and empty values—is classified
-as lossless and does not emit recovery markers.
+path is available. JSON compaction and verified TOON encoding preserve all
+fields, including diagnostic names, `null`, and empty values. These complete
+representations are lossless and do not need recovery markers. Explicit
+truncation or record reduction still follows the recovery policy above.
 
 The former stateless MCP Retrieve server was removed. It accepted hashes
 without verified model-visibility context, so it cannot serve as an authorized

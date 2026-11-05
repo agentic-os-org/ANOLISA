@@ -175,7 +175,7 @@ opaque trace_id 只进入兼容标签。
 
 CLI 无输入时创建干净 command root，不读取 Agent 配置、不猜测 session/tool ID，也不自动发现
 `TRACEPARENT/BAGGAGE` 环境变量。显式 `AGENT_SEC_INVOCATION_ID` 保留为兼容标签，缺省不生成 UUID。
-SDK 初始化在 help/version 返回之后。选项示例见 [Policy CLI 指南](../../../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)。
+SDK 初始化在 help/version 返回之后。选项示例见 [Policy CLI 指南](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md)。
 
 `asc_daemon_client::call` 的显式 carrier 完整替换 ambient parent/Baggage/兼容标签，只采用 request
 携带的 compatibility。没有显式 carrier 时继承当前 Context；显式 compatibility 对象替换 ambient 标签，
@@ -374,7 +374,7 @@ UF-007/008/009/012 的持久化、查询和重组验收不在当前工作包，�
 [daemon 协议](DAEMON_PROTOCOL_V1_zh.md)，provider/日志/关闭见
 [进程部署契约](DAEMON_PROCESS_DEPLOYMENT_CONTRACT_zh.md)。
 [PAP 生命周期契约](POLICY_SCOPE_BINDING_CONTRACT_zh.md) 与
-[CLI 使用参考](../../../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)
+[CLI 使用参考](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md)
 约束业务响应、输出和授权；安全事件接入还需遵守 [中间件契约](SECURITY_MIDDLEWARE_CONTRACT_zh.md)。
 
 OTEL-CR-001…008 的已采纳决策、直接消费者证据及部署/回滚顺序统一记录于

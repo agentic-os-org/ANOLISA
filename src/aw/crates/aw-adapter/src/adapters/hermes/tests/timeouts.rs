@@ -1,8 +1,9 @@
 use super::*;
-use aw_provider::admission::StepExecution;
+use aw_core::admission::StepExecution;
 
 fn prepared(profile: &Profile, mode: &str) -> Prepared {
     Prepared {
+        revision: "a".repeat(40),
         input: LaunchInput {
             document: json!({"spec":{"agents":{"hermes":{"evidence":{"mode":mode}}},
                 "execution":{"default_event_budget_ms":1001},"events":{}}}),
@@ -26,6 +27,8 @@ fn action(event: &str) -> AdmittedStep {
         event: event.into(),
         step_id: "record".into(),
         provider: "fixture".into(),
+        event_tools: vec!["*".into()],
+        step_tools: vec!["*".into()],
         on_error: "report".into(),
         execution: StepExecution::Provider {
             operation: "record".into(),

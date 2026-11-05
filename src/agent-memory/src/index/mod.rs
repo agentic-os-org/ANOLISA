@@ -88,15 +88,19 @@ impl IndexHandle {
         store.search(query, top_k, self.exclude_cold)
     }
 
-    /// Search with agent scope filter.
+    /// Search with agent scope filter and optional fact-category filter.
+    ///
+    /// `category` is pushed into SQL so it applies *before* the `top_k` limit;
+    /// see `BM25Store::search_scoped`.
     pub fn search_scoped(
         &self,
         query: &str,
         top_k: usize,
         agent_scope: Option<&str>,
+        category: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.search_scoped(query, top_k, self.exclude_cold, agent_scope)
+        store.search_scoped(query, top_k, self.exclude_cold, agent_scope, category)
     }
 
     /// Deep search: include cold files too.
@@ -138,9 +142,8 @@ impl IndexHandle {
     /// searchable, closing the race window between the file write and the
     /// notify watcher's next debounce flush (~200 ms).
     ///
-    /// The notify watcher will later process the same inotify event and
-    /// issue a redundant upsert — this is harmless because `upsert` is
-    /// idempotent (DELETE + INSERT on the same rowid).
+    /// The notify watcher skips the BM25 upsert when the stored mtime and
+    /// size match, so attribution must be correct on this synchronous path.
     ///
     /// Cold-file strategy: `upsert` inserts with `is_cold = 0` (warm) by
     /// default, which is correct — a freshly observed file should be warm.
@@ -148,9 +151,20 @@ impl IndexHandle {
     /// behavioural divergence. The `compact()` method only marks files
     /// cold when `access_count = 0 AND mtime_ms < cutoff`, so a newly
     /// indexed file is unaffected regardless of which path inserts it.
-    pub fn reindex_file(&self, rel_path: &str, body: &str, mtime_ms: i64, size: u64) -> Result<()> {
+    ///
+    /// `agent_id` is the observing agent's `MCP_CLIENT_NAME`, matching the
+    /// watcher's attribution. An untagged row is invisible to
+    /// `isolated:<agent>` and shared with other agents under `filter:<agent>`.
+    pub fn reindex_file(
+        &self,
+        rel_path: &str,
+        body: &str,
+        mtime_ms: i64,
+        size: u64,
+        agent_id: Option<&str>,
+    ) -> Result<()> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        store.upsert(rel_path, mtime_ms, size, body, None)
+        store.upsert(rel_path, mtime_ms, size, body, agent_id)
     }
 
     /// Compact the index: mark old, never-accessed files as cold.

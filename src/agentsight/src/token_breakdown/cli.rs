@@ -161,6 +161,23 @@ impl AnalyzeChatmlCommand {
                                         serde_json::Value::String(text) => text.clone(),
                                         other => other.to_string(),
                                     };
+                                    // SysOM's non-streaming POP response wraps
+                                    // the provider payload in
+                                    // `{"data": "<json string>"}`, the envelope
+                                    // the SysOM parser and the client both
+                                    // unwrap. Read the inner payload, or the
+                                    // wrapper is offered as the frame and
+                                    // nothing in it matches.
+                                    let payload =
+                                        serde_json::from_str::<serde_json::Value>(&payload)
+                                            .ok()
+                                            .and_then(|value| {
+                                                value
+                                                    .get("data")
+                                                    .and_then(|inner| inner.as_str())
+                                                    .map(str::to_string)
+                                            })
+                                            .unwrap_or(payload);
                                     Self::extract_response_from_sse(&[serde_json::json!({
                                         "data": payload
                                     })])
@@ -516,6 +533,66 @@ impl AnalyzeChatmlCommand {
                                 }
                             }
                         }
+                        // A whole Anthropic message (a non-streaming body,
+                        // or a gateway that returns one). `content` is the
+                        // same block array the streaming shape delivers
+                        // piecewise.
+                        Some("message") => {
+                            if let Some(blocks) =
+                                data_json.get("content").and_then(|v| v.as_array())
+                            {
+                                for (position, block) in blocks.iter().enumerate() {
+                                    match block.get("type").and_then(|v| v.as_str()) {
+                                        Some("text") => {
+                                            if let Some(text) =
+                                                block.get("text").and_then(|v| v.as_str())
+                                            {
+                                                if !text.is_empty() {
+                                                    content_parts.push(text.to_string());
+                                                }
+                                            }
+                                        }
+                                        Some("thinking") => {
+                                            if let Some(text) =
+                                                block.get("thinking").and_then(|v| v.as_str())
+                                            {
+                                                if !text.is_empty() {
+                                                    reasoning_parts.push(text.to_string());
+                                                }
+                                            }
+                                        }
+                                        Some("tool_use") => {
+                                            let arguments = block
+                                                .get("input")
+                                                .filter(|input| {
+                                                    input
+                                                        .as_object()
+                                                        .is_some_and(|object| !object.is_empty())
+                                                })
+                                                .map(|input| input.to_string())
+                                                .unwrap_or_default();
+                                            anthropic_calls.insert(
+                                                position as u64,
+                                                (
+                                                    block
+                                                        .get("id")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or_default()
+                                                        .to_string(),
+                                                    block
+                                                        .get("name")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or_default()
+                                                        .to_string(),
+                                                    arguments,
+                                                ),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
                         Some("content_block_delta") => {
                             let index =
                                 data_json.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -658,6 +735,93 @@ impl AnalyzeChatmlCommand {
                         _ => {}
                     }
 
+                    // ── Non-streaming provider bodies ─────────────────────
+                    // `process_events` offers a body as a single synthetic
+                    // frame, so it has no streaming `type` (Anthropic's whole
+                    // message is the exception, handled above). Read the
+                    // response object the provider returns instead of
+                    // reporting a zero-token answer.
+                    if matches!(event_type, None | Some("response")) {
+                        // OpenAI Responses: `output` is an array of items.
+                        if let Some(items) = data_json.get("output").and_then(|v| v.as_array()) {
+                            for item in items {
+                                match item.get("type").and_then(|v| v.as_str()) {
+                                    Some("message") => {
+                                        if let Some(parts) =
+                                            item.get("content").and_then(|v| v.as_array())
+                                        {
+                                            for part in parts {
+                                                if let Some(text) =
+                                                    part.get("text").and_then(|v| v.as_str())
+                                                {
+                                                    if !text.is_empty() {
+                                                        content_parts.push(text.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some("function_call") | Some("custom_tool_call") => {
+                                        let name =
+                                            item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                        let arguments = item
+                                            .get("arguments")
+                                            .or_else(|| item.get("input"))
+                                            .map(|value| match value {
+                                                serde_json::Value::String(text) => text.clone(),
+                                                other => other.to_string(),
+                                            })
+                                            .unwrap_or_default();
+                                        if !name.is_empty() || !arguments.is_empty() {
+                                            let slot = (0, tool_calls.len());
+                                            tool_calls.push((slot, name.to_string(), arguments));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        // Gemini: answer parts live under candidates[].content.
+                        if let Some(candidates) =
+                            data_json.get("candidates").and_then(|v| v.as_array())
+                        {
+                            for candidate in candidates {
+                                if let Some(parts) = candidate
+                                    .pointer("/content/parts")
+                                    .and_then(|v| v.as_array())
+                                {
+                                    for part in parts {
+                                        if let Some(text) =
+                                            part.get("text").and_then(|v| v.as_str())
+                                        {
+                                            if !text.is_empty() {
+                                                content_parts.push(text.to_string());
+                                            }
+                                        }
+                                        if let Some(call) = part.get("functionCall") {
+                                            let name = call
+                                                .get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let arguments = call
+                                                .get("args")
+                                                .map(|value| value.to_string())
+                                                .unwrap_or_default();
+                                            if !name.is_empty() || !arguments.is_empty() {
+                                                let slot = (0, tool_calls.len());
+                                                tool_calls.push((
+                                                    slot,
+                                                    name.to_string(),
+                                                    arguments,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Extract content and reasoning_content from the OpenAI
                     // chat-completions payload. A choice carries either
                     // streaming `delta` fragments or a cumulative `message`
@@ -731,9 +895,18 @@ impl AnalyzeChatmlCommand {
                             // streamed arguments fragments by index. A message
                             // snapshot carries the complete call, so it
                             // replaces the slot instead of appending to it.
-                            if let Some(calls) =
-                                payload.get("tool_calls").and_then(|t| t.as_array())
-                            {
+                            //
+                            // SysOM's Copilot stream spells the same list
+                            // `tool_use` (the same {index, id, type, function}
+                            // items), and the shared token extractor counts
+                            // both spellings. Reading only `tool_calls` broke
+                            // a SysOM call down as zero tool-call tokens.
+                            let calls: Vec<&serde_json::Value> = ["tool_calls", "tool_use"]
+                                .into_iter()
+                                .filter_map(|field| payload.get(field).and_then(|t| t.as_array()))
+                                .flatten()
+                                .collect();
+                            if !calls.is_empty() {
                                 for (call_pos, call) in calls.iter().enumerate() {
                                     let function = call.get("function");
                                     let name = function
@@ -1313,6 +1486,31 @@ mod tests {
         event
     }
 
+    /// SysOM's non-streaming POP response wraps the provider payload in
+    /// `{"data": "<json string>"}`; the SysOM parser unwraps it and so does
+    /// the client, but the breakdown offered the envelope itself as the
+    /// frame. Nothing matched, so an answer the parser read broke down as an
+    /// empty response.
+    #[test]
+    fn a_sysom_data_envelope_body_is_counted() {
+        let tokenizer = fixture_tokenizer();
+        let inner = json!({
+            "choices": [{
+                "message": {"content": "hello there", "tool_use": null}
+            }]
+        })
+        .to_string();
+        let events = vec![response_event(json!({ "data": inner }), 1)];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a SysOM envelope body must still break down");
+        assert!(
+            breakdowns[0].total_tokens > 0,
+            "the answer must be counted, got {:?}",
+            breakdowns[0]
+        );
+    }
+
     /// The trace writer stores a non-streaming response under `body`, but the
     /// analyzer only read `sse_events`. A `stream: false` call therefore
     /// contributed no output side at all: with a request event present the
@@ -1363,6 +1561,83 @@ mod tests {
             resp.content,
             vec!["hello".to_string(), " there".to_string()]
         );
+    }
+
+    #[test]
+    fn non_sse_anthropic_body_keeps_the_answer() {
+        let body = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "hello there"},
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup",
+                 "input": {"q": "x"}}
+            ]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.tool_calls, vec![r#"lookup: {"q":"x"}"#.to_string()]);
+    }
+
+    #[test]
+    fn non_sse_anthropic_body_keeps_thinking() {
+        let body = json!({
+            "type": "message",
+            "content": [
+                {"type": "thinking", "thinking": "reason first"},
+                {"type": "text", "text": "answer"}
+            ]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("reason first"));
+        assert_eq!(resp.content, vec!["answer".to_string()]);
+    }
+
+    #[test]
+    fn non_sse_responses_body_keeps_the_answer() {
+        let body = json!({
+            "object": "response",
+            "output": [
+                {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "hello there"}]},
+                {"type": "function_call", "name": "lookup", "arguments": "{\"q\":\"x\"}"},
+                {"type": "custom_tool_call", "name": "custom", "input": "payload"}
+            ]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(
+            resp.tool_calls,
+            vec![
+                r#"lookup: {"q":"x"}"#.to_string(),
+                "custom: payload".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn non_sse_gemini_body_keeps_the_answer() {
+        let body = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"text": "hello there"},
+                    {"functionCall": {"name": "lookup", "args": {"q": "x"}}}
+                ]},
+                "finishReason": "STOP"
+            }]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
+        assert_eq!(resp.tool_calls, vec![r#"lookup: {"q":"x"}"#.to_string()]);
+    }
+
+    #[test]
+    fn non_sse_legacy_completion_body_keeps_the_answer() {
+        let body = json!({
+            "choices": [{"index": 0, "text": "hello there", "finish_reason": "stop"}]
+        });
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&[sse(&body.to_string())]);
+        assert_eq!(resp.content, vec!["hello there".to_string()]);
     }
 
     #[test]
@@ -1662,6 +1937,29 @@ mod tests {
         assert_eq!(
             resp.tool_calls,
             vec![r#"get_weather: {"city":"Beijing"}"#.to_string()]
+        );
+    }
+
+    /// SysOM's Copilot stream carries its calls on
+    /// `choices[].message.tool_use` — `{index, id, type, function}` — not on
+    /// `tool_calls`. The snapshot arm read only `tool_calls`, so a SysOM
+    /// capture that made a call broke down with zero tool-call tokens while
+    /// the aggregator and the shared token extractor both counted the call.
+    #[test]
+    fn sse_sysom_tool_use_snapshot_is_extracted() {
+        let events = vec![
+            sse(
+                r#"{"choices":[{"message":{"content":"","tool_use":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"message":{"content":"","tool_use":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/tmp/a.md\"}"}}]}}]}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()],
+            "a SysOM tool_use snapshot must be read like tool_calls"
         );
     }
 

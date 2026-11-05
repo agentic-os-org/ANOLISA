@@ -155,13 +155,17 @@ case "$user_message" in
   *provider-host-executed-input-wait-timeout*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-input-wait-timeout","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"input-wait-helper"},"tool_use_id":"toolu-input-wait-timeout"}}'
     if IFS= read -r response; then
-      case "$response" in
-        *'"behavior":"host_executed_shell"'*'"exit_code":130'*'"input_wait":{"detected":true'*'"interrupted":true'*'"reason":"input-wait-timeout"'*'"status":"timed_out"'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-host-executed-input-wait-timeout","message":{"content":[{"type":"text","text":"Host-executed input-wait timeout result received."}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-executed-input-wait-timeout","is_error":false,"result":"done"}'
-          exit 0
-          ;;
-      esac
+      for expected in '"behavior":"host_executed_shell"' '"exit_code":130' '"input_wait":{"detected":true' '"interrupted":true' '"reason":"input-wait-timeout"' '"status":"timed_out"'; do
+        case "$response" in
+          *"$expected"*) ;;
+          *) response=; break ;;
+        esac
+      done
+      if [ -n "$response" ]; then
+        printf '%s\n' '{"type":"assistant","session_id":"sess-host-executed-input-wait-timeout","message":{"content":[{"type":"text","text":"Host-executed input-wait timeout result received."}]}}'
+        printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-executed-input-wait-timeout","is_error":false,"result":"done"}'
+        exit 0
+      fi
     fi
     printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-host-executed-input-wait-timeout","is_error":true,"result":"missing input-wait timeout result"}'
     exit 1

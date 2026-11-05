@@ -7,9 +7,10 @@ import json
 import logging
 import os
 from contextlib import redirect_stderr
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolResponse
 
@@ -374,4 +375,170 @@ class ResultsTests(MiddlewareFixture):
                 original,
             )
             self.assertIs(result[-1], original)
+
+
+class StrictWithholdingTests(MiddlewareFixture):
+    """tool.after on_error=withhold_result must never deliver an unchecked result."""
+
+    def middleware(self, on_error: str) -> Any:
+        return MODULE.AwToolMiddleware(
+            {},
+            {
+                "event": "tool.after",
+                "step": "strict",
+                "on_error": on_error,
+                "replace_result": False,
+            },
+        )
+
+    async def test_transport_and_native_faults_withhold_the_original_response(self) -> None:
+        original = ToolResponse(content=[TextBlock(text="sensitive original")])
+        faults: list[tuple[str, Any]] = [
+            ("timeout", TimeoutError()),
+            ("spawn", OSError("fixture spawn failure")),
+            ("exit", (1, b"", b"native failure")),
+            ("invalid stdout", (0, b"not-json", b"")),
+        ]
+        for label, fault in faults:
+            with self.subTest(fault=label):
+                middleware = self.middleware("withhold_result")
+                if isinstance(fault, BaseException):
+                    patch_invoke = patch.object(middleware, "_invoke", side_effect=fault)
+                else:
+                    patch_invoke = patch.object(
+                        middleware, "_invoke", AsyncMock(return_value=fault)
+                    )
+                diagnostic = io.StringIO()
+                with patch_invoke, redirect_stderr(diagnostic):
+                    result = await self.execute(middleware, original)
+                self.assertEqual(self.executed, ["call"])
+                self.assertIs(result[0], self.chunk)
+                self.assertIsNot(result[-1], original)
+                self.assertEqual(result[-1].state, ToolResultState.ERROR)
+                self.assertEqual(
+                    result[-1].content[0].text,
+                    "AW post-tool check failed; result withheld by policy",
+                )
+                self.assertIn("failed:", diagnostic.getvalue())
+                if label == "invalid stdout":
+                    self.assertIn("native_output_invalid", diagnostic.getvalue())
+                    self.assertNotIn(original.content[0].text, diagnostic.getvalue())
+
+    async def test_report_faults_still_deliver_the_original_response(self) -> None:
+        original = ToolResponse(content=[TextBlock(text="sensitive original")])
+        for label, fault in [
+            ("timeout", TimeoutError()),
+            ("exit", (1, b"", b"native failure")),
+            ("invalid stdout", (0, b"not-json", b"")),
+        ]:
+            with self.subTest(fault=label):
+                middleware = self.middleware("report")
+                patch_invoke = (
+                    patch.object(middleware, "_invoke", side_effect=fault)
+                    if isinstance(fault, BaseException)
+                    else patch.object(middleware, "_invoke", AsyncMock(return_value=fault))
+                )
+                with patch_invoke, redirect_stderr(io.StringIO()):
+                    result = await self.execute(middleware, original)
+                self.assertEqual(self.executed, ["call"])
+                self.assertIs(result[-1], original)
+
+    async def test_a_faulted_strict_step_still_lets_later_hooks_run(self) -> None:
+        original = ToolResponse(content=[TextBlock(text="sensitive original")])
+        seen = []
+
+        class Strict(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload: dict[str, Any]) -> Any:
+                seen.append(self.hook["step"])
+                if self.hook["step"] == "strict":
+                    raise TimeoutError()
+                return 0, b"", b""
+
+        # Registered outermost, so the strict wrapper runs last after the healthy
+        # observer has already seen the original response.
+        hooks = [
+            Strict(
+                {},
+                {
+                    "event": "tool.after",
+                    "step": step,
+                    "on_error": "withhold_result" if step == "strict" else "report",
+                },
+            )
+            for step in ["strict", "healthy"]
+        ]
+        with redirect_stderr(io.StringIO()):
+            result = await self.execute(hooks, original)
+        self.assertEqual(seen, ["healthy", "strict"])
+        self.assertEqual(result[-1].state, ToolResultState.ERROR)
+
+    async def test_outer_hooks_observe_the_original_while_withholding_defers(self) -> None:
+        original = ToolResponse(content=[TextBlock(text="sensitive original")])
+        seen = []
+        observed = []
+
+        class Observer(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload: dict[str, Any]) -> Any:
+                seen.append(self.hook["step"])
+                observed.append(payload["tool_response"])
+                return 0, b"", b""
+
+        class Strict(MODULE.AwToolMiddleware):
+            async def _invoke(self, payload: dict[str, Any]) -> Any:
+                seen.append(self.hook["step"])
+                raise TimeoutError()
+
+        # Configured order [observer, strict] leaves the strict wrapper innermost:
+        # it faults first, and the outer observer must still receive the original
+        # response it is correlated against, while the model sees the placeholder.
+        hooks = [
+            Observer({}, {"event": "tool.after", "step": "observer", "on_error": "report"}),
+            Strict(
+                {},
+                {"event": "tool.after", "step": "strict", "on_error": "withhold_result"},
+            ),
+        ]
+        with redirect_stderr(io.StringIO()):
+            result = await self.execute(hooks, original)
+        self.assertEqual(seen, ["strict", "observer"])
+        self.assertEqual(observed, [original.model_dump(mode="json")])
+        self.assertIs(result[0], self.chunk)
+        self.assertIsNot(result[-1], original)
+        self.assertEqual(result[-1].state, ToolResultState.ERROR)
+        self.assertEqual(
+            result[-1].content[0].text,
+            "AW post-tool check failed; result withheld by policy",
+        )
+
+    async def test_bridge_rejects_withholding_outside_tool_after(self) -> None:
+        import tempfile
+
+        for event in ["tool.before", "tool.after"]:
+            with self.subTest(event=event), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "executable": "aw",
+                            "binding": "binding",
+                            "ready_path": str(Path(directory) / "ready.json"),
+                            "ready_token": "token",
+                            "hooks": [
+                                {
+                                    "event": event,
+                                    "step": "check",
+                                    "on_error": "withhold_result",
+                                    "replace_result": False,
+                                    "budget_ms": 1000,
+                                }
+                            ],
+                        }
+                    )
+                )
+                with patch.dict(MODULE.os.environ, {"AW_NATIVE_CONFIG": str(path)}):
+                    if event == "tool.after":
+                        MODULE.AwBridge()
+                    else:
+                        with self.assertRaisesRegex(ValueError, "requires tool.after"):
+                            MODULE.AwBridge()
 

@@ -118,6 +118,7 @@ fn replay_rejects_when_live_owner_superseded_the_drain_terminal() {
             generation: 35,
         },
         PostCaptureOwner::MainPrompt,
+        false,
     ));
 
     let mut relay = InputRelayContext {
@@ -317,7 +318,7 @@ fn superseded_hold_owner_rejects_ctrl_c_without_control_events() {
         },
     );
     assert!(!harness.quarantine.observe(b"\x03"));
-    let installed = Some((RawInputMode::Hold, PostCaptureOwner::Hold));
+    let installed = Some((RawInputMode::Hold, PostCaptureOwner::Hold, false));
 
     let mut relay = InputRelayContext {
         master: &mut harness.master,

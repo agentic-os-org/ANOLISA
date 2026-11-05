@@ -2,7 +2,7 @@
 
 [English](../../en/runtime/local-service.md)
 
-[设计索引](../README.md) · [架构总览](../../../../../../docs/developer-guide/zh/aw/architecture.md)
+[设计索引](../README.md) · [架构总览](../architecture.md)
 
 `aw-service` 通过独立 Linux 进程和可复用的同步 Rust 客户端提供 Provider 执行
 能力。一个服务持有一份不可变的 AW 配置快照，管理绑定和事件，并持久保存执行
@@ -28,7 +28,9 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 ## 本地协议
 
 [wire.rs](../../../../crates/aw-service/src/wire.rs) 定义实验性协议
-`aw-service/v1alpha4`，与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
+`aw-service/v1alpha7`。第 6 版 daemon 缺少调用生产者登记和回收，连接发现阶段即拒绝。
+第 5 版 task-scope daemon 缺少 `unbind` 的完整原生请求空闲检查，
+连接发现阶段即拒绝。该协议与 Provider 的 stdio 协议 `aw-provider/v1alpha1` 分开。
 每条连接承载一个带长度前缀的 JSON 请求及一个响应，每帧上限为 8 MiB。原生 stdin 和归一化事件各自仍受 1 MiB 限制；
 帧空间包含字节数组编码为 JSON 后的膨胀。
 
@@ -41,11 +43,23 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | --- | --- | --- |
 | `status` | 无 | PID、资源数量、审计健康状态及尚未验证的采用状态 |
 | `bind` | `target`、可信 `capabilities`、绝对 `cwd`、完整 `environment` | 服务签发的 `instance_id`、身份和准备阶段 `audit_key` |
+| `own_instance` | `instance_id`、launcher `pid` | 不可变进程归属和审计 key |
+| `open_scope` | 根 `parent_id`、launcher 自身或其后代 worker `pid`、绝对 `cwd`、完整 `environment` | 继承根策略、独立完成准入的任务 binding |
+| `acknowledge_scope` | 任务 `instance_id` | 准备完成五秒内确认句柄交接，再允许回调 |
 | `unbind` | `instance_id` | 在全部事件关闭后释放绑定 |
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
-| `close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
+| 提交事件在实例内按 `(input.submit, session_id, turn_id)` 关联，与工具调用账本独立。
+事件包含 `input.text`，不带 `tool`。同轮步骤回调保留首次输入、原生字节和截止时间；
+文本或身份变化会被拒绝。完成、关闭及打开失败的声明保留到实例释放，上限为 1,024。
+普通 QwenPaw scope 随 reply 结束，Qoder scope 随 Query 关闭释放。
+
+`close_input_event` 接收 `instance_id`、`session_id`、`turn_id`，复用工具事件的取消与
+清理链路；取消可先于打开生效，并阻止同轮重开。实例释放会取消未完成提交，等待
+Provider 进程退出。元数据审计保存会话、轮次和处置，不保存用户文本。
+
+`close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
 | `invoke_step` | `event_id`、`instance_id`、`step_id`、可选 `native_environment` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
 | `close_event` | `event_id`、`instance_id` | 取消未完成工作、等待子进程回收并确认关闭 |
 | `start_observation` | `instance_id` | 启动一个可选实例观测，进行有界来源兼容探测 |
@@ -93,6 +107,69 @@ Rust 客户端通过 `Error::Attempt` 暴露该记录键。
 本地协议 v1alpha2 在 status 发现阶段拒绝 v1alpha1 daemon，不会继续绑定或回调。
 升级前先退出旧会话并用旧版命令停止服务，再一起更新 CLI 和 daemon；不得替换仍在
 使用的 socket。该版本隔离了回调环境的线协议变更，配置和 Provider 协议保持不变。
+
+## 常驻宿主与任务 scope
+
+`own_instance` 固定同用户 launcher 的 PID、启动时刻和 PID namespace。
+`open_scope` 继承根 binding 已准入的 target、能力与配置，再以任务自己的 cwd 和完整
+环境重新进行 Provider 准备。嵌套 scope、受限 reloadable 根和已启动观测均被拒绝。普通 resident Qoder SDK/QwenPaw
+根可启用空闲更新；完整任务占用和不可变子快照遵循[策略更新合同](policy-reload.md#普通-resident-任务快照)。
+worker 可以是 launcher 自身或其后代；fork worker 在 fork 后创建独立 scope。
+进程身份用于同用户信任边界内的生命周期核对。
+
+新任务在 `acknowledge_scope` 前拒绝回调。调用方收到句柄后先纳入清理保护，再在准备
+完成后的五秒内确认。响应丢失时即使 worker 继续存活，预留也会过期回收；过期或重复
+确认均被拒绝，回调不能延长交接时间。
+确认在窗口内持有准入锁提交状态，再写入成功审计；持久化完成前回调继续等待锁。
+慢审计不能把已提交的确认改判为过期。审计失败则取消任务、拒绝回调，并由维护循环回收。
+
+每个任务独立持有事件、重放阻断记录和 Provider 上下文。根关闭先取消全部子任务工作，
+再逐个等待清理，同时取消准备中的 scope；并发关闭按 binding 串行完成。
+关闭中的根拒绝新任务。连接断开取消准备，成功响应无法送达则释放预留。
+维护循环回收 launcher / worker 已退出的 scope，并核对启动时刻以拒绝 PID 复用。
+排队步骤在前序完成后及审计写入后重新核对两级 owner，再调用 Provider。
+清理超时保留 draining 状态并返回错误，
+维护循环继续进行有界回收。
+
+并发预算通过 spec.daemon.limits 配置：默认 64 个 binding（含根）、128 个 live event、
+64 个 Provider call、128 条连接、每 binding 256 个活动 invocation，各字段范围为 1..4096。
+status 展示用量、峰值和拒绝原因。准备中、空闲和排空中的 binding 都占容量。
+Pi/Claude 常驻生产接点与普通 Qoder SDK 生产接点按严格递增序号登记 invocation。
+每个普通 Qoder Query 持有一个已确认的子 scope；原生命令队列和原始回调排空后才回收
+invocation 并释放 scope。协议启用和旧事件准入共享同一把锁，
+接纳过旧模式工作的 binding 在其结束后也不能切换协议。FinishInvocation 拒绝新 open、排空
+worker，并针对迟到 close 原子回收身份与两阶段关联。未知/已回收 callback 被拒绝，
+高水位拒绝旧注册，慢调用保持活动。
+此类 binding 没有累计关联配额；旧模式保留 1,024 个关联边界。
+模型身份和回调排空见[长期会话](../adapters/resident-sdk.md)。审计磁盘与 SDK 历史需要独立
+保留策略，磁盘/审计故障停止准入；服务代次和 owner 校验继续保留。
+
+升级时先排空旧会话并停止旧 daemon，再同时更新 CLI 和 daemon 到
+`aw-service/v1alpha7`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
+
+### 持续接管有效性
+
+JS/Python 共用消费者在任务确认和 invocation 准入后启动 `watch_scope`。
+`check_scope` 将原 worker PID、不可变策略 revision 绑定到已有任务 owner，
+外层 binding 固定服务与任务代次。覆盖内登记和 Hook 派发重新检查有效性。
+Qoder 核对已安装的生产、控制派发和传输函数；QwenPaw 核对已有 middleware、
+parser 和 Toolkit 派发接点。
+
+空闲检查在上次检查完成两秒后运行，每次 CLI 调用限时六秒。连续十五秒未成功检查时，
+服务拒绝该 scope 的执行，即使 worker 仍然存活。接点失败或策略代次不匹配会永久
+阻断该 scope，重新连接不能恢复它。这些检查保留声明的覆盖边界：AW 范围外原生
+能力继续沿用自身授权行为。
+
+故障取消活动 Provider 工作，同时保留存活任务的归属，直到原生回调、工作和凭据
+完成清理。已登记 invocation 仍可回收；独立兄弟 scope 分别保持自身有效性。
+并发关闭等待同一次清理，迟到的 open 响应被关闭且不再确认。
+恢复需先完成清理，再创建新 scope，有副作用的调用不会自动重放。
+
+`status.instances[].scope_validity` 分别报告 `native_alive` 和 `covered_bridge`，
+后者取值为 `pending`、`ready`、`failed`、`unavailable`、`unmonitored`。
+`inspect.service.resident_scopes` 汇总任务数量；旧服务未提供的数据为 `null`。
+启动 `ready` 不能证明持续有效。新消费者在任务准入时拒绝不支持 watch 操作的服务；
+升级需排空现有任务，再统一更新 CLI、Adapter 和服务。
 
 ## 共享事件生命周期
 
@@ -148,9 +225,9 @@ Linux `CLOCK_MONOTONIC` 截止时间覆盖连接建立和消息传输，一次�
 通过有界通道将请求交给 scoped worker。共享期限和调用声明保留在这一个 Event 中，
 注册表无需同时存放所有者与借用它的 Event，也不需要自引用结构。
 
-当前资源上限为 16 个绑定槽、32 个打开的事件、每个绑定 64 个准入步骤、64 个并发
-步骤调用和 64 条活跃连接。超过限制会明确拒绝或返回传输失败，不会隐式排队重试。
-这些是服务准入限制，不是新增配置字段。
+并发限制通过 spec.daemon.limits 配置，默认值和用量见上文。每个 binding 跨事件合计最多 64 个配置步骤。
+全部活动连接（含控制 RPC）占用共享连接额度；额度用满后，额外 16 条连接只接纳控制/清理操作。
+过载明确失败，不隐式重试或重新开执行预算。
 
 ## 审计与结果不确定的调用
 
@@ -208,13 +285,13 @@ SIGINT/SIGTERM，取消活跃工作并等待连接和事件 worker。成功的 `
 
 ## 源码入口
 
-- [用户命令与本地演示](../../../../../../docs/developer-guide/zh/aw/native-agents.md#运行本地服务演示)
+- [用户命令与本地演示](../../../../../../docs/developer-guide/zh/aw/local-service.md)
 - [公共 API](../../../../crates/aw-service/src/lib.rs)、
   [Client](../../../../crates/aw-service/src/client.rs) 和
   [Server](../../../../crates/aw-service/src/server.rs)
 - [Runtime](../../../../crates/aw-service/src/runtime.rs) 与
   [审计元数据](../../../../crates/aw-service/src/audit.rs)
-- [开发检查](../../../../CONTRIBUTING_zh.md#运行时验收)
+- [开发检查](../../../../CONTRIBUTING_zh.md#构建与检查)
 
 ## 布尔命令投影
 
@@ -251,11 +328,18 @@ SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意
 
 ## 显式实例策略更新
 
-启用稳定桥接的 `aw run` 实例使用 `EnableReload`、`AssociateProcess`、
-`BridgeLifecycle`、`HookPlan` 和 `UpdatePolicy`。服务身份保持启动摘要，
+支持更新的 resident 和受限 reloadable `aw run` 实例共用 `EnableReload`、
+`AssociateProcess`、`BridgeLifecycle` 和 `UpdatePolicy`。resident 子任务使用不可变
+`ScopePolicy` 快照，受限桥接使用 `HookPlan`。服务身份保持启动摘要，
 `expected_revision` 指定实例 Host 的当前版本。原生请求入口与最终更新检查共用实例注册
 准入门，候选 Host 准备不持有该门。busy 更新不排队、不等工具排空，也不在返回后激活。
-已完成事件的关联声明跨版本保留，证据来自所属 Host 快照。
+受限桥接跨版本保留已完成事件关联声明；resident scope 保留现有回收及已退休身份保护。
+证据来自所属 Host 快照。
 
 [策略热更新设计](policy-reload.md) 说明生命周期、进程关联、固定入口、人工验收及
 后续 attach/steer 范围。
+
+受管根 binding 在没有任务 scope 时可使用 observation。任务 scope 及正在准备或持有 scope 的根拒绝 observation；已开启 observation 的根拒绝创建 scope。
+
+`unbind` 对 reloadable 实例在同一准入锁下检查完整请求/工具空闲状态并关闭准入；
+忙碌时返回 `busy`。`release_instance` 仍是取消并回收的内部清理操作，不能替代 detach 的空闲检查。

@@ -11,6 +11,9 @@ use super::runtime::{AuthPhase, RuntimeAuthState};
 pub(super) fn auth_capture_id(auth: &RuntimeAuthState) -> String {
     let scope = match &auth.phase {
         AuthPhase::ManagingProviders => "manage".to_string(),
+        AuthPhase::ProviderAction { provider_idx } if auth.field_capture_revision != 0 => {
+            format!("action-{provider_idx}-{}", auth.field_capture_revision)
+        }
         AuthPhase::ProviderAction { provider_idx } => format!("action-{provider_idx}"),
         AuthPhase::ConfirmDelete { provider_idx } => format!("delete-{provider_idx}"),
         AuthPhase::SelectingProvider => "select".to_string(),

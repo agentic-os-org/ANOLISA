@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import math
 import socket
 import ssl
 import time
 from pathlib import Path
 
-from collect_metrics import read_status
+from collect_metrics import ProcessIdentity, read_process_identity, read_status
+
 
 def tls_socket(host: str, port: int, timeout: float) -> ssl.SSLSocket:
     """Open an unverified TLS socket to the local benchmark server."""
@@ -32,9 +34,12 @@ def exchange(
     truncate_sse: bool = False,
 ) -> str:
     """Send bytes over TLS and classify the peer response without raising."""
+    phase = "not_sent"
     try:
         with tls_socket(host, port, timeout) as connection:
+            phase = "send_failed"
             connection.sendall(payload)
+            phase = "closed"
             if truncate_sse:
                 with http.client.HTTPResponse(connection) as stream:
                     stream.begin()
@@ -70,7 +75,7 @@ def exchange(
                 return "sent_and_closed"
             response = connection.recv(4096)
     except (OSError, ssl.SSLError, http.client.HTTPException) as error:
-        return f"closed:{type(error).__name__}"
+        return f"{phase}:{type(error).__name__}"
     if not response:
         return "closed_without_response"
     first_line = response.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
@@ -118,15 +123,32 @@ def cases(oversized_bytes: int) -> dict[str, tuple[bytes, bool]]:
     }
 
 
+def delivery_failures(outcomes: dict[str, dict[str, int]]) -> list[str]:
+    """Find cases with failed connection or incomplete request transmission."""
+    return sorted(
+        name
+        for name, counts in outcomes.items()
+        if any(
+            count > 0 and outcome.startswith(("not_sent:", "send_failed:", "failed:"))
+            for outcome, count in counts.items()
+        )
+    )
+
+
 def health_check(host: str, port: int, timeout: float) -> bool:
     """Return whether the mock server still answers after fault injection."""
     request = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     return " 200 " in exchange(host, port, request, timeout)
 
 
-def process_alive(pid: int | None) -> bool | None:
+def process_alive(pid: int | None, identity: ProcessIdentity | None = None) -> bool | None:
     """Return process liveness, or None when no process is being watched."""
-    return bool(read_status(pid)) if pid else None
+    if not pid:
+        return None
+    if identity is not None and read_process_identity(pid) != identity:
+        return False
+    alive = bool(read_status(pid))
+    return alive and (identity is None or read_process_identity(pid) == identity)
 
 
 def inject(
@@ -139,7 +161,12 @@ def inject(
 ) -> dict[str, object]:
     """Run every fault case and preserve per-case outcomes."""
     started = time.time()
-    before = process_alive(watch_pid)
+    identity = read_process_identity(watch_pid) if watch_pid else None
+    before = (
+        process_alive(watch_pid, identity)
+        if identity is not None
+        else (False if watch_pid else None)
+    )
     outcomes: dict[str, dict[str, int]] = {}
     for name, (payload, read_response) in cases(oversized_bytes).items():
         counts: dict[str, int] = {}
@@ -177,7 +204,9 @@ def inject(
         "server_healthy_after": health_check(host, port, timeout),
         "watched_pid": watch_pid,
         "process_alive_before": before,
-        "process_alive_after": process_alive(watch_pid),
+        "process_alive_after": (
+            process_alive(watch_pid, identity) if identity is not None else before
+        ),
     }
 
 
@@ -191,8 +220,15 @@ def main() -> int:
     parser.add_argument("--watch-pid", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.count < 1 or args.oversized_bytes < 1 or args.timeout <= 0:
-        raise SystemExit("count, oversized-bytes, and timeout must be positive")
+    if (
+        args.count < 1
+        or args.oversized_bytes < 1
+        or not math.isfinite(args.timeout)
+        or args.timeout <= 0
+    ):
+        raise SystemExit(
+            "count and oversized-bytes must be positive; timeout must be finite and positive"
+        )
     report = inject(
         args.host,
         args.port,
@@ -211,6 +247,7 @@ def main() -> int:
         if report["server_healthy_after"]
         and report["process_alive_after"] is not False
         and report.get("sse_truncation_verified") is True
+        and not delivery_failures(report["outcomes"])
         else 1
     )
 

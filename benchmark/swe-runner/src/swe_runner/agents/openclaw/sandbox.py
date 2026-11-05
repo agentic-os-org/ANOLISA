@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -40,7 +41,8 @@ _HOST_TOKENLESS_EXTRA_BIN_DIRS = (
 )
 _HOST_OPENCLAW_EXTENSIONS_DIR = Path.home() / ".openclaw" / "extensions"
 _TOKENLESS_RUNTIME_BIN_DIR = f"{_RUNNER_SUPPORT_DIR}/tokenless/bin"
-_TOKENLESS_BINARY_NAMES = ("rtk", "tokenless")
+# RTK runs as `tokenless rtk`, so Tokenless is the only helper binary.
+_TOKENLESS_BINARY_NAMES = ("tokenless",)
 _TOKENLESS_PLUGIN_ID = "tokenless"
 _DEFAULT_PATH_SUFFIX = f"{_TESTBED_ENV_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _PYTEST_CACHE_DIR = "/tmp/swe-runner-pytest-cache"
@@ -143,13 +145,13 @@ def _iter_host_tokenless_binary_candidates(binary_name: str) -> Iterator[Path]:
 def _resolve_host_tokenless_binary(binary_name: str) -> Path:
     candidates = list(_iter_host_tokenless_binary_candidates(binary_name))
     for candidate in candidates:
-        if candidate.is_file():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
 
     searched = ", ".join(str(candidate) for candidate in candidates) or "<none>"
     raise RuntimeError(
-        f"Tokenless binary {binary_name!r} not found on host. "
-        f"Ensure it is on PATH or installed in a known tokenless/OpenClaw plugin directory. Searched: {searched}"
+        f"Executable Tokenless binary {binary_name!r} not found on host. "
+        f"Ensure it is executable on PATH or in a known tokenless/OpenClaw plugin directory. Searched: {searched}"
     )
 
 
@@ -195,13 +197,13 @@ def _tokenless_binary_record(binary_name: str, source: Path, target: Path) -> di
 
 
 def _inject_tokenless_binaries(workspace: Path) -> None:
+    sources = {name: _resolve_host_tokenless_binary(name) for name in _TOKENLESS_BINARY_NAMES}
     tokenless_root = workspace / ".runner" / "tokenless"
     tokenless_target = tokenless_root / "bin"
     tokenless_target.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, object]] = []
 
-    for binary_name in _TOKENLESS_BINARY_NAMES:
-        source = _resolve_host_tokenless_binary(binary_name)
+    for binary_name, source in sources.items():
         logger.info("OPENCLAW_TOKENLESS_BINARY_RESOLVED name=%s path=%s", binary_name, source)
         target = tokenless_target / binary_name
         shutil.copy2(source, target)
@@ -232,6 +234,16 @@ def _enable_tokenless_plugin(config: dict[str, object]) -> None:
             raise RuntimeError("Invalid OpenClaw config: plugins.allow must be an array")
         if _TOKENLESS_PLUGIN_ID not in allowed_plugins:
             allowed_plugins.append(_TOKENLESS_PLUGIN_ID)
+
+
+# Subprocess bounds: these calls run while preparing sandboxes and inside
+# the cleanup callback (remove_agent_containers runs in prepared.cleanup()),
+# so an unresponsive CLI or docker daemon must fail the instance visibly
+# instead of hanging the whole batch forever. Mirrors env_checks (5s) and
+# workspace docker exec (60s).
+_SANDBOX_DOCKER_TIMEOUT_SECONDS = 30
+_SANDBOX_RECREATE_TIMEOUT_SECONDS = 120
+_SANDBOX_EXPLAIN_TIMEOUT_SECONDS = 60
 
 
 class OpenClawSandboxManager:
@@ -292,6 +304,7 @@ class OpenClawSandboxManager:
         run_command(
             [self._cli_path, "--profile", self._profile, "sandbox", "recreate", "--agent", agent_id, "--force"],
             check=True,
+            timeout=_SANDBOX_RECREATE_TIMEOUT_SECONDS,
         )
         self.remove_stale_agent_containers(agent_id)
 
@@ -299,6 +312,7 @@ class OpenClawSandboxManager:
         scope_key = build_openclaw_agent_scope_key(agent_id)
         result = run_command(
             ["docker", "ps", "-aq", "--filter", f"label={_OPENCLAW_SANDBOX_SESSION_LABEL}={scope_key}"],
+            timeout=_SANDBOX_DOCKER_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             logger.warning(
@@ -314,6 +328,7 @@ class OpenClawSandboxManager:
 
         remove_result = run_command(
             ["docker", "rm", "-f", *container_ids],
+            timeout=_SANDBOX_DOCKER_TIMEOUT_SECONDS,
         )
         if remove_result.returncode != 0:
             logger.warning(
@@ -388,11 +403,15 @@ class OpenClawSandboxManager:
         result = run_command(
             [self._cli_path, "--profile", self._profile, "sandbox", "explain", "--agent", spec.agent_id, "--json"],
             check=True,
+            timeout=_SANDBOX_EXPLAIN_TIMEOUT_SECONDS,
         )
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"OpenClaw sandbox explain returned invalid JSON for {spec.agent_id}") from exc
+        # 合法 JSON 但非对象（CLI 出错/警告路径的合理输出）同样走既有错误路径
+        if not isinstance(data, dict):
+            raise RuntimeError(f"OpenClaw sandbox explain returned invalid JSON for {spec.agent_id}")
 
         sandbox = data.get("sandbox")
         workspace_root = sandbox.get("workspaceRoot") if isinstance(sandbox, dict) else None

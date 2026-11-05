@@ -66,7 +66,6 @@ pub fn compress_json_with(
                 recovery: &RecoveryMethod::Shell,
                 stash,
                 allow_toon: false,
-                preserve_top_level_shape: false,
                 min_toon_chars: usize::MAX,
                 allow_unrecoverable: true,
             },
@@ -274,10 +273,11 @@ pub fn response_huge() -> Value {
 }
 
 /// The canonical tool response (`fixtures/tool_response.json`): a synthetic
-/// compression-friendly fixture (an envelope wrapping 60 records plus
-/// trace/log noise). Designed to exercise field deletion (debug/trace/logs)
-/// without changing its record count — does NOT represent typical
-/// tool-response compression rates.
+/// envelope wrapping 60 records plus diagnostic fields. Its compact form is a
+/// preservation control: JSON compression retains every value without savings.
+/// The rate suite separately exercises compaction of its pretty-printed form;
+/// focused fixtures cover record reduction and bounds. This is not a typical
+/// tool-response compression rate.
 ///
 /// Measured for BOTH latency (here) and compression rate (Rust in-process),
 /// so the two numbers describe the same bytes.

@@ -385,3 +385,37 @@ fn deferred_handoff_timeout_notice_restores_native_prompt_without_input() {
     );
     assert!(output.is_empty());
 }
+
+#[test]
+fn terminal_capture_invalidation_precedes_unrelated_approved_handoff_emission() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .pending_capture_invalidations
+        .push_back("dead-card".to_string());
+    let request = ShellHandoffRequest::new(
+        "echo approved",
+        "$ echo approved",
+        "approved_provider_shell_tool",
+        "user",
+        "req-approved",
+        "run-approved",
+        1,
+    )
+    .unwrap();
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request.clone());
+    let first =
+        render_raw_inline_events(&[], &mut Vec::new(), &adapter, "bash", &mut state).unwrap();
+    assert_eq!(
+        first,
+        RawObserverAction::InvalidateApprovalCapture("dead-card".to_string())
+    );
+    assert!(state.control.shell_handoff().pending_front().is_none());
+    let second =
+        render_raw_inline_events(&[], &mut Vec::new(), &adapter, "bash", &mut state).unwrap();
+    assert_eq!(second, RawObserverAction::EmitToPty(request));
+}

@@ -25,9 +25,9 @@ fn native_install_and_connect_share_exact_runtime_arguments() {
     else {
         panic!("expected native connection")
     };
-    assert_eq!(old.config, Some(new.config));
-    assert_eq!(old.agent, Some(new.agent));
-    assert_eq!(old.native_profile, new.native_profile);
+    assert_eq!(old.config, Some(new.native.config));
+    assert_eq!(old.agent, Some(new.native.agent));
+    assert_eq!(old.native_profile, new.native.native_profile);
     assert!(old.prefix.is_none() && old.bundle.is_none());
 }
 
@@ -267,6 +267,13 @@ fn invalid_utf8_returns_an_error_without_panicking() {
 
 #[test]
 fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
+    assert!(matches!(
+        parse("update --config aw.yaml --agent qoder").unwrap(),
+        Command::Update(Update { policy: None, .. })
+    ));
+    assert!(parse("update --config aw.yaml --pid 123").is_err());
+    assert!(parse("update --config aw.yaml --pid 123 --agent worker").is_err());
+    assert!(parse("update --socket /socket --agent qoder").is_err());
     assert!(matches!(parse("update --config boot.yaml --agent qoder --instance one --policy next.yaml --expected-revision abc").unwrap(), Command::Update(_)));
     for input in [
         "update --config boot.yaml --policy next.yaml",
@@ -274,6 +281,39 @@ fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
         "update --config boot.yaml --agent qoder --policy next.yaml --json",
         "request --socket /socket --timeout-ms 0",
         "request --socket /socket --timeout-ms 60001",
+    ] {
+        assert!(parse(input).is_err(), "{input}");
+    }
+}
+
+#[test]
+fn attachment_options_preserve_native_routing_and_reject_mixed_modes() {
+    for suffix in ["--pid 123", "--pid 123 --remove"] {
+        let Command::Install(old) =
+            parse(&format!("install --config aw.yaml --agent target {suffix}")).unwrap()
+        else {
+            panic!("expected legacy install")
+        };
+        let Command::Agent(Agent::Connect(new)) = parse(&format!(
+            "agent connect --config aw.yaml --agent target {suffix}"
+        ))
+        .unwrap() else {
+            panic!("expected connect")
+        };
+        assert_eq!(old.attachment, new.attachment);
+        assert_eq!(old.attachment.pid, Some(123));
+    }
+    for entry in ["install", "agent connect"] {
+        for suffix in ["--remove", "--pid 0", "--pid 1 --native-profile work"] {
+            assert!(parse(&format!("{entry} --config aw.yaml --agent target {suffix}")).is_err());
+        }
+    }
+    for input in [
+        "run --config aw.yaml --agent target --pid 1",
+        "run --config aw.yaml --agent target --remove",
+        "install --prefix /prefix --bundle /bundle --pid 1",
+        "install --prefix /prefix --bundle /bundle --remove",
+        "install --config aw.yaml --agent target --pid 1 --json",
     ] {
         assert!(parse(input).is_err(), "{input}");
     }

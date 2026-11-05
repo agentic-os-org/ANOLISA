@@ -24,11 +24,11 @@ Outputs (under ``fixtures/``, pretty-printed, deterministic — no RNG):
     records.json        1000 uniform records; backs response_items(n) latency.
     record_reduction.json
                         64 records with a critical anomaly in the middle.
-    tool_response.json  a realistic tool result (envelope + first 60 records +
+    tool_response.json  a synthetic tool result (envelope + first 60 records +
                         trace/logs); the canonical response payload measured
-                        for BOTH latency (Rust) and compression rate (Python).
+                        for BOTH latency (Rust) and compression rate (Rust).
     schema_search.json  the canonical function-calling schema; measured for
-                        BOTH latency (Rust) and compression rate (Python).
+                        BOTH latency (Rust) and compression rate (Rust).
 
 Regenerate with:  python3 gen_fixtures.py
 Fixtures are committed so CI and the Rust `include_str!` build do not depend on
@@ -47,7 +47,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 RECORD_COUNT = 1000
 
 # How many records the canonical tool response embeds. The surrounding and
-# per-record diagnostic fields give lossless cleanup measurable work to do.
+# per-record diagnostic fields are retained as ordinary payload values.
 TOOL_RESPONSE_ITEMS = 60
 
 # A focused Record Reduction fixture kept separate from the canonical response
@@ -62,7 +62,7 @@ SESSION_ROUNDS = 50
 def _record(i: int) -> dict:
     """One canonical record.
 
-    Fields combine removable diagnostics with scalar columns that TOON can
+    Fields combine diagnostics with scalar columns that TOON can
     encode into a compact table.
     """
     return {
@@ -72,6 +72,7 @@ def _record(i: int) -> dict:
         "status": "ok" if i % 2 == 0 else "pending",
         "score": round((i % 97) / 13.0, 4),
         "snippet": "matched line of source code with some surrounding context " * 2,
+        # Legacy text is opaque content; retain it for byte-identical comparisons.
         "debug": "verbose internal trace that should be dropped " * 2,
     }
 
@@ -81,7 +82,7 @@ def build_records() -> list[dict]:
 
 
 def build_tool_response(records: list[dict]) -> dict:
-    """Envelope the first ``TOOL_RESPONSE_ITEMS`` records with trace/log noise."""
+    """Envelope the first ``TOOL_RESPONSE_ITEMS`` records with trace/log fields."""
     return {
         "tool": "search_code",
         "status": "ok",

@@ -1,6 +1,6 @@
 //! Approval runtime state and the request and journal records it owns.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::agent::run::AgentRunOrigin;
 use crate::runtime::state_prelude::ApprovalPanelAction;
@@ -14,6 +14,7 @@ pub(crate) struct ApprovalState {
     pub(crate) active_panel_id: Option<String>,
     pub(crate) active_panel_height: usize,
     pub(crate) journal: Vec<RuntimeApprovalJournalEntry>,
+    pub(crate) pending_capture_invalidations: VecDeque<String>,
 }
 
 impl ApprovalState {

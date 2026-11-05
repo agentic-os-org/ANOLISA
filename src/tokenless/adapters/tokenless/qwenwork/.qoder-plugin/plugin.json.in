@@ -4,9 +4,9 @@
   "displayNameEn": "Tokenless for QwenWork",
   "displayNameCn": "Tokenless · 千问办公",
   "version": "@VERSION@",
-  "description": "Token optimization for QwenWorkCN on macOS in local mode",
-  "descriptionEn": "Token optimization for QwenWorkCN on macOS in local mode",
-  "descriptionZh": "千问办公 macOS 本地模式的命令改写与工具响应压缩",
+  "description": "Token optimization for QwenWorkCN on macOS and Windows x64 in local mode",
+  "descriptionEn": "Token optimization for QwenWorkCN on macOS and Windows x64 in local mode",
+  "descriptionZh": "千问办公 macOS 和 Windows x64 本地模式的命令改写与工具响应压缩",
   "author": {
     "name": "Shile Zhang",
     "email": "shile.zhang@linux.alibaba.com"

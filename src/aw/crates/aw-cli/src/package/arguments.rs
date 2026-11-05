@@ -1,4 +1,4 @@
-//! Reject non-UTF-8 compatibility arguments before parsing or touching files.
+//! Reject non-UTF-8 command arguments before parsing or touching files.
 
 use aw_package::{Error, Result};
 use std::ffi::OsString;

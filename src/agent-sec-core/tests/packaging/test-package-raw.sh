@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 BUILD="$TMP/build"
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" \
-    "$ROOT" "$ROOT/.anolisa/component.toml")"
+    "$ROOT" "$ROOT/packaging/anolisa/component.toml")"
 
 install -d -m 0755 \
     "$BUILD/v2/bin" \
@@ -56,7 +56,7 @@ cp "$ROOT/qoder-plugin/.qoder-plugin/plugin.json" "$BUILD/qoder-plugin/.qoder-pl
 cp "$ROOT/qoder-plugin/hooks/hooks.json" "$BUILD/qoder-plugin/hooks/"
 cp "$ROOT/qwen-code-extension/qwen-extension.json" "$BUILD/qwen-code-extension/"
 cp "$ROOT/cosh-extension/cosh-extension.json" "$BUILD/cosh-extension/"
-make -C "$ROOT" stage-skills BUILD_DIR="$BUILD"
+make -C "$ROOT" stage-skills stage-gateway BUILD_DIR="$BUILD"
 
 run_package() {
     local output="$1"
@@ -88,7 +88,7 @@ for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health agent-sec-p
     test "$(stat -c '%a' "$STAGE/bin/$binary")" = "755"
 done
 test ! -e "$STAGE/lib/anolisa/sec-core/python3.11/site-packages"
-cmp "$ROOT/.anolisa/component.toml" "$STAGE/.anolisa/component.toml"
+cmp "$ROOT/packaging/anolisa/component.toml" "$STAGE/.anolisa/component.toml"
 grep -Fq 'WantedBy=multi-user.target' \
     "$STAGE/share/anolisa/sec-core/agent-sec-core.service.in"
 
@@ -106,5 +106,92 @@ if grep -Eq 'site-packages/agent_sec_cli|agent-sec-cli-wrapper|agent-sec-daemon-
     echo "ERROR: V2 raw archive contains V1 CLI/daemon payload" >&2
     exit 1
 fi
+
+python3 - "$ROOT" "$STAGE" "$TMP" <<'PY'
+import os
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+root, stage, temporary = map(Path, sys.argv[1:])
+gateway = stage / "share/anolisa/sec-core/gateway"
+for name, source in {
+    "asc_gateway_addon.py": "v2/gateway/addon/asc_gateway_addon.py",
+    "asc_gateway_policy.py": "v2/gateway/addon/asc_gateway_policy.py",
+    "github-policy.json": "v2/crates/asc-gateway-plan/policies/github.json",
+    "mitmproxy.provenance": "v2/gateway/mitmproxy.provenance",
+    "install-mitmproxy.sh": "packaging/gateway/install-mitmproxy.sh",
+}.items():
+    assert (gateway / name).read_bytes() == (root / source).read_bytes(), name
+    assert (gateway / name).stat().st_mode & 0o777 == (0o755 if name.endswith(".sh") else 0o644)
+unit = stage / "share/anolisa/sec-core/agent-sec-gateway.service.in"
+assert '-s "{datadir}/sec-core/gateway/asc_gateway_addon.py"' in unit.read_text()
+assert "[Install]" not in unit.read_text()
+for path in ("opt/agent-sec-gateway", "run/agent-sec-gateway", "var/lib/agent-sec/credentials"):
+    assert not (stage / path).exists(), path
+manifest = stage / ".anolisa/component.toml"
+component = tomllib.loads(manifest.read_text())["component"]
+assert all(not service["enable"] and not service["start"] for service in component["services"])
+
+hook_bin = temporary / "hook-bin"
+hook_bin.mkdir()
+mock_cli = hook_bin / "agent-sec-cli"
+mock_cli.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$RAW_HOOK_CALLS"\nexit "$RAW_DISABLE_EXIT"\n')
+mock_manager = hook_bin / "systemctl"
+mock_manager.write_text('#!/bin/sh\n[ "$*" = "is-active --quiet agent-sec-gateway.service" ] || exit 2\nexit "$RAW_UNIT_EXIT"\n')
+for executable in (mock_cli, mock_manager):
+    executable.chmod(0o755)
+runtime = temporary / "active.json"
+script = temporary / "pre-uninstall-gateway.sh"
+script.write_text(
+    (stage / "share/anolisa/sec-core/pre-uninstall-gateway.sh.in").read_text()
+    .replace("{bindir}", str(hook_bin))
+    .replace("/run/agent-sec-gateway/active.json", str(runtime))
+)
+script.chmod(0o755)
+for unit_exit, disable_exit, manifest_present, expected in (
+    (1, 1, False, 0),
+    (0, 0, False, 0),
+    (0, 1, False, 1),
+    (1, 0, True, 0),
+):
+    if manifest_present:
+        runtime.write_text("{}")
+    elif runtime.exists():
+        runtime.unlink()
+    calls = temporary / "withdrawal-calls"
+    if calls.exists():
+        calls.unlink()
+    result = subprocess.run(
+        [str(script)], check=False, capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{hook_bin}:{os.environ['PATH']}",
+             "RAW_UNIT_EXIT": str(unit_exit), "RAW_DISABLE_EXIT": str(disable_exit),
+             "RAW_HOOK_CALLS": str(calls)},
+    )
+    assert result.returncode == expected, result.stderr
+    assert (calls.read_text() if calls.exists() else "") == (
+        "gateway disable\n" if unit_exit == 0 or manifest_present else ""
+    )
+
+verifier = [sys.executable, str(root / "packaging/raw/verify_release.py"),
+            str(root), str(root / "packaging/anolisa/component.toml"),
+            "--payload-root", str(stage)]
+asset = gateway / "asc_gateway_addon.py"
+saved = asset.with_suffix(".saved")
+asset.rename(saved)
+try:
+    result = subprocess.run(verifier, check=False, capture_output=True, text=True)
+    assert result.returncode != 0 and "raw gateway asset" in result.stderr
+finally:
+    saved.rename(asset)
+original = manifest.read_text()
+try:
+    manifest.write_text(original + '\n[[component.services]]\nunit = "agent-sec-gateway.service"\nscope = "system"\nenable = false\nstart = false\n')
+    result = subprocess.run(verifier, check=False, capture_output=True, text=True)
+    assert result.returncode != 0 and "must remain daemon-owned" in result.stderr
+finally:
+    manifest.write_text(original)
+PY
 
 echo "OK: agent-sec-core V2 raw package tests passed"

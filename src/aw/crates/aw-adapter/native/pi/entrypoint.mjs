@@ -4,8 +4,6 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "0.84.2";
-
 function packages(application) {
   let require = createRequire(pathToFileURL(application));
   const resolved = {};
@@ -20,13 +18,15 @@ function packages(application) {
     const metadata = JSON.parse(
       readFileSync(join(directory, "package.json"), "utf8"),
     );
-    if (metadata.name !== fullName || metadata.version !== VERSION) {
-      throw new Error(`AW requires ${fullName} ${VERSION}`);
+    if (metadata.name !== fullName || typeof metadata.version !== "string" ||
+        !/^[0-9][0-9A-Za-z.+_!-]{0,127}$/.test(metadata.version)) {
+      throw new Error(`AW requires ${fullName} with valid version metadata`);
     }
     const entry = metadata.exports?.["."]?.import ?? metadata.main;
     if (entry !== "./dist/index.js")
       throw new Error(`Unsupported ${fullName} module layout`);
     resolved[name] = join(directory, entry);
+    if (name === "pi-coding-agent") resolved.version = metadata.version;
     if (name === "pi-coding-agent")
       require = createRequire(pathToFileURL(resolved[name]));
   }
@@ -41,22 +41,29 @@ function packages(application) {
 }
 
 if (process.env.AW_PI_PROBE === "1") {
-  packages(process.argv.at(-1));
-  process.stdout.write(`AW Pi SDK ${VERSION}\n`);
+  const resolved = packages(process.argv.at(-1));
+  process.stdout.write(`AW Pi SDK ${resolved.version}\n`);
 } else {
   const [application, ...args] = process.argv.slice(2);
   const resolved = packages(application);
   const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
   const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
+  for (const [name, value] of [["AgentSession", sdk.AgentSession], ["Agent", core.Agent]])
+    if (typeof value !== "function") throw new Error(`AW Pi SDK requires native ${name}`);
   const app = await import(pathToFileURL(application).href);
   if (
     typeof app.createSession !== "function" ||
-    typeof app.run !== "function"
+    (typeof app.run !== "function" && typeof app.runWorker !== "function")
   ) {
     throw new Error(
       "Pi application must export createSession({sdk,args}) and run(session,{args})",
     );
   }
+  if (typeof app.runWorker === "function") {
+    if (typeof app.run === "function") throw new Error("Choose runWorker or run, not both");
+    const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
+    await runWorker(app, sdk, core, args);
+  } else {
   const installations = new Map();
   // All new/resume/fork/import replacements must use this common application factory.
   const createSession = async (options = {}) => {
@@ -87,4 +94,6 @@ if (process.env.AW_PI_PROBE === "1") {
       session.dispose();
     }
   }
+}
+
 }

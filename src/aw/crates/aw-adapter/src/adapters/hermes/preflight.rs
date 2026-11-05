@@ -2,7 +2,7 @@
 
 mod git;
 
-use super::{adapter, Result, REVISION};
+use super::{adapter, Result};
 use std::{
     ffi::OsString,
     os::unix::{
@@ -13,12 +13,12 @@ use std::{
     time::Duration,
 };
 
-/// Validate the pinned installation before and after native dotenv loading.
+/// Validate the selected installation before and after native dotenv loading.
 pub(super) fn checked_profile_command(
     command: &mut aw_exec::CommandSpec,
     profile: &std::path::Path,
     cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<(OsString, PathBuf, tempfile::TempDir)> {
+) -> Result<(OsString, PathBuf, tempfile::TempDir, String)> {
     checked_loader_environment(command)?;
     let python = python_entrypoint(command)?;
     let venv = python
@@ -98,10 +98,10 @@ print(json.dumps([unquote(url.path, errors='strict'), [path for path in sorted(s
     }
     let (source, sites): (PathBuf, Vec<PathBuf>) = serde_json::from_slice(&output.stdout)?;
     let source = trusted_native_path(&source)?;
-    checked_checkout(command, &source, cancelled)?;
+    let revision = checked_checkout(command, &source, cancelled)?;
     checked_site_paths(sites, cancelled)?;
     super::install::dotenv(&source.join(".env"))?;
-    // Use the pinned loader's dotenv precedence/interpolation, before native CLI
+    // Use the native loader's dotenv precedence/interpolation, before native CLI
     // imports. This subprocess cannot alter the eventual chat/provider environment.
     let script = r#"import json, os, sys
 from pathlib import Path
@@ -149,7 +149,9 @@ print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
             .map(|(key, value)| (OsString::from_vec(key), OsString::from_vec(value))),
     );
     checked_loader_environment(&after_dotenv)?;
-    checked_checkout(&after_dotenv, &source, cancelled)?;
+    if checked_checkout(&after_dotenv, &source, cancelled)? != revision {
+        return Err("Hermes checkout changed during native dotenv loading".into());
+    }
     // Sticky directories protect the script inode, not sibling import names.
     let version = adapter::Probe(cancelled).version_output_with_timeout(
         &discovery,
@@ -172,14 +174,14 @@ print(json.dumps([[list(os.fsencode(key)), list(os.fsencode(value))]
     if PathBuf::from(reported).canonicalize()? != source {
         return Err("Hermes version source differs from its installed metadata".into());
     }
-    Ok((selector, python, cache))
+    Ok((selector, python, cache, revision))
 }
 
 fn checked_checkout(
     command: &aw_exec::CommandSpec,
     source: &std::path::Path,
     cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<()> {
+) -> Result<String> {
     // Native Git runs from both cwd and source; relative scopes select different files.
     for key in [
         "GIT_CONFIG_SYSTEM",
@@ -228,10 +230,9 @@ fn checked_checkout(
             "HEAD".into(),
         ],
     )?;
-    if revision != REVISION {
-        return Err(
-            format!("Hermes official checkout {REVISION} is required by this adapter").into(),
-        );
+    if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Hermes checkout must report a full Git object ID".into());
     }
     let inspect = |args: &[&str]| git::inspect(&identity, args, cancelled);
     git::checked_configuration(&identity, cancelled)?;
@@ -311,7 +312,7 @@ fn checked_checkout(
         return Err(dirty.into());
     }
     scratch.close()?;
-    Ok(())
+    Ok(revision)
 }
 
 /// Isolate cache reads before Python initializes site or imports any native module.

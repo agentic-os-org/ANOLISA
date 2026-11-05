@@ -24,10 +24,10 @@ run_sec() {
     fi
 
     echo "==> Running agent-sec-core e2e test scripts manually"
-    if [ -f "/usr/local/bin/linux-sandbox" ]; then
-        python3 tests/e2e/linux-sandbox/e2e_test.py
+    if [ -x /usr/bin/linux-sandbox ] || command -v linux-sandbox >/dev/null 2>&1 || [ -x /usr/local/bin/linux-sandbox ]; then
+        python3 "$ROOT_DIR/src/agent-sec-core/tests/e2e/linux-sandbox/e2e_test.py"
     else
-        echo "linux-sandbox not found at /usr/local/bin/linux-sandbox, skipping e2e_test.py"
+        echo "linux-sandbox not found in /usr/bin, PATH or the legacy /usr/local/bin location, skipping e2e_test.py"
     fi
 }
 

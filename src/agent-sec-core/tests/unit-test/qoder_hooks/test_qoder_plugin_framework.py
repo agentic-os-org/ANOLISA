@@ -138,7 +138,9 @@ def test_plugin_manifest_declares_stable_name() -> None:
 
 
 def test_component_manifest_declares_native_qoder_bundle() -> None:
-    component = tomllib.loads((_CORE_DIR / ".anolisa" / "component.toml").read_text())
+    component = tomllib.loads(
+        (_CORE_DIR / "packaging" / "anolisa" / "component.toml").read_text()
+    )
     adapters = {
         adapter["framework"]: adapter for adapter in component.get("adapters", [])
     }

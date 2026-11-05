@@ -147,6 +147,14 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
             .arg(fixture.root.join("aw.json"))
             .args(["--agent", "qoder", "--reloadable"])
             .env("FAKE_RELOAD_ADAPTER", adapter)
+            .env(
+                "FAKE_RELOAD_VERSION",
+                if adapter == "qoder" {
+                    "1.1.90"
+                } else {
+                    "QwenPaw, version 2.2.3"
+                },
+            )
             .env("QWENPAW_WORKING_DIR", fixture.root.join("home"));
         let process = Process::spawn(&fixture, launch);
         wait(&fixture.root.join("native-ready"));
@@ -205,6 +213,7 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
                 Operation::Bind {
                     target: "qoder".into(),
                     capabilities: aw_service::Capabilities {
+                        failure_actions: Default::default(),
                         adapter: adapter.into(),
                         version: state["native_version"].as_str().unwrap().into(),
                         entrypoint: state["entrypoint"].as_str().unwrap().into(),
@@ -359,6 +368,21 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
             fs::read(fixture.root.join("aw.json")).unwrap(),
             original_config
         );
+        // The default update reads this same mutable file for both Adapters.
+        fixture.save(&candidate);
+        let mut single = fixture.command();
+        single
+            .args(["update", "--config"])
+            .arg(fixture.root.join("aw.json"))
+            .args(["--agent", "qoder"]);
+        let single = fixture.run(single);
+        assert!(
+            single.status.success(),
+            "{}",
+            String::from_utf8_lossy(&single.stderr)
+        );
+        assert_eq!(active(&service)["process"]["pid"], native_pid);
+        assert_ne!(active(&service)["policy_revision"], initial);
         command(&fixture, 4, json!({"action":"stop"}));
         let output = process.finish();
         assert!(
@@ -382,7 +406,7 @@ fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
 
 #[test]
 fn reload_optin_rejects_unverified_native_modes_before_starting_a_service() {
-    for print in [false, true] {
+    for version in ["1.1.64", "2.0.0"] {
         let fixture = Fixture::new();
         let document = fixture.document();
         fixture.save(&document);
@@ -391,11 +415,9 @@ fn reload_optin_rejects_unverified_native_modes_before_starting_a_service() {
             .args(["run", "--config"])
             .arg(fixture.root.join("aw.json"))
             .args(["--agent", "qoder", "--reloadable"]);
-        if print {
-            command
-                .env("FAKE_VERSION", "1.1.73")
-                .args(["--", "-p", "unused"]);
-        }
+        command
+            .env("FAKE_VERSION", version)
+            .args(["--", "-p", "unused"]);
         let output = fixture.run(command);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("runtime policy updates require"));

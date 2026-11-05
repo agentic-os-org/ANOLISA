@@ -4,6 +4,7 @@ pub mod capabilities;
 mod commands;
 mod context;
 pub mod output;
+pub mod sandbox;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;
@@ -32,6 +33,8 @@ pub struct Cli {
 /// How a parsed invocation reaches its result.
 #[derive(Debug)]
 pub enum Plan<'a> {
+    /// Run a local sandbox with explicit permissions, independently of the daemon.
+    Sandbox(&'a sandbox::SandboxCommand),
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
     /// Generate the observability record schema without a daemon endpoint.
@@ -102,6 +105,9 @@ impl Cli {
             let mut tokens = argv.iter().skip(1);
             let mut count = 0;
             while let Some(argument) = tokens.next() {
+                if argument == "--" {
+                    break;
+                }
                 if argument == "--text" || argument == "--code" {
                     tokens.next();
                 } else if argument.as_bytes().split(|byte| *byte == b'=').next()
@@ -121,7 +127,11 @@ impl Cli {
             // A local command must stay usable on hosts that never deploy a
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
-            None if arguments.command.is_observability_schema() => None,
+            None if arguments.command.is_observability_schema()
+                || arguments.command.sandbox().is_some() =>
+            {
+                None
+            }
             None => Some(resolve_socket(arguments.socket, socket_env)?),
         };
         Ok(Self {
@@ -133,7 +143,8 @@ impl Cli {
                 } else if arguments.command.is_llm_code_scan() {
                     u32::try_from(asc_model_client::MAX_CODE_SCAN_BUDGET.as_millis())
                         .unwrap_or(u32::MAX)
-                } else if arguments.command.is_skill_sec() {
+                } else if arguments.command.is_skill_sec() || arguments.command.gateway().is_some()
+                {
                     60_000
                 } else {
                     5_000
@@ -153,6 +164,9 @@ impl Cli {
 
     /// Reports whether this invocation runs locally or against the daemon.
     pub fn plan(&self) -> Plan<'_> {
+        if let Some(command) = self.command.sandbox() {
+            return Plan::Sandbox(command);
+        }
         if self.command.is_observability_schema() {
             return Plan::ObservabilitySchema;
         }
@@ -248,6 +262,21 @@ impl Cli {
         self.command.is_scan_prompt()
     }
 
+    /// Runs a secret-gateway command, or returns `None` for another command.
+    ///
+    /// # Errors
+    /// Returns daemon transport or output failures.
+    pub fn run_gateway(
+        &self,
+        socket: &Path,
+        stdout: &mut impl std::io::Write,
+        stderr: &mut impl std::io::Write,
+    ) -> Option<std::io::Result<u8>> {
+        self.command
+            .gateway()
+            .map(|command| command.run(socket, self.timeout(), stdout, stderr))
+    }
+
     /// The events query command, or `None` for another command.
     pub const fn events(&self) -> Option<&EventsCommand> {
         self.command.events()
@@ -336,6 +365,9 @@ pub enum InputError {
     /// transport loop, not the single-request path.
     #[error("events requests are resolved through the events transport loop")]
     EventsBatch,
+    /// Invalid secret-gateway input.
+    #[error("gateway: {0}")]
+    Gateway(String),
     /// A scan-prompt input failure; that command owns its variants and
     /// wording, mirroring V1's scan-specific messages.
     #[error(transparent)]
@@ -362,7 +394,8 @@ impl InputError {
             | Self::Json(_)
             | Self::LocalCommand
             | Self::PromptScanBatch
-            | Self::EventsBatch => false,
+            | Self::EventsBatch
+            | Self::Gateway(_) => false,
         }
     }
 }
@@ -370,6 +403,68 @@ impl InputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_never_resolves_a_daemon_and_preserves_target_options() {
+        let cli = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/unused",
+                "sandbox",
+                "run",
+                "--permissions",
+                "permissions.json",
+                "--",
+                "python3",
+                "a b.py",
+                "--socket",
+                "one",
+                "--socket",
+                "two",
+                "--timeout-ms",
+                "invalid",
+            ],
+            Some(OsStr::new("relative")),
+        )
+        .unwrap();
+        assert!(cli.socket().is_none());
+        assert!(matches!(cli.request(), Err(InputError::LocalCommand)));
+        let Plan::Sandbox(sandbox::SandboxCommand::Run(command)) = cli.plan() else {
+            panic!("local sandbox plan");
+        };
+        assert_eq!(
+            command.command,
+            [
+                "python3",
+                "a b.py",
+                "--socket",
+                "one",
+                "--socket",
+                "two",
+                "--timeout-ms",
+                "invalid",
+            ]
+        );
+    }
+
+    #[test]
+    fn sandbox_requires_permissions_and_an_explicit_command_boundary() {
+        for args in [
+            vec!["agent-sec-cli", "sandbox", "run", "--", "true"],
+            vec!["agent-sec-cli", "sandbox", "run", "--permissions", "p.json"],
+            vec![
+                "agent-sec-cli",
+                "sandbox",
+                "run",
+                "--permissions",
+                "p.json",
+                "true",
+            ],
+        ] {
+            assert!(Cli::parse_from_with_socket_env(args, None).is_err());
+        }
+    }
 
     #[test]
     fn scanner_hyphen_values_are_data_but_duplicate_global_options_fail() {

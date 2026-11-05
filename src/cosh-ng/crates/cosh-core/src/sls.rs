@@ -753,7 +753,7 @@ impl CoshCore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Read;
 
@@ -1005,18 +1005,18 @@ mod tests {
     }
 
     /// Serialize env-var-dependent tests to avoid cross-test interference.
-    static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// RAII guard that saves an env var's original value on creation and
     /// restores it on drop so tests never leak state even if the test body
     /// panics.
-    struct EnvVarGuard {
+    pub(crate) struct EnvVarGuard {
         key: &'static str,
         old_value: Option<String>,
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let old_value = std::env::var(key).ok();
             std::env::set_var(key, value);
             Self { key, old_value }

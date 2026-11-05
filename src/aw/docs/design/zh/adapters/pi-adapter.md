@@ -2,10 +2,14 @@
 
 [English](../../en/adapters/pi-adapter.md)
 
+显式常驻模式见[常驻 SDK 生命周期](resident-sdk.md)。
+下文任务 worker 模式保留原有生命周期与失败策略。
+
 Pi Adapter 支持公开的 Coding Agent/Core SDK
-`@earendil-works/pi-coding-agent` 和 `@earendil-works/pi-agent-core` 0.84.2，
+`@earendil-works/pi-coding-agent` 和 `@earendil-works/pi-agent-core`，
 使用 Linux 与 Node.js >=22.19.0。入口为 `sdk`：AW 管理的前台 worker 导入应用
-工厂。原生 Pi CLI 不在这个合同内。
+工厂。两个 SDK 的已验证基线均为 0.84.2，其他版本需保留 Agent/AgentSession 与
+工具生命周期接口。原生 Pi CLI 不在这个合同内。
 
 ## 工厂与生命周期
 
@@ -52,10 +56,13 @@ AW after 支持 `observe` 和 `replace_result`。步骤按配置顺序处理同�
 准备阶段固定会话、invocation UUID 与参数快照，直到完成；会话身份中途改变不会串线。Bridge 最多保留 512 个在途准备调用，在原生完成事件清理，包含跳过
 after 的取消路径。保留 Pi 顺序准备、并行执行的调度：after 按完成顺序，结果消息
 按原调用顺序，不添加全局工具锁。服务保留关联记录的容量仍限制长期 worker；
-每个 instance 最多 32 个 live event 和 1024 个保留的事件关联（包含已关闭的
-before/after），达到容量前须释放并重新绑定。在最后配置步骤之前拒绝会显式关闭
+旧任务 worker 每实例保留最多 1024 个关联（含已关闭的 before/after）。常驻工厂使用
+模型产生身份、活动状态回收和可配置并发预算，见[长期会话](resident-sdk.md)。在最后配置步骤之前拒绝会显式关闭
 事件，不运行剩余步骤，包含 `on_error:block` 下原生非法 JSON、非零/信号退出及
-执行故障。关闭失败会报告，且不会把拒绝变成允许。SDK 取消或本地传输上限可能在 helper
+执行故障。关闭失败会报告，且不会把拒绝变成允许。受管 `tool.after` 步骤在
+`on_error: report` 下 Provider 调用失败时收到中性回复：审计已记录该故障，
+未检查的原始结果保留，同一会话可继续下一次 prompt。before 故障、
+block/withhold 故障、取消、身份与清理失败仍停止任务。SDK 取消或本地传输上限可能在 helper
 确认关闭前终止它；已打开事件随后在原截止时间或 binding release 时终结，不延长
 预算。这与已等待完成的策略拒绝路径不同。
 
@@ -103,8 +110,8 @@ python3 crates/aw-cli/tests/fixtures/pi/tokenless-smoke.py \
   --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core
 ```
 
-这里运行真实 SDK、AW、Tokenless Provider 和 Protocol v2 CLI。模型 stream、bash
-工具、RTK rewrite 命令及 scanner backend 使用确定性 fixture，不执行建议的 shell
-命令。验证选中的压缩进入模型上下文、新重试重新通过 sec-core、RTK 已处理结果
+这里运行真实 SDK、AW、Tokenless Provider 和 Protocol v2 CLI，改写由 CLI 内置的
+RTK 生成。模型 stream、bash 工具及 scanner backend 使用确定性 fixture，不执行建议的
+shell 命令。验证选中的压缩进入模型上下文、新重试重新通过 sec-core、RTK 已处理结果
 保持不变。两个遥测 sink 均关闭，状态只位于指定测试 root。8 个 Bridge 授权与
 结果字段边界用例也通过默认 Rust Pi 门禁运行。

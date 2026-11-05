@@ -3,13 +3,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use skillfs_core::{ParseConfig, store::SkillStore};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Ordered mount inputs, separate from the legacy security configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct MountFile {
     /// Dedicated output directory, outside all sources.
@@ -42,6 +42,7 @@ pub(super) fn validate_options(args: &clap::ArgMatches) -> Result<()> {
                 "Mount"
                     | "config"
                     | "foreground"
+                    | "managed"
                     | "allow_other"
                     | "read_only"
                     | "verbose"

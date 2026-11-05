@@ -2,7 +2,7 @@
 
 Date: 2026-07-22
 
-Related documents: [Design](../design/audit-log.md) and
+Related documents: [Design](../design/en/audit-log.md) and
 [Implementation Spec](../spec/audit-log-spec.md)
 
 ## Context

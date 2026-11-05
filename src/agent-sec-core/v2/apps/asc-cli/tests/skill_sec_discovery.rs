@@ -43,7 +43,7 @@ async fn caller_home_and_xdg_cannot_inject_implicit_skill_roots() {
             cli.current_dir(&directory.0)
                 .arg("--socket")
                 .arg(&socket)
-                .args(["--timeout-ms", "2000", "skill-ledger"])
+                .args(["--timeout-ms", "2000", "skillsec"])
                 .args(arguments)
                 .env_remove("HOME")
                 .env_remove("XDG_DATA_HOME");

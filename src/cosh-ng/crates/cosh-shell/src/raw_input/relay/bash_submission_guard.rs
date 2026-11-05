@@ -1,11 +1,34 @@
 use crate::input::InputClassifier;
 
 use super::super::event_parser::NativeLineState;
+use super::super::event_parser::BRACKETED_PASTE_START;
 use super::super::generation::LineSubmitCounter;
 
 const BASH_SLASH_SUBMISSION_GUARD: &[u8] = b"\x1b[99~";
 const BASH_PRIVATE_SLASH_SUBMISSION_GUARD: &[u8] = b"\x1b[100~";
 const BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD: &[u8] = b"\x1b[101~";
+
+pub(super) fn observe_untracked_readline_binding(
+    bytes: &[u8],
+    relay: &super::InputRelayContext<'_>,
+) {
+    // Ctrl-X bindings can accept a line without CR/LF. Until the next real
+    // prompt marker, the old PS1 cannot authorize private Readline guards.
+    if relay.input_classifier.bash_slash_submission_guard_enabled() {
+        let mut prompt_scan = relay.line_submits.clone();
+        if relay.line_buffer.is_active() {
+            // Candidate paste delimiters may not have reached the PTY yet.
+            prompt_scan = LineSubmitCounter::default();
+            if relay.line_buffer.in_paste() {
+                prompt_scan.count(BRACKETED_PASTE_START);
+            }
+            prompt_scan.count(relay.line_buffer.pending_partial_bytes());
+        }
+        if prompt_scan.has_untracked_readline_prefix(bytes) {
+            relay.main_prompt_gate.set_at_prompt(false);
+        }
+    }
+}
 
 pub(super) struct PrivateHistorySubmission {
     pub(super) bytes: Vec<u8>,

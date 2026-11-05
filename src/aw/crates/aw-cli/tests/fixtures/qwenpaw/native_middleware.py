@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import sys
 import os
 from pathlib import Path
 import tempfile
@@ -16,8 +17,10 @@ from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
 ROOT = Path(__file__).resolve().parents[5]
-SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py")
+SPEC = importlib.util.spec_from_file_location("aw_qwenpaw", ROOT / "crates/aw-adapter/native/qwenpaw/plugin.py",
+    submodule_search_locations=[str(ROOT / "crates/aw-adapter/native/qwenpaw")])
 MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
@@ -531,13 +534,39 @@ class RegistrationTests(unittest.TestCase):
             startup[0]()
             self.assertEqual(json.loads((root / "ready.json").read_text())["hooks"], 0)
 
-    def test_wrong_runtime_or_disabled_plugin_never_registers(self):
-        incompatible = {"qwenpaw": "2.2.2b4", "agentscope": "2.0.8"}
-        with patch.object(MODULE, "version", side_effect=incompatible.__getitem__):
-            with self.assertRaisesRegex(RuntimeError, "AgentScope 2.0.9"):
-                MODULE.AwPlugin().register(SimpleNamespace())
-        with patch.object(MODULE, "version", return_value="wrong"), self.assertRaisesRegex(RuntimeError, "requires"):
-            MODULE.AwPlugin().register(SimpleNamespace())
+    def test_private_adjacent_descriptor_registers_without_startup_environment(self):
+        output = Path(os.environ["AW_TEST_OUTPUT"])
+        with tempfile.TemporaryDirectory(dir=output) as temporary:
+            root = Path(temporary)
+            descriptor = root / "aw-attachment.json"
+            descriptor.write_text(json.dumps({
+                "executable": "/aw", "binding": "/binding.json", "hooks": [],
+                "ready_path": str(root / "ready.json"), "ready_token": "attach",
+            }))
+            descriptor.chmod(0o600)
+            startup = []
+            api = SimpleNamespace(config={}, register_startup_hook=lambda name, callback: startup.append(callback))
+            with patch.object(MODULE, "__file__", str(root / "plugin.py")), patch.dict(os.environ, {}, clear=True):
+                MODULE.AwPlugin().register(api)
+            startup[0]()
+            self.assertEqual(json.loads((root / "ready.json").read_text())["token"], "attach")
+
+    def test_unsafe_adjacent_descriptor_never_falls_back_to_environment(self):
+        output = Path(os.environ["AW_TEST_OUTPUT"])
+        with tempfile.TemporaryDirectory(dir=output) as temporary:
+            root = Path(temporary)
+            descriptor = root / "aw-attachment.json"
+            descriptor.write_text("{}")
+            descriptor.chmod(0o644)
+            with patch.object(MODULE, "__file__", str(root / "plugin.py")):
+                with self.assertRaisesRegex(RuntimeError, "Unsafe"):
+                    MODULE.AwPlugin().register(SimpleNamespace(config={}))
+                descriptor.rename(root / "target")
+                descriptor.symlink_to(root / "target")
+                with self.assertRaisesRegex(RuntimeError, "Unsafe"):
+                    MODULE.AwPlugin().register(SimpleNamespace(config={}))
+
+    def test_disabled_plugin_never_registers(self):
         with self.assertRaisesRegex(RuntimeError, "disables"):
             MODULE.AwPlugin().register(SimpleNamespace(config={"enabled": False}))
 

@@ -1,102 +1,8 @@
-# =============================================================================
-# BUILD
-# =============================================================================
+_AGENTSIGHT_MAKE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-LIBBPF_SYS_LIBRARY_PATH ?= $(shell pkg-config --variable=libdir libbpf 2>/dev/null || echo /usr/lib64:/usr/lib)
-NPM_REGISTRY ?= https://registry.npmmirror.com
-NPM_REPLACE_REGISTRY_HOST ?= always
-
-.PHONY: build
-build: ## Build agentsight binary
-	env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
-		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
-		cargo build --release
-
-ENFORCER_BUILD = env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
-	LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" ./scripts/build-enforcer.sh
-
-.PHONY: build-enforcer
-build-enforcer: ## Build the privileged daemon; print its private verified path
-	@$(ENFORCER_BUILD)
-
-.PHONY: build-frontend
-build-frontend: ## Build and embed frontend into frontend-dist/
-	cd dashboard && npm install \
-		--registry="$(NPM_REGISTRY)" \
-		--replace-registry-host="$(NPM_REPLACE_REGISTRY_HOST)" \
-		&& npm run build:embed
-
-.PHONY: build-all
-build-all: build-frontend build build-enforcer ## Build frontend, AgentSight, and enforcer
-
-.PHONY: build-mac
-build-mac: build-frontend ## Build macOS local viewer (serve only; no eBPF)
-	cargo build --release --bin agentsight
-
-.PHONY: example
-example: build ## Build C FFI example (requires libagentsight)
-	gcc -o target/release/agentsight_example examples/agentsight_example.c \
-		-Iinclude -Ltarget/release -lagentsight -lpthread -ldl -lm
-
-# =============================================================================
-# INSTALL
-# =============================================================================
-
-INSTALL_PROFILE ?= system
-DESTDIR ?=
-ifeq ($(INSTALL_PROFILE),user)
-PREFIX ?= $(HOME)/.local
-BINDIR ?= $(PREFIX)/bin
-INSTALL_SYSTEMD ?= 0
-else
-PREFIX ?= /usr
-BINDIR ?= /usr/local/bin
-INSTALL_SYSTEMD ?= 1
-endif
-SYSCONFDIR ?= /etc
-LIBDIR ?= $(PREFIX)/lib
-SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
-SERVICE_BINDIR ?= $(BINDIR)
-SETCAP ?= auto
-
-.PHONY: install uninstall
-install: build-frontend build ## Build and install agentsight binary and set BPF capabilities
-	@enforcer_bin="$(ENFORCER_BIN)"; \
-		if [ -z "$$enforcer_bin" ]; then \
-			enforcer_bin=$$($(ENFORCER_BUILD)) || exit $$?; \
-		fi; \
-		install -d -m 0755 "$(DESTDIR)$(BINDIR)" && \
-		python3 scripts/copy-enforcer.py "$$enforcer_bin" "$(DESTDIR)$(BINDIR)/agentsight-enforcer"
-	install -d -m 0755 $(DESTDIR)$(SYSCONFDIR)/agentsight
-	install -p -m 0755 target/release/agentsight $(DESTDIR)$(BINDIR)/
-	install -p -m 0644 agentsight.json $(DESTDIR)$(SYSCONFDIR)/agentsight/config.json
-	@if [ "$(SETCAP)" = "1" ] || { [ "$(SETCAP)" = "auto" ] && [ "$(INSTALL_PROFILE)" = "system" ] && [ -z "$(DESTDIR)" ] && command -v setcap >/dev/null 2>&1; }; then \
-		setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(BINDIR)/agentsight; \
-	else \
-		echo "Skipping setcap for $(DESTDIR)$(BINDIR)/agentsight"; \
-	fi
-	@if [ "$(INSTALL_SYSTEMD)" = "1" ]; then \
-		install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_DIR); \
-		install -p -m 0755 scripts/agentsight-start.sh $(DESTDIR)$(BINDIR)/agentsight-start; \
-		sed 's|/usr/local/bin/agentsight-start|$(SERVICE_BINDIR)/agentsight-start|g' \
-			scripts/agentsight.service > $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service; \
-		sed 's|/usr/local/bin/agentsight-enforcer|$(SERVICE_BINDIR)/agentsight-enforcer|g' \
-			scripts/agentsight-enforcer.service > $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight-enforcer.service; \
-		chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service; \
-		chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight-enforcer.service; \
-	fi
-
-uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/agentsight
-	rm -f $(DESTDIR)$(BINDIR)/agentsight-enforcer
-	rm -f $(DESTDIR)$(BINDIR)/agentsight-start
-	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service
-	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight-enforcer.service
-	rm -f $(DESTDIR)$(SYSCONFDIR)/agentsight/config.json
-
-# =============================================================================
-# TEST & QUALITY
-# =============================================================================
+include $(_AGENTSIGHT_MAKE_DIR)packaging/build.mk
+include $(_AGENTSIGHT_MAKE_DIR)packaging/install.mk
+include $(_AGENTSIGHT_MAKE_DIR)packaging/delivery.mk
 
 .PHONY: package-raw stage-raw test-raw-package
 package-raw: ## Package prebuilt AgentSight binaries for one raw target
@@ -107,6 +13,10 @@ stage-raw: ## Stage one raw payload into DESTDIR
 
 test-raw-package: ## Validate Linux and macOS raw package assembly
 	@bash scripts/test-package-raw.sh
+
+# =============================================================================
+# TEST & QUALITY
+# =============================================================================
 
 .PHONY: test-batch-analysis
 test-batch-analysis: ## Exercise batch discovery and execution without model calls
@@ -175,7 +85,7 @@ uninstall-hooks: ## Remove the agentsight pre-push hook (unset core.hooksPath)
 
 .PHONY: help
 help: ## Show this help message
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := build-all
 

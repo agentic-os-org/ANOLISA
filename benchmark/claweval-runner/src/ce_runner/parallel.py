@@ -108,6 +108,8 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
         # Wait for health
         timeout_s = svc.get("ready_timeout", 15)
         deadline = time.monotonic() + timeout_s
+        ready = False
+        last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
                 if health_method == "POST":
@@ -115,10 +117,20 @@ def start_mock_services_with_offset(task_yaml: str, task_dir: str, port_offset: 
                 else:
                     r = httpx.get(health_check, timeout=2)
                 if r.status_code == 200:
+                    ready = True
                     break
-            except Exception:
-                pass
+                last_error = RuntimeError(
+                    f"health check returned HTTP {r.status_code}"
+                )
+            except Exception as exc:
+                last_error = exc
             time.sleep(0.5)
+        if not ready:
+            raise RuntimeError(
+                f"mock service '{name}' failed to become healthy within "
+                f"{timeout_s}s (port {port}, health check {health_check}): "
+                f"{last_error or 'no health response before the deadline'}"
+            )
 
 
 def reset_services_with_offset(task_yaml: str, port_offset: int):

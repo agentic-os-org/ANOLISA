@@ -280,6 +280,13 @@ export const RiskEnforcementPage: React.FC = () => {
     : health.capabilities.test_development
       ? t('risk.capability.testDev')
       : t('risk.capability.prod');
+  const fileDeleteGuardLabel = health?.capabilities.file_delete_guard === true
+    ? health.capabilities.file_delete_guard_mode
+      ? t('risk.capability.fileDeleteGuardWithMode', {
+        mode: health.capabilities.file_delete_guard_mode,
+      })
+      : t('risk.capability.fileDeleteGuard')
+    : null;
   const allowsCredentialEnforcement = health?.capabilities.credential_enforce === true;
 
   return (
@@ -442,6 +449,9 @@ export const RiskEnforcementPage: React.FC = () => {
         <form onSubmit={handleCreate} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <h2 className="font-semibold text-gray-900">{t('risk.form.title')}</h2>
           <p className="mt-1 text-xs text-gray-500">{capabilityLabel}</p>
+          {fileDeleteGuardLabel && (
+            <p className="mt-1 text-xs text-gray-600">{fileDeleteGuardLabel}</p>
+          )}
           <div className="mt-4 space-y-4">
             <label className="block text-sm font-medium text-gray-700">
               Agent ID

@@ -10,11 +10,14 @@ Produces a JSON entry suitable for the `codex_offsets.entries` array in
 `agentsight.json` (Tier 3 offset table).
 
 Usage:
-  ./extract-codex-offsets.py <binary>
+  ./extract-codex-offsets.py <binary> [--symbols <symbol-file>]
 
-`<binary>` should be a codex executable that still has a usable symbol
-table (release builds with their dynsym intact, or a `*.symbols` package
-downloaded from the codex release).
+`<binary>` is the deployed target executable; it supplies the fingerprint and the
+executable `PT_LOAD` segments used to convert symbol addresses into file offsets.
+Pass `--symbols` when that target is stripped, using the matching symbol file from
+the same build (for example the official `codex.debug`). The symbol file must match
+the target's Build ID, or its GNU debuglink CRC when no Build ID exists.
+Omit `--symbols` only when the target itself still has a usable symbol table.
 
 The output JSON is printed to stdout. Append it to
 `agentsight.json -> codex_offsets.entries`.
@@ -25,8 +28,10 @@ import hashlib
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
+import zlib
 from typing import Dict, Optional
 
 HEAD_SIZE = 65536
@@ -83,7 +88,7 @@ def detect_codex_version(path: str) -> Optional[str]:
 
 
 def nm_symbols(binary: str) -> Dict[str, int]:
-    """Return a {symbol_name: file_offset} map for defined text symbols.
+    """返回已定义代码符号的虚拟地址，尚未转换为 uprobe 文件偏移。
 
     Tries the regular symbol table first (`nm --defined-only`), then falls
     back to the dynamic symbol table (`nm -D --defined-only`) for release
@@ -142,9 +147,102 @@ def pick_offsets(syms: Dict[str, int]) -> Optional[dict]:
     return None
 
 
+def read_debuglink_crc(binary: str) -> Optional[int]:
+    """读取 GNU debuglink 校验值；官方 musl 包可能没有 Build ID。"""
+    try:
+        with open(binary, "rb") as stream:
+            header = stream.read(64)
+            if len(header) != 64 or header[:6] != b"\x7fELF\x02\x01":
+                return None
+            shoff = struct.unpack_from("<Q", header, 40)[0]
+            shsize, shnum, names_index = struct.unpack_from("<HHH", header, 58)
+            if shsize < 64 or names_index >= shnum:
+                return None
+            sections = []
+            for index in range(shnum):
+                stream.seek(shoff + index * shsize)
+                sections.append(struct.unpack("<IIQQQQIIQQ", stream.read(64)))
+            names_section = sections[names_index]
+            if names_section[5] > 1024 * 1024:
+                return None
+            stream.seek(names_section[4])
+            names = stream.read(names_section[5])
+            for section in sections:
+                if names[section[0] :].split(b"\0", 1)[0] != b".gnu_debuglink":
+                    continue
+                if section[5] > 4096:
+                    return None
+                stream.seek(section[4])
+                data = stream.read(section[5])
+                checksum_offset = (data.index(b"\0") + 4) & ~3
+                return struct.unpack_from("<I", data, checksum_offset)[0]
+    except (OSError, ValueError, struct.error):
+        return None
+    return None
+
+
+def matching_symbol_file(binary: str, symbol_file: str) -> bool:
+    target_id, symbol_id = read_buildid(binary), read_buildid(symbol_file)
+    if target_id and symbol_id:
+        return target_id == symbol_id
+    expected = read_debuglink_crc(binary)
+    if expected is None:
+        return False
+    checksum = 0
+    try:
+        with open(symbol_file, "rb") as stream:
+            for data in iter(lambda: stream.read(1024 * 1024), b""):
+                checksum = zlib.crc32(data, checksum)
+    except OSError:
+        # 读不到符号文件时不能宣称匹配；main 会统一报错并返回退出码。
+        return False
+    return checksum & 0xFFFFFFFF == expected
+
+
+def file_offsets(binary: str, offsets: dict) -> dict:
+    """用目标二进制的可执行 PT_LOAD 段转换地址，不能假定地址等于文件偏移。"""
+    with open(binary, "rb") as stream:
+        header = stream.read(64)
+        if len(header) != 64 or header[:6] != b"\x7fELF\x02\x01":
+            raise ValueError("expected a little-endian ELF64 target binary")
+        phoff = struct.unpack_from("<Q", header, 32)[0]
+        phsize, phnum = struct.unpack_from("<HH", header, 54)
+        segments = []
+        for index in range(phnum):
+            stream.seek(phoff + index * phsize)
+            raw = stream.read(56)
+            if phsize < 56 or len(raw) != 56:
+                raise ValueError("truncated ELF program header")
+            kind, flags, offset, address, _, size, _, _ = struct.unpack(
+                "<IIQQQQQQ", raw
+            )
+            if kind == 1 and flags & 1:
+                segments.append((offset, address, size))
+    result = dict(offsets)
+    for name in ("ssl_write", "ssl_read", "ssl_do_handshake"):
+        address = offsets[name]
+        for offset, base, size in segments:
+            if base <= address < base + size:
+                result[name] = offset + address - base
+                break
+        else:
+            raise ValueError(
+                "{} address 0x{:x} is outside executable PT_LOAD segments".format(
+                    name, address
+                )
+            )
+    return result
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    p.add_argument("binary", help="codex binary (with symbol table)")
+    p.add_argument(
+        "binary", help="target codex binary used for fingerprinting and file offsets"
+    )
+    p.add_argument(
+        "--symbols",
+        help="matching ELF symbol file (Build ID or GNU debuglink CRC must match)",
+    )
     args = p.parse_args()
 
     binary = args.binary
@@ -152,7 +250,17 @@ def main() -> int:
         print(f"error: not a file: {binary}", file=sys.stderr)
         return 1
 
-    syms = nm_symbols(binary)
+    symbol_file = args.symbols or binary
+    if args.symbols and not os.path.isfile(symbol_file):
+        print(f"error: not a file: {symbol_file}", file=sys.stderr)
+        return 1
+    if args.symbols and not matching_symbol_file(binary, symbol_file):
+        print(
+            "error: symbol file must match the target Build ID or GNU debuglink CRC",
+            file=sys.stderr,
+        )
+        return 4
+    syms = nm_symbols(symbol_file)
     if not syms:
         print(
             "error: nm produced no symbols — is this a stripped binary?",
@@ -171,6 +279,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 3
+
+    try:
+        offsets = file_offsets(binary, offsets)
+    except (OSError, ValueError, struct.error) as error:
+        print("error: invalid ELF offsets: {}".format(error), file=sys.stderr)
+        return 5
 
     entry = {
         "codex_version": detect_codex_version(binary) or "unknown",

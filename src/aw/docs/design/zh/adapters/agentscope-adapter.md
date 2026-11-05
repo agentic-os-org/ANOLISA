@@ -2,7 +2,7 @@
 
 [English](../../en/adapters/agentscope-adapter.md)
 
-`agentscope` Adapter 面向 AgentScope **2.0.6**，要求 **Python >=3.11**
+`agentscope` Adapter 的已验证基线为 AgentScope **2.0.6**，要求 **Python >=3.11**
 （[SDK 要求](https://pypi.org/project/agentscope/2.0.6/)），通过明确接线的公共 `Agent` 工厂
 工作。复用 AW 本地服务、binding、有界 `aw hook` 客户端、前台 launcher、readiness
 与生成文件清理；不把 SDK 标记为 QwenPaw，也不依赖 QwenPaw 插件加载器。
@@ -11,8 +11,8 @@
 
 `aw run --config FILE --agent TARGET` 选择配置中的 `adapter: agentscope`。
 `argv` 首项为应用 Python 解释器，随后为 `.py` 脚本或 `-m MODULE` 与应用参数。
-不支持 `-I`、`-E`、`-c` 等解释器覆盖选项。有界 preflight 使用同一解释器核对
-`importlib.metadata.version("agentscope") == "2.0.6"`。
+不支持 `-I`、`-E`、`-c` 等解释器覆盖选项。有界 preflight 使用同一解释器记录
+`importlib.metadata.version("agentscope")`。原生导入与工厂注册检查所需 middleware 接口。
 
 AW 向前台 worker 提供自有 `aw_agentscope.py` 导入目录和 `AW_NATIVE_CONFIG`。
 应用显式修改公共工厂：
@@ -68,6 +68,13 @@ AW 使用 AgentScope 的 `on_acting`，位于原生参数校验和权限检查�
   观察步骤和原生用户 Hook 先收到原始结果，压缩再修改模型可见的最终文本。
   回调故障按 report 处理后仍继续压缩。所有步骤共享 deadline 和 once-only 声明，
   事件预算仍为 **1..55000 ms**。
+- 严格 after 步骤（`on_error: withhold_result`）对完成的响应把关。传输失败、Hook
+  非零退出和无法解码的 Hook stdout 会标记本次调用，由最外层 AW 包装在所有 after
+  Hook 展开后以 `ToolResponse(state=ERROR)` 占位结果替换未检查原文：模型不会收到
+  原始文本，外层 after Hook 仍持有关联准入的原始 payload，且不受 hook 顺序或
+  `replace_result` 组合影响。该故障动作仅在桥支持完成响应替换的 SDK 版本上准入。
+  中间 `ToolChunk` 帧不缓冲：AgentScope 中间件接缝没有流门控，失败工具的部分
+  chunk 对完成响应边界之外的流式消费者仍可见。
 - 生成的 Hook 配置只向最后一个已准入的结构化替换步骤授予替换权限。native 和观察
   Hook 的 stdout 不能替换结果，所有回调在最终步骤之前保留相同的关联响应。
   Bridge 校验该权限必须为布尔值，且只能用于 after。
@@ -124,8 +131,16 @@ dispatch 旁路不经过这里，需要独立接点。框架终态成功与内�
 
 首版支持一个前台 Python worker，不支持 fork 型 Gunicorn supervisor、子 worker
 自动接线或远端沙箱。常驻业务服务需要显式处理每个 worker/会话的 launch 与 binding
-归属。本地服务每实例最多保留 1024 个事件关联（约 512 对 before/after），release
-之前不会因为 session ID 改变而重置预算。不隐含远端命令取消、热加载或 OS 隔离能力。
+归属。Bridge 在首个 hook 事件前打开一个 task scope 并启用 invocation
+ledger，进程退出时关闭：每次工具调用以 invocation id 按严格递增序列
+register、各 phase 完成后 finish，关联容量按调用回收，长调用历史不再向
+1024 事件实例上限累积。注册使用与 hook 求值相同的解码后 SDK 生效参数，
+注册摘要与归一化 hook 输入始终一致；进程内 scope 打开与 ledger 交付
+串行化，并发首调用共享同一 scope 与同一序列。重放注册按序列拒绝。Hook 传输与清理
+固定使用调用注册时的 scope；owner 失败时按配置的 Hook 策略报告失败，不会把现有调用
+重路由到 legacy root binding 或替代 scope。只有没有注册 scope owner 的调用才使用
+legacy root binding 路径；后续调用必须等待待清理 scope 成功关闭后才能打开新 scope。
+session ID 改变本身不重置任何预算。不隐含远端命令取消、热加载或 OS 隔离能力。
 
 已有 `native-hook/v1alpha1`、结构化 Provider 和默认布尔 Hook 均可使用。布尔 Hook
 返回 `true` 时产生配置的 effects；before 的 `effects: [observe, block]` 匹配 true 即
@@ -138,8 +153,8 @@ block、未成功结果及中间 chunk 不压缩；无效替换报告故障并�
 sec-core 的 `scan_code`/`observe_tool` 和 Tokenless 的 `pre_tool`/`post_tool`。
 PreTool 拒绝原始尝试，把完整重试参数交给模型；新调用必须重新通过原生权限和
 sec-core。RTK 归属来自新执行参数，与被拒绝调用的 ID 无关，可避免重复压缩。
-sec-core 映射必须匹配 Toolkit 的准确工具名和参数指针。RTK 需独立安装；
-`aw-package configure` 仍面向 Qoder/OpenClaw。
+sec-core 映射必须匹配 Toolkit 的准确工具名和参数指针。
+`aw config init` 仍面向 Qoder/OpenClaw。
 
 ## 验证
 

@@ -1709,6 +1709,250 @@ fn session_bytes(store: &SessionStore, session_id: &ProviderSessionId) -> u64 {
     fs::metadata(store.session_file(session_id)).unwrap().len()
 }
 
+fn plant_task_temporary(
+    store: &SessionStore,
+    session_id: &ProviderSessionId,
+    bytes: usize,
+) -> PathBuf {
+    fs::create_dir_all(&store.base_dir).unwrap();
+    let path = store
+        .base_dir
+        .join(format!(".{session_id}.{}.tmp", ProviderSessionId::new()));
+    fs::write(&path, vec![b'x'; bytes]).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+#[test]
+fn replacement_commit_refuses_peak_over_budget_before_writing() {
+    for temporary_bytes in [0, 128] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store(&temp);
+        let mut session = new_session(&store, &"x".repeat(4096));
+        store.persist(&mut session).unwrap();
+        let path = store.session_file(&session.session_id);
+        let original = fs::read(&path).unwrap();
+        session.messages.push(Message::assistant(&"y".repeat(4096)));
+        let mut incoming = session.clone();
+        incoming.generation += 1;
+        let incoming_bytes = serde_json::to_vec_pretty(&incoming).unwrap().len() as u64;
+        let temporary = plant_task_temporary(&store, &session.session_id, temporary_bytes);
+        let peak = original.len() as u64 + incoming_bytes + temporary_bytes as u64;
+        let store = store.with_task_budget(7, peak - 1);
+        let generation = session.generation;
+        let before = fs::read_dir(&store.base_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let result = store.persist(&mut session);
+
+        assert!(
+            matches!(result, Err(SessionError::BudgetExhausted { projected_bytes, budget_bytes }) if projected_bytes == peak && budget_bytes == peak - 1),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(session.generation, generation);
+        assert_eq!(
+            fs::metadata(temporary).unwrap().len(),
+            temporary_bytes as u64
+        );
+        let after = fs::read_dir(&store.base_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            after, before,
+            "rejected admission must not leave an incoming temporary"
+        );
+    }
+}
+
+#[test]
+fn replacement_commit_fits_when_old_and_staging_exactly_fill_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let mut session = new_session(&store, &"x".repeat(4096));
+    store.persist(&mut session).unwrap();
+    let old_bytes = session_bytes(&store, &session.session_id);
+    session.messages.push(Message::assistant(&"y".repeat(4096)));
+    let mut incoming = session.clone();
+    incoming.generation += 1;
+    let incoming_bytes = serde_json::to_vec_pretty(&incoming).unwrap().len() as u64;
+    let temporary = plant_task_temporary(&store, &session.session_id, 128);
+    let store = store.with_task_budget(7, old_bytes + incoming_bytes + 128);
+
+    store.persist(&mut session).unwrap();
+
+    assert_eq!(session.generation, incoming.generation);
+    assert_eq!(
+        serde_json::to_value(store.load(&session.session_id).unwrap().messages).unwrap(),
+        serde_json::to_value(&session.messages).unwrap()
+    );
+    assert_eq!(session_bytes(&store, &session.session_id), incoming_bytes);
+    let temporaries = fs::read_dir(&store.base_dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            (path.extension().is_some_and(|extension| extension == "tmp")).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(temporaries, vec![temporary]);
+}
+
+#[test]
+fn task_budget_counts_fresh_temporary_without_envelope() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = budgeted_store(&temp, 7, 1024);
+    let id = ProviderSessionId::new();
+    let path = plant_task_temporary(&store, &id, 1024);
+    let before = fs::symlink_metadata(&path).unwrap();
+
+    let result = store.enforce_task_budget(&ProviderSessionId::new(), 1);
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionError::BudgetExhausted {
+                projected_bytes: 1025,
+                budget_bytes: 1024,
+            })
+        ),
+        "{result:?}"
+    );
+    assert!(!store.session_file(&id).exists());
+    assert_eq!(fs::read(&path).unwrap(), vec![b'x'; 1024]);
+    let after = fs::symlink_metadata(&path).unwrap();
+    assert_eq!((after.ino(), after.uid()), (before.ino(), before.uid()));
+}
+
+#[test]
+fn task_budget_counts_keep_session_temporary_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = budgeted_store(&temp, 7, 1024);
+    let keep = plant_session(&store, now_ms(), 64);
+    let path = plant_task_temporary(&store, &keep, 1024);
+    let committed = fs::read(store.session_file(&keep)).unwrap();
+
+    let result = store.enforce_task_budget(&keep, 1);
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionError::BudgetExhausted {
+                projected_bytes,
+                budget_bytes: 1024,
+            }) if projected_bytes == 1025 + committed.len() as u64
+        ),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(store.session_file(&keep)).unwrap(), committed);
+    assert_eq!(fs::read(path).unwrap(), vec![b'x'; 1024]);
+}
+
+#[test]
+fn task_budget_counts_temporary_across_registered_scopes() {
+    let temp = tempfile::tempdir().unwrap();
+    let namespace = temp.path().join("budget");
+    let first = workspace_store(temp.path().join("first").to_str().unwrap(), temp.path())
+        .unwrap()
+        .with_task_budget(7, 1024)
+        .with_budget_namespace(namespace.clone());
+    let second = workspace_store(temp.path().join("second").to_str().unwrap(), temp.path())
+        .unwrap()
+        .with_task_budget(7, 1024)
+        .with_budget_namespace(namespace);
+    let keep = ProviderSessionId::new();
+    let first_path = plant_task_temporary(&first, &keep, 512);
+    let second_path = plant_task_temporary(&second, &keep, 512);
+    drop(first.acquire_budget_lock().unwrap());
+    drop(second.acquire_budget_lock().unwrap());
+
+    let result = second.enforce_task_budget(&keep, 1);
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionError::BudgetExhausted {
+                projected_bytes: 1025,
+                budget_bytes: 1024,
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(first_path).unwrap(), vec![b'x'; 512]);
+    assert_eq!(fs::read(second_path).unwrap(), vec![b'x'; 512]);
+}
+
+#[test]
+fn task_budget_reclaims_only_json_and_preserves_temporary() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = budgeted_store(&temp, 7, 512);
+    let expired = plant_session(&store, now_ms() - 8 * TEST_DAY_MS, 64);
+    let path = plant_task_temporary(&store, &expired, 512);
+    let before = fs::symlink_metadata(&path).unwrap();
+    let keep = ProviderSessionId::new();
+
+    let result = store.enforce_task_budget(&keep, 1);
+
+    assert!(
+        matches!(
+            result,
+            Err(SessionError::BudgetExhausted {
+                projected_bytes: 513,
+                budget_bytes: 512,
+            })
+        ),
+        "{result:?}"
+    );
+    assert!(!store.session_file(&expired).exists());
+    store.enforce_task_budget(&keep, 0).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), vec![b'x'; 512]);
+    let after = fs::symlink_metadata(&path).unwrap();
+    assert_eq!((after.ino(), after.uid()), (before.ino(), before.uid()));
+}
+
+#[test]
+fn task_budget_temporary_names_and_symlinks_do_not_expand_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = budgeted_store(&temp, 7, 1024);
+    let id = ProviderSessionId::new();
+    let staging = ProviderSessionId::new();
+    let path = plant_task_temporary(&store, &id, 1024);
+    for name in [
+        "unrelated.tmp".to_string(),
+        format!(".{id}.tmp"),
+        format!(".{id}.invalid.tmp"),
+        format!(".invalid.{staging}.tmp"),
+        format!(".{id}.{staging}.extra.tmp"),
+        format!(".{id}.AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.tmp"),
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.json".to_string(),
+    ] {
+        fs::write(store.base_dir.join(name), vec![b'y'; 2048]).unwrap();
+    }
+    let outside = temp.path().join("outside");
+    fs::write(&outside, vec![b'z'; 2048]).unwrap();
+    let link = store.base_dir.join(format!(".{id}.{staging}.tmp"));
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let directory = store.base_dir.join(format!(
+        ".{}.{}.tmp",
+        ProviderSessionId::new(),
+        ProviderSessionId::new()
+    ));
+    fs::create_dir(&directory).unwrap();
+
+    store
+        .enforce_task_budget(&ProviderSessionId::new(), 0)
+        .unwrap();
+    let entries = SessionStore::budget_entries(&store.base_dir).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].bytes, 1024);
+    assert_eq!(fs::read(path).unwrap(), vec![b'x'; 1024]);
+    assert_eq!(fs::read(&outside).unwrap(), vec![b'z'; 2048]);
+    assert_eq!(fs::read_link(link).unwrap(), outside);
+    assert!(directory.is_dir());
+}
+
 #[test]
 fn default_task_budget_matches_the_approved_per_user_retention_and_cap() {
     // The approved per-user task budget is 7 days and 100 MiB. Asserted on a
@@ -1831,6 +2075,7 @@ fn task_budget_refuses_new_persistence_when_nothing_may_be_evicted() {
     // to reclaim: the contract stops new optional persistence and says so,
     // instead of destroying the current interaction or overrunning the budget.
     let current = plant_session(&wide, now_ms() - 60_000, 64);
+    let stored = session_bytes(&wide, &current);
     let store = budgeted_store(&temp, 7, 32);
 
     let result = store.enforce_task_budget(&current, 4096);
@@ -1841,15 +2086,16 @@ fn task_budget_refuses_new_persistence_when_nothing_may_be_evicted() {
             Err(SessionError::BudgetExhausted {
                 projected_bytes,
                 budget_bytes
-            }) if *projected_bytes == 4096 && *budget_bytes == 32
+            }) if *projected_bytes == stored + 4096 && *budget_bytes == 32
         ),
-        "expected BudgetExhausted projecting exactly the incoming bytes, got {result:?}"
+        "expected BudgetExhausted including the current envelope, got {result:?}"
     );
     let error = result.unwrap_err();
     assert_eq!(error.code(), "budget_exhausted");
-    assert!(error
-        .to_string()
-        .contains("4096 bytes projected after commit"));
+    assert!(error.to_string().contains(&format!(
+        "{} bytes projected during atomic commit",
+        stored + 4096
+    )));
     assert!(
         store.session_file(&current).exists(),
         "refusing a commit must not delete anything"
@@ -2204,26 +2450,18 @@ fn persist_applies_the_task_budget_before_committing() {
 }
 
 #[test]
-fn task_budget_does_not_project_the_committed_sessions_own_stored_bytes() {
-    // The commit replaces whatever `keep` already occupies, so its old bytes
-    // must not be projected on top of the incoming ones. Counting both would
-    // make a single session that grows toward the budget first over-evict every
-    // other session of the user and then report a budget that is not full.
+fn task_budget_counts_the_current_envelope_without_evicting_it() {
     let temp = tempfile::tempdir().unwrap();
     let wide = budgeted_store(&temp, 7, TASK_BUDGET_BYTES);
     let keep = plant_session(&wide, now_ms() - 60_000, 4096);
     let stored = session_bytes(&wide, &keep);
-    assert!(
-        stored > 4096,
-        "the fixture must be larger than the incoming commit for the projection to differ"
-    );
-    // Admits the incoming bytes exactly, so double-counting `keep` overruns it.
     let store = budgeted_store(&temp, 7, stored);
 
-    store
-        .enforce_task_budget(&keep, stored)
-        .expect("the only session on disk is the one being committed");
+    let result = store.enforce_task_budget(&keep, stored);
 
+    assert!(
+        matches!(result, Err(SessionError::BudgetExhausted { projected_bytes, .. }) if projected_bytes == 2 * stored)
+    );
     assert!(store.session_file(&keep).exists());
 }
 
@@ -2421,6 +2659,7 @@ fn eviction_holds_the_activity_lease_until_the_envelope_is_removed() {
     let entry = BudgetEntry {
         session_id: id.clone(),
         bytes: session_bytes(&store, &id),
+        is_temporary: false,
     };
     let scope = BudgetScope {
         path: store.base_dir.clone(),
@@ -2865,6 +3104,7 @@ fn legacy_eviction_revalidates_the_pinned_directory_generation() {
     let entry = BudgetEntry {
         session_id: id,
         bytes: bytes.len() as u64,
+        is_temporary: false,
     };
     let scoped = ScopedStorage::new(root).unwrap();
     assert_eq!(
@@ -3059,3 +3299,51 @@ fn budget_activity_probes_do_not_rescan_temporary_files_per_candidate() {
 }
 
 mod redaction_boundaries;
+
+#[test]
+fn commits_reclaim_only_stale_temporary_files_from_an_abandoned_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let abandoned_workspace = temp.path().join("abandoned");
+    let current_workspace = temp.path().join("current");
+    fs::create_dir_all(&abandoned_workspace).unwrap();
+    fs::create_dir_all(&current_workspace).unwrap();
+    let abandoned = workspace_store(root.to_str().unwrap(), &abandoned_workspace).unwrap();
+    let mut old = new_session(&abandoned, "register abandoned root");
+    abandoned.persist(&mut old).unwrap();
+    fs::remove_file(abandoned.session_file(&old.session_id)).unwrap();
+    let stale = plant_task_temporary(&abandoned, &old.session_id, 4096);
+    let fresh = plant_task_temporary(&abandoned, &old.session_id, 1);
+    let unmanaged = abandoned.base_dir.join(".tmp");
+    fs::write(&unmanaged, b"unmanaged").unwrap();
+    set_mtime(&unmanaged, now_ms() - 2 * 60 * 60 * 1000);
+    set_mtime(&stale, now_ms() - 2 * 60 * 60 * 1000);
+    fs::set_permissions(&abandoned.base_dir, fs::Permissions::from_mode(0o750)).unwrap();
+    let mode = fs::metadata(&abandoned.base_dir).unwrap().mode();
+    drop(abandoned);
+    let current = workspace_store(root.to_str().unwrap(), &current_workspace).unwrap();
+    let mut session = new_session(&current, "fresh turn");
+    let mut incoming = session.clone();
+    incoming.generation = 1;
+    incoming.was_loaded = true;
+    let bytes = serde_json::to_vec_pretty(&incoming).unwrap().len() as u64;
+    let current = current.with_task_budget(7, bytes + 1);
+
+    current
+        .persist(&mut session)
+        .expect("stale bytes in an abandoned scope must be reclaimable");
+
+    assert!(!stale.exists());
+    assert_eq!(fs::read(unmanaged).unwrap(), b"unmanaged");
+    assert_eq!(fs::read(&fresh).unwrap(), vec![b'x']);
+    assert_eq!(fs::metadata(fresh.parent().unwrap()).unwrap().mode(), mode);
+    let fresh_before = fs::read(&fresh).unwrap();
+    let mut another = new_session(&current, "fresh turn");
+    let lease = current.acquire_live_lease(&session.session_id).unwrap();
+    assert!(matches!(
+        current.persist(&mut another),
+        Err(SessionError::BudgetExhausted { .. })
+    ));
+    assert_eq!(fs::read(fresh).unwrap(), fresh_before);
+    drop(lease);
+}

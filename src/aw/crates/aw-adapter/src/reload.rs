@@ -1,7 +1,7 @@
 //! Stable bridge plans keep native scheduling and lifecycle interpretation in Adapters.
 
 use crate::{adapter, HookEvent, HookOutput, NativeContext, NativeExit, Result};
-use aw_provider::admission::{AdapterCapabilities, AdmittedStep};
+use aw_core::admission::{AdapterCapabilities, AdmittedStep};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -36,16 +36,64 @@ pub struct Plan {
     pub observe: bool,
 }
 
-/// Check the initially pinned version and reusable native entrypoint.
+/// Check the reusable native entrypoint; runtime bridges verify its protocol.
 pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
     match (
         capabilities.adapter.as_str(),
-        capabilities.version.as_str(),
         capabilities.entrypoint.as_str(),
     ) {
-        ("qoder", "1.1.73", "tui") | ("qwenpaw", "2.2.2b4", "app") => Ok(()),
-        _ => Err("runtime policy updates require Qoder 1.1.73 TUI or QwenPaw 2.2.2b4 App".into()),
+        ("qoder", "tui") | ("qwenpaw", "app") | ("qoder-sdk", "sdk-worker") => Ok(()),
+        _ => {
+            Err("runtime policy updates require Qoder TUI, QwenPaw App or Qoder SDK worker".into())
+        }
     }
+}
+
+/// Check the ordinary resident adapters with immutable task policy snapshots.
+pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
+    if !matches!(capabilities.adapter.as_str(), "qoder-sdk" | "qwenpaw") {
+        return Err("resident policy updates require Qoder SDK or QwenPaw".into());
+    }
+    supported(capabilities)
+}
+
+/// Validate a replacement with the ordinary factory's native routing contract.
+pub fn validate_resident(
+    document: &Value,
+    target: &str,
+    capabilities: &AdapterCapabilities,
+) -> Result<()> {
+    resident_supported(capabilities)?;
+    let config = aw_config::Validator::new()
+        .map_err(|error| error.to_string())?
+        .parse(&serde_json::to_vec(document)?)
+        .map_err(|error| error.to_string())?;
+    let steps = aw_core::admission::preflight(&config, target, capabilities)
+        .map_err(|error| error.to_string())?;
+    scope_policy(document, target, &steps, capabilities)?;
+    Ok(())
+}
+
+/// Project an immutable task's routes without exposing Provider configuration.
+pub fn scope_policy(
+    document: &Value,
+    target: &str,
+    steps: &[AdmittedStep],
+    capabilities: &AdapterCapabilities,
+) -> Result<Value> {
+    resident_supported(capabilities)?;
+    if document["spec"]["agents"][target]["adapter"] != capabilities.adapter {
+        return Err("resident policy adapter differs from its target".into());
+    }
+    if adapter::observation_enabled(document, target) {
+        return Err("resident policy scopes do not support native evidence capture".into());
+    }
+    let (events, hooks) = match capabilities.adapter.as_str() {
+        "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
+        "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, false)?,
+        _ => return Err("unsupported resident policy adapter".into()),
+    };
+    Ok(json!({"events": events, "hooks": hooks}))
 }
 
 /// Validate native scheduling and budget constraints before Provider preparation.
@@ -56,8 +104,14 @@ pub fn validate(document: &Value, target: &str, capabilities: &AdapterCapabiliti
         .map_err(|e| e.to_string())?
         .parse(&bytes)
         .map_err(|e| e.to_string())?;
-    let steps = aw_provider::admission::preflight(&config, target, capabilities)
-        .map_err(|e| e.to_string())?;
+    let steps =
+        aw_core::admission::preflight(&config, target, capabilities).map_err(|e| e.to_string())?;
+    if steps
+        .iter()
+        .any(|step| crate::adapters::sdk_tools::checks_skill(step, &capabilities.adapter))
+    {
+        return Err("Skill checking requires ordinary resident mode".into());
+    }
     for event in ["tool.before", "tool.after"] {
         plan(document, target, &steps, event)?;
     }
@@ -86,6 +140,7 @@ pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str)
         .collect::<Vec<_>>();
     let sequential = match adapter {
         "qoder" => document["spec"]["agents"][target]["qoder"]["sequential"] == true,
+        "qoder-sdk" => true,
         "qwenpaw" => {
             if event == "tool.after" && !replacement {
                 ordered.reverse();
@@ -190,6 +245,10 @@ pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
     for output in outputs {
         result.stderr.extend(output.stderr);
         if matches!(output.exit, NativeExit::Code(2)) {
+            if adapter == "qoder-sdk" && !matches!(result.exit, NativeExit::Code(2)) {
+                // SDK denial reasons are JSON strings, not mergeable Hook objects.
+                result.stdout = output.stdout.clone();
+            }
             result.exit = NativeExit::Code(2);
         } else if !matches!(output.exit, NativeExit::Code(0))
             && matches!(result.exit, NativeExit::Code(0))
@@ -204,6 +263,9 @@ pub fn combine(adapter: &str, outputs: Vec<HookOutput>) -> Result<HookOutput> {
         }
     }
     if matches!(result.exit, NativeExit::Code(2)) {
+        if adapter == "qoder-sdk" {
+            return Ok(result);
+        }
         value = json!({});
     }
     if adapter == "qoder" || value != json!({}) {
@@ -253,7 +315,10 @@ pub fn adopt_step(
         // Qoder logs nonblocking exits. QwenPaw applies each wrapper's failure
         // policy; a report-only failure must not hide another step's veto/result.
         output.exit = NativeExit::Code(
-            if adapter == "qwenpaw" && event == "tool.before" && on_error == "block" {
+            if matches!(adapter, "qwenpaw" | "qoder-sdk")
+                && event == "tool.before"
+                && on_error == "block"
+            {
                 2
             } else {
                 0

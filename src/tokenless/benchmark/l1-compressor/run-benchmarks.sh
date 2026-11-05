@@ -50,15 +50,16 @@ else
 fi
 LOCK_SHA=$(sha256_of "$SCRIPT_DIR/Cargo.lock" || echo "unknown")
 FIXTURES_SHA=$(cat "$SCRIPT_DIR"/fixtures/*.json 2>/dev/null | sha256_of /dev/stdin || echo "unknown")
-RTK_BIN_PATH="${RTK_BIN:-$SCRIPT_DIR/../../third_party/rtk/target/release/rtk}"
+# RTK runs as `tokenless rtk`, the form PreTool rewrites commands to.
+TOKENLESS_BIN_PATH="${TOKENLESS_BIN:-$SCRIPT_DIR/../../target/release/tokenless}"
 
-# Resolve an rtk reference to a concrete executable path, mirroring the Rust
-# `find_rtk_binary` convention. `$RTK_BIN` may be a bare command name
-# (`RTK_BIN=rtk`), which the shell would exec through `PATH` — so testing `-x`
-# on the raw reference only inspects the CWD and would report a perfectly
-# usable `PATH` rtk as "unavailable" while the Rust side still finds and runs
-# it. Paths containing a slash are checked as given.
-resolve_rtk_bin() {
+# Resolve a tokenless reference to a concrete executable path, mirroring the
+# Rust `find_tokenless_binary` convention. `$TOKENLESS_BIN` may be a bare
+# command name (`TOKENLESS_BIN=tokenless`), which the shell would exec through
+# `PATH` — so testing `-x` on the raw reference only inspects the CWD and would
+# report a perfectly usable `PATH` tokenless as "unavailable" while the Rust
+# side still finds and runs it. Paths containing a slash are checked as given.
+resolve_tokenless_bin() {
     local ref="$1" resolved=""
     if [[ "$ref" == */* ]]; then
         resolved="$ref"
@@ -114,7 +115,7 @@ if [[ -n "$RTK_TIMEOUT_CMD" ]]; then
 fi
 
 rtk_version_probe() {
-    # Prints the first line of `<bin> --version`, and ONLY when the probe
+    # Prints the first line of `<bin> rtk --version`, and ONLY when the probe
     # succeeded: exit status 0 within the deadline. A timed-out, killed or
     # otherwise failing probe prints nothing, so the caller records
     # "unavailable" — partial stdout from a probe we had to abandon is worse
@@ -125,13 +126,13 @@ rtk_version_probe() {
     # `pipefail`, mask the probe's own status.
     local bin="$1" out="" status=0
     # shellcheck disable=SC2086 # RTK_TIMEOUT_PREFIX is an intentional flag list.
-    out="$($RTK_TIMEOUT_PREFIX "$bin" --version 2>/dev/null)" || status=$?
+    out="$($RTK_TIMEOUT_PREFIX "$bin" rtk --version 2>/dev/null)" || status=$?
     [[ "$status" -eq 0 ]] || out=""
     printf '%s' "${out%%$'\n'*}"
 }
 
-if RTK_BIN_RESOLVED="$(resolve_rtk_bin "$RTK_BIN_PATH")"; then
-    RTK_VERSION="$(rtk_version_probe "$RTK_BIN_RESOLVED")"
+if TOKENLESS_BIN_RESOLVED="$(resolve_tokenless_bin "$TOKENLESS_BIN_PATH")"; then
+    RTK_VERSION="$(rtk_version_probe "$TOKENLESS_BIN_RESOLVED")"
 else
     RTK_VERSION=""
 fi

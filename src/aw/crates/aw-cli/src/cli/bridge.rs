@@ -2,35 +2,10 @@
 
 use super::{adapter::HookBinding, Arguments, Exit, Result};
 use aw_service::{Client, LifecyclePhase, Operation};
-use std::{
-    fs::OpenOptions,
-    io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 pub(super) fn binding(path: &str) -> Result<HookBinding> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    // SAFETY: geteuid reads the current user identity without changing it.
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o7777 != 0o600
-        || metadata.len() > 1024 * 1024
-    {
-        return Err("unsafe or oversized hook binding".into());
-    }
-    let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("oversized hook binding".into());
-    }
-    let binding: HookBinding = serde_json::from_slice(&bytes)?;
+    let binding = HookBinding::read(path)?;
     if !binding.reloadable {
         return Err("instance has no stable reload bridge".into());
     }
@@ -43,13 +18,17 @@ pub(super) fn lifecycle(args: &Arguments) -> Result<Exit> {
         Err(error) => {
             eprintln!("AW lifecycle failed: {error}");
             // Qoder requires exit 2 to stop a prompt before model dispatch.
-            Ok(Exit::Code(2))
+            Ok(Exit::Code(if args.flags.contains_key("--confirm") {
+                0
+            } else {
+                2
+            }))
         }
     }
 }
 
 fn invoke(args: &Arguments) -> Result<Exit> {
-    args.check(&["--adapter", "--binding"], false)?;
+    args.check(&["--adapter", "--binding", "--confirm"], false)?;
     let binding = binding(args.required("--binding")?)?;
     if binding.adapter != args.required("--adapter")? {
         return Err("lifecycle adapter mismatch".into());
@@ -57,6 +36,10 @@ fn invoke(args: &Arguments) -> Result<Exit> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let bytes = super::hook::read_input(deadline)?;
     let native: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if let Some(path) = args.flags.get("--confirm") {
+        super::attachment::confirm::confirm(&binding, path, &native, deadline)?;
+        return Ok(Exit::Code(0));
+    }
     let (phase, key, pid) = if binding.adapter == "qoder" {
         let (phase, key) = aw_adapter::reload::qoder_lifecycle(&binding.native_context(), &native)?;
         // SAFETY: getppid reads the native exec-form callback's parent process.
@@ -65,7 +48,7 @@ fn invoke(args: &Arguments) -> Result<Exit> {
             key,
             unsafe { libc::getppid() } as u32,
         )
-    } else if binding.adapter == "qwenpaw" {
+    } else if matches!(binding.adapter.as_str(), "qwenpaw" | "qoder-sdk") {
         (
             serde_json::from_value::<LifecyclePhase>(native["phase"].clone())?,
             native["key"]

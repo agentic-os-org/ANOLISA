@@ -2,10 +2,15 @@
 
 [中文版](../../zh/adapters/pi-adapter.md)
 
+Explicit resident mode is described in [Resident SDK lifecycle](resident-sdk.md).
+The task-worker mode below retains its original one-worker lifecycle and failure policy.
+
 The Pi adapter supports the public Coding Agent/Core SDKs
-`@earendil-works/pi-coding-agent` and `@earendil-works/pi-agent-core` 0.84.2,
+`@earendil-works/pi-coding-agent` and `@earendil-works/pi-agent-core`,
 with Node.js >=22.19.0 on Linux. Its entrypoint is `sdk`: one AW-owned foreground
-worker imports an application factory. The native Pi CLI is outside this contract.
+worker imports an application factory. Both SDKs at 0.84.2 are the verified baseline;
+other releases must retain the Agent/AgentSession and tool lifecycle interfaces.
+The native Pi CLI is outside this contract.
 
 ## Factory and lifecycle
 
@@ -69,13 +74,18 @@ The bridge tracks at most 512 in-flight prepared calls and clears entries on
 native completion events, including abort paths that skip after.
 Pi's sequential preparation and parallel execution schedule is preserved:
 after events follow completion order, result messages retain source order.
-No global tool lock is added. The service's retained correlation capacity still
-limits a long-lived worker: there are at most 32 live events and 1024 retained
-event correlations per instance, including closed before/after events. Release/rebind
-before reaching that limit. A denial before the final configured step explicitly
+No global tool lock is added. Legacy task workers retain at most 1024 event
+correlations per instance, including closed before/after events. Resident factories
+use model-produced identity, active-state reclamation and configurable concurrent
+budgets; see [long sessions](resident-sdk.md). A denial before the final configured step explicitly
 closes the event without running remaining steps, including native invalid JSON,
 nonzero/signal exits and execution failures under `on_error:block`. A failure to
-close is reported and never changes a denial into an allow. SDK cancellation or a
+close is reported and never changes a denial into an allow. A managed
+`tool.after` step whose Provider invocation fails under `on_error: report`
+receives a neutral reply: the audit already records the fault, the unchecked
+original result is kept, and the same session continues with its next prompt.
+Before-tool faults, block/withhold faults, cancellation, identity and cleanup
+failures keep stopping the task. SDK cancellation or a
 local transport limit may terminate the helper before it can acknowledge close;
 any already opened event then reaches its original deadline or binding release,
 without extending its budget. This differs from an awaited policy denial.
@@ -130,9 +140,9 @@ python3 crates/aw-cli/tests/fixtures/pi/tokenless-smoke.py \
   --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core
 ```
 
-This runs the real SDK, AW, Tokenless Provider and Protocol v2 CLI. The model
-stream, bash tool, RTK rewrite command and scanner backend are deterministic
-fixtures; the test does not execute a suggested shell command. It checks selected
+This runs the real SDK, AW, Tokenless Provider and Protocol v2 CLI, whose linked
+RTK produces the rewrite. The model stream, bash tool and scanner backend are
+deterministic fixtures; the test does not execute a suggested shell command. It checks selected
 compression reaching model context, a fresh retry passing through sec-core again,
 and RTK-owned output remaining unchanged. Both telemetry sinks are disabled and
 all state is local to the supplied test root. The eight bridge authority/envelope

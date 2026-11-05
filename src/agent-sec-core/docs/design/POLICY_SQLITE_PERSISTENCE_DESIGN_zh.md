@@ -34,7 +34,7 @@ Policy、Scope、Binding 意图，以及仍需确认或清理的远端目标；�
 | route | 保留单个 `agentsight` route；cleanup 保存非敏感 endpoint，调用前与当前配置校验 |
 
 Policy、Scope 和 Binding 中的完整 Policy 快照仅保存 ID、名称、revision 和 authored template。
-恢复后的 Apply 由 Adapter 将 Binding 中的模板直接编译成目标 DSL。
+恢复后的 Apply 由 Translator 将 Binding 中的原生 JSON 翻译为 DSL，或将 Cedar 翻译为结构化文件防护配置。
 
 本阶段不解决：PEP 重启后对所有 Ready Binding 重新审计、跨 daemon 的远端 fencing、
 远端请求在 daemon 退出后延迟执行的排序，以及硬件不兑现同步写承诺时的数据可靠性。
@@ -54,7 +54,7 @@ PCP reconcile 和 Runtime 扫描，不应叫 PAP 专属后端。
 | `asc-policy-repository-sqlite` | 实现上述端口，负责 schema、事务、编码、约束、严格打开与存储错误分类 |
 | `asc-pcp` | 状态转换、认领、UNKNOWN 登记、观察合并、中断恢复；不写 SQL |
 | `asc-policy-runtime` | 单 Binding 执行所有权、队列补扫、重试和异常收尾；不决定存储布局 |
-| `asc-policy-adapter-agentsight` | 从 Binding 的模板快照直接编译 AgentSight DSL；不读取模板库或数据库 |
+| `asc-policy-translator-agentsight` | 从 Binding 快照翻译原生 JSON/DSL 或 Cedar 结构化文件防护配置；不读取模板库或数据库 |
 | `asc-agentsight-client` | 在版本化 cleanup 中保存 endpoint，远端调用前校验配置一致；每次执行重新读取凭据 |
 | `asc-daemon` | 连接、数据目录租约、启动恢复与 shutdown 装配；生产使用 SQLite |
 

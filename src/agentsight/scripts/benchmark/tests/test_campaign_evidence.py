@@ -86,7 +86,79 @@ def test_h2load_summary_preserves_protocol_specific_measurements(
     assert load["latency"]["min"] == 0.12
     assert load["latency"]["avg"] == 12.5
     assert load["latency"]["max"] == 1200
+    assert all(load["latency"][key] is None for key in ("p50", "p95", "p99"))
     assert h2load_stats.duration_ms("bad") is None
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_h2load_percentile_summary_reaches_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newline: str
+) -> None:
+    output = tmp_path / "h2load.txt"
+    # Column order and padded labels follow nghttp2 v1.70.0's summary printer.
+    output.write_bytes(
+        newline.join(
+            [
+                "finished in 1.10s, 90.83 req/s, 10.65KB/s",
+                "requests: 100 total, 100 started, 100 done, 98 succeeded, 2 failed, "
+                "1 errored, 1 timeout",
+                "                 min max median p95 p99 mean sd +/- sd",
+                "request     : 120us 1.20s 10.00ms 50.00ms 100.00ms 12.50ms 2.00ms 92.00%",
+                "connect     : 1ms 9ms 2ms 5ms 8ms 3ms 1ms 95.00%",
+                "TTFB        : 2ms 10ms 3ms 6ms 9ms 4ms 1ms 95.00%",
+                "",
+            ]
+        ).encode("utf-8")
+    )
+    report = tmp_path / "report.md"
+    summary_path = tmp_path / "summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "render_report.py",
+            "--protocol",
+            "h2",
+            "--qps",
+            "100",
+            "--duration",
+            "1.1",
+            "--load-log",
+            str(output),
+            "--output",
+            str(report),
+            "--summary-output",
+            str(summary_path),
+        ],
+    )
+    assert render_report.main() == 0
+    measured = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert measured["latency_ms"] == {
+        "first": None,
+        "last": None,
+        "min": 0.12,
+        "max": 1200.0,
+        "avg": 12.5,
+        "p50": 10.0,
+        "p95": 50.0,
+        "p99": 100.0,
+    }
+    markdown = report.read_text(encoding="utf-8")
+    assert "12.50 ms | 50.00 ms | 100.00 ms | 1200.00 ms" in markdown
+    assert measured["effective_qps"] == 90.83
+
+
+@pytest.mark.parametrize("label", ["time for request", "request     "])
+def test_h2load_incomplete_request_row_does_not_consume_connect_row(
+    tmp_path: Path, label: str
+) -> None:
+    output = tmp_path / "h2load.txt"
+    output.write_text(
+        f"{label}: 120us 1.20s\nconnect     : 1ms 9ms 2ms 5ms 8ms 3ms 1ms 95.00%\n",
+        encoding="utf-8",
+    )
+    load = h2load_stats.summarize_h2load(output)
+    assert all(value is None for value in load["latency"].values())
 
 
 def test_http2_mock_serves_health_sse_json_and_not_found() -> None:
@@ -1374,7 +1446,17 @@ def test_invalid_regression_evidence_writes_inconclusive_reports(
     ):
         assert "regression evidence is missing cargo test" in final["issues"]
     expected_count = len(valid_checks) if isinstance(invalid_checks, list) else 0
-    total = len(regression["checks"]) if isinstance(regression["checks"], list) else 0
+    # The ratio counts only readable checks on both sides: an entry without a
+    # command and an integer exit_code is not evidence either way, so it must not
+    # pad the denominator (see write_final()).
+    readable = [
+        check
+        for check in (
+            regression["checks"] if isinstance(regression["checks"], list) else []
+        )
+        if campaign_evidence.usable_regression_check(check)
+    ]
+    total = len(readable)
     report = (tmp_path / "final-report.md").read_text(encoding="utf-8")
     assert f"| 通过命令 | {expected_count}/{total} |" in report
     assert (

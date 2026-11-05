@@ -13,7 +13,7 @@
     "generate:agents": "node scripts/generate-agent-index.mjs",
     "validate:locales": "node scripts/validate-locales.mjs",
     "validate:agent-index": "node scripts/validate-agent-index.mjs",
-    "test:layout": "node --test scripts/generate-agent-index.test.mjs",
+    "test:layout": "node --test scripts/generate-agent-index.test.mjs scripts/prepare-docs.test.mjs scripts/navigation.test.mjs scripts/source-links.test.mjs",
     "check:links": "node scripts/check-links.mjs",
     "typecheck": "tsc --noEmit"
   },
@@ -26,7 +26,8 @@
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "js-yaml": "^4.1.1"
   },
   "devDependencies": {
     "@docusaurus/module-type-aliases": "3.10.2",
@@ -35,7 +36,10 @@
     "@types/node": "^22.15.3",
     "@types/react": "^19.1.2",
     "ajv": "^8.17.1",
-    "typescript": "~5.8.3"
+    "typescript": "~5.8.3",
+    "github-slugger": "^1.5.0",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.5"
   },
   "engines": {
     "node": ">=20.0"

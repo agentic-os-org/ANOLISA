@@ -10,6 +10,10 @@ use tokio::sync::Semaphore;
 use super::recorder::{RecordParams, TrajectoryRecorder};
 use super::types::*;
 
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const REQUEST_TIMEOUT_ENV: &str = "AGENTSIGHT_LLM_REQUEST_TIMEOUT_SECS";
+
 /// One raw completion: the visible answer, the hidden reasoning some models
 /// return on a separate field, and the usage counters. Reasoning is billed
 /// inside `output_tokens`, so it has to travel with them to keep a recorded
@@ -34,6 +38,7 @@ pub struct LlmClient {
     temperature: Option<f64>,
     semaphore: Arc<Semaphore>,
     max_retries: u32,
+    request_timeout: std::time::Duration,
     recorder: Option<Arc<TrajectoryRecorder>>,
 }
 
@@ -43,6 +48,22 @@ impl LlmClient {
         &self.model
     }
 
+    fn request_timeout_from_env() -> std::time::Duration {
+        let Ok(value) = std::env::var(REQUEST_TIMEOUT_ENV) else {
+            return DEFAULT_REQUEST_TIMEOUT;
+        };
+        match value.parse::<u64>() {
+            Ok(seconds) if seconds > 0 => std::time::Duration::from_secs(seconds),
+            _ => {
+                tracing::warn!(
+                    "Ignoring {REQUEST_TIMEOUT_ENV}={value:?}: expected a positive integer number of seconds"
+                );
+                DEFAULT_REQUEST_TIMEOUT
+            }
+        }
+    }
+
+    /// Build from OpenAI environment variables and `AGENTSIGHT_LLM_REQUEST_TIMEOUT_SECS`.
     pub fn from_env() -> Result<Self> {
         let base_url =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
@@ -56,10 +77,12 @@ impl LlmClient {
             temperature: None,
             semaphore: Arc::new(Semaphore::new(5)),
             max_retries: 3,
+            request_timeout: Self::request_timeout_from_env(),
             recorder: None,
         })
     }
 
+    /// Use explicit provider settings and `AGENTSIGHT_LLM_REQUEST_TIMEOUT_SECS` when set.
     pub fn with_config(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
@@ -72,6 +95,7 @@ impl LlmClient {
             temperature: None,
             semaphore: Arc::new(Semaphore::new(5)),
             max_retries: 3,
+            request_timeout: Self::request_timeout_from_env(),
             recorder: None,
         }
     }
@@ -108,9 +132,15 @@ impl LlmClient {
 
     /// Build a rig-core OpenAI Completions API client from current config.
     fn build_rig_client(&self) -> Result<openai::CompletionsClient> {
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(self.request_timeout)
+            .build()
+            .context("Failed to build LLM HTTP client")?;
         openai::Client::builder()
             .api_key(&self.api_key)
             .base_url(&self.base_url)
+            .http_client(http_client)
             .build()
             .map(|c| c.completions_api())
             .map_err(|e| anyhow::anyhow!("Failed to build rig client: {e}"))
@@ -344,7 +374,7 @@ impl LlmClient {
                     ));
                 }
                 Err(e) => {
-                    tracing::warn!("[{tag}] LLM call attempt {attempt} failed: {e}");
+                    tracing::warn!("[{tag}] LLM call attempt {attempt} failed: {e:#}");
                     last_err = Some(e);
                 }
             }
@@ -423,7 +453,7 @@ impl LlmClient {
         let response = builder
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Completion failed: {e}"))?;
+            .map_err(|e| anyhow::Error::new(e).context("Completion failed"))?;
 
         let input_tokens = response.usage.input_tokens as u32;
         let output_tokens = response.usage.output_tokens as u32;
@@ -636,5 +666,65 @@ mod tests {
         let recorder = Arc::new(TrajectoryRecorder::new("new-model", "session-1"));
         client.set_recorder(Arc::clone(&recorder));
         assert!(client.recorder().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_provider_body_times_out_and_a_fresh_retry_succeeds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&attempts);
+        let body = serde_json::json!({
+            "id":"fixture-completion", "object":"chat.completion", "created":0, "model":"fixture-model",
+            "choices":[{"index":0, "finish_reason":"stop", "message":{"role":"assistant", "content":"late answer"}}],
+            "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}
+        })
+        .to_string();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let attempt = server_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let headers = headers.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+                    let mut request = [0; 8192];
+                    let bytes_read = stream.read(&mut request).await.unwrap();
+                    assert!(bytes_read > 0, "the provider request must arrive");
+                    stream.write_all(headers.as_bytes()).await.unwrap();
+                    if attempt == 0 {
+                        let split = body.len() / 2;
+                        stream.write_all(&body.as_bytes()[..split]).await.unwrap();
+                        // Without a body deadline, the outer test timeout must fail.
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        stream.write_all(body.as_bytes()).await.unwrap();
+                    }
+                });
+            }
+        });
+        let mut client = LlmClient::with_config(url, "fixture-placeholder", "fixture-model");
+        client.max_retries = 1;
+        client.request_timeout = std::time::Duration::from_millis(100);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.chat(vec![ChatMessage::user(
+                "Answer after a stalled first response",
+            )]),
+        )
+        .await;
+        server.abort();
+        let text = result
+            .expect("the stalled body and retry must stay within separate request timeouts")
+            .expect("the fresh retry must complete");
+        assert_eq!(text, "late answer");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }

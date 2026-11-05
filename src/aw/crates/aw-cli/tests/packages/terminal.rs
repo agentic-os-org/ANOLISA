@@ -8,7 +8,7 @@ fn quiet_keeps_work_and_errors_while_verbose_separates_scope_details() {
     let output = invoke(f.install().arg("--quiet"));
     assert!(output.status.success());
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
+    assert!(f.prefix.join(".local-packages/installation.json").is_file());
     let output = invoke(f.install().arg("--quiet"));
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
@@ -48,7 +48,7 @@ fn quiet_keeps_work_and_errors_while_verbose_separates_scope_details() {
     );
     assert!(output.status.success());
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
-    assert!(!f.prefix.join("bin/aw").exists());
+    assert!(!f.prefix.join("bin/provider").exists());
     assert_eq!(fs::read(&f.config).unwrap(), original);
 }
 
@@ -90,20 +90,6 @@ fn output_options_are_strict_local_and_never_approval_flags() {
             assert!(output.stdout.is_empty());
         }
     }
-    for flag in [vec!["--quiet"], vec!["--verbose"], vec!["--color", "never"]] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_aw-package"));
-        command
-            .current_dir(&f.root)
-            .args(["install", "--prefix"])
-            .arg(&f.prefix)
-            .arg("--bundle")
-            .arg(&f.bundle)
-            .args(flag);
-        let output = invoke(&command);
-        assert_eq!(output.status.code(), Some(1));
-        assert!(output.stdout.is_empty());
-        assert!(!f.prefix.exists());
-    }
     assert!(!f.config.exists());
 }
 
@@ -118,7 +104,7 @@ fn piped_management_metadata_escapes_terminal_and_bidi_controls() {
     assert!(stdout.contains("prefix\\n\\r\\u{1b}[2J\\u{85}\\u{202e}"));
     assert_eq!(stdout.lines().count(), 1);
     assert!(!stdout.contains('\u{1b}') && !stdout.contains('\u{202e}'));
-    fs::write(f.prefix.join("bin/aw"), b"modified").unwrap();
+    fs::write(f.prefix.join("bin/provider"), b"modified").unwrap();
     let output = invoke(
         f.command()
             .args(["uninstall", "--yes", "--prefix"])

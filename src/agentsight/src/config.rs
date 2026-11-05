@@ -850,20 +850,86 @@ pub fn parse_json_rules(
     Ok(extract_rules(&parsed))
 }
 
+fn write_config_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let destination = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => match std::fs::canonicalize(path) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let target = std::fs::read_link(path)?;
+                if target.is_absolute() {
+                    target
+                } else {
+                    path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+                }
+            }
+            Err(error) => return Err(error),
+        },
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error),
+    };
+    let permissions = match std::fs::metadata(&destination) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+
+    for _ in 0..64 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary =
+            destination.with_extension(format!("tmp.{}.{}", std::process::id(), sequence));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+
+        let write_result = (|| {
+            if let Some(permissions) = &permissions {
+                file.set_permissions(permissions.clone())?;
+            }
+            file.write_all(content.as_bytes())?;
+            file.sync_all()
+        })();
+        drop(file);
+        // A same-directory rename exposes either complete generation, never
+        // the truncate-then-write window to a concurrent trace/serve worker.
+        let result = write_result.and_then(|()| std::fs::rename(&temporary, &destination));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        return result;
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("Failed to allocate a temporary config file next to {path:?}"),
+    ))
+}
+
 /// Ensure the agents configuration file exists and is up to date.
 ///
 /// - If the file does not exist, creates it with the embedded default.
 /// - If the file exists but `schema_version` is missing or older than
-///   `CURRENT_SCHEMA_VERSION`, backs up the old file and replaces it with the
-///   embedded default.
-/// - If the file exists and `schema_version` matches, leaves it untouched.
+///   `CURRENT_SCHEMA_VERSION`, backs up the old file and shallow-merges its
+///   top-level settings into the embedded default.
+/// - If the file exists and `schema_version` matches or exceeds the current
+///   version, leaves it untouched.
 pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {parent:?}"))?;
         }
-        std::fs::write(path, DEFAULT_AGENTS_JSON)
+        write_config_atomically(path, DEFAULT_AGENTS_JSON)
             .with_context(|| format!("Failed to write default agents config to {path:?}"))?;
         log::info!("Generated default agents config at {path:?}");
         return Ok(());
@@ -876,7 +942,7 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // BOM-prefixed config takes the same valid/invalid decision — and the
     // same schema upgrade — as its unmarked twin, instead of being frozen
     // as "invalid" while the load falls back to embedded defaults.
-    let content = strip_leading_bom(&content);
+    let normalized = strip_leading_bom(&content);
 
     // If the file is not valid JSON at all, leave it untouched so the caller's
     // load_from_file → parse_json_rules surfaces "JSON parse error: ..." and
@@ -885,15 +951,37 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
     // *valid* JSON whose schema_version is outdated; silently overwriting an
     // invalid file masks the parse error and breaks the documented fallback
     // contract (see issue #1502).
-    if serde_json::from_str::<serde_json::Value>(content).is_err() {
-        return Ok(());
-    }
+    let user: serde_json::Value = match serde_json::from_str(normalized) {
+        Ok(user) => user,
+        Err(_) => return Ok(()),
+    };
 
-    let on_disk_version = extract_schema_version(content);
+    let on_disk_version = extract_schema_version(normalized);
 
     if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
         return Ok(());
     }
+
+    // Overlay user top-level keys on the defaults so existing customizations
+    // survive while newly introduced sections are added.
+    let mut base: serde_json::Value = serde_json::from_str(DEFAULT_AGENTS_JSON)
+        .context("Embedded DEFAULT_AGENTS_JSON is invalid")?;
+
+    if let (Some(base_obj), Some(user_obj)) = (base.as_object_mut(), user.as_object()) {
+        for (key, value) in user_obj {
+            if key == "schema_version" {
+                continue;
+            }
+            base_obj.insert(key.clone(), value.clone());
+        }
+        base_obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()),
+        );
+    }
+
+    let merged =
+        serde_json::to_string_pretty(&base).context("Failed to serialize merged agents config")?;
 
     let backup = {
         let ts = std::time::SystemTime::now()
@@ -902,12 +990,14 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
             .unwrap_or(0);
         path.with_extension(format!("json.bak.{ts}"))
     };
-    std::fs::copy(path, &backup)
+    std::fs::write(&backup, content)
         .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
-    std::fs::write(path, DEFAULT_AGENTS_JSON)
-        .with_context(|| format!("Failed to replace outdated config at {path:?}"))?;
+    std::fs::set_permissions(&backup, std::fs::metadata(path)?.permissions())
+        .with_context(|| format!("Failed to preserve backup permissions at {backup:?}"))?;
+    write_config_atomically(path, &merged)
+        .with_context(|| format!("Failed to write merged config to {path:?}"))?;
     log::info!(
-        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, replaced it with defaults at {path:?} (backup at {backup:?})"
+        "Config schema_version {on_disk_version:?} < {CURRENT_SCHEMA_VERSION}, merged user config with defaults at {path:?} (backup at {backup:?})"
     );
     Ok(())
 }
@@ -2844,12 +2934,107 @@ mod tests {
         );
     }
 
+    fn assert_concurrent_workers_load_config(path: &Path) {
+        const WORKERS: usize = 8;
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKERS));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let path = path.to_path_buf();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ensure_default_agents_config(&path).unwrap();
+                    let mut config = AgentsightConfig::new();
+                    config.load_from_file(&path).unwrap();
+                    assert!(config.features.sqlite_storage_enabled);
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn ensure_default_agents_config_supports_concurrent_creation() {
+        for _ in 0..8 {
+            let dir = unique_temp_dir();
+            let path = dir.join("agentsight.json");
+            assert_concurrent_workers_load_config(&path);
+        }
+    }
+
+    #[test]
+    fn ensure_default_agents_config_supports_concurrent_upgrades() {
+        let stale = r#"{"schema_version": 1}"#;
+        for _ in 0..8 {
+            let dir = unique_temp_dir();
+            let path = dir.join("agentsight.json");
+            std::fs::write(&path, stale).unwrap();
+            assert_concurrent_workers_load_config(&path);
+
+            let backups: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("agentsight.json.bak.")
+                })
+                .collect();
+            assert!(!backups.is_empty());
+            for backup in backups {
+                assert_eq!(std::fs::read_to_string(backup.path()).unwrap(), stale);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_default_agents_config_preserves_config_symlink() {
+        let dir = unique_temp_dir();
+        let target = dir.join("managed.json");
+        let path = dir.join("agentsight.json");
+        std::fs::write(&target, r#"{"schema_version": 1}"#).unwrap();
+        std::os::unix::fs::symlink("managed.json", &path).unwrap();
+
+        ensure_default_agents_config(&path).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
     #[test]
     fn ensure_default_agents_config_upgrades_stale_config() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         std::fs::write(&path, r#"{"cmdline": {"allow": []}}"#).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
         ensure_default_agents_config(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
         // The old file should be backed up to a timestamped .bak.* file.
         let parent = path.parent().unwrap();
         let backups: Vec<_> = std::fs::read_dir(parent)
@@ -2866,6 +3051,18 @@ mod tests {
             std::fs::read_to_string(backups[0].path()).unwrap(),
             r#"{"cmdline": {"allow": []}}"#
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(backups[0].path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             extract_schema_version(&content),
@@ -3001,26 +3198,65 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_agents_config_replaces_outdated_config() {
+    fn ensure_default_agents_config_preserves_user_cmdline_rules_on_merge() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         let user_config = r#"{
-            "schema_version": 2,
+            "schema_version": 1,
             "cmdline": {
                 "allow": [
                     {"rule": ["*mycustomagent*"], "agent_name": "MyCustomAgent"}
-                ]
-            }
+                ],
+                "deny": [{"rule": ["*noisy*"]}]
+            },
+            "https": [{"rule": ["custom.api.example.com"]}]
         }"#;
         std::fs::write(&path, user_config).unwrap();
         ensure_default_agents_config(&path).unwrap();
         let result = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(result, DEFAULT_AGENTS_JSON);
-        assert!(!result.contains("MyCustomAgent"));
+        assert!(
+            result.contains("MyCustomAgent"),
+            "user cmdline rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("custom.api.example.com"),
+            "user https rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("*noisy*"),
+            "user deny rule lost during migration: {result}"
+        );
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            migrated["schema_version"].as_u64().unwrap() as u32,
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]
-    fn ensure_default_agents_config_replacement_contains_storage_section() {
+    fn ensure_default_agents_config_adds_missing_sections_on_merge() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let minimal_v1 = r#"{
+            "cmdline": {"allow": [{"rule": ["*test*"], "agent_name": "Test"}]}
+        }"#;
+        std::fs::write(&path, minimal_v1).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            migrated.get("features").is_some(),
+            "features section not added from default"
+        );
+        assert!(
+            migrated.get("runtime_limits").is_some(),
+            "runtime_limits section not added from default"
+        );
+        assert!(result.contains("Test"), "user rule lost");
+    }
+
+    #[test]
+    fn ensure_default_agents_config_merged_config_contains_storage_section() {
         let dir = unique_temp_dir();
         let path = dir.join("agentsight.json");
         std::fs::write(&path, r#"{"schema_version": 2}"#).unwrap();

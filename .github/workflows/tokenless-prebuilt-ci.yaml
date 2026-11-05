@@ -64,3 +64,51 @@ jobs:
 
       - name: Run Tokenless raw package tests
         run: src/tokenless/tests/test-package-raw.sh
+
+  windows:
+    name: Windows x64 build and Wine smoke
+    # The persistent release runner only executes trusted pushes or explicit dispatches.
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read Tokenless version
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' src/tokenless/Cargo.toml)"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile, package and smoke Windows artifacts
+        id: build
+        uses: ./.github/actions/build-tokenless-prebuilt
+        with:
+          version: ${{ steps.version.outputs.value }}
+          target-os: windows
+          target-arch: x86_64
+          profile: windows-msvc-x86_64
+
+      - name: Upload Windows ZIP, SBOM and wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenless-windows-x86_64
+          path: |
+            ${{ steps.build.outputs.artifact-directory }}/*
+            ${{ steps.build.outputs.wheel-directory }}/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows builder diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenless-windows-diagnostics
+          path: |
+            ${{ runner.temp }}/tokenless-prebuilt-windows-x86_64.build/out/*.log
+            ${{ runner.temp }}/tokenless-prebuilt-windows-x86_64.build/out/*.txt
+          if-no-files-found: ignore
+          retention-days: 7

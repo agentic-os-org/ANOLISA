@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "tsc && node --test test/status.test.mjs",
     "prepare": "tsc"
   },
   "dsh": {
@@ -24,7 +25,9 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.8",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.2 <0.2.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   },
   "engines": {

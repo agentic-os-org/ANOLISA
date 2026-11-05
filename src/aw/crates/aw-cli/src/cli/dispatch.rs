@@ -161,14 +161,24 @@ pub(super) fn invoke(args: &Arguments, adapter: &dyn Adapter) -> Result<HookOutp
                 .iter()
                 .any(|output| matches!(output.exit, NativeExit::Code(2)));
             outputs.extend(results);
-            if event == "tool.before" && blocked && binding.adapter == "qwenpaw" {
-                client.call(
+            if event == "tool.before"
+                && blocked
+                && matches!(binding.adapter.as_str(), "qwenpaw" | "qoder-sdk")
+            {
+                let close = if binding.adapter == "qoder-sdk" {
+                    Operation::CloseHookEvent {
+                        instance_id: id.clone(),
+                        event: event.into(),
+                        session_id: raw["session_id"].as_str().ok_or("missing session")?.into(),
+                        call_id: raw["tool_use_id"].as_str().ok_or("missing call")?.into(),
+                    }
+                } else {
                     Operation::CloseEvent {
                         event_id: handle.event_id.clone(),
                         instance_id: id.clone(),
-                    },
-                    deadline,
-                )?;
+                    }
+                };
+                client.call(close, deadline)?;
                 break;
             }
         }

@@ -215,6 +215,8 @@ fn run_registry_request_with_args_and_env(
         .arg("--registry")
         .args(args)
         .env("HOME", home)
+        .env_remove("COSH_HOME")
+        .env_remove("COSH_STATES_DIR")
         .env_remove("XDG_DATA_HOME")
         .env_remove("COSH_AI_PROVIDER")
         .env_remove("COSH_MODEL")
@@ -442,6 +444,133 @@ fn registry_enable_rolls_back_when_required_runtime_health_fails() {
     let listed =
         run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
     assert_eq!(listed["data"][0]["desired_state"], "disabled");
+}
+
+#[test]
+fn registry_extensions_adapter_cleanup_preserves_other_choices() {
+    let home = tempfile::tempdir().unwrap();
+    let cosh_home = home.path().join("custom-cosh");
+    let extension = cosh_home.join("extensions/example.adapter");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{"name":"example.adapter","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let invoke = |action: &str, params: Value| {
+        run_registry_request_with_args_and_env(
+            "extensions",
+            action,
+            params,
+            home.path(),
+            None,
+            &[],
+            &[("COSH_HOME", cosh_home.to_str().unwrap())],
+        )
+    };
+    let capability = invoke("adapter-capabilities", serde_json::json!({}));
+    assert_eq!(capability["data"]["conditional_clear_user_source"], true);
+    let selected = invoke(
+        "select-source",
+        serde_json::json!({"name":"example.adapter","source":"user"}),
+    );
+    assert_eq!(selected["success"], true, "{selected}");
+    let state_path = cosh_home.join("states/extensions.json");
+    let read_state =
+        || serde_json::from_slice::<Value>(&std::fs::read(&state_path).unwrap()).unwrap();
+    let identity = extension
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let selected_state = read_state();
+    // Conditional cleanup cannot erase a different identity.
+    let wrong = invoke(
+        "clear-user-source",
+        serde_json::json!({"name":"example.adapter", "source_identity":"/some/other/user"}),
+    );
+    assert_eq!(wrong["success"], true, "{wrong}");
+    assert_eq!(read_state(), selected_state);
+    std::fs::remove_dir_all(cosh_home.join("extensions")).unwrap();
+    let cleared = invoke(
+        "clear-user-source",
+        serde_json::json!({"name":"example.adapter", "source_identity":identity}),
+    );
+    assert_eq!(cleared["success"], true, "{cleared}");
+    assert!(read_state()["sourceSelections"]
+        .get("example.adapter")
+        .is_none());
+    let mut system_selected = read_state();
+    system_selected["sourceSelections"]["example.adapter"] =
+        serde_json::json!({"source":"system", "sourceIdentity":identity});
+    system_selected["disabled"] = serde_json::json!(["another.extension"]);
+    std::fs::write(&state_path, serde_json::to_vec(&system_selected).unwrap()).unwrap();
+    let preserved = invoke(
+        "clear-user-source",
+        serde_json::json!({"name":"example.adapter", "source_identity":identity}),
+    );
+    assert_eq!(preserved["success"], true, "{preserved}");
+    assert_eq!(read_state(), system_selected);
+}
+
+#[test]
+fn registry_extensions_respect_cosh_home_with_xdg_resources() {
+    let home = tempfile::tempdir().unwrap();
+    let cosh_home = home.path().join("custom-cosh");
+    let data_home = home.path().join("xdg-data");
+    let data_dirs = home.path().join("system-data");
+    for (root, name) in [
+        (
+            home.path().join(".copilot-shell/extensions"),
+            "example.default",
+        ),
+        (cosh_home.join("extensions"), "example.custom"),
+        (data_home.join("cosh-ng/extensions"), "example.xdg"),
+    ] {
+        let directory = root.join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("cosh-extension.json"),
+            serde_json::json!({"name": name, "version": "1.0.0"}).to_string(),
+        )
+        .unwrap();
+    }
+
+    for (profile, expected) in [
+        (None, "example.default"),
+        (Some(""), "example.default"),
+        (cosh_home.to_str(), "example.custom"),
+    ] {
+        let mut env = vec![
+            ("XDG_DATA_HOME", data_home.to_str().unwrap()),
+            ("XDG_DATA_DIRS", data_dirs.to_str().unwrap()),
+        ];
+        if let Some(profile) = profile {
+            env.push(("COSH_HOME", profile));
+        }
+        let listed = run_registry_request_with_args_and_env(
+            "extensions",
+            "list",
+            Value::Null,
+            home.path(),
+            None,
+            &[],
+            &env,
+        );
+        assert_eq!(listed["success"], true, "{listed}");
+        let mut names: Vec<_> = listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|extension| extension["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![expected, "example.xdg"],
+            "COSH_HOME={profile:?}"
+        );
+    }
 }
 
 #[test]
@@ -976,39 +1105,128 @@ fn registry_skills_discovers_custom_system_prefix() {
         )
         .unwrap();
     }
-    for runtime in [
-        "usr/local/libexec/anolisa/cosh-ng",
-        "usr/libexec/anolisa/cosh-ng",
+    for (runtime, data_root) in [
+        (
+            "usr/local/libexec/anolisa/cosh-ng",
+            "usr/local/share/anolisa",
+        ),
+        ("usr/libexec/anolisa/cosh-ng", "usr/share/anolisa"),
     ] {
         let executable = prefix.path().join(runtime).join("cosh-core");
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         // Relocate without opening the executable for writing during parallel spawns.
         std::fs::hard_link(&binary, &executable).unwrap();
-        let mut command = Command::new(executable);
-        command
-            .arg("--registry")
-            .env_clear()
-            .env("HOME", home.path())
-            .current_dir(home.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let response = registry_command_response(
-            command,
-            serde_json::json!({
-                "type": "registry_request", "request_id": "prefix-probe",
-                "domain": "skills", "action": "list", "params": null,
-            }),
-        );
-        assert_eq!(response["success"], true);
-        let skill = response["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|skill| skill["name"] == "prefix-probe")
-            .unwrap_or_else(|| panic!("skill missing for runtime {runtime}"));
-        assert_eq!(skill["level"], "system");
-        assert_eq!(skill["description"], "raw");
+        for recorded in [false, true] {
+            if recorded {
+                std::fs::write(
+                    executable.parent().unwrap().join("resources.conf"),
+                    format!(
+                        "profile=system\nskill_dir={}\n",
+                        prefix.path().join(data_root).join("skills").display(),
+                    ),
+                )
+                .unwrap();
+            }
+            let mut command = Command::new(&executable);
+            command
+                .arg("--registry")
+                .env_clear()
+                .env("HOME", home.path())
+                .current_dir(home.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let response = registry_command_response(
+                command,
+                serde_json::json!({
+                    "type": "registry_request", "request_id": "prefix-probe",
+                    "domain": "skills", "action": "list", "params": null,
+                }),
+            );
+            assert_eq!(response["success"], true);
+            let skill = response["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|skill| skill["name"] == "prefix-probe")
+                .unwrap_or_else(|| panic!("skill missing for runtime {runtime}"));
+            assert_eq!(skill["level"], "system");
+            assert_eq!(
+                skill["description"], "raw",
+                "{runtime}, recorded={recorded}"
+            );
+        }
+    }
+}
+
+#[test]
+fn registry_discovers_installed_resource_paths() {
+    let binary = binary_path();
+    let root = tempfile::tempdir_in(binary.parent().unwrap()).unwrap();
+    let executable = root.path().join("cosh-core");
+    std::fs::hard_link(&binary, &executable).unwrap();
+    let skills = root.path().join("custom resources/skills");
+    let extensions = root.path().join("custom resources/extensions");
+    let skill = skills.join("layout-probe");
+    let extension = extensions.join("layout.extension");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: layout-probe\ndescription: installed layout\n---\nBody.",
+    )
+    .unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{"schemaVersion":1,"name":"layout.extension","version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"}}"#,
+    )
+    .unwrap();
+
+    for (profile, extension_source) in [("system", "system"), ("user", "legacy")] {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("resources.conf"),
+            format!(
+                "profile={profile}\nskill_dir={}\nextension_dir={}\n",
+                skills.display(),
+                extensions.display(),
+            ),
+        )
+        .unwrap();
+        for (domain, name, field, expected) in [
+            ("skills", "layout-probe", "level", profile),
+            ("extensions", "layout.extension", "source", extension_source),
+        ] {
+            let mut command = Command::new(&executable);
+            command
+                .arg("--registry")
+                .env_clear()
+                .env("HOME", home.path())
+                .env("XDG_DATA_DIRS", root.path().join("unused"))
+                .current_dir(home.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let response = registry_command_response(
+                command,
+                serde_json::json!({
+                    "type": "registry_request", "request_id": "layout-probe",
+                    "domain": domain, "action": "list", "params": null,
+                }),
+            );
+            assert_eq!(response["success"], true, "{response}");
+            let item = response["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == name)
+                .unwrap_or_else(|| panic!("{domain} missing for {profile}: {response}"));
+            assert_eq!(item[field], expected, "{response}");
+            if domain == "extensions" {
+                assert_eq!(item["available_sources"], serde_json::json!([expected]));
+            }
+        }
     }
 }
 

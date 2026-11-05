@@ -111,7 +111,7 @@
       "release_tag_prefix": "skill/v",
       "ci_key": null,
       "issue_triagers": [
-        "Ziqi002"
+        "zkl123"
       ],
       "status": "active"
     },
@@ -252,6 +252,26 @@
       "ci_key": null,
       "issue_triagers": [
         "kongche-jbw"
+      ],
+      "status": "incubating"
+    },
+    {
+      "id": "benchmark",
+      "display_name": "Benchmark",
+      "aliases": [
+        "bench"
+      ],
+      "issue_option": "benchmark",
+      "path_prefixes": [
+        "benchmark/"
+      ],
+      "label": "component:benchmark",
+      "commit_scope": "benchmark",
+      "commit_scope_aliases": [],
+      "release_tag_prefix": null,
+      "ci_key": null,
+      "issue_triagers": [
+        "alex-yuxi"
       ],
       "status": "incubating"
     },

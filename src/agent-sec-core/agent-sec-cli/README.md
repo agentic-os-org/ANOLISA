@@ -289,7 +289,7 @@ outcome; the CLI writes those operation errors to standard error. Completed runs
 `VERIFICATION SKIPPED: NO CANDIDATE SKILLS`.
 
 Full behavior and topology reference:
-[Asset Verification User Guide](../../../docs/user-guide/en/agent-security/agent-sec-core/asset-verification.md).
+[Asset Verification User Guide](../../../docs/user-guide/en/agent-sec-core/asset-verification.md).
 
 ### Security Events
 

@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "anolisa-tokenless"
 dynamic = ["version"]
-description = "In-process Python SDK for Tokenless lifecycle optimization"
+description = "Python SDK for Tokenless lifecycle optimization"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -34,4 +34,8 @@ python-source = "python"
 module-name = "anolisa_tokenless._native"
 features = ["pyo3/extension-module"]
 strip = true
+include = [
+    { path = "python/anolisa_tokenless/_bin/tokenless", format = "wheel" },
+    { path = "python/anolisa_tokenless/_bin/tokenless.exe", format = "wheel" },
+]
 exclude = ["python/anolisa_tokenless/**/__pycache__/**"]

@@ -41,14 +41,20 @@ if preparation_mode == "slow-preparation":
     time.sleep(0.5 if method == "describe" else 3.0)
 
 if method == "describe":
+    names = os.environ.get("AW_HOST_OPERATIONS", "check,second,record").split(",")
     reply["operations"] = [
         {
             "name": name,
             "events": ["tool.before", "tool.after"],
             "effects": ["observe", "block"],
         }
-        for name in ["check", "second", "record"]
+        for name in names
+        if name
     ]
+    reply["operations"].append({"name":"submit", "events":["input.submit"], "effects":["observe", "block"]})
+    reply["operations"].append({
+        "name": "replace", "events": ["tool.after"], "effects": ["replace_result"]
+    })
 elif method == "invoke":
     native = request["event"]["native"]
     scenario = native["scenario"]
@@ -66,6 +72,8 @@ elif method == "invoke":
     if scenario in ["block", "observe", "wait"]:
         effect = "observe" if scenario == "wait" else scenario
         reply["effects"] = [{"type": effect, "reason_code": "fixture_policy"}]
+    if scenario == "replace" and request["operation"] == "replace":
+        reply["effects"] = [{"type": "replace_result", "text": "short result"}]
 
 if scenario == "wrong-id":
     reply["request_id"] = "uncorrelated-response"

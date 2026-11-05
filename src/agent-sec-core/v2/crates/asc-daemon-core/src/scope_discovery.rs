@@ -23,6 +23,8 @@ pub struct ProcessFingerprint {
     pub device: u64,
     /// Executable inode number.
     pub inode: u64,
+    /// Verified kernel UID; absent when credentials could not be safely observed.
+    pub uid: Option<u32>,
 }
 
 /// One verified process snapshot supplied by the procfs adapter.
@@ -53,6 +55,7 @@ pub struct ScanResult {
 /// One job's state. The owning daemon worker serializes all access.
 pub struct ScopeDiscoveryState {
     selector: ScopeSelector,
+    owner_uid: Option<u32>,
     pinned_pid: Option<ProcessIdentity>,
     checked: BTreeMap<u32, CheckedProcess>,
     instances: BTreeMap<u32, ProcessIdentity>,
@@ -84,6 +87,10 @@ impl ScopeDiscoveryState {
             return Err("cgroup discovery is unsupported");
         }
         Ok(Self {
+            owner_uid: scope
+                .uses_credentials()
+                .then_some(scope.owner_uid)
+                .flatten(),
             selector: scope.selector,
             pinned_pid: pinned_process,
             checked: BTreeMap::new(),
@@ -94,9 +101,14 @@ impl ScopeDiscoveryState {
         })
     }
 
+    /// Whether the procfs adapter must verify UID facts for this credential selection.
+    pub fn requires_owner_uid(&self) -> bool {
+        self.owner_uid.is_some()
+    }
+
     /// Applies a scan. `present` includes PIDs whose metadata could not be read.
-    /// Only a complete enumeration may remove absent processes. A failed read
-    /// never erases a selected instance or its deduplication key.
+    /// File selections survive failed reads and prune absence only on complete scans.
+    /// Credential selections require current verified ownership before submission.
     pub fn reconcile(
         &mut self,
         observations: Vec<ProcessObservation>,
@@ -104,11 +116,24 @@ impl ScopeDiscoveryState {
         complete: bool,
     ) -> ScanResult {
         let mut result = ScanResult::default();
+        if self.owner_uid.is_some() {
+            // Credentials are admitted only from this scan's verified owner facts.
+            // File selections deliberately retain their historic unreadable-instance semantics.
+            self.instances.retain(|_, identity| {
+                observations.iter().any(|observation| {
+                    observation.identity == *identity
+                        && observation.fingerprint.uid == self.owner_uid
+                })
+            });
+        }
         for observation in observations {
             let ProcessObservation {
                 identity,
-                fingerprint,
+                mut fingerprint,
             } = observation;
+            if self.owner_uid.is_none() {
+                fingerprint.uid = None;
+            }
             // A successfully observed replacement proves the previous instance exited.
             if self
                 .instances
@@ -142,6 +167,10 @@ impl ScopeDiscoveryState {
                     }
                     ScopeSelector::CgroupId { .. } => false,
                 };
+                let matches = matches
+                    && self
+                        .owner_uid
+                        .is_none_or(|uid| fingerprint.uid == Some(uid));
                 self.checked.insert(
                     identity.pid,
                     CheckedProcess {
@@ -195,6 +224,7 @@ mod tests {
         use asc_policy_types::identifiers::ResourceId;
         PreparedScope {
             scope_id: ResourceId::new("scope-one").unwrap(),
+            owner_uid: None,
             status: asc_policy_types::scope::ScopeStatus::Active,
             selector: ScopeSelector::Process {
                 matcher: ProcessMatcher::Executable {
@@ -218,8 +248,57 @@ mod tests {
                 process_name: "agent".to_owned(),
                 device: 1,
                 inode: 2,
+                uid: None,
             },
         }
+    }
+
+    #[test]
+    fn credential_owner_changes_invalidate_matches_without_changing_file_selection() {
+        let mut assigned = scope();
+        assigned.owner_uid = Some(1000);
+        assigned.policy_snapshots[0].template =
+            asc_policy_types::authoring::PolicySource::SecCore(
+                serde_json::from_value(serde_json::json!({
+                    "specVersion":"0.1", "rules":[{"effect":"allow","category":"network","action":"use_credential",
+                        "target":{"type":"http_request","credentialId":"github","scheme":"https",
+                            "host":"api.github.com","path":"/repos/**","methods":["GET"],"responseRewrite":"buffered"}}]
+                }))
+                .unwrap(),
+            );
+        let mut credentials = ScopeDiscoveryState::for_scope(assigned).unwrap();
+        let mut file = state();
+        let present = BTreeSet::from([10]);
+        let mut observation = process(10, 1, "/bin/agent");
+        observation.fingerprint.uid = Some(1000);
+        credentials.reconcile(vec![process_with_uid(1000)], &present, true);
+        file.reconcile(vec![observation], &present, true);
+        assert_eq!(credentials.instances().count(), 1);
+        assert_eq!(
+            credentials
+                .reconcile(vec![process_with_uid(2000)], &present, true)
+                .matched_checks,
+            1
+        );
+        assert_eq!(credentials.instances().count(), 0);
+        assert_eq!(
+            file.reconcile(vec![process_with_uid(2000)], &present, true)
+                .cached,
+            1
+        );
+        assert_eq!(file.instances().count(), 1);
+        credentials.reconcile(vec![process_with_uid(1000)], &present, true);
+        assert_eq!(credentials.instances().count(), 1);
+        credentials.reconcile(Vec::new(), &present, false);
+        assert_eq!(credentials.instances().count(), 0);
+        credentials.reconcile(vec![process(10, 1, "/bin/agent")], &present, true);
+        assert_eq!(credentials.instances().count(), 0);
+    }
+
+    fn process_with_uid(uid: u32) -> ProcessObservation {
+        let mut observation = process(10, 1, "/bin/agent");
+        observation.fingerprint.uid = Some(uid);
+        observation
     }
 
     #[test]
@@ -266,6 +345,7 @@ mod tests {
         let policy = policy();
         let scope = PreparedScope {
             scope_id: policy.policy_id.clone(),
+            owner_uid: None,
             status: asc_policy_types::scope::ScopeStatus::Active,
             selector: ScopeSelector::Process {
                 matcher: ProcessMatcher::Name {

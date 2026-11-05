@@ -53,6 +53,23 @@ class HookParity(unittest.TestCase):
     def test_schema_hook_matches_the_goldens(self):
         self.run_matrix("before_model", corpus.SCHEMA_HOOK, corpus.SCHEMA_AGENTS)
 
+    def test_qoder_payloads_outside_stdout_remain_json_text(self):
+        # These are contract fixtures, not shapes observed from native Qoder
+        # Bash. Qoder's object renderer would hide their results/stderr fields.
+        for name, field, expected in (
+            ("bash_array_truncation", "results", "entry-000"),
+            ("build_log_cargo_failure", "stderr", "error[E0308]"),
+        ):
+            with self.subTest(fixture=name):
+                source = Path(corpus.fixture_path("post_tool", name)).read_text()
+                proc = corpus.run_hook(
+                    corpus.RESPONSE_HOOK, source, corpus.RESPONSE_AGENTS["qoder-cli"]
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                output = json.loads(proc.stdout)["hookSpecificOutput"]["updatedToolOutput"]
+                self.assertIsInstance(output, str)
+                self.assertIn(expected, str(json.loads(output)[field]))
+
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")
 class PathListHooks(unittest.TestCase):
@@ -115,11 +132,7 @@ class PathListHooks(unittest.TestCase):
         }
         for agent in ("qwenwork", "qoder-cli"):
             output = self.replacement(self.run_response(source, agent=agent))
-            if agent == "qoder-cli":
-                self.assertIsInstance(output, str)
-                output = json.loads(output)
-            else:
-                self.assertIsInstance(output, dict)
+            self.assertIsInstance(output, dict)
             self.assertEqual(self.restore(output["stdout"]), source["stdout"])
             self.assertEqual({**output, "stdout": source["stdout"]}, source)
 

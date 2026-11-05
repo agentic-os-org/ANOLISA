@@ -1,16 +1,22 @@
-//! Typed local-package and offline-edit options, independent of runtime state.
+//! Typed Provider-extension and offline-edit options, independent of runtime state.
 
 use clap::Args;
 
 #[derive(Args, Debug, PartialEq)]
 #[group(multiple = true)]
 pub(super) struct Install {
-    /// Absolute destination for a local Preview bundle
-    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile"])]
+    /// Absolute installation directory for a local bundle
+    #[arg(long, value_name = "ABS_DIR", requires = "bundle", required_unless_present = "config", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
     pub prefix: Option<String>,
-    /// Absolute unpacked Preview bundle directory; no URL or RPM/DEB backend
-    #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile"])]
+    /// Absolute unpacked bundle directory; no URL or RPM/DEB backend
+    #[arg(long, value_name = "ABS_DIR", requires = "prefix", conflicts_with_all = ["config", "agent", "native_profile", "pid", "remove"])]
     pub bundle: Option<String>,
+    /// Show packages, files and conflicts without creating or changing anything
+    #[arg(long, requires = "prefix", conflicts_with = "config")]
+    pub dry_run: bool,
+    /// Package database scope (default: user); system writes require root
+    #[arg(long, value_enum, requires = "prefix", conflicts_with = "config")]
+    pub scope: Option<super::scope::Scope>,
     /// Legacy native Hook connection; prefer aw agent connect
     #[arg(long, value_name = "FILE", requires = "agent", conflicts_with_all = ["json", "quiet", "verbose", "color"])]
     pub config: Option<String>,
@@ -21,12 +27,14 @@ pub(super) struct Install {
     #[arg(long, value_name = "NAME", requires_all = ["config", "agent"])]
     pub native_profile: Option<String>,
     #[command(flatten)]
+    pub attachment: super::Attachment,
+    #[command(flatten)]
     pub output: crate::output::Options,
 }
 
 #[derive(Args, Debug, PartialEq)]
 pub(super) struct Prefix {
-    /// Absolute immutable Preview installation prefix
+    /// Absolute software installation directory
     #[arg(long, value_name = "ABS_DIR")]
     pub prefix: String,
     #[command(flatten)]
@@ -35,8 +43,17 @@ pub(super) struct Prefix {
 
 #[derive(Args, Debug, PartialEq)]
 pub(super) struct Uninstall {
+    /// Package IDs to remove; omit to remove the entire installation
+    #[arg(value_name = "PACKAGE")]
+    pub packages: Vec<String>,
     #[command(flatten)]
     pub prefix: Prefix,
+    /// Show removal and blockers without changing files or asking for confirmation
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Package database scope (default: user); system writes require root
+    #[arg(long, value_enum)]
+    pub scope: Option<super::scope::Scope>,
     /// Confirm this removal; does not override ownership, integrity or permissions
     #[arg(short = 'y', long)]
     pub yes: bool,
@@ -67,11 +84,14 @@ pub(super) struct Configure {
     )]
     pub openclaw: Option<String>,
     /// Provider template; none is the default
-    #[arg(long, value_parser = ["none", "tokenless", "sec-core", "sec-core+tokenless", "command"])]
+    #[arg(long, value_parser = ["none", "command"], conflicts_with = "template")]
     pub provider: Option<String>,
-    /// Absolute backend socket, only for the sec-core templates
+    /// Explicit distributor or Provider configuration template
     #[arg(long, value_name = "ABS_FILE")]
-    pub socket: Option<String>,
+    pub template: Option<String>,
+    /// Literal template variable NAME=VALUE; PREFIX and STATE are supplied by AW
+    #[arg(long, value_name = "NAME=VALUE", requires = "template")]
+    pub template_var: Vec<String>,
     /// Absolute program for the command template; generation never executes it
     #[arg(long, value_name = "ABS_PROGRAM")]
     pub check: Option<String>,
@@ -157,6 +177,37 @@ pub(super) struct RemoveHook {
     pub configuration: Configuration,
     #[arg(long, value_name = "EVENT")]
     pub event: String,
+    #[arg(long, value_name = "ID", allow_hyphen_values = true)]
+    pub id: String,
+    #[command(flatten)]
+    pub output: crate::output::Options,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct NativeSources {
+    #[command(flatten)]
+    pub configuration: Configuration,
+    /// Existing AW Agent target
+    #[arg(long, value_name = "TARGET")]
+    pub agent: String,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct AddNativeSource {
+    #[command(flatten)]
+    pub target: NativeSources,
+    /// AW source descriptor; never the native configuration contents
+    #[arg(long, value_name = "FILE")]
+    pub definition: String,
+    #[command(flatten)]
+    pub output: crate::output::Options,
+}
+
+#[derive(Args, Debug, PartialEq)]
+pub(super) struct RemoveNativeSource {
+    #[command(flatten)]
+    pub target: NativeSources,
+    /// Exact AW source descriptor ID
     #[arg(long, value_name = "ID", allow_hyphen_values = true)]
     pub id: String,
     #[command(flatten)]

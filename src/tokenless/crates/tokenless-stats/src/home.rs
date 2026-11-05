@@ -1,12 +1,12 @@
-//! Home-directory resolution rooted in the passwd database.
+//! Home-directory resolution rooted in the operating system's user identity.
 //!
 //! Every tokenless crate that writes state under the user's home (config,
 //! stats DB, log files) must agree on what "home" means. Reading `$HOME`
 //! directly is unsafe — a parent process can set it to anything before
 //! invoking the binary, redirecting state files into attacker-writable
-//! paths. This module derives the home directory from `getpwuid_r(getuid())`
-//! and refuses to fall back to anything that reads `$HOME` (dirs::home_dir,
-//! std::env, etc.); a missing passwd entry must surface as an empty string
+//! paths. This module uses `getpwuid_r(getuid())` on Unix and the current
+//! process token's profile directory on Windows, without environment fallbacks.
+//! A missing user profile must surface as an empty string
 //! so callers can refuse `$HOME`-relative writes rather than silently
 //! redirecting them into an attacker-controlled location.
 
@@ -21,11 +21,50 @@ pub fn get_home_dir() -> String {
     home_dir_from_passwd().unwrap_or_default()
 }
 
-/// Non-unix targets aren't a supported tokenless deployment, but keep a
-/// compilation-only stub so the rest of the crate still builds.
-#[cfg(not(unix))]
+/// Resolve the Windows profile from the current process token, ignoring HOME.
+#[cfg(windows)]
 pub fn get_home_dir() -> String {
-    String::new()
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStringExt;
+    use std::ptr::null_mut;
+
+    // Keep this module dependency-free on Windows: the patched RTK includes it.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn OpenProcessToken(process: *mut c_void, access: u32, token: *mut *mut c_void) -> i32;
+    }
+    #[link(name = "userenv")]
+    unsafe extern "system" {
+        fn GetUserProfileDirectoryW(token: *mut c_void, buffer: *mut u16, size: *mut u32) -> i32;
+    }
+    let mut token = null_mut();
+    // SAFETY: token points to a live output slot; TOKEN_QUERY is sufficient.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008, &mut token) } == 0 {
+        return String::new();
+    }
+    let mut size = 0;
+    // SAFETY: a null buffer queries the required UTF-16 capacity.
+    unsafe { GetUserProfileDirectoryW(token, null_mut(), &mut size) };
+    let mut buffer = vec![0u16; size as usize];
+    // SAFETY: buffer has the requested capacity and token remains open.
+    let success = unsafe { GetUserProfileDirectoryW(token, buffer.as_mut_ptr(), &mut size) };
+    // SAFETY: this function owns the token and closes it exactly once.
+    unsafe { CloseHandle(token) };
+    if success == 0 {
+        return String::new();
+    }
+    let end = buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(buffer.len());
+    std::ffi::OsString::from_wide(&buffer[..end])
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(unix)]
@@ -96,7 +135,10 @@ mod tests {
             "must not read $HOME as a fallback",
         );
         if !h.is_empty() {
-            assert!(h.starts_with('/'), "passwd home must be absolute: {h}");
+            assert!(
+                std::path::Path::new(&h).is_absolute(),
+                "home must be absolute: {h}"
+            );
         }
         // Restore previous HOME (or unset it) so we don't pollute sibling tests.
         unsafe {

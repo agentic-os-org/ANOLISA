@@ -185,8 +185,8 @@ cd src/agentsight
 # 构建前端并输出到 frontend-dist/（cargo build 前必须先执行）
 make build-frontend
 
-# 再构建包含嵌入 UI 的 Rust 二进制
-make build
+# 再单独构建包含嵌入 UI 的 Rust 二进制
+make build-binary
 
 # 或一步完成
 make build-all
@@ -324,17 +324,18 @@ sudo yum install agentsight
 ```
 
 安装内容：
-- `/usr/local/bin/agentsight` — CLI 可执行文件
-- `/usr/local/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight` — CLI 可执行文件
+- `/usr/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/bin/agentsight-start` — trace/serve 监督脚本
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight systemd 单元
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — 强制执行 systemd 单元
 
-RPM 是 Linux system 包。两个单元会随包安装，但默认不会启用；当两个单元都运行时，
+RPM 是 Linux system 包。两个单元会随包安装；当两个单元都运行时，
 AgentSight 会排在 enforcer 之后启动。
 
 ### 启动服务
 
-两种包安装都会让单元保持停止且不启用。准备开始采集时，再启动主服务。
+准备开始采集时，再启动主服务。
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -353,7 +354,7 @@ Dashboard 访问信息时需要使用 `sudo`。启动前台 tracer 前也要先�
 如需在 Kubernetes 中进行节点级采集，使用 `src/agentsight/packaging/` 下的
 DaemonSet 清单与运行时镜像（`k8s/daemonset.yaml` 与 `docker/Dockerfile`）。
 前置条件与验证步骤见
-[部署指南](../../docs/user-guide/zh/agent-observability/agentsight/deployment.md#kubernetes-daemonset节点级)。
+[部署指南](../../docs/user-guide/zh/agentsight/deployment.md#kubernetes-daemonset节点级)。
 
 ### 从源码构建
 
@@ -377,8 +378,9 @@ ActPlane enforcer，输出到每次新建的独立目录。脚本打印其绝对
 Linux 交叉构建通过 `scripts/build-enforcer.sh --target
 <aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` 显式选择目标；不传参数时
 保持宿主构建。`CARGO` 可指定准备好的 Cross 包装入口，但必须遵守指定目标。
-两种 Linux 架构使用相同 raw 包布局及源码自有的 `.anolisa/component.toml`。
-macOS ARM64 使用 `.anolisa/component.macos.toml`，仅包含主程序。
+两种 Linux 架构使用相同 raw 包布局及源码自有的
+`packaging/anolisa/raw/component.toml`。macOS ARM64 使用
+`packaging/anolisa/raw/component.macos.toml`，仅包含主程序。
 从 Linux 交叉构建 macOS 时使用 `--no-default-features --features server`，
 以跳过可选的 `bpf-build` 宿主依赖。
 打包器消费凭据并完成打包后，才可清理本次 enforcer 独立目录。
@@ -441,6 +443,11 @@ agentsight serve --host 0.0.0.0 --port 8080
 sudo agentsight trace
 ```
 
+## 离线分析
+
+独立分析器和批处理脚本可用 `--stats-only` 运行本地 perf/cost 统计，无需凭据或模型请求。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
+
 ## 配置
 
 AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路径 `/etc/agentsight/config.json`，若不存在则使用内嵌默认值）。
@@ -454,7 +461,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 通过 checkpoint gate 后才按容量淘汰；物理占用超过阈值时，以逻辑占用降至 90% 为目标。自动维护不执行
 `VACUUM`，释放页留在 freelist 供后续写入复用。Dashboard 设置页会展示策略、容量、覆盖范围与 worker
 健康状态，但不返回数据库路径。详见
-[配置指南](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#sqlite-存储策略)。
+[配置指南](../../docs/user-guide/zh/agentsight/configuration.md#sqlite-存储策略)。
 
 ### 功能开关（`features`）
 
@@ -502,7 +509,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 `metadata_only=true`；硬字节上限仍可强制回收。Probe 与 FFI 队列同时执行条数和字节限额，
 并记录被拒绝的事件数。这些预算约束保留的 payload；评估进程 RSS 时，
 还应计入 ring buffer、解码器工作内存及 allocator 开销。超时、raw 捕获与过载语义见
-[配置参考](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#运行时上限)。
+[配置参考](../../docs/user-guide/zh/agentsight/configuration.md#运行时上限)。
 
 配置 schema v5 随包提供上述默认值。启动升级时会备份并整体替换旧配置，自定义规则与设置需从备份恢复。
 实现说明见 [HTTP payload 所有权与内存限额](docs/design/payload-memory_zh.md)。
@@ -544,7 +551,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 ## ATIF 导出
 
 使用 `scripts/batch-analyze.py --export-atif DIRECTORY` 可在本地保存转换后的 Claude/Qoder ATIF，无需启动分析器。
-用法和限制见 [CLI 参考](../../docs/user-guide/zh/agent-observability/agentsight/cli-reference.md)。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
 
 ## 支持的 LLM 提供商
 
@@ -558,7 +565,7 @@ Token 解析支持多种 LLM API 格式：
 ## 批量分析并发
 
 批处理脚本可显式启用 `--jobs 1..8`（默认 1），限制并发调用数，并按原始顺序输出结果。
-用法和限制见 [CLI 参考](../../docs/user-guide/zh/agent-observability/agentsight/cli-reference.md)。
+用法和限制见 [CLI 参考](../../docs/user-guide/zh/agentsight/cli-reference.md)。
 
 ## 项目起源
 
@@ -568,4 +575,4 @@ Token 解析支持多种 LLM API 格式：
 
 Apache License 2.0 — 详见 [LICENSE](../../LICENSE)。
 
-可通过可选的 `tokenless_api` 配置记录远程 Tokenless 统计数据，详见[配置](../../docs/user-guide/zh/agent-observability/agentsight/configuration.md#tokenless-统计-api)。
+可通过可选的 `tokenless_api` 配置记录远程 Tokenless 统计数据，详见[配置](../../docs/user-guide/zh/agentsight/configuration.md#tokenless-统计-api)。

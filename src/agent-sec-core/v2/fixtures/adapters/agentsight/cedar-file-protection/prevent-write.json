@@ -1,0 +1,7 @@
+{
+  "language": "cedar",
+  "content": {
+    "schema": { "schemaId": "seccore.system", "revision": 1 },
+    "text": "forbid (principal, action == SecCore::Action::\"file.write\", resource is SecCore::File) when { context.input.operation == SecCore::WriteOperation::\"write\" && (resource.path == \"/workspace\" || resource.path like \"/workspace/*\") } unless { resource.path == \"/workspace/cache\" || resource.path like \"/workspace/cache/*\" };"
+  }
+}

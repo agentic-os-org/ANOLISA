@@ -87,7 +87,7 @@ class NativeTests(GateFixture):
                 )
 
     def test_native_secret_gate_rejects_unmerged_candidates_and_workflow_refs(self) -> None:
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         step = workflow.split(
             "      - name: Require a trusted candidate before executing repository code\n", 1
         )[1].split("      - name: Validate native coverage", 1)[0]
@@ -158,7 +158,7 @@ class NativeTests(GateFixture):
     def test_missing_entrypoint_and_empty_suites_fail(self) -> None:
         from unittest.mock import patch
 
-        for mode in ("missing", "empty", "manual", "unpinned", "deadline"):
+        for mode in ("missing", "empty", "manual", "unpinned", "deadline", "excessive-timeout"):
             manifest = copy.deepcopy(self.manifest)
             row = manifest["agents"]["agentscope"]
             if mode == "missing":
@@ -170,7 +170,7 @@ class NativeTests(GateFixture):
             elif mode == "unpinned":
                 row["requirements"] = ["agentscope>=2"]
             else:
-                row["cases"][0]["timeout_seconds"] = 0
+                row["cases"][0]["timeout_seconds"] = 2401 if mode == "excessive-timeout" else 0
             original = Path.read_text
 
             def read(path: Path, *args: object, **kwargs: object) -> str:
@@ -294,6 +294,11 @@ class NativeTests(GateFixture):
             case["results"][0]["cases"]["names"] = names
             with self.assertRaises(ValueError):
                 validate_case(case)
+        for result in (None, {"file": ["report.json"]}):
+            case = copy.deepcopy(self.manifest["agents"]["pi"]["cases"][0])
+            case["results"] = [result]
+            with self.subTest(result=result), self.assertRaisesRegex(ValueError, "file"):
+                validate_case(case)
 
     def test_custom_suites_reject_missing_empty_or_malformed_results(self) -> None:
         for agent, case in self.custom_cases():
@@ -328,7 +333,8 @@ class NativeTests(GateFixture):
                         elif mode == "renamed":
                             rows[0][spec["key"]] = "unexpected-case"
                         elif mode == "duplicate":
-                            rows[0] = rows[1]
+                            # Single-case reports need an extra row to form a duplicate.
+                            rows[:] = [rows[0]] * max(2, len(rows))
                         elif spec.get("values"):
                             rows[0][next(iter(spec["values"]))] = False
                         else:
@@ -508,7 +514,6 @@ class NativeTests(GateFixture):
             "aw-provider-tokenless",
             "aw-provider-sec-core",
             "tokenless",
-            "rtk",
             "policy",
             "agent-sec-cli",
             "agent-sec-daemon",

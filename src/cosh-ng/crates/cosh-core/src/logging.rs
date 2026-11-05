@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use tracing_subscriber::EnvFilter;
 
 /// Per-user log retention: today and the preceding two UTC dates. Approved by the user as a per-user total; the
@@ -203,13 +204,25 @@ fn open_log_file(dir: &std::path::Path, prefix: &str) -> std::io::Result<std::fs
         .mode(0o600)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .open(dir.join(format!("{prefix}.{}", today_suffix())))?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "log is not a regular file",
         ));
     }
+    ensure_log_owner(&metadata)?;
     Ok(file)
+}
+
+fn ensure_log_owner(metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    if metadata.uid() != nix::unistd::geteuid().as_raw() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "log belongs to another user",
+        ));
+    }
+    Ok(())
 }
 
 fn acquire_budget_lock(
@@ -393,6 +406,7 @@ fn reclaim_log_file(path: &std::path::Path) -> std::io::Result<()> {
                     "managed log is not a regular file",
                 ));
             }
+            ensure_log_owner(&metadata)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
@@ -509,7 +523,7 @@ fn managed_logs(
             continue;
         };
         let meta = std::fs::symlink_metadata(&path)?;
-        if meta.file_type().is_file() {
+        if meta.file_type().is_file() && meta.uid() == nix::unistd::geteuid().as_raw() {
             logs.push((path, date, meta.modified()?, meta.len()));
         }
     }
@@ -978,5 +992,139 @@ mod tests {
         if !nix::unistd::Uid::effective().is_root() {
             assert!(!dir_is_writable(&dir), "read-only dir must be detected");
         }
+    }
+    #[cfg(target_os = "linux")]
+    fn foreign_uid_snapshot(path: &std::path::Path) -> (Vec<u8>, u32, u32, u32, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).unwrap();
+        (
+            std::fs::read(path).unwrap(),
+            metadata.uid(),
+            metadata.gid(),
+            metadata.mode(),
+            metadata.ino(),
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires an explicitly provisioned writable foreign-UID fixture"]
+    fn foreign_uid_expired_log_preserves_content() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("COSH_TEST_FOREIGN_LOG_DIR").expect("dual-UID fixture directory"),
+        );
+        let prefix = "cosh-core.log";
+        let foreign = dir.join(format!(
+            "{prefix}.{}",
+            date_suffix_days_ago(LOG_RETENTION_DAYS + 1)
+        ));
+        std::fs::rename(dir.join("foreign"), &foreign).unwrap();
+        let before = foreign_uid_snapshot(&foreign);
+        let uid = nix::unistd::geteuid().as_raw();
+        assert_ne!(uid, 0, "DUT must be nonroot");
+        assert_ne!(before.1, uid, "sentinel must belong to another UID");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&foreign)
+            .expect("DAC must permit the actor to write foreign content");
+        let own = dir.join(format!(
+            "cosh-shell.log.{}",
+            date_suffix_days_ago(LOG_RETENTION_DAYS + 2)
+        ));
+        std::fs::write(&own, b"owned reclaim positive").unwrap();
+        assert_eq!(std::fs::metadata(&own).unwrap().uid(), uid);
+        cleanup_old_logs(&dir, LOG_RETENTION_DAYS).unwrap();
+        assert!(foreign.exists(), "foreign UID expired log was deleted");
+        assert_eq!(
+            foreign_uid_snapshot(&foreign),
+            before,
+            "foreign content or metadata changed"
+        );
+        assert!(!own.exists(), "own expired log must still be reclaimed");
+        assert_eq!(
+            reclaim_log_file(&foreign).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(foreign_uid_snapshot(&foreign), before);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires an explicitly provisioned writable foreign-UID fixture"]
+    fn foreign_uid_current_log_refuses_append() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use tracing_subscriber::fmt::MakeWriter;
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("COSH_TEST_FOREIGN_LOG_DIR").expect("dual-UID fixture directory"),
+        );
+        let prefix = "cosh-core.log";
+        let foreign = dir.join(format!("{prefix}.{}", today_suffix()));
+        std::fs::rename(dir.join("foreign"), &foreign).unwrap();
+        let before = foreign_uid_snapshot(&foreign);
+        let uid = nix::unistd::geteuid().as_raw();
+        assert_ne!(uid, 0, "DUT must be nonroot");
+        assert_ne!(std::fs::metadata(&foreign).unwrap().uid(), uid);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&foreign)
+            .expect("DAC must permit the actor to append foreign content");
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(LogBudgetGate::new(dir.clone())));
+        let writer = BudgetedWriter {
+            prefix,
+            gate: gate.clone(),
+        };
+        writer
+            .make_writer()
+            .write_all(b"must not append foreign content")
+            .unwrap();
+        assert_eq!(
+            foreign_uid_snapshot(&foreign),
+            before,
+            "foreign current log was appended or metadata changed"
+        );
+        assert!(
+            gate.lock().unwrap().suppressed,
+            "foreign write target must latch optional persistence IO failure"
+        );
+        assert_eq!(
+            open_log_file(&dir, prefix).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let owned_dir = dir.join("owned-positive");
+        std::fs::create_dir(&owned_dir).unwrap();
+        std::fs::set_permissions(&owned_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let owned_writer = BudgetedWriter {
+            prefix,
+            gate: std::sync::Arc::new(std::sync::Mutex::new(LogBudgetGate::new(owned_dir.clone()))),
+        };
+        owned_writer
+            .make_writer()
+            .write_all(b"owned append positive")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(owned_dir.join(format!("{prefix}.{}", today_suffix()))).unwrap(),
+            b"owned append positive"
+        );
+        let linked_dir = dir.join("symlink-negative");
+        std::fs::create_dir(&linked_dir).unwrap();
+        std::os::unix::fs::symlink(
+            &foreign,
+            linked_dir.join(format!("{prefix}.{}", today_suffix())),
+        )
+        .unwrap();
+        let linked_gate = std::sync::Arc::new(std::sync::Mutex::new(LogBudgetGate::new(
+            linked_dir.clone(),
+        )));
+        let linked_writer = BudgetedWriter {
+            prefix,
+            gate: linked_gate.clone(),
+        };
+        linked_writer
+            .make_writer()
+            .write_all(b"must not follow symlink")
+            .unwrap();
+        assert!(linked_gate.lock().unwrap().suppressed);
+        assert_eq!(foreign_uid_snapshot(&foreign), before);
     }
 }

@@ -7,6 +7,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.13] - Unreleased
+
+### Changed
+
+- Choose the memory runtime and OpenClaw integration separately using the core and plugins RPMs.
+- Raw installations render the MCP command for the selected binary directory.
+
+### Fixed
+
+- Honor configured embedding provider environment fields when the provider is selected in TOML; changing embedding models can require rebuilding vectors.
+- Prevent retired OpenClaw plugin instances from restarting their memory worker during reload or disposal.
+- Avoid publishing vectors for files whose text indexing failed in the same pass; a later successful scan retries them.
+- Reject overlapping ambiguous `mem_edit` matches before changing content.
+- Report `mem_export` scan or read errors instead of silently producing an incomplete archive.
+- Clean up incomplete destinations after failed `mem_promote` or create-only `mem_write` calls so they can be retried.
+- Restore nonempty read-only snapshot directories with their permissions intact and clean up failed staging before retry.
+
+## [0.2.12] - 2026-10-28
+
+### Fixed
+
+- **agent-memory**: Updated to v0.2.12, enforces persisted capture consent on each automatic OpenClaw observation through `memory_capture`, including changes made by another client; denied or failed captures remain retryable and successful captures appear in `memory_auto_created`. Upgrade the server and adapter together; an older server rejects the new hook call without falling back to manual observation. Manual writes remain available and existing observations are not relabeled (#8865)
+- **agent-memory**: Attributes new observations to `MCP_CLIENT_NAME` immediately, so the observing agent can recall them under isolated scope and another agent's filtered search excludes them. Existing untagged index rows are not backfilled by restarting or running `mem_index_refresh` (#7776)
+- **agent-memory**: Prepares complete replacements for `mem_edit` and `mem_write` overwrites before publishing them, preserving original content on preparation failures. Replacement requires readable/writable directories on one filesystem, Linux procfs and space for the new content; custom ownership and host security-label policies need validation, and other hard links retain old content. A reported post-publication sync failure means the new content is already visible; read it before retrying (#8982)
+- **agent-memory**: Restores only the requested file with `mem_revert`, preserving Git HEAD, staged changes and other files' pending edits; its response now identifies the source commit. Stage the restored file explicitly before a manual commit if its previous contents remain staged (#9082)
+- **agent-memory**: Validates gzip checksums and completion before publishing a restored snapshot, so damaged or truncated archives fail while the current memory files remain intact (#7631)
+- **agent-memory**: Watches memory changes before startup indexing, refreshes resized files even when their timestamps are unchanged, and preserves newly indexed children when an old file becomes a directory, keeping keyword and vector results current across these startup cases. Rewrites retaining both timestamp and size remain outside the scan fingerprint's guarantee (#8880, #9127, #9089)
+- **agent-memory**: Treats dotted filenames and `AND`, `NOT`, and `OR` as literal keyword-search text, so agents can recall terms such as `config.toml` without search-syntax errors; space-separated terms retain the existing all-term search and partial-match fallback (#8012)
+- **agent-memory**: Reports unreadable search-index rows with recovery guidance instead of returning successful empty or partial results, making keyword, vector and hybrid search failures visible without creating spurious interests or lessons from failed searches (#8854)
+- **agent-memory**: Preserves complete Unicode characters when shortening OpenClaw recall queries, preventing split emoji and malformed query prefixes (#4730)
+- **agent-memory**: Bounds session-log tail reads to 1 MiB and preserves UTF-8 boundaries, so oversized recent entries no longer make log reads fail or falsely appear empty; an oversized entry may still be returned as a partial tail (#7896)
+- **agent-memory**: Normalizes ASCII control characters in imported AMA frontmatter keys, values and list items to spaces, preventing injected metadata lines or premature frontmatter termination; these characters are intentionally not preserved during import (#4626)
+- **agent-memory**: Preserves concept and file rankings in `memory_summary` after AMA export/import and keeps literal commas, quotes and backslashes within single-line list entries, so summary counts remain accurate without rewriting existing imported files (#8862)
+- **agent-memory**: Preserves complete `MEMORY.md` link destinations when shortening long titles or descriptions, allowing agents to follow long paths while retaining the overall index size limit (#3621)
+- **agent-memory**: Returns valid unified patches from `mem_diff` with one pair of file headers and correctly escaped control characters in filenames, so consumers can parse and apply the result (#3575)
+- **agent-memory**: Keeps supersession markers inside valid leading frontmatter and logs failed index updates while retaining new facts, avoiding edits to ordinary note bodies and making repeated consolidation conflicts diagnosable (#3517, #3532)
+- **agent-memory**: Leaves unrepresentable `N days ago` and `N 天前` phrases unchanged during consolidation, preventing date overflow failures and accidental replacement with today's date (#9144)
+- **agent-memory**: Honors `ANOLISA_DRY_RUN=1` in OpenClaw install and uninstall scripts, previewing the applicable actions without installing, removing files or rewriting configuration; installation may still run the read-only CLI help probe (#7755)
+- **agent-memory**: Lists all 38 runtime tools in the packaged MCP catalog, enabling descriptor-based clients to discover the previously omitted session, summary, context, profile and index-refresh tools (#9148)
+
+## [0.2.11] - 2026-10-25
+
+### Fixed
+
+- **agent-memory**: Updated to v0.2.11, applies fact-category filtering before the keyword search result limit, so matching memories remain discoverable when other categories rank higher; this also covers short Chinese queries and fallback to keyword search, with case-sensitive category names. Vector/hybrid searches with an embedding provider still filter categories after truncation (#8721)
+- **agent-memory**: Applies the configured cold-memory exclusion and filters superseded memories before vector ranking and result limits, so excluded memories no longer crowd eligible results out of vector and hybrid searches (#3805)
+- **agent-memory**: Invalidates stale vectors after content edits and removes old search entries when files exceed the indexing size limit or stop being UTF-8, preventing keyword and vector results from serving obsolete content (#3803, #3820)
+- **agent-memory**: Removes only the requested path and its literal descendants from the index, preserving unrelated memories with wildcard-like characters or different letter casing in their names (#3801)
+- **agent-memory**: Skips redundant indexing and embedding calls for unchanged files after directory attribute updates, reducing embedding usage while preserving missing-vector recovery and files deleted and restored within one watcher batch (#8477)
+- **agent-memory**: Serializes concurrent automatic incremental consolidation and releases its guard after an unwind, preventing duplicate facts and allowing later automatic consolidation to continue; episodes retaining identical tool calls are deduplicated before applying budgets, while distinct tasks and recovery episodes remain separate (#8303, #8305)
+- **agent-memory**: Skips sanitized search-length markers when deriving interests and user profiles, preventing new `len=N` interests while preserving legacy recorded queries; previously generated junk facts remain and can be removed with `memory_forget` (#7928)
+- **agent-memory**: Preserves frontmatter metadata when a closing fence has no trailing newline, so export/import retains IDs and categories and summaries and profiles do not treat metadata as body text (#8687)
+- **agent-memory**: Preserves Chinese text, accents, and emoji when OpenClaw receives a reply split across pipe chunks, and releases the MCP worker after a failed initialization handshake before retrying, preventing corrupted tool results and orphaned processes (#8454, #8543)
+- **agent-memory**: Rejects invalid time-decay settings before service startup and ignores non-finite environment overrides with a warning, preventing broken recency rankings. Before upgrading, correct file settings to finite `time_decay_lambda >= 0` and `time_decay_alpha` in `[0, 1]`; invalid file settings now stop startup (#8701, #8699)
+- **agent-memory**: Keeps namespace initialization failures fatal on retry when user/group mappings were not completed, preventing a retry from starting the service with an incomplete isolation setup (#8439)
+
 ## [0.2.10] - 2026-10-15
 
 ### Added
@@ -33,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **agent-memory**: **Breaking change:** renames the OpenClaw tools to `anolisa_memory_search` and `anolisa_memory_get`, agents can access ANOLISA memories alongside OpenClaw's own memory tools without name conflicts; update prompts and tool allowlists, restart the gateway, and start a new conversation. Internal MCP names and stored memories are unchanged (#3347)
-- **agent-memory**: Declares all four plugin tools in OpenClaw's `coding` profile, agents retain access to the plugin tools under that profile without disabling `memory-core`; custom policies still need explicit tool entries, and disable markers from intermediate installers require the manual recovery described in the [user guide](../../docs/user-guide/en/token-saving/agent-memory.md) (#3347)
+- **agent-memory**: Declares all four plugin tools in OpenClaw's `coding` profile, agents retain access to the plugin tools under that profile without disabling `memory-core`; custom policies still need explicit tool entries, and disable markers from intermediate installers require the manual recovery described in the [user guide](../../docs/user-guide/en/agent-memory/index.md) (#3347)
 
 ### Fixed
 

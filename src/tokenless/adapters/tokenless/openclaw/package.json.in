@@ -12,7 +12,7 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc --project tsconfig.json && cp ../common/hooks/tool_categories.json dist/"
+    "build": "npm run clean && tsc --project tsconfig.json && node -e \"require('node:fs').copyFileSync('../common/hooks/tool_categories.json', 'dist/tool_categories.json')\""
   },
   "peerDependencies": {
     "tokenless": ">=0.1.0"

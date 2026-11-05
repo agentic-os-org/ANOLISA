@@ -86,8 +86,11 @@ git -C "$SOURCE_REPO" worktree lock --reason 'sec-core prebuilt package build' \
     "$FIXED_WORKTREE"
 
 COMPONENT_ROOT="$FIXED_WORKTREE/src/agent-sec-core"
+CONTRACT_DIR="$COMPONENT_ROOT/packaging/anolisa"
+# Historical tagged sources retain their original contract directory.
+[ -d "$CONTRACT_DIR" ] || CONTRACT_DIR="$COMPONENT_ROOT/.anolisa"
 COMPONENT_VERSION="$(python3 "$COMPONENT_ROOT/packaging/raw/verify_release.py" \
-    "$COMPONENT_ROOT" "$COMPONENT_ROOT/.anolisa/component.toml")"
+    "$COMPONENT_ROOT" "$CONTRACT_DIR/component.toml")"
 [ "$VERSION" = "$COMPONENT_VERSION" ] || \
     die "requested version $VERSION does not match sec-core $COMPONENT_VERSION"
 if [ -e "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
@@ -122,7 +125,7 @@ for binary in agent-sec-cli agent-sec-daemon agent-sec-daemon-health; do
     python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --max 2.28 \
         "$BUILD_DIR/v2/bin/$binary"
 done
-python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --max 2.28 \
+python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --require-static \
     "$BUILD_DIR/linux-sandbox"
 python3 "$COMMON_DIR/verify-glibc.py" --arch "$TARGET_ARCH" --max 2.28 \
     "$BUILD_DIR/python-runtime/bin/python3.11"

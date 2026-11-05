@@ -19,9 +19,12 @@ use std::{
 };
 use support::{Fixture, Service};
 
+#[path = "pretool/tool_scope.rs"]
+mod tool_scope;
+
 fn blocked(adapter: &str, output: &std::process::Output) -> bool {
     match adapter {
-        "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" => {
+        "qoder-sdk" | "qoder" | "qwenpaw" | "agentscope" | "hermes" | "claude-sdk" => {
             output.status.code() == Some(2)
         }
         _ => serde_json::from_slice::<Value>(&output.stdout).unwrap()["block"] == true,
@@ -66,6 +69,7 @@ print(json.dumps(reply))
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            failure_actions: Default::default(),
                             adapter: adapter.into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),
@@ -129,7 +133,7 @@ print(json.dumps(reply))
                 // SDK chains stop at a veto; the service must close unvisited steps.
                 if matches!(
                     adapter,
-                    "pi" | "claude-sdk" | "agentscope" | "qwenpaw" | "openclaw"
+                    "qoder-sdk" | "pi" | "claude-sdk" | "agentscope" | "qwenpaw" | "openclaw"
                 ) && blocked(adapter, outputs.last().unwrap())
                 {
                     break;
@@ -149,7 +153,9 @@ print(json.dumps(reply))
             );
             assert_eq!(
                 blocked(adapter, &outputs[0]),
-                matches!(attempt, "retry" | "error")
+                matches!(attempt, "retry" | "error"),
+                "{adapter}/{attempt}: {:?}",
+                outputs[0]
             );
             assert_eq!(
                 String::from_utf8_lossy(&outputs[0].stderr).contains("aw hook failed"),

@@ -40,6 +40,8 @@
     "tools": [
       "Bash",
       "bash",
+      "PowerShell",
+      "powershell",
       "Shell",
       "shell",
       "exec",

@@ -5,6 +5,57 @@ use std::os::unix::process::ExitStatusExt;
 
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_cli_remote_bashrc_startup_counts_match_native_bash() {
+    let counts = |binary: &str, args: &[&str], socket_stdin: bool| {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join(".bashrc"),
+            "printf 'hit\\n' >> \"$HOME/bashrc-hits\"\n",
+        )
+        .unwrap();
+        ["true", ". ~/.bashrc"].map(|script| {
+            let (input, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let stdin = if socket_stdin {
+                Stdio::from(OwnedFd::from(input))
+            } else {
+                Stdio::null()
+            };
+            let output = Command::new(binary)
+                .args(args)
+                .args(["-c", script])
+                .env_clear()
+                .env("HOME", home.path())
+                .env("PATH", "/usr/bin:/bin")
+                .env("SSH_CLIENT", "127.0.0.1 12345 22")
+                .env("SHLVL", "0")
+                .stdin(stdin)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            fs::read_to_string(home.path().join("bashrc-hits"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        })
+    };
+    for socket_stdin in [false, true] {
+        let native = counts("/bin/bash", &[], socket_stdin);
+        assert_eq!(native[1], native[0] * 2 + 1);
+        assert_eq!(
+            counts(
+                env!("CARGO_BIN_EXE_cosh-shell"),
+                &["--shell", "bash"],
+                socket_stdin
+            ),
+            native
+        );
+    }
+}
+
 #[test]
 fn raw_cli_double_dash_passthrough_executes_command_directly() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");

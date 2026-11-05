@@ -28,7 +28,8 @@
 /src/agent-sec-core/skills/             @1570005763                 # auto-label: component:sec-core
 /src/agent-sec-core/Makefile             @yangdao479                 # auto-label: component:sec-core
 /src/agent-sec-core/*.spec.in           @yangdao479                 # auto-label: component:sec-core
-/src/os-skills/                         @Ziqi002                    # auto-label: component:skill
+/src/agent-sec-core/packaging/*.mk       @yangdao479                 # auto-label: component:sec-core
+/src/os-skills/                         @zkl123                     # auto-label: component:skill
 /src/ws-ckpt/                           @yummypeng @Ziqi002         # auto-label: component:ckpt
 /src/ktuner/                            @jfeng18                    # auto-label: component:ktuner
 /src/tokenless/                         @Forrest-ly @ikunkun-sys    # auto-label: component:tokenless
@@ -59,3 +60,6 @@
 # ws-ckpt prebuilt build and packaging ownership
 /.github/actions/build-ws-ckpt-prebuilt/ @yummypeng
 /.github/workflows/ws-ckpt-prebuilt-ci.yaml @yummypeng
+
+# Shared benchmark runners and their documentation.
+/benchmark/                             @alex-yuxi                 # auto-label: component:benchmark

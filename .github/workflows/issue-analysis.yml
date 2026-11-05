@@ -1,0 +1,99 @@
+name: AI / Issue Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Analyze one issue or a bounded historical batch
+        type: choice
+        options: [single, batch]
+        default: single
+      issue_number:
+        description: Issue number for single mode
+        type: number
+        default: 0
+      max_issues:
+        description: Maximum issues in a historical batch (1-25)
+        type: number
+        default: 10
+      target_ref:
+        description: Source branch, tag or full SHA
+        type: string
+        default: main
+      publish:
+        description: Publish reviewed results and priority labels
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: number
+      target_ref:
+        default: main
+        type: string
+      publish:
+        default: false
+        type: boolean
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN:
+        required: true
+      DINGTALK_WEBHOOK:
+        required: false
+      DINGTALK_SECRET:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    if: github.repository_id == '1195873793'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      issues: ${{ steps.select.outputs.issues }}
+      has_issues: ${{ steps.select.outputs.has_issues }}
+      target_sha: ${{ steps.select.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        id: select
+        env:
+          ISSUE_ANALYSIS_COMPONENTS: ${{ vars.ISSUE_ANALYSIS_COMPONENTS }}
+          INPUT_MODE: ${{ inputs.mode || 'single' }}
+          INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          INPUT_MAX_ISSUES: ${{ inputs.max_issues }}
+          INPUT_TARGET_REF: ${{ inputs.target_ref }}
+        with:
+          script: |
+            const { discover } = require('${{ github.workspace }}/.github/scripts/issue-analysis-discovery');
+            await discover({ github, context, core, env: process.env });
+
+  analyze:
+    needs: select
+    if: needs.select.outputs.has_issues == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        issue_number: ${{ fromJSON(needs.select.outputs.issues) }}
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    uses: ./.github/workflows/issue-analysis-worker.yml
+    with:
+      issue_number: ${{ matrix.issue_number }}
+      target_ref: ${{ needs.select.outputs.target_sha }}
+      publish: ${{ inputs.publish }}
+      skip_completed: ${{ inputs.mode == 'batch' }}
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}

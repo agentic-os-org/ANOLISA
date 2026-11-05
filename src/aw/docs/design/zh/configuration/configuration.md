@@ -2,7 +2,7 @@
 
 [English](../../en/configuration/configuration.md)
 
-[设计索引](../README.md) · [架构总览](../../../../../../docs/developer-guide/zh/aw/architecture.md)
+[设计索引](../README.md) · [架构总览](../architecture.md)
 
 `aw-config` 负责期望配置解析；`aw-contracts` 继续负责能力 wire Schema、canonical
 编码和记录约束。用户配置不修改已有 Schema，也不能让现有 Registry 将任意

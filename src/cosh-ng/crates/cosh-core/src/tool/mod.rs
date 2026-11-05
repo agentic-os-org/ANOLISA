@@ -409,7 +409,7 @@ impl ToolRegistry {
     /// Convenience constructor for tests that don't need a real SkillManager.
     #[cfg(test)]
     pub fn with_defaults_for_test() -> Self {
-        let mgr = SkillManager::new(PathBuf::from("/tmp"), vec![], vec![]);
+        let mgr = SkillManager::new(PathBuf::from("/tmp"), vec![], vec![], vec![]);
         Self::with_defaults(mgr)
     }
 

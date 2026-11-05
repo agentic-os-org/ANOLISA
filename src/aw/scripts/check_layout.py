@@ -8,28 +8,26 @@ def structure(metadata: dict, root: Path) -> None:
     """Keep the reviewed crate boundaries and source sizes explicit."""
     allowed = {
         "aw-cli": {
-            "aw-adapter", "aw-config", "aw-contracts", "aw-exec", "aw-host", "aw-package",
-            "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde", "serde_json",
-            "serde_yaml_ng", "sha2", "tempfile",
+            "aw-adapter", "aw-config", "aw-contracts", "aw-core", "aw-exec", "aw-host",
+            "aw-package", "aw-provider", "aw-service", "clap", "clap_complete", "libc", "serde",
+            "serde_json", "serde_yaml_ng", "sha2", "tempfile", "reqwest",
         },
         "aw-adapter": {
-            "aw-config", "aw-contracts", "aw-exec", "aw-provider",
+            "aw-config", "aw-contracts", "aw-core", "aw-exec", "aw-provider",
             "serde", "serde_json", "serde_yaml_ng", "sha2", "thiserror",
-            "libc", "semver", "tempfile",
+            "libc", "semver", "tempfile", "reqwest",
         },
         "aw-package": {
             "serde",
             "serde_json",
             "serde_yaml_ng",
-            "sha2",
-            "thiserror",
             "libc",
-            "flate2",
-            "tar",
             "tempfile",
             "aw-config",
             "aw-exec",
             "aw-service",
+            "sha2",
+            "thiserror",
         },
         "aw-provider-tokenless": {
             "aw-exec",
@@ -44,6 +42,10 @@ def structure(metadata: dict, root: Path) -> None:
             "aw-provider-sec-core",
         },
         "aw-provider-sec-core": {
+            "serde_yaml_ng",
+            "aw-host",
+            "aw-adapter",
+            "aw-package",
             "aw-exec",
             "aw-provider",
             "serde",
@@ -53,11 +55,15 @@ def structure(metadata: dict, root: Path) -> None:
             "jsonschema",
         },
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
-        "aw-core": {"aw-contracts", "serde_json", "thiserror"},
+        "aw-core": {
+            "aw-config", "aw-contracts", "aw-provider", "serde_json", "sha2", "thiserror",
+        },
         "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
         "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-exec": {"libc", "thiserror"},
-        "aw-host": {"aw-config", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror"},
+        "aw-host": {
+            "aw-config", "aw-core", "aw-exec", "aw-provider", "serde_json", "sha2", "thiserror",
+        },
         "aw-service": {
             "aw-adapter",
             "aw-contracts",
@@ -76,6 +82,8 @@ def structure(metadata: dict, root: Path) -> None:
             "tempfile",
         },
     }
+    if metadata.get("shared_workspaces"):
+        raise ValueError("AW storage and runtime must remain inside framework crates")
     members = {
         p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]
     }
@@ -97,16 +105,29 @@ def structure(metadata: dict, root: Path) -> None:
         members[name] = package
     locations = {name: root / "crates" / name for name in allowed}
     locations.update({name: root.parents[1] / "providers" / directory for name, directory in providers.items()})
+    binaries = {
+        "aw-cli": {"aw"},
+        **{name: {name} for name in providers},
+    }
     for name, package in members.items():
         directory = locations[name]
         if Path(package["manifest_path"]).resolve() != (directory / "Cargo.toml").resolve():
             raise ValueError(f"{name}: workspace crate moved outside its reviewed location")
         source_roots = [directory / kind for kind in ("src", "tests", "examples")]
+        actual_binaries = {
+            target["name"] for target in package["targets"] if "bin" in target.get("kind", [])
+        }
+        if actual_binaries != binaries.get(name, set()):
+            raise ValueError(f"{name}: executable targets changed; review CLI ownership")
         for target in package["targets"]:
             source = Path(target["src_path"]).resolve()
             if not any(source.is_relative_to(path.resolve()) for path in source_roots):
                 raise ValueError(f"{name}: Cargo target is outside the audited source layout")
         for dependency in package["dependencies"]:
+            if (name == "aw-provider-sec-core"
+                    and dependency["name"] in {"aw-host", "aw-adapter", "aw-package", "serde_yaml_ng"}
+                    and dependency.get("kind") != "dev"):
+                raise ValueError("sec-core coverage consumers must remain test-only dependencies")
             if dependency["name"] not in allowed[name]:
                 raise ValueError(f"{name}: unreviewed dependency {dependency['name']}")
             if dependency["name"] in locations:
@@ -124,6 +145,7 @@ def structure(metadata: dict, root: Path) -> None:
     source_sizes(root)
     for name in providers:
         source_sizes(locations[name])
+    source_sizes(root.parents[1] / "distribution/packaging/aw")
 
 
 def source_sizes(root: Path) -> None:

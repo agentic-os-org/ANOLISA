@@ -13,7 +13,12 @@ listed below.
 
 **AgentSecCore (ANOLISA)** is listed in the [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa) with **Aligned** status.
 
-AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-security/owasp-agentic-top10.md).
+AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md).
+
+Rust V2 supports `agent-sec-cli sandbox run --permissions permissions.json -- command`
+for local execution with explicit filesystem and network permissions, without a
+daemon. See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
+for the permission format, runtime requirements and isolation boundaries.
 
 ## Background
 
@@ -37,7 +42,7 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 | **Skill Ledger** | Ed25519-signed skill integrity ledger with an append-only version chain | `agent-sec-cli skill-ledger` |
 | **Observability** | Agent lifecycle event recording, session debrief, and an interactive review TUI | `agent-sec-cli observability` |
 | **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
-| **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
+| **Sandbox** | Command isolation with explicit filesystem and network permissions (bubblewrap + seccomp) | `agent-sec-cli sandbox run` |
 
 The V2 source build installs `agent-sec-daemon` as the host-level
 `agent-sec-core.service` systemd unit. The V2 migration retains the hook-facing
@@ -45,7 +50,11 @@ CLI command and integration capability surface through Rust implementations.
 
 ## V2 SkillSec and Policy CLI
 
-The Rust V2 core adds **SkillSec** behind the existing `skill-ledger` command: local scanners,
+Use `agent-sec-cli skillsec status` or `agent-sec-cli skillsec --help`. The previous
+`skill-ledger` command remains a compatibility alias with identical behavior. Existing Hook
+capability IDs, environment variables and stored data are unchanged.
+
+The Rust V2 core exposes **SkillSec** through `agent-sec-cli skillsec`: local scanners,
 system-key signing, version history, decisions, rollback and SkillFS activation share one root
 daemon. All local users may manage all Skills within the enabled defaults, administrator-configured
 directories or authenticated SkillFS mounts. Default system directories and standard Skill directories
@@ -64,28 +73,59 @@ disablement; revoke them by removing the entries and restarting the daemon.
 The V2 systemd system unit is `agent-sec-core.service`; `agent-sec-daemon` is the executable name.
 Check the service with `sudo systemctl status agent-sec-core.service`.
 
-See the [V2 core guide](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
+See the [V2 core guide](../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
 for configuration, commands and the separate deployment/Agent Hook acceptance boundaries.
 V1 history and per-user keys are not imported. Hook adapters use daemon-owned initialization and
 validated `check`/`show` results while retaining host policies; see the
-[Hook integration boundary](../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md#agent-hook-integration).
+[Hook integration boundary](../../docs/user-guide/en/agent-sec-core/skillsec-v2.md#agent-hook-integration).
 
 Cosh-NG reserves 10 seconds for SkillSec initialization and querying in one Hook invocation.
 
 Rust V2 clients verify the connected daemon's kernel peer UID is 0 before sending requests.
 
 The source-built Rust `agent-sec-cli` provides 12 Policy, Scope and Binding administration
-commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
+commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [V2 workspace](v2/README.md). PAP state persists in SQLite; Binding acceptance does not imply enforcement.
 The default Policy database can fall back to `/var/lib/agent-sec/policy` when its
 `/var/log/agent-sec` ancestors are unsafe; owned leaf permissions are repaired to 0700.
 Conflicting or bypassed existing databases
 refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
-[Policy storage](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md#policy-database-location).
-PolicyTemplates are reusable policies with general rules; the AgentSight Adapter
-currently executes only file-deletion block rules. Scopes save immutable Policy snapshots and
-own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
+[Policy storage](../../docs/user-guide/en/agent-sec-core/policy-cli.md#policy-database-location).
+PolicyTemplates are reusable policies with general rules; the PEP Translator
+supports native JSON file-deletion block rules. Policy create/update also accepts Cedar
+source envelopes with an exact schema reference. Cedar admission and source persistence are
+available; Cedar `forbid` deletion/ordinary-write restrictions can be translated and deployed. Native JSON requests and saved
+snapshots retain their format. Scopes save immutable Policy snapshots and own automatic
+Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
 the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
+
+**Breaking change:** `scope create --cgroup-id` has been removed because cgroup
+assignments were not supported. Update scripts to select the intended processes
+with `--pid`, `--process-name`, or `--executable`.
+
+The V2 **Secret Gateway preview** keeps real GitHub credentials out of Agent processes.
+The V2 `agent-sec-core` RPM starts the base daemon automatically but leaves the gateway off; root installs
+mitmproxy explicitly. Raw packages include the same gateway assets but start neither service; the daemon
+alone controls the gateway lifecycle, and uninstall refuses to proceed if routing withdrawal fails.
+`gateway key add github --secret-file /root/github.token` imports without granting access: the same
+secret is idempotent, and a different value is rejected without overwrite.
+Replacement requires remove then add, a new Scope and updated Agent configuration; old fakes are
+permanently retired, with no automatic rotation. Existing native Policy JSON authorizes `network/use_credential` HTTPS
+requests, and a Scope pins that Policy revision with a non-root owner and process selector.
+Prepare the Scope, enable the gateway, query `gateway credentials --scope <scopeId>` as its owner,
+and configure the Agent's fake and CA before starting it. Discovery automatically attaches matching
+instances; it does not guarantee first-packet protection. Instance restarts retain the Scope fake;
+Scope deletion revokes only its fakes, while `gateway key remove github` retires the credential globally.
+Read-only status and credential queries are UID-scoped: status returns `{enabled, ready, scopes}`
+with `{scopeId, bindings}` entries, and credentials returns `{scopeId, environment}`. `ready` requires
+an enabled gateway, a passing read-only cgroup v2 check, active proxy unit, matching loaded generation
+and available CA. Enable checks cgroup v2 before changing enabled state; publication (including enabled
+recovery), enabled status queries and credential queries recheck it. Default-off recovery skips this
+preflight. No cgroup v1 fallback or mount changes occur; nftables `socket cgroupv2` is checked only by
+actual rule application, not an independent preflight. Wait separately for instance Binding `READY`.
+Key list returns active IDs only (`{"credentials":["github"]}`); add/remove return `{"credential":"github"}` and
+successful enable/disable return `{}`. See the
+[Secret Gateway design (Chinese)](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md).
 
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an
@@ -152,7 +192,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrappers and CI helpers
 ├── docs/design/               # Design documents
 ├── tests/                     # Unit, integration, packaging, and e2e tests
-├── .anolisa/component.toml    # ANOLISA component contract
+├── packaging/anolisa/         # ANOLISA component contract
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM packaging spec template
@@ -234,7 +274,7 @@ agent-sec-cli --version
 `agent-sec-core`:
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 
@@ -258,7 +298,7 @@ install command and exits; install them and rerun the same command.
 
 The source build does not register the component in ANOLISA state. Use the
 installed integration scripts instead of `anolisa adapter enable`; see
-[Source-build Integration](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#source-build-integration).
+[Source-build Integration](../../docs/user-guide/en/agent-sec-core/index.md#source-build-integration).
 
 An ANOLISA-managed raw package or adopted RPM places the framework adapters.
 Enable one as the user who owns the target framework configuration:
@@ -291,7 +331,7 @@ agent-sec-cli events --summary
 ```
 
 Full CLI reference and per-host integration steps:
-[AgentSecCore User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md).
+[AgentSecCore User Guide](../../docs/user-guide/en/agent-sec-core/index.md).
 
 ## Prompt Scanner
 
@@ -324,11 +364,11 @@ with `--model` or `PROMPT_SCANNER_L2_MODEL` (`--model` wins). Only one backend
 runs at a time and each needs its own `ollama pull`. `warmup` checks that Ollama
 can serve the selected model; it never downloads models automatically.
 
-Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/prompt-scanner.md).
+Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-sec-core/prompt-scanner.md).
 
 The V2 packages include `agent-sec-daemon-health`, a lightweight Rust probe that
 authenticates the daemon's UID before sending a health request. See the
-[probe reference](../../docs/user-guide/en/agent-security/agent-sec-core/internal-commands.md#agent-sec-daemon-health).
+[probe reference](../../docs/user-guide/en/agent-sec-core/internal-commands.md#agent-sec-daemon-health).
 
 ## Code Scanner
 
@@ -365,7 +405,7 @@ return a parseable `error` result; `DENY` returns a successful `warn` result.
 requiring them remain deferred.
 
 Full daemon endpoint, CLI, and host-hook status:
-[Code Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
+[Code Scanner User Guide](../../docs/user-guide/en/agent-sec-core/code-scanner.md).
 
 ## PII Checker
 
@@ -384,7 +424,7 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 loads custom business rules from `/etc/agent-sec/pii-checker/rules.yaml` at daemon startup;
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` selects an alternative. Restart to update.
-V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.0.0"`;
+V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.1.1"`;
 a `pass` result with partial coverage does not establish complete detection. This phase preserves
 Hook contracts without switching live hosts or adding PDP enforcement.
 The shared CLI `--trace-context` adapter propagates attribution through the top-level OTel
@@ -395,7 +435,10 @@ this input hook scans only the current `prompt`, excluding system prompts and hi
 Older supported hosts retain inbound scanning. Input blocking depends on policy,
 and tool-output hooks remain observation-only.
 
-Details: [PII Checker User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md).
+Fixture words such as `test` lower confidence only when matched as whole words.
+`latest 13812345678` retains its phone finding; `test-only` keeps its existing fixture treatment.
+
+Details: [PII Checker User Guide](../../docs/user-guide/en/agent-sec-core/pii-checker.md).
 
 ## Skill Ledger
 
@@ -494,7 +537,7 @@ from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and applies 
 alias for `observe`, while `deny` is an alias for `block`. Each
 check carries Qoder trace identifiers into the security audit log.
 
-Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md)
+Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-sec-core/skill-ledger.md)
 
 ## Agent Capability View
 
@@ -540,7 +583,7 @@ agent-sec-cli observability report --session-id <id> --format json
 agent-sec-cli observability schema
 ```
 
-Details: [Observability User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#observability).
+Details: [Observability User Guide](../../docs/user-guide/en/agent-sec-core/index.md#observability).
 
 ## Security Events
 
@@ -558,13 +601,13 @@ agent-sec-cli events --count-by category --last-hours 24
 agent-sec-cli events --summary
 ```
 
-Details: [Security Events User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#security-events).
+Details: [Security Events User Guide](../../docs/user-guide/en/agent-sec-core/index.md#security-events).
 
 ## Agent Hook Environment Variables
 
 The host hook matrix is maintained in the user guide to keep one authoritative
 source for environment variables and host-specific mode semantics:
-[Agent Hook Environment Variables](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#agent-hook-environment-variables).
+[Agent Hook Environment Variables](../../docs/user-guide/en/agent-sec-core/index.md#agent-hook-environment-variables).
 
 ## Development
 

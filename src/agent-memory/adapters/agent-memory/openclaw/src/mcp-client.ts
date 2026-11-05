@@ -132,6 +132,7 @@ export class McpStdioClient {
   private pending: Map<number, PendingCall> = new Map();
   private buffer = "";
   private initialized = false;
+  private disposed = false;
   private respawnAttempts = 0;
   private giveUp = false;
   private startingPromise: Promise<void> | null = null;
@@ -148,6 +149,9 @@ export class McpStdioClient {
 
   /** Lazy-start: spawn + initialize on first use. */
   private async ensureStarted(): Promise<void> {
+    if (this.disposed) {
+      throw new Error("agent-memory client is disposed");
+    }
     if (this.giveUp) {
       throw new Error(
         `agent-memory process repeatedly crashed; gave up after ${MAX_RESPAWN_ATTEMPTS} respawn attempts`,
@@ -265,12 +269,22 @@ export class McpStdioClient {
       detached: false,
     });
 
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
-      this.handleData(chunk.toString("utf8"));
+    // Decode both child streams through the stream's own incremental UTF-8
+    // decoder. A pipe can split one JSON-RPC reply anywhere, including inside
+    // a multibyte character, and decoding each Buffer chunk on its own turns
+    // both halves of that character into U+FFFD before JSON.parse ever runs —
+    // silently corrupting Chinese text, accents and emoji in tool results.
+    // setEncoding("utf8") keeps a trailing partial code point buffered until
+    // its remaining bytes arrive; the newline framing in handleData is
+    // unchanged, and each spawn gets a fresh stream decoder.
+    this.proc.stdout?.setEncoding("utf8");
+    this.proc.stdout?.on("data", (chunk: string) => {
+      this.handleData(chunk);
     });
 
-    this.proc.stderr?.on("data", (chunk: Buffer) => {
-      this.appendStderr(chunk.toString("utf8"));
+    this.proc.stderr?.setEncoding("utf8");
+    this.proc.stderr?.on("data", (chunk: string) => {
+      this.appendStderr(chunk);
     });
 
     this.proc.on("exit", (code, signal) => {
@@ -509,7 +523,15 @@ export class McpStdioClient {
 
   private deliberateStop = false;
 
-  /** Gracefully shut down the child process. */
+  /** Permanently retire this plugin instance and shut down its worker. */
+  async dispose(): Promise<void> {
+    // In-flight hooks can continue after shutdown rejects or completes an RPC.
+    // Retire before awaiting exit so their next query cannot restart this client.
+    this.disposed = true;
+    await this.stop();
+  }
+
+  /** Gracefully shut down the worker, allowing a later startup retry. */
   async stop(): Promise<void> {
     const child = this.proc;
     if (!child) {

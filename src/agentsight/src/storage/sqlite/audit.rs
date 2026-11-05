@@ -602,6 +602,7 @@ mod tests {
                 filename: Some("/bin/bash".to_string()),
                 args: Some("echo hi".to_string()),
                 exit_code: None,
+                signal: None,
             },
             session_id: Some("sess-abc-123".to_string()),
         };
@@ -651,6 +652,7 @@ mod tests {
                 filename: Some("/bin/ls".to_string()),
                 args: Some("ls -la".to_string()),
                 exit_code: Some(0),
+                signal: None,
             },
             session_id: None,
         };
@@ -743,6 +745,7 @@ mod tests {
                         filename: None,
                         args: Some(format!("cmd-{index:02}")),
                         exit_code: Some(0),
+                        signal: None,
                     },
                     session_id: None,
                 })
@@ -843,6 +846,7 @@ mod tests {
                 filename: Some("/bin/true".to_string()),
                 args: None,
                 exit_code: Some(0),
+                signal: None,
             },
             session_id: None,
         }

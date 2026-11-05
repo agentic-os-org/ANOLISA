@@ -11,7 +11,7 @@
       "requirements": [
         "agentscope==2.0.6"
       ],
-      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model.",
+      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model. Strict tool.after withholding replaces an unchecked native result with an error-state placeholder at the end of the middleware chain on timeout, hook error and invalid reply, keeping the original payload correlated for outer after hooks, and requires SDK 2.0.6+. Long histories recycle correlation capacity through the invocation ledger: 600 sequential tool calls in one worker complete past the legacy 512-call limit, and replayed registrations are rejected.",
       "cases": [
         {
           "name": "middleware",
@@ -21,7 +21,7 @@
           ],
           "timeout_seconds": 120,
           "report": "unittest",
-          "tests": 26
+          "tests": 38
         },
         {
           "name": "native",
@@ -140,6 +140,59 @@
               }
             }
           ]
+        },
+        {
+          "name": "long-calls",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/agentscope_long_calls.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/long-calls"
+          ],
+          "timeout_seconds": 400,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/long-calls/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "calls": 600,
+                "states": [
+                  "success"
+                ],
+                "hook_calls": 600,
+                "replay_rejected": true,
+                "bindings": 0,
+                "events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/agentscope_strict.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/strict"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict/result.json",
+              "values": {
+                "sdk_version": "2.0.6",
+                "withheld": 3,
+                "healthy": 1,
+                "observer_callbacks": 4
+              }
+            }
+          ]
         }
       ]
     },
@@ -149,13 +202,15 @@
       "mode": "automated",
       "versions": {
         "claude-agent-sdk": "0.2.88",
-        "mcp": "1.26.0"
+        "mcp": "1.26.0",
+        "httpx": "0.28.1"
       },
       "requirements": [
         "claude-agent-sdk==0.2.88",
-        "mcp==1.26.0"
+        "mcp==1.26.0",
+        "httpx==0.28.1"
       ],
-      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model.",
+      "boundary": "SDK and bundled CLI 2.1.161 with a deterministic local HTTP model, permissions, native hooks and real Tokenless; no hosted model. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Native cancelled custom-Hook asynchronous cleanup blocks terminal delivery and subsequent queries; the same client resumes after drain. Native user/project/local and inline settings, project Skills, local plugin command discovery, and HTTP MCP with a tenant header coexist with AW tool Hooks. CLI-loaded inline/project/plugin rewrite cases demonstrate that only the public Hook input is checked and ordinary rewritten Bash commands can execute without a final AW check; AW denial still prevents execution. Native HTTP MCP tool.after compression projects the model-visible string (structuredContent serialization or single text block) and the bundled CLI adopts the string replacement in the next model request; a report fault keeps the original projection.",
       "cases": [
         {
           "name": "sdk-cli",
@@ -216,8 +271,722 @@
                   "bash-compress-tool-failure",
                   "bash-pretool",
                   "bash-pretool-deny",
-                  "mcp-error-compress"
+                  "mcp-error-compress",
+                  "http-mcp",
+                  "http-mcp-compress-failure",
+                  "http-mcp-compress",
+                  "http-mcp-error-compress",
+                  "settings-disabled-hooks",
+                  "settings-native-deny",
+                  "bash-native-rewrite-inline",
+                  "bash-native-rewrite-inline-deny",
+                  "bash-native-rewrite-project",
+                  "bash-native-rewrite-project-deny",
+                  "bash-native-rewrite-plugin",
+                  "bash-native-rewrite-plugin-deny"
                 ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-lifecycle",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-lifecycle",
+            "--scenario",
+            "lifecycle"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-lifecycle/result.json",
+              "values": {
+                "tasks": 26,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-model-settings",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-model-settings",
+            "--scenario",
+            "settings"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-model-settings/result.json",
+              "values": {
+                "tasks": 8,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "concurrent_settings_clients": 2
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-cancel",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-cancel",
+            "--scenario",
+            "cancel"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-cancel/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-startup",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-startup",
+            "--scenario",
+            "startup"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-startup/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "validation-error",
+                  "mcp-owned-server",
+                  "mcp-duplicate-alias",
+                  "mcp-sdk-error",
+                  "initialize-error-concurrent-close",
+                  "initialize-cancel",
+                  "acknowledge-cancel",
+                  "acknowledge-expired"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-stop-failure",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-stop-failure",
+            "--scenario",
+            "stop-failure"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-stop-failure/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-messages",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-messages",
+            "--scenario",
+            "messages"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-messages/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "response-complete",
+                  "messages-complete",
+                  "response-eof",
+                  "messages-eof"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-eof-stop-failure",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-eof-stop-failure",
+            "--scenario",
+            "eof-stop-failure"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-eof-stop-failure/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "tasks": 1
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-observation",
+            "--scenario",
+            "observation"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "rejected_before_ready": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation-off",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--output",
+            "{output}/resident-observation-off",
+            "--scenario",
+            "startup",
+            "--evidence-mode",
+            "off"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation-off/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "validation-error",
+                  "mcp-owned-server",
+                  "mcp-duplicate-alias",
+                  "mcp-sdk-error",
+                  "initialize-error-concurrent-close",
+                  "initialize-cancel",
+                  "acknowledge-cancel",
+                  "acknowledge-expired"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "managed-mcp",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "mcp",
+            "--output",
+            "{output}/managed-mcp",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/managed-mcp/result.json",
+              "values": {
+                "tasks": 18,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "mode",
+                "names": [
+                  "allow",
+                  "deny",
+                  "before-error",
+                  "after-error",
+                  "error",
+                  "multi",
+                  "structured",
+                  "exception",
+                  "parallel",
+                  "mutation-outer",
+                  "mutation-instance",
+                  "mutation-clear",
+                  "mutation-cross-client",
+                  "result-mutation",
+                  "result-control",
+                  "mutation-tool-name",
+                  "mutation-tool-handler",
+                  "mutation-server-key"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "managed-mcp-failure",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "mcp-failure",
+            "--output",
+            "{output}/managed-mcp-failure",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/managed-mcp-failure/result.json",
+              "values": {
+                "tasks": 2,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "scenario": "mcp-failure"
+              },
+              "cases": {
+                "at": "cases",
+                "key": "mode",
+                "names": [
+                  "compress-error",
+                  "compress-recovery"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-long",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "long",
+            "--output",
+            "{output}/resident-long",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 1900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-long/result.json",
+              "values": {
+                "tasks": 1,
+                "calls": 1280,
+                "executions": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "status/resources/usage/invocations": 0,
+                "status/resources/usage/correlations": 0,
+                "mcp_calls": 640,
+                "native_calls": 640
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-drain",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "drain",
+            "--output",
+            "{output}/resident-drain"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-drain/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "cases": [
+                  "cancelled-callback-finally-drained",
+                  "result-withheld-until-drain",
+                  "query-rejected-during-drain",
+                  "same-client-stream-input-reuse",
+                  "multi-input-rejected-before-send",
+                  "idle-relay-peer-does-not-delay-disconnect"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-drain-timeout",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "drain-timeout",
+            "--output",
+            "{output}/resident-drain-timeout"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-drain-timeout/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "cases": [
+                  "undrained-callback-terminates-owned-group"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "model-relay-contract",
+          "argv": [
+            "{python}",
+            "tests/fixtures/model_relay_contract.py"
+          ],
+          "timeout_seconds": 60,
+          "report": "unittest",
+          "tests": 20
+        },
+        {
+          "name": "dispatch-contract",
+          "argv": [
+            "{python}",
+            "tests/fixtures/dispatch_contract.py"
+          ],
+          "timeout_seconds": 60,
+          "report": "unittest",
+          "tests": 4
+        },
+        {
+          "name": "resident-store",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "store",
+            "--output",
+            "{output}/resident-store"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-store/result.json",
+              "values": {
+                "tasks": 2,
+                "executions": 4,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "cases": [
+                  "store-mirror",
+                  "store-resume",
+                  "materialized-cleanup"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-native-denial",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "denial",
+            "--output",
+            "{output}/resident-native-denial"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-native-denial/result.json",
+              "values": {
+                "tasks": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "native-hook-deny",
+                  "permission-deny",
+                  "mcp-native-deny",
+                  "native-input-validation",
+                  "native-permission-rule"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-model-boundaries",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "boundaries",
+            "--output",
+            "{output}/resident-model-boundaries"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-model-boundaries/result.json",
+              "values": {
+                "tasks": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "interrupt-text-stream",
+                  "interrupt-tool-stream",
+                  "number-integral-float",
+                  "number-exponent",
+                  "number-large-integer"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-report",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "report",
+            "--output",
+            "{output}/resident-report",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-report/result.json",
+              "values": {
+                "passed": true,
+                "tasks": 15,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "http-allow",
+                  "http-tokenless-error",
+                  "http-after-error",
+                  "http-after-timeout",
+                  "http-after-invalid",
+                  "http-structured-allow",
+                  "http-structured-tokenless-error",
+                  "http-structured-after-error",
+                  "http-structured-after-timeout",
+                  "http-structured-after-invalid",
+                  "bash-allow",
+                  "bash-tokenless-error",
+                  "bash-after-error",
+                  "bash-after-timeout",
+                  "bash-after-invalid"
+                ],
+                "values": {
+                  "passed": true,
+                  "turns": 2
+                }
               }
             }
           ]
@@ -325,7 +1094,7 @@
       "mode": "automated",
       "versions": {},
       "npm_fixture": "crates/aw-cli/tests/fixtures/pi",
-      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures.",
+      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup.",
       "cases": [
         {
           "name": "public-factory",
@@ -425,6 +1194,313 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-lifecycle",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-lifecycle",
+            "--scenario",
+            "lifecycle",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 650,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-lifecycle/result.json",
+              "values": {
+                "tasks": 26,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-long",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--scenario",
+            "long",
+            "--output",
+            "{output}/resident-long",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 1900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-long/result.json",
+              "values": {
+                "tasks": 1,
+                "calls": 1280,
+                "executions": 5,
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "status/resources/usage/invocations": 0,
+                "status/resources/usage/correlations": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-startup",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-startup",
+            "--scenario",
+            "startup",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-startup/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "acknowledge-expired",
+                  "invalid-native-stream-rejected",
+                  "worker-reuse"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-cancel",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-cancel",
+            "--scenario",
+            "cancel",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-cancel/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel-before-tool",
+                  "cancel-after-tool",
+                  "cancel-executing-tool",
+                  "abort-before-tool",
+                  "abort-after-tool"
+                ],
+                "values": {
+                  "passed": true,
+                  "model_requests": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-drain",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-drain",
+            "--scenario",
+            "drain",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 90,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-drain/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "drain-success",
+                  "drain-reject",
+                  "drain-timeout"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-close-timeout",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-close-timeout",
+            "--scenario",
+            "close-timeout",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-close-timeout/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel-tool-timeout"
+                ],
+                "values": {
+                  "passed": true,
+                  "model_requests": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-observation",
+            "--scenario",
+            "observation",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0,
+                "rejected_before_ready": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-observation-off",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "pi",
+            "--output",
+            "{output}/resident-observation-off",
+            "--scenario",
+            "startup",
+            "--npm",
+            "{npm}",
+            "--evidence-mode",
+            "off"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-observation-off/result.json",
+              "values": {
+                "passed": true,
+                "status/bindings": 0,
+                "status/events": 0
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "acknowledge-expired",
+                  "invalid-native-stream-rejected",
+                  "worker-reuse"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -433,14 +1509,14 @@
       "python": "3.12.3",
       "mode": "automated",
       "versions": {
-        "qwenpaw": "2.2.2b4",
-        "agentscope": "2.0.9"
+        "qwenpaw": "2.2.2.post1",
+        "agentscope": "2.0.10"
       },
       "requirements": [
-        "qwenpaw==2.2.2b4",
-        "agentscope==2.0.9"
+        "qwenpaw==2.2.2.post1",
+        "agentscope==2.0.10"
       ],
-      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes.",
+      "boundary": "Pinned stock QwenPaw App/API and AgentScope middleware, with a deterministic local model; native shell allow, scan denial (after exact native approval), backend error and timeout blocking through the candidate sec-core daemon container. No cloud model key. Middleware and real AW RPC suites cover request/tool reload lifetimes, Coordinator consumption, early closure and blocked native cleanup. The App reload suite verifies add/remove/re-add policy switching across real HTTP shell and read_file success/error turns in one process; ERROR and INTERRUPTED chunks remain withheld until native cleanup completes. Native attach starts two stock Apps independently and verifies pre-request registration, first-tool denial, profile isolation, busy detach, cleanup, existing-Session reuse and reattachment without changing PID/start ticks. Ordinary App replies use child scopes through pinned Agent and Coordinator seams; resident tests cover 1025 calls with bounded active capacity, cancellation and original finalizers, private execution environments, exact dispatch input and strict PostTool output withholding. Pinned HTTP output and next-Agent hints are checked across processor, completion and offload barriers, cleanup failures and one shutdown deadline. A real scope CLI/service fixture checks denial text, Tokenless retry instructions and completion. Ordinary resident App startup confirms readiness before its first reply; the native startup seam and real service tests verify pre-first-task updates. Ordinary resident replies support explicit idle policy updates with immutable task snapshots, same-Agent reuse, strict Post and MCP route changes; private lease cleanup retains busy after child closure. Evidence capture is rejected. The separate reloadable path retains its prior idle-update contract. Managed MCP tool resolution adds a real ClientSession tools/call boundary with native-parent identity, full schema/annotations, exact approved arguments and complete structured/multimodal error envelopes; real protocol and AW Provider suites verify denial causes zero server calls and phases execute once. Resident App acceptance compares native and AW startup in one user profile, preserves existing plugin names and configuration, and exercises native MCP create/update/deny/delete while AW covers shell only. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. Fresh text input is checked before native reply admission; pinned native types distinguish confirmation, interruption and external tool-result resumes. Submission tests cover denial, recovery on the next fresh input, failure policy, turn identity and cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded. Skill Ledger acceptance uses the real daemon and stock Skill tools, covering signed/unsigned, drift, damaged signatures, source conflicts, directory authorization failure, unavailable backend and timeout; refusal excludes Skill instructions from native/model delivery.",
       "cases": [
         {
           "name": "middleware",
@@ -450,7 +1526,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 20
+          "tests": 22
         },
         {
           "name": "runtime-reload",
@@ -475,6 +1551,20 @@
             "{qwenpaw}"
           ],
           "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 2
+        },
+        {
+          "name": "native-attach",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_attach.py",
+            "--bin",
+            "{bin}",
+            "--qwenpaw",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 240,
           "report": "unittest",
           "tests": 1
         },
@@ -518,6 +1608,507 @@
               }
             }
           ]
+        },
+        {
+          "name": "resident-lifecycle",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_resident.py"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 70
+        },
+        {
+          "name": "resident-service",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_resident_service.py",
+            "--bin",
+            "{bin}"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 9
+        },
+        {
+          "name": "structured-mcp",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_mcp.py"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 8
+        },
+        {
+          "name": "structured-mcp-service",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_mcp_service.py",
+            "--bin",
+            "{bin}"
+          ],
+          "timeout_seconds": 180,
+          "report": "unittest",
+          "tests": 2
+        },
+        {
+          "name": "input-submission-types",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_submission.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 6
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission",
+            "--agent-bin",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-backend-error",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-timeout-block",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-cancel",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed",
+                  "cancelled": true,
+                  "blocked": true
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii",
+            "--agent-bin",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "tool-input-pii",
+                  "tool-output-pii",
+                  "tool-output-pii-newline",
+                  "tool-output-pii-tab",
+                  "code-deny",
+                  "tool-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-backend-error",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-timeout-block",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-cancel",
+            "--agent-bin",
+            "{qwenpaw}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-ledger",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/skill_native.py",
+            "--agent",
+            "qwenpaw",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/skill-ledger",
+            "--agent-bin",
+            "{qwenpaw}"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-ledger/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "unsigned",
+                  "signed",
+                  "drifted",
+                  "tampered",
+                  "shadow",
+                  "ambiguous",
+                  "backend-denied",
+                  "unavailable",
+                  "timeout",
+                  "bom"
+                ],
+                "values": {
+                  "passed": true,
+                  "native_skill_called": true,
+                  "config_preserved": true
+                }
+              }
+            },
+            {
+              "file": "fixtures/skill-ledger/bom-native-cache.json",
+              "values": {
+                "skipped": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-objects",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qwenpaw/native_skill.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 11
         }
       ],
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
@@ -606,6 +2197,47 @@
               }
             }
           ]
+        },
+        {
+          "name": "native-attach",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder/attach.py",
+            "--bin",
+            "{bin}",
+            "--output",
+            "{output}/native-attach"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/native-attach/results.json",
+              "values": {
+                "passed": true,
+                "native_version": "1.1.73",
+                "same_process": true,
+                "instance_released": true,
+                "runtime_removed": true,
+                "other_profile_process_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "confirmed-before-input",
+                  "first-native-tool-denied",
+                  "busy-detach-preserves-binding",
+                  "same-file-update-allows-next-tool",
+                  "detach-preserves-process-and-edits",
+                  "reattach"
+                ],
+                "values": {
+                  "passed": true
+                }
+              }
+            }
+          ]
         }
       ],
       "qoder_cli": {
@@ -621,7 +2253,7 @@
           }
         }
       },
-      "boundary": "Pinned Qoder 1.1.64 print-mode sec-core allow, scan denial, backend error and timeout blocking with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN. A separate checksummed 1.1.73 TUI lane requires a native startup handshake and default/add/remove idle policy activation before dispatch, retaining the same process. Full TUI tool-turn lifecycle/replacement adoption remains a separate acceptance boundary.",
+      "boundary": "Pinned Qoder 1.1.64 print-mode sec-core allow, scan denial, backend error and timeout blocking with its hosted Performance model and QODER_PERSONAL_ACCESS_TOKEN. A separate checksummed 1.1.73 TUI lane requires a native startup handshake and default/add/remove idle policy activation before dispatch, retaining the same process. Full TUI tool-turn lifecycle/replacement adoption remains a separate acceptance boundary. Native attach separately starts the 1.1.73 TUI in an isolated Ubuntu container, requires ConfigChange adoption before input, and verifies a hosted first-tool denial, ownership-aware detach and reattachment in the same process. Attachment acceptance also holds a native tool Hook during busy detach rejection and applies a same-file idle update before the next hosted tool executes.",
       "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
       "qoder_reload_cli": {
         "version": "1.1.73",
@@ -636,6 +2268,672 @@
           }
         }
       }
+    },
+    "qoder-sdk": {
+      "owner": "@kongche-jbw",
+      "python": "3.12.3",
+      "mode": "automated",
+      "versions": {},
+      "npm_packages": [
+        "@qoder-ai/qoder-agent-sdk@1.0.56"
+      ],
+      "boundary": "Real SDK 1.0.56 / bundled Worker 1.1.78 startDaemon and query, hosted Bash allow/deny, application/permission allow cannot override AW denial, denial reasons, first request, per-Query Hook isolation, native goal creation/completion and worktree callback cwd, explicit idle updates on existing Queries, busy during callbacks/cleanup and timeout-background child/notification cleanup, explicit background-task termination on close, reloadable background/worktree/goal denial, unchanged daemon and cleanup. Worktree callbacks report parent cwd; no worktree execution-directory guarantee, external PID attach, per-session AW policy. Ordinary Queries use child scopes and model tool identities from the private partial-output producer; the 119-case pinned SDK parser suite covers original callback drain, 1280 completed calls, transport loss, managed in-process MCP schemas/envelopes, per-phase MCP Hook delegation without duplicate policy execution, unmanaged server/tool contexts, memory/evolution gate and result callback cleanup, sendHostAction fallback cleanup and native invalid-option rejection. Ordinary resident Queries admit withhold_result: seven hosted Worker cases verify successful/error results, required failure, timeout, report and native text replacement behavior through legal AW configuration. Strict failure closes the Query before callback response and prevents subsequent tools; completed tool side effects remain. The parser also verifies private factory admission, output redaction before Post, original handler finalizers before lease release, and immutable approved input during asynchronous credential acquisition. Managed MCP control identities belong to the Query; the native protocol does not supply an originating model-tool ID. Per-Query env/auth overrides on a shared daemon are unsupported. Ordinary resident policies update between fully closed Queries; model waits, callbacks, MCP and private lease cleanup retain busy. Runtime daemon.auth(payload) replaces shared daemon credentials; stop joins active callbacks from current and earlier payloads. Ordinary resident Queries require evidence mode off; launch admission rejects enabled AgentSight evidence. The explicit managed MCP factory rejects schema parsing that changes approved arguments; native-configuration SDK MCP checks parsed handler input. Managed MCP dispatch snapshots handler, arguments and result, fences generation/cancellation, reports explicit query identity and rejects required model-parent identity before native server creation. Hosted managed-MCP allow/deny/strict-Post/cancellation currently have separate manual container evidence; these four cases are not scheduled by this matrix. The pinned parser suite uses fixture transport. Native Hook mcp_context is trusted Worker metadata and requires deployment revalidation together with the actual MCP control request. The installed Bridge declarative-profile lane verifies automatic settings acknowledgement before prompt release, native visibility and cleanup of two independent snapshots, daemon reuse and zero remaining AW scopes. The parser covers command consumer settlement, finite-input EOF gating, typed background identities and cancellation; failed cleanup retains ownership. Seven hosted ordinary-resident policy cases verify daemon prewarming for 35 seconds without a Query, first-task Hook addition, no-Hook busy admission, newly added and removed security routes, strict Post enable/report restoration, managed MCP denial and unchanged worker/daemon across revisions. The installed Bridge native-command lane uses the real official Worker in seven daemon/direct cases: post-authorization wrapper execution, logical native rule/canUseTool/Post input, command-specific native denial in default and acceptEdits modes, timeout auto-background, consumer acknowledgement before finite EOF or close, ticket retirement and exact native-process cleanup. Ordinary resident Queries retain native settings and Hooks without modifying SDK/Worker files. Policy checks the public PreToolUse input snapshot; later native Hook/permission rewrites are accepted without a final-input recheck. Initialization rejects disabled and headless-fast Hooks. The 20 native-configuration parser cases cover this boundary; separate manual global Pilot evidence covers unmodified SDK 1.0.54 and 1.0.56 in daemon and direct Query modes. Tool PII acceptance uses the real sec-core CLI/daemon: input denial has no tool side effect, output replacement is checked in adopted SDK results or subsequent App model requests, safe errors and native configuration are retained, and backend loss, timeout and cancellation withhold original output. Multi-block/media, managed MCP and background PII replacement remain outside this acceptance. UserPromptSubmit parser cases cover native blocking without tool identities and original callback draining on cancellation. Input-submission acceptance uses the real V2 daemon in fast mode and verifies clean input, prompt-injection and user-PII refusal before model dispatch, post-denial recovery, backend loss/timeout and preserved native configuration. Qoder also retains native submit vetoes; restricted reloadable and non-text modes are excluded. Skill Ledger acceptance uses the real daemon and stock Skill tools, covering signed/unsigned, drift, damaged signatures, source conflicts, directory authorization failure, unavailable backend and timeout; refusal excludes Skill instructions from native/model delivery. Qoder SDK Read text results project /file/content; real PII replacement is verified for plain/newline/Tab credentials, with safe file metadata and subsequent assistant continuation. Normal Read and missing-file errors retain native behavior.",
+      "cases": [
+        {
+          "name": "daemon-hooks",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "first-request-denied",
+                  "session-isolation",
+                  "allow-before-after",
+                  "tool-failure-observed",
+                  "native-permission-veto",
+                  "daemon-not-restarted",
+                  "application-allow-aw-deny",
+                  "denial-reason-preserved",
+                  "permission-allow-aw-deny",
+                  "native-goal-create-and-complete",
+                  "worktree-callback-cwd",
+                  "native-producer-identity"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "daemon-policy-update",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk-reload",
+            "--reloadable"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-reload/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "first-request-denied",
+                  "session-isolation",
+                  "allow-before-after",
+                  "tool-failure-observed",
+                  "native-permission-veto",
+                  "daemon-not-restarted",
+                  "existing-session-policy-update",
+                  "other-session-busy-update",
+                  "native-cleanup-busy-until-closed",
+                  "application-allow-aw-deny",
+                  "denial-reason-preserved",
+                  "permission-allow-aw-deny",
+                  "agent-definition-admission",
+                  "background-tool-denied",
+                  "goal-activation-denied",
+                  "worktree-agent-denied",
+                  "native-timeout-background-busy",
+                  "native-timeout-close-cleanup"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-parser",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"
+          ],
+          "timeout_seconds": 45,
+          "report": "tap",
+          "tests": 119
+        },
+        {
+          "name": "daemon-auth-drain",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/daemon-native.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/daemon-auth"
+          ],
+          "timeout_seconds": 90,
+          "report": "tap",
+          "tests": 6
+        },
+        {
+          "name": "strict-post",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/strict-post"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/strict-post/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "allow",
+                  "failure",
+                  "timeout",
+                  "report",
+                  "native-error",
+                  "failure-error",
+                  "replace"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-policy-update",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
+            "--aw",
+            "{bin}/aw",
+            "--npm",
+            "{npm}",
+            "--output",
+            "{output}/sdk-resident-policy",
+            "--resident-reload"
+          ],
+          "timeout_seconds": 1200,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/sdk-resident-policy/results.json",
+              "cases": {
+                "at": "",
+                "key": "case",
+                "names": [
+                  "open-query-busy-without-hooks",
+                  "new-query-adds-security-hook",
+                  "new-query-removes-security-hook",
+                  "new-query-enables-strict-post",
+                  "new-query-restores-report-post",
+                  "updated-managed-mcp-denial",
+                  "same-worker-and-daemon-across-revisions"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "declarative-profile",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native-profile.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/native-profile",
+            "{bin}/aw"
+          ],
+          "timeout_seconds": 120,
+          "report": "tap",
+          "tests": 2
+        },
+        {
+          "name": "native-command",
+          "argv": [
+            "node",
+            "--test-reporter=tap",
+            "crates/aw-cli/tests/fixtures/qoder_sdk/native-command.test.mjs",
+            "{npm}/node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js",
+            "{output}/native-command",
+            "{bin}/aw"
+          ],
+          "timeout_seconds": 1100,
+          "report": "tap",
+          "tests": 7
+        },
+        {
+          "name": "input-submission",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "prompt-risk",
+                  "user-pii",
+                  "after-denial",
+                  "native-veto"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-backend-error",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-timeout-block",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "input-submission-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/input-submission-cancel",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submission-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed",
+                  "cancelled": true,
+                  "blocked": true
+                }
+              }
+            },
+            {
+              "file": "fixtures/input-submission-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "clean",
+                  "tool-input-pii",
+                  "tool-output-pii",
+                  "tool-output-pii-newline",
+                  "tool-output-pii-tab",
+                  "code-deny",
+                  "tool-error",
+                  "read-clean",
+                  "tool-output-pii-read",
+                  "tool-output-pii-read-newline",
+                  "tool-output-pii-read-tab",
+                  "read-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-backend-error",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-backend-error",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "backend-error"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-backend-error/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "backend-error"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-backend-error/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-timeout-block",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-timeout-block",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "timeout-block"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-timeout-block/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "timeout-block"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-timeout-block/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tool-pii-cancel",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/tool-pii-cancel",
+            "--npm",
+            "{npm}",
+            "--fault",
+            "cancel"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/tool-pii-cancel/results.json",
+              "values": {
+                "passed": true,
+                "native_config_unchanged": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "cancel"
+                ],
+                "values": {
+                  "status": "passed"
+                }
+              }
+            },
+            {
+              "file": "fixtures/tool-pii-cancel/cleanup.json",
+              "values": {
+                "processes_stopped": true,
+                "backend_removed": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-ledger",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/sec_core/skill_native.py",
+            "--agent",
+            "qoder-sdk",
+            "--bin",
+            "{bin}",
+            "--image",
+            "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+            "--output",
+            "{output}/skill-ledger",
+            "--npm",
+            "{npm}"
+          ],
+          "timeout_seconds": 900,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-ledger/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "unsigned",
+                  "signed",
+                  "drifted",
+                  "tampered",
+                  "shadow",
+                  "ambiguous",
+                  "backend-denied",
+                  "unavailable",
+                  "timeout",
+                  "case-shadow",
+                  "project-only",
+                  "workspace-enabled",
+                  "empty-shadow",
+                  "model-only",
+                  "workflow-case",
+                  "workflow-empty",
+                  "dynamic-read"
+                ],
+                "values": {
+                  "passed": true,
+                  "native_skill_called": true,
+                  "config_preserved": true
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "container": "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac"
     }
   }
 }

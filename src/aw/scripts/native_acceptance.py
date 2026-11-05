@@ -31,16 +31,15 @@ def redact_logs(directory: Path, secret: str) -> None:
                 path.write_text(text.replace(secret, "[REDACTED]"))
 
 
-def verify_bundle(directory: Path, expected: str) -> None:
+def verify_bundle(directory: Path, expected: str, required: set[str] | None = None) -> None:
     """Bind every executable to the package build and candidate commit."""
     if (directory / "source-sha.txt").read_text().strip() != sha(expected):
         raise ValueError("native binary bundle belongs to a different commit")
-    required = {
+    required = required if required is not None else {
         "aw",
         "aw-provider-tokenless",
         "aw-provider-sec-core",
         "tokenless",
-        "rtk",
         "policy",
         "agent-sec-cli",
         "agent-sec-daemon",
@@ -230,6 +229,8 @@ def setup(row: dict, work: Path, commands: Commands) -> dict[str, str]:
             ],
             AW,
         )
+    if "@qoder-ai/qoder-agent-sdk@1.0.56" in row.get("npm_packages", []):
+        commands.run(["node", str(npm / "node_modules/@qoder-ai/qoder-agent-sdk/scripts/postinstall.cjs")], AW)
     if (npm / "package-lock.json").exists():
         shutil.copyfile(npm / "package-lock.json", commands.evidence / "npm-lock.json")
     values = {
@@ -323,14 +324,14 @@ def main() -> None:
         token = environment.pop("QODER_PERSONAL_ACCESS_TOKEN", "")
         commands = Commands(args.output, environment)
         try:
-            if args.agent == "qoder" and not token:
+            if args.agent in {"qoder", "qoder-sdk"} and not token:
                 raise ValueError("Qoder nightly requires the QODER_PERSONAL_ACCESS_TOKEN Secret")
             if platform.python_version() != row["python"]:
                 raise ValueError(f"native Python must match {row['python']}")
             result["node"] = commands.run(["node", "--version"], AW).strip()
             result["uv"] = commands.run(["uv", "--version"], AW).strip()
             values = setup(row, work, commands)
-            if args.agent == "qoder":
+            if args.agent in {"qoder", "qoder-sdk"}:
                 environment["QODER_PERSONAL_ACCESS_TOKEN"] = token
             values.update(bin=str(args.bin), output=str(output))
             if args.agent == "hermes":

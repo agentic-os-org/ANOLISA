@@ -122,6 +122,128 @@ fn pytest_quiet_log(files: usize) -> String {
     output
 }
 
+fn unittest_log(passing: usize) -> String {
+    let mut output = (0..passing)
+        .map(|index| format!("test_case_{index:03} (__main__.ExampleTests) ... ok\n"))
+        .collect::<String>();
+    output.push_str(&format!(
+        "\n----------------------------------------------------------------------\nRan {passing} tests in 0.295s\n\nOK\n"
+    ));
+    output
+}
+
+#[test]
+fn unittest_success_reduces_and_restores_exactly() {
+    for input in [
+        unittest_log(83),
+        unittest_log(83).replace("ExampleTests)", "ExampleTests.test_case)"),
+        unittest_log(83).replace('\n', "\r\n"),
+    ] {
+        assert!(BuildLogCompressor::detect(&input));
+        let store = InMemoryStore::new();
+        let outcome = BuildLogCompressor.compress(&input, Some(&store));
+        assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+        assert_eq!(outcome.metrics.omitted_lines, 79);
+        assert!(outcome.output.contains("test_case_000"));
+        assert!(outcome.output.contains("test_case_082"));
+        assert!(outcome.output.contains("Ran 83 tests in 0.295s"));
+        assert!(outcome.output.ends_with("OK\n") || outcome.output.ends_with("OK\r\n"));
+        let write = &outcome.stash_writes[0];
+        assert_eq!(
+            replace_marker_line(
+                &outcome.output,
+                &write.key,
+                &store.retrieve(&write.key).unwrap().unwrap(),
+            ),
+            input
+        );
+    }
+    let input = unittest_log(83);
+    assert_eq!(BuildLogCompressor.compress(&input, None).output, input);
+    assert_eq!(
+        BuildLogCompressor.compress(&input, Some(&AlwaysFail)).output,
+        input
+    );
+}
+
+#[test]
+fn unittest_django_keeps_nonpassing_records_and_tracebacks() {
+    let setup = "Creating test database for alias 'default'...\n\
+                 Operations to perform:\n\
+                   Apply all migrations: auth, contenttypes\n\
+                 Running migrations:\n\
+                   Applying auth.0001_initial... OK\n\
+                 System check identified no issues (0 silenced).\n";
+    let diagnostics = "test_skip (auth_tests.FormsTest) ... skipped 'database unavailable'\n\
+                       test_expected (auth_tests.FormsTest) ... expected failure\n\
+                       test_unexpected (auth_tests.FormsTest) ... unexpected success\n\
+                       test_fail (auth_tests.FormsTest) ... FAIL\n\
+                       test_error (auth_tests.FormsTest) ... ERROR\n\
+                       test_documented (auth_tests.FormsTest)\n\
+                       A description of the test ... ok\n\
+                       ======================================================================\n\
+                       ERROR: test_error (auth_tests.FormsTest)\n\
+                       ----------------------------------------------------------------------\n\
+                       Traceback (most recent call last):\n\
+                       \x20 File \"test_forms.py\", line 42, in test_error\n\
+                       \x20   raise ValueError('invalid form')\n\
+                       ValueError: invalid form\n\n";
+    let summary = "Ran 86 tests in 0.295s\n\n\
+                   FAILED (failures=1, errors=1, skipped=1, expected failures=1, unexpected successes=1)\n\
+                   Destroying test database for alias 'default'...\n";
+    let mut input = format!("{setup}{}", unittest_log(80));
+    input.insert_str(input.find("test_case_040").unwrap(), diagnostics);
+    input = input.replace("Ran 80 tests in 0.295s\n\nOK\n", summary);
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.metrics.omitted_blocks, 2);
+    assert!(outcome.output.starts_with(setup));
+    assert!(outcome.output.contains(diagnostics));
+    assert!(outcome.output.ends_with(summary));
+    let mut restored = outcome.output.clone();
+    for write in &outcome.stash_writes {
+        restored = replace_marker_line(
+            &restored,
+            &write.key,
+            &store.retrieve(&write.key).unwrap().unwrap(),
+        );
+    }
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn unittest_detection_accepts_partial_runs_and_rejects_prose() {
+    let partial = "test_a (tests.Example) ... ok\n\
+                   test_b (tests.Example) ... expected failure\n\
+                   test_c (tests.Example) ... skipped 'not supported'\n";
+    assert!(BuildLogCompressor::detect(partial));
+    let prefaced = format!("{}{partial}", "Preparing database...\n".repeat(140));
+    assert!(BuildLogCompressor::detect(&prefaced));
+    for summary in ["Ran 1 test in 0.001s", "Ran 83 tests in 0.295 s"] {
+        let input = format!("{summary}\n\nOK\n");
+        assert!(BuildLogCompressor::detect(&input));
+        assert_eq!(
+            BuildLogCompressor.compress(&input, Some(&InMemoryStore::new())).output,
+            input
+        );
+    }
+    for prose in [
+        "The unittest runner reports tests as ok, skipped, FAIL or ERROR.\n",
+        "OK\n",
+        "Ran tests in development.\n",
+        "Ran 83 tests in a temporary database.\n",
+        "Example: test_case (tests.Example) ... ok\n".repeat(20).as_str(),
+        "test prose (not a test identifier) ... ok\n".repeat(20).as_str(),
+    ] {
+        assert!(!BuildLogCompressor::detect(prose), "detected: {prose}");
+        assert_eq!(
+            BuildLogCompressor.compress(prose, Some(&InMemoryStore::new())).output,
+            prose
+        );
+    }
+}
+
 #[test]
 fn detects_six_supported_dialects() {
     for log in [

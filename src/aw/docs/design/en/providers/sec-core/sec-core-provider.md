@@ -7,7 +7,7 @@ on sec-core is a public process interface, not a Rust crate or daemon protocol.
 No sec-core CLI subcommand, source-package inclusion or AW dependency is needed.
 
 ```text
-AW Host → aw-provider-sec-core → agent-sec-cli scan-code → sec-core daemon
+AW Host → aw-provider-sec-core → agent-sec-cli scan-code / scan-pii → sec-core daemon
         ← AW effects/errors   ← scan JSON + exit status ← rules/verdict
 ```
 
@@ -46,12 +46,48 @@ process; it calls the existing daemon. Already-dispatched daemon work is bounded
 by sec-core and is not rolled back by terminating its client.
 
 The private configuration and runnable Host walkthrough are documented in the
-[user guide](../../../../../../../docs/user-guide/en/user-entrypoint/aw/security.md).
+[user guide](../../../../../../../docs/user-guide/en/aw/security.md).
 The sample supplies an entire AWConfiguration; no common configuration schema
 changes are required. Deployment ownership, native Hook scheduling, effect
 adoption and persistent AW auditing remain responsibilities of the daemon and
 adapters. Existing consumers of the earlier experimental `agent-sec-cli
 aw-provider` command must switch their Provider argv to this standalone bridge.
+
+## Submission scanning
+
+`scan_prompt` and `scan_user_input` consume the non-tool `input.submit` event. The Adapter owns the
+fresh turn identity and native decision boundary; the Host retains one deadline
+and one claim per step. The Provider sends the complete text on stdin to the
+public V2 `scan-prompt` command with explicit fast mode and user-input origin.
+It checks scan completeness as well as verdict. Prompt `ok=false` with warn/deny
+is risk, while incomplete/error output remains an invocation failure. AW keeps
+backend findings and user text out of effects and metadata audit. User PII calls
+the shared `pii::call` transport with `Source::UserInput`, the same turn context
+and remaining budget. Its risk mode is `pii.input_mode`; failures retain their
+separate Provider error path. Configuration,
+version limits and runnable native evidence are described in the
+[Provider reference](../../../../../../../docs/developer-guide/en/aw/providers/sec-core.md#user-submission-checks).
+
+## PII boundaries
+
+`pii::call` owns the stdin-only CLI request, source label, remaining budget and
+strict scan parsing for both tool phases and user-input consumers. It checks
+source, byte coverage, truncation and reported execution/custom-rule failures.
+`tool_pii` applies private input/output modes. It scans structured values as JSON
+for field/value context, then scans decoded string values and object keys
+individually to preserve whitespace boundaries and custom-rule anchors. Plain
+strings are scanned directly. The same traversal covers arguments, the complete
+native result and its retained envelope; each CLI call receives only the remaining
+invocation budget. On risk, one Adapter-authorized text value is cleared in a private
+copy and the retained envelope is scanned again within the same budget. Only a
+clean residual yields the fixed safety-message replacement. Other shapes fail
+through the configured output failure action.
+
+The Adapter projects and adopts the result. Qoder SDK ordinary resident Post
+returns `updatedToolOutput`; failed-tool callbacks retain native error semantics
+and cannot adopt that directive. QwenPaw buffers selected replacement streams
+before Coordinator/public delivery. AW admission still permits one final result
+replacement per event. A PII replacement policy must occupy that final step.
 
 ## Validation boundary
 

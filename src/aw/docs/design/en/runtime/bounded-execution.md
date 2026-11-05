@@ -2,7 +2,7 @@
 
 [中文版](../../zh/runtime/bounded-execution.md)
 
-[Design index](../README.md) · [Architecture](../../../../../../docs/developer-guide/en/aw/architecture.md)
+[Design index](../README.md) · [Architecture](../architecture.md)
 
 `aw-exec` runs one command with byte limits, an absolute deadline and cancellation.
 It provides the process transport shared by native hook commands and the

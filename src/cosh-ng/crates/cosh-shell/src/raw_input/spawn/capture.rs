@@ -1,4 +1,24 @@
+use super::super::pty::NonblockingReplayWrite;
 use super::*;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+mod native_interrupt;
+mod replay;
+
+#[cfg(test)]
+use native_interrupt::NativeCtrlC;
+use replay::{complete_and_replay_capture, flush_pending_capture_replay};
+#[cfg(test)]
+use replay::{
+    consume_pending_replay_control, is_replay_control, replay_hint_blocks_writing,
+    replay_or_reject_after_drain,
+};
+pub(super) use replay::{replay_mode_accepts_interrupt, wait_for_pending_capture_replay};
+
+pub(super) const REPLAY_IDLE: u8 = 0;
+pub(super) const REPLAY_PENDING: u8 = 1;
+pub(super) const REPLAY_CTRL_C: u8 = 2;
+pub(super) const REPLAY_EOF: u8 = 3;
 
 const CAPTURE_QUARANTINE_MAX_BYTES: usize = 64 * 1024;
 
@@ -25,9 +45,24 @@ fn capture_submit_drain_deadline() -> Duration {
 pub(super) struct CaptureOwnedInput {
     bytes: Vec<u8>,
     overflowed: bool,
+    pending_replay: Option<PendingCaptureReplay>,
+    pub(super) replay_control: Arc<AtomicU8>,
+}
+
+struct PendingCaptureReplay {
+    bytes: Vec<u8>,
+    offset: usize,
+    generation: u64,
+    owner: RawInputMode,
+    native_line_state: NativeLineState,
+    exit_tracker_after_replay: ExplicitExitTracker,
 }
 
 impl CaptureOwnedInput {
+    pub(super) fn has_pending_replay(&self) -> bool {
+        self.pending_replay.is_some()
+    }
+
     fn observe(&mut self, bytes: &[u8]) -> bool {
         if self.overflowed {
             return false;
@@ -49,7 +84,10 @@ impl CaptureOwnedInput {
     }
 
     fn clear(&mut self) {
-        *self = Self::default();
+        self.bytes.clear();
+        self.overflowed = false;
+        self.pending_replay = None;
+        self.replay_control.store(REPLAY_IDLE, Ordering::Release);
     }
 }
 
@@ -231,16 +269,12 @@ pub(super) fn drain_capture_submission(
         expire_capture_submission(relay.input_mode, generation);
     }
 
-    let chain_invalidated;
     let deadline = Instant::now() + capture_submit_drain_deadline();
     loop {
         match current_raw_input_mode(relay.input_mode) {
             RawInputMode::Draining {
-                generation: active,
-                invalidated,
-                ..
+                generation: active, ..
             } if active == generation => {
-                chain_invalidated = invalidated;
                 if !overflow {
                     overflow = drain_capture_read_ahead(
                         generation,
@@ -272,6 +306,7 @@ pub(super) fn drain_capture_submission(
                             expire_capture_submission(relay.input_mode, generation);
                         }
                     }
+                    Ok(InputRead::CaptureInvalidated) => {}
                     Ok(input @ (InputRead::Eof | InputRead::Error(_))) => {
                         *deferred_input = Some(input);
                         expire_capture_submission(relay.input_mode, generation);
@@ -311,88 +346,31 @@ pub(super) fn drain_capture_submission(
         return Ok(());
     }
 
-    let installed = complete_capture_replay(relay.input_mode, generation);
-    let _ = relay
-        .input_events
-        .send(RawInputEvent::CaptureDrained { generation });
-    if overflow || chain_invalidated {
-        // T3/T4: expired or overflowed chains never replay (#1913 D6).
+    if overflow {
         reject_quarantined_input(capture_owned_input, generation, relay);
-        return Ok(());
     }
-    replay_or_reject_after_drain(
-        installed,
-        card_state,
-        capture_owned_input,
-        generation,
-        relay,
-    )
-}
-
-/// Deliver the quarantined bytes to the observer-acknowledged
-/// post-capture owner; they re-enter the relay exactly like live input
-/// read under that owner's snapshot (no PTY bypass, #1913 D4), so a
-/// buffered Ctrl-C under a delay owner still cancels the agent instead
-/// of leaking into bash. Unroutable landings (follow-up capture, prompt
-/// ghost) reject visibly (fail-safe C4).
-fn replay_or_reject_after_drain(
-    installed: Option<(RawInputMode, PostCaptureOwner)>,
-    card_state: &mut CardInputState,
-    capture_owned_input: &mut CaptureOwnedInput,
-    generation: u64,
-    relay: &mut InputRelayContext<'_>,
-) -> io::Result<()> {
-    let bytes = capture_owned_input.take_bytes();
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    // The drain terminal released the mode lock before the Drained event
-    // went out; an observer may have armed a new owner in that window.
-    // Verify live ownership against the installed snapshot before ANY
-    // side effect (delivery or held-control events): a superseded owner
-    // must neither receive these bytes nor have its replacement disturbed
-    // by the dead chain's controls.
-    let owner_alive = installed.as_ref().is_some_and(|(mode, _)| {
-        current_raw_input_mode(relay.input_mode).input_ownership() == mode.input_ownership()
-    });
-    let replay_mode = match installed {
-        Some((mode @ RawInputMode::Terminal { .. }, PostCaptureOwner::MainPrompt))
-        | Some((mode @ RawInputMode::Delay { .. }, PostCaptureOwner::Delay))
-        | Some((mode @ RawInputMode::RawPassthrough, PostCaptureOwner::RawPassthrough))
-            if owner_alive =>
-        {
-            Some(mode)
-        }
-        Some((RawInputMode::Hold, PostCaptureOwner::Hold)) if owner_alive => {
-            // A hold owner has no consumer that could deliver ordinary
-            // text (held input only recognizes cancel controls), so the
-            // batch cannot count as delivered. Preserve the live-typing
-            // cancel semantics for recognized controls, then surface the
-            // batch as a visible rejection.
-            send_held_input_events(&bytes, relay.input_events);
-            None
-        }
-        _ => None,
-    };
-    let Some(mode) = replay_mode else {
+    let result = complete_and_replay_capture(card_state, capture_owned_input, generation, relay);
+    if !capture_owned_input.has_pending_replay() {
         let _ = relay
             .input_events
-            .send(RawInputEvent::CaptureInputRejected {
-                generation,
-                byte_len: bytes.len(),
-            });
-        return Ok(());
-    };
-    let mut deferred_input = None;
-    relay_input_chunk(
-        &bytes,
-        mode,
-        card_state,
-        capture_owned_input,
-        &mut deferred_input,
-        RelayReadContext::default(),
-        relay,
-    )
+            .send(RawInputEvent::CaptureDrained { generation });
+    }
+    result
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_REPLAY_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn before_replay_commit() {
+    BEFORE_REPLAY_COMMIT.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
 /// Discard the quarantined bytes with user-visible feedback; an empty
@@ -554,6 +532,7 @@ fn drain_capture_read_ahead(
                     return true;
                 }
             }
+            Ok(InputRead::CaptureInvalidated) => {}
             Ok(input @ (InputRead::Eof | InputRead::Error(_))) => {
                 *deferred_input = Some(input);
                 return false;
@@ -568,32 +547,19 @@ pub(super) fn drain_abandoned_capture(
     capture_owned_input: &mut CaptureOwnedInput,
     relay: &mut InputRelayContext<'_>,
 ) -> io::Result<()> {
-    let RawInputMode::Draining {
-        generation,
-        invalidated,
-        ..
-    } = current_raw_input_mode(relay.input_mode)
-    else {
+    if capture_owned_input.has_pending_replay() {
+        return flush_pending_capture_replay(capture_owned_input, relay);
+    }
+    let RawInputMode::Draining { generation, .. } = current_raw_input_mode(relay.input_mode) else {
         return Ok(());
     };
-    let installed = complete_capture_replay(relay.input_mode, generation);
-    let _ = relay
-        .input_events
-        .send(RawInputEvent::CaptureDrained { generation });
-    if invalidated {
-        // T3/T6: an invalidated chain never replays (#1913 D6).
-        reject_quarantined_input(capture_owned_input, generation, relay);
-        return Ok(());
+    let result = complete_and_replay_capture(card_state, capture_owned_input, generation, relay);
+    if !capture_owned_input.has_pending_replay() {
+        let _ = relay
+            .input_events
+            .send(RawInputEvent::CaptureDrained { generation });
     }
-    // T8: the buffered bytes replay before whatever live input triggered
-    // this drain, preserving arrival order (#1913 C3).
-    replay_or_reject_after_drain(
-        installed,
-        card_state,
-        capture_owned_input,
-        generation,
-        relay,
-    )
+    result
 }
 
 #[cfg(test)]

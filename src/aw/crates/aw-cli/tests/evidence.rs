@@ -10,6 +10,8 @@ mod common;
 mod completion;
 #[path = "evidence/lifecycle.rs"]
 mod lifecycle;
+#[path = "evidence/scopes.rs"]
+mod scopes;
 #[path = "evidence/source_contract.rs"]
 mod source_contract;
 #[path = "evidence/support.rs"]

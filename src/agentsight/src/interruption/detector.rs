@@ -252,6 +252,7 @@ fn is_unauthorized_error_text(text: &str) -> bool {
 fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
+        || opens_with_an_exception(&lower)
         || mentions_failing_exit_code(&lower)
         || mentions_failing_http_status(text)
         || lower.contains("error:")
@@ -263,6 +264,33 @@ fn text_has_tool_error_signal(text: &str) -> bool {
         || lower.contains("eperm")
         || lower.contains("\"status\": \"error\"")
         || lower.contains("\"status\":") && lower.contains("\"error\"")
+}
+
+/// Whether the text opens with a JVM or SQL exception class name.
+///
+/// `traceback` is the Python spelling of "the tool crashed and this is why",
+/// and the grounding classifier accepts the JVM/SQL spelling of the same
+/// thing: `find_signature` returns R4 at High confidence for a payload that
+/// *starts* with one of `outcome::EXCEPTION_MARKERS`, and the grader's
+/// `text_has_error_signal` was aligned to it. This scan knew only the Python
+/// one, so a call that died with its exception as the first line was a
+/// certain failure in the classifier and produced no ToolFailure here.
+///
+/// The class name has to open the payload, the anchor the other two readers
+/// apply: an exception the tool merely quotes deeper in its output describes
+/// something it reported, not something it did. Leading whitespace is skipped
+/// because output is routinely indented, and the comparison is
+/// case-insensitive like the rest of this scan.
+fn opens_with_an_exception(lower: &str) -> bool {
+    /// The class names the grounding classifier reads, in
+    /// `outcome::EXCEPTION_MARKERS`.
+    const EXCEPTION_MARKERS: &[&str] = &["java.lang.", "NullPointerException", "SQLException"];
+    let head = lower.trim_start();
+    EXCEPTION_MARKERS.iter().any(|marker| {
+        let marker = marker.to_ascii_lowercase();
+        head.get(..marker.len())
+            .is_some_and(|prefix| prefix == marker)
+    })
 }
 
 /// Whether a line of the payload opens with an HTTP 4xx/5xx status.
@@ -517,7 +545,9 @@ impl InterruptionDetector {
     ///   1. AuthError       — 401/403
     ///   2. RateLimit       — 429
     ///   3. NetworkTimeout  — 408/504
-    ///   4. ServiceUnavailable — 502/503
+    ///   4. ServiceUnavailable — 502/503 / overloaded, or a provider
+    ///                        server-pressure finish reason (DeepSeek's
+    ///                        `insufficient_system_resource`)
     ///   5. ContextOverflow — keywords in error body
     ///   5.5. ResourceExhaustion — quota/billing keywords
     ///   6. SafetyFilter    — finish_reason is a provider safety stop
@@ -690,17 +720,28 @@ impl InterruptionDetector {
         }
 
         // ── 4. ServiceUnavailable (502/503 / overloaded) ──────────────────────
+        // DeepSeek reports the same server pressure as a terminal finish
+        // reason (`insufficient_system_resource`, its documented value for a
+        // server short of system resources) on an otherwise clean 200
+        // response rather than as an error body — the same shape Gemini uses
+        // for `MALFORMED_FUNCTION_CALL` — so the reason is read here,
+        // case-insensitively like the other finish-reason arms. Without this
+        // arm a streamed stop fell to rule 8 and was reported as a transport
+        // cut, and a non-streamed one produced no event at all.
         if status_code == 502
             || status_code == 503
             || combined_error.contains("overloaded")
             || combined_error.contains("service_unavailable")
             || combined_error.contains("server is overloaded")
             || combined_error.contains("model is overloaded")
+            || finish_reason
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("insufficient_system_resource"))
         {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
                 "error": effective_error,
+                "finish_reason": finish_reason,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ServiceUnavailable,
@@ -898,7 +939,14 @@ impl InterruptionDetector {
 
         // ── 9. Token limit (output capped by max_tokens) ──────────────────────
         if is_token_limit_finish(finish_reason) {
-            if let Some(max_tokens) = call.request.max_tokens {
+            // A cap of 0 is "no cap" — a lenient gateway accepts
+            // `max_tokens: 0` and the request parser stores it verbatim —
+            // not a limit the output can be measured against: dividing by it
+            // makes the ratio +inf, which passed the threshold
+            // unconditionally and fabricated a TokenLimit whose detail
+            // serialised the ratio as JSON `null`. The same "zero disables"
+            // reading the runtime limits config uses.
+            if let Some(max_tokens) = call.request.max_tokens.filter(|&cap| cap > 0) {
                 if let Some(usage) = &call.token_usage {
                     let ratio = usage.output_tokens as f64 / max_tokens as f64;
                     if ratio >= self.config.token_limit_ratio {
@@ -929,7 +977,11 @@ impl InterruptionDetector {
         // 通过 input_tokens >> max_tokens 启发式判定（input > max_tokens * 4）
         if finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("length")) {
             if let Some(usage) = &call.token_usage {
-                if let Some(max_tokens) = call.request.max_tokens {
+                // Same guard as rule 9: a zero cap means "no cap", and with
+                // no cap `input > max_tokens * 4` held for any input at all,
+                // fabricating a ContextOverflow for every `length` finish a
+                // lenient gateway answered with `max_tokens: 0`.
+                if let Some(max_tokens) = call.request.max_tokens.filter(|&cap| cap > 0) {
                     // If input tokens are much larger than the output cap, this
                     // is almost certainly a context-length issue, not output truncation.
                     // Widen before multiplying: a large (but legal) max_tokens
@@ -1337,6 +1389,75 @@ mod tests {
         );
     }
 
+    /// A request with `max_tokens: 0` — which a lenient gateway accepts and
+    /// the request parser stores verbatim (`openai_parse` copies the value
+    /// through `as_u64`) — means "no cap", not a cap of zero. Rule 9 divided
+    /// by it anyway: a `length` finish produced ratio `+inf`, which passed the
+    /// 0.95 threshold unconditionally and fabricated a TokenLimit whose
+    /// detail serialised the ratio as JSON `null`; rule 10's
+    /// `input > max_tokens * 4` then held for any input at all and fabricated
+    /// a ContextOverflow on top, blaming the context window for a call the
+    /// gateway simply did not cap. Zero gates both rules, the same
+    /// "zero disables" reading the runtime limits config already uses.
+    #[test]
+    fn a_zero_max_tokens_cap_limits_nothing() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(0);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "partial".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("length".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::TokenLimit),
+            "a zero cap is no cap, so no output-ratio limit can be claimed, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::ContextOverflow),
+            "a zero cap is no cap, so no input overflow can be claimed, got {events:?}"
+        );
+
+        // The same rules still fire under a real cap: an output ratio past
+        // the threshold and an input beyond four times the cap.
+        call.request.max_tokens = Some(100);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 500,
+            output_tokens: 96, // 96/100 = 0.96 >= 0.95
+            total_tokens: 596,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "a positive cap still reports the output limit, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow),
+            "a positive cap still reports the input overflow heuristic, got {events:?}"
+        );
+    }
+
     /// Gemini turns a generation away with a safety-class `finishReason`
     /// instead of a `content_filter` spelling: `SAFETY` (prompt or answer
     /// blocked by a safety policy) and its siblings `RECITATION`, `BLOCKLIST`,
@@ -1485,6 +1606,61 @@ mod tests {
                 "{reason} is a complete provider response, got {events:?}"
             );
         }
+    }
+
+    /// DeepSeek ends an otherwise successful 200 SSE stream with the finish
+    /// reason `insufficient_system_resource` — its documented value for a
+    /// server under pressure (insufficient system resources). The reason
+    /// matched no list: not a normal finish, not a token limit, not a safety
+    /// stop, so rule 8 answered `sse_truncated` (high) and blamed the
+    /// transport for a stop the provider had chosen deliberately, while the
+    /// same reason on a non-streamed response produced no event at all.
+    /// Server pressure is what rule 4 already owns for the `overloaded`
+    /// wordings, so the finish reason is read there, keyed case-insensitively
+    /// like the other finish-reason arms.
+    #[test]
+    fn test_deepseek_resource_stop_is_service_pressure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("insufficient_system_resource".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ServiceUnavailable),
+            "a server-pressure stop is service unavailability, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "the provider ended the stream deliberately; it was not cut, got {events:?}"
+        );
+
+        // The same stop on a non-streamed response must not be dropped: the
+        // pressure is a property of the finish reason, not of the transport.
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("insufficient_system_resource".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ServiceUnavailable),
+            "a non-SSE response reports the same pressure stop, got {events:?}"
+        );
     }
 
     /// Gemini's `OTHER` and `LANGUAGE` are generation stops of their own: the
@@ -2796,6 +2972,74 @@ mod tests {
             );
             assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
         }
+    }
+
+    /// A JVM tool that crashes with its exception as the payload's first line
+    /// is this call's own failure, and both sibling readers of the same stored
+    /// payload grade it that way: the grounding classifier reads a payload
+    /// that *opens* with one of the class names (`outcome::EXCEPTION_MARKERS`)
+    /// as R4 at High confidence, and the grader's `text_has_error_signal` now
+    /// reads the same anchor. This scan knew a Python traceback but none of
+    /// those class names, so one record was a certain failure in the
+    /// classifier and a clean tool result here: no ToolFailure was recorded
+    /// for the call that crashed.
+    ///
+    /// The class name counts only where it opens the payload, the anchor the
+    /// other two readers apply: an exception the tool merely quotes deeper in
+    /// its output describes something else.
+    #[test]
+    fn an_exception_that_opens_the_payload_is_a_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "running the query".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        for payload in [
+            "java.lang.NullPointerException: Cannot invoke \"java.util.List.size()\" because \"rows\" is null",
+            "NullPointerException: rows is null",
+            "SQLException: no suitable driver found",
+            "  java.lang.IllegalStateException: closed",
+        ] {
+            call.request.messages = vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("toolu-jvm".to_string()),
+                    response: serde_json::json!(payload),
+                }],
+                name: None,
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "an exception that opens the payload is a tool failure: {payload}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+
+        // Quoted deeper in the output it belongs to something the tool merely
+        // reported, so it stays clean.
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-jvm".to_string()),
+                response: serde_json::json!(
+                    "result ok; tool method invocation failed, java.lang.NullPointerException at Foo.bar"
+                ),
+            }],
+            name: None,
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "an exception quoted inside the payload is not a failure: {events:?}"
+        );
     }
 
     /// The exit-status and HTTP-status-line signals the grader and the

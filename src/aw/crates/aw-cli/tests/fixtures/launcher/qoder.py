@@ -87,6 +87,14 @@ if not blocked:
     (root / f"tool-{run_id}").write_text("executed")
     hooks("PostToolUse")
 if "--hold" in arguments:
+    if option("--shutdown-delay"):
+        def finish_shutdown(*_):
+            time.sleep(float(option("--shutdown-delay")))
+            (root / f"cleanup-{run_id}").touch()
+            sys.exit(37)
+
+        signal.signal(signal.SIGTERM, finish_shutdown)
+        signal.signal(signal.SIGINT, finish_shutdown)
     (root / f"ready-{run_id}").write_text("waiting")
     # The parent releases after assertions, possibly after another Agent starts.
     deadline = time.monotonic() + int(os.environ["FAKE_HOLD_TIMEOUT_SECONDS"])

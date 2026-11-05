@@ -19,7 +19,7 @@ fn frozen_v1_builtin_responses_match() {
         let result = scanner
             .scan(case["text"].as_str().unwrap(), &options)
             .unwrap();
-        assert_eq!(result.summary.scanner_version, "2.1.0");
+        assert_eq!(result.summary.scanner_version, "2.1.1");
         assert!(
             result
                 .findings
@@ -40,8 +40,27 @@ fn frozen_v1_builtin_responses_match() {
             actual["summary"].as_object_mut().unwrap().remove(key);
         }
         let mut expected = case["expected"].clone();
-        // Engine provenance is intentionally versioned; all other fields in
-        // this retained V1 corpus must still match. New behavior has its own cases.
+        // Preserve the historical oracle; classify the intentional V2
+        // confidence change instead of regenerating Python outputs.
+        if case["text"] == "sk-test9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA" {
+            assert_eq!(expected["findings"][0]["confidence"], 0.51);
+            expected["findings"][0]["confidence"] = serde_json::json!(0.86);
+        }
+        if case["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("\nid=LTAI5tQnKxExampleToken12")
+        {
+            for (index, kind, old, new) in [
+                (3, "aliyun_access_key_secret", 0.59, 0.94),
+                (4, "aliyun_access_key_id", 0.69, 1.0),
+            ] {
+                assert_eq!(expected["findings"][index]["type"], kind);
+                assert_eq!(expected["findings"][index]["confidence"], old);
+                expected["findings"][index]["confidence"] = serde_json::json!(new);
+            }
+        }
+        // Engine provenance is intentionally versioned; all remaining fields match.
         for finding in expected["findings"].as_array_mut().unwrap() {
             finding["metadata"]["engine"] = serde_json::json!("regex_v2");
         }
@@ -142,6 +161,71 @@ fn long_invalid_email_domains_do_not_hide_later_addresses() {
 }
 
 #[test]
+fn candidate_search_preserves_python_boundaries_and_redacted_spans() {
+    let scanner = PiiScanner::new().unwrap();
+    let padding = "x".repeat(8192);
+    let token = "İabcdefghijklmno";
+    let key = "LTAIabcdefghijkl";
+    let id = "１１０１０５１９４９１２３１００２Ｘ";
+    let phone = "13800138000";
+    for (kind, left, value, right, masked) in [
+        (
+            "bearer_token",
+            "🙂bEaReR\u{1c}",
+            token,
+            "",
+            Some("İabc...[REDACTED]...lmno"),
+        ),
+        ("bearer_token", "中Bearer ", token, "", None),
+        (
+            "aliyun_access_key_id",
+            "\u{11f02}",
+            key,
+            "!",
+            Some("LTAI...[REDACTED]...ijkl"),
+        ),
+        ("aliyun_access_key_id", "_", key, "", None),
+        ("aliyun_access_key_id", "", key, "中", None),
+        ("cn_id", "中", id, "!", Some("１１０***********００２Ｘ")),
+        ("cn_id", "９", id, "", None),
+        ("cn_id", "", id, "_", None),
+        // Reject the country-prefixed candidate, then retry inside it.
+        ("phone_cn", "０86-", phone, "中", Some("138****8000")),
+        ("phone_cn", "", phone, "９", None),
+    ] {
+        let prefix = format!("{padding}\n{left}");
+        let text = format!("{prefix}{value}{right}");
+        let report = scanner
+            .scan(
+                &text,
+                &PiiScanOptions {
+                    redact_output: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(report.summary.coverage.status, CoverageStatus::Complete);
+        assert_eq!(
+            report.findings.len(),
+            usize::from(masked.is_some()),
+            "{kind}: {left}{value}{right}"
+        );
+        if let Some(finding) = report.findings.first() {
+            let start = prefix.chars().count();
+            assert_eq!(finding.pii_type, kind);
+            assert_eq!(
+                (finding.span.start, finding.span.end),
+                (start, start + value.chars().count())
+            );
+        }
+        assert_eq!(
+            report.redacted_text.unwrap(),
+            format!("{prefix}{}{right}", masked.unwrap_or(value))
+        );
+    }
+}
+
+#[test]
 fn mixed_unicode_positions_and_overlapping_credentials_are_redacted() {
     let scanner = PiiScanner::new().unwrap();
     let text = "🙂e\u{301} 密码=abcdefghijklmnop api_key=sk-abcdefghijklmnopqrstuvwxyz123456";
@@ -168,12 +252,10 @@ fn mixed_unicode_positions_and_overlapping_credentials_are_redacted() {
 }
 
 #[test]
-fn scanner_version_reflects_ci_cd_prefix_semantics() {
-    // The canonical CI/CD and cloud token prefixes (github_pat_, glpat-,
-    // pypi-, npm_, AKIA) are new matching semantics, so the detection
-    // identity moves with them: SCANNER_VERSION feeds the report summary and
-    // the ruleset id digest, keeping audit reproduction unambiguous.
-    assert_eq!(SCANNER_VERSION, "2.1.0");
+fn scanner_version_reflects_detection_semantics() {
+    // Whole-word fixture markers change scoring; version both the report and
+    // ruleset digest while retaining the previously added token prefixes.
+    assert_eq!(SCANNER_VERSION, "2.1.1");
     let report = PiiScanner::new()
         .unwrap()
         .scan(
@@ -181,7 +263,7 @@ fn scanner_version_reflects_ci_cd_prefix_semantics() {
             &PiiScanOptions::default(),
         )
         .unwrap();
-    assert_eq!(report.summary.scanner_version, "2.1.0");
+    assert_eq!(report.summary.scanner_version, "2.1.1");
     assert!(report.findings.iter().any(|f| f.pii_type == "api_key"));
 }
 

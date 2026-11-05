@@ -1680,7 +1680,7 @@ async fn call_json<T: serde::de::DeserializeOwned>(
     let raw = client
         .chat_json(messages)
         .await
-        .map_err(|e| format!("LLM call [{label}] failed: {e}"))?;
+        .map_err(|e| format!("LLM call [{label}] failed: {e:#}"))?;
     // Dump raw JSON so we can diagnose what the evaluator actually produced
     // when the graph comes back with too few nodes / weird kind values.
     log::debug!(

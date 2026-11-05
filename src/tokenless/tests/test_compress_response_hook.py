@@ -329,33 +329,29 @@ class TestBinaryFallbackPaths(unittest.TestCase):
         return module
 
     def test_supported_install_layouts_are_covered(self) -> None:
-        paths = self._hook_utils()._known_binary_paths("rtk", "/home/alice")
+        paths = self._hook_utils()._known_binary_paths("tokenless", "/home/alice")
         expected = (
-            "/home/alice/.local/bin/rtk",
-            "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
-            "/home/alice/.local/libexec/anolisa/tokenless/rtk",
-            "/usr/local/bin/rtk",
-            "/usr/local/libexec/anolisa/tokenless/rtk",
-            "/usr/bin/rtk",
-            "/usr/libexec/anolisa/tokenless/rtk",
-            "/usr/lib/anolisa/tokenless/rtk",
-            "/home/alice/.local/share/anolisa/tokenless/rtk",
-            "/home/alice/.local/lib/anolisa/tokenless/rtk",
+            "/home/alice/.local/bin/tokenless",
+            "/usr/local/bin/tokenless",
+            "/usr/bin/tokenless",
         )
         self.assertEqual(paths, expected)
 
-    def test_generic_binaries_skip_tokenless_helper_dirs(self) -> None:
-        paths = self._hook_utils()._known_binary_paths("docker", "/home/alice")
-        self.assertIn("/home/alice/.local/bin/docker", paths)
-        self.assertIn("/usr/local/bin/docker", paths)
-        self.assertIn("/usr/bin/docker", paths)
-        self.assertFalse(any("tokenless" in path for path in paths))
+    def test_binaries_skip_retired_tokenless_helper_dirs(self) -> None:
+        # RTK is linked into tokenless; no layout carries a standalone helper.
+        for name in ("docker", "rtk"):
+            with self.subTest(name=name):
+                paths = self._hook_utils()._known_binary_paths(name, "/home/alice")
+                self.assertIn(f"/home/alice/.local/bin/{name}", paths)
+                self.assertIn(f"/usr/local/bin/{name}", paths)
+                self.assertIn(f"/usr/bin/{name}", paths)
+                self.assertFalse(any("tokenless" in path for path in paths))
 
     def test_user_layouts_require_an_absolute_home(self) -> None:
         hook_utils = self._hook_utils()
         for home in ("", "relative/home"):
             with self.subTest(home=home):
-                paths = hook_utils._known_binary_paths("rtk", home)
+                paths = hook_utils._known_binary_paths("tokenless", home)
                 self.assertTrue(all(os.path.isabs(path) for path in paths))
                 self.assertFalse(any(".local" in path for path in paths))
 
@@ -382,24 +378,22 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                     ("/usr/local/bin/tokenless", "/usr/bin/tokenless"),
                 )
 
-    def test_resolver_finds_makefile_user_helper_without_path(self) -> None:
+    def test_resolver_finds_user_install_without_path(self) -> None:
         hook_utils = self._hook_utils()
         with tempfile.TemporaryDirectory() as home:
-            helper_dir = os.path.join(
-                home, ".local", "libexec", "anolisa", "tokenless"
-            )
-            os.makedirs(helper_dir)
-            rtk_path = os.path.join(helper_dir, "rtk")
-            with open(rtk_path, "w", encoding="utf-8") as handle:
+            local_bin = os.path.join(home, ".local", "bin")
+            os.makedirs(local_bin)
+            tokenless_path = os.path.join(local_bin, "tokenless")
+            with open(tokenless_path, "w", encoding="utf-8") as handle:
                 handle.write("#!/bin/sh\n")
-            os.chmod(rtk_path, 0o755)
+            os.chmod(tokenless_path, 0o755)
 
             hook_utils._resolved_cache.clear()
             with (
                 mock.patch.dict(os.environ, {"HOME": home}),
                 mock.patch.object(hook_utils.shutil, "which", return_value=None),
             ):
-                self.assertEqual(hook_utils.resolve_binary("rtk"), rtk_path)
+                self.assertEqual(hook_utils.resolve_binary("tokenless"), tokenless_path)
             hook_utils._resolved_cache.clear()
 
     def test_resolver_prefers_user_layout_to_explicit_legacy_fallback(self) -> None:
@@ -409,9 +403,9 @@ class TestBinaryFallbackPaths(unittest.TestCase):
             legacy_bin = os.path.join(home, "legacy")
             os.makedirs(local_bin)
             os.makedirs(legacy_bin)
-            user_rtk = os.path.join(local_bin, "rtk")
-            legacy_rtk = os.path.join(legacy_bin, "rtk")
-            for path in (user_rtk, legacy_rtk):
+            user_tokenless = os.path.join(local_bin, "tokenless")
+            legacy_tokenless = os.path.join(legacy_bin, "tokenless")
+            for path in (user_tokenless, legacy_tokenless):
                 with open(path, "w", encoding="utf-8") as handle:
                     handle.write("#!/bin/sh\n")
                 os.chmod(path, 0o755)
@@ -422,7 +416,7 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                 mock.patch.object(hook_utils.shutil, "which", return_value=None),
             ):
                 self.assertEqual(
-                    hook_utils.resolve_binary("rtk", legacy_rtk), user_rtk
+                    hook_utils.resolve_binary("tokenless", legacy_tokenless), user_tokenless
                 )
             hook_utils._resolved_cache.clear()
 
@@ -631,8 +625,8 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertNotIn("additionalContext", hso,
                          "Compressed content must not be in additionalContext (duplication)")
 
-    def test_qoder_cli_uses_updated_tool_output(self):
-        """Qoder CLI should replace structured tool output without version gating."""
+    def test_qoder_cli_serializes_generic_structured_output(self):
+        """Generic structured results remain visible as JSON text in Qoder."""
         large_payload = _make_large_json_payload()
 
         result = _run_hook(
@@ -657,7 +651,7 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertIsInstance(
             updated_output,
             str,
-            "Qoder CLI requires updatedToolOutput to be a string",
+            "Only a rewrapped native Bash stdout uses Qoder's object renderer",
         )
         compressed_data = json.loads(updated_output)
         self.assertEqual(compressed_data["stdout"], "x" * 20)
@@ -1158,7 +1152,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         updated = result["hookSpecificOutput"]["updatedToolOutput"]
         self.assertEqual(updated, self._bash_envelope(stdout[:40], stderr))
 
-    def test_qoder_rewrapped_envelope_is_a_compact_json_string(self):
+    def test_qoder_rewrapped_envelope_preserves_the_object(self):
         log = "npm ERR! code ELIFECYCLE\n" + "npm verbose stack line\n" * 150
         result = _run_hook(
             {
@@ -1174,9 +1168,8 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
         updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertIsInstance(updated, str,
-                              "Qoder requires a string updatedToolOutput")
-        self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
+        self.assertIsInstance(updated, dict, "Qoder must retain the structured tool result")
+        self.assertEqual(updated, self._bash_envelope(log[:40], ""))
 
     def test_qoder_uses_text_slot_at_200_chars(self) -> None:
         binary = _create_mock_tokenless(self.tmpdir, "no-savings")
@@ -1198,6 +1191,22 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
                 )
                 self.assertEqual(request["content"], expected)
 
+    def test_qoder_stderr_rewrap_remains_visible_as_json_text(self) -> None:
+        stderr = "error: build failed\n" * 30
+        envelope = self._bash_envelope("", stderr)
+        result = _run_hook(
+            {"tool_name": "Bash", "tool_response": envelope},
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            self.assertEqual(json.load(captured)["content"], stderr)
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIsInstance(updated, str)
+        self.assertEqual(json.loads(updated), self._bash_envelope("", stderr[:40]))
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
     def test_qoder_keeps_unselected_stderr_when_both_streams_are_long(self) -> None:
         stdout = "build step\n" * 30
         stderr = "warning\n" * 25
@@ -1211,7 +1220,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         with open(os.path.join(self.tmpdir, "request.json")) as captured:
             self.assertEqual(json.load(captured)["content"], stdout)
         updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertEqual(json.loads(updated), self._bash_envelope(stdout[:40], stderr))
+        self.assertEqual(updated, self._bash_envelope(stdout[:40], stderr))
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
     def test_qwenwork_rewrapped_envelope_preserves_metadata(self):

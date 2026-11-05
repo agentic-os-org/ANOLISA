@@ -5,7 +5,10 @@ use crate::{require, Result};
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
+pub(super) fn document(
+    settings: &Settings<'_>,
+    packages: Option<&std::collections::BTreeMap<String, crate::database::InstalledPackage>>,
+) -> Result<Value> {
     require(
         settings.qoder.is_some() || settings.openclaw.is_some(),
         "select at least one Agent entrypoint",
@@ -29,24 +32,10 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
     }
     match &settings.policy {
         Policy::None => {}
-        Policy::Tokenless => {}
-        Policy::SecCore { socket } | Policy::SecCoreTokenless { socket } => {
-            let provider = settings.prefix.join("libexec/aw/providers/sec-core");
-            let mut tools = json!({});
-            if settings.qoder.is_some() {
-                tools["Bash"] = json!({"language":"bash","input_pointer":"/command"});
-            }
-            if settings.openclaw.is_some() {
-                tools["exec"] = json!({"language":"bash","input_pointer":"/command"});
-            }
-            value["spec"]["providers"]["security"] = json!({
-                "protocol":"aw-provider/v1alpha1",
-                "transport":{"type":"stdio","location":"agent","argv":[provider.join("aw-provider-sec-core"),"--cli",provider.join("agent-sec-cli"),"--socket",socket]},
-                "timeout_ms":2000,"max_output_bytes":4096,
-                "config":{"version":1,"mode":"block","tools":tools}});
-            value["spec"]["events"] = json!({
-                "tool.before":{"enabled":true,"required":true,"steps":[{"id":"scan-code","provider":"security","operation":"scan_code","effects":["observe","block"],"on_error":"block"}]},
-                "tool.after":{"enabled":true,"required":true,"steps":[{"id":"observe-completion","provider":"security","operation":"observe_tool","effects":["observe"],"on_error":"report"}]}});
+        Policy::Template { .. } => {
+            let template = super::template::render(settings, packages)?;
+            value["spec"]["providers"] = template["providers"].clone();
+            value["spec"]["events"] = template["events"].clone();
         }
         Policy::Command {
             argv,
@@ -78,39 +67,6 @@ pub(super) fn document(settings: &Settings<'_>) -> Result<Value> {
             value["spec"]["events"] = json!({
                 "tool.before":{"enabled":true,"required":true,"steps":[{"id":"check-command","provider":"command","effects":[effect],"reason_code":reason_code,"on_error":"block"}]}});
         }
-    }
-    if matches!(
-        settings.policy,
-        Policy::Tokenless | Policy::SecCoreTokenless { .. }
-    ) {
-        let provider = settings.prefix.join("libexec/aw/providers/tokenless");
-        value["spec"]["providers"]["tokenless"] = json!({
-            "protocol":"aw-provider/v1alpha1", "transport":{"type":"stdio","location":"agent","argv":[provider.join("aw-provider-tokenless"),"--cli",provider.join("tokenless"),"--data-dir",settings.state.join("tokenless")]},
-            "timeout_ms":2000,"max_output_bytes":1048576,"config":{"version":1}});
-        let mut view_argv = value["spec"]["providers"]["tokenless"]["transport"]["argv"]
-            .as_array()
-            .ok_or_else(|| crate::Error::Invalid("Tokenless argv must be an array".into()))?
-            .clone();
-        view_argv.insert(1, json!("--view"));
-        value["spec"]["providers"]["tokenless"]["view"] = json!({
-            "protocol":"aw-provider-view/v1alpha1","implementation":"tokenless",
-            "transport":{"type":"stdio","location":"agent","argv":view_argv}});
-        if value["spec"]["events"]["tool.before"].is_null() {
-            value["spec"]["events"]["tool.before"] =
-                json!({"enabled":true,"required":true,"steps":[]});
-        }
-        value["spec"]["events"]["tool.before"]["steps"]
-            .as_array_mut()
-            .ok_or_else(|| crate::Error::Invalid("tool.before steps must be an array".into()))?
-            .push(json!({"id":"rewrite-command","provider":"tokenless","operation":"pre_tool","effects":["block"],"on_error":"report"}));
-        if value["spec"]["events"]["tool.after"].is_null() {
-            value["spec"]["events"]["tool.after"] =
-                json!({"enabled":true,"required":true,"steps":[]});
-        }
-        value["spec"]["events"]["tool.after"]["steps"]
-            .as_array_mut()
-            .ok_or_else(|| crate::Error::Invalid("tool.after steps must be an array".into()))?
-            .push(json!({"id":"compress-result","provider":"tokenless","operation":"post_tool","effects":["replace_result"],"on_error":"report"}));
     }
     Ok(value)
 }

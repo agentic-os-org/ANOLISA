@@ -8,6 +8,7 @@
 //! (`running`) terminates the loop on shutdown.
 
 pub mod atif;
+pub mod cline;
 pub mod codex;
 pub mod discovery;
 pub mod gemini;
@@ -157,14 +158,14 @@ fn process_session(
     let content =
         std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
-    let mut events = qoder::load_jsonl_events(&content);
-    // Legacy Gemini (<= 0.38) conversations are one pretty-printed JSON
-    // document: no line parses, so the whole content is the only unit.
-    if events.is_empty() {
-        if let Some(doc) = gemini::legacy_document(&content) {
-            events.push(doc);
-        }
-    }
+    // Recognize whole-file formats before JSONL: individual pretty-printed
+    // lines can be valid JSON without representing session events.
+    let mut events = gemini::legacy_document(&content)
+        .map(|document| vec![document])
+        .or_else(|| cline::record_array(&content))
+        .unwrap_or_else(|| qoder::load_jsonl_events(&content));
+    // A compact Cline writer puts the whole array on one JSONL line.
+    cline::normalize_events(&mut events);
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
         // every scan round (they will be retried only when size/mtime change).
@@ -174,18 +175,32 @@ fn process_session(
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
     // that needs a dedicated converter; Gemini CLI chats use an append-only
-    // record stream with `$`-prefixed correction records; everything else
-    // shares the Claude-style converter.
+    // record stream with `$`-prefixed correction records; Cline task files
+    // hold raw Anthropic message params plus a ui record stream; everything
+    // else shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
-    let is_gemini = !is_codex && gemini::is_gemini_chat(&events);
+    let is_gemini =
+        !is_codex && (session.source == "gemini-cli" || gemini::is_gemini_chat(&events));
+    let is_cline = !is_codex && !is_gemini && cline::is_cline_task(&events);
+    if is_cline {
+        cline::append_ui_records(&session.path, &mut events);
+    }
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
     } else if is_gemini {
         gemini::convert_gemini_events(&events, &session.source)?
+    } else if is_cline {
+        cline::convert_cline_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
     if trajectory.steps.is_empty() {
+        if is_gemini && gemini::explicitly_cleared(&events) {
+            // A successful rewind can remove every turn. The previous
+            // snapshot must not survive under the new file fingerprint.
+            store.clear_replayed_file(&file_path, file_size, file_mtime_ns)?;
+            return Ok(false);
+        }
         let _ = store.set_file_state(&file_path, file_size, file_mtime_ns);
         anyhow::bail!(
             "no ATIF steps extracted for source {}; converter support may be missing",
@@ -201,6 +216,8 @@ fn process_session(
         codex::extract_private_metadata(&events, &session.project)
     } else if is_gemini {
         gemini::extract_private_metadata(&events, &session.project)
+    } else if is_cline {
+        cline::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };
@@ -552,6 +569,53 @@ mod tests {
         assert_eq!(doc["extra"]["cwd"], "/w/demo-app");
         assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
         assert_eq!(rec.first_user_message.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn test_scan_once_routes_gemini_chat() {
+        let base = tmp_dir("gemini-route");
+        // Gemini CLI layout: <root>/<project>/chats/session-*.jsonl
+        let root = base.join(".gemini").join("tmp");
+        let project = root.join("demo-slug");
+        let chats = project.join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(project.join(".project_root"), "/w/demo-app\n").unwrap();
+        let content = concat!(
+            "{\"sessionId\":\"s-1\",\"projectHash\":\"h1\",\"startTime\":\"2026-08-03T09:00:00.000Z\"}\n",
+            "{\"id\":\"m1\",\"timestamp\":\"2026-08-03T09:00:01.000Z\",\"type\":\"user\",\"content\":\"hi\"}\n",
+            "{\"id\":\"m2\",\"timestamp\":\"2026-08-03T09:00:02.000Z\",\"type\":\"gemini\",\"model\":\"gemini-2.5-pro\",\"content\":\"hello\",\"tokens\":{\"input\":10,\"output\":5,\"cached\":0,\"total\":15}}\n",
+        );
+        std::fs::write(
+            chats.join("session-2026-08-03T09-00-ab12cd34.jsonl"),
+            content,
+        )
+        .unwrap();
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        let config = CollectorConfig {
+            scan_interval_secs: 1,
+            scan_dirs: Some(vec![root]),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+        };
+
+        scan_once(&store, &config);
+        assert_eq!(store.count().unwrap(), 1);
+
+        // The discovered file stem is the row identity, mirroring the Codex path.
+        let rec = store
+            .get("session-2026-08-03T09-00-ab12cd34")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.source, "gemini-cli");
+        // The `.project_root` marker names the project, not the registry slug.
+        assert_eq!(rec.project, "demo-app");
+        let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
+        assert_eq!(doc["agent"]["model_name"], "gemini-2.5-pro");
+        assert_eq!(doc["extra"]["user_message_count"], 1);
+        assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(rec.first_user_message.as_deref(), Some("hi"));
+        assert_eq!(rec.total_prompt_tokens, Some(10));
+        assert_eq!(rec.total_completion_tokens, Some(5));
     }
 
     #[test]

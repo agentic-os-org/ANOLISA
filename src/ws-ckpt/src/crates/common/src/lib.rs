@@ -23,6 +23,9 @@ pub const BTRFS_IMG_DIR: &str = "/var/lib/ws-ckpt";
 pub const LEGACY_BTRFS_IMG_PATH: &str = "/data/ws-ckpt/btrfs-data.img";
 pub const CONFIG_FILE_PATH: &str = "/etc/ws-ckpt/config.toml";
 pub const DEFAULT_IMG_SIZE_GB: u64 = 30;
+/// Minimum `backend.btrfs-loop.img_size` in GiB. A configuration policy, not a
+/// universal btrfs safety minimum.
+pub const MIN_BTRFS_LOOP_IMG_SIZE_GB: u64 = 5;
 pub const DEFAULT_IMG_MAX_PERCENT: f64 = 0.4; // 40% as fraction for calculation
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/ws-ckpt"; // systemd StateDirectory
 pub const STATE_FILE: &str = "state.json"; // daemon state file
@@ -216,6 +219,13 @@ pub enum Request {
         /// Opaque continuation token returned by the previous page.
         cursor: Option<String>,
     },
+    /// File-watcher health: which workspaces run without a live watcher,
+    /// and how many inotify queue overflows the shared watcher instance
+    /// observed. A dedicated request rather than a `StatusReport` field:
+    /// the report crosses the IPC in bincode frames, which encode
+    /// positionally, so inserting a field would break older clients and
+    /// the cosh-ng mirror of the status layout.
+    WatcherHealth,
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -393,6 +403,20 @@ pub enum Response {
     ListPageOk {
         snapshots: Vec<SnapshotListItem>,
         next_cursor: Option<String>,
+    },
+    /// Reply to [`Request::WatcherHealth`]. Field order is wire-frozen
+    /// (bincode encodes positionally).
+    WatcherHealthOk {
+        /// Workspaces currently running without a live file watcher:
+        /// change detection (automatic snapshot triggering, write
+        /// monitoring) is degraded for them. Empty when every workspace
+        /// has a healthy watcher.
+        workspaces_without_watcher: Vec<String>,
+        /// Cumulative inotify queue overflows observed on the shared
+        /// watcher instance. Each one interrupted event delivery; the
+        /// daemon treats every watched workspace as actively written
+        /// across an overflow until quiescence is re-observed.
+        watcher_queue_overflows: u64,
     },
 }
 
@@ -631,6 +655,85 @@ pub fn validate_checkpoint_id_v2(checkpoint_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Maximum byte length accepted for a snapshot identifier on the legacy
+/// surface. This is the filesystem component bound (`NAME_MAX`, 255 bytes on
+/// the Linux filesystems ws-ckpt deploys on), not the guarded protocol's
+/// policy bound: every id at or under it could have been recorded on disk by
+/// the CLI, so refusing longer ids strands no existing record.
+pub const SNAPSHOT_ID_MAX_BYTES: usize = 255;
+
+/// Validates a snapshot identifier for the legacy IPC surface.
+///
+/// The legacy protocol accepts every id the CLI parser accepts, so unlike
+/// [`validate_checkpoint_id_v2`] this is deliberately *not* a charset check:
+/// interior spaces and non-ASCII names stay valid. It rejects exactly the
+/// shapes that are unsafe as a path component or reserved by the index:
+/// empty and whitespace-only ids, path separators (`/` and `\\`), `.` and
+/// `..`, NUL (which can never arrive through argv but can through a
+/// serialized frame), over-length ids, and the [`LIVE_CHILD`] sentinel —
+/// a snapshot record named like the live-subvolume marker aliases the
+/// sentinel the DAG code special-cases.
+pub fn validate_snapshot_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.trim().is_empty() {
+        return Err("snapshot id must not be empty or whitespace".to_string());
+    }
+    if id == "." || id == ".." {
+        return Err("snapshot id must not be '.' or '..'".to_string());
+    }
+    if id.contains('/') || id.contains('\\') {
+        return Err("snapshot id must be a single path component (no '/' or '\\')".to_string());
+    }
+    if id.contains('\u{0}') {
+        return Err(format!("snapshot id must not contain NUL: {id:?}"));
+    }
+    if id == LIVE_CHILD {
+        return Err("snapshot id is reserved for the live workspace marker".to_string());
+    }
+    if id.len() > SNAPSHOT_ID_MAX_BYTES {
+        return Err(format!("snapshot id exceeds {SNAPSHOT_ID_MAX_BYTES} bytes"));
+    }
+    Ok(())
+}
+
+/// Validates a snapshot lookup reference (exact id or unique prefix) for the
+/// legacy IPC surface.
+///
+/// `Rollback`, `RollbackPreview` and `Diff` carry a reference that
+/// [`SnapshotIndex::resolve_by_prefix`] expands to the final id, so the
+/// caller's string is not necessarily a complete id and must not be held to
+/// [`validate_snapshot_id`]: `__live__` legitimately addresses
+/// `__live__backup` as its unique prefix, and `.`/`..` address dot-prefixed
+/// names. Only shapes no id accepted by [`validate_snapshot_id`] can contain
+/// are refused here — path separators, NUL, over-length strings — plus
+/// references with no non-whitespace content: no CLI-reachable query is
+/// blank, and blank ids are exactly the poison family the id validator
+/// rejects.
+///
+/// The resolved final id must still pass [`validate_snapshot_id`] before it
+/// drives any backend call; consumers map that failure to
+/// [`ResolveError::Unsafe`].
+pub fn validate_snapshot_ref(reference: &str) -> Result<(), String> {
+    if reference.trim().is_empty() {
+        return Err("snapshot reference must not be empty or whitespace".to_string());
+    }
+    if reference.contains('/') || reference.contains('\\') {
+        return Err(
+            "snapshot reference must be a single path component (no '/' or '\\')".to_string(),
+        );
+    }
+    if reference.contains('\u{0}') {
+        return Err(format!(
+            "snapshot reference must not contain NUL: {reference:?}"
+        ));
+    }
+    if reference.len() > SNAPSHOT_ID_MAX_BYTES {
+        return Err(format!(
+            "snapshot reference exceeds {SNAPSHOT_ID_MAX_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
 // ── Snapshot types ──
 
 /// Serde for `SnapshotMeta.metadata`: passes `Value` through for JSON,
@@ -723,6 +826,39 @@ pub struct SnapshotIndex {
     pub recovered_orphans: HashSet<String>,
 }
 
+/// Repairs made while pruning parent cycles from a snapshot index.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Cycle repairs that were also reported to operators as warnings.
+    pub cycle_repairs: Vec<PruneCycleRepair>,
+}
+
+/// A surviving child or head repaired after its deleted parents formed a cycle.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PruneCycleRepair {
+    /// A surviving child has no surviving ancestor and becomes a root.
+    ReparentedChild { cycle_at: String },
+    /// The head lies in a deleted parent cycle and is cleared.
+    ClearedHead { cycle_at: String },
+}
+
+impl PruneCycleRepair {
+    fn warning(&self, workspace_path: &Path) -> String {
+        match self {
+            Self::ReparentedChild { cycle_at } => format!(
+                "prune_chain: parent cycle in the snapshot index of workspace {workspace_path:?} \
+                 at snapshot {cycle_at} (reparenting a surviving child): the deleted set has no \
+                 surviving ancestor, so the child is reparented onto none"
+            ),
+            Self::ClearedHead { cycle_at } => format!(
+                "prune_chain: parent cycle in the snapshot index of workspace {workspace_path:?} \
+                 at snapshot {cycle_at} (repairing the head): the head lies inside the \
+                 deleted set's cycle and is cleared"
+            ),
+        }
+    }
+}
+
 impl SnapshotIndex {
     pub fn new(workspace_path: PathBuf) -> Self {
         Self {
@@ -777,7 +913,10 @@ impl SnapshotIndex {
     }
 
     /// Remove a batch of nodes from the DAG, processing only boundary edges.
-    pub fn prune_chain(&mut self, ids: &HashSet<String>) {
+    ///
+    /// Returns cycle repairs while also emitting operator warnings for them.
+    pub fn prune_chain(&mut self, ids: &HashSet<String>) -> PruneReport {
+        let mut report = PruneReport::default();
         let mut edges: Vec<(String, String)> = Vec::new();
         let mut surviving_parents: Vec<(String, String)> = Vec::new();
         for id in ids {
@@ -817,13 +956,11 @@ impl SnapshotIndex {
                     // it would never finish. No ancestor is the answer, and the
                     // recovery is reported rather than silent: a corrupt index
                     // otherwise surfaces later as "no head set" with no clue.
-                    tracing::warn!(
-                        "prune_chain: parent cycle in the snapshot index of workspace {:?} at \
-                         snapshot {} (reparenting a surviving child): the deleted set has no \
-                         surviving ancestor, so the child is reparented onto none",
-                        self.workspace_path,
-                        pid
-                    );
+                    report
+                        .cycle_repairs
+                        .push(PruneCycleRepair::ReparentedChild {
+                            cycle_at: pid.clone(),
+                        });
                     sp = None;
                     break;
                 }
@@ -854,13 +991,9 @@ impl SnapshotIndex {
                         // reported for the same reason: the head fix-up is a
                         // repair, and a repair nobody can see becomes a mystery
                         // "no head set" later.
-                        tracing::warn!(
-                            "prune_chain: parent cycle in the snapshot index of workspace {:?} \
-                             at snapshot {} (repairing the head): the head lies inside the \
-                             deleted set's cycle and is cleared",
-                            self.workspace_path,
-                            pid
-                        );
+                        report.cycle_repairs.push(PruneCycleRepair::ClearedHead {
+                            cycle_at: pid.clone(),
+                        });
                         p = None;
                         break;
                     }
@@ -876,6 +1009,10 @@ impl SnapshotIndex {
                 }
             }
         }
+        for repair in &report.cycle_repairs {
+            tracing::warn!("{}", repair.warning(&self.workspace_path));
+        }
+        report
     }
 }
 
@@ -944,6 +1081,11 @@ impl SnapshotIndex {
 pub enum ResolveError {
     NotFound,
     Ambiguous(usize),
+    /// The reference resolved to an index key that is not an acceptable
+    /// snapshot id (e.g. a pre-poisoned `..` or [`LIVE_CHILD`] key). Carries
+    /// the validator's message; consumers map this to `InvalidPath`, not
+    /// `SnapshotNotFound`.
+    Unsafe(String),
 }
 
 impl SnapshotIndex {
@@ -998,6 +1140,13 @@ pub struct WorkspaceInfo {
 }
 
 /// Status report for the daemon and its managed workspaces.
+///
+/// Field order is wire-frozen: this struct crosses the daemon IPC inside
+/// bincode frames, which encode structs positionally — `#[serde(default)]`
+/// cannot make an inserted field compatible, and older clients plus the
+/// cosh-ng mirror (`cosh-types/src/checkpoint.rs`) decode exactly these
+/// four fields. New health data must ride a dedicated request/response
+/// pair (see [`Request::WatcherHealth`]), never a new field here.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct StatusReport {
     pub uptime_secs: u64,
@@ -1201,6 +1350,9 @@ pub struct DaemonConfig {
     pub health_check_interval_secs: u64,
     /// Backend type string from config: "auto" | "btrfs-base" | "btrfs-loop"
     pub backend_type: String,
+    /// Optional BtrfsBase mount point; the backend appends `ws-ckpt-data`.
+    /// This is a startup setting, separate from the BtrfsLoop `mount_path`.
+    pub btrfs_mount: Option<PathBuf>,
     /// Target image size in GB. The on-disk image is grown/shrunk to match this at bootstrap.
     pub img_size: u64,
     /// Initial-creation cap as percentage of host partition capacity (0-100).
@@ -1251,6 +1403,13 @@ pub struct BtrfsLoopConfig {
     pub img_max_percent: Option<f64>,
 }
 
+/// BtrfsBase startup settings. Changes require a daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct BtrfsBaseConfig {
+    /// Absolute, writable btrfs mount point, not the `ws-ckpt-data` directory.
+    pub btrfs_mount: Option<PathBuf>,
+}
+
 /// Backend configuration section in config file.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BackendConfig {
@@ -1260,6 +1419,9 @@ pub struct BackendConfig {
     /// BtrfsLoop backend-specific settings
     #[serde(default, rename = "btrfs-loop")]
     pub btrfs_loop: Option<BtrfsLoopConfig>,
+    /// BtrfsBase backend-specific settings.
+    #[serde(default, rename = "btrfs-base")]
+    pub btrfs_base: Option<BtrfsBaseConfig>,
 }
 
 fn default_backend_type() -> String {
@@ -1271,6 +1433,7 @@ impl Default for BackendConfig {
         Self {
             r#type: default_backend_type(),
             btrfs_loop: None,
+            btrfs_base: None,
         }
     }
 }
@@ -1290,22 +1453,41 @@ pub struct FileConfig {
 /// Load config from a TOML file. Returns `FileConfig::default()` when the file
 /// does not exist.
 pub fn load_config_file(path: &Path) -> Result<FileConfig, WsCkptError> {
+    let fc = load_config_file_unvalidated(path)?;
+    validate_file_config(&fc, path)?;
+    Ok(fc)
+}
+
+/// Parses the config without range validation so an update can overwrite an
+/// out-of-range value; [`save_config_file`] validates before writing. TOML
+/// syntax and field-type errors are still returned.
+pub fn load_config_file_unvalidated(path: &Path) -> Result<FileConfig, WsCkptError> {
     match std::fs::read_to_string(path) {
-        Ok(content) => {
-            let fc: FileConfig = toml::from_str(&content)
-                .map_err(|e| WsCkptError::Config(format!("parse {}: {}", path.display(), e)))?;
-            validate_file_config(&fc, path)?;
-            Ok(fc)
-        }
+        Ok(content) => toml::from_str(&content)
+            .map_err(|e| WsCkptError::Config(format!("parse {}: {}", path.display(), e))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
         Err(e) => Err(WsCkptError::Io(e)),
     }
 }
 
-/// Validate numeric ranges in a loaded `FileConfig` so downstream consumers
+/// Validate absolute mount pins and numeric ranges so downstream consumers
 /// (e.g. bootstrap's `f64 -> u64` cast on `avail * img_max_percent / 100.0`)
 /// never see NaN/Infinity/out-of-range values.
 fn validate_file_config(fc: &FileConfig, path: &Path) -> Result<(), WsCkptError> {
+    if let Some(mount) = fc
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|b| b.btrfs_mount.as_ref())
+    {
+        if !mount.is_absolute() {
+            return Err(WsCkptError::Config(format!(
+                "backend.btrfs-base.btrfs_mount in {} must be an absolute mount point, got {:?}",
+                path.display(),
+                mount
+            )));
+        }
+    }
     if let Some(loop_cfg) = &fc.backend.btrfs_loop {
         if let Some(pct) = loop_cfg.img_max_percent {
             if !pct.is_finite() || !(0.0..=100.0).contains(&pct) {
@@ -1316,12 +1498,22 @@ fn validate_file_config(fc: &FileConfig, path: &Path) -> Result<(), WsCkptError>
                 )));
             }
         }
+        if let Some(size) = loop_cfg.img_size {
+            if size < MIN_BTRFS_LOOP_IMG_SIZE_GB {
+                return Err(WsCkptError::Config(format!(
+                    "backend.btrfs-loop.img_size in {}: expected a value of at least {} GiB (got {})",
+                    path.display(), MIN_BTRFS_LOOP_IMG_SIZE_GB, size
+                )));
+            }
+        }
     }
     Ok(())
 }
 
-/// Save config to a TOML file, creating parent directories as needed.
+/// Validates and saves config to a TOML file, creating parent directories as
+/// needed. Nothing is created or written when validation fails.
 pub fn save_config_file(path: &Path, config: &FileConfig) -> Result<(), WsCkptError> {
+    validate_file_config(config, path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1342,6 +1534,7 @@ impl Default for DaemonConfig {
             auto_cleanup_interval_secs: DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
             health_check_interval_secs: DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: DEFAULT_IMG_SIZE_GB,
             img_max_percent: DEFAULT_IMG_MAX_PERCENT * 100.0, // stored as 0-100
             min_free_bytes: 512 * 1024 * 1024,                // 512 MB
@@ -1691,6 +1884,96 @@ pub fn delete_workspace_policy(index_dir: &Path) -> Result<(), WsCkptError> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // ── validate_snapshot_id (legacy IPC surface) ──
+
+    #[test]
+    fn validate_snapshot_id_accepts_every_cli_compatible_id() {
+        let name_max = "a".repeat(SNAPSHOT_ID_MAX_BYTES);
+        for id in [
+            "snap-1",
+            "ckpt-20261015T104500.123",
+            "my snapshot",
+            "  padded  ",
+            "快照-1",
+            name_max.as_str(),
+        ] {
+            assert_eq!(
+                validate_snapshot_id(id),
+                Ok(()),
+                "id {id:?} must stay valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_empty_and_whitespace_only() {
+        for id in ["", " ", "\t", " \n "] {
+            assert!(
+                validate_snapshot_id(id).is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_traversal_and_separator_shapes() {
+        for id in [".", "..", "../escape", "a/b", "a\\b", "./.diff-tmp-backup"] {
+            assert!(
+                validate_snapshot_id(id).is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_id_rejects_nul_reserved_marker_and_over_length() {
+        assert!(validate_snapshot_id("a\u{0}b").is_err());
+        assert_eq!(
+            validate_snapshot_id(LIVE_CHILD).unwrap_err(),
+            "snapshot id is reserved for the live workspace marker"
+        );
+        let too_long = "a".repeat(SNAPSHOT_ID_MAX_BYTES + 1);
+        assert!(validate_snapshot_id(&too_long).is_err());
+    }
+
+    // ── validate_snapshot_ref (legacy IPC lookup references) ──
+
+    #[test]
+    fn validate_snapshot_ref_accepts_shapes_that_can_be_unique_prefixes() {
+        // A lookup reference is not the final id: `__live__` is the unique
+        // prefix of the valid id `__live__backup`, and `.`/`..` prefix
+        // dot-prefixed names. The resolved id is re-validated separately.
+        let name_max = "a".repeat(SNAPSHOT_ID_MAX_BYTES);
+        for reference in [
+            "snap-1",
+            LIVE_CHILD,
+            "__live__backup",
+            ".",
+            "..",
+            ".diff-tmp-backup",
+            "快照",
+            name_max.as_str(),
+        ] {
+            assert_eq!(
+                validate_snapshot_ref(reference),
+                Ok(()),
+                "reference {reference:?} must stay valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_ref_rejects_shapes_no_valid_id_can_contain() {
+        for reference in ["", " ", "\t", " \n ", "a/b", "a\\b", "../x", "a\u{0}b"] {
+            assert!(
+                validate_snapshot_ref(reference).is_err(),
+                "reference {reference:?} must be rejected"
+            );
+        }
+        let too_long = "a".repeat(SNAPSHOT_ID_MAX_BYTES + 1);
+        assert!(validate_snapshot_ref(&too_long).is_err());
+    }
 
     // ── Helper: encode then decode round-trip ──
     fn round_trip_request(req: &Request) -> Request {
@@ -2645,6 +2928,64 @@ mod tests {
     }
 
     #[test]
+    fn status_report_keeps_the_four_field_wire_layout() {
+        // #7592 review: StatusReport crosses the daemon IPC in bincode
+        // frames, which encode structs positionally, and the cosh-ng mirror
+        // (cosh-types/src/checkpoint.rs) decodes daemon status through the
+        // four-field layout. An inserted field made a new client reading an
+        // older daemon fail with UnexpectedEof (it read fs_total_bytes as a
+        // Vec length) and an older client read the shifted frame silently
+        // wrong (empty list => fs_total 0, fs_used = real total). Pin the
+        // positional layout in both directions.
+        let legacy_frame = (
+            42u64,
+            vec![WorkspaceInfo {
+                ws_id: "ws-abc".to_string(),
+                path: "/home/user/ws".to_string(),
+                snapshot_count: 5,
+            }],
+            1_000_000_000u64,
+            500_000_000u64,
+        );
+        // Older daemon -> this client.
+        let bytes = bincode::serialize(&legacy_frame).unwrap();
+        let report: StatusReport = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(report.uptime_secs, 42);
+        assert_eq!(report.workspaces.len(), 1);
+        assert_eq!(report.fs_total_bytes, 1_000_000_000);
+        assert_eq!(report.fs_used_bytes, 500_000_000);
+        // This daemon -> older client (and the cosh-ng mirror).
+        let report = StatusReport {
+            uptime_secs: 7,
+            workspaces: vec![],
+            fs_total_bytes: 9,
+            fs_used_bytes: 8,
+        };
+        let bytes = bincode::serialize(&report).unwrap();
+        let decoded: (u64, Vec<WorkspaceInfo>, u64, u64) = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, (7, vec![], 9, 8));
+    }
+
+    #[test]
+    fn response_watcher_health_ok_round_trip() {
+        let resp = Response::WatcherHealthOk {
+            workspaces_without_watcher: vec!["ws-degraded".to_string()],
+            watcher_queue_overflows: 3,
+        };
+        let decoded = round_trip_response(&resp);
+        match decoded {
+            Response::WatcherHealthOk {
+                workspaces_without_watcher,
+                watcher_queue_overflows,
+            } => {
+                assert_eq!(workspaces_without_watcher, vec!["ws-degraded".to_string()]);
+                assert_eq!(watcher_queue_overflows, 3);
+            }
+            _ => panic!("expected WatcherHealthOk variant"),
+        }
+    }
+
+    #[test]
     fn response_cleanup_ok_round_trip() {
         let resp = Response::CleanupOk {
             removed: vec!["msg1-step0".to_string(), "msg1-step1".to_string()],
@@ -2921,6 +3262,85 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[test]
+    fn load_config_file_rejects_btrfs_loop_img_size_below_minimum() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0", "1", "4"] {
+            let path = dir.path().join(format!("bad_{}.toml", bad));
+            let toml = format!("[backend.btrfs-loop]\nimg_size = {}\n", bad);
+            std::fs::write(&path, toml).unwrap();
+            let result = load_config_file(&path);
+            let err = result.expect_err("img_size below the minimum should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("img_size"),
+                "error should name img_size, got: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn load_config_file_accepts_btrfs_loop_img_size_at_or_above_minimum() {
+        let dir = tempfile::tempdir().unwrap();
+        for good in ["5", "6", "30"] {
+            let path = dir.path().join(format!("good_{}.toml", good));
+            let toml = format!("[backend.btrfs-loop]\nimg_size = {}\n", good);
+            std::fs::write(&path, toml).unwrap();
+            let result = load_config_file(&path);
+            assert!(
+                result.is_ok(),
+                "img_size = {} should be accepted, got {:?}",
+                good,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn save_config_file_rejects_invalid_img_size_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "auto_cleanup = true\n").unwrap();
+        let mut fc = load_config_file(&path).unwrap();
+        for size in [0, 1, 4] {
+            fc.backend.btrfs_loop = Some(BtrfsLoopConfig {
+                img_size: Some(size),
+                img_max_percent: None,
+            });
+            let err = save_config_file(&path, &fc).unwrap_err().to_string();
+            assert!(err.contains("backend.btrfs-loop.img_size"));
+            assert!(err.contains(&path.display().to_string()));
+            assert!(err.contains(&format!("got {}", size)));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "auto_cleanup = true\n"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_img_size_on_disk_can_be_repaired_via_unvalidated_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "auto_cleanup = true\n[backend]\ntype = \"btrfs-loop\"\n[backend.btrfs-loop]\nimg_size = 0\nimg_max_percent = 40.0\n",
+        )
+        .unwrap();
+        assert!(load_config_file(&path).is_err());
+        let mut fc = load_config_file_unvalidated(&path).unwrap();
+        fc.backend.btrfs_loop.as_mut().unwrap().img_size = Some(5);
+        save_config_file(&path, &fc).unwrap();
+        let repaired = load_config_file(&path).unwrap();
+        assert_eq!(repaired, fc);
+        assert_eq!(repaired.auto_cleanup, Some(true));
+        assert_eq!(repaired.backend.r#type, "btrfs-loop");
+        let loop_config = repaired.backend.btrfs_loop.unwrap();
+        assert_eq!(loop_config.img_size, Some(5));
+        assert_eq!(loop_config.img_max_percent, Some(40.0));
     }
 
     // ── Recover round-trip tests ──
@@ -3377,7 +3797,7 @@ mod tests {
         idx.head = Some("e".into());
 
         let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        idx.prune_chain(&ids);
+        assert!(idx.prune_chain(&ids).cycle_repairs.is_empty());
 
         assert_eq!(idx.snapshots["c"].parent_id, None);
         assert_eq!(idx.head.as_deref(), Some("e"));
@@ -3820,58 +4240,6 @@ mod tests {
         );
     }
 
-    /// Captures `tracing` events for the cycle tests. `tracing` without a
-    /// subscriber drops events, and this crate does not depend on
-    /// `tracing-subscriber`; a minimal recorder keeps that dependency out while
-    /// still proving the repair is reported.
-    #[derive(Clone, Default)]
-    struct EventRecorder {
-        messages: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
-    }
-
-    impl EventRecorder {
-        fn warnings(&self) -> Vec<String> {
-            self.messages
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(level, _)| level == "WARN")
-                .map(|(_, message)| message.clone())
-                .collect()
-        }
-    }
-
-    impl tracing::Subscriber for EventRecorder {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            struct Message(String);
-            impl tracing::field::Visit for Message {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        self.0 = format!("{value:?}");
-                    }
-                }
-            }
-            let mut message = Message(String::new());
-            event.record(&mut message);
-            let level = event.metadata().level().to_string();
-            self.messages.lock().unwrap().push((level, message.0));
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
     #[test]
     fn prune_chain_terminates_on_a_parent_cycle_below_the_head() {
         // a ↔ b form a cycle entirely inside the deleted set, and c hangs off b.
@@ -3885,14 +4253,12 @@ mod tests {
         idx.head = Some("c".into());
 
         let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        let recorder = EventRecorder::default();
-        let thread_recorder = recorder.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            tracing::subscriber::with_default(thread_recorder, || idx.prune_chain(&ids));
-            let _ = tx.send(idx);
+            let report = idx.prune_chain(&ids);
+            let _ = tx.send((idx, report));
         });
-        let idx = rx
+        let (idx, report) = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("prune_chain must terminate on a parent cycle inside the deleted set");
 
@@ -3901,17 +4267,14 @@ mod tests {
             "with no surviving ancestor the child becomes a root"
         );
         assert_eq!(idx.head.as_deref(), Some("c"));
-        let warnings = recorder.warnings();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("parent cycle") && w.contains("reparenting a surviving child")),
-            "the silent repair must be reported: {warnings:?}"
-        );
-        assert!(
-            warnings.iter().any(|w| w.contains("/ws")),
-            "the warning must name the workspace: {warnings:?}"
-        );
+        assert_eq!(report.cycle_repairs.len(), 1);
+        let PruneCycleRepair::ReparentedChild { cycle_at } = &report.cycle_repairs[0] else {
+            panic!("the surviving child repair must be reported: {report:?}");
+        };
+        assert!(["a", "b"].contains(&cycle_at.as_str()));
+        let warning = report.cycle_repairs[0].warning(&idx.workspace_path);
+        assert!(warning.contains("parent cycle") && warning.contains("/ws"));
+        assert!(warning.contains("reparenting a surviving child"));
     }
 
     #[test]
@@ -3925,25 +4288,23 @@ mod tests {
         idx.head = Some("b".into());
 
         let ids: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        let recorder = EventRecorder::default();
-        let thread_recorder = recorder.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            tracing::subscriber::with_default(thread_recorder, || idx.prune_chain(&ids));
-            let _ = tx.send(idx);
+            let report = idx.prune_chain(&ids);
+            let _ = tx.send((idx, report));
         });
-        let idx = rx
+        let (idx, report) = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("prune_chain must terminate when the head sits in a parent cycle");
 
         assert_eq!(idx.head, None, "no surviving ancestor means no head");
-        let warnings = recorder.warnings();
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("parent cycle") && w.contains("repairing the head")),
-            "the silent repair must be reported: {warnings:?}"
-        );
+        assert_eq!(report.cycle_repairs.len(), 1);
+        let PruneCycleRepair::ClearedHead { cycle_at } = &report.cycle_repairs[0] else {
+            panic!("the head repair must be reported: {report:?}");
+        };
+        assert!(["a", "b"].contains(&cycle_at.as_str()));
+        let warning = report.cycle_repairs[0].warning(&idx.workspace_path);
+        assert!(warning.contains("parent cycle") && warning.contains("repairing the head"));
     }
 
     #[test]
@@ -3958,14 +4319,20 @@ mod tests {
         let ids: HashSet<String> = ["a"].iter().map(|s| s.to_string()).collect();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            idx.prune_chain(&ids);
-            let _ = tx.send(idx);
+            let report = idx.prune_chain(&ids);
+            let _ = tx.send((idx, report));
         });
-        let idx = rx
+        let (idx, report) = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("a self-parented snapshot must not make the walk run forever");
 
         assert_eq!(idx.snapshots["c"].parent_id, None);
         assert_eq!(idx.head.as_deref(), Some("c"));
+        assert_eq!(
+            report.cycle_repairs,
+            vec![PruneCycleRepair::ReparentedChild {
+                cycle_at: "a".into()
+            }]
+        );
     }
 }

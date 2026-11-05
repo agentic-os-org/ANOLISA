@@ -441,19 +441,10 @@ Apply 检测到旧目标与本次目标跨 route 时，以 `Rejected / RECONCILE
 交给本次 Client；退出后释放。目标记录用于清理和决定 create/update，不作为步骤断点。
 
 
-Adapter 负责支持范围内的语义转换和 DSL 编码检查，不依赖单独固定版本的
-ActPlane compiler。目标 DSL 是否被接受，以实际部署的 AgentSight/ActPlane 为准。
-Client 当前下发前检查请求完整性、进程身份和目标 health/capability，没有远端
-validate-only 调用；编译拒绝由 Apply 响应报告。因此 update 仍可能在旧目标删除后
-才得知新 DSL 被拒绝。若需在删除旧目标前验证 DSL，须定义使用目标实际编译器的
-远端校验契约，不能用本地固定版本编译成功代替。
-本次移除 Adapter 的 `ACTPLANE_COMPILER_REJECTED_GENERATED_DSL` 本地故障路径；
-计划格式及 frozen DSL 输出不变，现有语义拒绝测试继续作为 Adapter 验收依据。
-此变更的验收类型为内部 Adapter 契约调整：Adapter、Client、PCP 三个 crate 的
-`cargo test -p asc-policy-adapter-agentsight -p asc-agentsight-client -p asc-pcp --locked --offline`
-应覆盖完整 Adapter golden、直接消费者及 loopback HTTP mock 组合测试；
-具体结果见验收报告，不代表真实部署版本的编译兼容性。回退须一起恢复编译器调用、依赖、lockfile 和
-编译断言，无 wire/state 格式迁移；不得恢复仅凭本地编译成功宣称目标兼容的结论。
+Translator 负责支持范围内的语义转换和编码检查，产出原生 JSON 对应的 DSL 或 Cedar
+对应的结构化文件防护配置。Client 下发前检查请求完整性、进程身份和目标 health/capability，
+没有远端 validate-only 调用。DSL 编译及结构化目标路径、拓扑校验在 PEP Apply 时完成，
+因此 update 仍可能在旧目标删除后才得知新策略被拒绝。
 
 当前 [AgentSight Client](../../v2/crates/asc-agentsight-client/README.md)
 实现 `asc-policy-target-contracts::TargetDeploymentClient`，只保留下列稳定准备/重放
@@ -480,7 +471,7 @@ delete(targets) -> DeploymentReport
 - `update` 封装具体 PEP 的更新机制；AgentSight 当前按先清理旧目标、再创建新目标
   实现。其他 PEP 可支持原地更新，不把先删后建固化成 Reconciler 的通用步骤。
 - AgentSight 本次准备固定 PID、start time、boot identity 和请求摘要，发送前再次校验。
-  下一次调用重新解析当前进程身份，不保留跨次比对依据，也不保证跨次仍为同一进程。
+  每次调用均与 Binding 中固定的进程身份比对；PID 复用或进程退出时拒绝下发。
 - `previous_targets` 含实际部署记录，必须按 target 身份去重并排除本次新目标身份。
   即使新目标已以 UNKNOWN 登记，也不能把它放入“先删除的旧目标”集合。
 - 旧 revision 记录只需可定位/可清理输入，不要求重新运行旧 Adapter。

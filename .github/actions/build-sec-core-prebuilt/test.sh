@@ -8,7 +8,7 @@ TEMPORARY="$(mktemp -d)"
 trap 'rm -rf "$TEMPORARY"' EXIT
 VERSION="$(python3 "$REPO_ROOT/src/agent-sec-core/packaging/raw/verify_release.py" \
     "$REPO_ROOT/src/agent-sec-core" \
-    "$REPO_ROOT/src/agent-sec-core/.anolisa/component.toml")"
+    "$REPO_ROOT/src/agent-sec-core/packaging/anolisa/component.toml")"
 
 if "$ACTION_DIR/build.sh" --source-repo "$REPO_ROOT" \
     --output-dir "$TEMPORARY/profile" --version "$VERSION" \
@@ -52,4 +52,5 @@ grep -Fq 'requested version 99.0.0 does not match sec-core' "$TEMPORARY/version.
 
 python3 "$ACTION_DIR/test_artifacts.py"
 python3 "$ACTION_DIR/test_python_sbom.py"
+python3 "$ACTION_DIR/../prebuilt-rust-common/test_verify_glibc.py"
 echo 'sec-core prebuilt action tests passed'

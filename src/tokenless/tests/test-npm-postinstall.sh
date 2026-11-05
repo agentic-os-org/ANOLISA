@@ -123,10 +123,8 @@ printf '{"component":"tokenless","version":"%s"}\n' "$FAKE_VERSION" \
 printf '#!/usr/bin/env bash\n' > "$PKG/adapters/tokenless/claude-code/scripts/install.sh"
 printf '{"name":"%s","version":"%s"}\n' "$PLATFORM_PKG" "$FAKE_VERSION" \
   > "$PKG/node_modules/$PLATFORM_PKG/package.json"
-for b in tokenless rtk; do
-  printf '#!/usr/bin/env bash\necho "%s"\n' "$b" > "$PKG/node_modules/$PLATFORM_PKG/bin/$b"
-  chmod +x "$PKG/node_modules/$PLATFORM_PKG/bin/$b"
-done
+printf '#!/usr/bin/env bash\necho tokenless\n' > "$PKG/node_modules/$PLATFORM_PKG/bin/tokenless"
+chmod +x "$PKG/node_modules/$PLATFORM_PKG/bin/tokenless"
 
 # run_postinstall <scenario> [ENV=VAL ...]
 OUT=""
@@ -232,7 +230,7 @@ assert_eq "stamps the copied manifest with the package version" \
 assert_eq "marks the tree it placed" "$(cat "$FRESH/.tokenless-owner")" \
   "npm:anolisa-tokenless@$FAKE_VERSION"
 assert_file "links the tokenless launcher" "$PKG/bin/tokenless"
-assert_file "links the rtk launcher" "$PKG/bin/rtk"
+assert_no_file "links no standalone rtk launcher" "$PKG/bin/rtk"
 
 # =============================================================================
 # 2. An anolisa-managed tree is preserved
@@ -392,17 +390,13 @@ assert_eq "the leftover is still exactly what it was" \
 # =============================================================================
 # 9. Rebuild repairs dangling native launcher symlinks
 # =============================================================================
-for b in tokenless rtk; do
-  rm -f "$PKG/bin/$b"
-  ln -s "$TEST_DIR/removed-platform/bin/$b" "$PKG/bin/$b"
-done
+rm -f "$PKG/bin/tokenless"
+ln -s "$TEST_DIR/removed-platform/bin/tokenless" "$PKG/bin/tokenless"
 run_postinstall dangling-launchers
 assert_eq "postinstall repairs dangling launchers" "$STATUS" "0"
-for b in tokenless rtk; do
-  assert_eq "the $b launcher targets the installed platform package" \
-    "$(readlink "$PKG/bin/$b")" "$PKG/node_modules/$PLATFORM_PKG/bin/$b"
-  assert_eq "the repaired $b launcher executes" "$("$PKG/bin/$b")" "$b"
-done
+assert_eq "the tokenless launcher targets the installed platform package" \
+  "$(readlink "$PKG/bin/tokenless")" "$PKG/node_modules/$PLATFORM_PKG/bin/tokenless"
+assert_eq "the repaired tokenless launcher executes" "$("$PKG/bin/tokenless")" "tokenless"
 run_postinstall dangling-launchers
 assert_eq "rebuilding repaired launchers is idempotent" "$STATUS" "0"
 

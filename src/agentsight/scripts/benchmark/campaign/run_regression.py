@@ -127,6 +127,7 @@ def run_check(
     checks.append(
         {
             "command": shlex.join(command),
+            "argv": list(command),
             "cwd": str(cwd),
             "log": log_path.name,
             "started_at_unix": started,

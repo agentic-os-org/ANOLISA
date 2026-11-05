@@ -30,10 +30,49 @@ fn pct(report: &serde_json::Value, pointer: &str) -> f64 {
 }
 
 #[test]
-fn response_canonical_lossless_savings_at_least_35_pct() {
+fn compact_response_canonical_is_preserved_without_savings() {
+    // Previously measured 36.3% by deleting diagnostic fields. The unchanged
+    // compact fixture now measures preservation: 20,813 bytes in and out, 0%.
+    let input = tokenless_bench::response_canonical();
+    let (output, outcome) = tokenless_bench::compress_json_with(&input, Default::default(), None);
+    assert_eq!(output, input);
+    assert_eq!(outcome.output, serde_json::to_string(&input).unwrap());
+    assert!(outcome.operations.is_empty());
     let report = compression_metrics();
     let saved = pct(&report, "/canonical/response/savings_pct");
-    assert!(saved >= 35.0, "response savings regressed: {saved}%");
+    assert_eq!(saved, 0.0);
+}
+
+#[test]
+fn pretty_response_canonical_compacts_without_omitting_values() {
+    use tokenless_compressors::{JsonCompressionContext, JsonCompressor, JsonOperation};
+
+    let original = tokenless_bench::response_canonical();
+    let input = serde_json::to_string_pretty(&original).unwrap();
+    let outcome = JsonCompressor::default()
+        .compress(
+            &input,
+            &JsonCompressionContext {
+                recovery: &tokenless_ccr::RecoveryMethod::None,
+                stash: None,
+                allow_toon: false,
+                min_toon_chars: usize::MAX,
+                allow_unrecoverable: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&outcome.output).unwrap(),
+        original
+    );
+    assert_eq!(outcome.operations, [JsonOperation::Cleanup]);
+    assert!(outcome.stash_writes.is_empty());
+    let before = tokenless_bench::metrics::estimate_tokens(&input);
+    let after = tokenless_bench::metrics::estimate_tokens(&outcome.output);
+    assert!(
+        after < before,
+        "pretty response must save tokens: {before} -> {after}"
+    );
 }
 
 #[test]
@@ -44,7 +83,10 @@ fn schema_canonical_savings_at_least_40_pct() {
 }
 
 #[test]
-fn full_stack_savings_at_least_49_pct() {
+fn full_stack_savings_at_least_18_pct() {
+    // Measured 19.5% with preserved response values and `toon-format` 0.7.0,
+    // down from 50.3% when diagnostic fields were deleted. Fixtures and
+    // stacking definitions match.
     let report = compression_metrics();
     let configs = report["stacking"]["configs"].as_array().unwrap();
     let full = configs
@@ -52,7 +94,7 @@ fn full_stack_savings_at_least_49_pct() {
         .find(|c| c["config"] == "full_stack")
         .expect("full_stack config present");
     let saved = full["savings_pct"].as_f64().unwrap();
-    assert!(saved >= 49.0, "full_stack savings regressed: {saved}%");
+    assert!(saved >= 18.0, "full_stack savings regressed: {saved}%");
 }
 
 #[test]

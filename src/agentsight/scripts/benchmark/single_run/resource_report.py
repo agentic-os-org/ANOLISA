@@ -23,15 +23,21 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
     cpu: list[float] = []
     cpu_seconds = covered = 0.0
     complete = True
+    rss_complete = True
     previous_end: float | None = None
     for index, row in enumerate(rows):
         timestamp = numeric(row.get("monotonic_timestamp"))
         if timestamp is None:
             complete = False
+            rss_complete = False
             continue
         value = numeric(row.get("rss_mb"))
-        if start <= timestamp < end and value is not None and value >= 0:
-            rss.append(value)
+        if start <= timestamp < end:
+            if value is not None and value >= 0:
+                rss.append(value)
+            else:
+                # A missing peak cannot be inferred from the remaining points.
+                rss_complete = False
         interval = numeric(row.get("cpu_interval_seconds"))
         if interval is None or interval <= 0:
             # The initial RSS sample establishes the CPU baseline and has no interval.
@@ -66,6 +72,7 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
         "rss_average_mib": sum(rss) / len(rss) if rss else None,
         "rss_peak_mib": max(rss) if rss else None,
         "samples": len(rss),
+        "rss_samples_valid": rss_complete and bool(rss),
         "cpu_average_pct": cpu_seconds / covered * 100 if covered else None,
         "cpu_p95_pct": percentile(cpu),
         "cpu_peak_pct": max(cpu) if cpu else None,
@@ -81,6 +88,8 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     worker = read_json(directory / "worker-result.json")
     load = read_json(directory / "agent-summary.json")
     capture = read_json(directory / "report.json")
+    if not isinstance(capture, dict):
+        capture = {"invalid": True}
     safety_stop = read_json(directory / "safety-stop.json")
     rows: list[dict[str, str]] = []
     evictions: list[float] = []
@@ -90,12 +99,14 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "channel_dropped": [],
     }
     final_metrics = read_internal_metrics(directory / "internal-metrics.prom")
+    invalid_counters: set[str] = set()
     for key in drop_samples:
         value = numeric(final_metrics.get(key))
         if value is not None and value >= 0:
             drop_samples[key].append(value)
+        elif key in final_metrics:
+            invalid_counters.add(key)
     counter_samples = {"eviction_count": evictions, **drop_samples}
-    invalid_counters: set[str] = set()
     metrics = directory / "metrics.csv"
     if metrics.exists():
         with metrics.open(newline="") as handle:
@@ -120,7 +131,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         resource_error = "missing or invalid load measurement window"
     elif invalid_counters:
         resource_error = "invalid internal counter samples: " + ", ".join(sorted(invalid_counters))
-    elif not resources["samples"] or not resources["cpu_samples_valid"]:
+    elif not resources["rss_samples_valid"] or not resources["cpu_samples_valid"]:
         resource_error = "missing or invalid RSS/CPU samples in the load window"
     elif resources["cpu_measurement_seconds"] < (end - start) * 0.95:
         resource_error = "CPU samples cover less than 95% of the load window"
@@ -128,10 +139,15 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     load_status = "PASS" if load.get("passed") is True else "FAIL" if load else "UNVERIFIED"
     probe_drops = {key: max(values) if values else None for key, values in drop_samples.items()}
     events_dropped = any(value is not None and value > 0 for value in probe_drops.values())
+    sent = capture.get("sent")
+    quality = {}
+    for key in ("completeness_ratio", "token_accuracy"):
+        value = capture.get(key)
+        quality[key] = numeric(value) if type(value) in (int, float) else None
     capture_ok = (
-        capture.get("sent", 0) > 0
-        and capture.get("completeness_ratio", 0) >= 0.999
-        and (capture.get("token_accuracy") or 0) >= 0.999
+        type(sent) is int
+        and sent > 0
+        and all(value is not None and 0.999 <= value <= 1 for value in quality.values())
         and not events_dropped
         and not invalid_counters.intersection(drop_samples)
     )
@@ -143,7 +159,7 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
     ffi = read_json(directory / "ffi-consumer.json") if source.get("mode") == "ffi" else None
     ffi_error = None
     if ffi is not None:
-        expected = capture.get("sent", 0) + len(
+        expected = (sent if type(sent) is int and sent > 0 else 0) + len(
             read_json(directory / "clients-ready.json").get("request_ids", [])
         )
         if not ffi.get("completed") or worker.get("trace_returncode") != 0:
@@ -165,10 +181,10 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         and not safety_stop
         and ffi_error is None
     )
-    capture_counts = {
-        key: capture.get(key)
-        for key in ("sent", "matched", "complete", "missing_count", "token_correct")
-    }
+    capture_counts = {}
+    for key in ("sent", "matched", "complete", "missing_count", "token_correct"):
+        value = capture.get(key)
+        capture_counts[key] = value if type(value) is int and value >= 0 else None
     if capture_counts["missing_count"] is None and isinstance(capture.get("missing_ids"), list):
         capture_counts["missing_count"] = len(capture["missing_ids"])
     return {
@@ -187,8 +203,8 @@ def summarize(directory: Path, source: dict[str, Any]) -> dict[str, Any]:
         "load": load_status,
         "capture": capture_status,
         "capture_source": capture.get("capture_source"),
-        "capture_completeness": capture.get("completeness_ratio"),
-        "capture_token_accuracy": capture.get("token_accuracy"),
+        "capture_completeness": quality["completeness_ratio"],
+        "capture_token_accuracy": quality["token_accuracy"],
         "capture_counts": capture_counts,
         "connection_evictions": max(evictions) if evictions else None,
         "probe_drops": probe_drops,

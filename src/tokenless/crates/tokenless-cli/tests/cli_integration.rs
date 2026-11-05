@@ -77,21 +77,46 @@ struct TempDataDir {
 }
 
 impl TempDataDir {
-    fn new() -> Option<Self> {
-        let home = get_home_dir();
+    /// Use system-wide temporary storage so rejection tests also run when the
+    /// default temporary directory is inside the trusted user profile.
+    fn new_external() -> Option<Self> {
+        #[cfg(windows)]
+        let base = std::path::PathBuf::from(std::env::var_os("SystemRoot")?).join("Temp");
+        #[cfg(unix)]
+        let base = std::path::PathBuf::from("/tmp");
         let temp_dir = tempfile::Builder::new()
-            .prefix("tokenless-external-data-dir-integration-")
+            .prefix("tokenless-external-data-dir-")
+            .tempdir_in(&base)
+            .inspect_err(|error| {
+                eprintln!(
+                    "external-root fixture unavailable at {}: {error}",
+                    base.display()
+                )
+            })
+            .ok()?;
+        let root = temp_dir.path().canonicalize().ok()?;
+        let home = get_home_dir();
+        if !home.is_empty() && root.starts_with(std::path::Path::new(&home).canonicalize().ok()?) {
+            eprintln!(
+                "external-root fixture is inside the trusted home: {}",
+                root.display()
+            );
+            return None;
+        }
+        let data_dir = root.join("databases");
+        Some(Self {
+            _temp_dir: temp_dir,
+            root,
+            data_dir,
+        })
+    }
+
+    fn new() -> Option<Self> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("tokenless-data-dir-integration-")
             .tempdir()
             .ok()?;
         let root = temp_dir.path().to_path_buf();
-        if !home.is_empty()
-            && root
-                .canonicalize()
-                .ok()?
-                .starts_with(std::path::Path::new(&home).canonicalize().ok()?)
-        {
-            return None;
-        }
         let data_dir = root.join("databases");
         Some(Self {
             _temp_dir: temp_dir,
@@ -251,7 +276,7 @@ fn valid_stats_db_override_wins_over_invalid_data_dir() {
 
 #[test]
 fn stats_db_override_cannot_escape_selected_data_dir() {
-    let fixture = match TempDataDir::new() {
+    let fixture = match TempDataDir::new_external() {
         Some(fixture) => fixture,
         None => return,
     };
@@ -267,6 +292,26 @@ fn stats_db_override_cannot_escape_selected_data_dir() {
     assert!(!outside_db.exists());
     assert!(fixture.data_dir.join("stats.db").is_file());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
+}
+
+#[test]
+fn stats_db_override_allows_trusted_home_outside_selected_data_dir() {
+    let Some(fixture) = TempStatsDb::new() else {
+        return;
+    };
+    let data = tempfile::tempdir().unwrap();
+    let outside_db = fixture.dir.join("home-stats.db");
+    let output = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", data.path())
+        .env("TOKENLESS_STATS_DB", &outside_db)
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(outside_db.is_file());
+    assert!(!data.path().join("stats.db").exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
 }
 
 #[test]
@@ -306,6 +351,86 @@ fn compress_schema_from_file() {
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["function"]["name"], "f");
+}
+
+/// Run a tokenless subcommand with `input` on stdin and capture its output.
+/// Stats and SLS stay off so the assertions see only the emitted payload.
+fn run_stdin_command(
+    fixture: &TempDataDir,
+    compression_enabled: &str,
+    args: &[&str],
+    input: &str,
+) -> std::process::Output {
+    fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", compression_enabled)
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap()
+}
+
+/// `compress-schema` shares the byte-exact stdout contract of `compress-toon`
+/// and `retrieve`: the payload is emitted verbatim, so a passthrough run
+/// reproduces the input byte-for-byte (no LF appended, none doubled) and an
+/// encoded run emits exactly the candidate the stats recorder measures.
+#[test]
+fn compress_schema_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let schema = r#"{"function":{"name":"test","description":"A test function","parameters":{"type":"object","properties":{"x":{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}"#;
+
+    // Dry-run passthrough emits the input unchanged; the trailing-LF variant
+    // catches a doubled newline just as the bare variant catches an added one.
+    for payload in [schema.to_string(), format!("{schema}\n")] {
+        let output = run_stdin_command(&fixture, "0", &["compress-schema", "--no-stash"], &payload);
+        assert!(
+            output.status.success(),
+            "compress-schema failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-schema must reproduce the input byte-for-byte"
+        );
+    }
+
+    // With compression on, stdout is exactly the emitted candidate: compact
+    // JSON from the schema compressor, with no LF appended.
+    let long_desc = "Run a shell command in the workspace. ".repeat(20);
+    let schema = format!(
+        r#"{{"function":{{"name":"test","description":"{long_desc}","parameters":{{"type":"object","properties":{{"x":{{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}}}}}}"#
+    );
+    let output = run_stdin_command(&fixture, "1", &["compress-schema", "--no-stash"], &schema);
+    assert!(
+        output.status.success(),
+        "compress-schema failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(&schema).unwrap();
+    let expected =
+        serde_json::to_string(&tokenless_schema::SchemaCompressor::new().compress(&value)).unwrap();
+    assert_ne!(
+        expected, schema,
+        "fixture must compress, otherwise the run is a passthrough"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        expected,
+        "compress-schema stdout must equal the emitted candidate byte-for-byte"
+    );
 }
 
 #[test]
@@ -461,8 +586,10 @@ fn compress_response_from_stdin() {
         .unwrap();
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(result.get("data").is_some());
-    assert!(result.get("debug").is_none());
+    assert_eq!(
+        result,
+        serde_json::from_str::<serde_json::Value>(response).unwrap()
+    );
 }
 
 #[test]
@@ -507,10 +634,44 @@ fn compress_response_cli_matches_runtime_library() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        expected.output,
-    );
+    // Exact equality with the runtime library output: no `trim_end()`, so an
+    // appended trailing newline fails the comparison.
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected.output);
+}
+
+/// `compress-response` shares the byte-exact stdout contract of
+/// `compress-toon` and `retrieve`: a passthrough run must reproduce the input
+/// verbatim, so automation can detect the passthrough by comparing stdout with
+/// the input payload. The runs here are dry-run with statistics off, so they
+/// assert the emitted bytes only - equality with the recorded `after` text
+/// holds in active mode alone (see the CLI reference).
+#[test]
+fn compress_response_stdout_is_byte_exact() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let input = r#"{"data":"value","debug":"remove"}"#;
+    // The trailing-LF variant catches a doubled newline just as the bare
+    // variant catches an added one.
+    for payload in [input.to_string(), format!("{input}\n")] {
+        let output = run_stdin_command(
+            &fixture,
+            "0",
+            &["compress-response", "--no-stash"],
+            &payload,
+        );
+        assert!(
+            output.status.success(),
+            "compress-response failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            payload.as_bytes(),
+            "dry-run compress-response must reproduce the input byte-for-byte"
+        );
+    }
 }
 
 #[test]
@@ -561,10 +722,10 @@ fn compress_response_stats_use_unicode_aware_estimates() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].before_tokens, estimate_tokens(&response));
-    assert_eq!(
-        records[0].after_tokens,
-        estimate_tokens(compressed.trim_end())
-    );
+    // The recorded `after` is measured on exactly the emitted bytes: no
+    // compensating trim, so an LF the CLI appended but the recorder did not
+    // measure fails here.
+    assert_eq!(records[0].after_tokens, estimate_tokens(&compressed));
 }
 
 #[test]
@@ -592,8 +753,9 @@ fn dry_run_no_savings_keeps_the_no_savings_warning() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim_end(),
-        response
+        output.stdout,
+        response.as_bytes(),
+        "dry-run passthrough must reproduce the input byte-for-byte"
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("response compression did not reduce size"));
@@ -1958,7 +2120,7 @@ fn post_tool_request_json(content: &str, recovery_available: bool, session_id: &
 }
 
 fn debug_laden_content() -> String {
-    serde_json::to_string(&serde_json::json!({
+    serde_json::to_string_pretty(&serde_json::json!({
         "url": "https://registry.example.com/packages",
         "status": 200,
         "debug": "cache=miss upstream=registry-04 trace=9f2e11c0 backend_latency_ms=184 retries=0",
@@ -2004,6 +2166,11 @@ fn compress_post_tool_uses_the_v2_result_envelope() {
     );
     assert_eq!(response["result"]["recoverability"], "lossless");
     assert_eq!(response["result"]["content_type"], "json");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(response["result"]["output"].as_str().unwrap())
+            .unwrap(),
+        serde_json::from_str::<serde_json::Value>(&content).unwrap()
+    );
 }
 
 #[test]
@@ -2116,6 +2283,14 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
         .into_iter()
         .map(Into::into)
         .collect();
+        #[cfg(windows)]
+        paths.retain(|path| {
+            !path.to_string_lossy().ends_with(' ')
+                && !path
+                    .to_string_lossy()
+                    .chars()
+                    .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+        });
         // With quotePath=false these bytes are emitted raw, outside the
         // text input accepted by the compression API.
         #[cfg(unix)]
@@ -2302,6 +2477,67 @@ fn compress_post_tool_reduces_and_restores_build_logs() {
 }
 
 #[test]
+fn compress_post_tool_unittest_logs_preserve_summary_and_recover_original() {
+    let fixture = TempDataDir::new().unwrap();
+    let mut content = (0..83)
+        .map(|index| format!("test_case_{index:03} (__main__.ExampleTests) ... ok\n"))
+        .collect::<String>();
+    content.push_str(
+        "\n----------------------------------------------------------------------\nRan 83 tests in 0.295s\n\nOK\n",
+    );
+    for (status, recovery, disposition) in [
+        ("success", "shell", "applied"),
+        ("success", "none", "no_savings"),
+        ("error", "shell", "tool_error"),
+    ] {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&build_log_request(&content, status, "unittest-log")).unwrap();
+        request["input"]["capabilities"]["recovery"]["kind"] = recovery.into();
+        request["input"]["command"] = "python -m unittest -v".into();
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &request.to_string(),
+        );
+        assert!(output.status.success(), "{:?}", output);
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        assert_eq!(result["content_type"], "build_log");
+        assert_eq!(result["disposition"], disposition);
+        if disposition != "applied" {
+            assert_eq!(result["output"], content);
+            assert_eq!(result["applied_operations"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["recoverability"], "retrievable");
+        assert_eq!(
+            result["applied_operations"],
+            serde_json::json!(["build_log_reduction"])
+        );
+        assert!(
+            result["after_tokens"].as_u64().unwrap() < result["before_tokens"].as_u64().unwrap()
+        );
+        let compressed = result["output"].as_str().unwrap();
+        assert!(compressed.ends_with("Ran 83 tests in 0.295s\n\nOK\n"));
+        let hash = extract_hash(compressed).unwrap();
+        let retrieve = fixture.command().args(["retrieve", hash]).output().unwrap();
+        assert!(retrieve.status.success());
+        let marker = compressed.lines().find(|line| line.contains(hash)).unwrap();
+        assert_eq!(
+            compressed.replace(
+                &format!("{marker}\n"),
+                &String::from_utf8(retrieve.stdout).unwrap(),
+            ),
+            content
+        );
+    }
+}
+
+#[test]
 fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -2412,32 +2648,48 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 }
 
 #[test]
-fn compress_pre_tool_resolves_the_independent_rtk_binary() {
+#[cfg(unix)]
+fn compress_pre_tool_runs_rewrites_through_the_embedded_rtk() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
+    // A stray `rtk` on PATH must play no part: RTK is linked into tokenless.
     let bin_dir = tempfile::tempdir().unwrap();
-    let rtk = bin_dir.path().join("rtk");
-    std::fs::write(
-        &rtk,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'rtk 0.43.0'; exit 0; fi\nprintf 'rtk grep --count error log'\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
+    let stray = bin_dir.path().join("rtk");
+    std::fs::write(&stray, "#!/bin/sh\nexit 97\n").unwrap();
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = std::fs::metadata(&rtk).unwrap().permissions();
+        let mut permissions = std::fs::metadata(&stray).unwrap().permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&rtk, permissions).unwrap();
+        std::fs::set_permissions(&stray, permissions).unwrap();
     }
+    let path = std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    // RTK reads permission rules and its own configuration from the home directory.
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("alpha.txt"), "").unwrap();
+    let isolate = |command: &mut Command| {
+        command
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("TOKENLESS_STATS_ENABLED", "0");
+    };
+
     let request = serde_json::json!({
         "protocol_version": 2,
         "operation": "pre_tool",
         "attribution": {"agent_id": "integration-agent"},
         "input": {
             "tool_name": "Bash",
-            "arguments": {"command": "grep error log"},
+            "arguments": {"command": "ls", "timeout": 30},
             "command_field": "command",
             "capabilities": {
                 "replace_arguments": true,
@@ -2445,24 +2697,501 @@ fn compress_pre_tool_resolves_the_independent_rtk_binary() {
             }
         }
     });
-    let output = spawn_with_stdin(
-        fixture
-            .command()
-            .env(
-                "PATH",
-                std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
-                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-                ))
-                .unwrap(),
-            )
-            .env("TOKENLESS_STATS_ENABLED", "0"),
-        &["compress"],
-        &request.to_string(),
+    let mut compress = fixture.command();
+    isolate(&mut compress);
+    let output = spawn_with_stdin(&mut compress, &["compress"], &request.to_string());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success());
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["action"], "replace_arguments");
     assert_eq!(response["result"]["output_optimization"], "rtk");
+    assert_eq!(response["result"]["arguments"]["timeout"], 30);
+    let rewritten = response["result"]["arguments"]["command"].as_str().unwrap();
+    assert!(rewritten.ends_with(" rtk ls"), "{rewritten}");
+    assert!(rewritten.contains("tokenless"), "{rewritten}");
+
+    // The rewritten command is self-contained: this binary runs RTK's `ls`.
+    let mut shell = Command::new("sh");
+    isolate(&mut shell);
+    let executed = shell
+        .args(["-c", rewritten])
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&executed.stdout).contains("alpha.txt"));
+}
+
+/// How the caller of a stalled rewrite runs `tokenless compress`.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq)]
+enum StalledCaller {
+    /// Shares its process group with the CLI, as the hook adapters do.
+    SharedGroup,
+    /// Starts the CLI in a group of its own, as AW and the Python SDK do.
+    OwnGroup,
+    /// Hands the CLI a full stderr pipe that it never reads.
+    FullStderr,
+    /// Makes the CLI the first command of a job-control pipeline: the CLI
+    /// leads a group that also holds the command reading its output.
+    Pipeline,
+    /// Runs the rewrite child that `compress` starts, behind a full stderr pipe.
+    ChildBehindFullStderr,
+}
+
+/// Returns a fixture whose `workspace` has no `.claude` ancestor, so RTK asks
+/// `git` for the project root.
+#[cfg(unix)]
+fn fixture_without_claude_ancestor() -> TempDataDir {
+    let fixtures = [TempDataDir::new(), TempDataDir::new_external()];
+    for fixture in fixtures.into_iter().flatten() {
+        let root = fixture.root.canonicalize().unwrap();
+        if !root.ancestors().any(|dir| dir.join(".claude").exists()) {
+            return fixture;
+        }
+    }
+    panic!("every temporary root has a `.claude` ancestor; point TMPDIR elsewhere");
+}
+
+/// Returns `tokenless compress`, set up for a PreTool rewrite in a workspace
+/// whose `git rev-parse` never answers, as on a hung mount, and the file that
+/// the stub `git` writes its PID to. The fixture owns the workspace.
+#[cfg(unix)]
+fn compress_behind_stalled_git() -> (TempDataDir, std::process::Command, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Stdio;
+
+    let fixture = fixture_without_claude_ancestor();
+    let bin_dir = fixture.root.join("bin");
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    for dir in [&bin_dir, &home, &workspace] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let pid_file = fixture.root.join("git.pid");
+    let git = bin_dir.join("git");
+    std::fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .unwrap();
+    let mut compress = fixture.command();
+    compress.arg("compress");
+    compress
+        .current_dir(&workspace)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    (fixture, compress, pid_file)
+}
+
+/// A PreTool request that RTK rewrites only after asking `git` for the project root.
+#[cfg(unix)]
+fn stalled_git_request() -> String {
+    serde_json::json!({
+        "protocol_version": 2,
+        "operation": "pre_tool",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {
+            "tool_name": "Bash",
+            "arguments": {"command": "git status"},
+            "command_field": "command",
+            "capabilities": {"replace_arguments": true, "block_and_suggest": false}
+        }
+    })
+    .to_string()
+}
+
+/// Runs a PreTool rewrite behind a stalled `git` and checks that the CLI ends
+/// within its limit together with `git`.
+#[cfg(unix)]
+fn assert_stalled_rewrite_ends_with_git(caller: StalledCaller) {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let (_fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    if caller == StalledCaller::ChildBehindFullStderr {
+        compress.arg("--rewrite-child");
+    }
+    // AW, the SDK and a job-control shell start the CLI as a group leader, and
+    // `compress` starts its rewrite child that way too.
+    if matches!(
+        caller,
+        StalledCaller::OwnGroup | StalledCaller::Pipeline | StalledCaller::ChildBehindFullStderr
+    ) {
+        compress.process_group(0);
+    }
+    // Held open, so a write to the full pipe blocks instead of failing.
+    let mut _stderr_reader = None;
+    if matches!(
+        caller,
+        StalledCaller::FullStderr | StalledCaller::ChildBehindFullStderr
+    ) {
+        let (reader, writer) = full_pipe();
+        _stderr_reader = Some(reader);
+        compress.stderr(writer);
+    }
+
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    // A job-control shell starts the reader in the group of the pipeline's first command.
+    let mut reader = (caller == StalledCaller::Pipeline).then(|| {
+        std::process::Command::new("cat")
+            .stdin(child.stdout.take().unwrap())
+            .stdout(Stdio::null())
+            .process_group(child.id() as i32)
+            .spawn()
+            .unwrap()
+    });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    // A regression can hang the CLI for good, so the test bounds its own wait.
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            panic!("tokenless compress still running after 20 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let elapsed = started.elapsed();
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_end(&mut stdout).unwrap();
+    }
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr).unwrap();
+    }
+
+    let stderr = String::from_utf8_lossy(&stderr);
+    // A workspace below a `.claude` directory would pass without RTK running git.
+    assert!(pid_file.exists(), "RTK never ran git: {stderr}");
+    assert!(
+        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        "{elapsed:?}: {stderr}"
+    );
+    if caller == StalledCaller::ChildBehindFullStderr {
+        // The child kills its whole group, itself included.
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{stderr}");
+    } else {
+        assert_eq!(status.code(), Some(1), "{status:?}: {stderr}");
+    }
+    assert!(stdout.is_empty());
+    if !matches!(
+        caller,
+        StalledCaller::FullStderr | StalledCaller::ChildBehindFullStderr
+    ) {
+        assert!(
+            stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+            "{stderr}"
+        );
+    }
+    if let Some(reader) = &mut reader {
+        // The reader shares the CLI's group and must see end of input, not a signal.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reader_status = loop {
+            if let Some(status) = reader.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = reader.kill();
+                panic!("the pipeline's reader did not see the end of its input");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(reader_status.success(), "{reader_status:?}");
+    }
+    let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_gone(pid) {
+        assert!(Instant::now() < deadline, "stalled git {pid} survived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Returns both ends of a blocking pipe whose buffer is already full.
+#[cfg(unix)]
+fn full_pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    // SAFETY: F_GETFL and F_SETFL only read and change the flags of this descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    loop {
+        match writer.write(&[b'x'; 4096]) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("cannot fill the pipe: {error}"),
+        }
+    }
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+    (reader, writer)
+}
+
+/// Treats a zombie as gone: a container without an init process may never reap it.
+#[cfg(unix)]
+fn process_gone(pid: libc::pid_t) -> bool {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| matches!(rest.trim_start().chars().next(), Some('Z' | 'X')));
+    }
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) != 0 }
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_in_the_callers_group() {
+    // The test process survives only if the CLI spares the group it shared.
+    assert_stalled_rewrite_ends_with_git(StalledCaller::SharedGroup);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_in_its_own_group() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::OwnGroup);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_behind_a_full_stderr() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::FullStderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_but_not_the_rest_of_its_pipeline() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::Pipeline);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_ends_a_stalled_rewrite_behind_a_full_stderr() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::ChildBehindFullStderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_runs_no_rtk_outside_a_process_group_of_its_own() {
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+
+    // Started directly, the child shares this test's group, which a timeout
+    // could not end without ending the test as well.
+    let (_fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    compress.arg("--rewrite-child");
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        // SAFETY: the stub only sleeps; ending it early affects nothing else.
+        unsafe { libc::kill(pid.trim().parse().unwrap(), libc::SIGKILL) };
+        panic!("RTK ran git without owning the processes it starts: {stderr}");
+    }
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("cannot bound the RTK rewrite: `compress --rewrite-child` runs only"),
+        "{stderr}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5), "{stderr}");
+}
+
+/// Returns the PID of the rewrite child that `compress` started.
+#[cfg(target_os = "linux")]
+fn rewrite_child_of(compress: u32) -> libc::pid_t {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            // The parent PID is the second field after the parenthesized name.
+            let parent = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .and_then(|parent| parent.parse::<u32>().ok());
+            if parent == Some(compress) {
+                return entry.file_name().to_str().unwrap().parse().unwrap();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "compress started no rewrite child"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn killing_compress_leaves_no_rewrite_child_waiting_on_a_locked_stats_database() {
+    use std::io::Write as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::time::{Duration, Instant};
+
+    let (fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    // Opening the stats recorder waits up to 5 s for this lock before the
+    // rewrite starts, and RTK then waits on the stalled `git`.
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let lock = rusqlite::Connection::open(fixture.data_dir.join("stats.db")).unwrap();
+    lock.execute_batch("CREATE TABLE held (x); BEGIN EXCLUSIVE;")
+        .unwrap();
+    compress
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .process_group(0);
+    let started = Instant::now();
+    let mut outer = compress.spawn().unwrap();
+    outer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let child = rewrite_child_of(outer.id());
+    // Past reading its request, the child waits on the lock.
+    std::thread::sleep(Duration::from_millis(500));
+    // As the SDK and AW do at their limits, end only the group of `compress`.
+    // SAFETY: `compress` leads its own group, which holds nothing of the test's.
+    unsafe { libc::killpg(outer.id() as libc::pid_t, libc::SIGKILL) };
+    outer.wait().unwrap();
+    let deadline = started + Duration::from_secs(7);
+    while !process_gone(child) {
+        if Instant::now() > deadline {
+            // SAFETY: the child leads its own group, which the test started.
+            unsafe { libc::killpg(child, libc::SIGKILL) };
+            panic!("rewrite child {child} outlived its deadline after compress was killed");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        let pid: libc::pid_t = pid.trim().parse().unwrap();
+        assert!(
+            process_gone(pid),
+            "stalled git {pid} survived its rewrite child"
+        );
+    }
+    drop(lock);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_ends_at_its_deadline_while_its_response_cannot_be_written() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::time::{Duration, Instant};
+
+    let (fixture, mut compress, _pid_file) = compress_behind_stalled_git();
+    // RTK takes the `.claude` directory as the project root without asking
+    // `git`, so the rewrite returns at once and the response write blocks.
+    std::fs::create_dir(fixture.root.join("workspace/.claude")).unwrap();
+    // Held open, so the write blocks instead of failing.
+    let (_stdout_reader, writer) = full_pipe();
+    compress
+        .arg("--rewrite-child")
+        .process_group(0)
+        .stdout(writer);
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    drop(compress);
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("the rewrite child still blocks writing its response after 10 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let elapsed = started.elapsed();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}: {stderr}");
+    assert!(
+        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        "{elapsed:?}: {stderr}"
+    );
+    assert!(
+        stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn rtk_subcommand_passes_arguments_through_verbatim() {
+    let output = tokenless_bin().args(["rtk", "--version"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("rtk "));
+
+    // Usage names the embedding command, so pasted hints stay runnable.
+    let output = tokenless_bin().args(["rtk", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: tokenless rtk"));
 }
 
 #[test]
@@ -2598,6 +3327,191 @@ fn compress_toon_min_chars_zero_encodes_short_payload() {
     assert_eq!(emitted, "a: short", "expected TOON object encoding");
 }
 
+/// 40 uniform records keyed by ID. TOON spec v4.4 encodes this shape as a
+/// keyed tabular map, which is shorter than compact JSON; 0.5.0 expanded every
+/// entry into an indented block and never reached the encoder.
+fn keyed_record_map(ratio: &str) -> String {
+    let entries = (0..40)
+        .map(|index| {
+            let ratio = if index == 3 { ratio } else { "0.5" };
+            format!(r#""u{index}":{{"name":"user{index}","active":true,"ratio":{ratio}}}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"users":{{{entries}}}}}"#)
+}
+
+/// TOON's numeric domain is narrower than JSON's. Spec v4.4 brought keyed
+/// object maps inside the size gate, so the direct `compress-toon` entry has to
+/// apply the same fidelity gate the PostTool JSON domain applies instead of
+/// silently writing `1e-400` as the integer `0`.
+#[test]
+fn compress_toon_keeps_original_json_when_numbers_would_not_survive() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    // Control: the same shape without an offending literal is still encoded,
+    // so the passthroughs below are the numeric gate and not a size accident.
+    let clean = keyed_record_map("0.5");
+    let output = run_compress_toon(&fixture, &clean, "1", "toon-numeric-clean", &[]);
+    assert!(
+        output.status.success(),
+        "compress-toon failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let encoded = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        encoded.starts_with("users[40:]{name,active,ratio}:"),
+        "expected a keyed tabular map, got {encoded:?}"
+    );
+
+    // `1e-400` is caught by the literal scan; `-0.0` and `1e3` survive the
+    // scan and are caught by the decode round trip, which sees the lost sign
+    // and the float-to-integer type change.
+    for ratio in ["1e-400", "-0.0", "1e3"] {
+        let input = keyed_record_map(ratio);
+        let output = run_compress_toon(&fixture, &input, "1", "toon-numeric-lossy", &[]);
+        assert!(
+            output.status.success(),
+            "compress-toon failed for ratio {ratio}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let emitted = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            emitted, input,
+            "ratio {ratio} must pass through byte-for-byte"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot retain") && stderr.contains("skipping encoding"),
+            "expected the numeric skip note for ratio {ratio}, got {stderr:?}"
+        );
+    }
+
+    // A declined payload books no savings, same as the length gate.
+    let stats_db = fixture.data_dir.join("stats.db");
+    if stats_db.exists() {
+        let recorder = StatsRecorder::new(stats_db).unwrap();
+        let records = recorder
+            .records_by_session("toon-numeric-lossy", None)
+            .unwrap();
+        assert!(records.is_empty());
+    }
+}
+
+/// Every advisory note on the `compress-toon` path is emitted after the payload
+/// and through a write whose failure is discarded. `eprintln!` panics when the
+/// write fails, so stderr redirected to a full filesystem used to turn a
+/// documented "exit 0, original JSON on stdout" passthrough into exit code 101
+/// with an empty stdout.
+#[test]
+fn compress_toon_passthrough_survives_an_unwritable_stderr() {
+    // `/dev/full` accepts the write and then reports ENOSPC, which is what a
+    // full log filesystem looks like to the process. Nothing portable
+    // reproduces it, so hosts without the device skip the case.
+    let dev_full = std::path::Path::new("/dev/full");
+    if !dev_full.exists() {
+        return;
+    }
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    // One case per advisory note. Each payload is a documented passthrough, so
+    // stdout has to reproduce it byte for byte whatever stderr does.
+    struct Case {
+        label: &'static str,
+        input: String,
+        args: &'static [&'static str],
+        compression_enabled: &'static str,
+    }
+    let cases = [
+        Case {
+            label: "numeric gate",
+            input: keyed_record_map("1e3"),
+            args: &[],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "length gate",
+            input: r#"{"a":"short"}"#.to_owned(),
+            args: &[],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "no savings",
+            input: "{}".to_owned(),
+            args: &["--min-toon-chars", "0"],
+            compression_enabled: "1",
+        },
+        Case {
+            label: "dry run",
+            input: keyed_record_map("0.5"),
+            args: &[],
+            compression_enabled: "0",
+        },
+    ];
+
+    for case in cases {
+        let stderr = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dev_full)
+            .unwrap();
+        let output = fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", case.compression_enabled)
+            .env("TOKENLESS_STATS_ENABLED", "1")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .args([
+                "compress-toon",
+                "--agent-id",
+                "integration-agent",
+                "--session-id",
+                "toon-unwritable-stderr",
+            ])
+            .args(case.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::from(stderr))
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(case.input.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: an unwritable stderr must not fail compress-toon, got {:?}",
+            case.label,
+            output.status
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            case.input,
+            "{}: the payload must still reach stdout byte for byte",
+            case.label
+        );
+    }
+
+    // Control: with a writable stderr the notes are still there, so the cases
+    // above prove the write is tolerated and not that it was dropped.
+    let numeric = keyed_record_map("1e3");
+    let output = run_compress_toon(&fixture, &numeric, "1", "toon-writable-stderr", &[]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot retain"),
+        "the advisory note must still be printed when stderr is writable"
+    );
+}
+
 #[test]
 fn html_extraction_is_env_gated_and_recovers_the_original_page() {
     let temp = tempfile::tempdir().unwrap();
@@ -2691,6 +3605,125 @@ fn html_extraction_is_env_gated_and_recovers_the_original_page() {
     }
 }
 
+#[test]
+fn html_long_code_block_is_compressed_and_recovers_the_original_page() {
+    let fixture = TempDataDir::new().expect("isolated data directory");
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(run.len() + 1);
+    // Removing the script must save enough to accept the complete code block,
+    // including its long fences, rather than merely returning a no-savings view.
+    let html = format!(
+        "<!DOCTYPE html><html><head><title>Code reference</title></head><body>\
+         <p>This reference preserves code examples and their exact delimiters \
+         so they can be used without changing their meaning.</p>\
+         <pre><code class=\"language-sh\">a{run}b</code></pre>\
+         <script>{}</script></body></html>",
+        "var padding = 12345;".repeat(32 * 1024)
+    );
+    let mut request: serde_json::Value =
+        serde_json::from_str(&build_log_request(&html, "success", "html-long-code")).unwrap();
+    request["input"]["tool_name"] = "WebFetch".into();
+    request["input"]["content_origin"] = "api_response".into();
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request.to_string(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "html");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["html_extraction"])
+    );
+    assert_eq!(result["recoverability"], "retrievable");
+    let rendered = result["output"].as_str().unwrap();
+    assert!(rendered.contains(&format!("\n{fence}sh\na{run}b\n{fence}\n")));
+    assert!(!rendered.contains("var padding"));
+    assert!(rendered.len() < html.len());
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let hash = result["stash_keys"][0].as_str().unwrap();
+    let retrieved = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["retrieve", hash])
+        .output()
+        .unwrap();
+    assert!(retrieved.status.success(), "{retrieved:?}");
+    assert_eq!(retrieved.stdout, html.as_bytes());
+}
+
+#[test]
+fn html_zero_rowspan_preserves_columns_and_recovers_the_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("data");
+    let html = format!(
+        "<!DOCTYPE html><html><head><title>Service inventory</title></head><body>\
+         <p>This service inventory records deployment regions, service names, \
+         and instance counts for the production environment.</p>\
+         <table><thead><tr><th>Region</th><th>Service</th><th>Count</th></tr></thead>\
+         <tbody><tr><td rowspan=\"0\">EU</td><td>api</td><td>10</td></tr>\
+         <tr><td>worker</td><td>20</td></tr></tbody></table>\
+         <script>{}</script></body></html>",
+        "var padding = 12345; ".repeat(100)
+    );
+    let mut request: serde_json::Value =
+        serde_json::from_str(&post_tool_request_json(&html, true, "html-zero-rowspan")).unwrap();
+    request["input"]["capabilities"]["replace_with_text"] = true.into();
+    let output = spawn_with_stdin(
+        tokenless_bin()
+            .env("TOKENLESS_DATA_DIR", &state)
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB")
+            .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request.to_string(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["html_extraction"])
+    );
+    assert_eq!(result["recoverability"], "retrievable");
+    let rendered = result["output"].as_str().unwrap();
+    assert!(
+        rendered.contains(
+            "| Region | Service | Count |\n| --- | --- | --- |\n\
+         | EU | api | 10 |\n|  | worker | 20 |"
+        ),
+        "{rendered}"
+    );
+    let hash = result["stash_keys"][0].as_str().unwrap();
+    let retrieved = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", &state)
+        .env_remove("TOKENLESS_STASH_DB")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["retrieve", hash])
+        .output()
+        .unwrap();
+    assert!(retrieved.status.success());
+    assert_eq!(retrieved.stdout, html.as_bytes());
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Fail-soft warnings must survive an unwritable stderr (fd 2 → /dev/full)
 // ─────────────────────────────────────────────────────────────────────
@@ -2743,11 +3776,15 @@ fn stats_open_warning_survives_an_unwritable_stderr() {
     assert_eq!(output.stdout, baseline.stdout);
 }
 
-/// A compressible response: dropping the debug/trace fields yields token
+/// A compressible response: compacting indentation yields token
 /// savings, so the stats/SLS recording tail of the command runs.
 #[cfg(target_os = "linux")]
-const COMPRESSIBLE_RESPONSE: &str =
-    r#"{"data":"value","debug":"remove","trace":"remove","empty_field":""}"#;
+const COMPRESSIBLE_RESPONSE: &str = r#"{
+    "data": "value",
+    "debug": "diagnostic context",
+    "trace": "request trace",
+    "empty_field": ""
+}"#;
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -3099,8 +4136,8 @@ fn stats_list_maps_an_unwritable_stdout_to_an_operation_error() {
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
-/// The payload path: a healthy run keeps the bytes `println!` wrote (the
-/// compressed output plus one LF), and an unwritable stdout becomes an
+/// The payload path: a healthy run emits the compressed output byte-exact (the
+/// writer appends no LF any more), and an unwritable stdout becomes an
 /// operation error instead of a panic.
 #[test]
 #[cfg(target_os = "linux")]
@@ -3131,11 +4168,17 @@ fn compress_response_maps_an_unwritable_stdout_to_an_operation_error() {
             .unwrap()
     };
 
+    // Control: the healthy run wrote its payload through the same writer the
+    // unwritable run below exercises. `compress-response` is byte-exact, so the
+    // single trailing LF `println!` used to append is part of what this checks
+    // is gone - the assertion follows the emitted bytes, not the old newline.
     let healthy = run(std::process::Stdio::piped());
     assert!(healthy.status.success(), "{healthy:?}");
+    assert!(!healthy.stdout.is_empty(), "no payload was written");
     assert!(
-        healthy.stdout.ends_with(b"\n"),
-        "the payload still carries the single trailing LF println! added"
+        !healthy.stdout.ends_with(b"\n"),
+        "the payload is emitted byte-exact, so the writer appends no LF: {}",
+        String::from_utf8_lossy(&healthy.stdout)
     );
 
     let full = run(std::process::Stdio::from(dev_full()));
@@ -3230,6 +4273,7 @@ fn stats_clear_prompt_fails_without_clearing_when_the_consumer_stopped_reading()
 
 /// A response above the 500-character TOON minimum, so `compress-toon`
 /// actually encodes it instead of taking the passthrough branch.
+#[cfg(target_os = "linux")]
 fn toon_encodable_response() -> String {
     let rows: Vec<String> = (0..24)
         .map(|index| format!(r#"{{"id":{index},"name":"row-{index}","note":"padding-{index}"}}"#))
@@ -3491,7 +4535,7 @@ fn stashable_tool_schema(name: &str) -> String {
     .to_string()
 }
 
-/// A clean, compact JSON object: `json_cleanup` has nothing to drop, so the
+/// A clean, compact JSON object: `json_cleanup` has nothing to compact, so the
 /// hook re-emits it byte-for-byte and reports no savings.
 #[cfg(target_os = "linux")]
 fn clean_json_object(keys: usize) -> String {
@@ -3576,7 +4620,7 @@ fn response_no_savings_notice_survives_an_unwritable_stderr() {
 }
 
 /// With compression disabled every run prints the dry-run notice, and a
-/// payload with nothing to drop adds the no-savings one; both precede the
+/// payload with nothing to compact adds the no-savings one; both precede the
 /// original payload on stdout.
 #[test]
 #[cfg(target_os = "linux")]
@@ -3652,10 +4696,10 @@ fn post_tool_no_savings_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
-    // The fixture root is never under the real home (`TempDataDir::new`
+    // The fixture root is never under the real home (`TempDataDir::new_external`
     // refuses that case), so this path is outside both trusted roots.
     let rejected = fixture.root.join("rejected-stats.db");
     assert_notices_survive_unwritable_stderr(
@@ -3678,7 +4722,7 @@ fn rejected_stats_db_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
     let rejected = fixture.root.join("rejected-stash.db");
@@ -3701,7 +4745,7 @@ fn rejected_stash_db_override_notice_survives_an_unwritable_stderr() {
 #[test]
 #[cfg(target_os = "linux")]
 fn rejected_stash_db_env_notice_survives_an_unwritable_stderr() {
-    let Some(fixture) = TempDataDir::new() else {
+    let Some(fixture) = TempDataDir::new_external() else {
         return;
     };
     let rejected = fixture.root.join("rejected-stash.db");

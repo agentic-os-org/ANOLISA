@@ -1,6 +1,10 @@
 //! CLI-to-service hook bridge contracts; fake-host scheduling is not native adoption.
 #![cfg(target_os = "linux")]
 
+#[path = "launcher/attachment.rs"]
+mod attachment;
+#[path = "launcher/attachment_endpoint.rs"]
+mod attachment_endpoint;
 #[path = "support/command_policy.rs"]
 mod command_policy;
 #[path = "launcher/hermes_trust.rs"]
@@ -9,8 +13,12 @@ mod hermes_trust;
 mod policy_update;
 #[path = "launcher/qoder_version.rs"]
 mod qoder_version;
+#[path = "launcher/registration_packages.rs"]
+mod registration_packages;
 #[path = "launcher/runtime_policy.rs"]
 mod runtime_policy;
+#[path = "launcher/single_config.rs"]
+mod single_config;
 #[path = "launcher/support.rs"]
 mod support;
 

@@ -74,10 +74,20 @@ def main() -> None:
     if not tool_use_id:
         skip()
 
+    tool_name = input_data.get("tool_name", "")
+    # Managed engines call their Windows shell "Bash"; the legacy engine runs Bash.
+    if (
+        os.name == "nt"
+        and _AGENT_ID == "qwenwork"
+        and tool_name == "Bash"
+        and os.environ.get("QWENWORK_PLUGIN_HOOK_COMPATIBILITY") == "managed-tool-hooks-v1"
+    ):
+        tool_name = "PowerShell"
+
     request = build_pre_tool_request(
         tool_input,
         _AGENT_ID,
-        input_data.get("tool_name", ""),
+        tool_name,
         "command",
         session_id=session_id,
         tool_use_id=tool_use_id,

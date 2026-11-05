@@ -94,7 +94,7 @@ impl<'a> ExactValue<'a> {
         }
     }
 
-    /// Whether cleanup treats this value as empty.
+    /// Whether this is an empty string or container.
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             Self::String(value) => value.is_empty(),
@@ -104,7 +104,7 @@ impl<'a> ExactValue<'a> {
         }
     }
 
-    /// Whether cleanup treats this value as empty or null.
+    /// Whether this is empty or null, for record importance signals.
     pub(crate) fn is_empty_or_null(&self) -> bool {
         matches!(self, Self::Null) || self.is_empty()
     }
@@ -117,11 +117,6 @@ impl<'a> ExactValue<'a> {
     /// Whether this is an object.
     pub(crate) fn is_object(&self) -> bool {
         matches!(self, Self::Object(_))
-    }
-
-    /// Whether this is null.
-    pub(crate) fn is_null(&self) -> bool {
-        matches!(self, Self::Null)
     }
 }
 

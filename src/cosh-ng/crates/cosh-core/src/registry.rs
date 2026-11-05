@@ -272,7 +272,18 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
         .iter()
         .filter_map(|p| expand_path(p))
         .collect();
-    let skill_manager = SkillManager::new(project_root, custom_paths, ext_manager.skill_dirs());
+    let system_paths = config
+        .skills
+        .system_paths
+        .iter()
+        .filter_map(|path| expand_path(path))
+        .collect();
+    let skill_manager = SkillManager::new(
+        project_root,
+        custom_paths,
+        ext_manager.skill_dirs(),
+        system_paths,
+    );
     if !args.bare {
         skill_manager.refresh().await;
     }

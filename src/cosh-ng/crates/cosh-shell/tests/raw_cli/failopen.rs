@@ -399,8 +399,10 @@ fn pre_spawn_error_falls_open_to_login_bash() {
     session.finish();
 }
 
+/// Bash discovers PATH from the managed shell, so a relay error before it
+/// starts has no login side effect yet and falls open with one profile run.
 #[test]
-fn path_probe_side_effect_prevents_relay_error_fallback() {
+fn bash_relay_error_before_shell_start_falls_open_with_one_profile_run() {
     let mut session = FailopenSession::spawn_with_profile(
         &[
             ("COSH_SHELL_BOOTSTRAP_PATH", "1"),
@@ -409,18 +411,15 @@ fn path_probe_side_effect_prevents_relay_error_fallback() {
         "printf 'hit\\n' >> \"$HOME/.cosh_profile_hits\"\n",
     );
     assert!(
-        session.wait_for("raw shell failed"),
-        "expected relay error diagnostic; got:\n{}",
+        session.wait_for("falling back to bash"),
+        "expected relay error fall-open diagnostic; got:\n{}",
         session.text()
     );
+    session.send(b"exit\n");
     let (transcript, profile_hits) = session.finish_with_profile_hits();
-    assert!(
-        !transcript.contains("falling back to bash"),
-        "PATH producer disarmed fallback before relay Err:\n{transcript}"
-    );
     assert_eq!(
         profile_hits, 1,
-        "PATH probe profile must run exactly once; got {profile_hits}:\n{transcript}"
+        "only the fallback login shell may run the profile; got {profile_hits}:\n{transcript}"
     );
 }
 
@@ -457,10 +456,10 @@ fn pre_spawn_panic_falls_open_to_login_bash() {
     );
 }
 
-/// The default login PATH probe already executes `.bash_profile`; a later
-/// pre-spawn failure must not launch a second login shell and repeat it.
+/// No side probe runs `.bash_profile` before the managed shell, so a pre-spawn
+/// failure may fall open and the profile still runs exactly once.
 #[test]
-fn path_probe_side_effect_prevents_pre_spawn_fallback() {
+fn bash_pre_spawn_panic_falls_open_with_one_profile_run() {
     let mut session = FailopenSession::spawn_with_profile(
         &[
             ("COSH_SHELL_BOOTSTRAP_PATH", "1"),
@@ -473,22 +472,23 @@ fn path_probe_side_effect_prevents_pre_spawn_fallback() {
         "expected pre-spawn panic diagnostic; got:\n{}",
         session.text()
     );
+    assert!(
+        session.wait_for("falling back to bash"),
+        "expected pre-spawn fall-open diagnostic; got:\n{}",
+        session.text()
+    );
     session.send(b"exit\n");
     let (transcript, profile_hits) = session.finish_with_profile_hits();
-    assert!(
-        !transcript.contains("falling back to bash"),
-        "PATH probe already ran the profile; must not start a second login shell:\n{transcript}"
-    );
     assert_eq!(
         profile_hits, 1,
-        "PATH probe profile must run exactly once; got {profile_hits}:\n{transcript}"
+        "only the fallback login shell may run the profile; got {profile_hits}:\n{transcript}"
     );
 }
 
-/// A failed PATH probe may still have run the login profile, so its attempted
-/// state must suppress fallback just like a successful probe.
+/// A profile that fails is never pre-run by a Bash PATH probe, so no probe
+/// failure is reported and only the fallback login shell runs it.
 #[test]
-fn failed_path_probe_side_effect_prevents_pre_spawn_fallback() {
+fn failing_bash_profile_runs_only_in_the_fallback_login_shell() {
     let mut session = FailopenSession::spawn_with_profile(
         &[
             ("COSH_SHELL_BOOTSTRAP_PATH", "1"),
@@ -497,20 +497,18 @@ fn failed_path_probe_side_effect_prevents_pre_spawn_fallback() {
         "printf 'hit\\n' >> \"$HOME/.cosh_profile_hits\"\nexit 23\n",
     );
     assert!(
-        session.wait_for("failed to discover PATH")
-            && session.wait_for("panicked before shell start"),
-        "expected failed-probe and pre-spawn diagnostics; got:\n{}",
+        session.wait_for("falling back to bash"),
+        "expected pre-spawn fall-open diagnostic; got:\n{}",
         session.text()
     );
-    session.send(b"exit\n");
     let (transcript, profile_hits) = session.finish_with_profile_hits();
     assert!(
-        !transcript.contains("falling back to bash"),
-        "failed PATH probe may have run the profile; must not fallback:\n{transcript}"
+        !transcript.contains("failed to discover PATH"),
+        "Bash must not run a side PATH probe:\n{transcript}"
     );
     assert_eq!(
         profile_hits, 1,
-        "failed PATH probe profile must run once; got {profile_hits}:\n{transcript}"
+        "only the fallback login shell may run the profile; got {profile_hits}:\n{transcript}"
     );
 }
 

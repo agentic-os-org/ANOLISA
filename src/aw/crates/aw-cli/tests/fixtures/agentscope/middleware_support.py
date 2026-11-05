@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +13,13 @@ from agentscope.tool import ToolChunk, ToolResponse
 
 
 ROOT = Path(__file__).resolve().parents[5]
+_BRIDGE = ROOT / "crates/aw-adapter/native/agentscope"
+# aw_agentscope imports its sibling ledger module by absolute name; the direct
+# unittest entrypoint must place that directory on the module search path the
+# same way the launcher does for aw run.
+sys.path.insert(0, str(_BRIDGE))
 SPEC = importlib.util.spec_from_file_location(
-    "aw_agentscope", ROOT / "crates/aw-adapter/native/agentscope/aw_agentscope.py"
+    "aw_agentscope", _BRIDGE / "aw_agentscope.py"
 )
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

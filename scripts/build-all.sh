@@ -40,6 +40,10 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# This entrypoint composes the ANOLISA distribution; standalone component
+# packaging selects its own (possibly empty) namespace instead.
+export AWPRJ=anolisa
+
 # ─── defaults ───
 
 INSTALL_DEPS=true
@@ -147,8 +151,19 @@ component_install_root() {
     echo "$(component_target_dir "$1")/install-root"
 }
 
+# Product installation keeps its explicit legacy profiles separate from the
+# component-owned, file-only PREFIX/AWPRJ/DESTDIR installation contract.
+component_install_target() {
+    case "$1" in
+        agentsight|tokenless|ws-ckpt|agent-memory) echo install-legacy ;;
+        *) echo install ;;
+    esac
+}
+
 stage_component_make_install() {
     local component="$1" dir="$2"; shift 2
+    local install_target
+    install_target="$(component_install_target "$component")"
     local stage_root
     stage_root="$(component_target_dir "$component")"
 
@@ -157,7 +172,7 @@ stage_component_make_install() {
     if $DRY_RUN; then
         echo "DRY-RUN: rm -rf $stage_root"
         echo "DRY-RUN: mkdir -p $stage_root"
-        echo "DRY-RUN: (cd $dir && make install DESTDIR=$stage_root INSTALL_PROFILE=system PREFIX= BINDIR=/bin $*)"
+        echo "DRY-RUN: (cd $dir && make $install_target DESTDIR=$stage_root INSTALL_PROFILE=system PREFIX= BINDIR=/bin $*)"
         return 0
     fi
 
@@ -166,7 +181,7 @@ stage_component_make_install() {
 
     cd "$dir"
     run_logged "stage ${component} -> target/${component}" \
-        make install DESTDIR="$stage_root" INSTALL_PROFILE=system \
+        make "$install_target" DESTDIR="$stage_root" INSTALL_PROFILE=system \
             PREFIX="" BINDIR="/bin" "$@"
 }
 
@@ -184,6 +199,8 @@ system_staged_install() {
 
 run_component_make_install() {
     local component="$1" dir="$2"; shift 2
+    local install_target
+    install_target="$(component_install_target "$component")"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
 
     if $DRY_RUN; then
@@ -192,10 +209,10 @@ run_component_make_install() {
             stage_root="$(component_install_root "$component")"
             echo "DRY-RUN: rm -rf $stage_root"
             echo "DRY-RUN: mkdir -p $stage_root"
-            echo "DRY-RUN: (cd $dir && make install DESTDIR=$stage_root INSTALL_PROFILE=system PREFIX=$SYSTEM_PREFIX BINDIR=$SYSTEM_BIN_DIR SERVICE_BINDIR=$SYSTEM_BIN_DIR $*)"
+            echo "DRY-RUN: (cd $dir && make $install_target DESTDIR=$stage_root INSTALL_PROFILE=system PREFIX=$SYSTEM_PREFIX BINDIR=$SYSTEM_BIN_DIR SERVICE_BINDIR=$SYSTEM_BIN_DIR $*)"
             echo "DRY-RUN: cp -a $stage_root/. /"
         else
-            echo "DRY-RUN: (cd $dir && make install INSTALL_PROFILE=user PREFIX=$INSTALL_PREFIX $*)"
+            echo "DRY-RUN: (cd $dir && make $install_target INSTALL_PROFILE=user PREFIX=$INSTALL_PREFIX $*)"
         fi
         return 0
     fi
@@ -208,13 +225,13 @@ run_component_make_install() {
         rm -rf "$stage_root"
         mkdir -p "$stage_root"
         run_logged "stage system install ${component} -> target/${component}/install-root" \
-            make install DESTDIR="$stage_root" INSTALL_PROFILE=system \
+            make "$install_target" DESTDIR="$stage_root" INSTALL_PROFILE=system \
                 PREFIX="$SYSTEM_PREFIX" BINDIR="$SYSTEM_BIN_DIR" \
                 SERVICE_BINDIR="$SYSTEM_BIN_DIR" "$@"
         system_staged_install "$component" "$stage_root"
     else
-        run_logged "make install (${component})" \
-            make install INSTALL_PROFILE=user PREFIX="$INSTALL_PREFIX" "$@"
+        run_logged "make ${install_target} (${component})" \
+            make "$install_target" INSTALL_PROFILE=user PREFIX="$INSTALL_PREFIX" "$@"
     fi
 }
 
@@ -956,8 +973,14 @@ install_build_tools() {
 
     if [[ "$PKG_BASE" == "rpm" ]]; then
         if ! cmd_exists g++; then missing+=("gcc-c++"); fi
+        if want_component sec-core && ! rpm -q glibc-static &>/dev/null; then
+            missing+=("glibc-static")
+        fi
     else
         if ! cmd_exists g++; then missing+=("g++"); fi
+        if want_component sec-core && ! dpkg -s libc6-dev &>/dev/null; then
+            missing+=("libc6-dev")
+        fi
     fi
 
     if [[ ${#missing[@]} -eq 0 ]]; then
@@ -1898,7 +1921,7 @@ build_tokenless() {
     cd "$dir"
 
     # rtk setup is handled by Makefile build-tokenless target (just setup-rtk),
-    # but 'just' must be available before make install runs.
+    # but 'just' must be available before make install-legacy runs.
     if ! $DRY_RUN; then
         if ! command -v just &>/dev/null; then
             die "'just' is required for tokenless build (rtk clone+patch orchestration). Install: cargo install just"
@@ -1907,28 +1930,26 @@ build_tokenless() {
         info "DRY-RUN: just setup-rtk would be called by Makefile build-tokenless"
     fi
 
-    info "make install (tokenless workspace) ..."
+    info "make install-legacy (tokenless workspace) ..."
     stage_component_make_install "tokenless" "$dir"
     if $DRY_RUN; then
         ok "tokenless build plan generated"
         return 0
     fi
 
-    local component_root bin rtk_bin
+    local component_root bin
     component_root="$(component_target_dir tokenless)"
     bin="$component_root/bin/tokenless"
-    rtk_bin="$component_root/libexec/anolisa/tokenless/rtk"
-    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]]; then
+    if [[ -f "$bin" ]]; then
         if [[ ! -d "$component_root/share/anolisa/adapters/tokenless" ]]; then
             warn "tokenless adapter resources staged empty"
         fi
         if [[ ! -d "$component_root/share/anolisa/extensions/tokenless" ]]; then
             warn "tokenless cosh extension staged empty"
         fi
-        ok "tokenless and rtk built successfully"
+        ok "tokenless (with embedded RTK) built successfully"
     else
-        [[ -f "$bin" ]]     || warn "Expected artifact $bin not found"
-        [[ -f "$rtk_bin" ]] || warn "Expected artifact $rtk_bin not found"
+        warn "Expected artifact $bin not found"
     fi
 }
 
@@ -2101,8 +2122,8 @@ runtime_manifest_path() {
     case "$1" in
         cosh)      echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/cosh/component.toml" ;;
         skills)    echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/os-skills/component.toml" ;;
-        sec-core)  echo "$PROJECT_ROOT/src/agent-sec-core/.anolisa/component.toml" ;;
-        cosh-ng)   echo "$PROJECT_ROOT/src/cosh-ng/.anolisa/component.toml" ;;
+        sec-core)  echo "$PROJECT_ROOT/src/agent-sec-core/packaging/anolisa/component.toml" ;;
+        cosh-ng)   echo "$PROJECT_ROOT/src/cosh-ng/packaging/anolisa/raw/component.toml" ;;
         tokenless) echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/tokenless/component.toml" ;;
         ws-ckpt)   echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/ws-ckpt/component.toml" ;;
         memory)    echo "$PROJECT_ROOT/distribution/anolisa/manifests/components/agent-memory/component.toml" ;;
@@ -2214,7 +2235,7 @@ source_build_runtime_dependencies() {
                 echo 'sight|node|language-runtime|node --version|nodejs|nodejs||>=20|'
                 ;;
             memory)
-                # `make install` bundles the OpenClaw adapter from source
+                # `make install-legacy` bundles the OpenClaw adapter from source
                 # (npm install + esbuild), so Node.js is a source-build
                 # requirement even though the installed MCP server itself is
                 # a Rust binary that never shells out to node.
@@ -2826,9 +2847,9 @@ uninstall_tokenless() {
     local dir="$PROJECT_ROOT/src/tokenless"
     run_component_make_uninstall "tokenless" "$dir" || true
     if $DRY_RUN; then
-        ok "tokenless and rtk uninstall plan generated"
+        ok "tokenless uninstall plan generated"
     else
-        ok "tokenless and rtk uninstalled"
+        ok "tokenless uninstalled"
     fi
 }
 

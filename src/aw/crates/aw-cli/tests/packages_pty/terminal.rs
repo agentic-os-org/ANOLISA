@@ -16,6 +16,13 @@ fn captured(command: &Command, mode: &str, no_color: bool, term: &str) -> Value 
         .current_dir(command.get_current_dir().unwrap())
         .env("TERM", term)
         .env_remove("NO_COLOR");
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            wrapper.env(name, value);
+        } else {
+            wrapper.env_remove(name);
+        }
+    }
     if no_color {
         wrapper.env("NO_COLOR", "1");
     }
@@ -89,8 +96,8 @@ fn output_write_failure_does_not_undo_a_completed_installation() {
         let diagnostic = text(&output, "stderr");
         assert!(!diagnostic.contains("rollback") && !diagnostic.contains("panicked"));
         assert!(diagnostic.starts_with("aw:"));
-        assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
-        assert!(f.prefix.join("bin/aw").is_file());
+        assert!(f.prefix.join(".local-packages/installation.json").is_file());
+        assert!(f.prefix.join("bin/provider").is_file());
     }
     let f = Fixture::new();
     let output = captured(
@@ -102,6 +109,6 @@ fn output_write_failure_does_not_undo_a_completed_installation() {
     assert_eq!(output["code"], 1);
     assert!(text(&output, "stdout").starts_with("Installed "));
     assert!(text(&output, "stderr").is_empty());
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
-    assert!(f.prefix.join("bin/aw").is_file());
+    assert!(f.prefix.join(".local-packages/installation.json").is_file());
+    assert!(f.prefix.join("bin/provider").is_file());
 }

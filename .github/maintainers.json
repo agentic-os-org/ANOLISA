@@ -44,7 +44,7 @@
             "label": "component:skill",
             "maintainers": [
                 {
-                    "github": "Ziqi002"
+                    "github": "zkl123"
                 }
             ]
         },
@@ -127,6 +127,14 @@
             "maintainers": [
                 {
                     "github": "jfeng18"
+                }
+            ]
+        },
+        {
+            "label": "component:benchmark",
+            "maintainers": [
+                {
+                    "github": "alex-yuxi"
                 }
             ]
         }

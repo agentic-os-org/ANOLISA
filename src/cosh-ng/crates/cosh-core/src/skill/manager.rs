@@ -30,12 +30,21 @@ impl SkillManager {
     /// * `custom_paths` – already-expanded custom skill directory paths from
     ///   config (`skills.custom_paths`).
     /// * `extension_paths` – skill directories contributed by loaded extensions.
+    /// * `system_paths` – configured package directories at System priority.
     pub fn new(
         project_root: PathBuf,
         custom_paths: Vec<PathBuf>,
         extension_paths: Vec<PathBuf>,
+        system_paths: Vec<PathBuf>,
     ) -> Arc<Self> {
         let (change_tx, _) = broadcast::channel(16);
+        let resources = crate::paths::resource_dirs();
+        let mut package_paths = Vec::new();
+        for path in resources.system_skills.into_iter().chain(system_paths) {
+            if !package_paths.contains(&path) {
+                package_paths.push(path);
+            }
+        }
         Arc::new(Self {
             cache: RwLock::new(HashMap::new()),
             project_root,
@@ -43,14 +52,8 @@ impl SkillManager {
             extension_paths,
             change_tx,
             watcher_handle: RwLock::new(None),
-            user_paths: user_skill_dirs(
-                dirs::home_dir(),
-                std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-            ),
-            system_paths: crate::paths::system_data_dirs()
-                .into_iter()
-                .map(|dir| dir.join(SKILLS_DIR))
-                .collect(),
+            user_paths: resources.user_skills,
+            system_paths: package_paths,
         })
     }
 
@@ -63,7 +66,7 @@ impl SkillManager {
         user_dir: Option<PathBuf>,
         system_dir: Option<PathBuf>,
     ) -> Arc<Self> {
-        let mut manager = Self::new(project_root, custom_paths, Vec::new());
+        let mut manager = Self::new(project_root, custom_paths, Vec::new(), Vec::new());
         let inner = Arc::get_mut(&mut manager).unwrap();
         if let Some(dir) = user_dir {
             inner.user_paths = vec![dir];
@@ -215,25 +218,6 @@ impl SkillManager {
             .flat_map(|&level| self.dirs_of(level))
             .collect()
     }
-}
-
-// ANOLISA uses the XDG layout on both Linux and macOS, rather than the
-// platform-specific data directory returned by dirs::data_dir(). Match its
-// install layout by ignoring relative roots and explicit dot segments.
-fn user_skill_dirs(home: Option<PathBuf>, data_home: Option<PathBuf>) -> Vec<PathBuf> {
-    let data_home = data_home
-        .filter(|path| {
-            path.is_absolute()
-                && !path
-                    .to_string_lossy()
-                    .split(std::path::MAIN_SEPARATOR)
-                    .any(|segment| segment == "." || segment == "..")
-        })
-        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
-    home.into_iter()
-        .map(|home| home.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
-        .chain(data_home.map(|data| data.join("anolisa/skills")))
-        .collect()
 }
 
 /// Expand `~`, `${VAR}`, and `$VAR` in a path string.
@@ -419,6 +403,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_package_paths_keep_system_priority() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        let user = root.path().join("user");
+        let custom = root.path().join("custom");
+        for directory in [&package, &user, &custom] {
+            std::fs::create_dir(directory).unwrap();
+            std::fs::write(
+                directory.join("shared.md"),
+                "---\nname: shared\ndescription: Shared skill\n---\n\nBody.",
+            )
+            .unwrap();
+        }
+        let defaults = crate::paths::resource_dirs().system_skills;
+        let mut manager = SkillManager::new(
+            root.path().join("project"),
+            vec![custom.clone()],
+            Vec::new(),
+            vec![package.clone(), package.clone()],
+        );
+        let inner = Arc::get_mut(&mut manager).unwrap();
+        assert!(inner.system_paths.starts_with(&defaults));
+        assert_eq!(inner.system_paths.last(), Some(&package));
+        assert_eq!(inner.system_paths.len(), defaults.len() + 1);
+        inner.system_paths = vec![package.clone()];
+        inner.user_paths = vec![user.clone()];
+
+        for (directory, level) in [
+            (&custom, SkillLevel::Custom),
+            (&user, SkillLevel::User),
+            (&package, SkillLevel::System),
+        ] {
+            manager.refresh().await;
+            let skill = manager.load("shared").await.unwrap();
+            assert_eq!(skill.level, level);
+            assert_eq!(skill.file_path, directory.join("shared.md"));
+            assert_eq!(manager.list().await[0].file_path, skill.file_path);
+            std::fs::remove_file(directory.join("shared.md")).unwrap();
+        }
+    }
+
+    #[test]
+    fn standalone_skills_follow_the_selected_xdg_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("xdg-data");
+        let skill = data.join("cosh-ng/skills/standalone");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: standalone\ndescription: Installed independently\n---\nUse this skill.\n",
+        )
+        .unwrap();
+        let directories = crate::paths::resource_dirs_for(
+            None,
+            Some(&root.path().join("home")),
+            Some(data.as_os_str()),
+            None,
+        )
+        .user_skills;
+        let loaded: Vec<_> = directories
+            .iter()
+            .flat_map(|path| loader::load_skills_from_dir(path, SkillLevel::User))
+            .collect();
+        assert!(loaded.iter().any(|skill| skill.name == "standalone"));
+        assert!(!directories
+            .iter()
+            .any(|path| path.starts_with(root.path().join("home/.local/share"))));
+    }
+
+    #[tokio::test]
     async fn ordered_directories_agree_for_list_load_and_watch() {
         let root = tempfile::tempdir().unwrap();
         let mut mgr = SkillManager::new(
@@ -428,20 +482,27 @@ mod tests {
                 root.path().join("extension-1"),
                 root.path().join("extension-2"),
             ],
+            Vec::new(),
         );
         let inner = Arc::get_mut(&mut mgr).unwrap();
+        let resources =
+            crate::paths::resource_dirs_for(None, Some(&root.path().join("home")), None, None);
+        inner.system_paths = resources.system_skills;
         assert_eq!(
             inner.system_paths,
             vec![
+                PathBuf::from("/usr/local/share/cosh-ng/skills"),
+                PathBuf::from("/usr/share/cosh-ng/skills"),
                 PathBuf::from("/usr/local/share/anolisa/skills"),
                 PathBuf::from("/usr/share/anolisa/skills"),
             ]
         );
-        inner.user_paths = user_skill_dirs(Some(root.path().join("home")), None);
+        inner.user_paths = resources.user_skills;
         assert_eq!(
             inner.user_paths,
             vec![
                 root.path().join("home/.copilot-shell/skills"),
+                root.path().join("home/.local/share/cosh-ng/skills"),
                 root.path().join("home/.local/share/anolisa/skills"),
             ]
         );
@@ -451,7 +512,7 @@ mod tests {
             .map(|path| root.path().join(path.strip_prefix("/").unwrap()))
             .collect();
         let dirs = mgr.watch_dirs();
-        assert_eq!(dirs.len(), 9);
+        assert_eq!(dirs.len(), 12);
         for (i, dir) in dirs.iter().enumerate() {
             std::fs::create_dir_all(dir).unwrap();
             for name in ["shared".to_string(), format!("only-{i}")] {
@@ -489,7 +550,13 @@ mod tests {
 
         let mut mgr = isolated_manager(project_dir.path(), vec![custom_dir.path().to_path_buf()]);
         let inner = Arc::get_mut(&mut mgr).unwrap();
-        inner.user_paths = user_skill_dirs(Some(project_dir.path().join("home")), None);
+        inner.user_paths = crate::paths::resource_dirs_for(
+            None,
+            Some(&project_dir.path().join("home")),
+            None,
+            None,
+        )
+        .user_skills;
         inner.system_paths = vec![project_dir.path().join("usr/local/share/anolisa/skills")];
         let dirs = mgr.watch_dirs();
         for dir in &dirs {

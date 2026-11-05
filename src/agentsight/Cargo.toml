@@ -38,6 +38,7 @@ log = "0.4.22"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 memchr = "2"
+reqwest = "0.13"
 rig-core = "0.40.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -51,7 +52,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [package]
 name = "agentsight"
-version = "0.14.1"
+version = "0.15.3"
 edition = "2024"
 
 [features]
@@ -114,6 +115,7 @@ dirs = { workspace = true }
 sysinfo = "0.33"
 
 [dev-dependencies]
+dirs = { workspace = true }
 actix-web = { version = "4", features = ["macros"] }
 agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
 criterion = { workspace = true }

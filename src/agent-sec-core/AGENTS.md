@@ -75,11 +75,12 @@ cd agent-sec-cli && uv sync
 
 ### 4. 代码格式化
 
-使用 **black + isort** 进行代码格式化（配置在 `agent-sec-cli/pyproject.toml`）：
+使用 **black + isort** 进行代码格式化。Makefile 显式为 Black 传入
+`agent-sec-cli/pyproject.toml`，整个组件使用同一配置：
 
-- `line-length = 100`
-- `target-version = py311`
-- `isort` profile = "black"
+- Black `line-length = 88`
+- Black `target-version = py311`
+- isort `profile = "black"`、`line_length = 80`
 
 ```bash
 # 从 agent-sec-core 目录执行
@@ -738,7 +739,7 @@ Do NOT write guidelines from design intent or mental models. Write them AFTER ve
 - The three-layer defense framing (pre-execution prevention → runtime detection → kernel-level containment) helps users understand why multiple modules exist.
 
 ### Content Decisions
-- Eight modules in overview table (Sandbox is architecture-only, no dedicated usage section). Seven usage sections: Prompt Scanner, Code Scanner, Skill Ledger, PII Checker, Security Baseline, Observability, Security Events. Do not merge them.
+- Keep capability usage sections separate. Sandbox has a dedicated bilingual guide for direct execution with explicit OS permissions; link to it from the overview.
 - Agent integration order in docs: CLI (always available) → OpenClaw plugin → Hermes plugin → cosh hook (auto-loaded, no user action needed). This reflects manual-effort-first ordering.
 - `loongshield` may be mentioned alongside `agent-sec-cli harden` — loongshield is an Alinux system component users already know; `agent-sec-cli harden` is ANOLISA's unified entry point wrapping it.
 - ML model preparation: state that L2 uses ModelScope model `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`; operators must run `ollama pull` first, and `scan-prompt warmup` only verifies availability. Never reference internal model registries.

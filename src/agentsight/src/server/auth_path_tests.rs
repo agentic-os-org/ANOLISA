@@ -119,6 +119,88 @@ async fn storage_config_mutation_fails_closed_without_credentials() {
 }
 
 #[actix_web::test]
+async fn llm_preferences_get_fails_closed_without_credentials() {
+    let fixture = AuthFixture::new();
+    let token = fixture.auth.token().unwrap_or_default().to_string();
+    let app = awtest::init_service(
+        App::new()
+            .wrap(AuthMiddleware::new(Arc::clone(&fixture.auth)))
+            .route(
+                "/api/preferences",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/preferences/export",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            )
+            .route(
+                "/api/preferences/turns",
+                web::get().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+    )
+    .await;
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+    let llm_uris = [
+        "/api/preferences?llm=true",
+        "/%61pi/preferences?llm=true",
+        "/api/preferences?llm=%74rue",
+        "/api/preferences?%6clm=true",
+        "/api/preferences?l%6cm=true",
+        "/api/preferences?%6C%6Cm=true",
+    ];
+
+    for uri in llm_uris {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(uri)
+                .peer_addr(loopback)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(uri)
+                .peer_addr(loopback)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+
+    for uri in [
+        "/api/preferences",
+        "/api/preferences?llm=false",
+        "/api/preferences/export?llm=true",
+        "/api/preferences/turns?llm=true",
+    ] {
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(uri)
+                .peer_addr(loopback)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+#[test]
+fn duplicate_preferences_llm_values_fail_query_parsing() {
+    for query in ["llm=false&llm=true", "llm=true&llm=false"] {
+        assert!(
+            web::Query::<crate::preferences::api::PreferencesQuery>::from_query(query).is_err(),
+            "{query}"
+        );
+    }
+}
+
+#[actix_web::test]
 async fn authenticated_encoded_mutations_only_reach_matching_routes() {
     let fixture = AuthFixture::new();
     let token = fixture.auth.token().unwrap_or_default().to_string();

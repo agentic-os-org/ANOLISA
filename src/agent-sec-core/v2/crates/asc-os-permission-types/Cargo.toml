@@ -1,0 +1,19 @@
+[package]
+name = "asc-os-permission-types"
+description = "Portable OS permission contracts for AgentSecCore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-foundation-types = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

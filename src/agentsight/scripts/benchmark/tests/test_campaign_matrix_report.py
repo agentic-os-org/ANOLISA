@@ -98,3 +98,64 @@ def test_matrix_report_cli_preserves_incomplete_evidence(
         assert not any(
             row["version"] == "baseline" and row["qps"] == 100 for row in rows
         )
+
+
+def test_report_writers_tolerate_partial_run_records(tmp_path: Path) -> None:
+    import aggregate_report
+
+    soak_items = [
+        (tmp_path / "soak.json", {"scenario": "soak", "version": "baseline"})
+    ]
+    aggregate_report.write_soak(tmp_path, soak_items)
+
+    soak_report = (tmp_path / "soak-report.md").read_text()
+    assert "| baseline | — |" in soak_report
+    assert "NOT EXECUTED" not in soak_report
+
+
+def test_matrix_rows_skip_records_without_identity() -> None:
+    import aggregate_report
+
+    items = [
+        (Path("a"), {"scenario": "matrix", "qps": 100}),
+        (Path("b"), {"scenario": "matrix", "qps": 100, "version": None}),
+    ]
+    assert aggregate_report.matrix_rows(items) == []
+
+    null_evaluation = [
+        (
+            Path("c"),
+            {"scenario": "matrix", "qps": 100, "version": "baseline", "evaluation": None},
+        )
+    ]
+    rows = aggregate_report.matrix_rows(null_evaluation)
+    assert rows[0]["pass_count"] == 0
+
+
+def test_final_report_excludes_unusable_checks_from_the_denominator(
+    tmp_path: Path,
+) -> None:
+    import aggregate_report
+
+    settings, items, capacities, recovery, faults, regression = (
+        complete_formal_evidence(1)
+    )
+    config = json.loads((BENCHMARK / "campaign/campaign.example.json").read_text())
+    for section, values in settings.items():
+        config[section].update(values)
+    config["thresholds"] = thresholds()
+    config["recovery"].update(tolerance_ratio=0.1, recovery_window_seconds=2)
+    config["fault"]["repetitions_per_case"] = 1
+    # Four readable checks plus three entries that are not evidence either way;
+    # an unreadable entry must leave the denominator alone.
+    regression["checks"] = regression["checks"] + [
+        {"command": "no-exit-code"},
+        {"exit_code": 0},
+        "not-an-object",
+    ]
+    (tmp_path / "manifest.json").write_text("{}")
+    aggregate_report.write_final(
+        tmp_path, config, [], capacities, items, recovery, faults, regression
+    )
+    report = (tmp_path / "final-report.md").read_text()
+    assert "| 通过命令 | 4/4 |" in report

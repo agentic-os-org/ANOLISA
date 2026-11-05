@@ -26,6 +26,7 @@ import campaign
 import campaign_manifest
 from campaign_config import safety_settings, validate_campaign
 from campaign_evidence import finite_float
+from campaign_manifest import write_json
 from collect_metrics import GIB, MIB, allocated_size, available_memory_bytes
 
 BTF_PATH = Path("/sys/kernel/btf/vmlinux")
@@ -39,6 +40,16 @@ BENCHMARK_ALLOW_RULE = {
     "rule": ["*python*", "*mock_llm_server.py*"],
     "agent_name": "BenchmarkHarness",
 }
+
+
+def _signal_group(process: subprocess.Popen[bytes], number: int) -> None:
+    """Signal the child's whole session, not just its leader."""
+    try:
+        os.killpg(process.pid, number)
+    except ProcessLookupError:
+        pass
+
+
 FORMAL_STAGES = (
     ("baseline", "capacity"),
     ("optimized", "capacity"),
@@ -74,16 +85,6 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object: {path}")
     return value
-
-
-def write_json(path: Path, value: dict[str, Any]) -> None:
-    """Atomically replace a JSON checkpoint."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
 
 
 def file_sha256(path: Path) -> str:
@@ -455,15 +456,15 @@ class TracerProcess:
         """Request graceful shutdown, escalating only for this owned child."""
         process = self.process
         if process is not None and process.poll() is None:
-            process.send_signal(signal.SIGINT)
+            _signal_group(process, signal.SIGINT)
             try:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                process.terminate()
+                _signal_group(process, signal.SIGTERM)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    _signal_group(process, signal.SIGKILL)
                     process.wait(timeout=5)
         if self.log is not None and not self.log.closed:
             self.log.close()
@@ -591,15 +592,15 @@ class BenchmarkServer:
         """Stop only the server child owned by this runner."""
         process = self.process
         if process is not None and process.poll() is None:
-            process.send_signal(signal.SIGINT)
+            _signal_group(process, signal.SIGINT)
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.terminate()
+                _signal_group(process, signal.SIGTERM)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    _signal_group(process, signal.SIGKILL)
                     process.wait(timeout=5)
         if self.log is not None and not self.log.closed:
             self.log.close()

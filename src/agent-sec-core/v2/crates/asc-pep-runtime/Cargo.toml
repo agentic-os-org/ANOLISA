@@ -1,0 +1,24 @@
+[package]
+name = "asc-pep-runtime"
+description = "Direct sandbox execution with fixed OS permissions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-sandbox-types = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rustix = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-sandbox = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

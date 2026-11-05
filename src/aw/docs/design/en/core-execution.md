@@ -2,7 +2,7 @@
 
 [中文版](../zh/core-execution.md)
 
-[Design index](README.md) · [Architecture](../../../../../docs/developer-guide/en/aw/architecture.md)
+[Design index](README.md) · [Architecture](architecture.md)
 
 `aw-core` executes policy-resolved capability plans through trusted embedding
 ports. It reuses the existing registered contract schemas and validators;

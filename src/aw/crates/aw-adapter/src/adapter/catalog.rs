@@ -1,7 +1,7 @@
 //! Registered native dialects and the runtime capabilities admitted by their launchers.
 
 use super::Adapter;
-use aw_provider::admission::AdapterCapabilities as Capabilities;
+use aw_core::admission::AdapterCapabilities as Capabilities;
 
 pub(crate) struct Profile {
     pub name: &'static str,
@@ -17,6 +17,7 @@ const TOOL_EVENTS: &[(&str, &[&str])] = &[
 impl Profile {
     pub fn capabilities(&self, version: &str, entrypoint: &str) -> Capabilities {
         Capabilities {
+            failure_actions: Default::default(),
             adapter: self.name.into(),
             version: version.into(),
             entrypoint: entrypoint.into(),
@@ -40,6 +41,16 @@ pub(crate) const QODER: Profile = Profile {
     events: TOOL_EVENTS,
 };
 
+pub(crate) const QODER_SDK: Profile = Profile {
+    name: "qoder-sdk",
+    adapter: &super::super::adapters::qoder_sdk::QoderSdk,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
+};
+
 pub(crate) const OPENCLAW: Profile = Profile {
     name: "openclaw",
     adapter: &super::super::adapters::openclaw::OpenClaw,
@@ -55,7 +66,11 @@ pub(crate) const HERMES: Profile = Profile {
 pub(crate) const QWENPAW: Profile = Profile {
     name: "qwenpaw",
     adapter: &super::super::adapters::qwenpaw::QwenPaw,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const PI: Profile = Profile {
@@ -76,8 +91,9 @@ pub(crate) const AGENTSCOPE: Profile = Profile {
     events: TOOL_EVENTS,
 };
 
-pub(crate) const PROFILES: &[Profile] =
-    &[QODER, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE];
+pub(crate) const PROFILES: &[Profile] = &[
+    QODER, QODER_SDK, OPENCLAW, HERMES, QWENPAW, PI, CLAUDE_SDK, AGENTSCOPE,
+];
 
 #[cfg(test)]
 mod tests {

@@ -60,6 +60,8 @@ normalize_modes() {
         -type f -exec chmod 0755 {} +
     find "$stage/adapters" "$stage/share/anolisa/skills" \
         -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod 0755 {} +
+    chmod 0755 "$stage/share/anolisa/sec-core/gateway/install-mitmproxy.sh" \
+        "$stage/share/anolisa/sec-core/pre-uninstall-gateway.sh.in"
 }
 
 stage_payload() {
@@ -94,6 +96,18 @@ stage_payload() {
         "$ROOT/packaging/systemd/agent-sec-core-v2.service.in" \
         "$stage/share/anolisa/sec-core/agent-sec-core.service.in"
     install -p -m 0644 "$ROOT/LICENSE" "$stage/share/doc/sec-core/LICENSE"
+    install -d -m 0755 "$stage/share/anolisa/sec-core/gateway"
+    install -p -m 0644 "$BUILD_DIR/gateway/asc_gateway_addon.py" \
+        "$BUILD_DIR/gateway/asc_gateway_policy.py" "$BUILD_DIR/gateway/github-policy.json" \
+        "$BUILD_DIR/gateway/mitmproxy.provenance" "$stage/share/anolisa/sec-core/gateway/"
+    install -p -m 0755 "$BUILD_DIR/gateway/install-mitmproxy.sh" \
+        "$stage/share/anolisa/sec-core/gateway/"
+    sed 's|{datadir}/asc_gateway_addon.py|"{datadir}/sec-core/gateway/asc_gateway_addon.py"|g' \
+        "$BUILD_DIR/gateway/agent-sec-gateway.service.in" \
+        > "$stage/share/anolisa/sec-core/agent-sec-gateway.service.in"
+    install -p -m 0644 "$BUILD_DIR/gateway/gateway.conf" "$stage/share/anolisa/sec-core/"
+    install -p -m 0755 "$ROOT/packaging/raw/assets/pre-uninstall-gateway.sh.in" \
+        "$stage/share/anolisa/sec-core/"
 
     validate_bundled_python "$BUILD_DIR/python-runtime"
     copy_tree_dereferenced "$BUILD_DIR/python-runtime" \
@@ -136,10 +150,17 @@ COMMAND="${1:-}"
 [ "$COMMAND" = "stage" ] || [ "$COMMAND" = "package" ] || \
     die "usage: $0 {stage|package}"
 
+# The shipped manifest and adapter launcher still describe the legacy raw tree.
+[ "${RAW_LAYOUT_PROFILE:-anolisa}" = "anolisa" ] || \
+    die "raw packaging supports only RAW_LAYOUT_PROFILE=anolisa; use make install DESTDIR=... for component-owned installation"
+AWPRJ="${AWPRJ-anolisa}"
+[ "$AWPRJ" = anolisa ] || \
+    die "raw packages require AWPRJ=anolisa; cannot remap AWPRJ without updating the raw manifest and adapter runtime layout"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/target}"
-CONTRACT="${RAW_CONTRACT:-$ROOT/.anolisa/component.toml}"
+CONTRACT="${RAW_CONTRACT:-$ROOT/packaging/anolisa/component.toml}"
 TARGET_OS="${TARGET_OS:-linux}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 

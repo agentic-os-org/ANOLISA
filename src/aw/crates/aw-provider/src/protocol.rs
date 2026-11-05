@@ -40,6 +40,19 @@ impl ValidatedConfig {
     }
 }
 
+/// Protocol-checked evidence supplied by the caller for one configured Provider.
+///
+/// The caller owns discovery and must associate both responses with the same
+/// configured Provider. These values do not establish process identity or prove
+/// that an Agent has installed a hook.
+#[derive(Clone)]
+pub struct ProviderEvidence {
+    /// The operations, events and effects declared by the Provider.
+    pub description: Description,
+    /// The exact private configuration accepted by that Provider.
+    pub configuration: ValidatedConfig,
+}
+
 /// Candidate effects from one invocation, never a receipt or adoption record.
 pub struct Outcome(Value);
 
@@ -49,9 +62,9 @@ impl Outcome {
         &self.0
     }
 
-    /// Whether the Provider requested blocking this tool attempt.
+    /// Whether the Provider requested blocking this submission or tool attempt.
     ///
-    /// False adds no restriction; it does not authorize the native tool.
+    /// False adds no restriction; it does not authorize the native submission or tool.
     pub fn requests_block(&self) -> bool {
         self.0["effects"]
             .as_array()
@@ -73,6 +86,7 @@ pub enum Reply {
 pub struct Protocol {
     request: jsonschema::Validator,
     response: jsonschema::Validator,
+    event: jsonschema::Validator,
 }
 
 impl Protocol {
@@ -81,17 +95,38 @@ impl Protocol {
     /// # Errors
     /// Returns [`Error::InvalidSchema`] if a bundled schema is invalid.
     pub fn new() -> Result<Self, Error> {
-        fn compile(schema: &str) -> Result<jsonschema::Validator, Error> {
-            let schema: Value = serde_json::from_str(schema).map_err(|_| Error::InvalidSchema)?;
+        fn compile(schema: &Value) -> Result<jsonschema::Validator, Error> {
             jsonschema::draft202012::options()
                 .offline()
-                .build(&schema)
+                .build(schema)
                 .map_err(|_| Error::InvalidSchema)
         }
+        let request: Value =
+            serde_json::from_str(REQUEST_SCHEMA).map_err(|_| Error::InvalidSchema)?;
+        let response: Value =
+            serde_json::from_str(RESPONSE_SCHEMA).map_err(|_| Error::InvalidSchema)?;
         Ok(Self {
-            request: compile(REQUEST_SCHEMA)?,
-            response: compile(RESPONSE_SCHEMA)?,
+            request: compile(&request)?,
+            response: compile(&response)?,
+            event: compile(
+                request
+                    .pointer("/oneOf/2/properties/event")
+                    .ok_or(Error::InvalidSchema)?,
+            )?,
         })
+    }
+
+    /// Validate a normalized event without constructing or invoking a Provider request.
+    ///
+    /// # Errors
+    /// Rejects size/depth overflow, unknown or missing fields, malformed identities
+    /// and a tool result supplied before execution. Bare-event limits apply.
+    pub fn validate_event(&self, event: &Value) -> Result<(), Error> {
+        encode(event)?;
+        if !self.event.is_valid(event) {
+            return Err(Error::Invalid("event schema mismatch"));
+        }
+        check_event_result(event)
     }
 
     /// Parses one JSON request, rejecting ambiguity and unsupported invocation effects.
@@ -114,7 +149,10 @@ impl Protocol {
             return Err(Error::Invalid("request schema mismatch"));
         }
         if value["method"] == "invoke" {
-            let before = value["event"]["name"] == "tool.before";
+            let before = matches!(
+                value["event"]["name"].as_str(),
+                Some("input.submit" | "tool.before")
+            );
             for effect in array(&value["allowed_effects"])? {
                 if effect != "observe"
                     && !(before && effect == "block")
@@ -125,12 +163,7 @@ impl Protocol {
                     return Err(Error::Invalid("invocation effect is not implemented"));
                 }
             }
-            if before
-                && (!value["event"]["tool"]["result"].is_null()
-                    || value["event"]["tool"].get("result_projection").is_some())
-            {
-                return Err(Error::Invalid("tool.before cannot supply a tool result"));
-            }
+            check_event_result(&value["event"])?;
         }
         Ok(())
     }
@@ -268,6 +301,15 @@ impl Protocol {
             _ => Err(Error::Invalid("unknown request method")),
         }
     }
+}
+
+fn check_event_result(event: &Value) -> Result<(), Error> {
+    if event["name"] == "tool.before"
+        && (!event["tool"]["result"].is_null() || event["tool"].get("result_projection").is_some())
+    {
+        return Err(Error::Invalid("tool.before cannot supply a tool result"));
+    }
+    Ok(())
 }
 
 fn array(value: &Value) -> Result<&Vec<Value>, Error> {

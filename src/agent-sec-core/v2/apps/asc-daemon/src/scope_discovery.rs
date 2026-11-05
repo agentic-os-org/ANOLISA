@@ -68,11 +68,13 @@ impl asc_pap::ScopeDiscovery for ScopeDiscoveryRegistry {
     fn start(&self, scope: &asc_pap::ScopeDiscoverySeed) -> Result<(), PapError> {
         let mut guard = self.jobs.lock().map_err(|_| PapError::Unavailable)?;
         let jobs = guard.as_mut().ok_or(PapError::Unavailable)?;
+        // Scope IDs are immutable; restart/recovery replay must not delete an
+        // assignment merely because its owned worker is already running.
+        if jobs.iter().any(|job| job.scope_id == scope.scope_id) {
+            return Ok(());
+        }
         if jobs.len() >= MAX_DISCOVERY_JOBS {
             return Err(PapError::Unavailable);
-        }
-        if jobs.iter().any(|job| job.scope_id == scope.scope_id) {
-            return Err(PapError::Conflict);
         }
         let state =
             ScopeDiscoveryState::from_seed(scope.clone()).map_err(|_| PapError::Conflict)?;
@@ -116,6 +118,7 @@ impl ScopeDiscoveryJob {
         interval: Duration,
         sink: Arc<dyn asc_pap::ScopeBindingSink>,
     ) -> Result<Self, PapError> {
+        let verify_uid = state.requires_owner_uid();
         let state = Arc::new(Mutex::new(state));
         let boot_id = fs::read_to_string(root.join("sys/kernel/random/boot_id"))
             .map_err(|_| PapError::Unavailable)?;
@@ -131,7 +134,7 @@ impl ScopeDiscoveryJob {
             while !worker_stop.load(Ordering::Acquire) {
                 let run_span = tracing::info_span!("scope_discovery.scan", scope_id = %worker_scope_id);
                 let entered = run_span.enter();
-                let scan = scan_proc(&root, boot_id.trim(), &worker_stop);
+                let scan = scan_proc(&root, boot_id.trim(), &worker_stop, verify_uid);
                 if worker_stop.load(Ordering::Acquire) { break; }
                 match scan {
                     Ok(scan) => {
@@ -227,7 +230,12 @@ struct ProcScan {
     unreadable: usize,
 }
 
-fn scan_proc(root: &Path, boot_id: &str, stop: &AtomicBool) -> io::Result<ProcScan> {
+fn scan_proc(
+    root: &Path,
+    boot_id: &str,
+    stop: &AtomicBool,
+    verify_uid: bool,
+) -> io::Result<ProcScan> {
     let mut scan = ProcScan {
         observations: Vec::new(),
         present: BTreeSet::new(),
@@ -252,7 +260,7 @@ fn scan_proc(root: &Path, boot_id: &str, stop: &AtomicBool) -> io::Result<ProcSc
             continue;
         };
         scan.present.insert(pid);
-        match observe(root, boot_id, pid) {
+        match observe(root, boot_id, pid, verify_uid) {
             Ok(observation) => scan.observations.push(observation),
             // Zombies, kernel threads and processes exiting during enumeration
             // legitimately have no exe link. Keep their last state until absent.
@@ -263,12 +271,17 @@ fn scan_proc(root: &Path, boot_id: &str, stop: &AtomicBool) -> io::Result<ProcSc
     Ok(scan)
 }
 
-fn observe(root: &Path, boot_id: &str, pid: u32) -> io::Result<ProcessObservation> {
+fn observe(
+    root: &Path,
+    boot_id: &str,
+    pid: u32,
+    verify_uid: bool,
+) -> io::Result<ProcessObservation> {
     let process = root.join(pid.to_string());
     let identity = read_identity(&process, boot_id, pid)?;
-    let fingerprint = read_fingerprint(&process)?;
+    let fingerprint = read_fingerprint(&process, verify_uid)?;
     if identity != read_identity(&process, boot_id, pid)?
-        || fingerprint != read_fingerprint(&process)?
+        || fingerprint != read_fingerprint(&process, verify_uid)?
     {
         return Err(io::Error::other(
             "process changed during observation; retry next scan",
@@ -301,7 +314,7 @@ fn read_identity(process: &Path, boot_id: &str, pid: u32) -> io::Result<ProcessI
     })
 }
 
-fn read_fingerprint(process: &Path) -> io::Result<ProcessFingerprint> {
+fn read_fingerprint(process: &Path, verify_uid: bool) -> io::Result<ProcessFingerprint> {
     let exe = process.join("exe");
     let metadata = fs::metadata(&exe)?;
     Ok(ProcessFingerprint {
@@ -311,7 +324,31 @@ fn read_fingerprint(process: &Path) -> io::Result<ProcessFingerprint> {
             .to_owned(),
         device: metadata.dev(),
         inode: metadata.ino(),
+        uid: if verify_uid {
+            read_uid(process).ok()
+        } else {
+            None
+        },
     })
+}
+
+fn read_uid(process: &Path) -> io::Result<u32> {
+    let status = fs::read_to_string(process.join("status"))?;
+    let values = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .ok_or_else(|| io::Error::other("missing proc UID"))?;
+    let uids = values
+        .split_whitespace()
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| io::Error::other("invalid proc UID"))?;
+    // Real/effective/saved/filesystem credentials must agree; elevated or changing
+    // processes must not inherit a user's credential injection rights.
+    if uids.len() != 4 || uids.iter().any(|uid| *uid != uids[0]) {
+        return Err(io::Error::other("process UID credentials differ"));
+    }
+    Ok(uids[0])
 }
 
 #[cfg(test)]
@@ -392,9 +429,11 @@ mod tests {
                 executable: executable.to_str().unwrap().to_owned(),
             },
         };
-        assert!(pap.create_scope_assignment(&selector, &[]).is_err());
-        let scope = pap.create_scope_assignment(&selector, &refs).unwrap();
-        let other = pap.create_scope_assignment(&selector, &refs[..1]).unwrap();
+        assert!(pap.create_scope_assignment(&selector, &[], None).is_err());
+        let scope = pap.create_scope_assignment(&selector, &refs, None).unwrap();
+        let other = pap
+            .create_scope_assignment(&selector, &refs[..1], None)
+            .unwrap();
         let second = Process(Command::new(&executable).arg("30").spawn().unwrap());
         {
             let guard = registry.jobs.lock().unwrap();
@@ -448,7 +487,7 @@ mod tests {
         pap.delete_scope(&other.scope_id).unwrap();
         registry.shutdown().unwrap();
         assert!(matches!(
-            pap.create_scope_assignment(&selector, &refs[1..]),
+            pap.create_scope_assignment(&selector, &refs[1..], None),
             Err(PapError::Unavailable)
         ));
         assert_eq!(pap.list_scopes(100, 0).unwrap().total, 2);
@@ -475,6 +514,7 @@ mod tests {
                         policy_id: policy.policy_id.clone(),
                         policy_revision: policy.revision,
                     }],
+                    None,
                 )
                 .unwrap(),
             );
@@ -485,7 +525,8 @@ mod tests {
                 &[asc_policy_types::scope::PolicyReference {
                     policy_id: policy.policy_id.clone(),
                     policy_revision: policy.revision
-                }]
+                }],
+                None,
             ),
             Err(PapError::Unavailable)
         ));
@@ -502,6 +543,7 @@ mod tests {
                     policy_id: policy.policy_id.clone(),
                     policy_revision: policy.revision,
                 }],
+                None,
             )
             .unwrap();
         assert_ne!(replacement.scope_id, removed.scope_id);
@@ -512,7 +554,8 @@ mod tests {
                 &[asc_policy_types::scope::PolicyReference {
                     policy_id: policy.policy_id.clone(),
                     policy_revision: policy.revision
-                }]
+                }],
+                None,
             ),
             Err(PapError::Unavailable)
         ));
@@ -578,17 +621,43 @@ mod tests {
         )
         .unwrap();
         fs::write(process.join("comm"), "agent\n").unwrap();
+        fs::write(
+            process.join("status"),
+            "Name:\tagent\nUid:\t1000\t1000\t1000\t1000\n",
+        )
+        .unwrap();
         let stop = AtomicBool::new(false);
-        let scan = scan_proc(directory.path(), "boot", &stop).unwrap();
+        let scan = scan_proc(directory.path(), "boot", &stop, true).unwrap();
         assert_eq!(scan.observations[0].identity.start_time, 987);
+        assert_eq!(scan.observations[0].fingerprint.uid, Some(1000));
+        fs::write(process.join("status"), "Uid:\t1000\t0\t1000\t1000\n").unwrap();
+        assert_eq!(
+            observe(directory.path(), "boot", 42, true)
+                .unwrap()
+                .fingerprint
+                .uid,
+            None
+        );
+        fs::remove_file(process.join("status")).unwrap();
+        assert_eq!(
+            observe(directory.path(), "boot", 42, true)
+                .unwrap()
+                .fingerprint
+                .uid,
+            None
+        );
         fs::write(process.join("stat"), "malformed").unwrap();
-        let scan = scan_proc(directory.path(), "boot", &stop).unwrap();
+        let scan = scan_proc(directory.path(), "boot", &stop, true).unwrap();
         assert!(scan.complete);
         assert_eq!(scan.present, BTreeSet::from([42]));
         assert!(scan.observations.is_empty());
         assert_eq!(scan.unreadable, 1);
-        assert!(scan_proc(&directory.path().join("missing"), "boot", &stop).is_err());
+        assert!(scan_proc(&directory.path().join("missing"), "boot", &stop, true).is_err());
         stop.store(true, Ordering::Release);
-        assert!(!scan_proc(directory.path(), "boot", &stop).unwrap().complete);
+        assert!(
+            !scan_proc(directory.path(), "boot", &stop, true)
+                .unwrap()
+                .complete
+        );
     }
 }

@@ -6,14 +6,19 @@
 #[path = "launcher/support.rs"]
 mod support;
 
+#[path = "qwenpaw/resident.rs"]
+mod resident;
+
+use aw_service::Operation;
 use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
+    time::Instant,
 };
-use support::{Fixture, Service, LITERAL};
+use support::{Fixture, Service, LITERAL, TIMEOUT};
 
 fn action() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qwenpaw/action.py")
@@ -72,7 +77,12 @@ fn preserved(fixture: &Fixture) {
         fs::read_to_string(fixture.root.join("home/plugins/existing/data")).unwrap(),
         "unchanged"
     );
-    assert!(!fixture.root.join("home/plugins/aw-native").exists());
+    assert_eq!(
+        fs::read_dir(fixture.root.join("home/plugins"))
+            .unwrap()
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -92,6 +102,25 @@ fn empty_policy_starts_native_app_and_releases_owned_files() {
     assert!(!fixture.root.join("order.jsonl").exists());
     preserved(&fixture);
     service.released(&fixture);
+}
+
+#[test]
+fn app_versions_still_require_native_registration_and_cleanup() {
+    for version in ["2.2.2", "2.2.2.post2", "3.0.0rc1"] {
+        let fixture = Fixture::new();
+        let document = setup(&fixture);
+        let service = Service::start(&fixture, &document);
+        let mut command = launch(&fixture);
+        command.env(
+            "FAKE_QWENPAW_VERSION",
+            format!("QwenPaw, version {version}"),
+        );
+        let result = fixture.successful(command);
+        assert_eq!(result["ready_hook_count"], 0);
+        assert_eq!(result["tool_executed"], true);
+        preserved(&fixture);
+        service.released(&fixture);
+    }
 }
 
 #[test]
@@ -221,7 +250,7 @@ fn report_callback_failures_preserve_before_execution_and_after_result() {
 }
 
 #[test]
-fn unsupported_entries_and_existing_plugin_are_rejected_before_service_creation() {
+fn unsupported_entries_are_rejected_before_service_creation() {
     let fixture = Fixture::new();
     let mut document = setup(&fixture);
     native(&fixture, &mut document, "tool.before", "before");
@@ -241,21 +270,38 @@ fn unsupported_entries_and_existing_plugin_are_rejected_before_service_creation(
         assert!(!fixture.run(launch(&fixture)).status.success());
         assert!(!fixture.root.join("state").exists());
     }
-    document["spec"]["agents"]["qwenpaw"]["argv"] =
-        json!([fixture.root.join("fake qwenpaw"), "app"]);
-    fixture.save(&document);
+}
+
+#[test]
+fn user_plugin_name_and_disabled_settings_do_not_conflict_with_owned_installation() {
+    let fixture = Fixture::new();
+    let document = setup(&fixture);
+    let original = r#"{"plugins":{"aw-native":{"enabled":false}},"future":{"nested":[1,true]}}"#;
+    fs::write(fixture.root.join("home/config.json"), original).unwrap();
     fs::create_dir(fixture.root.join("home/plugins/aw-native")).unwrap();
     fs::write(
         fixture.root.join("home/plugins/aw-native/owned-by-user"),
         "preserve",
     )
     .unwrap();
-    assert!(!fixture.run(launch(&fixture)).status.success());
+    let service = Service::start(&fixture, &document);
+    let result = fixture.successful(launch(&fixture));
+    assert_eq!(result["tool_executed"], true);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("home/config.json")).unwrap(),
+        original
+    );
     assert_eq!(
         fs::read_to_string(fixture.root.join("home/plugins/aw-native/owned-by-user")).unwrap(),
         "preserve"
     );
-    assert!(!fixture.root.join("state").exists());
+    assert_eq!(
+        fs::read_dir(fixture.root.join("home/plugins"))
+            .unwrap()
+            .count(),
+        2
+    );
+    service.released(&fixture);
 }
 
 #[test]
@@ -273,12 +319,19 @@ fn app_exit_before_readiness_releases_instance_and_owned_files() {
 
 #[test]
 fn serial_steps_share_one_event_deadline_and_failure_policy() {
+    const EVENT_BUDGET_MS: u64 = 5000;
+    const STEP_DELAY_MS: u64 = 3000;
     let fixture = Fixture::new();
     let mut document = setup(&fixture);
     for label in ["budget-first", "budget-second"] {
         native(&fixture, &mut document, "tool.before", label);
+        document["spec"]["providers"][label]["transport"]["argv"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(STEP_DELAY_MS.to_string()));
     }
-    document["spec"]["events"]["tool.before"]["budget_ms"] = json!(600);
+    // Leave startup/scheduling headroom while two delays still exceed one budget.
+    document["spec"]["events"]["tool.before"]["budget_ms"] = json!(EVENT_BUDGET_MS);
     for step in document["spec"]["events"]["tool.before"]["steps"]
         .as_array_mut()
         .unwrap()
@@ -287,14 +340,43 @@ fn serial_steps_share_one_event_deadline_and_failure_policy() {
     }
     let service = Service::start(&fixture, &document);
     let output = fixture.run(launch(&fixture));
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let recent = service
+        .client
+        .call(Operation::RecentExecutions, Instant::now() + TIMEOUT)
+        .unwrap();
+    let markers = [
+        "budget-first-started",
+        "budget-first-completed",
+        "budget-second-started",
+        "budget-second-completed",
+    ]
+    .map(|name| (name, fs::read_to_string(fixture.root.join(name))));
+    let diagnostic = format!(
+        "event budget={EVENT_BUDGET_MS}ms, step delay={STEP_DELAY_MS}ms; markers={markers:?}\nexecutions={recent}\nstatus={}\nstdout={}\nstderr={stderr}",
+        output.status, String::from_utf8_lossy(&output.stdout),
     );
-    assert!(fixture.root.join("budget-first-completed").exists());
-    assert!(!fixture.root.join("budget-second-completed").exists());
-    assert!(fixture.root.join("tool-executed").exists());
+    assert!(output.status.success(), "{diagnostic}");
+    assert!(
+        fixture.root.join("budget-first-completed").exists(),
+        "{diagnostic}"
+    );
+    assert!(
+        fixture.root.join("budget-second-started").exists(),
+        "{diagnostic}"
+    );
+    assert!(
+        !fixture.root.join("budget-second-completed").exists(),
+        "{diagnostic}"
+    );
+    let calls = recent["items"].as_array().unwrap();
+    assert_eq!(calls.len(), 2, "{diagnostic}");
+    assert_eq!(calls[1]["step_id"], "budget-first", "{diagnostic}");
+    assert_eq!(calls[1]["status"], "ok", "{diagnostic}");
+    assert_eq!(calls[0]["step_id"], "budget-second", "{diagnostic}");
+    assert_eq!(calls[0]["failure"], "transport", "{diagnostic}");
+    assert_eq!(calls[0]["failure_action"], "report", "{diagnostic}");
+    assert!(fixture.root.join("tool-executed").exists(), "{diagnostic}");
     preserved(&fixture);
     service.released(&fixture);
 }
@@ -360,31 +442,15 @@ fn native_callback_environment_preserves_profile_changes_without_rebinding_provi
 }
 
 #[test]
-fn observation_only_app_registers_callbacks_without_actions() {
+fn resident_observation_is_rejected_before_launch() {
     let fixture = Fixture::new();
     let mut document = setup(&fixture);
     fixture.observation(&mut document, "qwenpaw");
     let service = Service::start(&fixture, &document);
     let output = fixture.run(launch(&fixture));
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["ready_hook_count"], 2);
-    assert_eq!(report["tool_executed"], true);
-    let audit = fixture.run_audit(&service, &output);
-    assert_eq!(
-        audit["records"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|row| row["record"]["phase"] == "native_callback")
-            .count(),
-        2
-    );
-    assert_eq!(audit["terminal"], true);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("resident task scopes do not support native evidence"));
     preserved(&fixture);
     service.released(&fixture);
 }

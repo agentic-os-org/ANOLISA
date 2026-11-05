@@ -17,7 +17,6 @@ use super::shared_maps::{MapKind, SharedMaps};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Read,
     mem::{self, MaybeUninit},
     path::Path,
     slice,
@@ -28,6 +27,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+mod scan;
+#[cfg(test)]
+use scan::ssl_exe_markers;
+use scan::{collect_pattern_hits, file_has_ssl_markers, fill_buf};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
 #[allow(
@@ -504,6 +508,13 @@ impl SslSniff {
         Ok(())
     }
 
+    /// 仅将关联到实际 uprobe 的进程视为可采集，排除不可追踪文件的负缓存。
+    pub(super) fn has_process_attachments(&self, pid: u32) -> bool {
+        self.pid_inodes
+            .get(&pid)
+            .is_some_and(|files| files.iter().any(|file| self.attachments.contains_key(file)))
+    }
+
     /// Number of SSL library files with live uprobe attachments (diagnostics).
     pub fn traced_inode_count(&self) -> usize {
         self.attachments.len()
@@ -547,6 +558,9 @@ impl SslSniff {
         // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
         let result = match kind {
             SslLibKind::OpenSsl => attach_openssl(&mut self.skel, path, -1),
+            SslLibKind::Python => {
+                return attach_python_ssl(pid, path, || attach_openssl(&mut self.skel, path, -1));
+            }
             SslLibKind::GnuTls => attach_gnutls(&mut self.skel, path, -1),
             SslLibKind::Nss => attach_nss(&mut self.skel, path, -1),
             SslLibKind::ExplicitTap => {
@@ -634,13 +648,7 @@ impl SslSniff {
             }
         };
 
-        match result {
-            Ok(links) => AttachOutcome::Attached(links),
-            Err(e) => {
-                log::warn!("[attach_process] pid={pid}: attach failed for {path}: {e:#}");
-                AttachOutcome::Failed
-            }
-        }
+        finish_ssl_attach(pid, path, result)
     }
 
     /// Detach SSL probes for a process and clean up traced files.
@@ -796,32 +804,6 @@ pub(super) struct StaticSslOffsets {
     pub read_is_ex: bool,
 }
 
-/// Appends the absolute offset of every pattern match starting in `window`
-/// below `limit`, one vector per entry of `patterns`, in ascending order.
-///
-/// Walks the window once and tests every pattern at each position, rather than
-/// walking it once per pattern. The signatures are all function prologues that
-/// share a leading byte run, so each comparison rejects a position on its first
-/// byte and the extra signatures cost close to nothing. Walking per pattern
-/// instead means a binary matching none of them is scanned once for every
-/// signature before it can be rejected, on the synchronous attach path.
-fn collect_pattern_hits(
-    window: &[u8],
-    patterns: &[&[u8]],
-    base: usize,
-    limit: usize,
-    hits: &mut [Vec<usize>],
-) {
-    for pos in 0..limit.min(window.len()) {
-        let tail = &window[pos..];
-        for (slot, pattern) in hits.iter_mut().zip(patterns) {
-            if tail.len() >= pattern.len() && &tail[..pattern.len()] == *pattern {
-                slot.push(base + pos);
-            }
-        }
-    }
-}
-
 /// Bytes read per window by [`scan_file_patterns`].
 ///
 /// Caps the scan's peak memory. Agent binaries reach hundreds of megabytes (a
@@ -868,51 +850,6 @@ fn scan_file_patterns(path: &str, patterns: &[&[u8]]) -> Option<Vec<Vec<usize>>>
         carry = overlap;
     }
     Some(hits)
-}
-
-/// Reads until `dst` is full or the file ends, returning the byte count.
-///
-/// `Read::read` is free to return short of the request before EOF, and a short
-/// window would split a pattern that is actually present, so the fill has to be
-/// driven to completion rather than trusted to one call.
-///
-/// # Errors
-///
-/// Returns `None` on any I/O error other than an interrupted call.
-fn fill_buf(file: &mut fs::File, mut dst: &mut [u8]) -> Option<usize> {
-    let mut total = 0;
-    while !dst.is_empty() {
-        match file.read(dst) {
-            Ok(0) => break,
-            Ok(n) => {
-                total += n;
-                dst = &mut dst[n..];
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return None,
-        }
-    }
-    Some(total)
-}
-
-/// String markers whose presence in an executable indicates a statically
-/// linked BoringSSL, regardless of the binary's name. BoringSSL builds keep
-/// vendor path strings (`vendor/boringssl/...`) and the
-/// `openssl_is_boringssl` symbol name in .rodata even when stripped.
-/// Deliberately BoringSSL-only: statically-linked OpenSSL binaries stay
-/// opt-in through the name-based fast path (codex, python3.x), keeping this
-/// fallback scoped to the Bun/Node binary shape it was built for. This is a
-/// cheap prefilter, not a verdict: a hit only justifies running the
-/// (expensive) three-tier detection, which remains the source of truth.
-///
-/// The marker is stored reversed and reassembled at runtime so the
-/// contiguous string never appears in AgentSight's own binary: AgentSight
-/// resolves the https-rule domains itself, and a self-match would trigger a
-/// pointless full byte-pattern scan of its own executable. (A capitalized
-/// `BoringSSL` variant is unusable anyway: the aws-lc dependency embeds
-/// that exact string, which would self-match the same way.)
-fn ssl_exe_markers() -> Vec<Vec<u8>> {
-    vec![b"lssgnirob".iter().copied().rev().collect()]
 }
 
 /// Probe the main executable of `pid` for statically-linked SSL when maps
@@ -992,45 +929,6 @@ fn stat_dev_to_key(dev: u64) -> u64 {
     let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff_u64);
     let minor = (dev & 0xff) | ((dev >> 12) & !0xff_u64);
     (major << 32) | minor
-}
-
-/// True when any marker from [`ssl_exe_markers`] occurs in the file at
-/// `path`.
-///
-/// Streams the file in rounds of [`SCAN_CHUNK_BYTES`] fresh bytes (the
-/// buffer additionally holds the `max_marker_len - 1` bytes carried over
-/// from the previous round, so a marker straddling a round boundary is
-/// still seen) and stops at the first hit, so a matching binary costs only
-/// the read up to its first marker.
-fn file_has_ssl_markers(path: &str) -> bool {
-    let markers = ssl_exe_markers();
-    let overlap = markers.iter().map(|m| m.len()).max().unwrap_or(1) - 1;
-    let Ok(mut file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = vec![0u8; overlap + SCAN_CHUNK_BYTES];
-    let mut carry = 0usize;
-    loop {
-        let Some(read) = fill_buf(&mut file, &mut buf[carry..]) else {
-            return false;
-        };
-        let filled = carry + read;
-        if filled == 0 {
-            return false;
-        }
-        let window = &buf[..filled];
-        if markers
-            .iter()
-            .any(|marker| window.windows(marker.len()).any(|w| w == marker.as_slice()))
-        {
-            return true;
-        }
-        if filled < buf.len() {
-            return false;
-        }
-        buf.copy_within(filled - overlap..filled, 0);
-        carry = overlap;
-    }
 }
 
 fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
@@ -1209,6 +1107,8 @@ fn missing_tap_is_a_coverage_gap(path: &str) -> bool {
 enum SslLibKind {
     /// libssl.so  (OpenSSL / LibreSSL)
     OpenSsl,
+    /// Python may embed OpenSSL in its executable or in a shared libpython.
+    Python,
     /// libgnutls.so
     GnuTls,
     /// libnspr4.so (NSS / Firefox)
@@ -1266,14 +1166,48 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
     ) {
         return Some(SslLibKind::ExplicitTap);
     }
-    // uv Python statically links OpenSSL into the binary. The ELF .symtab contains
-    // SSL_write/SSL_read/SSL_do_handshake as LOCAL symbols, so attach_openssl()
-    // (symbol-name uprobe) works directly. Only match python3.<ver> (with version
-    // suffix) to avoid matching bare "python3" symlinks from system Python.
-    if name.starts_with("python3.") {
-        return Some(SslLibKind::OpenSsl);
+    // uv builds differ in whether OpenSSL lives in the executable or libpython.
+    // These are candidates: inspect the image before attempting symbol attach.
+    if name.starts_with("python3.") || (name.starts_with("libpython3.") && name.contains(".so")) {
+        return Some(SslLibKind::Python);
     }
     None
+}
+
+// A missing symbol name rules out this image; libbpf resolves the actual
+// function when present. Scan only after inode dedup, so both positive and
+// negative results are shared by workers mapping the same Python build.
+fn python_ssl_present(path: &str) -> Result<bool> {
+    let hits = scan_file_patterns(path, &[b"SSL_write\0"])
+        .with_context(|| format!("failed to scan Python SSL image {path}"))?;
+    Ok(hits.first().is_some_and(|matches| !matches.is_empty()))
+}
+
+fn attach_python_ssl(
+    pid: i32,
+    path: &str,
+    attach: impl FnOnce() -> Result<Vec<Link>>,
+) -> AttachOutcome {
+    match python_ssl_present(path) {
+        Ok(true) => finish_ssl_attach(pid, path, attach()),
+        Ok(false) => AttachOutcome::Untraceable,
+        Err(error) => {
+            log::warn!(
+                "[attach_process] pid={pid}: cannot inspect Python SSL image {path}: {error:#}"
+            );
+            AttachOutcome::Failed
+        }
+    }
+}
+
+fn finish_ssl_attach(pid: i32, path: &str, result: Result<Vec<Link>>) -> AttachOutcome {
+    match result {
+        Ok(links) => AttachOutcome::Attached(links),
+        Err(error) => {
+            log::warn!("[attach_process] pid={pid}: attach failed for {path}: {error:#}");
+            AttachOutcome::Failed
+        }
+    }
 }
 
 /// Parse a maps `dev` field (`maj:min`, both hex) into one stable value.
@@ -1705,6 +1639,9 @@ static CODEX_OFFSET_TABLE: std::sync::LazyLock<Option<OffsetTable>> =
         let json = include_str!("../../agentsight.json");
         OffsetTable::load(json)
     });
+
+#[cfg(test)]
+mod python_tests;
 
 #[cfg(test)]
 mod tests {

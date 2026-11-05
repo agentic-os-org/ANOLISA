@@ -23,7 +23,7 @@ prompt colors and cursor ownership remain with the existing shell/PTY path.
 
 ## Input-Wait Handling
 
-When an agent-approved foreground command sits in a kernel-evidenced input wait (password prompt, pager, plain stdin read on the session tty), the shell shows an inline hint card and — after `shell.input_wait_timeout_secs` (default 120, `0` disables) — interrupts the foreground group and reports the wait to the provider. Fullscreen TUIs and pipeline reads are exempt. See the [configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#cosh-shell-configuration).
+When an agent-approved foreground command sits in a kernel-evidenced input wait (password prompt, pager, plain stdin read on the session tty), the shell shows an inline hint card and — after `shell.input_wait_timeout_secs` (default 120, `0` disables) — interrupts the foreground group and reports the wait to the provider. Fullscreen TUIs and pipeline reads are exempt. See the [configuration guide](../../../../docs/user-guide/en/cosh-ng/configuration.md#cosh-shell-configuration).
 
 ## Build And Check
 

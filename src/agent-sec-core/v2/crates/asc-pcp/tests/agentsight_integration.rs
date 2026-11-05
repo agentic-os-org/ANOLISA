@@ -15,8 +15,8 @@ use store::{TestAdmission, TestStore};
 
 use asc_agentsight_client::*;
 use asc_pcp::*;
-use asc_policy_adapter_agentsight::AgentSightAdapter;
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
+use asc_policy_translator_agentsight::AgentSightTranslator;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use common::*;
@@ -57,6 +57,154 @@ fn initial() -> ReconcileRecord {
             status: (BindingStatus::PendingApply).into(),
         },
         deployments: vec![],
+    }
+}
+
+#[test]
+fn cedar_delete_and_write_flow_through_pap_sqlite_reconciler_and_http() {
+    use asc_pap::{PapService, ScopeBindingSink};
+    use asc_policy_types::scope::{PolicyReference, ScopeSelector};
+    use asc_policy_types::target::TranslationOutcome;
+    use serde_json::json;
+
+    struct Discovery;
+    impl asc_pap::ScopeDiscovery for Discovery {
+        fn start(&self, _: &asc_pap::ScopeDiscoverySeed) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+        fn stop(&self, _: &ResourceId) -> Result<(), asc_pap::PapError> {
+            Ok(())
+        }
+    }
+
+    for (source, delete, write) in [
+        (
+            include_str!(
+                "../../../fixtures/adapters/agentsight/cedar-file-protection/prevent-delete.json"
+            ),
+            true,
+            false,
+        ),
+        (
+            include_str!(
+                "../../../fixtures/adapters/agentsight/cedar-file-protection/prevent-write.json"
+            ),
+            false,
+            true,
+        ),
+    ] {
+        let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+        let pap = PapService::new(repo.clone()).with_scope_discovery(Arc::new(Discovery));
+        let policy = pap
+            .create_policy(
+                "Cedar file protection",
+                &serde_json::from_str(source).unwrap(),
+            )
+            .unwrap();
+        let scope = pap
+            .create_scope_assignment(
+                &ScopeSelector::Pid { pid: 4242 },
+                &[PolicyReference {
+                    policy_id: policy.policy_id.clone(),
+                    policy_revision: policy.revision,
+                }],
+                None,
+            )
+            .unwrap();
+        pap.sync_instances(&scope.scope_id, &[spec(7).scope.process])
+            .unwrap();
+        let binding = pap.list_bindings(10, 0).unwrap().items.remove(0);
+        assert_eq!(binding.spec.policy, policy);
+        let id = binding.spec.binding_id.clone();
+        let TranslationOutcome::Translated(plan) =
+            AgentSightTranslator.translate(&binding.spec).unwrap()
+        else {
+            panic!("expected Cedar translation");
+        };
+        let prepared = AgentSightClient::with_dependencies(Wire::new([]), Identity::default())
+            .prepare_apply(&plan)
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&prepared.content).unwrap();
+        let bytes: Vec<u8> = serde_json::from_value(payload["request"].clone()).unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["file_protection_policy"],
+            json!({
+                "version":1,"topology_mode":"static_at_apply","targets":[{
+                    "path":"/workspace","kind":"directory_tree",
+                    "protections":{"delete":delete,"ordinary_write":write},
+                    "exclusions":[{"path":"/workspace/cache","kind":"directory_subtree"}]
+                }]
+            })
+        );
+        assert!(body.get("policy_dsl").is_none());
+        let inspect_repo = repo.clone();
+        let inspect_id = id.clone();
+        let server = MockHttp::start(
+            vec![
+                Exchange {
+                    request: request(AgentSightHttpMethod::Get, ENFORCEMENT_HEALTH_PATH, None),
+                    response: Some(response(
+                        200,
+                        &serde_json::to_vec(&structured_health()).unwrap(),
+                    )),
+                },
+                Exchange {
+                    request: request(
+                        AgentSightHttpMethod::Post,
+                        ENFORCEMENT_BINDINGS_PATH,
+                        Some(bytes),
+                    ),
+                    response: Some(response(
+                        200,
+                        &serde_json::to_vec(
+                            &json!({"request":body,"state":"enforced","domain_id":1}),
+                        )
+                        .unwrap(),
+                    )),
+                },
+                Exchange {
+                    request: request(
+                        AgentSightHttpMethod::Delete,
+                        &path(&prepared.target.id),
+                        None,
+                    ),
+                    response: Some(response(204, b"")),
+                },
+            ],
+            move |request| {
+                if request.method == AgentSightHttpMethod::Post {
+                    let saved = inspect_repo.read(&inspect_id).unwrap().unwrap();
+                    assert_eq!(saved.deployments.len(), 1);
+                    assert_eq!(saved.deployments[0].presence, Presence::Unknown);
+                }
+            },
+        );
+        let worker = core(
+            repo.clone(),
+            Arc::new(TestClock::default()),
+            &server.base_url,
+        );
+        let mut schedule = AttemptSchedule::default();
+        assert_eq!(
+            worker.reconcile(&id, &mut schedule).unwrap(),
+            Disposition::Completed
+        );
+        assert_eq!(
+            pap.get_binding(&id).unwrap().status.phase,
+            BindingStatus::Ready
+        );
+        assert_eq!(
+            repo.read(&id).unwrap().unwrap().deployments[0].presence,
+            Presence::Present
+        );
+        pap.delete_scope(&scope.scope_id).unwrap();
+        assert_eq!(
+            worker.reconcile(&id, &mut schedule).unwrap(),
+            Disposition::Completed
+        );
+        assert_eq!(pap.get_binding(&id), Err(asc_pap::PapError::NotFound));
+        server.finish(3);
     }
 }
 
@@ -138,10 +286,10 @@ fn core(
         transport,
         Identity::default(),
     ));
-    let adapter = |binding: &PreparedBinding| AgentSightAdapter.translate(binding);
+    let translator = |binding: &PreparedBinding| AgentSightTranslator.translate(binding);
     BindingReconciler::new(
         repo,
-        Arc::new(adapter),
+        Arc::new(translator),
         BTreeMap::from([(
             DEFAULT_AGENTSIGHT_ROUTE.into(),
             Arc::new(move || Ok(client.clone())) as Arc<dyn asc_pcp::TargetDeploymentClientFactory>,
@@ -447,7 +595,7 @@ fn retry_rejects_reused_process_identity_and_retains_unknown_cleanup() {
         let clock = Arc::new(TestClock::default());
         let core = BindingReconciler::new(
             repo.clone(),
-            Arc::new(|b: &PreparedBinding| AgentSightAdapter.translate(b)),
+            Arc::new(|b: &PreparedBinding| AgentSightTranslator.translate(b)),
             BTreeMap::from([(DEFAULT_AGENTSIGHT_ROUTE.into(), {
                 Arc::new(move || Ok(client.clone() as Arc<dyn TargetDeploymentClient>))
                     as Arc<dyn asc_pcp::TargetDeploymentClientFactory>

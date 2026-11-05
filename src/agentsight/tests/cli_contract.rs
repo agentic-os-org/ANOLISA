@@ -487,6 +487,7 @@ fn audit_db_reads_the_given_database() {
                 filename: Some("/usr/bin/db_flag_probe".to_string()),
                 args: Some("--probe".to_string()),
                 exit_code: Some(0),
+                signal: None,
             },
             session_id: None,
         })

@@ -254,6 +254,76 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     });
   }
 
+  it("decodes a reply the pipe splits inside a multibyte character", {
+    timeout: 30_000,
+  }, async (context) => {
+    // Regression for #4694: every stdout chunk used to be decoded on its own
+    // with `Buffer.toString("utf8")`, so a chunk boundary landing inside a
+    // multibyte character replaced both halves with U+FFFD before JSON.parse
+    // ever ran, and the tool result came back corrupted.
+    //
+    // The reply below is far larger than the 64 KiB pipe buffer, so the child
+    // cannot hand it over in one piece and the parent must read it in several
+    // chunks — that is what makes the split reproducible instead of scheduler
+    // dependent. The payload alternates a 3-byte and a 4-byte code point
+    // (7 bytes per unit), so consecutive 64 KiB boundaries cannot all land on
+    // a code point boundary: per-chunk decoding has to corrupt the text.
+    const directory = await mkdtemp(join(tmpdir(), "memory-unicode-test-"));
+    const binaryPath = join(directory, "mcp-server");
+    let childPid: number | undefined;
+    context.after(async () => {
+      if (childPid !== undefined) {
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch (error) {
+          assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+        }
+      }
+      await rm(directory, { recursive: true, force: true });
+    });
+
+    const units = 36_000;
+    const expected = String.fromCodePoint(0x8bb0, 0x1f9e0).repeat(units);
+    await writeFile(
+      binaryPath,
+      `#!${process.execPath}
+const readline = require("node:readline");
+setInterval(() => {}, 1000);
+const TEXT = String.fromCodePoint(0x8bb0, 0x1f9e0).repeat(${units});
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  const result =
+    request.method === "initialize"
+      ? {}
+      : {
+          content: [
+            { type: "text", text: TEXT },
+            { type: "text", text: String(process.pid) },
+          ],
+        };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`,
+      { mode: 0o700 },
+    );
+
+    const client = new McpStdioClient({ ...cfg, binaryPath });
+    const reply = await client.callTool("memory_get_context", {});
+    const lastNewline = reply.lastIndexOf("\n");
+    childPid = Number(reply.slice(lastNewline + 1));
+    const text = reply.slice(0, lastNewline);
+
+    assert.equal(text.length, expected.length);
+    assert.ok(
+      !text.includes("\ufffd"),
+      "reply contains a U+FFFD replacement character: the pipe split a multibyte character",
+    );
+    assert.equal(text, expected);
+
+    await client.stop();
+  });
+
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
     const client = new McpStdioClient(cfg);
     try {

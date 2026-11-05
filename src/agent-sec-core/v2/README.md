@@ -1,16 +1,17 @@
 # AgentSecCore V2 Policy, SkillSec and daemon
 
 SkillSec supplies scanning, system-key integrity, versions and activation through the Rust
-`skill-ledger` CLI and a root daemon. See the [core guide](../../../docs/user-guide/en/agent-security/agent-sec-core/skillsec-v2.md)
+`skillsec` CLI (`skill-ledger` remains a compatibility alias) and a root daemon. See the
+[core guide](../../../docs/user-guide/en/agent-sec-core/skillsec-v2.md)
 and [migration/acceptance boundaries](../docs/design/SKILL_SEC_PHASE_ONE.md).
 Agent Hook migration is separate; the core never calls Python Ledger.
 
 This workspace slice contains the dependency-light contracts, Policy
 Administration Point, first-version PAP daemon protocol, Policy-template
 validation, protocol-independent Unix-domain-socket service framework, and runnable
-foreground process bootstrap, together with the first AgentSight file-deletion
-target Adapter, and its independent deployment Client used by later AgentSecCore
-V2 work packages. `asc-pcp` provides synchronous attempts and
+foreground process bootstrap, together with a PEP Translator for native JSON
+file-deletion rules and Cedar deletion/ordinary-write restrictions, and an
+independent Deployment Client. `asc-pcp` provides synchronous attempts and
 `asc-policy-runtime/src/reconciliation/` provides the bounded Binding queue,
 workers, retry timers and compensation scanning. The daemon stores Policy, Scope
 and Binding state in SQLite, including deployment cleanup responsibility.
@@ -51,8 +52,21 @@ Ready Bindings and terminal failures are not automatically reapplied.
 
 The Rust `agent-sec-cli` exposes 12 Policy, Scope and Binding administration commands through
 an explicit daemon socket. Its Cargo package and source directory remain `asc-cli`;
-the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
+the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-sec-core/policy-cli.md)
 and [lifecycle acceptance criteria](../docs/design/POLICY_SCOPE_BINDING_CONTRACT_zh.md#6-可执行验收).
+
+The Rust CLI also provides local sandbox execution:
+
+```bash
+agent-sec-cli sandbox run --permissions permissions.json -- command
+```
+
+`asc-pep-runtime::prepare_launch` resolves the command, and `execute` installs the
+caller-supplied `OsPermissionSet` through the sibling static `linux-sandbox`
+helper. This path does not connect to the daemon. See the
+[sandbox guide](../../../docs/user-guide/en/agent-sec-core/sandbox.md) for the
+permission format and the [execution design](../docs/design/LINUX_SANDBOX_PEP_DESIGN_zh.md)
+for preparation, installation and process-lifetime boundaries.
 
 The current crates are:
 
@@ -60,13 +74,23 @@ The current crates are:
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, template validation, and target Adapter contracts. Snapshots retain
   `policyId`, `policyName`, `revision` and `template`.
-- `asc-policy-adapter-agentsight`: deterministic file-deletion and pinned-process
-  translation directly from the Binding's template into an AgentSight/ActPlane
-  plan, with semantic and encoding checks. Reusable policies contain general
-  rules; this Adapter supports only block + file/write + operation=delete without
-  history. Any unsupported rule rejects the complete Binding with its rule index.
-  Typed resources currently cover files; undefined resource formats are rejected.
-  Compiler acceptance belongs to the deployed target, not an embedded compiler.
+- `asc-os-permission-types`: versioned OS permissions shared by enforcement backends.
+- `asc-sandbox-types`: the standalone sandbox invocation, path identity and status contracts.
+- `asc-pep-runtime`: command and path preparation, strict sandbox execution and
+  installation-handshake supervision for caller-supplied permissions.
+- `asc-policy-cedar`: Cedar frontend library with a pinned file/process and
+  whole-network permission schema, strict SDK validation, common-subset checks
+  through `validate` and official typed PST output through `pst`. Agent Hook
+  actions can add separate typed contexts.
+  PAP uses it to validate Cedar sources submitted through CLI/RPC before saving
+  the original text and exact schema reference in SQLite. Cedar file-deletion and ordinary-write
+  translation and deployment are connected. See the
+  [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
+- `asc-policy-translator-agentsight`: translates immutable Binding snapshots into
+  target plans. Native JSON supports block + file/write + operation=delete without
+  history and produces DSL; Cedar supports a bounded `forbid` subset for deletion
+  and ordinary writes and produces structured file-protection JSON. Unsupported
+  rules reject the entire translation. Backend validation occurs at deployment.
 - `asc-agentsight-client`: health-gated AgentSight apply/delete transport for
   one configured endpoint, with process identity resolution and complete HTTP
   fixtures. It does not depend on a reconciliation framework.
@@ -149,7 +173,7 @@ correlation from Context, while kernel peer identity is passed as `CallerIdentit
 Opaque labels are not OpenTelemetry IDs. Business requests retain 4 MiB capacity
 with a separate 32 KiB propagation allowance; responses remain limited to 4 MiB.
 
-See the [PII user guide](../../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md)
+See the [PII user guide](../../../docs/user-guide/en/agent-sec-core/pii-checker.md)
 for limits, rule migration, compatibility differences and rollback. Hook/RPM tests
 exercise real Rust subprocesses without switching Agent hosts.
 
@@ -178,12 +202,21 @@ UDS frame -> DaemonDispatcher -> method metadata authorization
           -> PapHandler -> PolicyAdministration -> PapService<R, C>
 ```
 
-RPC reuses the domain `PolicyTemplate`, `ScopeSelector`, `PreparedPolicy`,
+RPC reuses the domain `PolicySource`, `ScopeSelector`, `PreparedPolicy`,
 `PreparedScope`, and `BindingView` types. It does not define result wrappers for
 each CRUD operation. `PolicyAdministration` intentionally mirrors the use cases
 once: it erases `R`/`C` before dispatch and repeats authorization at the
 application boundary; there is no additional `PapServiceAdapter` forwarding
 object.
+
+Policy create/update accepts native JSON templates and Cedar source envelopes.
+PAP validates Cedar against its exact schema before saving source; the shared
+source decoder reads historical native Policy, Scope and Binding snapshots.
+Native serialization and SQLite storage version 1 are retained. Saved Cedar
+source can be passed to the existing `asc-policy-cedar::pst` entrypoint to
+regenerate the official PST under its saved schema. The PEP Translator supports
+Cedar `forbid` deletion/ordinary-write restrictions; unsupported semantics reject
+the entire translation. The Deployment Client checks capabilities and applies the plan.
 
 The current bootstrap bounds frame read, application dispatch, rejection
 encoding, response write, connection drain, and final Tokio runtime shutdown.

@@ -15,7 +15,7 @@ from typing import Any
 
 from campaign_config import safety_settings, validate_campaign
 from campaign_evaluation import evaluate
-from campaign_manifest import ensure_manifest
+from campaign_manifest import ensure_manifest, write_json
 from campaign_runtime import capture_runtime_log, log_position, process_metadata
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -54,6 +54,78 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def completed_run(path: Path, identity: dict[str, Any]) -> dict[str, Any] | None:
+    """Reuse only a matching terminal checkpoint, never an interrupted write."""
+    try:
+        result = read_json(path)
+    except (OSError, ValueError, TypeError):
+        return None
+    if any(
+        type(result.get(key)) is not type(value) or result[key] != value
+        for key, value in identity.items()
+    ):
+        return None
+    evaluation = result.get("evaluation")
+    if not isinstance(result.get("summary"), dict) or not isinstance(evaluation, dict):
+        return None
+    if evaluation.get("verdict") not in ("PASS", "FAIL", "INCONCLUSIVE"):
+        return None
+    return result
+
+
+def run_identity(
+    version: str,
+    scenario: str,
+    label: str,
+    qps: int,
+    duration: int,
+    warmup: int,
+    repetition: int,
+) -> dict[str, Any]:
+    """Describe the measurement required for a reusable run checkpoint."""
+    return {
+        "schema_version": 1,
+        "scenario": scenario,
+        "label": label,
+        "version": version,
+        "qps": qps,
+        "duration_seconds": duration,
+        "warmup_seconds": warmup,
+        "repetition": repetition,
+    }
+
+
+def resume_recovery_repetition(
+    results: Path,
+    version: str,
+    repetition: int,
+    phases: tuple[tuple[str, int, int], ...],
+) -> bool:
+    """Reuse a complete sequence, or archive every phase before replaying it."""
+    directories = [
+        results / "runs" / "recovery" / version / label / f"rep-{repetition}"
+        for label, _, _ in phases
+    ]
+    if all(
+        completed_run(
+            directory / "run-result.json",
+            run_identity(version, "recovery", label, qps, duration, 0, repetition),
+        )
+        is not None
+        for directory, (label, qps, duration) in zip(directories, phases)
+    ):
+        print(f"[SKIP] completed recovery repetition: {version}:{repetition}", flush=True)
+        return True
+    archive = results / "incomplete" / "recovery" / version / f"rep-{repetition}-{time.time_ns()}"
+    for directory in directories:
+        if directory.exists():
+            archive.mkdir(parents=True, exist_ok=True)
+            destination = archive / directory.parent.name
+            directory.rename(destination)
+            print(f"[ARCHIVE] interrupted recovery phase: {destination}", flush=True)
+    return False
+
+
 def run_once(
     campaign: dict[str, Any],
     results_root: Path,
@@ -73,14 +145,15 @@ def run_once(
     pid = pid_override or version.get("pid")
     if not pid or not Path(f"/proc/{pid}").exists():
         raise ValueError(f"{version_name} AgentSight pid is missing or not alive")
-    output = (
-        results_root / "runs" / scenario / version_name / label / f"rep-{repetition}"
-    )
+    output = results_root / "runs" / scenario / version_name / label / f"rep-{repetition}"
+    identity = run_identity(version_name, scenario, label, qps, duration, warmup, repetition)
     if output.exists():
         result_path = output / "run-result.json"
         if resume and result_path.is_file():
-            print(f"[SKIP] completed run: {result_path}", flush=True)
-            return read_json(result_path)
+            previous = completed_run(result_path, identity)
+            if previous is not None:
+                print(f"[SKIP] completed run: {result_path}", flush=True)
+                return previous
         if not resume:
             raise FileExistsError(
                 f"run output already exists; use --resume or a new campaign ID: {output}"
@@ -152,9 +225,7 @@ def run_once(
         if warmup_status != 0:
             safety_stop_path = warmup_output / "safety-stop.json"
             if warmup_status == SAFETY_EXIT_CODE or safety_stop_path.exists():
-                safety_stop = (
-                    read_json(safety_stop_path) if safety_stop_path.exists() else {}
-                )
+                safety_stop = read_json(safety_stop_path) if safety_stop_path.exists() else {}
                 reason = safety_stop.get("reason", "unknown")
                 raise RuntimeError(
                     f"benchmark safety guard stopped {version_name}:{scenario} "
@@ -194,24 +265,15 @@ def run_once(
     summary["runtime_clean"] = runtime_clean
     summary["runtime_errors"] = runtime_errors
     if summary_path.exists():
-        summary_path.write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        write_json(summary_path, summary)
     evaluation = evaluate(summary, campaign["thresholds"], scenario)
     if status != 0:
         evaluation["verdict"] = "FAIL"
         if "harness_exit_code" not in evaluation["failed"]:
             evaluation["failed"].append("harness_exit_code")
     result = {
-        "schema_version": 1,
-        "scenario": scenario,
-        "label": label,
-        "version": version_name,
+        **identity,
         "metrics_enabled": bool(version.get("metrics_file")),
-        "qps": qps,
-        "duration_seconds": duration,
-        "warmup_seconds": warmup,
-        "repetition": repetition,
         "started_at_unix": started,
         "ended_at_unix": time.time(),
         "harness_exit_code": status,
@@ -219,9 +281,7 @@ def run_once(
         "summary": summary,
         "evaluation": evaluation,
     }
-    (output / "run-result.json").write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json(output / "run-result.json", result)
     if status == SAFETY_EXIT_CODE:
         reason = safety_stop.get("reason") if safety_stop else "unknown"
         raise RuntimeError(
@@ -362,11 +422,7 @@ def capacity(
 
     search_initial_upper: int | None = None
     if low and first_fail is None:
-        candidate = (
-            align_up(pretest_fail, resolution)
-            if pretest_fail is not None
-            else safety_max
-        )
+        candidate = align_up(pretest_fail, resolution) if pretest_fail is not None else safety_max
         candidate = min(safety_max, max(low + resolution, candidate))
         search_initial_upper = candidate if candidate > low else None
         while candidate > low:
@@ -409,8 +465,7 @@ def capacity(
             verdict = capacity_verdict(result)
             verdicts.append(verdict)
             print(
-                f"[CAPACITY] {version} confirm qps={value} "
-                f"repetition={repetition}: {verdict}",
+                f"[CAPACITY] {version} confirm qps={value} " f"repetition={repetition}: {verdict}",
                 flush=True,
             )
         confirmation[str(value)] = verdicts
@@ -441,9 +496,7 @@ def capacity(
             "confirmation": confirmation,
         }
         report_path = results / f"capacity-{version}.json"
-        report_path.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        write_json(report_path, report)
         raise RuntimeError(
             f"{version} failed at the minimum capacity search level "
             f"({resolution} QPS); lower capacity.qps_resolution and start a new "
@@ -458,9 +511,7 @@ def capacity(
             return "PASS"
         if verdicts.count("FAIL") >= required_confirmations:
             return "FAIL"
-        raise RuntimeError(
-            f"capacity confirmation is inconclusive at {value} QPS: {verdicts}"
-        )
+        raise RuntimeError(f"capacity confirmation is inconclusive at {value} QPS: {verdicts}")
 
     confirmed_pass: int | None = None
     confirmed_fail: int | None = None
@@ -478,9 +529,7 @@ def capacity(
             known_failures = [
                 int(value)
                 for value, verdict in probes.items()
-                if verdict == "FAIL"
-                and int(value) > upper_candidate
-                and value not in confirmation
+                if verdict == "FAIL" and int(value) > upper_candidate and value not in confirmation
             ]
             upper_candidate = (
                 min(known_failures)
@@ -496,14 +545,10 @@ def capacity(
             known_passes = [
                 int(value)
                 for value, verdict in probes.items()
-                if verdict == "PASS"
-                and int(value) < confirmed_fail
-                and value not in confirmation
+                if verdict == "PASS" and int(value) < confirmed_fail and value not in confirmation
             ]
             lower_candidate = (
-                max(known_passes)
-                if known_passes
-                else align_down(confirmed_fail / 2, resolution)
+                max(known_passes) if known_passes else align_down(confirmed_fail / 2, resolution)
             )
             if lower_candidate >= confirmed_fail:
                 lower_candidate = confirmed_fail - resolution
@@ -568,17 +613,13 @@ def capacity(
         "probes": probes,
         "confirmation": confirmation,
     }
-    (results / f"capacity-{version}.json").write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json((results / f"capacity-{version}.json"), report)
     return report
 
 
 def resolved_qps(campaign: dict[str, Any], results: Path) -> tuple[list[int], int, int]:
     """Resolve the common matrix, soak, and overload QPS values."""
-    capacities = [
-        read_json(results / f"capacity-{name}.json") for name in campaign["versions"]
-    ]
+    capacities = [read_json(results / f"capacity-{name}.json") for name in campaign["versions"]]
     maxima = [item.get("maximum_sustainable_qps") for item in capacities]
     if not all(isinstance(value, int) and value > 0 for value in maxima):
         raise ValueError("both versions need confirmed capacity results")
@@ -608,9 +649,7 @@ def resolved_qps(campaign: dict[str, Any], results: Path) -> tuple[list[int], in
     }
     if resolution_path.exists() and read_json(resolution_path) != resolved:
         raise ValueError("resolved campaign load levels changed after first use")
-    resolution_path.write_text(
-        json.dumps(resolved, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json(resolution_path, resolved)
     return matrix, soak, overload
 
 
@@ -680,6 +719,10 @@ def run_scenario(
             ("recover", soak_qps, settings["recover_seconds"]),
         )
         for repetition in range(1, settings["repetitions"] + 1):
+            # A resumed stage has a new tracer process. A recovery measurement
+            # is only meaningful after stable and overload ran on that process.
+            if resume and resume_recovery_repetition(results, version, repetition, phases):
+                continue
             for label, qps, duration in phases:
                 run_once(
                     campaign,
@@ -692,7 +735,7 @@ def run_scenario(
                     0,
                     repetition,
                     pid,
-                    resume=resume,
+                    resume=False,
                 )
     elif scenario == "fault":
         settings = campaign["fault"]

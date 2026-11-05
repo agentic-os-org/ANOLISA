@@ -20,6 +20,7 @@ pub(crate) struct ShellAuditRecorder {
     writer: Option<AuditSegmentWriter>,
     writer_root: Option<PathBuf>,
     mode: AuditMode,
+    max_disk_bytes: u64,
     shell_session_id: String,
     seen_events: usize,
     truncation: TruncationReport,
@@ -66,7 +67,7 @@ impl ShellAuditRecorder {
             error
         });
         let writer = writer_root.as_ref().ok().and_then(|root| {
-            AuditSegmentWriter::create(root)
+            AuditSegmentWriter::create_with_capacity(root, settings.max_disk_bytes)
                 .map_err(|error| {
                     tracing::warn!(target: "cosh_audit", "audit writer unavailable: {error}");
                     error
@@ -78,6 +79,7 @@ impl ShellAuditRecorder {
             writer,
             writer_root: writer_root.ok(),
             mode: settings.mode,
+            max_disk_bytes: settings.max_disk_bytes,
             shell_session_id,
             seen_events: 0,
             truncation: TruncationReport::Idle,
@@ -100,6 +102,7 @@ impl ShellAuditRecorder {
             writer: None,
             writer_root: None,
             mode: AuditMode::Required,
+            max_disk_bytes: AuditSettings::default().max_disk_bytes,
             shell_session_id: shell_session_id.into(),
             seen_events: 0,
             truncation: TruncationReport::Idle,
@@ -119,6 +122,7 @@ impl ShellAuditRecorder {
             writer: AuditSegmentWriter::create(root).ok(),
             writer_root: Some(root.to_path_buf()),
             mode: AuditMode::BestEffort,
+            max_disk_bytes: AuditSettings::default().max_disk_bytes,
             shell_session_id: "audit-test-session".to_string(),
             seen_events: 0,
             truncation: TruncationReport::Idle,
@@ -620,7 +624,7 @@ impl ShellAuditRecorder {
         let Some(root) = self.writer_root.as_deref() else {
             return;
         };
-        if let Ok(writer) = AuditSegmentWriter::create(root) {
+        if let Ok(writer) = AuditSegmentWriter::create_with_capacity(root, self.max_disk_bytes) {
             self.writer = Some(writer);
         }
     }

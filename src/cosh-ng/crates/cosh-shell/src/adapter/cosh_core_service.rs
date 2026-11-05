@@ -28,6 +28,7 @@ use process::{
 use registry::{execute_registry, log_registry_transport_failure};
 use run::run_turn;
 
+use runtime::AdmissionState;
 pub(crate) use runtime::PersistentCoshCoreRuntime;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -35,7 +36,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 fn service_loop(
     receiver: mpsc::Receiver<ServiceCommand>,
     live: Arc<AtomicBool>,
-    busy: Arc<AtomicBool>,
+    admission: Arc<Mutex<AdmissionState>>,
     cancel_pending: Arc<AtomicBool>,
     reload_pending: Arc<AtomicBool>,
     current_process: Arc<Mutex<ProcessBindings>>,
@@ -45,7 +46,6 @@ fn service_loop(
     while let Ok(command) = receiver.recv() {
         match command {
             ServiceCommand::Run(mut command) => {
-                busy.store(true, Ordering::SeqCst);
                 let result = run_turn(
                     &mut process,
                     &mut command,
@@ -76,7 +76,10 @@ fn service_loop(
                 }
                 command.run_done.store(true, Ordering::SeqCst);
                 cancel_pending.store(false, Ordering::SeqCst);
-                busy.store(false, Ordering::SeqCst);
+                admission
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .finish_run();
             }
             ServiceCommand::Registry(command) => {
                 let result = match process.as_mut() {
@@ -88,8 +91,8 @@ fn service_loop(
                 if log_registry_transport_failure(&result, &command) {
                     reset_process(&mut process, &live, &active_stdin, &current_process);
                 }
+                *admission.lock().unwrap_or_else(|error| error.into_inner()) = AdmissionState::Idle;
                 let _ = command.response_tx.send(result);
-                busy.store(false, Ordering::SeqCst);
             }
             ServiceCommand::Shutdown => {
                 if let Some(process) = process.as_mut() {

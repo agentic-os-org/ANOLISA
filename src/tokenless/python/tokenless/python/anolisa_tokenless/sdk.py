@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import logging
 import os
 import re
+import signal
+import subprocess
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib.resources import files
@@ -14,6 +19,15 @@ from typing import Any
 
 from anolisa_tokenless._native import TokenlessRuntime
 from anolisa_tokenless.stats import TokenlessStats
+
+_LOGGER = logging.getLogger(__name__)
+
+# RTK can block without limit, for example in `git rev-parse` on a hung mount.
+_PRE_TOOL_TIMEOUT_SECONDS = 5.0
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 2.0
+_STDERR_EXCERPT_CHARS = 500
+# `tokenless compress` exit status for a request it cannot read or decode.
+_EXIT_INVALID_REQUEST = 2
 
 
 class PreToolAction(StrEnum):
@@ -334,7 +348,8 @@ class TokenlessSdk:
             diff_compression_enabled=self.config.diff_compression_enabled,
             html_extraction_enabled=self.config.html_extraction_enabled,
         )
-        self._rtk_path = self._resolve_rtk() if self.config.rtk_enabled else None
+        self._rtk_launcher = self._resolve_launcher() if self.config.rtk_enabled else None
+        self._rewrite_failure_reported = False
         self._stats: TokenlessStats | None = None
 
     @property
@@ -363,13 +378,22 @@ class TokenlessSdk:
         return _before_model_response(response)
 
     async def pre_tool(self, request: PreToolRequest) -> PreToolResponse:
-        """Runs the Core PreTool service with the packaged RTK executable."""
-        if self._rtk_path is None:
+        """Runs the Core PreTool service in a short-lived `tokenless compress` process.
+
+        RTK assumes one process per command: it caches trusted filters and project files
+        for the process lifetime and can wait on `git` without a deadline, so it does not
+        run inside the host. If the child fails or exceeds its deadline, the command passes
+        through unchanged and a warning is logged. Only a request the CLI cannot read or
+        decode raises `ValueError`.
+        """
+        if self._rtk_launcher is None:
             raise RuntimeError("Tokenless RTK is disabled")
-        response = await asyncio.to_thread(
-            self.runtime._pre_tool_json,
-            _json_dumps(
-                {
+        envelope = _json_dumps(
+            {
+                "protocol_version": 2,
+                "operation": "pre_tool",
+                "attribution": _attribution_kwargs(request.attribution),
+                "input": {
                     "tool_name": request.tool_name,
                     "arguments": request.arguments,
                     "command_field": request.command_field,
@@ -377,20 +401,21 @@ class TokenlessSdk:
                         "replace_arguments": request.capabilities.replace_arguments,
                         "block_and_suggest": request.capabilities.block_and_suggest,
                     },
-                }
-            ),
-            self._rtk_path,
-            **_attribution_kwargs(request.attribution),
-        )
-        value = _json_object(response)
-        arguments = value["arguments"]
-        if not isinstance(arguments, dict):
-            raise TypeError("Core returned non-object PreTool arguments")
-        return PreToolResponse(
-            arguments=arguments,
-            action=PreToolAction(value["action"]),
-            output_optimization=OutputOptimization(value["output_optimization"]),
-        )
+                },
+            }
+        ).encode("utf-8")
+        try:
+            output = await asyncio.to_thread(
+                _run_compress, self._rtk_launcher, envelope, self.runtime.data_dir
+            )
+            return _pre_tool_response(output)
+        except _RewriteUnavailable as failure:
+            self._report_rewrite_failure(failure)
+            return PreToolResponse(
+                arguments=copy.deepcopy(request.arguments),
+                action=PreToolAction.PASSTHROUGH,
+                output_optimization=OutputOptimization.NONE,
+            )
 
     async def post_tool(self, request: PostToolRequest) -> PostToolResponse:
         """Runs Core PostTool routing and the content-domain Pipeline."""
@@ -446,18 +471,116 @@ class TokenlessSdk:
         value = _json_object(response)
         return RetrieveResponse(hash=value["hash"], payload=value["payload"])
 
-    def _resolve_rtk(self) -> Path:
-        resource = files("anolisa_tokenless").joinpath("_bin", "rtk")
+    def _resolve_launcher(self) -> Path:
+        name = "tokenless.exe" if sys.platform == "win32" else "tokenless"
+        resource = files("anolisa_tokenless").joinpath("_bin", name)
         if not isinstance(resource, Path):
             raise RuntimeError(
-                "anolisa-tokenless must be installed as an unpacked wheel so packaged "
-                "RTK has a stable executable path"
+                "anolisa-tokenless must be installed as an unpacked wheel so the packaged "
+                "tokenless executable has a stable path for RTK commands"
             )
         if not resource.is_file() or not os.access(resource, os.X_OK):
             raise RuntimeError(
-                "anolisa-tokenless installation is missing its executable packaged RTK"
+                "anolisa-tokenless installation is missing its packaged tokenless executable"
             )
         return resource
+
+    def _report_rewrite_failure(self, failure: _RewriteUnavailable) -> None:
+        # One warning keeps lost savings visible without repeating on every tool call.
+        level = logging.DEBUG if self._rewrite_failure_reported else logging.WARNING
+        self._rewrite_failure_reported = True
+        _LOGGER.log(level, "Tokenless PreTool left the command unchanged: %s", failure)
+
+
+class _RewriteUnavailable(Exception):
+    """PreTool produced no usable result, so the command runs unchanged."""
+
+
+def _run_compress(launcher: Path, envelope: bytes, data_dir: str) -> bytes:
+    """Returns the stdout of one `tokenless compress`, bounded by the PreTool deadline."""
+    isolation: dict[str, Any]
+    if sys.platform == "win32":
+        isolation = {"creationflags": subprocess.CREATE_NO_WINDOW}
+    else:
+        # A new session is a new process group, which a timeout kills as a whole.
+        isolation = {"start_new_session": True}
+    try:
+        process = subprocess.Popen(
+            [os.fspath(launcher), "compress"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "TOKENLESS_DATA_DIR": data_dir},
+            **isolation,
+        )
+    except OSError as error:
+        raise _RewriteUnavailable(f"cannot start {launcher}: {error}") from error
+    try:
+        stdout, stderr = process.communicate(envelope, timeout=_PRE_TOOL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        _kill_process_tree(process)
+        raise _RewriteUnavailable(
+            f"{launcher} compress exceeded {_PRE_TOOL_TIMEOUT_SECONDS} seconds"
+        ) from error
+    if process.returncode == 0:
+        return stdout
+    detail = stderr.decode("utf-8", "replace").strip()[-_STDERR_EXCERPT_CHARS:]
+    if process.returncode == _EXIT_INVALID_REQUEST:
+        raise ValueError(f"invalid PreTool request: {detail}")
+    raise _RewriteUnavailable(f"{launcher} compress exited with {process.returncode}: {detail}")
+
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kills a timed-out child and what it started, such as a stalled `git`."""
+    try:
+        if sys.platform == "win32":
+            system_root = os.environ.get("SystemRoot", r"C:\Windows")
+            subprocess.run(
+                [
+                    os.path.join(system_root, "System32", "taskkill.exe"),
+                    "/T",
+                    "/F",
+                    "/PID",
+                    str(process.pid),
+                ],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        process.kill()
+    # The wait is bounded because a child stuck in the kernel outlives SIGKILL;
+    # subprocess reaps an abandoned child when it next starts a process.
+    try:
+        process.wait(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    # On Windows, communicate() reader threads hold these pipes until every writer
+    # exits, and closing a pipe would block on them; the threads release it instead.
+    if sys.platform != "win32":
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+
+
+def _pre_tool_response(output: bytes) -> PreToolResponse:
+    try:
+        value = _json_object(output)["result"]
+        arguments = value["arguments"]
+        if not isinstance(arguments, dict):
+            raise TypeError("non-object PreTool arguments")
+        return PreToolResponse(
+            arguments=arguments,
+            action=PreToolAction(value["action"]),
+            output_optimization=OutputOptimization(value["output_optimization"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise _RewriteUnavailable(f"malformed tokenless compress response: {error!r}") from error
 
 
 def _attribution_kwargs(attribution: Attribution) -> dict[str, str | None]:
@@ -472,7 +595,7 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _json_object(value: str) -> dict[str, Any]:
+def _json_object(value: str | bytes) -> dict[str, Any]:
     decoded = json.loads(value)
     if not isinstance(decoded, dict):
         raise TypeError("Core returned a non-object lifecycle response")

@@ -1,4 +1,4 @@
-//! AgentScope 2.0.6 public factory bridge with explicit application opt-in.
+//! AgentScope public factory bridge with explicit application opt-in.
 
 use crate::{
     adapter::{
@@ -7,15 +7,39 @@ use crate::{
     },
     Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, time::Duration};
 
-const VERSION: &str = "2.0.6";
 pub(crate) struct AgentScope;
 struct Prepared {
     input: LaunchInput,
+    version: String,
+}
+
+/// The bridge withholds an unchecked final result only when `ToolResponse`
+/// replacement already works; older SDKs cannot express the withheld reply.
+fn withholding_supported(version: &str) -> bool {
+    // Leading dotted numeric segments order releases; a suffix such as
+    // 2.0.6.post1 parses to a zero extra segment and stays supported.
+    fn segments(value: &str) -> Vec<u64> {
+        value
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let supported = segments("2.0.6");
+    let provided = segments(version);
+    for (index, segment) in provided.iter().enumerate() {
+        let floor = supported.get(index).copied().unwrap_or(0);
+        if *segment != floor {
+            return *segment > floor;
+        }
+    }
+    // Short metadata ("2", "2.0") is missing segments; missing segments are
+    // zero and must still clear every remaining floor segment. Extra segments
+    // ("2.0.6.post1") compare as zero against an implicit zero floor.
+    provided.len() >= supported.len() || supported[provided.len()..].iter().all(|floor| *floor == 0)
 }
 
 impl Adapter for AgentScope {
@@ -53,10 +77,8 @@ impl Adapter for AgentScope {
                 "from importlib.metadata import version; print(version('agentscope'))".into(),
             ],
         )?;
-        if probe != VERSION {
-            return Err(format!("AgentScope {VERSION} is required by this adapter").into());
-        }
-        Ok(Box::new(Prepared { input }))
+        let version = crate::version::reported(&probe, "AgentScope")?;
+        Ok(Box::new(Prepared { input, version }))
     }
     fn normalize(&self, binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         normalize(binding, event, native)
@@ -75,7 +97,14 @@ impl Adapter for AgentScope {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::AGENTSCOPE.capabilities(VERSION, "factory")
+        let mut capabilities =
+            super::super::adapter::catalog::AGENTSCOPE.capabilities(&self.version, "factory");
+        if withholding_supported(&self.version) {
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+        }
+        capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         event_routes(&self.input.document, steps).map(|_| ())
@@ -86,16 +115,36 @@ impl PreparedLaunch for Prepared {
             .trim()
             .to_owned();
         let ready = context.files.directory().join("agentscope-ready.json");
+        // Providers spawned by the task scope inherit this environment; the
+        // bridge process itself runs with bridge import paths appended, which
+        // must not leak into Provider processes.
+        // JSON carries text; non-UTF-8 environment bytes cannot survive the
+        // round trip, so reject them instead of corrupting Provider context.
+        let mut provider_environment = BTreeMap::new();
+        for (key, value) in &self.input.command.environment {
+            let key = key
+                .to_str()
+                .ok_or("Provider environment keys must be valid UTF-8")?;
+            let value = value
+                .to_str()
+                .ok_or("Provider environment values must be valid UTF-8")?;
+            provider_environment.insert(key.to_owned(), value.to_owned());
+        }
         let native = context.files.write(
             "agentscope-hooks.json",
             &serde_json::to_vec(&json!({
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
+                "provider_environment": provider_environment,
             }))?,
         )?;
         context.files.write(
             "aw_agentscope.py",
             include_bytes!("../../native/agentscope/aw_agentscope.py"),
+        )?;
+        context.files.write(
+            "aw_scope_ledger.py",
+            include_bytes!("../../native/agentscope/aw_scope_ledger.py"),
         )?;
         let mut command = self.input.command.clone();
         let inherited = command.environment.get(std::ffi::OsStr::new("PYTHONPATH"));
@@ -214,8 +263,21 @@ fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aw_provider::admission::StepExecution;
+    use aw_core::admission::StepExecution;
     use std::path::PathBuf;
+
+    #[test]
+    fn withholding_requires_a_bridge_capable_sdk_version() {
+        assert!(withholding_supported("2.0.6"));
+        assert!(withholding_supported("2.0.6.0"));
+        assert!(withholding_supported("2.0.6.post1"));
+        assert!(withholding_supported("2.0.10"));
+        assert!(withholding_supported("3.0.0"));
+        assert!(!withholding_supported("2.0.5"));
+        assert!(!withholding_supported("1.9.9"));
+        assert!(!withholding_supported("2"));
+        assert!(!withholding_supported("2.0"));
+    }
 
     #[test]
     fn replacement_registers_outermost_so_observers_unwind_first() {
@@ -225,6 +287,8 @@ mod tests {
                 event: "tool.after".into(),
                 step_id: id.into(),
                 provider: id.into(),
+                event_tools: vec!["*".into()],
+                step_tools: vec!["*".into()],
                 on_error: "report".into(),
                 execution: if id == "user" {
                     StepExecution::Native

@@ -1,4 +1,4 @@
-# AgentSight Client and Reconciler integration
+# AgentSight Deployment Client and Reconciler integration
 
 `AgentSightClient<T, R>` implements `asc_policy_target_contracts::TargetDeploymentClient` directly.
 The composition root registers `AgentSightClientFactory::default()` in the
@@ -16,7 +16,7 @@ added to the Reconciler, and the Client never reads or writes a repository.
 
 | Client API | Behavior |
 |---|---|
-| `prepare_apply(plan)` | Decode the existing Adapter plan; derive UUIDv5 from Binding ID/revision; read boot ID and process start time; encode a fixed, non-secret request and cleanup reference. No HTTP. |
+| `prepare_apply(plan)` | Decode the Translator's plan; derive UUIDv5 from Binding ID/revision; read boot ID and process start time; encode a fixed, non-secret request and cleanup reference. No HTTP. |
 | `create(prepared)` | Validate format, digest, target reference and process identity; check PEP capability; recheck identity; send the exact saved request bytes. |
 | `update(previous, prepared)` | Validate/preflight before deleting old enforcement; delete old targets; create only when all old targets are confirmed absent. Return partial observations on any failure. |
 | `delete_targets(targets)` | Delete saved target references without reading the current Binding, PID or boot ID. Only 204 or typed `binding_not_found` 404 confirms absence. |
@@ -27,8 +27,8 @@ the prepared-replay path; the former `apply(plan)` and
 prepare a call-local request and register its target before `create` or `update`, then pass saved
 target references to deletion. The former convenience-result enum
 `AgentSightDeploymentState` is now private; mutation results use
-`DeploymentReport`. The HTTP protocol is unchanged. The unreleased cleanup schema
-remains version 1 and contains only Binding ID/revision for deletion.
+`DeploymentReport`. Both DSL and structured policies use the same HTTP endpoint.
+Cleanup schema version 2 includes endpoint and Binding ID/revision for deletion.
 
 The default target route is `agentsight`. `with_reconcile_route("host-primary")`
 selects another bounded non-secret configuration identity. The registry key must
@@ -38,12 +38,32 @@ the target identity. A wrong route/ID/cleanup tuple is rejected before HTTP.
 
 ## Prepared request contract
 
-Adapter plans include `source.scopeRevision` alongside `source.scopeId` as
-provenance. The Client validates a supplied revision but does not use it in the
-target UUID, cleanup input or HTTP request. Earlier v1 plans without this field
-remain readable; new Adapter output always supplies it. The plan format remains
-`agentsight.actplane.binding.v1`; update the strict Client reader before emitting
-the added field. Already prepared requests are unchanged.
+The Client accepts `agentsight.actplane.binding.v2`, schema version 2. Plans pin
+the process PID, start time, boot ID and PID namespace. `source.scopeId` is
+provenance; there is no `scopeRevision`. Target UUIDs depend on Binding ID/revision.
+
+The policy media type selects either `application/vnd.actplane.dsl.v1` or
+`application/vnd.agentsight.file-protection.v1+json`. Structured content is decoded
+using SecCore's shared `asc-agentsight-protocol` types and sent as
+`file_protection_policy`, with `policy_dsl` omitted. The policy payload itself has
+version 1; this is independent of the version-2 deployment plan. Existing DSL
+prepared requests retain their original bytes.
+
+The Client supports its HTTP request/response contract explicitly. The Translator
+and Client share payload types, the version and media type from
+`asc-agentsight-protocol`. Unsupported structured versions, fields and enum
+values are rejected. The Translator's output and Client's payload serialization
+are checked against `fixtures/clients/agentsight/file-protection-v1.json` in the
+V2 workspace. New payload versions require a Client change and compatibility
+validation against the target release.
+
+Structured preflight requires static mount topology and the protection flags
+needed by each target: `file_entry_delete_protection`,
+`directory_tree_delete_protection`, and/or `ordinary_write_protection`. Missing
+structured capability fields default to unavailable. Legacy DSL retains the
+`file_delete_guard` check. Neither path silently falls back to the other. See the
+[Cedar mapping contract](../../../docs/design/AGENTSIGHT_CEDAR_TRANSLATION.md)
+for supported expressions, backend limitations and both protection flows.
 
 `source.policyId` and `source.policyRevision` populate AgentSight's product-policy
 attribution fields. Deployment identity remains the UUID derived from the source
@@ -61,14 +81,13 @@ addresses or IPv6 `::1`. All other hosts require HTTPS. Use `127.0.0.1` or `[::1
 instead of `localhost` for local HTTP, avoiding reliance on name resolution.
 Certificate verification remains enabled and redirects remain disabled.
 
-Format: `agentsight.enforcement.apply.v1`. Opaque content contains schema version
-1, boot ID, exact POST body bytes and their SHA-256 digest. Cleanup contains only
-schema version 1 and Binding ID/revision. It does not store process identity or
-request digests. Prepared content is call-local and is not persisted.
+Format: `agentsight.enforcement.apply.v2`. Opaque content contains schema version
+2, boot ID, PID namespace, exact POST body bytes and their SHA-256 digest. Cleanup
+contains schema version 2, endpoint and Binding ID/revision. Cleanup does not store
+process identity or request digests. Prepared content is call-local and is not persisted.
 
-Each retry prepares against the current process identity. Cleanup does not compare
-that identity with a previous attempt. The checks below protect the identity
-captured by this particular preparation, not identity continuity across attempts.
+Each retry verifies the process against the immutable Binding's pinned identity.
+Cleanup does not require a still-running process or regenerate a current policy.
 
 Replays check boot ID and `/proc/<pid>/stat` start time without regenerating the
 body. PID reuse, process exit or a different boot rejects Apply. Temporary
@@ -87,13 +106,12 @@ must include the new variant.
 
 ## Failure and update semantics
 
-The Adapter generates DSL without embedding an ActPlane compiler. The Client's
-preflight checks request integrity, process identity and target health/capability;
-it does not prove that the deployed target accepts the DSL. The current Client
-has no remote validate-only call, so compiler rejection is learned from Apply.
-In particular, update can confirm old-target deletion before the new DSL is
-rejected. Validation before cleanup would require a target validation contract
-using the deployed compiler, not a separately pinned local compiler.
+The Translator generates native DSL or structured file protection. Client preflight
+checks request integrity, process identity and target health/capability. Backend
+DSL compilation and structured filesystem/topology validation still happen on
+Apply. The Client has no remote validate-only call, so update can confirm old-target
+deletion before a new policy is rejected by the backend. Transactional replacement
+is outside this change.
 
 The return value includes per-target Present/Absent/Unknown and a bounded safe
 error. A timeout, malformed response, rejection or unconfirmed deletion never
@@ -129,7 +147,7 @@ core. The shared ports are in `asc-policy-target-contracts`; data types are in
 `asc-pcp` or its repository.
 
 The Reconciler crate owns the subsequent `agentsight_integration` suite, which
-connects Adapter, Reconciler, Client, Ureq and the SQLite repository to an HTTP mock
+connects Translator, Reconciler, Client, Ureq and the SQLite repository to an HTTP mock
 and checks exact requests and registration before modification.
 
 This establishes real Client/transport wiring, not live AgentSight or kernel
@@ -140,3 +158,8 @@ real-process E2E require their own acceptance evidence.
 `tests/factory.rs` verifies deferred credential loading, retryable credential failures,
 and actual HTTP authorization using separate Client instances before and after
 a token-file update. No daemon/CLI token configuration option is added.
+
+`tests/file_protection.rs` checks structured requests against fixed version-1 JSON,
+rejects unsupported versions and fields, and checks exact-byte retry, required
+capabilities before update cleanup, invalid artifacts and acknowledgements with
+changed protection flags.

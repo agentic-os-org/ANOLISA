@@ -15,7 +15,9 @@ import collect_metrics
 import resource_report
 
 
-def row(timestamp: float, interval: float | str, cpu: float | str, rss: float) -> dict[str, str]:
+def row(
+    timestamp: float, interval: float | str, cpu: float | str, rss: float | str
+) -> dict[str, str]:
     return {
         "monotonic_timestamp": str(timestamp),
         "cpu_interval_seconds": str(interval),
@@ -149,6 +151,65 @@ def test_zero_cpu_baseline_has_no_relative_percentage(tmp_path: Path) -> None:
     assert resource_report.report(tmp_path, {"before": {}, "after": {}})
     summary = json.loads((tmp_path / "resource-summary.json").read_text())
     assert summary["comparison"]["cpu_peak_pct"] == {"percentage_points": -150, "percent": None}
+
+
+def test_collector_row_without_vmrss_cannot_certify_a_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifacts(tmp_path, "before", 10, 400)
+    directory = artifacts(tmp_path, "after", 10, 250)
+    # Procfs can expose numeric status fields without VmRSS (for example
+    # during process exit). sample() emits a live row with an empty RSS field.
+    monkeypatch.setattr(collect_metrics, "read_status", lambda _: {"Threads": 1})
+    monkeypatch.setattr(collect_metrics, "read_cpu_ticks", lambda _: 110)
+    monkeypatch.setattr(collect_metrics.time, "monotonic", lambda: 11.0)
+    monkeypatch.setattr(collect_metrics.os, "sysconf", lambda _: 100)
+    measured, _, _ = collect_metrics.sample(123, 100, 10.0, 0, None)
+    assert measured["process_alive"] == 1
+    assert measured["rss_mb"] == ""
+    assert measured["cpu_pct"] == "10.000"
+    with (directory / "metrics.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=collect_metrics.FIELDS)
+        writer.writeheader()
+        writer.writerows([row(10, "", "", 250), measured, row(12, 1, 10, 250)])
+    assert not resource_report.report(tmp_path, {"before": {}, "after": {}})
+    summary = json.loads((tmp_path / "resource-summary.json").read_text())
+    assert summary["runs"]["after"]["cpu_samples_valid"]
+    assert not summary["comparison"]
+
+
+@pytest.mark.parametrize("rss", ["", "nan", "inf", "-1", "broken"])
+def test_invalid_load_rss_suppresses_improvement(tmp_path: Path, rss: str) -> None:
+    artifacts(tmp_path, "before", 10, 400)
+    directory = artifacts(tmp_path, "after", 10, 250)
+    path = directory / "metrics.csv"
+    with path.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    # Keep one usable RSS point and complete CPU coverage. Dropping only the
+    # bad point used to certify this run and advertise a 37.5% improvement.
+    rows[1]["rss_mb"] = rss
+    with path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    assert not resource_report.report(tmp_path, {"before": {}, "after": {}})
+    summary = json.loads((tmp_path / "resource-summary.json").read_text())
+    assert not summary["valid"] and not summary["comparison"]
+    after = summary["runs"]["after"]
+    assert after["rss_average_mib"] == after["rss_peak_mib"] == 250
+    assert after["cpu_samples_valid"]
+    assert not after["rss_samples_valid"]
+    assert "RSS" in after["resource_error"]
+
+
+def test_rss_validity_follows_the_half_open_measurement_window() -> None:
+    rows = [row(9, "", "", ""), row(10, 1, 10, 0), row(11, 1, 10, 250)]
+    rows += [row(12, 1, 10, ""), row(13, 1, 10, 300)]
+    load = resource_report.resource_stats(rows, 10, 12)
+    assert load["rss_samples_valid"]
+    assert load["rss_average_mib"] == 125
+    assert not resource_report.resource_stats(rows, 12, 14)["rss_samples_valid"]
+    assert not resource_report.resource_stats([], 10, 12)["rss_samples_valid"]
 
 
 def write_counters(directory: Path, counters: list[dict[str, str]]) -> None:

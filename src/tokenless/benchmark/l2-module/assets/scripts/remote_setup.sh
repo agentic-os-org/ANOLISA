@@ -78,21 +78,14 @@ if ! command -v rg >/dev/null 2>&1; then
         || fail ripgrep
 fi
 
-# --- tokenless + rtk builds -------------------------------------------------
+# --- tokenless build (links RTK; l2_compare runs it as `tokenless rtk`) ------
 cd "$WORK/anolisa/src/tokenless" || fail cd_tokenless
-just setup-rtk > "$LOG/setup_rtk.log" 2>&1 || fail setup_rtk
+# third_party/rtk is never synced, so a checkout from an older pin or patch set
+# outlives source updates here. setup-rtk.sh rejects such a checkout instead of
+# building stale sources; it is only a cache, so start it over once.
+{ just setup-rtk || { just clean-rtk && just setup-rtk; }; } \
+    > "$LOG/setup_rtk.log" 2>&1 || fail setup_rtk
 cargo build --release > "$LOG/build_tokenless.log" 2>&1 || fail build_tokenless
-
-# The vendored rtk crate ships no [workspace] table of its own. If any ancestor
-# directory (e.g. a stray /root/Cargo.toml) contains a workspace manifest, cargo
-# walks up, tries to attach rtk to it, and aborts. Make rtk self-contained so it
-# builds regardless of what lives above the checkout (idempotent, cargo's own
-# recommended remedy).
-if ! grep -q '^\[workspace\]' third_party/rtk/Cargo.toml; then
-    printf '\n[workspace]\n' >> third_party/rtk/Cargo.toml
-fi
-cargo build --release --manifest-path third_party/rtk/Cargo.toml \
-    > "$LOG/build_rtk.log" 2>&1 || fail build_rtk
 
 # --- l2_compare (separate L2 benchmark workspace) --------------------------
 cd benchmark/l2-module || fail cd_l2_module

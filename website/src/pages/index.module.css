@@ -1,0 +1,707 @@
+.page {
+  color: var(--site-ink);
+  overflow-wrap: break-word;
+}
+
+:global(html):has(.page) {
+  scroll-padding-top: calc(var(--ifm-navbar-height) + 1.5rem);
+}
+
+.page :is(a, button):focus-visible {
+  outline: 3px solid var(--site-signal);
+  outline-offset: 5px;
+}
+
+.container {
+  width: min(1280px, calc(100% - 64px));
+  margin-inline: auto;
+}
+
+.section {
+  padding-block: clamp(44px, 5vw, 68px);
+  border-top: 1px solid var(--site-line);
+}
+
+.eyebrow {
+  margin: 0 0 14px;
+  color: var(--site-signal);
+  font: 0.73rem/1.6 var(--ifm-font-family-monospace);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.sectionHeading {
+  max-width: 850px;
+  margin-bottom: 28px;
+}
+
+.sectionHeading h2 {
+  margin: 0 0 14px;
+  font-size: clamp(1.8rem, 2.8vw, 2.6rem);
+  font-weight: 550;
+  line-height: 1.3;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.sectionHeading > p:not(.eyebrow) {
+  margin-bottom: 0;
+  color: var(--site-muted);
+  font-size: 1rem;
+  line-height: 1.8;
+}
+
+.hero {
+  --hero-bg: #073d33;
+  --hero-ink: #f1f8f4;
+  --hero-muted: #b6d4c8;
+  --hero-signal: #78e5bb;
+  --hero-line: rgba(167, 230, 202, 0.22);
+  --hero-grid: rgba(167, 230, 202, 0.045);
+  --hero-panel: rgba(1, 24, 20, 0.3);
+  padding-block: clamp(40px, 5vw, 68px);
+  color: var(--hero-ink);
+  background-color: var(--hero-bg);
+  background-image:
+    linear-gradient(to right, var(--hero-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--hero-grid) 1px, transparent 1px),
+    radial-gradient(ellipse at 5% 0%, rgba(85, 206, 155, 0.1), transparent 65%);
+  background-size: 48px 48px, 48px 48px, 100% 100%;
+}
+
+:global([data-theme='dark']) .hero {
+  --hero-bg: #061f1a;
+  --hero-ink: #edf8f1;
+  --hero-muted: #a5c7b7;
+  --hero-signal: #79e6bc;
+  --hero-line: rgba(150, 220, 183, 0.2);
+  --hero-grid: rgba(150, 220, 183, 0.035);
+  --hero-panel: rgba(0, 12, 9, 0.25);
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(32px, 4vw, 60px);
+}
+
+.heroGrid > *,
+.startStack > *,
+.benefitGrid > *,
+.roleGrid > *,
+.componentGrid > *,
+.resourceGrid > *,
+.communityGrid > * {
+  min-width: 0;
+}
+
+.wordmark {
+  display: block;
+  width: clamp(320px, 31vw, 400px);
+  max-width: 100%;
+  height: auto;
+  margin-bottom: 20px;
+}
+
+.hero .eyebrow {
+  color: var(--hero-muted);
+}
+
+.hero h1 {
+  max-width: 29ch;
+  margin: 0 0 20px;
+  color: var(--hero-ink);
+  font-size: clamp(1.65rem, 2.55vw, 2.3rem);
+  font-weight: 550;
+  line-height: 1.3;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.scopeLine {
+  max-width: 65ch;
+  margin: 0 0 12px;
+  color: var(--hero-muted);
+  font-size: 0.94rem;
+  line-height: 1.8;
+}
+
+.heroStatement {
+  max-width: 70ch;
+  margin: 0;
+  color: var(--hero-muted);
+  font-size: 0.82rem;
+  line-height: 1.8;
+}
+
+.heroStatement strong {
+  color: var(--hero-ink);
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.primaryButton,
+.secondaryButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 46px;
+  padding: 10px 19px;
+  border: 1px solid var(--hero-signal);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.5;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.primaryButton {
+  background: var(--hero-signal);
+  color: var(--hero-bg);
+}
+
+.primaryButton:hover {
+  background: color-mix(in srgb, var(--hero-signal) 86%, white);
+  color: var(--hero-bg);
+  text-decoration: none;
+}
+
+.secondaryButton {
+  border-color: var(--hero-line);
+  background: transparent;
+  color: var(--hero-ink);
+}
+
+.secondaryButton:hover {
+  background: var(--hero-panel);
+  color: var(--hero-signal);
+  text-decoration: none;
+}
+
+.hero :is(a, button):focus-visible {
+  outline-color: var(--hero-signal);
+  outline-offset: 4px;
+}
+
+.heroInstaller {
+  max-width: 620px;
+  margin-top: 24px;
+}
+
+.heroInstaller .eyebrow {
+  margin-bottom: 8px;
+  font-size: 0.66rem;
+}
+
+.heroInstaller :global(.commandBlock) {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid var(--hero-line);
+  border-radius: 4px;
+  background: var(--hero-panel);
+  color: var(--hero-ink);
+}
+
+.heroInstaller :global(.commandBlock code) {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 13px 14px;
+  border: 0;
+  color: inherit;
+  font-size: clamp(0.68rem, 1.05vw, 0.8rem);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.heroInstaller :global(.commandBlock button) {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 14px;
+  border-top: 0;
+  border-left: 1px solid var(--hero-line);
+  color: var(--hero-signal);
+  font-size: 0.73rem;
+  line-height: 1.5;
+}
+
+.startPanel {
+  padding: 22px;
+  border: 1px solid var(--hero-line);
+  border-radius: 6px;
+  background: var(--hero-panel);
+}
+
+.startPanelHeading {
+  margin: 0 0 16px;
+  color: var(--hero-muted);
+  font: 0.75rem/1.7 var(--ifm-font-family-monospace);
+  letter-spacing: 0.04em;
+}
+
+.startStack {
+  display: grid;
+  gap: 12px;
+}
+
+.startCard {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 18px;
+  align-items: start;
+  gap: 5px 12px;
+  padding: 17px 16px;
+  border: 1px solid var(--hero-line);
+  border-radius: 4px;
+  background: rgba(170, 235, 200, 0.035);
+  color: var(--hero-ink);
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.startCard:hover {
+  border-color: var(--hero-signal);
+  background: rgba(170, 235, 200, 0.075);
+  color: var(--hero-ink);
+  text-decoration: none;
+}
+
+.cardNumber {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  margin: 2px 0 0;
+  color: var(--hero-signal);
+  font: 0.72rem/1.6 var(--ifm-font-family-monospace);
+}
+
+.startCard h3 {
+  grid-column: 2;
+  grid-row: 1;
+  margin: 0;
+  color: var(--hero-ink);
+  font-size: 1.02rem;
+  font-weight: 550;
+  line-height: 1.5;
+}
+
+.startCard p {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+  color: var(--hero-muted);
+  font-size: 0.81rem;
+  line-height: 1.7;
+}
+
+.cardLink {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  margin: 0;
+  color: var(--hero-signal);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.resourceGrid,
+.componentGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.benefitGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.benefitCard {
+  padding-top: 18px;
+  border-top: 1px solid var(--site-line);
+}
+
+.benefitCard h3 {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.benefitCard p {
+  margin: 0;
+  color: var(--site-muted);
+  font-size: 0.9rem;
+  line-height: 1.8;
+}
+
+.ecosystem {
+  margin-top: 32px;
+  padding-top: 28px;
+  border-top: 1px solid var(--site-line);
+}
+
+.ecosystemTitle {
+  margin: 0 0 20px;
+  font-size: 1.2rem;
+  font-weight: 550;
+  line-height: 1.5;
+}
+
+.roleGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 32px;
+}
+
+.roleCopy :is(h3, h4) {
+  margin: 0 0 10px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.roleCopy p {
+  margin: 0;
+  color: var(--site-muted);
+  font-size: 0.94rem;
+  line-height: 1.85;
+}
+
+.catalogSection,
+.resourcesSection {
+  background: var(--site-panel);
+}
+
+.catalogLayer + .catalogLayer {
+  margin-top: 28px;
+}
+
+.layerTitle {
+  margin: 0 0 14px;
+  color: var(--site-muted);
+  font: 0.8rem/1.7 var(--ifm-font-family-monospace);
+  letter-spacing: 0.03em;
+}
+
+.componentGrid:has(> :nth-child(2):last-child) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.componentGrid:has(> :only-child),
+.singleComponent {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.componentCard {
+  display: block;
+  padding: 22px;
+  border: 1px solid var(--site-line);
+  border-radius: 4px;
+  background: var(--site-bg);
+  color: var(--site-ink);
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.componentTitle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.componentTitle h4 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.componentTitle > span,
+.resourceCard h3 > span {
+  flex-shrink: 0;
+  color: var(--site-signal);
+}
+
+.componentCard p {
+  margin: 0;
+  color: var(--site-muted);
+  font-size: 0.88rem;
+  line-height: 1.8;
+}
+
+.auxiliaryNote {
+  margin: 24px 0 0;
+  color: var(--site-muted);
+  font-size: 0.87rem;
+  line-height: 1.85;
+}
+
+.auxiliaryNote a {
+  font-weight: 500;
+}
+
+.textLink {
+  display: inline-block;
+  margin-top: 18px;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.resourceCard {
+  display: block;
+  padding: 24px;
+  border: 1px solid var(--site-line);
+  border-radius: 4px;
+  background: var(--site-bg);
+  color: var(--site-ink);
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.resourceCard h3 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  font-size: 1.03rem;
+  font-weight: 550;
+  line-height: 1.5;
+}
+
+.resourceCard p {
+  margin: 0;
+  color: var(--site-muted);
+  font-size: 0.9rem;
+  line-height: 1.8;
+}
+
+a.componentCard:hover,
+a.resourceCard:hover {
+  border-color: var(--site-signal);
+  background: var(--site-panel-strong);
+  color: var(--site-ink);
+  text-decoration: none;
+}
+
+.communityGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.7fr);
+  gap: 48px;
+}
+
+.communityCopy h3 {
+  margin: 0 0 14px;
+  font-size: 1.3rem;
+  font-weight: 550;
+  line-height: 1.5;
+}
+
+.communityCopy p {
+  max-width: 72ch;
+  margin: 0 0 14px;
+  color: var(--site-muted);
+  font-size: 0.95rem;
+  line-height: 1.85;
+}
+
+.communityLinks {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
+.communityMeta {
+  margin-top: 24px;
+  color: var(--site-muted);
+  font-size: 0.84rem;
+  line-height: 1.7;
+}
+
+@media (max-width: 1050px) {
+  .heroGrid {
+    gap: 28px;
+  }
+
+  .startPanel {
+    padding: 17px;
+  }
+
+  .startCard {
+    grid-template-columns: 22px minmax(0, 1fr) 16px;
+    gap: 4px 9px;
+    padding: 15px 12px;
+  }
+
+  .startCard h3 {
+    font-size: 0.96rem;
+  }
+
+  .benefitGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .componentGrid,
+  .resourceGrid {
+    gap: 16px;
+  }
+
+  .componentCard,
+  .resourceCard {
+    padding: 20px;
+  }
+}
+
+@media (max-width: 850px) {
+  .container {
+    width: calc(100% - 40px);
+  }
+
+  .heroGrid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 30px;
+  }
+
+  .wordmark {
+    width: 360px;
+  }
+
+  .hero h1 {
+    max-width: 31ch;
+    font-size: clamp(1.7rem, 4.5vw, 2.2rem);
+  }
+
+  .startPanel {
+    padding: 20px;
+  }
+
+  .startCard {
+    grid-template-columns: 26px minmax(0, 1fr) 18px;
+    gap: 4px 12px;
+    padding: 16px;
+  }
+
+  .componentGrid,
+  .resourceGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .roleGrid,
+  .communityGrid {
+    gap: 28px;
+  }
+}
+
+@media (max-width: 560px) {
+  .container {
+    width: calc(100% - 32px);
+  }
+
+  .hero {
+    padding-block: 30px 38px;
+    background-size: 36px 36px, 36px 36px, 100% 100%;
+  }
+
+  .section {
+    padding-block: 38px;
+  }
+
+  .wordmark {
+    width: 320px;
+    margin-bottom: 16px;
+  }
+
+  .hero h1 {
+    margin-bottom: 16px;
+    font-size: clamp(1.55rem, 5.9vw, 1.95rem);
+  }
+
+  .scopeLine {
+    font-size: 0.88rem;
+  }
+
+  .heroStatement {
+    font-size: 0.78rem;
+  }
+
+  .heroInstaller {
+    margin-top: 20px;
+  }
+
+  .heroInstaller :global(.commandBlock code) {
+    padding-inline: 10px;
+  }
+
+  .heroInstaller :global(.commandBlock button) {
+    padding-inline: 10px;
+  }
+
+  .startPanel {
+    padding: 15px;
+  }
+
+  .startCard {
+    grid-template-columns: 22px minmax(0, 1fr) 16px;
+    gap: 4px 8px;
+    padding: 14px 12px;
+  }
+
+  .sectionHeading {
+    margin-bottom: 24px;
+  }
+
+  .sectionHeading h2 {
+    font-size: 1.8rem;
+  }
+
+  .benefitGrid,
+  .roleGrid,
+  .componentGrid,
+  .componentGrid:has(> :nth-child(2):last-child),
+  .resourceGrid,
+  .communityGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .actions {
+    align-items: stretch;
+  }
+
+  .primaryButton,
+  .secondaryButton {
+    padding-inline: 15px;
+    font-size: 0.86rem;
+  }
+
+  .ecosystem {
+    margin-top: 28px;
+    padding-top: 24px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :global(html):has(.page) {
+    scroll-behavior: auto;
+  }
+
+  .page *,
+  .page *::before,
+  .page *::after {
+    transition: none;
+    animation: none;
+  }
+}

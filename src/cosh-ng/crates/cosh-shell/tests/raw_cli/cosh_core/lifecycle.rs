@@ -371,3 +371,77 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         "{output}"
     );
 }
+
+#[test]
+fn raw_cli_cosh_core_pending_approval_eof_restores_native_prompt_and_fresh_once() {
+    let home_guard = tempfile::Builder::new()
+        .prefix("cosh-pending-core-eof-native-")
+        .tempdir()
+        .unwrap();
+    let home = home_guard.path().to_path_buf();
+    let home_str = home.display().to_string();
+    fs::write(
+        home.join(".bashrc"),
+        "PS1='\\[\\e[32m\\]eof-native$\\[\\e[0m\\] '\n",
+    )
+    .unwrap();
+    let core = home.join("core-fixture");
+    let effect = home.join("unapproved-effect");
+    let request = serde_json::json!({
+        "type": "control_request", "request_id": "ctrl-pending-eof",
+        "request": {"subtype":"can_use_tool", "tool_name":"shell",
+            "input":{"command":format!("printf unapproved >> '{}'", effect.display())},
+            "tool_use_id":"toolu-pending-eof"}
+    });
+    write_executable(
+        &core,
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = --registry ]; then printf '%s\n' '{{"tools":[],"skills":[]}}'; exit 0; fi
+read -r init
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","capabilities":{{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}}}}}'
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"sess-pending-eof","model":"fixture"}}'
+read -r user_message
+printf '%s\n' started >> "$HOME/core-starts"
+cat <<'PENDING_REQUEST'
+{request}
+PENDING_REQUEST
+exit 0
+"#
+        ),
+    );
+    let core_str = core.display().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "cosh-core",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("COSH_CORE_PATH", &core_str),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+        &home,
+        &[
+            ("eof-native$", b"?? pending-core-eof-native\n"),
+            ("Approval req-1", b""),
+            (
+                "cosh-core output reached EOF",
+                b"printf '%s\n' fresh >> fresh; printf '%s%s\n' EOF_FRESH_ READY\n",
+            ),
+            ("EOF_FRESH_READY", b"exit\n"),
+        ],
+    );
+    assert!(output.contains("cosh-core output reached EOF"), "{output}");
+    assert!(!effect.exists(), "unapproved request executed: {output}");
+    assert_eq!(fs::read(home.join("fresh")).unwrap(), b"fresh\n");
+    assert_eq!(
+        fs::read_to_string(home.join("core-starts"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let after_eof = output.split("cosh-core output reached EOF").last().unwrap();
+    assert!(after_eof.contains("eof-native$"), "{output}");
+    assert!(output.contains("\u{1b}[32m"), "{output}");
+    let _ = fs::remove_dir_all(home);
+}

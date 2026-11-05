@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use agentsight_atif::{
-    same_call_id, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult,
+    resolve_call_id, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult,
     Step, StepSource, ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
 };
 
@@ -228,9 +228,15 @@ pub fn convert_qoder_events(
                 }
 
                 // Process content blocks
-                let content_blocks = match msg.get("content").and_then(|v| v.as_array()) {
-                    Some(arr) => arr,
-                    None => continue,
+                let content_blocks = match msg.get("content") {
+                    Some(serde_json::Value::Array(arr)) => arr,
+                    Some(serde_json::Value::String(text)) => {
+                        if !text.is_empty() {
+                            message_parts.push(text.clone());
+                        }
+                        continue;
+                    }
+                    _ => continue,
                 };
                 for block in content_blocks {
                     let bt = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -538,6 +544,10 @@ fn extract_tool_results(content: &serde_json::Value) -> Vec<ExtractedToolResult>
                     .collect();
                 text_parts.join("\n")
             }
+            // An explicit null is "the producer recorded no output", not the
+            // four-character string "null": stringifying it here hands every
+            // consumer of the observation a result the tool never produced.
+            serde_json::Value::Null => String::new(),
             other => other.to_string(),
         };
 
@@ -586,15 +596,24 @@ fn merge_tool_results_into_agent_steps(
 ) -> Vec<ExtractedToolResult> {
     let mut unmatched = Vec::new();
     for tr in tool_results {
-        // Most recent owner wins: each call is issued by exactly one step, and
-        // searching backwards also covers results arriving after an
-        // intervening user turn.
-        let Some(idx) = steps.iter().rposition(|step| {
-            step.source == StepSource::Agent
-                && step.tool_calls.as_ref().is_some_and(|tcs| {
-                    tcs.iter()
-                        .any(|tc| same_call_id(&tc.tool_call_id, &tr.tool_use_id))
-                })
+        let owner = resolve_call_id(
+            &tr.tool_use_id,
+            steps
+                .iter()
+                .filter(|step| step.source == StepSource::Agent)
+                .flat_map(|step| step.tool_calls.iter().flatten())
+                .map(|call| call.tool_call_id.as_str()),
+        )
+        .map(String::from);
+        let Some(idx) = owner.as_ref().and_then(|id| {
+            steps.iter().rposition(|step| {
+                step.source == StepSource::Agent
+                    && step
+                        .tool_calls
+                        .iter()
+                        .flatten()
+                        .any(|call| &call.tool_call_id == id)
+            })
         }) else {
             // The mixed-event caller can retain replayed context on its user
             // step; result-only carriers keep the existing discard policy.
@@ -607,7 +626,7 @@ fn merge_tool_results_into_agent_steps(
             if let Some(tcs) = step.tool_calls.as_mut() {
                 for tc in tcs
                     .iter_mut()
-                    .filter(|tc| same_call_id(&tc.tool_call_id, &tr.tool_use_id))
+                    .filter(|tc| Some(&tc.tool_call_id) == owner.as_ref())
                 {
                     let mut extra = tc.extra.take().unwrap_or_default();
                     extra.insert(
@@ -627,7 +646,7 @@ fn merge_tool_results_into_agent_steps(
             None
         };
         let result = ObservationResult {
-            source_call_id: Some(tr.tool_use_id.clone()),
+            source_call_id: owner,
             content: Some(serde_json::Value::String(tr.content.clone())),
             subagent_trajectory_ref: None,
             extra,
@@ -949,5 +968,29 @@ mod tests {
         let traj = convert_qoder_events(&[], "qoder").unwrap();
         assert!(traj.steps.is_empty());
         assert!(traj.final_metrics.is_none());
+    }
+
+    #[test]
+    fn test_convert_null_tool_result_is_empty_not_the_text_null() {
+        // An explicit null content is "the tool produced no output", not the
+        // four-character string "null". Stringifying it fabricated a result
+        // the tool never produced, which the analyzers then scanned as real
+        // output.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t8\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t8\",\"content\":null}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0]
+            .observation
+            .as_ref()
+            .expect("the null result still attaches to its call");
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t8"));
+        assert_eq!(
+            obs.results[0].content.as_ref(),
+            Some(&serde_json::Value::String(String::new())),
+            "a null tool result records no text"
+        );
     }
 }

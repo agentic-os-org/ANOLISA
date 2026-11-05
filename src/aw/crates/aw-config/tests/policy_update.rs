@@ -186,6 +186,7 @@ fn different_observation_limits_remain_frozen_in_either_number_representation() 
 fn comparison_is_offline_and_does_not_depend_on_the_adapter() {
     for adapter in [
         "qoder",
+        "qoder-sdk",
         "qwenpaw",
         "openclaw",
         "hermes",

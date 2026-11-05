@@ -28,7 +28,7 @@ pub struct MemorySummaryEntry {
 pub struct MemorySummary {
     /// Total memory files found.
     pub total_memories: usize,
-    /// Created by auto-consolidation.
+    /// Created by auto-consolidation or auto-capture.
     pub auto_created: usize,
     /// Created by manual memory_observe or mem_write.
     pub manual_created: usize,
@@ -73,7 +73,12 @@ fn parse_frontmatter_list(fm: &HashMap<String, String>, key: &str) -> Vec<String
     let Some(val) = fm.get(key) else {
         return Vec::new();
     };
-    // Simple parser: strip brackets, split by comma, trim quotes
+    // Export normalizes block lists to JSON arrays. Decode those and inline
+    // JSON arrays before the legacy fallback so commas and escapes stay in items.
+    if let Ok(items) = serde_json::from_str::<Vec<String>>(val) {
+        return items.into_iter().filter(|item| !item.is_empty()).collect();
+    }
+    // Preserve support for legacy unquoted and single-quoted inline lists.
     let inner = val.trim_start_matches('[').trim_end_matches(']');
     inner
         .split(',')
@@ -164,13 +169,17 @@ pub fn memory_summary(svc: &MemoryService, recent_limit: usize) -> Result<Memory
         });
         *summary.by_category.entry(category.clone()).or_insert(0) += 1;
 
+        // Import writes JSON arrays as block lists; use the export reader for
+        // these fields without changing the scalar summary field semantics.
+        let (list_frontmatter, _) = super::memory_export::parse_frontmatter(&content);
+
         // Concept tracking
-        for concept in parse_frontmatter_list(&fm, "concepts") {
+        for concept in parse_frontmatter_list(&list_frontmatter, "concepts") {
             *concept_counts.entry(concept).or_insert(0) += 1;
         }
 
         // File reference tracking
-        for file_ref in parse_frontmatter_list(&fm, "files") {
+        for file_ref in parse_frontmatter_list(&list_frontmatter, "files") {
             *file_counts.entry(file_ref).or_insert(0) += 1;
         }
 

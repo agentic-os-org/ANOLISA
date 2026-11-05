@@ -14,8 +14,11 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "prebuilt-rust-common"))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / ".github/actions/prebuilt-rust-common"))
 from targets import component_targets
+
+from packaged_executable import packaged_executable
 
 RUNTIME_NAME = "anolisa-tokenless"
 RUNTIME_FILENAME = "anolisa_tokenless"
@@ -44,6 +47,9 @@ class NativeTarget:
 
 
 TARGETS = {
+    ("windows", "x86_64"): NativeTarget(
+        "windows", "x86_64", frozenset({"win_amd64"}), "pe"
+    ),
     ("linux", "x86_64"): NativeTarget(
         "linux",
         "x86_64",
@@ -172,14 +178,30 @@ def verify_macho(payload: bytes, architecture: str, member: str) -> None:
         fail(f"{member} has Mach-O CPU type {cpu_type:#x}, expected {architecture}")
 
 
+def verify_pe(payload: bytes, member: str) -> None:
+    if len(payload) < 64 or payload[:2] != b"MZ":
+        fail(f"{member} is not a PE binary")
+    offset = struct.unpack_from("<I", payload, 0x3C)[0]
+    if offset < 64 or offset + 26 > len(payload):
+        fail(f"{member} has an invalid PE header offset")
+    if (
+        payload[offset:offset + 4] != b"PE\0\0"
+        or struct.unpack_from("<H", payload, offset + 4)[0] != 0x8664
+        or struct.unpack_from("<H", payload, offset + 24)[0] != 0x20B
+    ):
+        fail(f"{member} is not an x64 PE32+ binary")
+
+
 def verify_binary(payload: bytes, target: NativeTarget, member: str) -> None:
     if target.binary_format == "elf":
         verify_elf(payload, target.architecture, member)
+    elif target.binary_format == "pe":
+        verify_pe(payload, member)
     else:
         verify_macho(payload, target.architecture, member)
 
 
-def verify_runtime(path: Path, version: str) -> NativeTarget:
+def verify_runtime(path: Path, version: str, executable: str) -> NativeTarget:
     distribution, filename_version, python_tag, abi_tag, platforms = parse_filename(path)
     if distribution != RUNTIME_FILENAME:
         fail(f"{path.name} is not a {RUNTIME_NAME} wheel")
@@ -203,19 +225,25 @@ def verify_runtime(path: Path, version: str) -> NativeTarget:
         native_members = [
             name
             for name in archive.namelist()
-            if name.startswith("anolisa_tokenless/_native") and name.endswith(".so")
+            if name.startswith("anolisa_tokenless/_native")
+            and name.endswith(".pyd" if target.os_name == "windows" else ".so")
         ]
         if len(native_members) != 1:
             fail(f"{path.name} must contain exactly one native extension")
-        rtk_members = [
-            name for name in archive.namelist() if name == "anolisa_tokenless/_bin/rtk"
+        if target.os_name == "windows":
+            executable += ".exe"
+        # _bin is also a Python package; any other file there is a stale binary.
+        executable_members = [
+            name
+            for name in archive.namelist()
+            if name.startswith("anolisa_tokenless/_bin/") and not name.endswith(".py")
         ]
-        if len(rtk_members) != 1:
-            fail(f"{path.name} must contain exactly one embedded RTK binary")
-        rtk_info = archive.getinfo(rtk_members[0])
-        if not ((rtk_info.external_attr >> 16) & 0o111):
-            fail(f"{path.name} embeds a non-executable RTK binary")
-        for member in (native_members[0], rtk_members[0]):
+        if executable_members != [f"anolisa_tokenless/_bin/{executable}"]:
+            fail(f"{path.name} must embed exactly {executable}, found {executable_members}")
+        executable_info = archive.getinfo(executable_members[0])
+        if not ((executable_info.external_attr >> 16) & 0o111):
+            fail(f"{path.name} embeds a non-executable {executable} binary")
+        for member in (native_members[0], executable_members[0]):
             verify_binary(archive.read(member), target, member)
     return target
 
@@ -259,7 +287,7 @@ def verify_agentscope(path: Path, version: str) -> None:
             or normalize_python_version(requirement.group(2)) != version
         ):
             fail(f"{path.name} must require exactly {expected}")
-        native_suffixes = (".so", ".dylib", ".dll", ".exe")
+        native_suffixes = (".so", ".dylib", ".dll", ".exe", ".pyd")
         if any(name.endswith(native_suffixes) for name in archive.namelist()):
             fail(f"{path.name} must be a platform-independent wheel")
 
@@ -298,7 +326,7 @@ def main() -> int:
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--layout", choices=("flat", "aggregate"), required=True)
-    parser.add_argument("--os", choices=("linux", "macos"))
+    parser.add_argument("--os", choices=("linux", "macos", "windows"))
     parser.add_argument("--arch", choices=("x86_64", "aarch64"))
     parser.add_argument("--tokenless-source-root", type=Path)
     checksum_group = parser.add_mutually_exclusive_group()
@@ -311,6 +339,8 @@ def main() -> int:
         if not args.directory.is_dir():
             fail(f"wheel directory does not exist: {args.directory}")
         targets = expected_targets(args.layout, args.os, args.arch, args.tokenless_source_root)
+        source_root = args.tokenless_source_root or REPO_ROOT
+        executable = packaged_executable(source_root / "src/tokenless")
         wheels = sorted(args.directory.glob("*.whl"))
         expected_count = len(targets) + (1 if ("linux", "x86_64") in targets else 0)
         if len(wheels) != expected_count:
@@ -322,7 +352,7 @@ def main() -> int:
             if wheel.name.startswith(f"{AGENTSCOPE_FILENAME}-"):
                 agentscope_wheels.append(wheel)
                 continue
-            target = verify_runtime(wheel, python_version)
+            target = verify_runtime(wheel, python_version, executable)
             key = (target.os_name, target.architecture)
             if key in actual_targets:
                 fail(f"duplicate runtime wheel for {target.os_name}/{target.architecture}")

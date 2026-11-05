@@ -23,8 +23,8 @@ use crate::auth::navigation::{step_back, BackOutcome};
 use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
 use crate::auth::provider_display::auth_providers_for_display;
 use crate::auth::provider_management::{
-    core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
-    ExistingProvider, ProviderAction,
+    core_auth_configure, load_core_auth_state, provider_action_choice, ExistingProvider,
+    ProviderAction,
 };
 use crate::auth::retry::restore_after_failed_submission_at;
 use crate::auth::validation::{record_field_edit, record_field_submission, FieldSubmission};
@@ -387,26 +387,7 @@ fn handle_auth_answer<W: std::io::Write>(
 
             match action {
                 ProviderAction::Activate => {
-                    core_auth_activate(adapter, &existing.name).map_err(std::io::Error::other)?;
-                    clear_observed_model_after_provider_change(state);
-                    // Clear and show confirmation
-                    state.auth.state.take();
-                    clear_active_auth_panel(state, output)?;
-                    let renderer =
-                        RatatuiInlineRenderer::for_terminal().with_language(state.language);
-                    renderer.write_notice_panel(
-                        output,
-                        NoticePanelModel {
-                            title: "Provider switched",
-                            body: vec![format!(
-                                "Active provider: {} (\"{}\")",
-                                existing.label, existing.name
-                            )],
-                            footer: None,
-                        },
-                    )?;
-                    crate::slash::prompt::write_shell_prompt(state, output)?;
-                    output.flush()?;
+                    super::activation::activate_provider(adapter, state, &existing, output)?;
                 }
                 ProviderAction::Edit => {
                     // Enter edit mode for this provider

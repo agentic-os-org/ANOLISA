@@ -266,6 +266,7 @@ fn deletion_retry_preserves_targets_then_removes_record_and_new_create_uses_fres
                 policy_id: spec.policy.policy_id.clone(),
                 policy_revision: spec.policy.revision,
             }],
+            None,
         )
         .unwrap();
     asc_pap::ScopeBindingSink::sync_instances(

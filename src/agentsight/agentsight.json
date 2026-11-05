@@ -321,6 +321,34 @@
     "schema_version": 1,
     "entries": [
       {
+        "codex_version": "0.162.1",
+        "fingerprint": {
+          "file_size": 294415048,
+          "head_64k_sha256": "7dc69b6b27cd13ffead0b4fadfc281fd596c299d9adadb7db58be46f800e7eb2"
+        },
+        "offsets": {
+          "ssl_write": 231360640,
+          "ssl_read": 231358720,
+          "ssl_do_handshake": 231369984,
+          "write_is_ex": true,
+          "read_is_ex": true
+        }
+      },
+      {
+        "codex_version": "0.147.0",
+        "fingerprint": {
+          "file_size": 258278208,
+          "head_64k_sha256": "7c1711d5ebe71f83b773d8a76ad724c8a8ab1188f68d9e98b996bd7a1f3f88f6"
+        },
+        "offsets": {
+          "ssl_write": 204730912,
+          "ssl_read": 204730320,
+          "ssl_do_handshake": 204728640,
+          "write_is_ex": true,
+          "read_is_ex": true
+        }
+      },
+      {
         "codex_version": "0.141.0",
         "fingerprint": {
           "file_size": 276579568,

@@ -33,6 +33,17 @@ from pathlib import Path
 DEFAULT_MAX_AGENT_LEN = 2000
 
 
+def message_length(message: object) -> int:
+    """Measure the shared ATIF reader's string, null and content-part forms."""
+    if message is None:
+        return 0
+    if isinstance(message, str):
+        return len(message)
+    # agentsight_atif::de_message preserves structured messages as compact
+    # JSON text. Counting the input array measures parts instead of characters.
+    return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+
+
 def measure(atif_json):
     """Extract the structural triage inputs from one ATIF document."""
     doc = json.loads(atif_json)
@@ -42,7 +53,7 @@ def measure(atif_json):
         "n_user_turns": sum(1 for s in steps if s.get("source") == "user"),
         "n_tool_calls": sum(len(s.get("tool_calls") or []) for s in steps),
         "max_agent_len": max(
-            (len(s.get("message") or "") for s in steps if s.get("source") == "agent"),
+            (message_length(s.get("message")) for s in steps if s.get("source") == "agent"),
             default=0,
         ),
     }

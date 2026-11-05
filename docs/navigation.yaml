@@ -1,0 +1,364 @@
+version: 1
+
+# Public routes and bilingual navigation labels are independent of source paths.
+website:
+  navbar:
+    - id: user-guide
+      label: {en: User Guide, zh: 用户指南}
+      to: /docs/user-guide/
+    - id: developer-guide
+      label: {en: Developer Guide, zh: 开发者指南}
+      items:
+        - id: sdk
+          label: {en: SDK, zh: SDK}
+          to: /docs/developer-guide/sdk/
+        - id: aw-integration
+          label: {en: AW Integration, zh: AW 接入}
+          to: /docs/developer-guide/aw/
+    - id: contribute
+      label: {en: Contribute, zh: 贡献者指南}
+      to: /docs/contribute/
+    - id: changelog
+      label: {en: Changelog, zh: 变更日志}
+      to: /changelog/
+    - id: agents
+      label: {en: For Agents, zh: Agent 入口}
+      to: /agents/
+    - id: github
+      label: {en: GitHub, zh: GitHub}
+      href: https://github.com/agentic-os-org/ANOLISA
+      position: right
+      className: headerGithubLink
+      ariaLabel: ANOLISA GitHub repository
+  footer:
+    - id: docs
+      label: {en: Docs, zh: 文档}
+      items:
+        - label: {en: Documentation, zh: 文档首页}
+          to: /docs/
+        - label: {en: Quickstart, zh: 快速开始}
+          to: /docs/user-guide/getting-started/quickstart/
+        - label: {en: Building, zh: 源码构建}
+          to: /docs/user-guide/getting-started/building/
+        - label: {en: Changelog, zh: 变更日志}
+          to: /changelog/
+        - label: {en: For Agents, zh: Agent 入口}
+          to: /agents/
+    - id: guides
+      label: {en: Guides, zh: 指南}
+      items:
+        - label: {en: User Guide, zh: 用户指南}
+          to: /docs/user-guide/
+        - label: {en: Developer Guide, zh: 开发者指南}
+          to: /docs/developer-guide/
+        - label: {en: SDK, zh: SDK}
+          to: /docs/developer-guide/sdk/
+        - label: {en: AW Integration, zh: AW 接入}
+          to: /docs/developer-guide/aw/
+        - label: {en: Contribute, zh: 贡献者指南}
+          to: /docs/contribute/
+    - id: community
+      label: {en: Community, zh: 社区}
+      items:
+        - label: {en: GitHub, zh: GitHub}
+          href: https://github.com/agentic-os-org/ANOLISA
+        - label: {en: Security, zh: 安全}
+          href: https://github.com/agentic-os-org/ANOLISA/blob/main/SECURITY.md
+  sidebars:
+    developerGuide:
+      - id: overview
+        label: {en: Developer Guide, zh: 开发者指南}
+        doc: developer-guide/index
+      - id: sdk
+        label: {en: SDK, zh: SDK}
+        to: /docs/developer-guide/sdk/
+      - id: aw-integration
+        label: {en: AW Integration, zh: AW 接入}
+        to: /docs/developer-guide/aw/
+    sdkGuide:
+      - id: sdk
+        label: {en: SDK, zh: SDK}
+        generated: /developer-guide/sdk
+        items:
+          - id: tokenless
+            label: {en: Tokenless SDK, zh: Tokenless SDK}
+            doc: developer-guide/sdk/tokenless/index
+            items:
+              - id: agentscope
+                label: {en: AgentScope Integration, zh: AgentScope 集成}
+                doc: developer-guide/sdk/tokenless/agentscope
+    awGuide:
+    - id: overview
+      label:
+        en: AW Developer Guide
+        zh: AW 开发者指南
+      doc: developer-guide/aw/index
+    - id: integration
+      label:
+        en: Integration Tutorial
+        zh: 接入教程
+      doc: developer-guide/aw/integration
+    - id: agents
+      label:
+        en: Agent / SDK integration
+        zh: Agent / SDK 接入
+      doc: developer-guide/aw/native-agents
+      items:
+      - id: qoder
+        label:
+          en: Qoder CLI
+          zh: Qoder CLI
+        doc: developer-guide/aw/agents/qoder
+      - id: qoder-sdk
+        label:
+          en: Qoder SDK
+          zh: Qoder SDK
+        doc: developer-guide/aw/agents/qoder-sdk
+      - id: openclaw
+        label:
+          en: OpenClaw
+          zh: OpenClaw
+        doc: developer-guide/aw/agents/openclaw
+      - id: qwenpaw
+        label:
+          en: QwenPaw
+          zh: QwenPaw
+        doc: developer-guide/aw/agents/qwenpaw
+      - id: hermes
+        label:
+          en: Hermes
+          zh: Hermes
+        doc: developer-guide/aw/agents/hermes
+      - id: agentscope
+        label:
+          en: AgentScope SDK
+          zh: AgentScope SDK
+        doc: developer-guide/aw/agents/agentscope
+      - id: pi
+        label:
+          en: Pi SDK
+          zh: Pi SDK
+        doc: developer-guide/aw/agents/pi
+      - id: claude-sdk
+        label:
+          en: Claude SDK
+          zh: Claude SDK
+        doc: developer-guide/aw/agents/claude-sdk
+    - id: providers
+      label:
+        en: Provider Development
+        zh: Provider 开发与接入
+      doc: developer-guide/aw/providers/index
+      items:
+      - id: hooks
+        label:
+          en: Custom Hooks
+          zh: 自定义 Hook
+        doc: developer-guide/aw/providers/hooks
+      - id: protocol
+        label:
+          en: Execution Protocol
+          zh: 执行协议
+        doc: developer-guide/aw/providers/protocol
+      - id: views
+        label:
+          en: Read-only Views
+          zh: 只读展示接口
+        doc: developer-guide/aw/providers/views
+      - id: sec-core
+        label:
+          en: Agent Security Core
+          zh: Agent Security Core
+        doc: developer-guide/aw/providers/sec-core
+      - id: tokenless
+        label:
+          en: Tokenless
+          zh: Tokenless
+        doc: developer-guide/aw/providers/tokenless
+    - id: deployment
+      label:
+        en: Deployment
+        zh: 部署
+      items:
+      - id: resident
+        label:
+          en: Resident SDKs
+          zh: 常驻 SDK
+        doc: developer-guide/aw/deployment/resident
+      - id: lifecycle
+        label:
+          en: Services and Containers
+          zh: 服务与容器
+        doc: developer-guide/aw/deployment/lifecycle
+      - id: policy-updates
+        label:
+          en: Policy Updates
+          zh: 策略更新
+        doc: developer-guide/aw/deployment/policy-updates
+      - id: process-attach
+        label:
+          en: External Processes
+          zh: 外部进程接入
+        doc: developer-guide/aw/deployment/process-attach
+    - id: validation
+      label:
+        en: Integration Validation
+        zh: 接入验证
+      items:
+      - id: native-validation
+        label:
+          en: Native Tool Behavior
+          zh: 原生工具效果
+        doc: developer-guide/aw/validation
+      - id: local-service
+        label:
+          en: Local Service Demo
+          zh: 本地服务演示
+        doc: developer-guide/aw/local-service
+    - id: reference
+      label:
+        en: Reference
+        zh: 参考
+      items:
+      - id: configuration
+        label:
+          en: Configuration Fields
+          zh: 配置字段
+        doc: developer-guide/aw/configuration
+      - id: editor
+        label:
+          en: Configuration Editing
+          zh: 配置编辑
+        doc: developer-guide/aw/reference/configuration-editor
+      - id: cli
+        label:
+          en: CLI Automation
+          zh: CLI 自动化
+        doc: developer-guide/aw/reference/cli
+      - id: packages
+        label:
+          en: Package Management
+          zh: 包管理
+        doc: developer-guide/aw/reference/packages
+      - id: agentsight
+        label:
+          en: AgentSight
+          zh: AgentSight
+        doc: developer-guide/aw/agentsight
+    contributeGuide:
+      - id: overview
+        label: {en: General Contribution Guide, zh: 通用贡献指南}
+        doc: contribute/index
+      - id: aw
+        label: {en: AW, zh: AW}
+        doc: contribute/aw/index
+        items:
+          - id: building
+            label: {en: Building, zh: 构建}
+            doc: contribute/aw/building
+          - id: aw-testing
+            label: {en: Native and Release Acceptance, zh: 原生与发行验收}
+            doc: contribute/aw/testing
+      - id: cosh-ng
+        label: {en: cosh-ng, zh: cosh-ng}
+        doc: contribute/cosh-ng/index
+        items:
+          - id: getting-started
+            label: {en: Development Setup, zh: 开发入门}
+            doc: contribute/cosh-ng/getting-started
+          - id: adding-commands
+            label: {en: Adding Commands, zh: 添加命令}
+            doc: contribute/cosh-ng/adding-commands
+          - id: adding-distros
+            label: {en: Adding Distributions, zh: 添加发行版}
+            doc: contribute/cosh-ng/adding-distros
+          - id: testing
+            label: {en: Testing, zh: 测试}
+            doc: contribute/cosh-ng/testing
+      - id: ws-ckpt
+        label: {en: ws-ckpt, zh: ws-ckpt}
+        items:
+          - id: packaging
+            label: {en: Packaging, zh: 打包}
+            doc: contribute/ws-ckpt/packaging
+
+# Website groups are independent of the flat component directories.
+groups:
+  - id: getting-started
+    label:
+      en: Getting started
+      zh: 开始使用
+    items:
+      - path: getting-started/quickstart.md
+        label: {en: Quickstart, zh: 快速开始}
+      - path: getting-started/images.md
+        label: {en: Images and cloud services, zh: 镜像与云服务入口}
+      - path: getting-started/installation.md
+        label: {en: Installation, zh: 安装}
+      - path: getting-started/anolisa-cli.md
+        label: {en: ANOLISA CLI, zh: ANOLISA CLI}
+      - path: getting-started/building.md
+        label: {en: Building and deployment, zh: 构建与部署}
+      - path: getting-started/testing.md
+        label: {en: Testing, zh: 测试}
+      - path: getting-started/troubleshooting.md
+        label: {en: Troubleshooting, zh: 排障}
+  - id: user-entrypoint
+    label: {en: User Entrypoint Layer, zh: 用户入口层}
+    items:
+      - component: cosh-ng
+        label: {en: cosh (cosh-ng), zh: cosh (cosh-ng)}
+        description:
+          en: An AI-native terminal that preserves your existing shell experience, with natural-language tasks, tools, and Skills.
+          zh: 保持现有 Shell 使用体验的 AI 原生终端，可通过自然语言完成任务，并调用工具与 Skills。
+      - component: os-skills
+        label: {en: OS Skills, zh: OS Skills}
+        description:
+          en: An OS handbook for AI Agents, covering system administration, monitoring, security, DevOps automation, and more.
+          zh: 面向 AI Agent 的 OS 使用说明书，覆盖系统管理、监控、安全和 DevOps 自动化等场景。
+  - id: aw-unified-stack
+    label: {en: AW Unified Stack Layer, zh: 统一接入层}
+    items:
+      - component: aw
+        label: {en: AW, zh: AW}
+        description:
+          en: A unified architecture connecting Agent frameworks with extensible AI-native system software.
+          zh: 以统一架构向上对接 Agent framework，向下衔接可扩展的 AI 原生系统软件。
+  - id: agent-semantic-layer
+    label: {en: Agent Semantic Layer, zh: Agent 语义层}
+    items:
+      - component: agentsight
+        label: {en: AgentSight, zh: AgentSight}
+        description:
+          en: Observe Agent execution through trajectories, LLM calls, and Token usage.
+          zh: Agent 可观测性工具，用于查看运行轨迹、LLM 调用和 Token 消耗。
+      - component: agent-sec-core
+        label: {en: Agent Security Core, zh: Agent Security Core}
+        description:
+          en: OS-level security kernel for AI Agents.
+          zh: 面向 AI Agent 的 OS 级安全内核。
+      - component: tokenless
+        label: {en: Tokenless, zh: Tokenless}
+        description:
+          en: Reduce AI Agent Token usage through tool output compression, tool schema simplification, command rewriting, and other techniques.
+          zh: 通过工具输出压缩、工具 Schema 精简、命令改写等方式，减少 AI Agent 的 Token 消耗。
+      - component: agent-memory
+        label: {en: Agent Memory, zh: Agent Memory}
+        description:
+          en: Give Agents searchable, persistent memory to retain and reuse information across sessions.
+          zh: 为 Agent 提供可检索的持久化记忆，让信息在不同会话之间保留和复用。
+      - component: skillfs
+        label: {en: SkillFS, zh: SkillFS}
+        description:
+          en: Organize Skills into stable filesystem views for Agents to discover and read on demand.
+          zh: 将 Skills 组织成稳定的文件系统视图，供 Agent 按需发现和读取。
+      - component: ws-ckpt
+        label: {en: Workspace Checkpoint, zh: Workspace Checkpoint}
+        description:
+          en: Create Agent workspace snapshots, compare file differences, and roll back changes when needed.
+          zh: 为 Agent 工作区创建快照、比较文件差异，并在需要时回滚变更。
+      - component: ktuner
+        label: {en: ktuner, zh: ktuner}
+        description:
+          en: Inspect Linux kernel parameters, get tuning recommendations, and apply or roll back changes.
+          zh: 检查 Linux 内核参数，给出调优建议，并支持应用和回滚改动。

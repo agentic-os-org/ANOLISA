@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from importlib.metadata import version
 import json
 import logging
 import os
@@ -18,6 +17,30 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.middleware import MiddlewareBase
 from agentscope.tool import ToolChunk, ToolResponse
 
+from .aw_skill import metadata as skill_metadata, skill_context, verify as verify_skill
+
+
+
+def validate_hooks(config: dict[str, Any]) -> None:
+    """Apply the same native route contract at launch and task handoff."""
+    if not isinstance(config.get("hooks"), list):
+        raise ValueError("AW plugin configuration requires hooks")
+    for hook in config["hooks"]:
+        if not isinstance(hook, dict):
+            raise ValueError("AW Hook route must be an object")
+        if hook.get("event") not in {"input.submit", "tool.before", "tool.after"}:
+            raise ValueError("Unsupported AW native event")
+        if not isinstance(hook.get("step"), str) or not hook["step"]:
+            raise ValueError("AW step must be a nonempty string")
+        if hook.get("on_error") not in {"report", "block", "withhold_result"}:
+            raise ValueError("Invalid AW failure policy")
+        if type(hook.get("budget_ms")) is not int or not 1 <= hook["budget_ms"] <= 55000:
+            raise ValueError("AW native budget must be 1..55000 ms")
+        if type(hook.get("replace_result", False)) is not bool:
+            raise ValueError("AW result replacement must be boolean")
+        if hook.get("replace_result", False) and hook["event"] != "tool.after":
+            raise ValueError("AW result replacement requires tool.after")
+
 
 class CallbackFailure(RuntimeError):
     """A fixed adapter failure code, separate from a native policy denial."""
@@ -29,8 +52,15 @@ class AwToolMiddleware(MiddlewareBase):
     def __init__(self, config: dict[str, Any], hook: dict[str, Any]) -> None:
         self.config = config
         self.hook = hook
+        self.scope = None
 
     async def _invoke(self, payload: dict[str, Any]) -> tuple[int, bytes, bytes]:
+        if self.scope is not None:
+            from .aw_scope import ScopeTransportFailure
+            try:
+                return await self.scope.invoke_native(self.hook, payload)
+            except ScopeTransportFailure as error:
+                raise CallbackFailure("scope_transport_failure") from error
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
         if len(encoded) > 1024 * 1024:
             raise CallbackFailure("native_input_limit")
@@ -63,14 +93,20 @@ class AwToolMiddleware(MiddlewareBase):
         return proc.returncode, stdout, stderr
 
     async def _run(self, payload: dict[str, Any]) -> ToolResponse | None:
+        payload = {**payload, **skill_metadata()}
         try:
-            return await self._evaluate(payload)
+            result = await self._evaluate(payload)
+            if self.hook["event"] == "tool.before" and result is None:
+                verify_skill()
+            return result
         except (OSError, TimeoutError, CallbackFailure) as error:
             code = str(error) if isinstance(error, CallbackFailure) else type(error).__name__
             logging.getLogger(__name__).error(
                 "AW %s step %s failed: %s; on_error=%s",
                 self.hook["event"], self.hook["step"], code, self.hook["on_error"],
             )
+            if self.hook["event"] == "tool.after" and self.hook["on_error"] == "withhold_result":
+                raise CallbackFailure("strict_posttool_failed") from error
             if self.hook["event"] == "tool.before" and self.hook["on_error"] == "block":
                 return ToolResponse(
                     state=ToolResultState.DENIED,
@@ -107,6 +143,7 @@ class AwToolMiddleware(MiddlewareBase):
                 raise CallbackFailure("invalid_result_replacement") from error
         return None
 
+    @skill_context
     async def on_acting(
         self,
         agent: Any,
@@ -177,6 +214,7 @@ class AwReloadMiddleware(MiddlewareBase):
             if finished:
                 await self.lifecycle("request_end", key)
 
+    @skill_context
     async def on_acting(self, agent: Any, input_kwargs: dict[str, Any], next_handler: Callable[..., AsyncGenerator[Any, None]]) -> AsyncGenerator[Any, None]:
         import hashlib
         call = input_kwargs["tool_call"]
@@ -236,28 +274,34 @@ class AwPlugin:
     """Validate once, then register factories which perform no configuration I/O."""
 
     def register(self, api: Any) -> None:
-        if version("qwenpaw") != "2.2.2b4" or version("agentscope") != "2.0.9":
-            raise RuntimeError("AW requires QwenPaw 2.2.2b4 and AgentScope 2.0.9")
         if api.config.get("enabled") is False:
             raise RuntimeError("QwenPaw configuration disables the AW plugin")
-        config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
+        descriptor = Path(__file__).with_name("aw-attachment.json")
+        if descriptor.exists():
+            # A hot-installed App cannot inherit environment added after startup.
+            metadata = descriptor.lstat()
+            if not descriptor.is_file() or descriptor.is_symlink() or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+                raise RuntimeError("Unsafe AW attachment descriptor")
+            config = json.loads(descriptor.read_text())
+        else:
+            config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(config.get(key), str) or not config[key]:
                 raise ValueError(f"AW plugin configuration requires {key}")
-        if not isinstance(config.get("hooks"), list):
-            raise ValueError("AW plugin configuration requires hooks")
-        for hook in config["hooks"]:
-            if hook.get("event") not in {"tool.before", "tool.after"}:
-                raise ValueError("Unsupported AW native event")
-            if not isinstance(hook.get("step"), str) or not hook["step"]:
-                raise ValueError("AW step must be a nonempty string")
-            if hook.get("on_error") not in {"report", "block"}:
-                raise ValueError("Invalid AW failure policy")
-            if type(hook.get("budget_ms")) is not int or not 1 <= hook["budget_ms"] <= 55000:
-                raise ValueError("AW native budget must be 1..55000 ms")
-        if config.get("reloadable"):
+        validate_hooks(config)
+        if config.get("resident"):
+            if config.get("reloadable"):
+                raise RuntimeError("AW resident task scopes require a non-reloadable QwenPaw binding")
+            from .aw_native import install_guard
+            from .aw_resident import ResidentMiddleware
+            install_guard()
+            api.register_middleware(
+                lambda ctx, agent_config: ResidentMiddleware(config, AwToolMiddleware, ctx),
+                priority=0,
+            )
+        elif config.get("reloadable"):
             api.register_middleware(lambda ctx, agent_config: AwReloadMiddleware(config), priority=0)
-        for hook in config["hooks"]:
+        for hook in ([] if config.get("resident") else config["hooks"]):
             def factory(ctx: Any, agent_config: Any, hook: dict = hook) -> AwToolMiddleware:
                 return AwToolMiddleware(config, hook)
 
@@ -265,12 +309,15 @@ class AwPlugin:
         # The native App invokes startup hooks only after load_all_plugins has
         # completed and its plugin registry is published. Registration alone
         # would also succeed before the loader finishes or rolls a plugin back.
-        api.register_startup_hook("aw-ready", lambda: self._startup(config) if config.get("reloadable") else self._ready(config))
+        api.register_startup_hook("aw-ready", lambda: self._startup(config) if config.get("reloadable") or config.get("resident_policy_reload") else self._ready(config))
 
     @staticmethod
     async def _startup(config: dict[str, Any]) -> None:
         if config.get("reloadable"):
             await AwReloadMiddleware(config).lifecycle("ready", "")
+        if config.get("resident_policy_reload"):
+            from .aw_scope import Scope
+            await Scope({**config, "adapter": "qwenpaw"}).ready()
         AwPlugin._ready(config)
 
     @staticmethod

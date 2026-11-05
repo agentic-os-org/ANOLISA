@@ -1,6 +1,6 @@
 //! Versioned local control messages; native identities are data, not authentication.
 
-use aw_provider::admission::AdapterCapabilities;
+use aw_core::admission::AdapterCapabilities;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, ffi::OsString};
@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, ffi::OsString};
 mod environment;
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
-pub const VERSION: &str = "aw-service/v1alpha4";
+pub const VERSION: &str = "aw-service/v1alpha7";
 
 /// Bootstrap configuration and daemon lifetime to which mutable requests bind.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -32,6 +32,9 @@ pub struct Capabilities {
     pub entrypoint: String,
     /// Supported effects by event.
     pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions supported at the exact launch entrypoint.
+    #[serde(default)]
+    pub failure_actions: BTreeMap<String, Vec<String>>,
 }
 
 impl From<AdapterCapabilities> for Capabilities {
@@ -41,6 +44,7 @@ impl From<AdapterCapabilities> for Capabilities {
             version: value.version,
             entrypoint: value.entrypoint,
             events: value.events,
+            failure_actions: value.failure_actions,
         }
     }
 }
@@ -52,6 +56,7 @@ impl From<Capabilities> for AdapterCapabilities {
             version: value.version,
             entrypoint: value.entrypoint,
             events: value.events,
+            failure_actions: value.failure_actions,
         }
     }
 }
@@ -168,6 +173,82 @@ pub enum Operation {
         #[serde(with = "environment")]
         environment: BTreeMap<OsString, OsString>,
     },
+    /// Tie a prepared root binding to its same-user launcher lifetime.
+    OwnInstance {
+        /// Prepared root instance; ownership is immutable after registration.
+        instance_id: String,
+        /// Launcher PID, corroborated with start time, UID and PID namespace.
+        pid: u32,
+    },
+    /// Prepare an isolated task binding under an owned root's immutable policy.
+    OpenScope {
+        /// Owned root; nested task scopes and restricted reload roots are rejected.
+        parent_id: String,
+        /// Task worker PID: the root launcher itself or one of its descendants.
+        pid: u32,
+        /// Absolute task working directory.
+        cwd: String,
+        /// Complete explicit task environment, with no daemon inheritance.
+        #[serde(with = "environment")]
+        environment: BTreeMap<OsString, OsString>,
+    },
+    /// Read the immutable task policy before preparing and acknowledging native routes.
+    ScopePolicy {
+        /// Prepared task scope under an owned resident reload root.
+        instance_id: String,
+    },
+    /// Confirm that the native owner received its task handle within five seconds.
+    AcknowledgeScope {
+        /// Prepared task binding; callbacks remain closed until acknowledgement.
+        instance_id: String,
+    },
+
+    /// Start continuous validity checking on an acknowledged task scope.
+    WatchScope {
+        /// Task identity, already bound to the outer service generation.
+        instance_id: String,
+        /// Native worker PID; must match the original scope owner.
+        pid: u32,
+    },
+    /// Validate the installed bridge against its immutable task policy.
+    CheckScope {
+        /// Previously watched task scope.
+        instance_id: String,
+        /// Original native worker PID.
+        pid: u32,
+        /// Revision returned by WatchScope; a mismatch permanently fences the scope.
+        policy_revision: String,
+        /// Whether the native owner still observes every required installed seam.
+        valid: bool,
+    },
+
+    /// Enable producer-sequenced reclamation on a fresh owned binding.
+    EnableInvocations {
+        /// Owned binding whose adapter supplies stable producer identities.
+        instance_id: String,
+    },
+    /// Reserve one invocation before forwarding it to native dispatch.
+    RegisterInvocation {
+        /// Binding generation is carried by the outer request identity.
+        instance_id: String,
+        /// Strictly increasing producer sequence, starting at one.
+        sequence: u64,
+        /// Stable native identity reused by every callback phase.
+        call_id: String,
+        /// Native tool name before dialect normalization.
+        tool_name: String,
+        /// Immutable tool input observed at the producer.
+        input: Value,
+    },
+    /// Cancel and drain both phases before reclaiming their details.
+    FinishInvocation {
+        /// Binding which owns the invocation.
+        instance_id: String,
+        /// Sequence returned by the owning producer.
+        sequence: u64,
+        /// Stable identity paired with the sequence.
+        call_id: String,
+    },
     /// Opt an AW-launched instance into stable bridge policy updates before spawning.
     EnableReload {
         /// Prepared instance whose Adapter supports the stable bridge.
@@ -228,7 +309,7 @@ pub enum Operation {
         /// Original native callback bytes used to corroborate the identity.
         native_input: Vec<u8>,
     },
-    /// Release a binding; active events must be closed first.
+    /// Release an idle binding; reloadable instances reject active native requests/tools.
     Unbind {
         /// Service-issued identifier.
         instance_id: String,
@@ -248,16 +329,17 @@ pub enum Operation {
         /// Normalized Provider event, including the matching instance ID.
         event: Value,
     },
-    /// Lease one native callback shared by all step processes for the same tool call.
+    /// Lease one native submission or tool callback shared by all its step processes.
     ///
-    /// Nonempty session/tool call IDs identify the event within this instance.
+    /// Nonempty session plus turn/tool-call IDs identify the event within this instance.
     /// Repeated opens require identical input and reuse the first deadline. Hermes
     /// completion observers and final replacement normalize only their seam name
     /// and observer-only middleware trace; the first native bytes are retained.
     /// OpenClaw binds compression and native completion to one original snapshot;
     /// its pinned completion view supplies native metadata without renewing claims.
-    /// Closed correlations remain claimed until unbind; they cannot start a new budget.
-    /// At most 1024 correlations are retained per instance; exhaustion is explicit.
+    /// Sequenced bindings require a producer registration and reclaim both phases
+    /// after FinishInvocation drains them. Unknown or retired identities fail closed.
+    /// Legacy bindings and submissions retain at most 1024 claims until unbind; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.
         instance_id: String,
@@ -269,7 +351,8 @@ pub enum Operation {
     /// Cancel one native correlation, wait for cleanup and forbid later opens.
     ///
     /// Closing before an in-flight open wins must also prevent that open from
-    /// creating an abandoned event. Repeated closes are idempotent.
+    /// creating an abandoned event. Repeated closes are idempotent while the
+    /// invocation is retained; sequenced bindings reject closes after retirement.
     CloseHookEvent {
         /// Owning binding instance.
         instance_id: String,
@@ -279,6 +362,15 @@ pub enum Operation {
         session_id: String,
         /// Invocation-scoped normalized tool call identifier.
         call_id: String,
+    },
+    /// Cancel a submitted turn without creating a tool invocation identity.
+    CloseInputEvent {
+        /// Owning binding instance.
+        instance_id: String,
+        /// Session used by the normalized submission.
+        session_id: String,
+        /// Adapter-issued turn identity.
+        turn_id: String,
     },
     /// Execute one step; concurrent RPCs preserve caller scheduling.
     InvokeStep {

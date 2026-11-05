@@ -573,26 +573,35 @@ impl GenAIBuilder {
         let agent_name_str = agent_name.as_deref().unwrap_or("");
         let pid_i32 = conn_id.pid as i32;
 
-        let session_id = metadata_session
+        let session_id = metadata_session.or_else(|| {
+            // Mapper first (same order as call_builder.rs): a FileWrite
+            // from this pid already revealed the real session UUID, which
+            // groups the crash-drain record with the normal calls of the
+            // same session instead of an isolated crash bucket (#2059).
+            //
+            // Known limitation: pid_map has no lifecycle bound, so a
+            // recycled pid whose new process has not yet written a session
+            // file can surface the previous process's mapping here. This
+            // mis-groups only orphan calls that would otherwise get a
+            // synthetic crash hash, and needs pid reuse + zero FileWrite +
+            // drain to coincide — accepted instead of lifecycle tracking.
+            response_mapper
+                .get_session_by_pid(conn_id.pid)
+                .map(str::to_string)
+        });
+        let (session_key, conversation_key) = self.id_resolver.message_keys(
+            agent_name_str,
+            pid_i32,
+            &first_user_text,
+            &last_user_text,
+            user_message_count,
+            session_id.is_none(),
+        );
+        let session_id = session_id
             .or_else(|| {
-                // Mapper first (same order as call_builder.rs): a FileWrite
-                // from this pid already revealed the real session UUID, which
-                // groups the crash-drain record with the normal calls of the
-                // same session instead of an isolated crash bucket (#2059).
-                //
-                // Known limitation: pid_map has no lifecycle bound, so a
-                // recycled pid whose new process has not yet written a session
-                // file can surface the previous process's mapping here. This
-                // mis-groups only orphan calls that would otherwise get a
-                // synthetic crash hash, and needs pid reuse + zero FileWrite +
-                // drain to coincide — accepted instead of lifecycle tracking.
-                response_mapper
-                    .get_session_by_pid(conn_id.pid)
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                self.id_resolver
-                    .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+                session_key
+                    .as_ref()
+                    .and_then(|key| self.id_resolver.peek_session_id_with_key(key))
             })
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
@@ -603,9 +612,9 @@ impl GenAIBuilder {
                     0,
                 ))
             });
-        let conversation_id = self
-            .id_resolver
-            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text, user_message_count)
+        let conversation_id = conversation_key
+            .as_ref()
+            .and_then(|key| self.id_resolver.peek_conversation_id_with_key(key))
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
                     "conversation",
@@ -622,12 +631,9 @@ impl GenAIBuilder {
         // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
         // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
         // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
-        self.id_resolver.finish_conversation(
-            agent_name_str,
-            pid_i32,
-            &last_user_text,
-            user_message_count,
-        );
+        if let Some(key) = &conversation_key {
+            self.id_resolver.finish_conversation_with_key(key);
+        }
 
         Some(PendingCallInfo {
             call_id,
@@ -1035,6 +1041,87 @@ mod tests {
             "the reported prompt_tokens already include the cached part"
         );
         assert_eq!(enrichment.cache_read_tokens, Some(64));
+    }
+
+    /// A drained stream whose only content is a provider-side call
+    /// (`server_tool_use` / `mcp_tool_use`) persisted no output at all: the
+    /// merger folded the block into its text accumulator, so the call and
+    /// every `input_json_delta` fragment aimed at it were dropped and
+    /// `output_messages` stayed `None` — and with it the `tool_call_ids` the
+    /// pending row derives from it. The same stream captured live kept the
+    /// call, so the two paths disagreed on one response.
+    #[test]
+    fn test_extract_sse_enrichment_keeps_a_server_tool_call() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_srv","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"rust\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":0}"#),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"mcp_tool_use","id":"mcptoolu_1","name":"github_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"drain\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":1}"#),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("a drained server-tool turn must keep its calls");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("must round-trip as Vec<OutputMessage>");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("end_turn"));
+        let calls: Vec<(&str, &str, &serde_json::Value)> = parsed[0]
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => Some((
+                    id.as_deref().unwrap_or_default(),
+                    name.as_str(),
+                    arguments.as_ref().expect("the streamed input must parse"),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "srvtoolu_1",
+                    "web_search",
+                    &serde_json::json!({"query": "rust"})
+                ),
+                (
+                    "mcptoolu_1",
+                    "github_search",
+                    &serde_json::json!({"q": "drain"})
+                ),
+            ],
+            "both provider-side calls must reach the pending row: {json}"
+        );
+        assert_eq!(
+            crate::genai::semantic::tool_call_ids_json(&parsed).as_deref(),
+            Some(r#"["srvtoolu_1","mcptoolu_1"]"#),
+            "the tool_call_ids column is derived from these parts"
+        );
     }
 
     #[test]
@@ -1762,9 +1849,10 @@ mod tests {
         // 同固定文本的下一轮对话重新锚定。
         let builder = GenAIBuilder::new();
         let pid = 1i32;
-        let text = "hello";
-        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
-        let req = make_request("/v1/chat/completions", body);
+        let text = "雪|\"\n\0".repeat(128 * 1024);
+        let body = serde_json::json!({"model":"gpt-4","messages":[{"role":"user","content":text}]})
+            .to_string();
+        let req = make_request("/v1/chat/completions", &body);
         let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
 
@@ -1780,18 +1868,20 @@ mod tests {
         // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
         let turn1 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-1", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-1", 1)
             .unwrap();
 
         // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
-        builder
+        let pending = builder
             .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .expect("LLM path should create pending");
+        assert_eq!(pending.conversation_id.as_deref(), Some(turn1.as_str()));
+        assert_eq!(pending.user_query.as_deref(), Some(text.as_str()));
 
         // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
         let turn2 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-2", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-2", 1)
             .unwrap();
         assert_ne!(
             turn1, turn2,

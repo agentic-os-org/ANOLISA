@@ -215,6 +215,14 @@ function makeHarness() {
     },
     '../utils/apiClient': { ...stubs },
     '../utils/savings': savingsModule,
+    '../utils/optimizationStrategies': (() => {
+      const module = { exports: {} };
+      const code = transpile('src/utils/optimizationStrategies.ts');
+      new Function('require', 'module', 'exports', code)((name) => {
+        throw new Error(`optimization strategies must not require anything at runtime: ${name}`);
+      }, module, module.exports);
+      return module.exports;
+    })(),
     '../utils/savingsCsv': { downloadSavingsCsv: (rows) => downloads.push(rows) },
     '../components/DateTimePicker': componentStub('DateTimePicker'),
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),

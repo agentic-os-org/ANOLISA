@@ -851,7 +851,7 @@ pub async fn run_optimization(
                         .body(json)
                 }
                 Err(e) => HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()})),
+                    .json(serde_json::json!({"error": format!("{e:#}")})),
             }
         }
     }

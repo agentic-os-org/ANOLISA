@@ -1,0 +1,148 @@
+.highlights {
+  min-width: 0;
+  margin-bottom: 16px;
+  color: var(--hero-ink);
+}
+
+.slides {
+  display: grid;
+  align-items: start;
+  min-width: 0;
+}
+
+.slide {
+  grid-area: 1 / 1;
+  min-width: 0;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.slide.active {
+  visibility: visible;
+  opacity: 1;
+}
+
+.headline {
+  margin: 0 0 6px;
+  color: var(--hero-ink);
+  font-size: clamp(1.05rem, 1.5vw, 1.2rem);
+  line-height: 1.7;
+  overflow-wrap: break-word;
+}
+
+.headline strong {
+  color: var(--hero-signal);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.note {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--hero-muted);
+  font-size: 0.74rem;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.note a,
+.sourceLink {
+  color: var(--hero-muted);
+  text-decoration: underline;
+  text-decoration-color: var(--hero-line);
+  text-underline-offset: 0.2em;
+}
+
+.note a:hover,
+.sourceLink:hover {
+  color: var(--hero-signal);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.selectors {
+  display: flex;
+  align-items: center;
+}
+
+.selector {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  min-width: 32px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.selector::before {
+  display: block;
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--hero-muted);
+  opacity: 0.5;
+  content: '';
+}
+
+.selector:hover::before {
+  background: var(--hero-ink);
+  opacity: 1;
+}
+
+.selector[aria-current='true']::before {
+  width: 20px;
+  background: var(--hero-signal);
+  opacity: 1;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 36px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--hero-muted);
+  font: inherit;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.toggleIcon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: currentColor;
+}
+
+.toggle:hover {
+  background: var(--hero-panel);
+  color: var(--hero-ink);
+}
+
+.selector:focus-visible,
+.toggle:focus-visible {
+  outline: 2px solid var(--hero-signal);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slide {
+    transition: none;
+  }
+}

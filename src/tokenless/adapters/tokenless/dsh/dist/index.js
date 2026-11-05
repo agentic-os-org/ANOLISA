@@ -31,6 +31,7 @@ const TOKENLESS_RETRIEVE_COMMAND_RE = /^[ \t]*(?:"tokenless"|'tokenless'|tokenle
 
 // DSH does not expose content origin, so map its built-in tool names at the
 // host boundary. Core owns every compression decision after this translation.
+// tests/test-dsh-adapter.sh checks both sets against common/hooks/tool_categories.json.
 const FILE_TOOLS = new Set([
   'read',
   'read_file',
@@ -51,6 +52,7 @@ const FILE_TOOLS = new Set([
 const COMMAND_TOOLS = new Set([
   'bash',
   'pwsh',
+  'powershell',
   'shell',
   'exec',
   'terminal',

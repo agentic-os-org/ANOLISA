@@ -11,6 +11,9 @@ members = [
     "crates/asc-capability-pii-scan",
     "crates/asc-capability-prompt-scan",
     "crates/asc-capability-skill-sec",
+    "crates/asc-credential-store",
+    "crates/asc-gateway-plan",
+    "crates/asc-gateway-runtime",
     "crates/asc-daemon-client",
     "crates/asc-daemon-core",
     "crates/asc-daemon-handler",
@@ -27,21 +30,26 @@ members = [
     "crates/asc-foundation-types",
     "crates/asc-model-client",
     "crates/asc-agentsight-client",
-    "crates/asc-policy-adapter-agentsight",
+    "crates/asc-agentsight-protocol",
+    "crates/asc-policy-translator-agentsight",
+    "crates/asc-pep-runtime",
+    "crates/asc-policy-cedar",
     "crates/asc-pap",
     "crates/asc-pcp",
     "crates/asc-policy-runtime",
     "crates/asc-policy-target-contracts",
+    "crates/asc-os-permission-types",
+    "crates/asc-sandbox-types",
     "crates/asc-policy-types",
     "crates/asc-policy-repository",
     "crates/asc-policy-repository-sqlite",
 ]
 
 [workspace.package]
-version = "1.0.1"
+version = "1.1.2"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.89"
 repository = "https://github.com/alibaba/anolisa"
 publish = false
 
@@ -51,9 +59,13 @@ asc-policy-runtime = { path = "crates/asc-policy-runtime" }
 asc-action-runtime = { path = "crates/asc-action-runtime" }
 asc-action-types = { path = "crates/asc-action-types" }
 asc-agentsight-client = { path = "crates/asc-agentsight-client" }
+asc-agentsight-protocol = { path = "crates/asc-agentsight-protocol" }
 asc-capability-code-scan = { path = "crates/asc-capability-code-scan" }
 asc-capability-prompt-scan = { path = "crates/asc-capability-prompt-scan" }
 asc-capability-skill-sec = { path = "crates/asc-capability-skill-sec" }
+asc-credential-store = { path = "crates/asc-credential-store" }
+asc-gateway-plan = { path = "crates/asc-gateway-plan" }
+asc-gateway-runtime = { path = "crates/asc-gateway-runtime" }
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 tracing = "0.1"
@@ -76,15 +88,22 @@ asc-observability = { path = "crates/asc-observability" }
 asc-pap = { path = "crates/asc-pap" }
 asc-pcp = { path = "crates/asc-pcp" }
 asc-persistence-sqlite = { path = "crates/asc-persistence-sqlite" }
-asc-policy-adapter-agentsight = { path = "crates/asc-policy-adapter-agentsight" }
+asc-policy-translator-agentsight = { path = "crates/asc-policy-translator-agentsight" }
+asc-pep-runtime = { path = "crates/asc-pep-runtime" }
+linux-sandbox = { path = "../linux-sandbox" }
+asc-policy-cedar = { path = "crates/asc-policy-cedar" }
 asc-policy-target-contracts = { path = "crates/asc-policy-target-contracts" }
 asc-policy-repository = { path = "crates/asc-policy-repository" }
+asc-os-permission-types = { path = "crates/asc-os-permission-types" }
+asc-sandbox-types = { path = "crates/asc-sandbox-types" }
 asc-policy-types = { path = "crates/asc-policy-types" }
 asc-security-events = { path = "crates/asc-security-events" }
 asc-telemetry = { path = "crates/asc-telemetry" }
 asc-security-summary = { path = "crates/asc-security-summary" }
 asc-sqlite-kernel = { path = "crates/asc-sqlite-kernel" }
 base64 = "0.22"
+cedar-policy = "=4.14.0"
+cedar-policy-core = "=4.14.0"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6", features = ["derive"] }
 signal-hook = { version = "0.3", default-features = false }
@@ -93,11 +112,12 @@ dirs = "6"
 fancy-regex = "0.16"
 fail = { version = "0.5.1", default-features = false }
 log = "0.4"
-nix = { version = "0.31", default-features = false, features = ["user", "fs"] }
+miette = "7.6"
+nix = { version = "0.31", default-features = false, features = ["user", "fs", "socket"] }
 regex = "1.10"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
-rustix = { version = "1.1", features = ["fs", "process", "net"] }
+rustix = { version = "1.1", features = ["fs", "process", "net", "pipe"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 serde_yaml = "0.9"

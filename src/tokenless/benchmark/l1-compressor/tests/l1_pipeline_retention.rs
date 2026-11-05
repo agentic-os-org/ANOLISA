@@ -16,7 +16,7 @@
 //!
 //! Verifies that canonical payloads traversing the compression pipeline
 //! (JsonCompressor/SchemaCompressor → TOON encode → TOON decode) retain
-//! their semantic fields while noise is stripped.
+//! their semantic fields while only explicit bounds omit response content.
 //!
 //! Decode outcomes are pinned, never swallowed: the pipeline helper returns
 //! the raw `Result` of a STRICT TOON decode — the exact mode the paired
@@ -99,8 +99,7 @@ fn response_pipeline_preserves_tool_and_status() {
 
 #[test]
 fn response_pipeline_preserves_result_item_fields() {
-    // Lossless cleanup exceeds the selection threshold for the canonical
-    // response, so all records survive rather than entering bounded reduction.
+    // Record reduction requires a Stash, so this no-stash path keeps all records.
     let decoded = response_pipeline(
         &response_canonical(),
         JsonCompressionConfig::default(),
@@ -110,7 +109,7 @@ fn response_pipeline_preserves_result_item_fields() {
     let results = decoded["results"]
         .as_array()
         .expect("results array exists after pipeline");
-    assert_eq!(results.len(), 60, "lossless cleanup keeps every record");
+    assert_eq!(results.len(), 60, "no-stash path keeps every record");
     let first = &results[0];
     assert!(first["id"].is_number(), "id preserved");
     assert!(first["name"].is_string(), "name preserved");
@@ -121,31 +120,16 @@ fn response_pipeline_preserves_result_item_fields() {
 }
 
 #[test]
-fn response_pipeline_drops_noise_fields() {
-    let decoded = response_pipeline(
-        &non_record_array_response(),
-        JsonCompressionConfig::default(),
-        None,
-    )
-    .expect("default no-stash pipeline must round-trip through strict TOON decode");
-    let obj = decoded.as_object().expect("decoded response is an object");
-    // Top-level noise fields dropped by the compressor.
-    for k in ["debug", "trace", "logs"] {
-        assert!(
-            !obj.contains_key(k),
-            "{k} should be dropped by the pipeline"
-        );
+fn response_pipeline_preserves_diagnostic_fields() {
+    let original = response_canonical();
+    let decoded = response_pipeline(&original, JsonCompressionConfig::default(), None)
+        .expect("default no-stash pipeline must round-trip through strict TOON decode");
+    for k in ["trace", "logs"] {
+        assert_eq!(decoded.get(k), original.get(k));
     }
-    // Per-item debug field also stripped from kept result entries.
-    if let Some(results) = decoded["results"].as_array() {
-        for item in results.iter().take(5) {
-            if item.is_object() {
-                assert!(
-                    item.get("debug").is_none(),
-                    "debug should be dropped from result items"
-                );
-            }
-        }
+    let results = decoded["results"].as_array().unwrap();
+    for (index, item) in results.iter().take(5).enumerate() {
+        assert_eq!(item["debug"], original["results"][index]["debug"]);
     }
 }
 

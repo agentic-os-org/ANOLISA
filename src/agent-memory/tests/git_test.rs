@@ -95,6 +95,87 @@ fn mem_revert_restores_committed_content() {
 }
 
 #[test]
+fn revert_preserves_pending_work_with_auto_commit() {
+    assert_revert_scope(true);
+}
+
+#[test]
+fn revert_preserves_pending_work_without_auto_commit() {
+    assert_revert_scope(false);
+}
+
+fn assert_revert_scope(auto_commit: bool) {
+    let (_tmp, svc) = setup(true, true);
+    svc.write("a.md", "original a", false).unwrap();
+    svc.write("b.md", "original b", false).unwrap();
+    // Commit the seed files first, then reopen with the setting under test;
+    // both cases must start from the same tracked HEAD content.
+    let mut cfg = svc.config.clone();
+    cfg.memory.git.auto_commit = auto_commit;
+    drop(svc);
+    let svc = MemoryService::new(cfg).unwrap();
+    let repo = git2::Repository::open(&svc.mount.root).unwrap();
+    let head = repo.head().unwrap().target().unwrap();
+    std::fs::write(svc.mount.root.join("a.md"), "edited a").unwrap();
+    std::fs::write(svc.mount.root.join("b.md"), "edited b").unwrap();
+    std::fs::write(svc.mount.root.join("untracked.md"), "not ready").unwrap();
+    // Include deliberately staged work as well as unstaged/untracked work.
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("a.md")).unwrap();
+    index.add_path(std::path::Path::new("b.md")).unwrap();
+    index.write().unwrap();
+    let index_before = std::fs::read(svc.mount.root.join(".git/index")).unwrap();
+
+    let restored_from = svc.mem_revert("a.md").unwrap();
+    assert_eq!(svc.read("a.md").unwrap(), "original a");
+    assert_eq!(svc.read("b.md").unwrap(), "edited b");
+    assert_eq!(
+        restored_from,
+        head.to_string(),
+        "revert must return the source HEAD hash"
+    );
+    assert_eq!(repo.head().unwrap().target().unwrap(), head);
+    assert_eq!(
+        std::fs::read(svc.mount.root.join(".git/index")).unwrap(),
+        index_before
+    );
+    assert!(
+        repo.head()
+            .unwrap()
+            .peel_to_tree()
+            .unwrap()
+            .get_path(std::path::Path::new("untracked.md"))
+            .is_err()
+    );
+
+    svc.mem_revert("b.md").unwrap();
+    assert_eq!(
+        svc.read("b.md").unwrap(),
+        "original b",
+        "the first revert consumed the second file's undo"
+    );
+    assert_eq!(repo.head().unwrap().target().unwrap(), head);
+    assert_eq!(svc.read("untracked.md").unwrap(), "not ready");
+    assert_eq!(
+        std::fs::read(svc.mount.root.join(".git/index")).unwrap(),
+        index_before
+    );
+}
+
+#[test]
+fn sequential_reverts_restore_each_files_original_content() {
+    let (_tmp, svc) = setup(true, true);
+    svc.write("a.md", "original a", false).unwrap();
+    svc.write("b.md", "original b", false).unwrap();
+    std::fs::write(svc.mount.root.join("a.md"), "edited a").unwrap();
+    std::fs::write(svc.mount.root.join("b.md"), "edited b").unwrap();
+    svc.mem_revert("a.md").unwrap();
+    svc.mem_revert("b.md").unwrap();
+    assert_eq!(svc.read("a.md").unwrap(), "original a");
+    assert_eq!(svc.read("b.md").unwrap(), "original b");
+}
+
+#[test]
 fn mem_log_filters_by_path() {
     let (_tmp, svc) = setup(true, true);
     svc.write("alpha.md", "a1", false).unwrap();

@@ -58,9 +58,16 @@ pub(super) fn generate(
     Ok((settings, crate::reload::routes()))
 }
 
-pub(super) fn check_sources(cwd: &Path, flags: &Value, sequential: bool) -> Result<()> {
+pub(super) fn check_sources(
+    cwd: &Path,
+    environment: &BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+    flags: &Value,
+    sequential: bool,
+) -> Result<()> {
     check_scheduling(flags, sequential)?;
-    let home = std::env::var_os("HOME").ok_or("HOME is required for Qoder settings")?;
+    let home = environment
+        .get(std::ffi::OsStr::new("HOME"))
+        .ok_or("HOME is required for Qoder settings")?;
     for path in [
         std::path::PathBuf::from(home).join(".qoder/settings.json"),
         cwd.join(".qoder/settings.json"),

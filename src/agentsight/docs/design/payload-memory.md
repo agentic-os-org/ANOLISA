@@ -9,6 +9,10 @@ runtime, including the ring buffer, native decoding state and allocator retentio
 
 ## Ownership boundaries
 
+Executable SSL scans use vectorized substring searches in bounded 4 MiB windows with signature
+overlap. Every overlapping match and cross-window start is preserved; inode caching and symbol
+selection keep their existing behavior.
+
 ```mermaid
 flowchart LR
     Probe[Probe payload] --> Capture[Queue with slot and byte limits]
@@ -71,6 +75,12 @@ Dynamic sinks also re-read their current path so a paused exporter can resume wi
 changes. Inactive sinks are still called during immediate fan-out: activation during persistence
 does not discard the current call, which may carry its fallback session metadata. Subsequent calls
 to an active external sink use the existing resolution window.
+
+GenAI session and conversation resolution prepares lookup keys once per call and reuses them for
+turn eviction and crash draining. Identical first/last user text shares its unfinished SHA-256
+state. Repeated long text can reuse exact-byte-checked prefixes in a cache bounded by 2 MiB and
+64 entries; eviction never changes anchors. Anchors retain domain-separated IDs and binary lookup
+digests, preserving external ID bytes, process/message-count isolation and sliding TTL behavior.
 
 SQLite completion serializes JSON before taking the connection lock. Capacity selection uses
 `octet_length` on stored JSON columns to read their byte lengths without fetching and scanning whole
@@ -179,4 +189,4 @@ budgets, traffic-free hard timeouts, partial responses, fragmented compressed SS
 equivalence with and without raw export, and FFI reservation lifetimes. RSS and throughput benchmarks
 remain separate from these correctness checks. Byte budgets do not guarantee a process RSS ceiling.
 
-See the [runtime configuration reference](../../../../docs/user-guide/en/agent-observability/agentsight/configuration.md#runtime-limits).
+See the [runtime configuration reference](../../../../docs/user-guide/en/agentsight/configuration.md#runtime-limits).

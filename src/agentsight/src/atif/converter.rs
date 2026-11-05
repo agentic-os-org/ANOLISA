@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use agentsight_atif::{
     ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Metrics, Observation,
-    ObservationResult, Step, StepSource, ToolCall, same_call_id,
+    ObservationResult, Step, StepSource, ToolCall, resolve_call_id,
 };
 
 use crate::genai::semantic::{
@@ -359,33 +359,51 @@ fn collect_tool_definitions(parsed: &[Option<LLMCall>]) -> Option<Vec<serde_json
     if defs.is_empty() { None } else { Some(defs) }
 }
 
-/// Extract system prompt text from event data.
+/// Extract instruction text, normalizing OpenAI's replacement role to ATIF system.
 fn extract_system_prompt(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> Option<String> {
-    // Strategy 1: from parsed LLMCall request messages
     if let Some(call) = parsed {
-        let text = extract_text_by_role(&call.request.messages, "system");
+        // Read both instruction roles in the order retained by the producer.
+        // Joining each role separately or deduplicating text would lose data.
+        let text = call
+            .request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role.as_str(), "system" | "developer"))
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::Text { content } if !content.is_empty() => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         if !text.is_empty() {
             return Some(text);
         }
     }
 
-    // Strategy 2: from system_instructions column (JSON array of InputMessage)
-    if let Some(ref json) = event.system_instructions {
-        if let Some(msgs) = crate::genai::semantic::input_messages_from_column(json) {
-            let text = extract_text_from_input_messages(&msgs, "system");
-            if !text.is_empty() {
-                return Some(text);
-            }
-        }
-        // Might be a plain string
-        if let Ok(s) = serde_json::from_str::<String>(json) {
-            if !s.is_empty() {
-                return Some(s);
-            }
+    // Empty parsed instruction text has always fallen back to stored columns.
+    // Those columns split system messages from the remaining input history, so
+    // retain their available order without claiming the original interleaving.
+    let mut instructions = Vec::new();
+    if let Some(json) = event.system_instructions.as_deref() {
+        let text = crate::genai::semantic::input_messages_from_column(json)
+            .map(|messages| extract_text_from_input_messages(&messages, "system"))
+            .or_else(|| serde_json::from_str::<String>(json).ok());
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            instructions.push(text);
         }
     }
-
-    None
+    if let Some(messages) = event
+        .input_messages
+        .as_deref()
+        .and_then(crate::genai::semantic::input_messages_from_column)
+    {
+        let text = extract_text_by_role(&messages, "developer");
+        if !text.is_empty() {
+            instructions.push(text);
+        }
+    }
+    (!instructions.is_empty()).then(|| instructions.join("\n"))
 }
 
 /// Extract user query text from event data.
@@ -718,6 +736,11 @@ fn flatten_result_content(payload: &serde_json::Value) -> String {
     }
     match payload {
         serde_json::Value::String(s) => s.clone(),
+        // An explicit null is "the producer recorded no output", not the
+        // four-character string "null": the shared ATIF message reader maps a
+        // null *message* to empty text, and stringifying the result here would
+        // hand the classifiers a fabricated output.
+        serde_json::Value::Null => String::new(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
@@ -728,7 +751,7 @@ fn flatten_result_content(payload: &serde_json::Value) -> String {
 /// `content` is the common spelling and stays first. The rest are what the
 /// twin readers of the same payload already scan — the interruption detector's
 /// `tool_response_failure_text` reads `error`, `message`, `content`,
-/// `response` and `details`; the grader's `tool_response_has_error_signal`
+/// `response` and `details`; the grader's `tool_response_has_error`
 /// reads `response`, `content`, `error` and `output` — so an MCP result that
 /// reports `{"error":"grep: …","is_error":true}` exports its reason as text
 /// for every consumer, not as the serialised object that defeats a classifier
@@ -799,18 +822,29 @@ fn collect_tool_responses(
                 // JSON-encoded *string* rather than an object. The detector and
                 // the grader both re-parse that shape before judging it; read
                 // the same envelope here so the same bytes get the same
-                // outcome. Only an object envelope is looked through — a
-                // plain string payload keeps its previous rendering, which is
+                // outcome. An object envelope is looked through for its flags;
+                // a plain string payload keeps its previous rendering, which is
                 // what the flattening below expects.
                 let encoded = match response {
                     serde_json::Value::String(text) => {
-                        serde_json::from_str::<serde_json::Value>(text.trim())
-                            .ok()
-                            .filter(serde_json::Value::is_object)
+                        serde_json::from_str::<serde_json::Value>(text.trim()).ok()
                     }
                     _ => None,
                 };
-                let envelope = encoded.as_ref().unwrap_or(response);
+                // An encoded *array* is not an envelope: an MCP tool with
+                // several content items serialises its block array as that
+                // string, and there are no flags to read off it. The typed
+                // path parses such strings into real arrays, and both twins
+                // recurse through the parsed array
+                // (`tool_response_failure_text`, `value_has_error_signal`),
+                // so the parsed array becomes the payload below and the
+                // flattening reads its text blocks instead of exporting the
+                // encoding.
+                let encoded_blocks = encoded.as_ref().filter(|value| value.is_array());
+                let envelope = encoded
+                    .as_ref()
+                    .filter(|value| value.is_object())
+                    .unwrap_or(response);
                 let status_is_error = envelope
                     .get("status")
                     .and_then(|v| v.as_str())
@@ -849,7 +883,9 @@ fn collect_tool_responses(
                 // "output"]. `content` stays first (the common spelling), a
                 // null value is skipped, and an envelope with none of the keys
                 // keeps the whole response as before.
-                let payload = if is_error.is_some() {
+                let payload = if let Some(blocks) = encoded_blocks {
+                    blocks
+                } else if is_error.is_some() {
                     ERROR_ENVELOPE_KEYS
                         .iter()
                         .filter_map(|key| envelope.get(*key))
@@ -869,17 +905,20 @@ fn collect_tool_responses(
     // separator differences some agents introduce when echoing a call id back.
     for (id, content_str, extra) in &pending {
         let Some(tc_id) = id else { continue };
-        let found = tc_ids
-            .iter()
-            .find(|(known, _)| same_call_id(known, tc_id))
-            .map(|(_, idx)| *idx);
+        let owner = resolve_call_id(tc_id, tc_ids.keys().copied());
+        let found = owner.and_then(|owner| {
+            tc_ids
+                .iter()
+                .find(|(known, _)| **known == owner)
+                .map(|(_, index)| *index)
+        });
         let Some(idx) = found else { continue };
         if matched[idx] {
             continue;
         }
         matched[idx] = true;
         results.push(ObservationResult {
-            source_call_id: Some(tc_id.to_string()),
+            source_call_id: owner.map(str::to_string),
             content: Some(serde_json::Value::String(content_str.clone())),
             subagent_trajectory_ref: None,
             extra: extra.clone(),
@@ -1506,21 +1545,36 @@ pub(crate) mod tests {
     /// stayed in the evidence pool, where `grep: no such file or directory`
     /// could ground — or refuse to ground — a later claim it never sourced.
     ///
+    /// An encoded *array* is the other shape that string arrives in: an MCP
+    /// tool with several content items serialises its block array as that
+    /// string, and the converter rejected it with the same object filter, so
+    /// the observation exported the raw encoding — the `[{"type":"text"`
+    /// punctuation that defeats a classifier matching lines that start with
+    /// an error token — while both twins recurse through the parsed array.
+    ///
     /// Both spellings must agree on the same bytes; that agreement is what
     /// this pins.
     #[test]
     fn an_encoded_tool_result_envelope_keeps_its_declared_outcome() {
         use crate::grounding::{evidence::build_index, outcome::CallStatus};
 
-        for (encoded, flag, expected) in [
+        for (encoded, flag, expected_content, expected) in [
             (
                 r#"{"content":"grep: no such file or directory","isError":false}"#,
                 Some(false),
+                "grep: no such file or directory",
                 CallStatus::Ok,
             ),
             (
                 r#"{"content":"command failed","isError":true}"#,
                 Some(true),
+                "command failed",
+                CallStatus::Failed,
+            ),
+            (
+                r#"[{"type":"text","text":"command failed"},{"type":"text","text":"exit code 1"}]"#,
+                None,
+                "command failed\nexit code 1",
                 CallStatus::Failed,
             ),
         ] {
@@ -1553,6 +1607,11 @@ pub(crate) mod tests {
             .unwrap();
             let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
             assert_eq!(result.is_error(), flag, "payload {encoded}");
+            assert_eq!(
+                result.content.as_ref().and_then(|content| content.as_str()),
+                Some(expected_content),
+                "the payload must be read through its encoded form, got {encoded}"
+            );
 
             let index = build_index(&doc, 0..doc.steps.len());
             assert_eq!(
@@ -2111,6 +2170,57 @@ pub(crate) mod tests {
         assert_eq!(
             results[0].content.as_ref().and_then(|c| c.as_str()),
             Some("raw-a.txt")
+        );
+    }
+
+    /// An explicit `null` tool-result payload means the producer recorded no
+    /// output, not the four-character string "null".
+    ///
+    /// The observation content is the text every downstream consumer reads:
+    /// `outcome::classify_call` scans it for a line starting with an error
+    /// token and the evidence pool's haystack carries it, so a null flattened
+    /// to `"null"` fabricates an output the tool never produced — and the
+    /// trajectory then serialises that fabricated text back. The shared ATIF
+    /// message reader maps an explicit null *message* to the empty string for
+    /// the same reason.
+    #[test]
+    fn an_explicit_null_tool_result_is_empty_not_the_text_null() {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-null".into()),
+                name: "Read".into(),
+                arguments: Some(serde_json::json!({"file_path": "/tmp/empty"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let replayed = vec![InputMessage {
+            role: "user".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-null".into()),
+                response: serde_json::Value::Null,
+            }],
+            name: None,
+        }];
+
+        let doc = convert_trace_to_atif(
+            "trace-null",
+            vec![
+                call_event(1, 1_000_000_000, Some(agent_turn), None, Some("read it")),
+                call_event(2, 3_000_000_000, None, Some(replayed), None),
+            ],
+        )
+        .expect("trace converts");
+        let results = &doc.steps[2]
+            .observation
+            .as_ref()
+            .expect("the call carries a result")
+            .results;
+        assert_eq!(results[0].source_call_id.as_deref(), Some("tc-null"));
+        assert_eq!(
+            results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("")
         );
     }
 

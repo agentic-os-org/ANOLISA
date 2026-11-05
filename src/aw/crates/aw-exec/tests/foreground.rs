@@ -6,7 +6,9 @@
 #[path = "support/fixture.rs"]
 mod fixture;
 
-use aw_exec::{run_foreground, CommandSpec};
+use aw_exec::{
+    run_foreground, run_foreground_with_grace, run_foreground_worker_with_grace, CommandSpec,
+};
 use fixture::{execute, limits, wait_until_exists, Directory, NORMAL_TIMEOUT};
 use std::{
     collections::BTreeMap,
@@ -53,6 +55,16 @@ fn foreground_helper() {
     let directory = PathBuf::from(directory);
     record_process(&directory, "helper", std::process::id());
     let scenario = std::env::var("AW_FOREGROUND_SCENARIO").unwrap();
+    let grace = std::env::var("AW_FOREGROUND_GRACE_MS")
+        .ok()
+        .map(|value| Duration::from_millis(value.parse().unwrap()));
+    let stop_mode = std::env::var("AW_FOREGROUND_STOP").unwrap_or_default();
+    let leader_signals = std::env::var_os("AW_FOREGROUND_WORKER").is_some();
+    let stop_signal = if std::env::var_os("AW_FOREGROUND_INT").is_some() {
+        libc::SIGINT
+    } else {
+        libc::SIGTERM
+    };
     // Each helper has a separate process and terminal session, so signal and
     // foreground changes never affect libtest's own process or other tests.
     let original = unsafe { libc::getpgrp() };
@@ -70,6 +82,7 @@ fn foreground_helper() {
     };
     let before = unsafe { libc::tcgetpgrp(0) };
     let signal = AtomicI32::new(0);
+    let failed = AtomicBool::new(false);
     let finished = AtomicBool::new(false);
     let command = CommandSpec {
         program: std::env::var_os("AW_FOREGROUND_PYTHON").unwrap().into(),
@@ -95,11 +108,33 @@ fn foreground_helper() {
                 if finished.load(Ordering::Acquire) {
                     return;
                 }
-                if (matches!(scenario.as_str(), "signal" | "stubborn")
-                    && directory.join("ready").exists())
+                if (matches!(
+                    scenario.as_str(),
+                    "signal" | "stubborn" | "graceful" | "grace-stubborn" | "worker"
+                ) && directory.join("ready").exists())
                     || (scenario == "tty-stubborn" && directory.join("child-terminal").exists())
                 {
-                    signal.store(libc::SIGTERM, Ordering::Release);
+                    if stop_mode == "failure-first" {
+                        failed.store(true, Ordering::Release);
+                    } else {
+                        signal.store(stop_signal, Ordering::Release);
+                    }
+                    if matches!(stop_mode.as_str(), "failure-first" | "failure-after") {
+                        assert!(wait_until_exists(
+                            &directory.join("term-received"),
+                            deadline
+                        ));
+                        if stop_mode == "failure-first" {
+                            signal.store(stop_signal, Ordering::Release);
+                        } else {
+                            failed.store(true, Ordering::Release);
+                        }
+                    } else if stop_mode == "repeat" {
+                        while !finished.load(Ordering::Acquire) && Instant::now() < deadline {
+                            thread::sleep(Duration::from_millis(100));
+                            signal.store(stop_signal, Ordering::Release);
+                        }
+                    }
                     return;
                 }
                 if Instant::now() >= deadline {
@@ -109,7 +144,13 @@ fn foreground_helper() {
                 thread::sleep(Duration::from_millis(5));
             }
         });
-        let result = run_foreground(&command, &signal);
+        let result = match grace {
+            Some(grace) if leader_signals => {
+                run_foreground_worker_with_grace(&command, &signal, &failed, grace, |_| {})
+            }
+            Some(grace) => run_foreground_with_grace(&command, &signal, &failed, grace, |_| {}),
+            None => run_foreground(&command, &signal),
+        };
         finished.store(true, Ordering::Release);
         notifier.join().unwrap();
         result
@@ -217,6 +258,117 @@ fn atomic_signal_is_forwarded_and_stubborn_group_has_a_bounded_grace() {
         } else {
             directory.assert_reaped();
         }
+    }
+}
+
+fn grace_command(directory: &Directory, scenario: &str, grace_ms: u64, stop: &str) -> CommandSpec {
+    let mut command = helper_command(directory, scenario);
+    command
+        .environment
+        .insert("AW_FOREGROUND_GRACE_MS".into(), grace_ms.to_string().into());
+    command
+        .environment
+        .insert("AW_FOREGROUND_STOP".into(), stop.into());
+    command
+}
+
+fn run_grace_case(directory: &Directory, command: &CommandSpec) -> (String, u128) {
+    let output = execute(command, b"", limits(0, 4096, 4096)).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = fs::read_to_string(directory.0.join("result")).unwrap();
+    let elapsed = fs::read_to_string(directory.0.join("elapsed"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    (result, elapsed)
+}
+
+#[test]
+fn configured_grace_allows_cleanup_beyond_the_legacy_deadline() {
+    for configured in [false, true] {
+        let directory = Directory::new();
+        let command = if configured {
+            grace_command(&directory, "graceful", 4000, "")
+        } else {
+            helper_command(&directory, "graceful")
+        };
+        let (result, _) = run_grace_case(&directory, &command);
+        assert_eq!(
+            result,
+            if configured {
+                "code=Some(37) signal=None"
+            } else {
+                "code=None signal=Some(9)"
+            }
+        );
+        assert_eq!(directory.0.join("cleanup-complete").exists(), configured);
+        directory.assert_reaped();
+    }
+}
+
+#[test]
+fn configured_grace_bounds_stubborn_groups_without_signal_renewal() {
+    for mode in ["", "repeat"] {
+        let directory = Directory::new();
+        let command = grace_command(&directory, "grace-stubborn", 800, mode);
+        let (result, elapsed) = run_grace_case(&directory, &command);
+        assert_eq!(result, "code=None signal=Some(9)");
+        assert!(
+            (800..1800).contains(&elapsed),
+            "{mode}: elapsed {elapsed} ms"
+        );
+        let received: u32 = fs::read_to_string(directory.0.join("term-received"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(received >= if mode == "repeat" { 2 } else { 1 });
+        directory.assert_descendant_stopped();
+    }
+}
+
+#[test]
+fn internal_failure_never_extends_either_shutdown_deadline() {
+    for (mode, grace_ms, minimum, maximum) in [
+        ("failure-first", 4000, 2000, 3500),
+        ("failure-after", 4000, 2000, 3500),
+        ("failure-after", 700, 700, 1800),
+    ] {
+        let directory = Directory::new();
+        let command = grace_command(&directory, "grace-stubborn", grace_ms, mode);
+        let (result, elapsed) = run_grace_case(&directory, &command);
+        assert_eq!(result, "code=None signal=Some(9)");
+        assert!(
+            (minimum..maximum).contains(&elapsed),
+            "{mode}/{grace_ms}: elapsed {elapsed} ms"
+        );
+        directory.assert_descendant_stopped();
+    }
+}
+
+#[test]
+fn invalid_grace_is_rejected_before_spawning() {
+    let directory = Directory::new();
+    for grace in [
+        Duration::ZERO,
+        Duration::from_micros(999),
+        Duration::from_millis(120001),
+        Duration::MAX,
+    ] {
+        let started = AtomicBool::new(false);
+        let result = run_foreground_with_grace(
+            &directory.command("unused"),
+            &AtomicI32::new(0),
+            &AtomicBool::new(false),
+            grace,
+            |_| started.store(true, Ordering::Release),
+        );
+        assert!(result.is_err(), "accepted grace {grace:?}");
+        assert!(!started.load(Ordering::Acquire));
+        assert!(!directory.0.join("leader.pid").exists());
     }
 }
 
@@ -408,3 +560,6 @@ fn terminal_transfer_error_still_cleans_the_spawned_child() {
         directory.assert_reaped();
     }
 }
+
+#[path = "foreground/worker.rs"]
+mod worker;

@@ -2,60 +2,41 @@
 
 [中文版](../zh/README.md)
 
-Start with the [architecture overview](../../../../../docs/developer-guide/en/aw/architecture.md)
-for crate dependencies and source entry points. The current Hook path is:
+Design documents explain implementation ownership, protocol invariants and trade-offs. Operational steps live in the [developer guide](../../../../../docs/developer-guide/en/aw/index.md). Start with [architecture](architecture.md) and [boundaries](architecture-boundaries.md), then follow the area you are changing.
 
-Read [Architecture boundaries](architecture-boundaries.md) for source ownership,
-internal interfaces and release work deferred from this migration.
+`aw-package` owns local Provider management and configuration through a private
+file-transaction store; `aw-exec` owns runtime file leases. Distribution Make
+targets and scripts build release artifacts. Independently installed Providers
+connect through the process protocol without AW package records.
 
-`aw-cli` owns the `aw` and compatibility `aw-package` frontends. Software
-installation and offline edits call `aw-package` APIs directly; runtime commands
-call `aw-service`. The extraction preserves the Hook path and protocol versions.
+## Request execution
 
-```mermaid
-flowchart LR
-    Agent[Native Agent] --> Adapter[aw-adapter]
-    Adapter --> Service[aw-service]
-    Service --> Host[aw-host]
-    Host --> Exec[aw-exec]
-    Exec --> Provider[Provider process]
-    Provider --> Backend[Tokenless or sec-core CLI]
-    Service --> Journal[aw-core FileJournal]
-```
-
-Arrows show request and audit flow. Results return to the Adapter for native
-adoption. `aw-core::Core` plan execution is a separate API, described below.
-
-## Follow a request
-
-| Read in order | Owner and boundary |
+| Area | Contract |
 | --- | --- |
-| [Configuration](configuration/configuration.md) | `aw-config` validates desired input before runtime preparation |
-| [Policy update boundary](runtime/policy-reload.md) | Offline comparison and explicit idle-only activation; external attachment remains planned |
-| [Adapter dispatch](adapters/adapter-dispatch.md) | The CLI registers native callbacks, normalizes events, and adopts effects |
-| [Local service](runtime/local-service.md) | `aw-service` manages bindings, events, and audit; dispatches steps to Host |
-| [Provider Host](runtime/provider-host.md) | `aw-host` prepares Providers and invokes admitted steps |
-| [Provider protocol](providers/provider-protocol.md) | `aw-provider` validates request/reply messages and capabilities |
-| [Bounded execution](runtime/bounded-execution.md) | `aw-exec` owns command transport and process cleanup |
+| Configuration | [Configuration](configuration/configuration.md) · [Editing and native sources](configuration/configuration-editing.md) |
+| Policy admission | [Core admission](core-admission.md) |
+| Native wiring | [Adapter dispatch](adapters/adapter-dispatch.md) |
+| Runtime | [Service](runtime/local-service.md) · [Policy updates](runtime/policy-reload.md) · [Host](runtime/provider-host.md) · [Bounded execution](runtime/bounded-execution.md) |
+| Capability plans | [Core execution](core-execution.md) |
+| Provider extensions | [Local Provider management](packaging/package-management.md) |
 
-## Choose an integration
+## Adapters and extensions
 
-| Integration | Design |
+[AgentScope](adapters/agentscope-adapter.md) · [Claude SDK](adapters/claude-sdk-adapter.md) · [Hermes](adapters/hermes-adapter.md) · [OpenClaw](adapters/openclaw-adapter.md) · [Pi](adapters/pi-adapter.md) · [QwenPaw](adapters/qwenpaw-adapter.md)
+
+| Area | Contract |
 | --- | --- |
-| Native Agent callbacks | [AgentScope](adapters/agentscope-adapter.md), [Claude SDK](adapters/claude-sdk-adapter.md), [Hermes](adapters/hermes-adapter.md), [OpenClaw](adapters/openclaw-adapter.md), [Pi](adapters/pi-adapter.md), [QwenPaw](adapters/qwenpaw-adapter.md); Qoder is covered by [Adapter dispatch](adapters/adapter-dispatch.md) and [Local service](runtime/local-service.md) |
-| Independent Provider development and contribution | [Shared directory](../../../../../providers/README.md) and [distribution guide](../../../../../docs/developer-guide/en/aw/providers.md) |
-| Security Provider and backend readiness | [sec-core Provider](providers/sec-core/sec-core-provider.md), then [sec-core health](providers/sec-core/sec-core-health.md) |
-| Tokenless Provider | [Integration reference](../../../../../docs/developer-guide/en/aw/tokenless.md) |
-| Packaging and configuration editing | [Build guide](../../../../../docs/developer-guide/en/aw/building.md), then [Configuration editing](configuration/configuration-editing.md) |
-| Read-only inspection | [Provider views](providers/provider-views.md); independent of Hook admission |
+| Resident tasks and Qoder SDK | [Resident SDK](adapters/resident-sdk.md) |
+| MCP | [Structured MCP](adapters/structured-mcp.md) · [Claude MCP](adapters/claude-mcp.md) |
+| Private execution | [Execution leases](adapters/private-execution.md) |
+| sec-core | [Provider](providers/sec-core/sec-core-provider.md) · [Health](providers/sec-core/sec-core-health.md) |
 
-## Audit, evidence, and capability plans
+Tool selection and malformed-event failures are defined in the
+[Provider Host contract](runtime/provider-host.md); shipped names and input
+mappings are listed in the [sec-core configuration reference](../../../../../docs/developer-guide/en/aw/providers/sec-core.md#configure-a-provider).
 
-| Topic | Relationship to the Hook path |
-| --- | --- |
-| [Core execution and storage](core-execution.md) | The service reuses FileJournal. The plan executor separately requires embedding Host/Journal ports |
-| [Read-only AgentSight connector](integrations/agentsight/agentsight-readonly.md) | Optional source reads used by the service |
-| [Evidence and context](runtime/evidence-context.md) | Native identity, observation, and explicit context freezing; schemas belong to `aw-contracts` |
-| [AgentSight integration roadmap](integrations/agentsight/agentsight-integration.md) | Relates observation to future coverage, incremental export, and semantic evaluation; these later stages are not current capabilities |
+## Evidence and observation
 
-For install and daily use, see the [user guide](../../../../../docs/user-guide/en/user-entrypoint/aw/README.md).
+[Public runtime/audit objects](runtime/public-objects.md)
+
+[Connector](integrations/agentsight/agentsight-readonly.md) · [Evidence context](runtime/evidence-context.md) · [Integration roadmap](integrations/agentsight/agentsight-integration.md)

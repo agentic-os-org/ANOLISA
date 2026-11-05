@@ -5,7 +5,7 @@ use crate::{CommandSpec, Error};
 use std::{
     io,
     process::ExitStatus,
-    sync::atomic::{AtomicI32, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -90,6 +90,9 @@ impl Drop for Terminal {
 pub(crate) fn run(
     spec: &CommandSpec,
     signal: &AtomicI32,
+    failed: &AtomicBool,
+    shutdown_grace: Duration,
+    leader_signals: bool,
     started: impl FnOnce(u32),
 ) -> Result<ExitStatus, Error> {
     let mut terminal = Terminal::capture().map_err(|e| io_error("terminal transfer", e))?;
@@ -108,11 +111,22 @@ pub(crate) fn run(
             child.signal(libc::SIGCONT)?;
         }
         let mut stopping = None;
+        let mut failure_sent = false;
         while !child.observe_exit()? {
             let pending = signal.swap(0, Ordering::AcqRel);
             if pending != 0 {
-                child.signal(pending)?;
-                stopping.get_or_insert(Instant::now() + Duration::from_secs(2));
+                if leader_signals {
+                    child.signal_leader(pending)?;
+                } else {
+                    child.signal(pending)?;
+                }
+                stopping.get_or_insert(Instant::now() + shutdown_grace);
+            }
+            if failed.load(Ordering::Acquire) && !failure_sent {
+                child.signal(libc::SIGTERM)?;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                stopping = Some(stopping.map_or(deadline, |current| current.min(deadline)));
+                failure_sent = true;
             }
             if stopping.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;

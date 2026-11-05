@@ -110,9 +110,10 @@ def extract_sheet_refs(formula: str) -> list[str]:
     sheet is referenced multiple times in one formula).
     """
     refs = []
-    # Quoted sheet names: 'Sheet Name'!
-    for m in re.finditer(r"'([^']+)'!", formula):
-        refs.append(m.group(1))
+    # Quoted sheet names: 'Sheet Name'! — an apostrophe inside the name is
+    # escaped by doubling it, so the sheet It's is referenced as 'It''s'!A1.
+    for m in re.finditer(r"'((?:[^']|'')*)'!", formula):
+        refs.append(m.group(1).replace("''", "'"))
     # Unquoted sheet names: SheetName! (not preceded by a single quote)
     for m in re.finditer(r"(?<!')([A-Za-z_\u4e00-\u9fff][A-Za-z0-9_.·\u4e00-\u9fff]*)!", formula):
         refs.append(m.group(1))
@@ -132,8 +133,11 @@ def extract_name_refs(formula: str) -> list[str]:
     This is approximate. False positives are possible; false negatives are rare.
     """
     names = []
-    # Remove quoted sheet references first to avoid false matches
-    formula_clean = re.sub(r"'[^']*'![A-Z$0-9:]+", "", formula)
+    # Remove quoted sheet references first to avoid false matches; the
+    # apostrophe-escaping form matches extract_sheet_refs above, otherwise
+    # "'Company''s Data'!A1" leaves "'Company" behind and the
+    # identifier scan reports the sheet name as an unknown name.
+    formula_clean = re.sub(r"'(?:[^']|'')*'![A-Z$0-9:]+", "", formula)
     formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):

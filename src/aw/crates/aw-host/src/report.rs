@@ -103,6 +103,8 @@ pub enum FailureAction {
     Report,
     /// Request a native block because execution failed, not because policy matched.
     Block,
+    /// Withhold a tool result when a required PostTool step fails.
+    WithholdResult,
 }
 
 /// Native callback bytes and status; the Adapter applies its framework's semantics.
@@ -115,8 +117,10 @@ pub struct NativeOutput {
     pub status: ExitStatus,
 }
 
-/// Successful transport result with explicit protocol ownership.
+/// Successful step result with explicit execution ownership.
 pub enum StepOutput {
+    /// The validated event did not match this step's tool selectors; no command ran.
+    Skipped,
     /// Protocol-validated candidate effects; the Adapter owns adoption.
     Provider(Outcome),
     /// Native output is not interpreted as AW policy or a Provider response.
@@ -127,7 +131,7 @@ pub enum StepOutput {
 pub struct Invocation {
     /// Correlated execution metadata, including the native process status when available.
     pub record: CallRecord,
-    /// Explicitly typed Provider/native output or the original execution failure.
+    /// A neutral skip, typed Provider/native output or the original execution failure.
     pub result: Result<StepOutput, Failure>,
     /// Present only on failure; does not replace or hide `result`.
     pub failure_action: Option<FailureAction>,

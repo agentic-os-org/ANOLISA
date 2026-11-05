@@ -6,6 +6,25 @@ mod checkout;
 use super::*;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
+#[test]
+fn hermes_plugin_checks_launch_revision_before_readiness() {
+    let fixture = Fixture::new();
+    let mut command = Command::new(&fixture.python);
+    command
+        .arg("-B")
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/hermes/launch_contract.py"),
+        )
+        .env("AW_TEST_OUTPUT", &fixture.root);
+    let output = fixture.run(command);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stderr.contains("Ran 3 tests") && stderr.contains("\nOK\n"),
+        "{stderr}"
+    );
+}
+
 fn hermes_fixture() -> (Fixture, PathBuf) {
     let mut fixture = Fixture::new();
     let profile = fixture.native_profile();
@@ -229,6 +248,24 @@ fn hermes_discovers_metadata_above_the_version_output_limit() {
         );
     }
     fs::set_permissions(source.join(".git"), fs::Permissions::from_mode(0o700)).unwrap();
+    for name in ["config", "hooks", "info"] {
+        let path = source.join(".git").join(name);
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(if path.is_dir() { 0o700 } else { 0o600 }),
+        )
+        .unwrap();
+    }
+    let entrypoint = native.join("hermes");
+    let script = fs::read_to_string(&entrypoint).unwrap();
+    fs::write(
+        &entrypoint,
+        script.replace(
+            "if '--version' in sys.argv:\n",
+            "if '--version' in sys.argv:\n    (root / 'version-entered').touch()\n",
+        ),
+    )
+    .unwrap();
     let index = fs::read(source.join(".git/index")).ok();
     for operation in ["install", "run"] {
         let mut command = command(&fixture, &profile, operation);
@@ -237,9 +274,10 @@ fn hermes_discovers_metadata_above_the_version_output_limit() {
         assert_eq!(output.status.code(), Some(1));
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(
-            error.contains("official checkout 952c941e"),
+            error.contains("native version probe failed"),
             "{operation}: {error}"
         );
+        assert!(fixture.root.join("version-entered").exists());
         assert!(!fixture.root.join("version-started").exists());
         assert!(!fixture.root.join("writer-started").exists());
         assert!(!fixture.root.join("state").exists());
@@ -359,7 +397,7 @@ fn hermes_rejects_non_executable_or_special_explicit_entrypoints() {
             assert!(started.elapsed() < Duration::from_secs(3));
             assert!(!fixture.root.join("version-started").exists());
             assert!(!fixture.root.join("writer-started").exists());
-            assert!(!profile.join(".aw-install.lock").exists());
+            assert!(!profile.join(".local-install.lock").exists());
             assert_eq!(
                 fs::read(profile.join("config.yaml")).unwrap(),
                 original.as_bytes()
@@ -411,7 +449,7 @@ fn hermes_rejects_writable_native_paths_before_any_probe() {
                 );
                 assert!(!fixture.root.join("version-started").exists());
                 assert!(!fixture.root.join("writer-started").exists());
-                assert!(!profile.join(".aw-install.lock").exists());
+                assert!(!profile.join(".local-install.lock").exists());
                 assert_eq!(
                     fs::read(profile.join("config.yaml")).unwrap(),
                     original.as_bytes()
@@ -441,7 +479,7 @@ fn hermes_rejects_writable_git_helpers_before_execution() {
         assert!(error.contains("permits modification"), "{error}");
         assert!(!fixture.root.join("git-started").exists());
         assert!(!fixture.root.join("version-started").exists());
-        assert!(!profile.join(".aw-install.lock").exists());
+        assert!(!profile.join(".local-install.lock").exists());
         assert_eq!(
             fs::read(profile.join("config.yaml")).unwrap(),
             b"unknown: keep\n"

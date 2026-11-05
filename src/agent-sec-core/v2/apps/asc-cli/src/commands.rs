@@ -5,6 +5,7 @@ mod capabilities;
 mod common;
 mod events;
 mod events_summary;
+mod gateway;
 mod observability;
 mod policy;
 mod scan_code;
@@ -19,6 +20,7 @@ use clap::Subcommand;
 use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
 pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
+pub(crate) use self::gateway::GatewayCommand;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
@@ -30,6 +32,9 @@ use crate::InputError;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Run a command locally with explicitly supplied sandbox permissions.
+    #[command(subcommand)]
+    Sandbox(crate::sandbox::SandboxCommand),
     /// Collect observability records through the daemon.
     #[command(subcommand)]
     Observability(observability::ObservabilityCommand),
@@ -51,13 +56,23 @@ pub(crate) enum Command {
     /// List the caller's own security events from the daemon.
     Events(EventsCommand),
     /// Manage Skill scanning, signatures, history and activation.
-    #[command(subcommand)]
+    #[command(name = "skillsec", alias = "skill-ledger", subcommand)]
     SkillLedger(skill_ledger::SkillLedgerCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
     Capabilities(CapabilitiesCommand),
+    /// Protect GitHub tokens from Agents with the secret gateway.
+    #[command(subcommand)]
+    Gateway(GatewayCommand),
 }
 
 impl Command {
+    pub(crate) const fn sandbox(&self) -> Option<&crate::sandbox::SandboxCommand> {
+        match self {
+            Self::Sandbox(command) => Some(command),
+            _ => None,
+        }
+    }
+
     pub(crate) fn run_observability_query(
         &self,
         socket: &std::path::Path,
@@ -84,8 +99,20 @@ impl Command {
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
-            Self::Capabilities(_) => Err(InputError::LocalCommand),
+            Self::Capabilities(_) | Self::Sandbox(_) => Err(InputError::LocalCommand),
+            // Gateway commands own their transport: `run` execs after the response.
+            Self::Gateway(_) => Err(InputError::Gateway(
+                "gateway commands run through their own transport".into(),
+            )),
             Self::SkillLedger(command) => command.request(),
+        }
+    }
+
+    /// Returns the gateway command when this invocation manages the secret gateway.
+    pub(crate) const fn gateway(&self) -> Option<&GatewayCommand> {
+        match self {
+            Self::Gateway(command) => Some(command),
+            _ => None,
         }
     }
 

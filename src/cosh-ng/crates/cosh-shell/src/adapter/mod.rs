@@ -26,12 +26,14 @@ mod cosh_core_service;
 mod cosh_core_tests;
 mod ecs_probe;
 mod fake;
+mod launch_path;
 mod process;
 mod prompt;
 #[cfg(test)]
 mod prompt_tests;
 mod qwen;
 mod qwen_stream;
+mod session_assets;
 
 pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
@@ -46,6 +48,7 @@ pub use cosh_core::{
 pub(crate) use cosh_core_registry::RegistryQueryError;
 pub use ecs_probe::EcsProbeTask;
 pub use fake::FakeAgentAdapter;
+pub(crate) use launch_path::{command_with_trusted_startup_path, record_trusted_startup_path};
 pub(crate) use process::{
     agent_event_is_provider_progress, record_cancellation_pending_session,
     run_provider_process_loop, spawn_provider_child, start_cancellable_provider_process,
@@ -58,6 +61,7 @@ pub use prompt::{
     prompt_from_request_with_evidence_policy, provider_prompt_contract,
 };
 pub use qwen::QwenCliAdapter;
+pub(crate) use session_assets::{admit_session_assets, gateway_executable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterError {

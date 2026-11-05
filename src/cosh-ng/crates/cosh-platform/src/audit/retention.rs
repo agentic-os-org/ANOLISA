@@ -1,6 +1,10 @@
 //! Deterministic retention planning and lock-safe orphan recovery.
 
 use std::collections::BTreeSet;
+
+#[cfg(test)]
+mod blocked_tests;
+mod lifecycle;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -93,6 +97,8 @@ pub enum RetentionExecutionStatus {
     Complete,
     /// At least one selected deletion failed.
     Partial,
+    /// Lifecycle evidence could not be inspected safely within the fixed limits.
+    Blocked,
 }
 
 /// Starts a best-effort retention pass when the last successful pass is older than 24 hours.
@@ -124,7 +130,10 @@ pub fn schedule_retention(root: PathBuf, settings: AuditSettings, component: Aud
                 if execution.status == RetentionExecutionStatus::SkippedBusy {
                     return;
                 }
-                let event_result = emit_retention_event(&root, component, &execution);
+                let event_result = emit_retention_event(&root, component, &execution, &settings);
+                if let Err(error) = &event_result {
+                    tracing::warn!(target: "cosh_audit", ?error, "scheduled retention event write failed");
+                }
                 if execution.status == RetentionExecutionStatus::Complete && event_result.is_ok() {
                     state.last_retention_success = Some(Utc::now());
                     state.last_retention_error = None;
@@ -133,6 +142,8 @@ pub fn schedule_retention(root: PathBuf, settings: AuditSettings, component: Aud
                         operation: "retention".to_string(),
                         code: if event_result.is_err() {
                             "event_write_failed".to_string()
+                        } else if execution.status == RetentionExecutionStatus::Blocked {
+                            "lifecycle_scan_blocked".to_string()
                         } else {
                             "partial_delete".to_string()
                         },
@@ -159,8 +170,10 @@ fn emit_retention_event(
     root: &Path,
     component: AuditComponentName,
     execution: &RetentionExecution,
+    settings: &AuditSettings,
 ) -> Result<(), CoshError> {
-    let mut writer = AuditSegmentWriter::create(root, component.clone())?;
+    let mut writer =
+        AuditSegmentWriter::create_with_settings(root, component.clone(), settings.clone())?;
     let now = Utc::now();
     let payload = AuditControlData {
         operation: Some("scheduled_retention".to_string()),
@@ -193,13 +206,13 @@ fn emit_retention_event(
             euid: None,
         },
         AuditEventOutcome {
-            status: if execution.failed.is_empty() {
+            status: if execution.status == RetentionExecutionStatus::Complete {
                 AuditOutcomeStatus::Success
             } else {
                 AuditOutcomeStatus::Failed
             },
             code: None,
-            retryable: !execution.failed.is_empty(),
+            retryable: execution.status != RetentionExecutionStatus::Complete,
         },
         AuditSubject {
             kind: "retention".to_string(),
@@ -217,7 +230,7 @@ fn emit_retention_event(
     writer.close()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SegmentInfo {
     path: PathBuf,
     basename: String,
@@ -237,7 +250,9 @@ pub fn plan_retention(
     now: DateTime<Utc>,
 ) -> Result<RetentionPlan, CoshError> {
     let (segments, truncated) = discover_segments(root)?;
-    Ok(build_retention_plan(segments, truncated, settings, now))
+    let (plan, protection) = build_retention_plan(segments, truncated, settings, now);
+    protection.ok_or_else(|| retention_error("lifecycle_scan_blocked"))?;
+    Ok(plan)
 }
 
 /// Plans retention without mutating recoverable orphan segments.
@@ -266,8 +281,9 @@ pub fn plan_retention_dry_run(
         segment.basename = segment.basename.trim_end_matches(".active").to_string();
         orphan_locks.push(lock);
     }
-    let plan = build_retention_plan(segments, truncated, settings, now);
     drop(orphan_locks);
+    let (plan, protection) = build_retention_plan(segments, truncated, settings, now);
+    protection.ok_or_else(|| retention_error("lifecycle_scan_blocked"))?;
     Ok(plan)
 }
 
@@ -276,7 +292,7 @@ fn build_retention_plan(
     truncated: bool,
     settings: &AuditSettings,
     now: DateTime<Utc>,
-) -> RetentionPlan {
+) -> (RetentionPlan, Option<lifecycle::Protection>) {
     segments.sort_by(|left, right| {
         left.timestamp
             .cmp(&right.timestamp)
@@ -285,12 +301,19 @@ fn build_retention_plan(
     let total_bytes = segments
         .iter()
         .fold(0_u64, |total, segment| total.saturating_add(segment.bytes));
+    let protection = lifecycle::Protection::read(&segments, truncated);
+    let order = protection
+        .as_ref()
+        .map(|guard| guard.order(&segments))
+        .unwrap_or_default();
     let cutoff = now - Duration::days(i64::from(settings.retention_days));
     let mut candidates = Vec::new();
+    let mut selected = BTreeSet::new();
     let mut selected_bytes = 0_u64;
-
-    for segment in segments.iter().filter(|segment| !segment.active) {
-        if segment.timestamp < cutoff {
+    for index in &order {
+        let segment = &segments[*index];
+        if segment.timestamp < cutoff && protection.as_ref().unwrap().ready(*index, &selected) {
+            selected.insert(*index);
             selected_bytes = selected_bytes.saturating_add(segment.bytes);
             candidates.push(RetentionCandidate {
                 basename: segment.basename.clone(),
@@ -300,36 +323,34 @@ fn build_retention_plan(
             });
         }
     }
-
     let mut remaining = total_bytes.saturating_sub(selected_bytes);
-    if remaining > settings.max_disk_bytes {
-        for segment in segments.iter().filter(|segment| !segment.active) {
-            if remaining <= settings.max_disk_bytes {
-                break;
-            }
-            if candidates
-                .iter()
-                .any(|candidate| candidate.basename == segment.basename)
-            {
-                continue;
-            }
-            candidates.push(RetentionCandidate {
-                basename: segment.basename.clone(),
-                bytes: segment.bytes,
-                timestamp: segment.timestamp,
-                reason: RetentionReason::DiskCap,
-            });
-            selected_bytes = selected_bytes.saturating_add(segment.bytes);
-            remaining = remaining.saturating_sub(segment.bytes);
+    for index in order {
+        if remaining <= settings.max_disk_bytes {
+            break;
         }
+        if selected.contains(&index) || !protection.as_ref().unwrap().ready(index, &selected) {
+            continue;
+        }
+        let segment = &segments[index];
+        selected.insert(index);
+        selected_bytes = selected_bytes.saturating_add(segment.bytes);
+        remaining = remaining.saturating_sub(segment.bytes);
+        candidates.push(RetentionCandidate {
+            basename: segment.basename.clone(),
+            bytes: segment.bytes,
+            timestamp: segment.timestamp,
+            reason: RetentionReason::DiskCap,
+        });
     }
-
-    RetentionPlan {
-        total_bytes,
-        selected_bytes,
-        candidates,
-        truncated,
-    }
+    (
+        RetentionPlan {
+            total_bytes,
+            selected_bytes,
+            candidates,
+            truncated,
+        },
+        protection,
+    )
 }
 
 /// Recovers only active segments whose advisory lock can be acquired.
@@ -389,8 +410,14 @@ pub fn execute_retention(
         });
     };
     let recovered = recover_orphans(root)?;
-    let plan = plan_retention(root, settings, now)?;
-    let (segments, _) = discover_segments(root)?;
+    let (mut segments, truncated) = discover_segments(root)?;
+    segments.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.basename.cmp(&right.basename))
+    });
+    let (plan, protection) = build_retention_plan(segments.clone(), truncated, settings, now);
+    let mut removed = BTreeSet::new();
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
     for candidate in &plan.candidates {
@@ -401,13 +428,29 @@ pub fn execute_retention(
             failed.push(candidate.basename.clone());
             continue;
         };
+        let index = segments
+            .iter()
+            .position(|current| current.path == segment.path)
+            .unwrap();
+        if !protection
+            .as_ref()
+            .is_some_and(|guard| guard.can_remove(index, &segments, &removed))
+        {
+            failed.push(candidate.basename.clone());
+            continue;
+        }
         match std::fs::remove_file(&segment.path) {
-            Ok(()) => deleted.push(candidate.basename.clone()),
+            Ok(()) => {
+                removed.insert(index);
+                deleted.push(candidate.basename.clone());
+            }
             Err(_) => failed.push(candidate.basename.clone()),
         }
     }
     Ok(RetentionExecution {
-        status: if failed.is_empty() {
+        status: if protection.is_none() {
+            RetentionExecutionStatus::Blocked
+        } else if failed.is_empty() {
             RetentionExecutionStatus::Complete
         } else {
             RetentionExecutionStatus::Partial
@@ -443,18 +486,31 @@ fn discover_segments(root: &Path) -> Result<(Vec<SegmentInfo>, bool), CoshError>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok((Vec::new(), false));
         }
-        Err(error) => return Err(retention_io_error("read segments", &directory, error)),
+        Err(error) => return Err(discovery_io_error("read segments", &directory, error)),
     };
     let mut paths = BTreeSet::new();
     let mut truncated = false;
-    for date in dates.flatten() {
-        if !date.file_type().is_ok_and(|kind| kind.is_dir()) {
+    for date in dates {
+        let date =
+            date.map_err(|error| discovery_io_error("read segment date", &directory, error))?;
+        let kind = date
+            .file_type()
+            .map_err(|error| discovery_io_error("inspect segment date", &date.path(), error))?;
+        if !kind.is_dir() {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(date.path()) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        let date_path = date.path();
+        let entries = std::fs::read_dir(&date_path)
+            .map_err(|error| discovery_io_error("read segment date", &date_path, error))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| discovery_io_error("read segment entry", &date_path, error))?;
+            let kind = entry.file_type().map_err(|error| {
+                discovery_io_error("inspect segment entry", &entry.path(), error)
+            })?;
+            if !kind.is_file() {
+                continue;
+            }
             let basename = entry.file_name().to_string_lossy().into_owned();
             let active = basename.ends_with(".jsonl.active");
             if !active && !basename.ends_with(".jsonl") {
@@ -474,18 +530,15 @@ fn discover_segments(root: &Path) -> Result<(Vec<SegmentInfo>, bool), CoshError>
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let active = basename.ends_with(".jsonl.active");
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata)
-                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
-            {
-                metadata
-            }
-            _ => continue,
-        };
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| discovery_io_error("inspect segment", &path, error))?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
         let timestamp = metadata
             .modified()
             .map(DateTime::<Utc>::from)
-            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+            .map_err(|error| discovery_io_error("read segment timestamp", &path, error))?;
         segments.push(SegmentInfo {
             path,
             basename,
@@ -501,7 +554,7 @@ fn open_existing_private(path: &Path) -> Result<File, CoshError> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
     #[cfg(unix)]
-    options.custom_flags(nix::libc::O_NOFOLLOW);
+    options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
     let file = options
         .open(path)
         .map_err(|error| retention_io_error("open active segment", path, error))?;
@@ -518,6 +571,10 @@ fn has_partial_tail(file: &mut File) -> std::io::Result<bool> {
     let mut byte = [0_u8; 1];
     file.read_exact(&mut byte)?;
     Ok(byte[0] != b'\n')
+}
+
+fn discovery_io_error(operation: &str, path: &Path, error: std::io::Error) -> CoshError {
+    retention_error(retention_io_error(operation, path, error).message)
 }
 
 fn retention_io_error(operation: &str, path: &Path, error: std::io::Error) -> CoshError {
@@ -541,6 +598,129 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[test]
+    fn scheduled_event_succeeds_without_writer_contention() {
+        let root = private_root();
+        emit_retention_event(
+            root.path(),
+            AuditComponentName::CoshCore,
+            &RetentionExecution::default(),
+            &AuditSettings::default(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduled_retention_records_success_after_persisting_event() {
+        let root = private_root();
+        schedule_retention(
+            root.path().to_path_buf(),
+            AuditSettings::default(),
+            AuditComponentName::CoshCore,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let state = loop {
+            if let Some(state) = read_state(root.path()).unwrap() {
+                if state.last_retention_success.is_some() {
+                    break state;
+                }
+                assert!(state.last_retention_error.is_none(), "{state:?}");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "scheduler did not finish"
+            );
+            std::thread::yield_now();
+        };
+        assert!(state.last_retention_error.is_none());
+        let (segments, _) = discover_segments(root.path()).unwrap();
+        assert_eq!(segments.len(), 1);
+        assert!(!segments[0].active);
+        let event: AuditEventV1 =
+            serde_json::from_slice(&std::fs::read(&segments[0].path).unwrap()).unwrap();
+        assert_eq!(event.event_type.as_str(), "retention.pruned");
+        assert_eq!(event.data()["operation"], "scheduled_retention");
+        assert_eq!(event.outcome.status, AuditOutcomeStatus::Success);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scheduled_event_serializes_with_startup_writer_admission() {
+        let root = private_root();
+        let mut startup =
+            AuditSegmentWriter::create(root.path(), AuditComponentName::CoshCore).unwrap();
+        emit_retention_event(
+            root.path(),
+            AuditComponentName::CoshCore,
+            &RetentionExecution::default(),
+            &AuditSettings::default(),
+        )
+        .unwrap();
+        let (segments, _) = discover_segments(root.path()).unwrap();
+        let bytes = std::fs::read(&segments[0].path).unwrap();
+        let mut event: AuditEventV1 = serde_json::from_slice(&bytes).unwrap();
+        startup
+            .append(&mut event, AuditDurability::Ordinary)
+            .unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join("v1/write-budget.lock"))
+            .unwrap();
+        let serialization = super::super::store::serialize_writes().unwrap();
+        let reservation = Flock::lock(file, FlockArg::LockExclusive).unwrap();
+        let path = root.path().to_path_buf();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(nix::unistd::gettid()).unwrap();
+            let result = emit_retention_event(
+                &path,
+                AuditComponentName::CoshCore,
+                &RetentionExecution::default(),
+                &AuditSettings::default(),
+            );
+            done_tx.send(result).unwrap();
+        });
+        let tid = started_rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut waited = false;
+        let early = loop {
+            if let Ok(result) = done_rx.try_recv() {
+                break Some(result);
+            }
+            let syscall = std::fs::read_to_string(format!("/proc/self/task/{tid}/syscall"))
+                .unwrap_or_default();
+            let mut fields = syscall.split_whitespace();
+            let number = fields.next().and_then(|n| n.parse::<i64>().ok());
+            let operation = fields
+                .nth(1)
+                .and_then(|n| i64::from_str_radix(n.trim_start_matches("0x"), 16).ok());
+            if number == Some(nix::libc::SYS_futex)
+                && operation.is_some_and(|op| matches!(op & 127, 0 | 9))
+            {
+                waited = true;
+                break None;
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::yield_now();
+        };
+        drop(reservation);
+        drop(serialization);
+        let result = match early {
+            Some(result) => result,
+            None => done_rx.recv().unwrap(),
+        };
+        worker.join().unwrap();
+        assert!(result.is_ok(), "real retention emitter error: {result:?}");
+        assert!(waited, "scheduled event did not wait for writer admission");
+        startup.close().unwrap();
+    }
+
+    #[cfg(unix)]
     fn private_root() -> crate::audit::AuditTestDir {
         let root = crate::audit::AuditTestDir::create();
         ensure_private_dir(&root.path().join("v1")).unwrap();
@@ -554,8 +734,8 @@ mod tests {
         let root = private_root();
         let date = root.path().join("v1/segments/2020-01-01");
         ensure_private_dir(&date).unwrap();
-        std::fs::write(date.join("old.jsonl"), vec![0_u8; 10]).unwrap();
-        std::fs::write(date.join("live.jsonl.active"), vec![0_u8; 100]).unwrap();
+        std::fs::write(date.join("old.jsonl"), vec![b'\n'; 10]).unwrap();
+        std::fs::write(date.join("live.jsonl.active"), vec![b'\n'; 100]).unwrap();
         #[cfg(unix)]
         for path in [date.join("old.jsonl"), date.join("live.jsonl.active")] {
             use std::os::unix::fs::PermissionsExt;

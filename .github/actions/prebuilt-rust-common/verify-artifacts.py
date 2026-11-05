@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import re
 import sys
 import tarfile
+import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +93,8 @@ def expected_files(
     component_name: str, version: str, target_os: str, target_arch: str
 ) -> set[str]:
     """Return the exact four release asset names for one target."""
-    archive = f"{component_name}-{version}-{target_os}-{target_arch}.tar.gz"
+    extension = "zip" if target_os == "windows" else "tar.gz"
+    archive = f"{component_name}-{version}-{target_os}-{target_arch}.{extension}"
     return {
         archive,
         f"{archive}.sha256",
@@ -121,16 +125,26 @@ def validate_directory(
             f"missing={missing or 'none'} extra={extra or 'none'}"
         )
 
-    archive_name = f"{component_name}-{version}-{target_os}-{target_arch}.tar.gz"
+    extension = "zip" if target_os == "windows" else "tar.gz"
+    archive_name = f"{component_name}-{version}-{target_os}-{target_arch}.{extension}"
     archive = directory / archive_name
     archive_sha = sha256_file(archive)
     if read_sidecar(Path(f"{archive}.sha256"), archive.name) != archive_sha:
         die(f"archive checksum mismatch: {archive}")
     try:
-        with tarfile.open(archive, "r:gz") as package:
-            if not package.getmembers():
-                die(f"archive is empty: {archive}")
-    except (OSError, tarfile.TarError) as error:
+        if target_os == "windows":
+            with zipfile.ZipFile(archive) as package:
+                if not package.namelist() or package.testzip() is not None:
+                    die(f"archive is empty or corrupt: {archive}")
+        else:
+            with gzip.open(archive, "rb") as compressed:
+                with tarfile.open(fileobj=compressed, mode="r:") as package:
+                    if not package.getmembers():
+                        die(f"archive is empty: {archive}")
+                # Tar end markers can precede gzip's CRC/size trailer and later members.
+                while compressed.read(1024 * 1024):
+                    pass
+    except (OSError, EOFError, zlib.error, tarfile.TarError, zipfile.BadZipFile) as error:
         die(f"cannot read archive {archive}: {error}")
 
     sbom = Path(f"{archive}.cdx.json")
@@ -147,7 +161,8 @@ def validate_directory(
         die(f"SBOM is not CycloneDX 1.6: {sbom}")
     metadata = data.get("metadata")
     component = metadata.get("component") if isinstance(metadata, dict) else None
-    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-tar"
+    archive_format = "zip" if target_os == "windows" else "tar"
+    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-{archive_format}"
     if not isinstance(metadata, dict) or not isinstance(component, dict):
         die(f"SBOM is missing metadata.component: {sbom}")
     if (

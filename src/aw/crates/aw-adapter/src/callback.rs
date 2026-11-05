@@ -6,6 +6,15 @@ use crate::{
 };
 use serde_json::Value;
 
+/// Identify Adapter-owned correlation when the public callback has no native call ID.
+///
+/// This metadata labels task and invocation identities; it grants no execution authority.
+pub fn correlation_source(event: &Value) -> Option<&'static str> {
+    (event["agent"]["adapter"] == "claude-sdk"
+        && event["native"]["aw_source"] == crate::adapters::claude_mcp::SOURCE)
+        .then_some(crate::adapters::claude_mcp::SOURCE)
+}
+
 /// Whether the native bridge explicitly closes an abandoned event.
 pub fn supports_event_close(adapter: &str) -> bool {
     adapter == "agentscope"
@@ -52,6 +61,12 @@ pub fn normalize(
         if let Some(projection) = crate::projection::project(adapter_id, &snapshot) {
             project_within_limit(&mut bound, projection)?;
         }
+        if completion["phase"] == "observation" {
+            // Native completion uses policy aliases. Retain the original name
+            // bound by replacement; service validation still checks the snapshot,
+            // canonical name, input and completion digest before dispatch.
+            normalized["tool"]["native_name"] = bound["tool"]["native_name"].clone();
+        }
         normalized["native"]["aw_completion"] = serde_json::json!({
             "phase":completion["phase"], "snapshot":bound, "input":snapshot_input
         });
@@ -85,11 +100,13 @@ pub fn stops_before(adapter: &str, output: Option<&HookOutput>, on_error: &str) 
                 _ => on_error == "block",
             }
         }
-        ("claude-sdk" | "agentscope" | "qwenpaw", Some(output)) => {
+        ("qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw", Some(output)) => {
             matches!(output.exit, Exit::Code(2))
                 || (on_error == "block" && !matches!(output.exit, Exit::Code(0)))
         }
-        ("pi" | "openclaw" | "claude-sdk" | "agentscope" | "qwenpaw", None) => on_error == "block",
+        ("pi" | "openclaw" | "qoder-sdk" | "claude-sdk" | "agentscope" | "qwenpaw", None) => {
+            on_error == "block"
+        }
         _ => false,
     }
 }
@@ -115,11 +132,49 @@ pub fn response(
     native: &Value,
     diagnostics: &mut dyn std::io::Write,
 ) -> Result<HookOutput> {
-    if !matches!(on_error, "report" | "block") {
+    if !(matches!(on_error, "report" | "block")
+        || (event == "tool.after" && on_error == "withhold_result"))
+    {
         return Err("invalid failure action".into());
     }
     if output["status"] != "ok" {
+        // Claude recovery requires a completed, audited Provider fault. Scope/RPC,
+        // native directive, cancellation and cleanup errors remain failures.
+        let claude_report = adapter_id == "claude-sdk"
+            && output["status"] == "error"
+            && output["kind"] == "provider"
+            && output["effects"] == serde_json::json!([])
+            && on_error == "report"
+            && (matches!(
+                output["failure"].as_str(),
+                Some("exit" | "incomplete_input" | "provider" | "protocol")
+            ) || (output["failure"] == "transport"
+                && output["failure_detail"] == "deadline_exceeded"));
+        if (adapter_id == "pi" || claude_report)
+            && output["failure_action"] == "report"
+            && event == "tool.after"
+        {
+            let failure = output["failure"].as_str().unwrap_or("unknown");
+            writeln!(
+                diagnostics,
+                "aw step failed ({failure}); recorded as report in the instance audit"
+            )
+            .and_then(|_| std::io::Write::flush(diagnostics))
+            .ok();
+            return Ok(adapter.reply(false));
+        }
         return Err("step execution failed; query the instance audit for metadata".into());
+    }
+    if output["kind"] == "skipped" {
+        if output["effects"] != serde_json::json!([])
+            || output.get("native").is_some()
+            || !output["failure"].is_null()
+            || !output["failure_action"].is_null()
+            || output["call"].get("process") != Some(&Value::Null)
+        {
+            return Err("invalid skipped step response".into());
+        }
+        return Ok(adapter.reply(false));
     }
     if output["kind"] == "native" {
         let stdout: Vec<u8> = serde_json::from_value(output["native"]["stdout"].clone())?;
@@ -131,9 +186,9 @@ pub fn response(
             (None, Some(signal @ 1..=64)) => Exit::Signal(signal as i32),
             _ => return Err("invalid native exit status".into()),
         };
-        let claude_before = adapter_id == "claude-sdk" && event == "tool.before";
+        let sdk_before = matches!(adapter_id, "claude-sdk" | "qoder-sdk") && event == "tool.before";
         // Validate before success so fail-closed vetoes use the existing event closure.
-        if claude_before {
+        if sdk_before {
             diagnostics.write_all(&stderr)?;
             diagnostics.flush()?;
             if code == Some(2) {
@@ -146,7 +201,7 @@ pub fn response(
                 return Ok(reply);
             }
         }
-        if claude_before && code == Some(0) {
+        if sdk_before && code == Some(0) {
             let value: Value =
                 serde_json::from_slice(if stdout.iter().all(u8::is_ascii_whitespace) {
                     b"{}"
@@ -175,7 +230,7 @@ pub fn response(
         return Ok(HookOutput {
             exit,
             stdout,
-            stderr: if claude_before { Vec::new() } else { stderr },
+            stderr: if sdk_before { Vec::new() } else { stderr },
         });
     }
     if output["kind"] != "provider" {
@@ -206,8 +261,8 @@ pub fn response(
     }
     let blocked = effects.iter().any(|effect| effect["type"] == "block");
     if blocked {
-        if event != "tool.before" {
-            return Err("block is unsupported after a tool".into());
+        if !matches!(event, "input.submit" | "tool.before") {
+            return Err("block requires a submission or pre-tool event".into());
         }
         let mut reply = adapter.reply(true);
         if let Some(text) = effects
@@ -258,6 +313,232 @@ pub fn readiness_degraded(adapter: &str, reason: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn withholding_allows_success_and_propagates_execution_failure() {
+        let adapter = adapter::select("qwenpaw").unwrap();
+        let success = json!({"kind":"skipped", "status":"ok", "effects":[],
+            "failure":null, "failure_action":null, "call":{"process":null}});
+        let response_for = |event, output| {
+            response(
+                adapter,
+                event,
+                "withhold_result",
+                output,
+                "qwenpaw",
+                &json!({}),
+                &mut Vec::new(),
+            )
+        };
+        assert!(matches!(
+            response_for("tool.after", success.clone()).unwrap().exit,
+            Exit::Code(0)
+        ));
+        assert!(response_for("tool.before", success).is_err());
+        assert!(response_for(
+            "tool.after",
+            json!({"status":"error",
+            "failure":"provider", "failure_action":"withhold_result"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn report_faults_return_a_neutral_reply_for_pi_and_claude() {
+        let adapter = adapter::select("pi").unwrap();
+        let fault = json!({"kind":"provider", "status":"error",
+            "failure":"provider", "failure_action":"report",
+            "effects":[], "call":{"process":null}});
+        let mut diagnostics = Vec::new();
+        let output = response(
+            adapter,
+            "tool.after",
+            "report",
+            fault,
+            "pi",
+            &json!({"tool_call":{"name":"read_file","input":"{}"},
+                "tool_response":{"content":[{"type":"text","text":"original"}]}}),
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert!(matches!(output.exit, Exit::Code(0)));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+        let claude = adapter::select("claude-sdk").unwrap();
+        for failure in [
+            "exit",
+            "incomplete_input",
+            "provider",
+            "protocol",
+            "transport",
+        ] {
+            let fault = json!({"kind":"provider", "status":"error",
+                "failure":failure, "failure_action":"report", "effects":[],
+                "failure_detail":"deadline_exceeded"});
+            let output = response(
+                claude,
+                "tool.after",
+                "report",
+                fault.clone(),
+                "claude-sdk",
+                &json!({}),
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(matches!(output.exit, Exit::Code(0)));
+            assert!(output.stdout.is_empty());
+            for (key, value) in [
+                ("failure_action", json!("block")),
+                ("failure_action", json!("withhold_result")),
+                ("status", json!("unknown")),
+                ("kind", json!("native")),
+                ("effects", json!([{"type":"block"}])),
+                ("failure", json!("native_environment")),
+                ("failure", json!("unknown")),
+            ] {
+                let mut invalid = fault.clone();
+                invalid[key] = value;
+                assert!(response(
+                    claude,
+                    "tool.after",
+                    "report",
+                    invalid,
+                    "claude-sdk",
+                    &json!({}),
+                    &mut Vec::new()
+                )
+                .is_err());
+            }
+            for (event, action) in [("tool.before", "report"), ("tool.after", "block")] {
+                assert!(response(
+                    claude,
+                    event,
+                    action,
+                    fault.clone(),
+                    "claude-sdk",
+                    &json!({}),
+                    &mut Vec::new()
+                )
+                .is_err());
+            }
+        }
+        for detail in [
+            Value::Null,
+            json!("cancelled"),
+            json!("cleanup"),
+            json!("other"),
+        ] {
+            assert!(response(
+                claude,
+                "tool.after",
+                "report",
+                json!({
+                    "kind":"provider", "status":"error", "failure":"transport",
+                    "failure_detail":detail, "failure_action":"report", "effects":[]
+                }),
+                "claude-sdk",
+                &json!({}),
+                &mut Vec::new()
+            )
+            .is_err());
+        }
+        // Before-tool and block/withhold faults stay fail-closed.
+        let mut diagnostics = Vec::new();
+        assert!(response(
+            adapter,
+            "tool.before",
+            "report",
+            json!({"status":"error", "failure":"provider", "failure_action":"report"}),
+            "pi",
+            &json!({}),
+            &mut diagnostics,
+        )
+        .is_err());
+        for (event, on_error) in [("tool.after", "block"), ("tool.after", "withhold_result")] {
+            let mut diagnostics = Vec::new();
+            assert!(response(
+                adapter,
+                event,
+                on_error,
+                json!({"status":"error", "failure":"provider", "failure_action":on_error}),
+                "pi",
+                &json!({}),
+                &mut diagnostics,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn skipped_steps_are_neutral_for_every_adapter_and_both_tool_events() {
+        let skipped = json!({"kind":"skipped", "status":"ok", "effects":[],
+            "failure":null, "failure_action":null, "call":{"process":null}});
+        for profile in adapter::catalog::PROFILES {
+            for event in ["tool.before", "tool.after"] {
+                let native = json!({"tool_result":{"text":"original", "isError":true},
+                    "permissionDecision":"deny"});
+                let mut diagnostics = Vec::new();
+                let output = response(
+                    profile.adapter,
+                    event,
+                    "block",
+                    skipped.clone(),
+                    profile.name,
+                    &native,
+                    &mut diagnostics,
+                )
+                .unwrap();
+                let neutral = profile.adapter.reply(false);
+                assert_eq!(output.stdout, neutral.stdout, "{} {event}", profile.name);
+                assert_eq!(output.stderr, neutral.stderr);
+                assert!(matches!(output.exit, Exit::Code(0)));
+                assert!(!stops_before(profile.name, Some(&output), "block"));
+                assert!(diagnostics.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_skip_responses_cannot_hide_effects_failures_or_processes() {
+        let skipped = json!({"kind":"skipped", "status":"ok", "effects":[],
+            "failure":null, "failure_action":null, "call":{"process":null}});
+        for (pointer, value) in [
+            ("/effects", json!([{"type":"block"}])),
+            ("/effects", json!(null)),
+            ("/status", json!("error")),
+            ("/failure", json!("transport")),
+            ("/failure_action", json!("block")),
+            ("/call/process", json!({"exit_code":0})),
+            ("/call", json!({})),
+        ] {
+            let mut invalid = skipped.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                response(
+                    adapter::select("qoder").unwrap(),
+                    "tool.before",
+                    "report",
+                    invalid,
+                    "qoder",
+                    &Value::Null,
+                    &mut Vec::new()
+                )
+                .is_err(),
+                "{pointer}"
+            );
+        }
+        let mut invalid = skipped;
+        invalid["native"] = Value::Null;
+        assert!(response(
+            adapter::select("qoder").unwrap(),
+            "tool.before",
+            "report",
+            invalid,
+            "qoder",
+            &Value::Null,
+            &mut Vec::new()
+        )
+        .is_err());
+    }
 
     #[test]
     fn pi_early_close_uses_json_denial_even_with_report_errors() {
@@ -349,7 +630,7 @@ mod tests {
 
     #[test]
     fn sdk_early_close_preserves_denial_exit_and_failure_policy() {
-        for adapter in ["agentscope", "claude-sdk", "qwenpaw"] {
+        for adapter in ["agentscope", "claude-sdk", "qwenpaw", "qoder-sdk"] {
             for (exit, on_error, expected) in [
                 (Exit::Code(0), "block", false),
                 (Exit::Code(0), "report", false),

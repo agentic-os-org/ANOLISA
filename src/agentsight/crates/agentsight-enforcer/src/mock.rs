@@ -15,8 +15,17 @@ use agentsight_enforcement_protocol::{
 };
 use uuid::Uuid;
 
+use crate::backend::{structured_file_protection_unsupported, validate_apply_policy_payload};
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
+
+fn validate_mock_policy_payload(request: &ApplyPolicy) -> Result<(), BackendError> {
+    validate_apply_policy_payload(request)?;
+    if request.file_protection_policy.is_some() {
+        return Err(structured_file_protection_unsupported());
+    }
+    Ok(())
+}
 
 /// In-memory single-binding backend that performs no kernel operations.
 pub struct MockBackend {
@@ -48,6 +57,7 @@ impl MockBackend {
         request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<Binding, BackendError> {
+        validate_mock_policy_payload(&request)?;
         let mut bindings = self.bindings();
         let mut credential_policies = self.credential_policies();
         if let Some(existing) = bindings.get(&request.binding_id) {
@@ -303,6 +313,18 @@ impl EnforcementBackend for MockBackend {
                 (target, Some(policy))
             }
         };
+        if let Err(error) = validate_mock_policy_payload(&target_request) {
+            return Ok(if actual.as_ref() == Some(&request.expected) {
+                ReplaceOutcome::SourceRetained {
+                    binding: request.expected,
+                    code: crate::backend::backend_failure_code(&error),
+                }
+            } else {
+                ReplaceOutcome::Conflict {
+                    code: ReplaceFailureCode::BindingConflict,
+                }
+            });
+        }
         let target = Binding {
             request: target_request,
             state: BindingState::Enforced,
@@ -395,6 +417,7 @@ impl EnforcementBackend for MockBackend {
 fn mock_validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode {
     match error {
         ReplaceValidationError::CredentialPolicy(_)
+        | ReplaceValidationError::PolicyPayload(_)
         | ReplaceValidationError::SourcePolicySnapshot(_) => ReplaceFailureCode::CompileFailure,
         ReplaceValidationError::SameBindingId
         | ReplaceValidationError::SourceNotEnforced
@@ -446,6 +469,7 @@ fn mock_credential_request(
             policy_revision: policy.revision.to_string(),
             policy_dsl,
             policy_mode: Some(policy.mode),
+            file_protection_policy: None,
         },
         policy,
     ))
@@ -563,8 +587,9 @@ fn unix_epoch_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use agentsight_enforcement_protocol::{
-        Effect, ReplaceFailureCode, ReplaceOutcome, ReplacePolicy, ReplacementPolicy,
-        ReplacementSource,
+        Effect, FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
+        FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections, ReplaceFailureCode,
+        ReplaceOutcome, ReplacePolicy, ReplacementPolicy, ReplacementSource,
     };
 
     use super::*;
@@ -580,7 +605,71 @@ mod tests {
             policy_revision: "revision".into(),
             policy_dsl: "label AGENT".into(),
             policy_mode: None,
+            file_protection_policy: None,
         }
+    }
+
+    fn structured_request() -> ApplyPolicy {
+        let mut request = request();
+        request.policy_dsl.clear();
+        request.file_protection_policy = Some(FileProtectionPolicy {
+            version: FILE_PROTECTION_POLICY_VERSION,
+            topology_mode: FileProtectionTopologyMode::StaticAtApply,
+            targets: vec![FileProtectionTarget {
+                path: "/fixture/protected".into(),
+                kind: FileProtectionTargetKind::DirectoryTree,
+                protections: FileProtections {
+                    delete: true,
+                    ordinary_write: false,
+                },
+                exclusions: Vec::new(),
+            }],
+        });
+        request
+    }
+
+    #[test]
+    fn replace_retains_source_when_replacement_payload_is_unsupported() {
+        let backend = MockBackend::new();
+        let source = backend.apply(request()).expect("legacy apply");
+
+        let outcome = backend
+            .replace(replacement(source.clone(), structured_request()))
+            .expect("payload validation failure is reported as an outcome");
+
+        assert!(matches!(
+            outcome,
+            ReplaceOutcome::SourceRetained {
+                code: ReplaceFailureCode::CompileFailure,
+                ..
+            }
+        ));
+        assert_eq!(
+            EnforcementBackend::bindings(&backend)
+                .expect("bindings should remain queryable")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn mock_apply_rejects_structured_policy_without_creating_binding() {
+        let backend = MockBackend::new();
+
+        let error = backend
+            .apply(structured_request())
+            .expect_err("mock must not acknowledge unimplemented structured policy");
+
+        assert!(matches!(
+            error,
+            BackendError::CompileFailure(message)
+                if message == "structured file protection policies are not implemented by this backend"
+        ));
+        assert!(
+            EnforcementBackend::bindings(&backend)
+                .expect("bindings should remain queryable")
+                .is_empty()
+        );
     }
 
     fn violation(binding_id: Uuid) -> ViolationEvent {
@@ -695,6 +784,28 @@ mod tests {
         assert!(
             receiver.recv_timeout(Duration::from_millis(20)).is_ok(),
             "a different port must not be exempt"
+        );
+    }
+
+    #[test]
+    fn replace_retains_source_when_structured_target_is_unimplemented() {
+        let backend = MockBackend::new();
+        let source = backend.apply(request()).expect("source should apply");
+
+        let outcome = backend
+            .replace(replacement(source.clone(), structured_request()))
+            .expect("unsupported replacement should have a typed outcome");
+
+        assert_eq!(
+            outcome,
+            ReplaceOutcome::SourceRetained {
+                binding: source.clone(),
+                code: ReplaceFailureCode::CompileFailure,
+            }
+        );
+        assert_eq!(
+            EnforcementBackend::bindings(&backend).expect("source binding should remain queryable"),
+            vec![source]
         );
     }
 

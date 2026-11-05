@@ -2,7 +2,7 @@
 
 [中文版](../../zh/adapters/agentscope-adapter.md)
 
-The `agentscope` Adapter targets AgentScope **2.0.6** on **Python >=3.11**
+The `agentscope` Adapter has a verified baseline of AgentScope **2.0.6** on **Python >=3.11**
 ([SDK requirement](https://pypi.org/project/agentscope/2.0.6/)) and explicitly composed
 public `Agent` factories. It shares AW's local service, binding, bounded `aw hook`
 client, foreground launcher, readiness and generated-file cleanup. It does not
@@ -13,8 +13,9 @@ identify the SDK as QwenPaw or depend on QwenPaw's plugin loader.
 `aw run --config FILE --agent TARGET` selects the configured `adapter: agentscope`.
 `argv` starts with the application Python interpreter, followed by a `.py` script
 or `-m MODULE` and application arguments. Interpreter override switches such as
-`-I`, `-E` and `-c` are rejected. The same interpreter must report
-`importlib.metadata.version("agentscope") == "2.0.6"` during the bounded preflight.
+`-I`, `-E` and `-c` are rejected. The bounded preflight records
+`importlib.metadata.version("agentscope")` from the same interpreter. Native
+imports and factory registration verify the required middleware interfaces.
 
 AW supplies an owned `aw_agentscope.py` import path and `AW_NATIVE_CONFIG` to the
 foreground worker. The application explicitly changes its public factory:
@@ -81,6 +82,18 @@ permission checks and immediately outside `Toolkit.call_tool`.
   then compression changes the final model-visible text. Reported callback failures
   do not skip compression. All steps share one deadline and once-only claims;
   event budgets remain **1..55000 ms**.
+- A strict after step (`on_error: withhold_result`) gates the completed response.
+  Transport failure, nonzero Hook exit and undecodable Hook stdout mark the
+  invocation; the outermost AW wrapper then substitutes the unchecked native
+  result with a `ToolResponse(state=ERROR)` placeholder once every after hook
+  has unwound. The model never receives the original text, while outer after
+  hooks keep observing the correlated original payload they were admitted
+  against, whatever the hook order or `replace_result` composition. Admission
+  grants this failure action only on SDK versions whose bridge supports
+  completed-response replacement. Intermediate `ToolChunk` frames are not
+  buffered: the AgentScope middleware seam exposes no stream gate, so partial
+  chunks of a failing tool remain visible to streaming consumers outside the
+  completed-response boundary.
 - Generated hook configuration grants replacement authority only to the final
   admitted structured replacement step. Native and observation Hook stdout cannot
   replace the result, so every callback keeps the same correlated response until
@@ -166,9 +179,22 @@ success is separate from business failure encoded in returned content.
 This first contract supports one foreground Python worker, not a forking
 Gunicorn supervisor, automatic attachment in child workers or remote sandboxes.
 A long-lived business service needs explicit per-worker/session launch and
-binding ownership. The local service retains at most 1024 event correlations per
-instance (roughly 512 before/after pairs) until release; session IDs alone do not
-reset that budget. No remote command cancellation, hot reload or OS isolation
+binding ownership. The bridge opens one task scope and enables the
+invocation ledger before its first hook event, closing it at process exit:
+each tool call registers under its invocation id with a strictly increasing
+sequence and finishes when its phases complete, so correlation capacity is
+recycled per call and long histories no longer accumulate toward the
+1024-event instance limit. Registration decodes the SDK-effective arguments
+with the same pinned parser as hook evaluation, so the registered digest and
+the normalized hook input always agree; scope opening and ledger deliveries
+are serialized within the process, so concurrent first calls share one scope
+and one sequence. Replayed registrations are rejected by sequence. Hook
+transport and cleanup retain the invocation's registration scope; a failed
+owner reports a Hook failure under the configured policy and is never rerouted
+to the legacy root binding or a replacement scope. Only calls without a
+registered scope owner use the legacy root-binding path. Subsequent calls may
+open a fresh scope after pending cleanup succeeds. Session IDs alone never
+reset any budget. No remote command cancellation, hot reload or OS isolation
 is implied.
 
 The existing `native-hook/v1alpha1`, structured Provider and default Boolean Hook
@@ -186,8 +212,8 @@ uses the existing sec-core `scan_code`/`observe_tool` and Tokenless
 full retry arguments to the model. A new call must pass native permissions and
 sec-core again. Attributed RTK ownership comes from the new executed arguments,
 not the rejected call ID, and prevents double compression. Keep the exact Toolkit
-tool names and input pointers in the sec-core mapping. RTK must be installed
-separately; `aw-package configure` continues to target Qoder/OpenClaw.
+tool names and input pointers in the sec-core mapping. `aw config init` continues
+to target Qoder/OpenClaw.
 
 ## Validation
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -259,10 +260,14 @@ class Inputs:
             command = ["cargo", "build", "--release", "--locked"]
             command.extend(["--lib"] if self.ffi else ["--bin", "agentsight"])
             log = Path(source["binary"]).parent / "build.log"
-            if run(command, log, cwd=source["component"], env=env):
-                raise RuntimeError(f"release build failed; see {log}")
-            name = "libagentsight.so" if self.ffi else "agentsight"
-            shutil.copy2(cache / "target/release" / name, Path(source["binary"]).parent / name)
+            cache.mkdir(parents=True, exist_ok=True)
+            # Cargo's own lock ends before the output is copied to this run.
+            with (cache / "build.lock").open("a+b") as build_lock:
+                fcntl.flock(build_lock, fcntl.LOCK_EX)
+                if run(command, log, cwd=source["component"], env=env):
+                    raise RuntimeError(f"release build failed; see {log}")
+                name = "libagentsight.so" if self.ffi else "agentsight"
+                shutil.copy2(cache / "target/release" / name, Path(source["binary"]).parent / name)
             source["build_command"] = command
         if self.ffi:
             directory = Path(source["binary"]).parent

@@ -129,14 +129,9 @@ class CodexRewriteHookPayloadShapeTest(HookPayloadShapeMixin, unittest.TestCase)
     script = CODEX_REWRITE_SCRIPT
 
     def hook_env(self) -> dict:
-        # The version gate runs before the payload parse; satisfy it with
-        # a stub rtk advertising a supported version.
-        self.write_stub(
-            "rtk",
-            "#!/bin/sh\n"
-            "if [ \"$1\" = \"--version\" ]; then echo 'rtk 0.43.0'; exit 0; fi\n"
-            "exit 1\n",
-        )
+        # The hook skips before reading stdin when no tokenless binary
+        # resolves; a PATH stub keeps the parse reachable.
+        self.write_stub("tokenless", "#!/bin/sh\nexit 1\n")
         return self.build_env(path_dir=Path(self.tmpdir.name))
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -213,7 +214,8 @@ async def main() -> None:
         shell_events = [event async for event in agent._acting(shell_call)]
         assert len(shell_events) == 2
         assert len(_SHELL_COMMANDS) == 1
-        assert str(integration.middleware.sdk._rtk_path) in _SHELL_COMMANDS[0]
+        # The CLI names itself by its resolved path.
+        assert os.path.realpath(integration.middleware.sdk._rtk_launcher) in _SHELL_COMMANDS[0]
         assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
         assert f"TOKENLESS_SESSION_ID={agent.state.session_id}" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]

@@ -375,7 +375,8 @@ def normalize_sbom(
     if not isinstance(metadata, dict) or not isinstance(root, dict):
         die("cargo-sbom output is missing metadata.component")
 
-    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-tar"
+    archive_format = "zip" if target_os == "windows" else "tar"
+    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-{archive_format}"
     root.update(
         {
             "type": "application",
@@ -514,6 +515,7 @@ def main() -> int:
         ("linux", "aarch64"): "aarch64-unknown-linux-gnu",
         ("macos", "aarch64"): "aarch64-apple-darwin",
         ("macos", "x86_64"): "x86_64-apple-darwin",
+        ("windows", "x86_64"): "x86_64-pc-windows-msvc",
     }.get((args.target_os, args.target_arch))
     if expected_target is None or args.target != expected_target:
         die("target triple does not match the requested OS and architecture")

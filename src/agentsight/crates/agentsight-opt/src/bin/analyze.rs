@@ -1,7 +1,7 @@
 //! Standalone CLI for running optimization analysis on an ATIF trajectory file.
 //!
 //! Usage:
-//!   analyze <trajectory.json> --dim <perf|cost|accuracy>
+//!   analyze <trajectory.json> --dim <perf|cost|accuracy> [--stats-only]
 //!
 //! Environment variables (required for LLM-backed dimensions):
 //!   OPENAI_API_KEY   — LLM API key
@@ -16,12 +16,15 @@ use agentsight_opt::{AnalyzePipeline, AtifTrajectory, LlmClient};
 
 fn usage() {
     eprintln!(
-        "Usage: analyze <trajectory.json> --dim <perf|cost|accuracy>\n\
+        "Usage: analyze <trajectory.json> --dim <perf|cost|accuracy> [--stats-only]\n\
          \n\
          Dimensions:\n\
          \x20 perf      Performance stats + LLM strategy selection\n\
          \x20 cost      Cost stats + LLM waste identification\n\
          \x20 accuracy  LLM accuracy attribution\n\
+         \n\
+         Options:\n\
+         \x20 --stats-only  Local perf/cost statistics; no LLM requests or API key\n\
          \n\
          Environment variables:\n\
          \x20 OPENAI_API_KEY   LLM API key (required)\n\
@@ -30,7 +33,7 @@ fn usage() {
     );
 }
 
-fn parse_args() -> Result<(String, String)> {
+fn parse_args() -> Result<(String, String, bool)> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
@@ -40,10 +43,12 @@ fn parse_args() -> Result<(String, String)> {
 
     let mut file_path = None;
     let mut dim = None;
+    let mut stats_only = false;
     let mut i = 0;
 
     while i < args.len() {
         match args[i].as_str() {
+            "--stats-only" => stats_only = true,
             "--dim" => {
                 i += 1;
                 if i >= args.len() {
@@ -72,7 +77,11 @@ fn parse_args() -> Result<(String, String)> {
         other => bail!("unknown dimension '{other}', expected: perf, cost, accuracy"),
     }
 
-    Ok((file_path, dim))
+    if stats_only && dim == "accuracy" {
+        bail!("--stats-only supports perf and cost; accuracy requires LLM analysis");
+    }
+
+    Ok((file_path, dim, stats_only))
 }
 
 #[tokio::main]
@@ -84,13 +93,24 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let (file_path, dim) = parse_args()?;
+    let (file_path, dim, stats_only) = parse_args()?;
 
     // Load trajectory
     let content =
         std::fs::read_to_string(&file_path).with_context(|| format!("cannot read {file_path}"))?;
     let trajectory = AtifTrajectory::from_json(&content)
         .with_context(|| format!("failed to parse ATIF trajectory from {file_path}"))?;
+
+    // Keep the credential and network boundary below the entire local path.
+    if stats_only {
+        let output = match dim.as_str() {
+            "perf" => serde_json::json!({"perf": AnalyzePipeline::run_perf(&trajectory)?}),
+            "cost" => serde_json::json!({"cost": AnalyzePipeline::run_cost(&trajectory)?}),
+            _ => unreachable!(), // Validated by parse_args before reading the input.
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     // Build LLM client + pipeline
     let client = LlmClient::from_env().context(

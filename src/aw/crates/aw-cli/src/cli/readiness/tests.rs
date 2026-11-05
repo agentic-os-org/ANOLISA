@@ -32,13 +32,14 @@ impl Fixture {
         }
     }
     fn command(&self, mode: &str) -> CommandSpec {
-        let script = r#"import json,os,sys,time
+        let script = r#"import json,os,signal,sys,time
 from pathlib import Path
 root=Path(sys.argv[1]);mode=sys.argv[2]
 (root/'process.json').write_text(json.dumps({'pid':os.getpid(),'pgid':os.getpgrp(),'cwd':str(root),'command':sys.argv,'ports':[],'deadline_seconds':3,'stop':f'kill -TERM -- -{os.getpgrp()}'}))
 if mode in ('ready','unrelated'):
  p=root/'ready.tmp';p.write_text(json.dumps({'version':1,'adapter':'fixture','token':'owned-launch-token','pid':os.getppid() if mode=='unrelated' else os.getpid(),'hooks':2}));p.chmod(0o600);p.rename(root/'ready.json')
 elif mode=='missing':time.sleep(60)
+elif mode=='stubborn':signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)
 if mode=='unrelated':time.sleep(1);(root/'continued').write_text('unexpected')
 "#;
         CommandSpec {
@@ -90,6 +91,9 @@ fn readiness_timeout_cancels_and_reaps_owned_agent() {
     let result = run(
         &fixture.command("missing"),
         &AtomicI32::new(0),
+        &AtomicBool::new(false),
+        Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     );
@@ -104,6 +108,9 @@ fn successful_native_startup_preserves_exit_status() {
     let status = run(
         &fixture.command("ready"),
         &AtomicI32::new(0),
+        &AtomicBool::new(false),
+        Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     )
@@ -113,11 +120,34 @@ fn successful_native_startup_preserves_exit_status() {
 }
 
 #[test]
+fn readiness_failure_retains_short_cleanup_with_long_shutdown_grace() {
+    let fixture = Fixture::new();
+    let mut ready = fixture.ready();
+    ready.timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    let result = run(
+        &fixture.command("stubborn"),
+        &AtomicI32::new(0),
+        &AtomicBool::new(false),
+        Duration::from_secs(6),
+        true,
+        Some(ready),
+        |_| {},
+    );
+    assert!(result.unwrap_err().to_string().contains("startup deadline"));
+    assert!((Duration::from_secs(2)..Duration::from_secs(5)).contains(&started.elapsed()));
+    fixture.reaped();
+}
+
+#[test]
 fn process_exit_is_not_hook_readiness() {
     let fixture = Fixture::new();
     let result = run(
         &fixture.command("early"),
         &AtomicI32::new(0),
+        &AtomicBool::new(false),
+        Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     );
@@ -134,6 +164,9 @@ fn unrelated_live_pid_cannot_attest_readiness_and_owned_agent_is_reaped() {
     let result = run(
         &fixture.command("unrelated"),
         &AtomicI32::new(0),
+        &AtomicBool::new(false),
+        Duration::from_secs(2),
+        false,
         Some(fixture.ready()),
         |_| {},
     );
@@ -147,7 +180,16 @@ fn spawn_failure_returns_without_starting_a_readiness_watcher() {
     let fixture = Fixture::new();
     let mut command = fixture.command("ready");
     command.program = fixture.0.join("missing-agent");
-    assert!(run(&command, &AtomicI32::new(0), Some(fixture.ready()), |_| {}).is_err());
+    assert!(run(
+        &command,
+        &AtomicI32::new(0),
+        &AtomicBool::new(false),
+        Duration::from_secs(2),
+        false,
+        Some(fixture.ready()),
+        |_| {}
+    )
+    .is_err());
     assert!(!fixture.ready().path.exists());
 }
 

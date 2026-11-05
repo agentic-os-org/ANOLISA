@@ -157,6 +157,7 @@ fn value_has_error_signal(value: &serde_json::Value) -> bool {
 fn text_has_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
+        || opens_with_an_exception(&lower)
         || mentions_failing_exit_code(&lower)
         || mentions_failing_http_status(text)
         || lower.contains("no such file or directory")
@@ -195,6 +196,35 @@ fn mentions_failing_http_status(text: &str) -> bool {
                 && digits.clone().take(2).all(|c| c.is_ascii_digit())
                 && digits.count() >= 2
         })
+    })
+}
+
+/// Whether the text opens with a JVM or SQL exception class name.
+///
+/// `traceback` is the Python spelling of "the tool crashed and this is why",
+/// and the grounding classifier accepts the JVM/SQL spelling of the same
+/// thing: `find_signature` returns R4 at High confidence for a payload that
+/// *starts* with one of `outcome::EXCEPTION_MARKERS`. This scan knew only the
+/// Python one, so a tool that died with its exception as the first line was a
+/// certain failure in the classifier and a clean tool result here — `tool_use`
+/// scored 1.0, no `tool_failure` finding was emitted, and the root cause could
+/// not become a ToolFailure for the match the classifier had already rejected
+/// as evidence.
+///
+/// The class name has to open the payload, the anchor the classifier applies:
+/// an exception the tool merely quotes deeper in its output describes
+/// something it reported, not something it did. Leading whitespace is skipped
+/// because output is routinely indented, and the comparison is
+/// case-insensitive like the rest of this scan.
+fn opens_with_an_exception(lower: &str) -> bool {
+    /// The class names the grounding classifier reads, in
+    /// `outcome::EXCEPTION_MARKERS`.
+    const EXCEPTION_MARKERS: &[&str] = &["java.lang.", "NullPointerException", "SQLException"];
+    let head = lower.trim_start();
+    EXCEPTION_MARKERS.iter().any(|marker| {
+        let marker = marker.to_ascii_lowercase();
+        head.get(..marker.len())
+            .is_some_and(|prefix| prefix == marker)
     })
 }
 
@@ -850,5 +880,48 @@ mod tests {
                 "a success status is not a failure: {payload}"
             );
         }
+    }
+
+    /// A tool that crashes with its exception as the payload's first line is
+    /// this call's own failure, and the grounding classifier grades it that
+    /// way: `find_signature` reads a payload that *opens* with one of the JVM
+    /// and SQL class names and returns R4 at High confidence
+    /// (`outcome::EXCEPTION_MARKERS`). This scan read a traceback but none of
+    /// those class names, so the same stored result was a certain failure in
+    /// one reader and a clean tool result here — `tool_use` scored 1.0 and no
+    /// `tool_failure` finding was emitted.
+    ///
+    /// The class name is anchored to the payload's opening exactly as the
+    /// classifier anchors it: an exception the tool merely quotes deeper in
+    /// its output describes something else, and the classifier records that
+    /// one as a `nested_error` annotation instead of a failure.
+    #[test]
+    fn detects_a_payload_that_opens_with_its_exception() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"java.lang.NullPointerException: Cannot invoke \"java.util.List.size()\" because \"rows\" is null"}]"#,
+            r#"[{"type":"tool_result","content":"NullPointerException: rows is null"}]"#,
+            r#"[{"type":"tool_result","content":"SQLException: no suitable driver found"}]"#,
+            r#"[{"type":"tool_result","content":"  java.lang.IllegalStateException: closed"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "an exception that opens the payload is a tool failure: {payload}"
+            );
+        }
+
+        // Quoted deeper in the output it belongs to something the tool merely
+        // reported, so it stays clean — the anchor the classifier applies.
+        let quoted = event(
+            None,
+            Some(
+                r#"[{"type":"tool_result","content":"result ok; tool method invocation failed, java.lang.NullPointerException at Foo.bar"}]"#,
+            ),
+            None,
+        );
+        assert!(
+            !looks_like_tool_failure(&quoted),
+            "an exception quoted inside the payload is not this call's failure"
+        );
     }
 }

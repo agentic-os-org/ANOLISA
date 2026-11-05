@@ -261,6 +261,22 @@ pub fn select_source(
     Ok(loaded)
 }
 
+/// Removes only a matching user-source selection, preserving later choices.
+pub fn clear_user_source(
+    name: &str,
+    source_identity: &str,
+    state_dir_override: Option<&Path>,
+) -> Result<(), ExtensionStateError> {
+    let mut loaded = load(state_dir_override)?.state;
+    if loaded.source_selections.get(name).is_some_and(|selection| {
+        selection.source == SourceSelection::User && selection.source_identity == source_identity
+    }) {
+        loaded.source_selections.remove(name);
+        save(&loaded, state_dir_override)?;
+    }
+    Ok(())
+}
+
 /// Persists the next successfully constructed runtime generation.
 pub fn publish_next_generation(
     state_dir_override: Option<&Path>,

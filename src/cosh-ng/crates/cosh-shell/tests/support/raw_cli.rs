@@ -524,7 +524,26 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_marker_input(
     current_dir: &Path,
     steps: &[(&str, &[u8])],
 ) -> String {
+    run_raw_cli_binary_with_args_env_current_dir_and_marker_input(
+        Path::new(env!("CARGO_BIN_EXE_cosh-shell")),
+        adapter,
+        extra_args,
+        envs,
+        current_dir,
+        steps,
+    )
+}
+
+pub(crate) fn run_raw_cli_binary_with_args_env_current_dir_and_marker_input(
+    binary: &Path,
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+    steps: &[(&str, &[u8])],
+) -> String {
     run_raw_cli_marker_input_inner(
+        binary,
         adapter,
         extra_args,
         envs,
@@ -541,6 +560,7 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_marker_input(
     steps: &[(&str, &[u8])],
 ) -> String {
     run_raw_cli_marker_input_inner(
+        Path::new(env!("CARGO_BIN_EXE_cosh-shell")),
         adapter,
         extra_args,
         envs,
@@ -551,6 +571,7 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_marker_input(
 }
 
 fn run_raw_cli_marker_input_inner(
+    binary: &Path,
     adapter: &str,
     extra_args: &[&str],
     envs: &[(&str, &str)],
@@ -560,7 +581,6 @@ fn run_raw_cli_marker_input_inner(
 ) -> String {
     let _run_guard = raw_cli_run_guard(run_mode);
     let mut input_readiness = RawCliInputReadiness::new();
-    let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut command = Command::new(binary);
     command
         .current_dir(current_dir)

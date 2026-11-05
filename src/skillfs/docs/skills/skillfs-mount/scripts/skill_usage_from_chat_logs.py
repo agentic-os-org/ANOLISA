@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 def iter_chat_files(logs_dir: Path):
-    pattern = str(logs_dir / "projects" / "*" / "chats" / "*.jsonl")
+    pattern = os.path.join(glob.escape(str(logs_dir)), "projects", "*", "chats", "*.jsonl")
     return glob.glob(pattern)
 
 

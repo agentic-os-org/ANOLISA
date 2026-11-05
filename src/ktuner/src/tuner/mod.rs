@@ -4726,14 +4726,20 @@ mod tests {
                 }
             }
         });
+        // The stand-in records its arguments: a run that reaches the host's
+        // systemctl instead writes nothing here.
+        //
+        // Written BEFORE the fixture files below, not after them: production
+        // spawns it through `systemctl_quiet`, which swallows spawn errors by
+        // design, so a lingering ETXTBSY on the freshly-written executable
+        // would surface only as a missing `calls` file. The three file writes
+        // that follow give that window time to close (issue #7321).
+        let calls = dir.0.join("systemctl-calls");
+        let program = executable_systemctl_stand_in(&dir.0, &calls);
+
         fs::write(&ledger, serde_json::to_string(&ledger_json).unwrap()).unwrap();
         fs::write(&script, "#!/bin/sh\n").unwrap();
         fs::write(&service, "[Unit]\n").unwrap();
-
-        // The stand-in records its arguments: a run that reaches the host's
-        // systemctl instead writes nothing here.
-        let calls = dir.0.join("systemctl-calls");
-        let program = executable_systemctl_stand_in(&dir.0, &calls);
 
         let guard = lock_ledger_at(path).unwrap();
         persist_from_rollback_at(
@@ -5810,6 +5816,12 @@ mod tests {
         ));
         fs::remove_dir_all(&dir).ok();
         fs::create_dir_all(&dir).expect("create temp dir");
+        // The stand-in is written first for the same ETXTBSY reason as in
+        // `persist_retire_disables_the_unit_it_removes` (issue #7321): the
+        // fixture writes below let its spawn window close.
+        let calls = dir.join("systemctl-calls");
+        let program = executable_systemctl_stand_in(&dir, &calls);
+
         let ledger = dir.join("rollback.json");
         fs::write(&ledger, b"{}").expect("write ledger");
         let sysctl = dir.join("99-ktuner.conf");
@@ -5818,10 +5830,6 @@ mod tests {
         fs::write(&service, b"[Unit]\n").expect("write unit file");
         let script = dir.join("apply-nonsysctl.sh");
         fs::write(&script, b"#!/bin/sh\n").expect("write script");
-        // The stand-in records its arguments: a run that reaches the host's
-        // systemctl instead writes nothing here.
-        let calls = dir.join("systemctl-calls");
-        let program = executable_systemctl_stand_in(&dir, &calls);
 
         let cleanup_leftovers = finalize_rollback_at(
             ledger.to_str().unwrap(),

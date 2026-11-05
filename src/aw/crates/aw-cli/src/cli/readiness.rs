@@ -8,7 +8,7 @@ use std::{
     os::unix::fs::MetadataExt,
     process::ExitStatus,
     sync::{
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
         mpsc,
     },
     thread,
@@ -18,31 +18,35 @@ use std::{
 pub(super) fn run(
     command: &CommandSpec,
     signal: &AtomicI32,
+    failed: &AtomicBool,
+    shutdown_grace: Duration,
+    leader_signals: bool,
     ready: Option<Readiness>,
     started: impl FnOnce(u32),
 ) -> Result<ExitStatus> {
-    let Some(ready) = ready else {
-        return aw_exec::run_foreground_observed(command, signal, started).map_err(Into::into);
-    };
-    if ready.timeout.is_zero() || ready.timeout > Duration::from_secs(120) {
+    if ready
+        .as_ref()
+        .is_some_and(|ready| ready.timeout.is_zero() || ready.timeout > Duration::from_secs(120))
+    {
         return Err("native startup deadline must be within 1..120000 ms".into());
     }
     let (stop, receiver) = mpsc::sync_channel(1);
     thread::scope(|scope| {
         let mut watcher = None;
-        let execution = aw_exec::run_foreground_observed(command, signal, |pid| {
+        let execute = if leader_signals {
+            aw_exec::run_foreground_worker_with_grace
+        } else {
+            aw_exec::run_foreground_with_grace
+        };
+        let execution = execute(command, signal, failed, shutdown_grace, |pid| {
             started(pid);
-            let ready = &ready;
+            let Some(ready) = &ready else { return };
             watcher = Some(scope.spawn(move || {
                 let result = wait(ready, receiver, pid);
                 if result.is_err() {
-                    // aw-exec consumes this signal and cleans up only its owned group.
-                    let _ = signal.compare_exchange(
-                        0,
-                        libc::SIGTERM,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
+                    // Startup failure keeps its short cleanup budget even when
+                    // the application has a longer cooperative shutdown grace.
+                    failed.store(true, Ordering::Release);
                 }
                 result
             }));
@@ -56,7 +60,7 @@ pub(super) fn run(
             None => false,
         };
         let status = execution?;
-        if !registered && status.success() {
+        if ready.is_some() && !registered && status.success() {
             return Err("Agent exited before native hooks became ready".into());
         }
         Ok(status)
@@ -89,7 +93,7 @@ fn wait(
     }
 }
 
-fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
+pub(super) fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
     let metadata = match std::fs::symlink_metadata(&ready.path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),

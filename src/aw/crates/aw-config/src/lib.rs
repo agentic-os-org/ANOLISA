@@ -5,6 +5,8 @@
 //! discovery, private configuration validation and native effect admission belong
 //! to the service and adapter layers; this crate never starts those components.
 
+pub mod native;
+
 mod parsing;
 mod policy_update;
 mod validation;
@@ -113,6 +115,7 @@ impl Validator {
             constraint: error.schema_path().to_string(),
         })?;
         validation::validate(&document)?;
+        native::validate(&document)?;
         Ok(Configuration(document))
     }
 }

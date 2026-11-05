@@ -115,6 +115,7 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<u8, RunError> {
     let socket = match cli.plan() {
+        Plan::Sandbox(command) => return command.run().map_err(RunError::Sandbox),
         // The capability view describes the environment this process inherited,
         // so it must resolve it here rather than through a daemon.
         Plan::Local(command) => {
@@ -136,7 +137,7 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
         }
         Plan::Daemon { socket } => socket,
     };
-    if let Some(result) = cli.run_observability_query(socket) {
+    if let Some(result) = run_owned_transport(cli, socket) {
         return result.map_err(RunError::Output);
     }
     // Scan-prompt resolves its own request batch (one per input line or
@@ -227,8 +228,16 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     }
 }
 
+/// Commands that page, review or exec around their own daemon calls.
+fn run_owned_transport(cli: &Cli, socket: &std::path::Path) -> Option<io::Result<u8>> {
+    cli.run_observability_query(socket)
+        .or_else(|| cli.run_gateway(socket, &mut io::stdout().lock(), &mut io::stderr()))
+}
+
 #[derive(Debug, thiserror::Error)]
 enum RunError {
+    #[error(transparent)]
+    Sandbox(#[from] asc_cli::sandbox::SandboxError),
     #[error(transparent)]
     Input(#[from] InputError),
     #[error(transparent)]

@@ -266,7 +266,7 @@ def main() -> None:
             assert status["bindings"] == 0 and status["events"] == 0, status
             assert not list(state.glob("launch-*"))
             journals = list(state.rglob("*.jsonl"))
-            assert len(journals) == 610, "missing durable event journals"
+            assert len(journals) == 618, "missing durable event journals"
             verified = []
             for journal in journals:
                 audit = subprocess.run(

@@ -38,7 +38,7 @@ for (const htmlFile of htmlFiles) {
   }
 
   const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/)?.[1] ?? '';
-  if (/<a\b[^>]*>\s*(?:中文版|English)\s*<\/a>/.test(article)) {
+  if (/<p\b[^>]*>\s*<a\b[^>]*>\s*(?:中文版|English)\s*<\/a>\s*<\/p>/.test(article)) {
     errors.push(
       `${path.relative(buildDir, htmlFile)}: inline locale switch duplicates the navbar`,
     );
@@ -46,6 +46,10 @@ for (const htmlFile of htmlFiles) {
 
   for (const match of html.matchAll(/<a\b[^>]*\shref="([^"]+)"/g)) {
     const href = match[1];
+    if (/copilot-shell/i.test(href)) {
+      errors.push(`${path.relative(buildDir, htmlFile)}: deprecated Copilot Shell link ${href}`);
+      continue;
+    }
     if (/^(?:https?:|mailto:|tel:|javascript:)/.test(href)) continue;
     const parsed = new URL(href, `${siteUrl}${currentPath}`);
     const target = parsed.pathname === currentPath

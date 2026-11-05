@@ -365,7 +365,9 @@ runner 工作目录的 owner、权限和 umask。
 
 **[TARGET V2][IMPLEMENTED] DPROC-UDS-002 服务端身份认证**：
 `asc-daemon-client` 在 connect 成功后、首次 write 前，对同一连接 fd 读取 Linux
-`SO_PEERCRED`，要求服务端 UID 为 0。凭据读取失败或 UID 不符返回独立的
+`SO_PEERCRED`，要求服务端 UID 为 0。跨 PID namespace 时内核可返回 PID=0，
+凭据读取必须允许该值，认证仅判断 UID，不要求共享 PID namespace。
+凭据读取失败或 UID 不符返回独立的
 `ServerIdentity` 错误，关闭连接，不发送请求、不重试、不回退本地实现；非 Linux
 返回不支持认证的错误。期望 UID 不从 socket 文件属主、客户端 UID 或响应 JSON 推导。
 服务 UID 是信任域；该检查不区分其它 root 进程，也不能保护同 UID 的不可信 Agent。
@@ -380,6 +382,8 @@ runner 工作目录的 owner、权限和 umask。
 可执行 fixture：`tests/v2/e2e/test_daemon_process_e2e.py::test_dproc_uds_002_rejects_fake_peer_even_with_root_owned_socket`
 验证 socket 文件属主改为 root 的非 root 伪服务仍被真实 Rust CLI 和 native health probe 拒绝，
 服务端不得收到请求字节；该用例需要 root 的跨 UID 进程环境，编译或单元测试不替代该验收。
+同文件的 `test_dproc_uds_002_authenticates_uid_with_zero_peer_pid` 使用 user/PID namespace
+确认内核实际返回 PID=0，并验证 CLI 和 health probe 接受 UID=0、拒绝非 root UID 且不发送请求。
 普通 workspace CI 统一启用默认关闭的 `asc-daemon-client/testing` feature，并设置
 `AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK=1`，允许非 root 模拟服务执行协议和业务测试，
 普通测试无需修改。身份认证回归单独使用默认配置执行；RPM 构建和 E2E 不启用该 feature
@@ -519,6 +523,7 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 | DPROC-017 | state migrator 完成 V1 per-user 到 system-owned state 的 owner-safe 迁移和回滚 |
 | DPROC-018 | CLI/TUI 不直读 SQLite；query 必须经过 daemon authorization |
 | DPROC-019 | raw/RPM/container/systemd/Helm 生成 checksum、SBOM 和 build metadata |
+| DPROC-024 | V2 分包回滚到旧 V2 `agent-sec-cli` 服务包时，保留事务前的服务启用策略和运行状态；`tests/test-component-rpm-rollback.py` 验证真实 RPM 事务顺序，`tests/v2/packaging/test_rpm_service_migration.py` 验证状态恢复。前者使用隔离 rpmdb 和模拟 systemd，不替代真实 daemon 就绪验收 |
 | DPROC-023 | Policy 默认目录安全性选择与已有状态冲突拒绝；已有自有叶目录修复为 `0700`，仅祖先不安全触发回退；显式数据根不回退，不修改已有数据库；fixture 为 `v2/crates/asc-policy-repository-sqlite/src/path/tests.rs` 和 `v2/apps/asc-daemon/tests/bootstrap.rs` 的同名测试及叶目录修复回归 |
 
 每个 DPROC ID 必须映射到机器可执行 fixture 或真实部署证据。Rust unit test 不能代替安装后
@@ -645,6 +650,9 @@ CLI/进程均支持显式 --socket 和非空 AGENT_SEC_DAEMON_SOCKET 覆盖；�
 领域状态默认 `/var/lib/agent-sec/skillsec`，root 所有、0700，当前 signing-key.pk8 为 0600。
 `/etc/agent-sec/skillsec.json` 或 --skillsec-config 可注入 stateDir、精确 managedSkillDirs、
 scanners 和 parsers，以及默认开启的 enableDefaultSkillDirs；配置要求 root 所有、不可被普通用户写入，不接受 HOME 配置覆盖。
+公开 file-only `make install` / `make install-core` 生成的 system unit 使用
+`--skillsec-config CONFIGDIR/skillsec.json`，读取本次安装的配置；`DESTDIR` 只用于暂存，
+不进入服务参数。RPM/raw 原有 unit 继续使用 native 配置默认值，配置和状态的安全校验不变。
 默认授权包含系统目录及本地 `/etc/passwd` 的所有有效账户 HOME 下标准 Skill 目录，不按 UID 或
 登录 shell 排除账户，不采信客户端环境。禁用默认目录不影响显式配置或 SkillFS；账户变化重启后生效。
 DPROC-SG-007 的可执行边界为 `apps/asc-daemon/src/skill_sec/defaults.rs` 及 capability 的 `tests/scope.rs`。
@@ -758,3 +766,118 @@ obs 仍使用服务端解析的组合名称下钻；组合名称有歧义时拒�
 组合名称、普通用户隔离和歧义拒绝；`v2/apps/asc-daemon/tests/sec_query_protocol.rs` 与
 `v2/apps/asc-cli/tests/events_dual_uid.rs` 验证 sec 的真实 UDS UID、原始 session ID 查询与返回标签。
 以上不替代安装态不同 UID/systemd 验收。
+
+## 14. [TARGET V2] Secret Gateway 进程、权限与数据目录（DPROC-GW）
+
+daemon 提供七个 `gateway.*` 方法。`enable`、`disable`、`key.add`、`key.remove`、`key.list`
+只允许 UDS peer UID 0；`status`、`credentials` 为 LocalUser，root 可查询全部，非 root 只能
+查询 owner UID 为 peer UID 的 Scope。凭据 Policy/Scope 管理同样要求 root；普通 file Policy
+的既有权限、selector 与快照不变，不能把凭据限制扩展为所有 Policy 的新权限规则。
+
+授权来自 canonical Policy/Scope/Binding。原生 `specVersion=0.1` Policy 通过
+`network/use_credential/http_request` 指定 credential、HTTPS、精确 host、有界 path、大写
+methods 与 responseRewrite。Scope 固定 Policy revision 完整快照、持续 process selector 与
+非 root owner UID。不同 file/credential Policy 可在同 Scope 执行，单 Policy 不混合。
+
+Agent 自主启动。无进程时即可导入 key（不授权）、创建 Policy/Scope、准备稳定 fake/port/plan；
+再 enable，以 owner 查询 `credentials --scope <scopeId>`、配置 Agent 后启动。仅满足下述网关
+ready 条件时交付完整 environment，否则明确失败。约两秒 discovery 自动创建实例 Binding，
+核验完整进程身份、UID 与组，接管已有后代快照，新后代继承实例 cgroup。不承诺 first packet；
+此前流量、已有连接与迁移期间并发后代不受追溯保护。部分迁移失败仍须保留清理责任。
+查询不迁移调用者、不修改环境。gateway dispatch 预算 45s，CLI 默认超时 60s，加载上限 20s。
+
+`key add` 对相同 secret 幂等成功，不同值明确报错、不覆盖；更换 key 必须先 remove 再 add，
+不自动轮换。remove 永久退役该凭据在全部 Scope 中的旧 fake，重新导入不复活旧 fake，需
+新 Scope 和新的 Agent 配置。add/remove 成功返回 `{"credential":"github"}`，key list 只列
+active 凭据 ID（`{"credentials":["github"]}`），enable/disable 成功返回 `{}`。
+status 返回 `{enabled, ready, scopes: [{scopeId, bindings}]}`，credentials 返回
+`{scopeId, environment}`。`ready` 同时要求 enabled、cgroup v2 检查通过、unit active、
+loaded generation 匹配内部当前 generation、CA 可用；generation 与 revoked/tombstone
+保留在内部，不作为管理查询的展示字段。已启用时每次 status 都重新只读检查 cgroup，失败
+返回 `ready=false`，不改变状态；credentials 也重新检查，失败不交付 environment。网关 ready
+不能替代等待实例 Binding `READY` 与引流完成。
+
+enable 在改变 enabled 前检查 Linux `/sys/fs/cgroup` 的 `statfs` 类型为
+`CGROUP2_SUPER_MAGIC`，且 daemon 自身 `/proc/self/cgroup` 视图存在 `0::` 条目；
+证据不可读或非 v2 时失败。apply 在每次发布前检查，包括已启用状态恢复；默认关闭恢复不
+运行此预检，不会仅因 cgroup v2 不可用而失败。不自动降级为 v1，不修改挂载；这不是完整
+内核/nft 能力预检，nft `socket cgroupv2` 不独立探测，仍可能在实际规则应用时失败。
+
+数据面是独立的 `agent-sec-gateway.service`，以无特权 `agent-sec-gw` 运行固定版本的
+mitmproxy standalone 构建，不继承 daemon 权限。daemon 仅经 drop-in
+`agent-sec-core.service.d/gateway.conf` 增加 `CAP_NET_ADMIN`，用于替换 nftables 表
+`inet agent_sec_gateway`；Binding 实例 cgroup 通过 systemd D-Bus 创建。网关账户主组必须
+同名且无其他成员，Scope owner 和进程不得具备读取网关秘密的 UID/组权限，准备、接管与
+下发均须核验。cgroup 是分类边界，同 UID 多 Scope 不能防止该用户读取彼此 fake。
+V2 `agent-sec-core` RPM 包含 addon、policy 模块、网关 unit、daemon drop-in、installer 和
+provenance，构建只 staging 到 `DESTDIR`。安装自动启动基础 daemon，但网关默认关闭：
+不启动代理、不创建网关账户、不携带或下载 mitmproxy、不添加引流。未配置凭据 Scope、
+没有保存网关状态的初始安装，daemon 启动和重启也不创建网关 runtime、凭据目录或 nft 表；
+默认关闭不跳过既有 assignment 或此前已启用状态的同步恢复。管理员显式安装 standalone，
+再配置 Policy/Scope 并 enable。源码 staging 不是最终 RPM 已构建/验收的证明。
+最终卸载在存在运行 manifest 或代理 active 时，先经 daemon 执行 disable，再停止两个服务；
+disable 失败则拒绝卸载。升级不执行该清理，手动安装的 mitmproxy 和持久凭据不由 RPM 删除。
+raw 包包含相同网关静态资产，由组件 manifest 渲染 unit 和卸载脚本路径；基础 daemon
+声明 `enable=false/start=false`，gateway unit 仅作为文件交付，其启停仍由 daemon 独占，
+不进入 ANOLISA 通用组件重启操作。安装不执行网关初始化。raw 卸载通过严格 `pre_uninstall`
+钩子完成上述撤流，失败不停止服务、不删除文件；raw 升级不因新增网关资产而启用或重启代理。
+
+持久状态位于 `/var/lib/agent-sec/gateway/state.json`（0600，目录 0700）和
+`/var/lib/agent-sec/credentials`，不进入 `/var/log/agent-sec`；`AGENT_SEC_DATA_DIR` 覆盖
+两者的父目录。运行目录 `/run/agent-sec-gateway` 为 root:agent-sec-gw 0751，manifest、plan 与
+secrets 快照为 0640，`status/` 归网关账户所有，`ca-bundle.pem` 为 0644。
+
+主动 `disable` 先应用 nft delete 事务撤流，成功后停止 unit，两步均成功后才通过
+`remove_except_ca` 删除运行目录中除 `ca-bundle.pem` 外的全部内容（包括 `status/`），
+并保存 `enabled=false`；持久 key 与 canonical Policy/Scope assignment 保留。执行投影不保存
+第二套授权规则，只保存 Scope owner/port/revoked fence、Binding 责任与完整实例身份。
+撤流失败立即返回，不停止 unit、不删文件、不修改期望 `enabled`；unit 停止失败也立即返回
+并保留运行文件与期望 `enabled`，但引流已撤除，
+须显式重试 disable。文件清理或状态保存失败均明确返回错误，须核查期望状态与清理责任并
+重试，不能把任一错误当作完整关闭。成功关闭保留公开 CA 的原路径，避免已有配置悬空；
+`/run` 在主机重启后仍会丢失，CA 不保证跨重启保留。恢复直连不会替换 fake，fake 仍不能用于
+GitHub 鉴权；已有代理连接不保证无缝恢复，须重连。
+
+本版本是可用性优先的有限 fail-open：nft 仅以 `meta nfproto ipv4` 匹配 canonical 有效且已
+接管的 credential Binding 实例 TCP 80/443，同 Scope 多实例共享端口。没有 UDP/443 drop
+或 filter chain。IPv6 与 HTTP/3/QUIC 不引流、不强制回退或拒绝，放行但不保护，fake 原样
+发送，鉴权可能失败。
+已进入 IPv4 代理的 HTTP(S) 仍执行原安全校验；HTTPS 全部执行 TLS MITM，无 fake 不等于
+TLS 透传或不受影响，generation 未就绪仍拒绝。撤销失败的停止代理与删除整个运行目录
+（`remove_all`）行为保持不变，不适用主动 disable 的 CA 保留规则，不能概括为所有故障都 fail-open。
+
+当前 daemon 在启动 Binding worker 前恢复 file Scope 删除屏障并同步执行
+`GatewayService.recover()`，开放 UDS 请求前再执行 `PapService.recover_scopes()`；不设置
+独立 gateway 恢复 Job。Apply claim 的 SQLite 事务核对 canonical Scope 仍为 `Active`，
+防止删除中的 assignment 重新部署策略。网关构造读取投影失败时，先停止旧代理、撤流并
+删除运行时快照，再返回错误；持久投影和凭据不删除，清理失败显式报告且不跳过其它清理。
+网关构造或恢复失败单独记录错误；Active 凭据 Scope 恢复失败保留 `Active`，不转入删除，
+不阻塞原有 file-policy daemon readiness。
+file Scope 恢复或 PAP 存储扫描失败仍阻止启动。
+管理员排除故障后可用 `scope retry --scope-id <scopeId>` 重新 validate/prepare 并启动 discovery。
+generation 在每次尝试前持久化且不复用；网关恢复、撤销或首次 enable 失败时停止 unit、
+撤流并删除运行目录，保留 canonical intent。systemd `active` 不代表网关已加载，发布流程等待
+`status/health.json` 的 loadedGeneration 等于当前 generation 后才更新引流。
+unit 在启动前和停止后都删除 `status/health.json`，避免上一个进程的报告在新进程绑定监听端口前被当作已加载。
+恢复重新读取 canonical Scope/Binding 与固定 Policy 快照，并核验 boot ID、PID namespace、
+PID/start time 和执行 cgroup；不能仅凭保存的 PID 接管新进程。多实例共享 Scope fake；同
+Scope 的重叠父子树复用已拥有的 cgroup，不迁移已受保护成员，非重叠实例仍独立。Binding
+在接入未受保护成员前持久保存根路径及共享路径引用；重试只增加经过核验的引用，不丢弃
+已有责任。保留跨 Scope 拒绝；先删父或先删子都不撤除其它 Binding 仍引用的路径，实例
+退出只清理自身 Binding，不撤销共享 grant。Scope 删除关闭 admission、撤销其 fake，保留
+清理责任直到完成。Policy Runtime 拥有单一 Scope 清理 worker，调用 `sweep_deleting_scopes()`，
+在 Binding 清理完成后执行 Deleting Scope 的 final release，包括零实例 Scope；shutdown
+等待其实际调用结束。网关等待不占用 Binding timer；file-only Scope 和 credential Scope
+使用独立变更锁，混合 Scope 归 credential 域。空 Scope 也释放端口，
+不删除 real、不停止 Agent。全局 key retirement 撤销所有 Scope 对该凭据的 fake。
+await 后须重新验证 canonical 授权，过时操作不得恢复引流。
+
+| ID | 必须验证 | 验证入口 |
+|---|---|---|
+| DPROC-GW-001 | 七个方法、分发与权限；凭据 root 限制不改变普通 file 权限 | `asc-daemon-protocol/tests/pap_contract.rs` |
+| DPROC-GW-002 | Scope 准备/删除、Binding 实例/后代身份、UID 查询、稳定 fake、generation、失败收敛、组隔离、目录权限 | `asc-gateway-runtime/src/tests.rs` |
+| DPROC-GW-003 | unit、drop-in 与静态文件 staging、安装/卸载边界 | `tests/v2/packaging/test_systemd.py` |
+| DPROC-GW-004 | 真实 CLI Policy/Scope、startup-before-agent、discovery/systemd/nft；mock REST real→fake；Git clone/fetch/push；跨 Scope、相同 secret 幂等/不同值拒绝覆盖、remove/add 后旧 fake 永久退役与新 Scope 配置、多实例与重启稳定 fake、空 Scope 删除；域外/UDP 放行；daemon/proxy 重启；关闭仅保留 CA | `tests/v2/systemd/test_gateway.py`；显式 `ASC_GATEWAY_E2E_USER`，本机 `198.18.0.1`、临时 CA 与 dummy Token，不访问外网 |
+
+验证入口不代表本次源码或最终 RPM 已通过运行测试。默认关闭 E2E 只观察 `scopes=[]`、无
+nft/runtime/凭据目录，不启用网关、不改变宿主网关状态。

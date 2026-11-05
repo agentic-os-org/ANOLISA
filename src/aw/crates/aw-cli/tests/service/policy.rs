@@ -14,6 +14,8 @@ use std::{
     time::Instant,
 };
 
+#[path = "policy/detach.rs"]
+mod detach;
 #[path = "policy/preparation.rs"]
 mod preparation;
 
@@ -25,13 +27,14 @@ fn bind(fixture: &Fixture, client: &Client, adapter: &str) -> Binding {
     let mut operation = fixture.bind_operation();
     if let Operation::Bind { capabilities, .. } = &mut operation {
         capabilities.adapter = adapter.into();
-        capabilities.version = if adapter == "qoder" {
-            "1.1.73"
-        } else {
-            "2.2.2b4"
-        }
-        .into();
-        capabilities.entrypoint = if adapter == "qoder" { "tui" } else { "app" }.into();
+        let (version, entrypoint) = match adapter {
+            "qoder" => ("1.1.73", "tui"),
+            "qoder-sdk" => ("1.0.56", "sdk-worker"),
+            "qwenpaw" => ("2.2.2.post1", "app"),
+            _ => panic!("unsupported policy fixture adapter"),
+        };
+        capabilities.version = version.into();
+        capabilities.entrypoint = entrypoint.into();
     }
     let binding: Binding = serde_json::from_value(call(client, operation).unwrap()).unwrap();
     call(

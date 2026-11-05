@@ -1,4 +1,4 @@
-//! QwenPaw App 2.2.2b4 middleware; the native runtime owns tool scheduling.
+//! QwenPaw App middleware; the native runtime owns tool scheduling.
 
 use crate::{
     adapter::{
@@ -7,8 +7,7 @@ use crate::{
     },
     read_file, Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -19,11 +18,11 @@ use std::{
     time::Duration,
 };
 
-const VERSION: &str = "2.2.2b4";
 pub(crate) struct QwenPaw;
 
 struct Prepared {
     input: LaunchInput,
+    version: String,
     working: PathBuf,
     plugin: Option<OwnedPlugin>,
 }
@@ -32,10 +31,11 @@ struct OwnedPlugin {
     path: PathBuf,
     identity: (u64, u64),
     created_parent: bool,
+    cleanup_on_drop: bool,
 }
 
 impl OwnedPlugin {
-    fn create(working: &std::path::Path) -> Result<Self> {
+    fn create(working: &std::path::Path, id: &str) -> Result<Self> {
         let parent = working.join("plugins");
         let mut created_parent = false;
         match fs::symlink_metadata(&parent) {
@@ -47,24 +47,51 @@ impl OwnedPlugin {
             }
             Err(error) => return Err(error.into()),
         }
-        let path = parent.join("aw-native");
+        let path = parent.join(id);
         DirBuilder::new().mode(0o700).create(&path).map_err(|error| {
-            format!("cannot install owned QwenPaw plugins/aw-native (existing entries are preserved): {error}")
+            format!("cannot install owned QwenPaw plugin {id} (existing entries are preserved): {error}")
         })?;
         let metadata = fs::symlink_metadata(&path)?;
         let owned = Self {
             path,
             identity: (metadata.dev(), metadata.ino()),
             created_parent,
+            cleanup_on_drop: true,
         };
+        let manifest = manifest(id)?;
         for (name, bytes) in [
+            ("plugin.json", manifest.as_slice()),
             (
-                "plugin.json",
-                include_bytes!("../../native/qwenpaw/plugin.json").as_slice(),
+                "aw_skill.py",
+                include_bytes!("../../native/qwenpaw/aw_skill.py").as_slice(),
             ),
             (
                 "plugin.py",
                 include_bytes!("../../native/qwenpaw/plugin.py").as_slice(),
+            ),
+            (
+                "aw_submission.py",
+                include_bytes!("../../native/qwenpaw/aw_submission.py").as_slice(),
+            ),
+            (
+                "aw_private.py",
+                include_bytes!("../../native/qwenpaw/aw_private.py").as_slice(),
+            ),
+            (
+                "aw_resident.py",
+                include_bytes!("../../native/qwenpaw/aw_resident.py").as_slice(),
+            ),
+            (
+                "aw_mcp.py",
+                include_bytes!("../../native/qwenpaw/aw_mcp.py").as_slice(),
+            ),
+            (
+                "aw_native.py",
+                include_bytes!("../../native/qwenpaw/aw_native.py").as_slice(),
+            ),
+            (
+                "aw_scope.py",
+                include_bytes!("../../native/claude-sdk/aw_scope.py").as_slice(),
             ),
         ] {
             let mut file = OpenOptions::new()
@@ -102,7 +129,9 @@ impl OwnedPlugin {
 
 impl Drop for OwnedPlugin {
     fn drop(&mut self) {
-        let _ = self.cleanup();
+        if self.cleanup_on_drop {
+            let _ = self.cleanup();
+        }
     }
 }
 
@@ -128,14 +157,8 @@ impl Adapter for QwenPaw {
             return Err("QWENPAW_WORKING_DIR must be an existing absolute directory".into());
         }
         let working = working.canonicalize()?;
-        let config: Value =
-            serde_json::from_slice(&read_file(working.join("config.json"), 1024 * 1024)?)?;
-        if !config.is_object() || config["plugins"]["aw-native"]["enabled"] == false {
-            return Err("QwenPaw configuration must be an object and permit the AW plugin".into());
-        }
-        if fs::symlink_metadata(working.join("plugins/aw-native")).is_ok() {
-            return Err("QwenPaw working directory already owns plugins/aw-native".into());
-        }
+        // QwenPaw owns config.json parsing, defaults and live updates. The
+        // launch adds a distinct plugin without interpreting user plugin settings.
         for name in ["QWENPAW_RUNTIME_ID", "QWENPAW_RUNTIME_PROVISIONER"] {
             if input
                 .command
@@ -148,13 +171,17 @@ impl Adapter for QwenPaw {
                 );
             }
         }
-        if adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?
-            != format!("QwenPaw, version {VERSION}")
-        {
-            return Err(format!("QwenPaw {VERSION} is required by this adapter").into());
-        }
+        let output =
+            adapter::Probe(cancelled).version_output(&input.command, &["--version".into()])?;
+        let version = crate::version::reported(
+            output
+                .strip_prefix("QwenPaw, version ")
+                .ok_or("QwenPaw --version must identify QwenPaw and its version")?,
+            "QwenPaw",
+        )?;
         Ok(Box::new(Prepared {
             input,
+            version,
             working,
             plugin: None,
         }))
@@ -179,10 +206,27 @@ impl Adapter for QwenPaw {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::QWENPAW.capabilities(VERSION, "app")
+        let mut capabilities =
+            super::super::adapter::catalog::QWENPAW.capabilities(&self.version, "app");
+        if self.input.options.reloadable {
+            capabilities.events.remove("input.submit");
+        }
+        if !self.input.options.reloadable {
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+        }
+        capabilities
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if !self.input.options.reloadable
+            && adapter::observation_enabled(&self.input.document, &self.input.target)
+        {
+            return Err(
+                "QwenPaw resident task scopes do not support native evidence capture".into(),
+            );
+        }
         if self.input.options.reloadable {
             crate::reload::validate(
                 &self.input.document,
@@ -199,6 +243,75 @@ impl PreparedLaunch for Prepared {
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
+        self.configure_in(context, &self.working.clone())
+    }
+
+    fn attachment(
+        &mut self,
+        context: &LaunchContext<'_>,
+    ) -> Result<crate::attachment::Registration> {
+        let plan = self.configure_in(context, context.files.directory())?;
+        let descriptor: Value = serde_json::from_slice(&read_file(
+            context.files.directory().join("qwenpaw-hooks.json"),
+            1024 * 1024,
+        )?)?;
+        let source = self
+            .plugin
+            .as_ref()
+            .ok_or("missing staged plugin")?
+            .path
+            .clone();
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(source.join("aw-attachment.json"))?;
+        output.write_all(&serde_json::to_vec(&descriptor)?)?;
+        output.sync_all()?;
+        let args = &plan.command.args;
+        let mut port = 8088;
+        for (index, arg) in args.iter().enumerate() {
+            if arg == "--port" {
+                port = args
+                    .get(index + 1)
+                    .and_then(|arg| arg.to_str())
+                    .ok_or("missing App port")?
+                    .parse::<u16>()
+                    .map_err(|_| "invalid App port")?;
+            }
+            if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--port=")) {
+                port = value.parse::<u16>().map_err(|_| "invalid App port")?;
+            }
+        }
+        // The attachment directory now owns staging, including failed-cleanup
+        // retries. Ordinary aw run retains Prepared's drop cleanup.
+        self.plugin
+            .as_mut()
+            .ok_or("missing staged plugin")?
+            .cleanup_on_drop = false;
+        Ok(crate::attachment::Registration::Qwenpaw {
+            profile: self.working.clone(),
+            port,
+            source,
+            descriptor,
+        })
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if let Some(plugin) = self.plugin.as_ref() {
+            plugin.cleanup()?;
+        }
+        self.plugin = None;
+        Ok(())
+    }
+}
+
+impl Prepared {
+    fn configure_in(
+        &mut self,
+        context: &LaunchContext<'_>,
+        plugin_root: &std::path::Path,
+    ) -> Result<LaunchPlan> {
         let (events, hooks) = if self.input.options.reloadable {
             (crate::reload::routes(), Vec::new())
         } else {
@@ -211,16 +324,20 @@ impl PreparedLaunch for Prepared {
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
             .to_owned();
+        let plugin_id = format!("aw-native-{token}");
         let ready = context.files.directory().join("qwenpaw-ready.json");
         let native = context.files.write(
             "qwenpaw-hooks.json",
             &serde_json::to_vec(&json!({
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
+                "plugin_id": plugin_id,
                 "reloadable":self.input.options.reloadable,
+                "resident": !self.input.options.reloadable,
+                "resident_policy_reload": !self.input.options.reloadable,
             }))?,
         )?;
-        self.plugin = Some(OwnedPlugin::create(&self.working)?);
+        self.plugin = Some(OwnedPlugin::create(plugin_root, &plugin_id)?);
         let mut command = self.input.command.clone();
         command.environment.insert(
             "QWENPAW_WORKING_DIR".into(),
@@ -243,14 +360,14 @@ impl PreparedLaunch for Prepared {
             }),
         })
     }
+}
 
-    fn finish(&mut self) -> Result<()> {
-        if let Some(plugin) = self.plugin.as_ref() {
-            plugin.cleanup()?;
-        }
-        self.plugin = None;
-        Ok(())
-    }
+/// Bind the bundled manifest to this installation without changing native settings.
+pub(crate) fn manifest(id: &str) -> Result<Vec<u8>> {
+    let mut manifest: Value =
+        serde_json::from_slice(include_bytes!("../../native/qwenpaw/plugin.json"))?;
+    manifest["id"] = json!(id);
+    Ok(serde_json::to_vec(&manifest)?)
 }
 
 fn check_args(args: &[std::ffi::OsString]) -> Result<()> {
@@ -279,7 +396,7 @@ fn check_args(args: &[std::ffi::OsString]) -> Result<()> {
     Ok(())
 }
 
-fn event_routes(
+pub(crate) fn event_routes(
     document: &Value,
     steps: &[AdmittedStep],
     observe: bool,
@@ -287,7 +404,7 @@ fn event_routes(
     let mut events = BTreeMap::new();
     let mut hooks = Vec::new();
     // After wrappers are outermost, so they also observe an inner before denial.
-    for event in ["tool.after", "tool.before"] {
+    for event in ["tool.after", "tool.before", "input.submit"] {
         let selected = adapter::native_steps(steps, event, observe);
         if selected.is_empty() {
             continue;
@@ -307,7 +424,18 @@ fn event_routes(
             registration.reverse();
         }
         for step in registration {
-            hooks.push(json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget}));
+            let admitted = steps
+                .iter()
+                .find(|candidate| candidate.event == event && candidate.step_id == step.step_id);
+            let all_tools = vec!["*".to_owned()];
+            let mut hook = json!({"event": event, "step": step.step_id,
+                "on_error": step.on_error, "budget_ms": budget, "replace_result": step.replaces_result,
+                "event_tools": admitted.map(|step| &step.event_tools).unwrap_or(&all_tools),
+                "step_tools": admitted.map(|step| &step.step_tools).unwrap_or(&all_tools)});
+            if admitted.is_some_and(|step| super::sdk_tools::checks_skill(step, "qwenpaw")) {
+                hook["skill_check"] = json!(true);
+            }
+            hooks.push(hook);
         }
         events.insert(
             event.into(),
@@ -335,11 +463,25 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 }
 
 fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Value> {
+    if event == "input.submit" && native["event"] == event {
+        return super::submission::normalize(binding, native, "qwenpaw", "input_text");
+    }
     if !matches!(event, "tool.before" | "tool.after") || native["event"] != event {
         return Err("QwenPaw callback event does not match the binding".into());
     }
     let session = identifier(&native["session_id"], "session_id")?;
-    let call = identifier(&native["tool_call"]["id"], "tool_call.id")?;
+    let native_call = identifier(&native["tool_call"]["id"], "tool_call.id")?;
+    let call = if let Some(value) = native.get("aw_invocation_id") {
+        let value = value
+            .as_str()
+            .ok_or("QwenPaw requires an invocation UUID")?;
+        if !super::sdk_tools::invocation_uuid(value) {
+            return Err("QwenPaw requires a canonical invocation UUID v4".into());
+        }
+        value
+    } else {
+        native_call
+    };
     let tool = identifier(&native["tool_call"]["name"], "tool_call.name")?;
     let input: Value = serde_json::from_str(
         native["tool_call"]["input"]
@@ -362,7 +504,45 @@ fn normalize(binding: &NativeContext, event: &str, native: &Value) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aw_provider::admission::StepExecution;
+    use aw_core::admission::StepExecution;
+
+    #[test]
+    fn withholding_is_limited_to_the_ordinary_resident_launch() {
+        for reloadable in [false, true] {
+            let prepared = Prepared {
+                version: "2.2.3".into(),
+                input: LaunchInput {
+                    document: json!({}),
+                    target: "target".into(),
+                    options: adapter::NativeOptions {
+                        reloadable,
+                        ..Default::default()
+                    },
+                    command: aw_exec::CommandSpec {
+                        program: "/not-launched".into(),
+                        args: vec![],
+                        cwd: "/".into(),
+                        environment: BTreeMap::new(),
+                    },
+                },
+                working: "/".into(),
+                plugin: None,
+            };
+            assert_eq!(
+                prepared
+                    .capabilities()
+                    .failure_actions
+                    .contains_key("tool.after"),
+                !reloadable
+            );
+        }
+        for profile in super::super::super::adapter::catalog::PROFILES {
+            assert!(profile
+                .capabilities("fixture", "fixture")
+                .failure_actions
+                .is_empty());
+        }
+    }
 
     #[test]
     fn replacement_registers_outermost_so_observers_unwind_first() {
@@ -372,6 +552,8 @@ mod tests {
                 event: "tool.after".into(),
                 step_id: id.into(),
                 provider: id.into(),
+                event_tools: vec!["*".into()],
+                step_tools: vec!["*".into()],
                 on_error: "report".into(),
                 execution: if id == "user" {
                     StepExecution::Native
@@ -401,6 +583,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["compress", "user", "observe"]
         );
+        assert!(hooks
+            .iter()
+            .all(|hook| hook["event_tools"] == json!(["*"]) && hook["step_tools"] == json!(["*"])));
         assert_eq!(
             events["tool.after"].replacement_step.as_deref(),
             Some("compress")

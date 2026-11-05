@@ -68,6 +68,10 @@ jobs:
           python3 scripts/check-sqlite-entrypoints.py --self-test
           python3 scripts/check-sqlite-entrypoints.py
 
+      - name: Check Codex offset extraction
+        working-directory: src/agentsight
+        run: python3 tests/test_extract_codex_offsets.py
+
       - name: Lint
         working-directory: src/agentsight
         run: cargo clippy --workspace --all-targets -- -D warnings

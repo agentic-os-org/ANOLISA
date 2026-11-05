@@ -129,7 +129,7 @@ not establish capture completeness or the 275 MB memory target.
 ## 6. Measure AgentSight resources
 
 Start the collector beforehand as described in the
-[CLI reference](../../../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md).
+[CLI reference](../../../../docs/user-guide/en/agentsight/cli-reference.md).
 eBPF tracing requires root or the required capabilities. In an isolated copy
 of the production configuration, match the clients with this `cmdline.allow`
 entry and exclude mock-server discovery rules:

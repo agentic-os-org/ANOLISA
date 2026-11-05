@@ -6,15 +6,19 @@ Application persistence and health endpoints are separate acceptance gates.
 import json
 import os
 import pwd
+import shutil
 import signal
 import socket
 import stat
 import subprocess
 import tempfile
 import time
+import warnings
 from pathlib import Path
 
 import pytest
+
+from tests.v2.e2e.conftest import _SOCKET_WAIT_SECONDS
 
 
 def test_bound_socket_allows_ordinary_users(daemon):
@@ -72,7 +76,12 @@ with socket.socket(socket.AF_UNIX) as listener:
             os.chown(endpoint, 0, 0)
             if client == "cli":
                 result = cli(
-                    "--socket", str(endpoint), "policy", "list", "--timeout-ms", "1000"
+                    "--socket",
+                    str(endpoint),
+                    "policy",
+                    "list",
+                    "--timeout-ms",
+                    "1000",
                 )
             else:
                 environment = os.environ.copy()
@@ -117,6 +126,168 @@ def test_native_health_probe_accepts_real_root_daemon(daemon, health_probe):
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize("peer_uid", [0, 1000])
+@pytest.mark.parametrize("client", ["cli", "health"])
+def test_dproc_uds_002_authenticates_uid_with_zero_peer_pid(
+    health_probe, peer_uid, client, monkeypatch
+):
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        pytest.skip("unshare is required for the PID namespace fixture")
+    namespace = [
+        unshare,
+        "-Upf",
+        f"--map-user={peer_uid}",
+        f"--map-group={peer_uid}",
+        "--kill-child",
+    ]
+    available = subprocess.run(
+        namespace + ["true"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if available.returncode:
+        pytest.skip(f"user/PID namespaces unavailable: {available.stderr.strip()}")
+    with (
+        tempfile.TemporaryDirectory(prefix="asc-peer-pid-") as directory,
+        socket.socket(socket.AF_UNIX) as listener,
+    ):
+        endpoint = str(Path(directory) / "daemon.sock")
+        command, method = [health_probe], "daemon.health"
+        if client == "cli":
+            command = [shutil.which("agent-sec-cli"), "policy", "list"]
+            method = "policy.templates.list"
+        monkeypatch.setenv("AGENT_SEC_DAEMON_SOCKET", endpoint)
+        monkeypatch.delenv("AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK", raising=False)
+        listener.bind(endpoint)
+        listener.listen(2)
+        listener.settimeout(5)
+        # Keep the listener outside the client's PID namespace; map its owner
+        # to either UID without requiring host root.
+        process = subprocess.Popen(
+            namespace
+            + [
+                "/usr/bin/python3",
+                "-c",
+                """import os, socket, struct, sys
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.connect(sys.argv[1])
+    credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    pid, uid, _ = struct.unpack("iII", credentials)
+    assert (pid, uid) == (0, int(sys.argv[2])), (pid, uid)
+os.execv(sys.argv[3], sys.argv[3:])
+""",
+                endpoint,
+                str(peer_uid),
+                *command,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(5)
+                assert connection.recv(1) == b""  # Credential observation only.
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(5)
+                with connection.makefile("rb") as reader:
+                    request = reader.readline()
+                if peer_uid == 0:
+                    assert json.loads(request)["method"] == method
+                    connection.sendall(
+                        b'{"requestId":"pid-zero","result":{"status":"ok"}}\n'
+                    )
+                else:
+                    assert request == b"", "untrusted server received request bytes"
+            stdout, stderr = process.communicate(timeout=5)
+            assert process.returncode == (0 if peer_uid == 0 else 1), stderr
+            if peer_uid == 0:
+                assert stderr == ""
+            else:
+                assert stdout == ""
+                assert "server identity verification failed; request not sent" in stderr
+                assert f"expected daemon UID 0, got {peer_uid}" in stderr
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+
+
+def test_default_start_and_restart_do_not_activate_gateway(
+    start_daemon, tmp_path, monkeypatch, record_property
+):
+    data = tmp_path / "data"
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(data))
+    runtime = Path("/run/agent-sec-gateway")
+    assert not runtime.exists(), "requires an environment without an active gateway"
+    nft = shutil.which("nft")
+    nft_unavailable = None
+
+    for phase in ("before_start", "after_start", "after_restart"):
+        if phase != "before_start":
+            daemon = start_daemon()
+            result = daemon.cli("gateway", "status")
+            if result.returncode == 0:
+                assert result.stderr == ""
+                assert json.loads(result.stdout) == {
+                    "enabled": False,
+                    "ready": False,
+                    "scopes": [],
+                }
+            else:
+                assert nft_unavailable is not None, result.stderr
+                assert result.returncode == 1
+                assert result.stdout == ""
+                assert json.loads(result.stderr)["error"] == {
+                    "code": "unavailable",
+                    "message": "the credential gateway is not configured in this daemon",
+                }
+        if nft is None:
+            nft_unavailable = "nft is not installed"
+        else:
+            tables = subprocess.run(
+                [nft, "--json", "list", "tables"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if tables.returncode != 0 and any(
+                reason in tables.stderr.lower()
+                for reason in ("operation not permitted", "permission denied")
+            ):
+                nft_unavailable = "nft read permission denied"
+            else:
+                assert tables.returncode == 0, tables.stderr
+                assert not any(
+                    entry.get("table", {}).get("name") == "agent_sec_gateway"
+                    for entry in json.loads(tables.stdout)["nftables"]
+                ), f"gateway nftables table exists during {phase}"
+        assert not runtime.exists()
+        assert not (data / "gateway").exists()
+        assert not (data / "credentials").exists()
+        if phase != "before_start":
+            daemon.process.send_signal(signal.SIGTERM)
+            daemon.process.communicate(timeout=5)
+            assert daemon.process.returncode == 0
+            assert not daemon.socket_path.exists()
+    record_property(
+        "gateway_nft_coverage",
+        f"unavailable: {nft_unavailable}" if nft_unavailable else "verified",
+    )
+    if nft_unavailable:
+        warnings.warn(
+            f"Gateway nftables absence was not verified: {nft_unavailable}",
+            pytest.PytestWarning,
+            stacklevel=1,
+        )
+
+
 @pytest.mark.skipif(os.geteuid() != 0, reason="cross-UID UDS test requires root")
 def test_ordinary_uid_connects_but_cannot_administer_or_replace_socket(
     daemon_bin, daemon_settings
@@ -139,7 +310,7 @@ def test_ordinary_uid_connects_but_cannot_administer_or_replace_socket(
             env=environment,
         )
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
             while (
                 not endpoint.exists() or stat.S_IMODE(endpoint.stat().st_mode) != 0o666
             ):
@@ -200,18 +371,64 @@ else:
                 raise
 
 
-def test_sigterm_cooperatively_exits_and_removes_socket(start_daemon):
-    handle = start_daemon()
+def test_sigterm_cooperatively_exits_and_removes_socket(start_daemon, monkeypatch):
+    with monkeypatch.context() as environment:
+        environment.setenv("RUST_LOG", "info")
+        handle = start_daemon()
     socket_path = handle.socket_path
     assert socket_path.exists()
     socket_inode = os.stat(socket_path).st_ino
 
     handle.process.send_signal(signal.SIGTERM)
-    handle.process.communicate(timeout=5.0)
+    _, stderr = handle.process.communicate(timeout=5.0)
 
     assert handle.process.returncode == 0
     # The daemon owns its socket and unlinks exactly the inode it bound.
     assert not socket_path.exists(), f"socket inode {socket_inode} was left behind"
+    records = [json.loads(line) for line in stderr.splitlines() if line.startswith("{")]
+    startup = [
+        record
+        for record in records
+        if record.get("fields", {}).get("reason") == "startup_stage"
+    ]
+    stages = [record["fields"]["stage"] for record in startup]
+    required = [
+        "policy_storage",
+        "skillsec",
+        "event_storage",
+        "skill_worker",
+        "policy_runtime",
+        "retention_catchup",
+        "uds_bind",
+        "rpc_ready",
+    ]
+    assert set(required) <= set(stages), stderr
+    positions = [stages.index(stage) for stage in required]
+    assert positions == sorted(positions), stderr
+    assert all(record["timestamp"] and record["level"] == "INFO" for record in startup)
+    elapsed = [
+        record["fields"]["elapsed_ms"]
+        for record in startup
+        if "elapsed_ms" in record["fields"]
+    ]
+    assert elapsed == sorted(elapsed)
+    assert startup[-1]["fields"]["duration_ms"] >= 0
+    retention = [
+        record["fields"]
+        for record in records
+        if record.get("fields", {}).get("reason") == "retention_stage"
+    ]
+    assert {(entry["store"], entry["phase"]) for entry in retention} == {
+        ("security", "started"),
+        ("security", "completed"),
+        ("observability", "started"),
+        ("observability", "completed"),
+    }, stderr
+    assert all(
+        entry["duration_ms"] >= 0
+        for entry in retention
+        if entry["phase"] == "completed"
+    )
 
 
 def test_relative_socket_fails(daemon_bin):
@@ -247,7 +464,9 @@ def test_dproc_014_second_socket_in_same_runtime_is_rejected(daemon, daemon_bin)
     assert daemon.request("policy", "list")["total"] == 0
 
 
-def test_dproc_003_sigkill_restart_reuses_lock_and_reclaims_socket(start_daemon):
+def test_dproc_003_sigkill_restart_reuses_lock_and_reclaims_socket(
+    start_daemon,
+):
     first = start_daemon()
     lock = first.socket_path.parent / "daemon.lock"
     inode = lock.stat().st_ino
@@ -331,7 +550,8 @@ def test_dproc_012_directory_special_bits_allow_safe_access(
 
 
 @pytest.mark.parametrize(
-    "kind", ["symlink", "writable", "world_writable", "setgid_writable", "ancestor"]
+    "kind",
+    ["symlink", "writable", "world_writable", "setgid_writable", "ancestor"],
 )
 def test_dproc_012_unsafe_directory_is_rejected(daemon_bin, tmp_path, kind):
     runtime = tmp_path / "runtime"
@@ -393,7 +613,7 @@ def test_socket_environment_and_explicit_precedence(
         env=env,
     )
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _SOCKET_WAIT_SECONDS
         while not endpoint.exists():
             assert process.poll() is None
             assert time.monotonic() < deadline

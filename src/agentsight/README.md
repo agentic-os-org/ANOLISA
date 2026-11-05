@@ -185,8 +185,8 @@ cd src/agentsight
 # Build frontend and embed into frontend-dist/ (required before cargo build)
 make build-frontend
 
-# Then build the Rust binary with the embedded UI
-make build
+# Then build only the Rust binary with the embedded UI
+make build-binary
 
 # Or do both in one step
 make build-all
@@ -326,18 +326,18 @@ sudo yum install agentsight
 ```
 
 Installs:
-- `/usr/local/bin/agentsight` — CLI binary
-- `/usr/local/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight` — CLI binary
+- `/usr/bin/agentsight-enforcer` — ActPlane enforcement engine
+- `/usr/bin/agentsight-start` — trace/serve supervisor
 - `/usr/lib/systemd/system/agentsight.service` — AgentSight system unit
 - `/usr/lib/systemd/system/agentsight-enforcer.service` — enforcement system unit
 
-The RPM is a Linux system package. Its units are installed but not enabled by
-default; when both units run, AgentSight is ordered after the enforcer.
+The RPM is a Linux system package. When both units run, AgentSight is ordered
+after the enforcer.
 
 ### Start the Service
 
-Both package routes leave the units stopped and disabled. Start the main unit
-when you are ready to begin collection:
+Start the main unit when you are ready to begin collection:
 
 ```bash
 sudo systemctl enable --now agentsight.service
@@ -358,7 +358,7 @@ starting a foreground tracer.
 For node-wide collection in Kubernetes, use the DaemonSet manifest and runtime
 image under `src/agentsight/packaging/` (`k8s/daemonset.yaml` and
 `docker/Dockerfile`). See the
-[deployment guide](../../docs/user-guide/en/agent-observability/agentsight/deployment.md#kubernetes-daemonset-node-wide)
+[deployment guide](../../docs/user-guide/en/agentsight/deployment.md#kubernetes-daemonset-node-wide)
 for prerequisites and verification.
 
 ### Build from Source
@@ -384,8 +384,9 @@ For Linux cross builds, `scripts/build-enforcer.sh --target
 <aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` selects the target explicitly;
 without arguments it builds for the host. `CARGO` may select a prepared Cross
 wrapper, but must honor the requested target. Both Linux architectures use the
-same raw payload layout and source-owned `.anolisa/component.toml`. macOS ARM64
-uses `.anolisa/component.macos.toml` and ships only the main executable. Cross
+same raw payload layout and source-owned
+`packaging/anolisa/raw/component.toml`. macOS ARM64 uses
+`packaging/anolisa/raw/component.macos.toml` and ships only the main executable. Cross
 compiling macOS from Linux requires `--no-default-features --features server` to
 skip the optional `bpf-build` host dependencies. Remove
 the private enforcer directory only after packaging has consumed its receipt.
@@ -451,6 +452,11 @@ Open `http://127.0.0.1:7396` to view the Agent Dashboard. `trace` scans local AI
 sudo agentsight trace
 ```
 
+## Offline analysis
+
+Use `--stats-only` with the standalone analyzer or batch script for local perf/cost statistics without credentials or model requests.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
+
 ## Configuration
 
 AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/config.json`; falls back to embedded defaults if absent).
@@ -466,7 +472,7 @@ per-database locks coordinate `trace` and `serve`. Cleanup removes expired recor
 before size pruning, and targets 90% logical usage after physical allocation crosses the limit;
 automatic maintenance never runs `VACUUM` and leaves freed pages reusable. The Dashboard Settings
 page shows policy, capacity, coverage, and worker health without exposing database paths. See the
-[configuration guide](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#sqlite-storage-policies).
+[configuration guide](../../docs/user-guide/en/agentsight/configuration.md#sqlite-storage-policies).
 
 ### Feature Flags (`features`)
 
@@ -517,7 +523,7 @@ Resource removals report bounded metadata with `incomplete=true` and `metadata_o
 Hard byte limits still permit forced reclamation.
 Probe and FFI queues enforce byte limits alongside their slot limits and count rejected events.
 These budgets cover retained payloads; process RSS also includes the ring buffer, decoder working
-memory and allocator overhead. See the [configuration reference](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#runtime-limits)
+memory and allocator overhead. See the [configuration reference](../../docs/user-guide/en/agentsight/configuration.md#runtime-limits)
 for timeout, raw capture and overload behavior.
 
 Configuration schema v5 ships these defaults. Startup upgrades back up and replace older config
@@ -562,7 +568,7 @@ For resource-constrained environments, disable non-essential features and reduce
 ## ATIF export
 
 Use `scripts/batch-analyze.py --export-atif DIRECTORY` to save converted Claude/Qoder ATIF locally without invoking an analyzer.
-See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
 
 ## Supported LLM Providers
 
@@ -576,7 +582,7 @@ Token parsing supports multiple LLM API formats:
 ## Batch concurrency
 
 The batch script accepts opt-in `--jobs 1..8` (default 1), with bounded concurrent invocations and ordered output.
-See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
+See the [CLI reference](../../docs/user-guide/en/agentsight/cli-reference.md) for usage and limits.
 
 ## Origins
 
@@ -586,4 +592,4 @@ This project is derived from [https://github.com/eunomia-bpf/agentsight.git](htt
 
 Apache License 2.0 — see [LICENSE](../../LICENSE) for details.
 
-Remote Tokenless statistics can be recorded through the optional `tokenless_api` configuration; see [configuration](../../docs/user-guide/en/agent-observability/agentsight/configuration.md#tokenless-statistics-api).
+Remote Tokenless statistics can be recorded through the optional `tokenless_api` configuration; see [configuration](../../docs/user-guide/en/agentsight/configuration.md#tokenless-statistics-api).

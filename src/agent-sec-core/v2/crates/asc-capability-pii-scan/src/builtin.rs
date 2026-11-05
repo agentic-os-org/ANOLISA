@@ -84,21 +84,34 @@ impl<'a> Text<'a> {
         &self.input[self.offsets[start]..self.offsets[end]]
     }
     fn score(&self, span: Span, base: f64, email: bool) -> f64 {
-        let context = self
-            .slice(
-                span.start.saturating_sub(64),
-                (span.end + 64).min(self.chars.len()),
-            )
-            .to_lowercase()
-            .replace('-', "_");
+        let start = span.start.saturating_sub(64);
+        let end = (span.end + 64).min(self.chars.len());
+        let context = self.slice(start, end).to_lowercase();
         let mut score = base;
-        if POSITIVE.iter().any(|s| context.contains(s)) {
+        let positive_context = context.replace('-', "_");
+        if POSITIVE.iter().any(|s| positive_context.contains(s)) {
             score += 0.12;
         }
         if !email
-            && ["example", "dummy", "test", "sample", ".invalid"]
-                .iter()
-                .any(|s| context.contains(s))
+            && (context.contains(".invalid")
+                || ["example", "dummy", "test", "sample"].iter().any(|marker| {
+                    self.chars[start..end]
+                        .windows(marker.len())
+                        .enumerate()
+                        .any(|(offset, candidate)| {
+                            let index = start + offset;
+                            // Clipping the context must not turn part of a word into a marker.
+                            candidate
+                                .iter()
+                                .zip(marker.chars())
+                                .all(|(actual, expected)| actual.eq_ignore_ascii_case(&expected))
+                                && (index == 0 || !word(self.chars[index - 1]))
+                                && self
+                                    .chars
+                                    .get(index + marker.len())
+                                    .is_none_or(|c| !word(*c))
+                        })
+                }))
         {
             score -= 0.35;
         }
@@ -182,6 +195,18 @@ impl BuiltinDetector {
                             .into()
                     }
                     "_EMAIL_RE" => r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}".into(),
+                    // Keep candidate search linear and check the frozen Python boundaries
+                    // only where the body matches, in candidate_boundaries.
+                    "_BEARER_RE" => python_pattern(&pattern.replacen(r"(?i)\b", "(?i)", 1)),
+                    "_ALIYUN_ACCESS_KEY_ID_RE" => {
+                        python_pattern(pattern.trim_start_matches(r"\b").trim_end_matches(r"\b"))
+                    }
+                    "_CN_ID_RE" | "_PHONE_CN_RE" => python_pattern(
+                        pattern
+                            .trim_start_matches(r"(?<!\d)")
+                            .trim_end_matches(r"(?!\d)")
+                            .trim_end_matches(r"(?!\w)"),
+                    ),
                     _ => python_pattern(&pattern),
                 };
                 RegexBuilder::new(&pattern)
@@ -307,6 +332,12 @@ impl<'a> Cursor<'a> {
                 };
                 check_deadline(deadline)?;
                 let whole = captures.get(0).ok_or(ScanError::Matching)?;
+                if !candidate_boundaries(id, text.input, whole) {
+                    // A rejected country prefix can contain a valid local phone number.
+                    let first = whole.as_str().chars().next().ok_or(ScanError::Matching)?;
+                    self.position = whole.start() + first.len_utf8();
+                    continue;
+                }
                 self.position = whole.end();
                 let found = if id == "_SECRET_FIELD_RE" {
                     secret(text, &captures)?
@@ -437,6 +468,19 @@ fn basic<'a>(
 fn word(c: char) -> bool {
     let index = WORD_RANGES.partition_point(|(_, end)| *end < c);
     WORD_RANGES.get(index).is_some_and(|(start, _)| *start <= c)
+}
+
+fn candidate_boundaries(id: &str, input: &str, matched: Match<'_>) -> bool {
+    let before = || input[..matched.start()].chars().next_back();
+    let after = || input[matched.end()..].chars().next();
+    let decimal = |c| validators::decimal(c).is_some();
+    match id {
+        "_BEARER_RE" => !before().is_some_and(word),
+        "_ALIYUN_ACCESS_KEY_ID_RE" => !before().is_some_and(word) && !after().is_some_and(word),
+        "_CN_ID_RE" => !before().is_some_and(decimal) && !after().is_some_and(word),
+        "_PHONE_CN_RE" => !before().is_some_and(decimal) && !after().is_some_and(decimal),
+        _ => true,
+    }
 }
 
 fn api_key<'a>(

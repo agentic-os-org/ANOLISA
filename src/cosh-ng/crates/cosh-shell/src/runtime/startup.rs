@@ -201,11 +201,6 @@ const BASH_NON_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[
         io: BootstrapPathProbeIo::Pty,
     },
 ];
-const BASH_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
-    flags: "-lic",
-    source: "Bash interactive login startup",
-    io: BootstrapPathProbeIo::Pipes,
-}];
 const ZSH_NON_LOGIN_PATH_PROBES: &[BootstrapPathProbe] = &[BootstrapPathProbe {
     flags: "-ic",
     source: "Zsh interactive startup",
@@ -262,9 +257,10 @@ fn bootstrap_path_probe_plan(
     if !enabled {
         return None;
     }
+    // A Bash login has no side probe: its managed shell reports the startup
+    // PATH after sourcing the login profile exactly once.
     match (shell_kind, login) {
         (RawShellKind::Bash, false) => Some(("bash", BASH_NON_LOGIN_PATH_PROBES)),
-        (RawShellKind::Bash, true) => Some(("bash", BASH_LOGIN_PATH_PROBES)),
         (RawShellKind::Zsh, false) => Some(("zsh", ZSH_NON_LOGIN_PATH_PROBES)),
         (RawShellKind::Zsh, true) => Some(("zsh", ZSH_LOGIN_PATH_PROBES)),
         _ => None,
@@ -542,10 +538,10 @@ fn merge_path_additions_at_anchors(overlay: &str, base: &str) -> String {
 pub(crate) fn bootstrap_process_path_from_shell(
     shell_kind: &RawShellKind,
     login: bool,
+    enabled: bool,
     winsize: &Winsize,
     effects: &LoginEffectGuard,
 ) {
-    let enabled = std::env::var("COSH_SHELL_BOOTSTRAP_PATH").as_deref() != Ok("0");
     let Some((shell, probes)) = bootstrap_path_probe_plan(shell_kind, login, enabled) else {
         return;
     };

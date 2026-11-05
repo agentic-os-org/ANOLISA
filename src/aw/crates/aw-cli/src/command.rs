@@ -3,7 +3,10 @@
 mod confirmation;
 mod discovery;
 mod dispatch;
+mod inventory;
+mod management;
 mod package;
+mod scope;
 #[cfg(test)]
 mod tests;
 mod validation;
@@ -18,7 +21,7 @@ use package::{Configure, Edit, Install, Show};
     about = "Run native Agents and manage local AW software and configuration",
     disable_help_subcommand = true,
     arg_required_else_help = true,
-    after_help = "Install accepts local unpacked Preview bundles only.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
+    after_help = "Install accepts local unpacked Provider bundles with package.json.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -41,10 +44,16 @@ enum Command {
     },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
-    /// Install a local Preview bundle, or retain legacy native Hook connection
+    /// Install a local Provider extension, or connect native Hooks
     Install(Install),
-    /// Remove owned files from one Preview installation prefix
+    /// Remove selected packages or an entire installation, preserving unknown files
     Uninstall(package::Uninstall),
+    /// List recorded software installations without checking or changing their files
+    List(inventory::List),
+    /// Check installed software files without repairing or starting anything
+    Doctor(inventory::Query),
+    /// Recover interrupted package operations from their durable local records
+    Recover(management::Recover),
     /// Connect a configured Agent's persistent native Hooks
     #[command(subcommand)]
     Agent(Agent),
@@ -57,7 +66,7 @@ enum Command {
         after_help = "No system service is installed. serve runs in the foreground."
     )]
     Service(Service),
-    /// Update an opted-in idle instance's policy, not installed software
+    /// Update a supported idle instance's runtime policy
     Update(Update),
     /// Query service and optional Provider views; may execute view commands
     Inspect(Inspect),
@@ -83,12 +92,15 @@ enum Command {
     /// Internal reloadable native lifecycle protocol
     #[command(hide = true)]
     Bridge(Bridge),
+    /// Internal resident SDK task lifecycle protocol
+    #[command(hide = true)]
+    Scope(Scope),
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Agent {
     /// Connect supported native Hooks; does not install Agent software
-    Connect(Native),
+    Connect(Connect),
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -103,8 +115,14 @@ enum Service {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Config {
-    /// Create a configuration from installed Preview packages
-    Init(Configure),
+    /// Show redacted native source declarations; does not load or activate them
+    NativeSources(package::NativeSources),
+    /// Record a native source reference without opening the native source
+    AddNativeSource(package::AddNativeSource),
+    /// Remove a reference while retaining the original native source
+    RemoveNativeSource(package::RemoveNativeSource),
+    /// Create an offline configuration with optional Provider templates
+    Init(Box<Configure>),
     /// Print configuration JSON, including private Provider values
     Show(Show),
     /// Check configuration; optionally compare a policy update's scope
@@ -132,6 +150,25 @@ struct Native {
     /// Native framework profile, not an AW deployment profile
     #[arg(long, value_name = "NAME")]
     native_profile: Option<String>,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct Connect {
+    #[command(flatten)]
+    native: Native,
+    #[command(flatten)]
+    attachment: Attachment,
+}
+
+#[derive(Args, Debug, PartialEq)]
+#[group(multiple = true)]
+struct Attachment {
+    /// Attach to an idle caller-owned Qoder TUI or QwenPaw App process
+    #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..), requires_all = ["config", "agent"], conflicts_with = "native_profile")]
+    pid: Option<u32>,
+    /// Detach owned Hooks while idle; leave the native process running
+    #[arg(long, requires = "pid")]
+    remove: bool,
 }
 
 #[derive(Args, Debug, PartialEq)]
@@ -201,9 +238,9 @@ struct Update {
     /// Select an instance, optionally intersecting --agent
     #[arg(long, value_name = "ID", required_unless_present = "agent")]
     instance: Option<String>,
-    /// Candidate policy document; does not replace the launch configuration
-    #[arg(long, value_name = "FILE")]
-    policy: String,
+    /// Separate candidate; defaults to --config for an existing connection
+    #[arg(long, value_name = "FILE", required_unless_present = "config")]
+    policy: Option<String>,
     /// Optimistic concurrency precondition; no automatic retry on conflict
     #[arg(long, value_name = "SHA256")]
     expected_revision: Option<String>,
@@ -251,10 +288,24 @@ struct Hook {
     close_event: Option<String>,
 }
 
+#[derive(Args, Debug, PartialEq)]
+struct Scope {
+    #[command(flatten)]
+    bridge: Bridge,
+    #[arg(long, value_parser = ["open", "acknowledge", "close", "invoke"])]
+    action: String,
+    #[arg(long)]
+    event: Option<String>,
+    #[arg(long)]
+    step: Option<String>,
+    #[arg(long)]
+    on_error: Option<String>,
+}
+
 pub(crate) fn run(arguments: Vec<String>) -> crate::cli::Result<crate::cli::Exit> {
     if let Some(protocol) = arguments
         .first()
-        .filter(|name| matches!(name.as_str(), "hook" | "bridge"))
+        .filter(|name| matches!(name.as_str(), "hook" | "bridge" | "scope"))
     {
         // Native callbacks have fail-closed replies and exit codes even for
         // malformed arguments. Keep their exact parser and protocol boundary.

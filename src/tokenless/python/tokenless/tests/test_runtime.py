@@ -248,6 +248,32 @@ class TokenlessRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(TokenlessError, "JSON parse error"):
             self.runtime.compress_response("not-json")
 
+    def test_response_preserves_fields_and_empty_array_positions(self) -> None:
+        original = {
+            "debug": "request evidence",
+            "trace": None,
+            "traces": [],
+            "stack": {},
+            "stacktrace": "",
+            "logs": [None, "", [], {}, False, 0],
+            "logging": {"debug": None, "values": [1, None, 2]},
+        }
+        for stash_enabled in (False, True):
+            for pretty in (False, True):
+                with self.subTest(stash_enabled=stash_enabled, pretty=pretty):
+                    content = (
+                        json.dumps(original, indent=2)
+                        if pretty
+                        else json.dumps(original, separators=(",", ":"))
+                    )
+                    result = self.runtime.compress_response(
+                        content, stash_enabled=stash_enabled
+                    )
+                    self.assertEqual(json.loads(result.output), original)
+                    self.assertEqual(result.applied, pretty)
+                    if not pretty:
+                        self.assertEqual(result.output, content)
+
     def test_missing_hash_raises_package_error(self) -> None:
         with self.assertRaisesRegex(TokenlessError, "no stashed payload"):
             self.runtime.retrieve("000000000000000000000000")

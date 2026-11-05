@@ -224,7 +224,11 @@ pub fn create_export(
 }
 
 fn emit_export_created(root: &Path, exported: &AuditExportResult) -> Result<(), CoshError> {
-    let mut writer = AuditSegmentWriter::create(root, AuditComponentName::CoshCli)?;
+    let mut writer = AuditSegmentWriter::create_with_settings(
+        root,
+        AuditComponentName::CoshCli,
+        super::config::load_audit_settings(None)?.settings,
+    )?;
     let now = Utc::now();
     let mut event = AuditEventV1::new(
         Uuid::new_v4().to_string(),

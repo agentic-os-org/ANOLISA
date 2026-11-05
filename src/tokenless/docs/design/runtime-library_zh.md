@@ -4,9 +4,9 @@
 
 ## 目标
 
-`anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含 PyO3
-Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk`
-出现在 `PATH` 中。
+`anolisa-tokenless` 是框架无关的 Tokenless SDK。BeforeModel、PostTool 和 Retrieve 通过
+PyO3 Runtime 在进程内运行；PreTool 在子进程中运行，详见下文。平台 Wheel 同时包含 PyO3 Runtime
+和匹配的 `tokenless` 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk` 出现在 `PATH` 中。
 
 公开的 `TokenlessSdk` 把宿主框架的四个生命周期映射为 Tokenless 行为：
 
@@ -27,12 +27,22 @@ Session 标识；PreTool 与普通 PostTool 还必须提供 Tool Use 标识。�
 OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约，不是 OpenAI 请求。
 
 `tokenless-runtime` 统一持有 SQLite Stash 和统计记录器。Schema 与响应压缩共享 Stash，
-候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
-提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
-携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
+候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。RTK 链接在 `tokenless`
+可执行文件中；Adapter 提供 `command_field` 时，`TokenlessSdk.pre_tool` 每次调用都启动
+`tokenless compress`，因为 RTK 假定一条命令对应一个进程：它在进程生命周期内缓存已信任的过滤规则和
+项目文件，并可能无时限地等待 `git rev-parse`。因此每次调用都能看到最新的 RTK 状态。SDK 给子进程
+5 秒时限，超时后杀掉其进程组（Windows 上用 `taskkill /T`），任何失败都记录警告并放行原命令。每个
+改写后的 wrapper 都以 `tokenless rtk` 形式调用 Wheel 内置的 `tokenless`，并携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
 Rust Core，而不是 Python 配置中。Shell 工具的 `PostToolRequest` 在 `command` 字段携带实际
 执行的命令行；由 Core 而非 Adapter 把只打印本地文件的结果报告为 `file_read`，打印出的
 HTML 页面因此保持原样，输出中的数据仍照常压缩。
+
+PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，保留已识别的原生
+`head`、`tail` 调用，支持嵌套和 Shell 换行续行。所有参数形式均保持原生执行，包括字节
+窗口和持续跟踪模式。一旦识别到此类调用，其所在的整条 Pipeline 或复合命令都跳过 RTK
+改写。这避免了 RTK `read --max-lines` 路径的结构截断；显式 RTK 调用保持既有行为。
+不会读取自定义 `hooks.transparent_prefixes`，因此这些前缀下的调用仍可能被改写。
+该规则独立于搜索路径共享开关，保留现有 PostTool 文件读取策略。
 
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
@@ -40,13 +50,13 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
 后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
-千问办公的 Hook Adapter 在两个生命周期请求之前，将两个工作区 Shell MCP 名称统一为
+千问办公的 Hook Adapter 在两个生命周期请求之前，将识别到的工作区 Shell MCP 名称统一为
 `Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
 确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置
 及结构化响应处理。插件私有二进制也由 Adapter 解析；私有 PATH 或工作区状态不代表
 模型可以调用恢复命令，因此这些路径声明 `recovery.kind = none`。
 
-非法输入、内置 RTK 缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
+非法输入、内置 `tokenless` 可执行文件缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
@@ -56,7 +66,7 @@ OpenClaw 2026.6.6 或更高版本通过已声明且显式启用的工具结果 m
 失败并保留收到的宿主结果，因为宿主会把 middleware 抛出的异常转为工具失败。
 旧版 middleware 预处理可能已裁剪文本或元数据。Tokenless 不会在 API 最低版本之上
 额外拒绝这些宿主，也不会重建缺失内容。仅 `applied` 压缩替换文本；工具错误诊断仍可
-追加上下文。详见[宿主兼容边界](../../../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#openclaw)。
+追加上下文。详见[宿主兼容边界](../../../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
 
 构建 CLI 和 OpenClaw Adapter 后，可在 `src/tokenless` 使用本地宿主镜像运行可选容器回归：
 
@@ -117,7 +127,24 @@ PreTool 保留已识别的原生 `find` 调用，以便 PostTool 接收原生结
 Claude Code Adapter 仅提取无上下文选项的原生 Grep `mode=content` 响应，将其文本槽声明为
 API 响应，再只替换原输出对象的 `content` 字段。包括宿主限额在内的其他元数据保持不变；
 完整性指保留收到的所有记录，不表示宿主裁剪前的全部可能命中。
-其他 Grep 模式和宿主保留既有路由。RTK 负责的 Bash 输出继续绕过原生 PostTool 压缩。
+其他 Grep 模式和宿主保留既有路由。
+
+RTK 输出所有权会在执行完成后再次确认。PreTool 在 Runtime 数据目录的 `rtk-outcomes.db`
+原子保存原命令和实际执行的完整命令，并为每条改写后的 RTK 命令分配执行批次和序号，独立于统计开关。随包 RTK 记录
+输出字节是否改变；Token 估算持平或增加不能证明内容未变。PostTool 按 Agent、会话、工具调用
+一次性消费结果之前，要求其 `command` 与记录的命令（含执行批次）完全一致；命令缺失或被修改时
+保留旁路，因此重试注册失败也不能复用旧结果。只有全部输出字节未变且工具执行成功，才使用
+保存的原命令继续进入原有管线，
+保留文件读取来源及其他命令相关保护。重试改写无法跟踪时尝试使前一批次失效；即使失效操作失败，
+命令匹配也阻止此次重试复用旧结果。迟到结果不能重建已删除的批次。
+输出已改变、结果缺失或过期、旧版 RTK、状态读写失败时，仍跳过后置压缩。复合调用要求每条
+新改写命令都有结果；包含既有或无法跟踪的 RTK 命令、无法可靠解析的 Shell 替换时，保守地停用后续处理。
+PowerShell Wrapper 目前不生成回执，保留 RTK 旁路。
+Core 会记录结果查询失败的警告；RTK 侧写入失败保持静默，避免污染工具输出。
+未消费结果一天后过期，后续改写通过索引清理过期记录。
+管线沿用宿主声明的能力。Common Hook、Hermes 和 OpenClaw 在查询结果前已为 RTK 输出声明
+`recovery: none`，因此回退仅接受无损候选；本次修改不会为这些调用启用 Stash/retrieve 恢复。
+继续 PostTool 不保证产生压缩：候选结果仍须通过原有保真与收益检查。
 
 搜索路径共享默认开启。CLI 可通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 关闭；
 未设置或为空时保持开启，`1`、`true`、`yes`（不区分大小写）也表示开启；其他值均关闭。
@@ -165,10 +192,10 @@ Session；客户端不会推断或强制这两种模式。Python API 不清空�
 
 ## 打包与验证
 
-`make python-wheel` 会构建固定版本 RTK，把它暂存为
-`anolisa_tokenless/_bin/rtk`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
-可以通过 `PYTHON_RTK_BINARY` 指定为同一 Wheel 目标构建的 RTK 文件。
-`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 RTK 的条件下验证
+`make python-wheel` 会构建 `tokenless`，把它暂存为
+`anolisa_tokenless/_bin/tokenless`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
+可以通过 `PYTHON_TOKENLESS_BINARY` 指定为同一 Wheel 目标构建的 `tokenless` 文件。
+`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 `tokenless` 或 RTK 的条件下验证
 四个生命周期和 Stats 查询。
 
 `anolisa-tokenless-agentscope` 支持 AgentScope 1.0.11 至 1.0.x 和 2.0.x。1.x Adapter

@@ -1,7 +1,6 @@
 //! Scan orchestration: the single entry point that turns code into a verdict.
 //!
-//! A direct port of V1's `scanner.scan`. It validates input, rewrites a Bash
-//! command that wraps an inline interpreter call into that call's own language,
+//! It validates input, scans Bash input alongside an extracted interpreter payload,
 //! optionally narrows the rule set, runs the regex engine, and assembles a
 //! [`ScanResult`]. Every failure is turned into an error result rather than
 //! propagated, because the caller must always receive a verdict.
@@ -9,9 +8,10 @@
 use std::borrow::Cow;
 use std::time::Instant;
 
+use crate::engine::run_regex_rules_for_inputs;
 use crate::errors::CodeScanError;
-use crate::extractor::extract_inline_code;
-use crate::findings::{Finding, Verdict, build_summary, compute_verdict};
+use crate::extractor::{extract_inline_code, extract_python_shell_commands};
+use crate::findings::{Finding, Verdict, build_summary, compute_verdict, merge_findings};
 use crate::rules::{Language, load_rules};
 use crate::run_regex_rules;
 
@@ -45,7 +45,7 @@ pub struct ScanResult {
     pub verdict: Verdict,
     /// Human-readable one-line summary; wording is part of the contract.
     pub summary: String,
-    /// Every matching rule, in rule-load order; empty on pass or error.
+    /// Matching rules in first-seen order, with overlapping scan results merged by rule id.
     pub findings: Vec<Finding>,
     /// Language the code was scanned as, after any inline rewrite.
     pub language: Language,
@@ -78,8 +78,8 @@ impl ScanResult {
 /// Scans `code` written in `language` for security issues.
 ///
 /// This is the sole public entry point of the capability. When `rules` is
-/// `Some`, only rules whose id appears in it are run; `None` runs the whole set
-/// for the language. The action executor routes the literal `"llm"` to the
+/// `Some`, only rules whose id appears in it are run; `None` runs the language's
+/// rules plus Bash rules for direct Python command literals. The action executor routes `"llm"` to the
 /// injected local-model client; this direct regex entry point returns its
 /// V1-compatible unavailable result for that mode. Any other value runs the
 /// regex engine.
@@ -105,9 +105,15 @@ pub fn scan(code: &str, language: Language, rules: Option<&[String]>, mode: &str
     // Resolved before the pipeline runs so that a failure reports the language
     // actually scanned. V1 rebinds its `code`/`language` locals inside the try
     // block, so its error handler already sees the rewritten language.
-    let (code, language) = resolve_target(code, language);
+    let (target, language) = resolve_target(code, language);
+    let findings = scan_with_regex(&target, language, rules).and_then(|mut findings| {
+        if matches!(target, Cow::Owned(_)) {
+            merge_findings(&mut findings, scan_with_regex(code, Language::Bash, rules)?);
+        }
+        Ok(findings)
+    });
 
-    match scan_with_regex(&code, language, rules) {
+    match findings {
         Ok(findings) => {
             let verdict = compute_verdict(&findings);
             let summary = build_summary(&findings, language);
@@ -156,7 +162,21 @@ fn scan_with_regex(
     if let Some(enabled) = rules {
         rule_set.retain(|rule| enabled.iter().any(|id| id == &rule.rule_id));
     }
-    run_regex_rules(code, &rule_set, language)
+    let mut findings = run_regex_rules(code, &rule_set, language)?;
+    if language == Language::Python {
+        let commands = extract_python_shell_commands(code)?;
+        if !commands.is_empty() {
+            let mut shell_rules = load_rules(Language::Bash)?;
+            if let Some(enabled) = rules {
+                shell_rules.retain(|rule| enabled.iter().any(|id| id == &rule.rule_id));
+            }
+            merge_findings(
+                &mut findings,
+                run_regex_rules_for_inputs(&commands, &shell_rules, Language::Bash)?,
+            );
+        }
+    }
+    Ok(findings)
 }
 
 /// Whole milliseconds elapsed since `start`, saturating rather than wrapping.
@@ -251,25 +271,134 @@ mod tests {
 
     #[test]
     fn rule_filter_narrows_the_active_set() {
-        let all = scan("rm -rf /tmp/test", Language::Bash, None, "regex");
-        let matched = all
-            .findings
-            .first()
-            .expect("a finding exists")
-            .rule_id
-            .clone();
-        let narrowed = scan(
-            "rm -rf /tmp/test",
-            Language::Bash,
-            Some(std::slice::from_ref(&matched)),
-            "regex",
-        );
-        assert!(narrowed.findings.iter().all(|f| f.rule_id == matched));
+        for (code, language) in [
+            ("rm -rf /tmp/test", Language::Bash),
+            (r#"os.system("rm -rf /tmp/test")"#, Language::Python),
+            (
+                r#"pickle.loads(data); os.system("rm -rf /tmp/test")"#,
+                Language::Python,
+            ),
+        ] {
+            let all = scan(code, language, None, "regex");
+            assert!(!all.findings.is_empty());
+            for finding in &all.findings {
+                let narrowed = scan(
+                    code,
+                    language,
+                    Some(std::slice::from_ref(&finding.rule_id)),
+                    "regex",
+                );
+                assert_eq!(narrowed.verdict, Verdict::Warn);
+                assert_eq!(narrowed.findings.as_slice(), std::slice::from_ref(finding));
+            }
 
-        let empty = scan("rm -rf /tmp/test", Language::Bash, Some(&[]), "regex");
+            let empty = scan(code, language, Some(&[]), "regex");
+            assert!(empty.ok);
+            assert_eq!(empty.verdict, Verdict::Pass);
+            assert!(empty.findings.is_empty());
+        }
+    }
+
+    #[test]
+    fn inline_interpreters_preserve_outer_findings() {
+        for dangerous in [
+            "cat /etc/shadow",
+            "rm -rf /tmp/test",
+            "dd if=/dev/zero of=/dev/sda",
+        ] {
+            let control = scan(dangerous, Language::Bash, None, "regex");
+            assert_eq!(control.verdict, Verdict::Warn);
+            for interpreter in [r#"python3 -c "print(1)""#, r#"bash -c "echo hi""#] {
+                for code in [
+                    format!("{dangerous}; {interpreter}"),
+                    format!("{interpreter} && {dangerous}"),
+                ] {
+                    let result = scan(&code, Language::Bash, None, "regex");
+                    assert!(result.ok, "{code}: {}", result.summary);
+                    assert_eq!(result.verdict, control.verdict, "{code}");
+                    for expected in &control.findings {
+                        assert!(
+                            result
+                                .findings
+                                .iter()
+                                .any(|finding| finding.rule_id == expected.rule_id),
+                            "{code}: missing {}",
+                            expected.rule_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_python_preserves_inner_and_outer_rule_filters() {
+        let code = r#"cat /etc/shadow; python3 -c "pickle.loads(data)""#;
+        let python = scan("pickle.loads(data)", Language::Python, None, "regex");
+        let bash = scan("cat /etc/shadow", Language::Bash, None, "regex");
+        assert!(!python.findings.is_empty());
+        assert!(!bash.findings.is_empty());
+        let combined = scan(code, Language::Bash, None, "regex");
+        assert!(combined.ok);
+        assert_eq!(combined.language, Language::Python);
+        for expected in python.findings.iter().chain(&bash.findings) {
+            let filtered = scan(
+                code,
+                Language::Bash,
+                Some(std::slice::from_ref(&expected.rule_id)),
+                "regex",
+            );
+            assert_eq!(filtered.verdict, Verdict::Warn);
+            assert_eq!(filtered.findings, vec![expected.clone()]);
+            assert!(combined.findings.contains(expected));
+        }
+        let empty = scan(code, Language::Bash, Some(&[]), "regex");
         assert!(empty.ok);
         assert_eq!(empty.verdict, Verdict::Pass);
         assert!(empty.findings.is_empty());
+    }
+
+    #[test]
+    fn overlapping_shell_findings_are_merged_without_duplicate_evidence() {
+        for code in [
+            r#"python3 -c "subprocess.Popen('wipefs -a /dev/sda')""#,
+            r#"bash -c "wipefs -a /dev/sda""#,
+            r#"wipefs -a /dev/sda; python3 -c "subprocess.Popen('wipefs -a /dev/sda'); subprocess.run('shred /dev/sdb')""#,
+        ] {
+            let result = scan(
+                code,
+                Language::Bash,
+                Some(&["shell-disk-wipe".to_owned()]),
+                "regex",
+            );
+            let expected = scan(
+                if code.contains("shred") {
+                    "wipefs -a /dev/sda; shred /dev/sdb"
+                } else {
+                    "wipefs -a /dev/sda"
+                },
+                Language::Bash,
+                Some(&["shell-disk-wipe".to_owned()]),
+                "regex",
+            );
+            assert!(result.ok, "{code}: {}", result.summary);
+            assert_eq!(result.verdict, expected.verdict, "{code}");
+            assert_eq!(result.findings, expected.findings, "{code}");
+        }
+    }
+
+    #[test]
+    fn harmless_inline_interpreters_still_pass() {
+        for code in [
+            r#"python3 -c "print(1)""#,
+            r#"echo hello; python3 -c "print(1)""#,
+            r#"bash -c "echo hi" && echo done"#,
+        ] {
+            let result = scan(code, Language::Bash, None, "regex");
+            assert!(result.ok, "{code}: {}", result.summary);
+            assert_eq!(result.verdict, Verdict::Pass, "{code}");
+            assert!(result.findings.is_empty(), "{code}");
+        }
     }
 
     #[test]
@@ -293,6 +422,17 @@ mod tests {
             "tail rule was not reported: {:?}",
             result.findings
         );
+    }
+
+    #[test]
+    fn long_python_literals_do_not_exhaust_command_extraction() {
+        for quote in ["\"", "'", "\"\"\"", "'''"] {
+            let code = format!("example = {quote}{}{quote}", "a".repeat(600_000));
+            let result = scan(&code, Language::Python, None, "regex");
+            assert!(result.ok, "{}", result.summary);
+            assert_eq!(result.verdict, Verdict::Pass);
+            assert!(result.findings.is_empty());
+        }
     }
 
     #[test]

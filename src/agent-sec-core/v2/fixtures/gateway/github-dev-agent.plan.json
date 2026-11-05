@@ -1,0 +1,92 @@
+{
+  "format": "agent-sec-gateway-plan/v1",
+  "scopeId": "00000000-0000-4000-8000-000000000001",
+  "policies": [
+    {
+      "id": "policy:github",
+      "revision": 7
+    }
+  ],
+  "credentials": [
+    "github"
+  ],
+  "rules": [
+    {
+      "source": {
+        "policyId": "policy:github",
+        "policyRevision": 7,
+        "ruleIndex": 0
+      },
+      "match": {
+        "scheme": "https",
+        "host": "api.github.com",
+        "path": "/**",
+        "methods": [
+          "GET",
+          "HEAD",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE"
+        ],
+        "credentialId": "github"
+      },
+      "responseRewrite": "buffered",
+      "because": "GitHub REST API with github"
+    },
+    {
+      "source": {
+        "policyId": "policy:github",
+        "policyRevision": 7,
+        "ruleIndex": 1
+      },
+      "match": {
+        "scheme": "https",
+        "host": "github.com",
+        "path": "/**/info/refs",
+        "methods": [
+          "GET"
+        ],
+        "credentialId": "github"
+      },
+      "responseRewrite": "buffered",
+      "because": "Git ref discovery with github"
+    },
+    {
+      "source": {
+        "policyId": "policy:github",
+        "policyRevision": 7,
+        "ruleIndex": 2
+      },
+      "match": {
+        "scheme": "https",
+        "host": "github.com",
+        "path": "/**/git-upload-pack",
+        "methods": [
+          "POST"
+        ],
+        "credentialId": "github"
+      },
+      "responseRewrite": "none",
+      "because": "Git fetch with github"
+    },
+    {
+      "source": {
+        "policyId": "policy:github",
+        "policyRevision": 7,
+        "ruleIndex": 3
+      },
+      "match": {
+        "scheme": "https",
+        "host": "github.com",
+        "path": "/**/git-receive-pack",
+        "methods": [
+          "POST"
+        ],
+        "credentialId": "github"
+      },
+      "responseRewrite": "buffered",
+      "because": "Git push with github"
+    }
+  ]
+}

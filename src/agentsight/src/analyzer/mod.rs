@@ -27,7 +27,7 @@ pub use message::{
 
 // Re-export analysis result
 pub use result::{
-    AnalysisResult, HttpRecord, MessageTokenCount, OutputTokenCount, PromptTokenCount,
+    AnalysisResult, HttpContext, HttpRecord, MessageTokenCount, OutputTokenCount, PromptTokenCount,
     TokenConsumptionBreakdown,
 };
 

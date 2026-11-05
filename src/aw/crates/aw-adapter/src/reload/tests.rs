@@ -1,7 +1,7 @@
 //! Native policy updates retain scheduling and vetoes independently of service state.
 
 use super::*;
-use aw_provider::admission::StepExecution;
+use aw_core::admission::StepExecution;
 
 fn document(adapter: &str) -> Value {
     json!({"spec":{"agents":{"target":{"adapter":adapter}},"events":{},"execution":{"default_event_budget_ms":1000}}})
@@ -14,6 +14,8 @@ fn steps(event: &str, replacement: bool) -> Vec<AdmittedStep> {
             event: event.into(),
             step_id: id.into(),
             provider: id.into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["*".into()],
             on_error: "report".into(),
             execution: StepExecution::Provider {
                 operation: "record".into(),
@@ -89,6 +91,53 @@ fn empty_initial_policy_still_registers_both_stable_routes() {
 }
 
 #[test]
+fn native_routes_use_only_the_targets_admitted_steps() {
+    let validator = aw_config::Validator::new().unwrap();
+    let mut value = validator
+        .parse(include_bytes!(
+            "../../../aw-config/examples/aw.minimal.yaml"
+        ))
+        .unwrap()
+        .as_value()
+        .clone();
+    value["spec"]["agents"] = json!({
+        "sdk":{"adapter":"qoder-sdk","argv":["/bin/true"]},
+        "app":{"adapter":"qwenpaw","argv":["/bin/true"]}
+    });
+    value["spec"]["providers"]["hook"] = json!({
+        "transport":{"type":"stdio","location":"agent","argv":["/bin/true"]},
+        "timeout_ms":1000,"max_output_bytes":4096
+    });
+    value["spec"]["events"]["tool.after"]["steps"] = json!([
+        {"id":"app","provider":"hook","effects":["observe"],
+         "on_error":"withhold_result","match":{"tools":["native:qwenpaw:tool"]}},
+        {"id":"sdk","provider":"hook","effects":["observe"],
+         "on_error":"report","match":{"tools":["native:qoder-sdk:Bash"]}}
+    ]);
+    let config = validator
+        .parse(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    let capabilities = AdapterCapabilities {
+        adapter: "qoder-sdk".into(),
+        version: "1.0.56".into(),
+        entrypoint: "sdk-worker".into(),
+        events: BTreeMap::from([
+            ("tool.before".into(), vec!["observe".into(), "block".into()]),
+            ("tool.after".into(), vec!["observe".into()]),
+        ]),
+        failure_actions: BTreeMap::new(),
+    };
+    let selected = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
+    let native = adapter::native_steps(&selected, "tool.after", false);
+    assert_eq!(native.len(), 1);
+    assert_eq!(native[0].step_id, "sdk");
+    let dynamic = plan(config.as_value(), "sdk", &selected, "tool.after").unwrap();
+    assert_eq!(dynamic.groups.len(), 1);
+    assert_eq!(dynamic.groups[0][0].id, "sdk");
+    assert!(!dynamic.replacement);
+}
+
+#[test]
 fn qoder_stop_and_permission_wait_do_not_claim_request_idle() {
     let context = NativeContext {
         target: "target".into(),
@@ -160,15 +209,17 @@ fn per_step_failure_actions_preserve_other_vetoes_and_final_replacements() {
         stdout: b"ignored failure output".to_vec(),
         stderr: b"diagnostic".to_vec(),
     };
-    let report = adopt_step("qwenpaw", "tool.before", "report", failure()).unwrap();
-    assert!(matches!(report.exit, NativeExit::Code(0)));
-    assert!(report.stdout.is_empty());
-    assert!(matches!(
-        adopt_step("qwenpaw", "tool.before", "block", failure())
-            .unwrap()
-            .exit,
-        NativeExit::Code(2)
-    ));
+    for adapter in ["qwenpaw", "qoder-sdk"] {
+        let report = adopt_step(adapter, "tool.before", "report", failure()).unwrap();
+        assert!(matches!(report.exit, NativeExit::Code(0)));
+        assert!(report.stdout.is_empty());
+        assert!(matches!(
+            adopt_step(adapter, "tool.before", "block", failure())
+                .unwrap()
+                .exit,
+            NativeExit::Code(2)
+        ));
+    }
     let veto = HookOutput { exit: NativeExit::Code(0), stdout: br#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"native veto"}}"#.to_vec(), stderr: vec![] };
     let veto = adopt_step("qoder", "tool.before", "report", veto).unwrap();
     let report = adopt_step("qoder", "tool.before", "report", failure()).unwrap();
@@ -291,4 +342,64 @@ fn qoder_preserves_ordered_additional_context_and_final_replacement() {
         value["hookSpecificOutput"]["updatedToolOutput"],
         "second-context"
     );
+}
+
+#[test]
+fn qoder_sdk_reload_preserves_the_first_denial_reason() {
+    let mut veto = HookOutput {
+        exit: NativeExit::Code(2),
+        stdout: vec![],
+        stderr: vec![],
+    };
+    let reason = "Retry with arguments: {\"command\":\"rtk candidate\"}";
+    adapter::block_reason("qoder-sdk", &mut veto, reason).unwrap();
+    let veto = adopt_step("qoder-sdk", "tool.before", "block", veto).unwrap();
+    let output = combine(
+        "qoder-sdk",
+        vec![
+            veto,
+            HookOutput {
+                exit: NativeExit::Code(0),
+                stdout: br#"{"decision":"allow"}"#.to_vec(),
+                stderr: vec![],
+            },
+            HookOutput {
+                exit: NativeExit::Code(2),
+                stdout: br#""another denial""#.to_vec(),
+                stderr: vec![],
+            },
+        ],
+    )
+    .unwrap();
+    assert!(matches!(output.exit, NativeExit::Code(2)));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        reason
+    );
+}
+
+#[test]
+fn policy_updates_use_native_entrypoints_across_framework_releases() {
+    for (adapter, entrypoint) in [
+        ("qoder", "tui"),
+        ("qwenpaw", "app"),
+        ("qoder-sdk", "sdk-worker"),
+    ] {
+        for version in ["1.0.55", "1.0.57", "3.0.0-preview", "2026.10.29"] {
+            let mut capabilities = AdapterCapabilities {
+                adapter: adapter.into(),
+                version: version.into(),
+                entrypoint: entrypoint.into(),
+                events: BTreeMap::new(),
+                failure_actions: BTreeMap::new(),
+            };
+            assert!(supported(&capabilities).is_ok());
+            assert_eq!(
+                resident_supported(&capabilities).is_ok(),
+                adapter != "qoder"
+            );
+            capabilities.entrypoint = "unsupported".into();
+            assert!(supported(&capabilities).is_err());
+        }
+    }
 }

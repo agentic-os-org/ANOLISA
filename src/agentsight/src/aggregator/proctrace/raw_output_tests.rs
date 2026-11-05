@@ -53,7 +53,7 @@ fn raw_output_cap_preserves_utf8_through_trace_serialization() {
             let proc = agg
                 .process_event(&VariableEvent::Exit {
                     header: header(7),
-                    exit_code: 0,
+                    raw_exit_status: 0,
                 })
                 .unwrap();
             let (bytes, other, field) = if fd == 1 {
@@ -99,8 +99,27 @@ fn raw_split_character_below_cap_is_reassembled() {
     let proc = agg
         .process_event(&VariableEvent::Exit {
             header: header(5),
-            exit_code: 0,
+            raw_exit_status: 0,
         })
         .unwrap();
     assert_eq!(proc.stdout_string(), "中");
+}
+
+#[test]
+fn raw_exit_status_is_retained() {
+    let mut agg = ProcessEventAggregator::new();
+    agg.process_event(&VariableEvent::Exec {
+        header: header(1),
+        filename: "probe".into(),
+        args: "probe".into(),
+    });
+
+    let proc = agg
+        .process_event(&VariableEvent::Exit {
+            header: header(2),
+            raw_exit_status: 0x700,
+        })
+        .expect("exit completes the process");
+
+    assert_eq!(proc.raw_exit_status, Some(0x700));
 }

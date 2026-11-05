@@ -42,10 +42,10 @@ fn noninteractive_and_json_removal_require_explicit_consent_without_writes() {
 }
 
 #[test]
-fn explicit_consent_preserves_integrity_checks_and_legacy_package_behavior() {
+fn explicit_consent_preserves_integrity_checks() {
     let f = Fixture::new();
     success(f.install().output().unwrap());
-    fs::write(f.prefix.join("bin/aw"), b"modified").unwrap();
+    fs::write(f.prefix.join("bin/provider"), b"modified").unwrap();
     let output = invoke(
         f.command()
             .args(["uninstall", "-y", "--json", "--prefix"])
@@ -53,16 +53,21 @@ fn explicit_consent_preserves_integrity_checks_and_legacy_package_behavior() {
     );
     assert_eq!(output.status.code(), Some(1));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["error"]["code"], "package_contract");
-    assert!(f.prefix.join(".aw-packages/aw-core.json").is_file());
+    assert_eq!(report["error"]["code"], "plan_blocked");
+    assert!(!report["result"]["plan"]["problems"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(f.prefix.join(".local-packages/installation.json").is_file());
     let f = Fixture::new();
     success(f.install().output().unwrap());
-    let output = Command::new(env!("CARGO_BIN_EXE_aw-package"))
-        .args(["uninstall", "--prefix"])
+    let output = f
+        .command()
+        .args(["uninstall", "--yes", "--prefix"])
         .arg(&f.prefix)
         .current_dir(&f.root)
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(!f.prefix.join("bin/aw").exists());
+    assert!(!f.prefix.join("bin/provider").exists());
 }

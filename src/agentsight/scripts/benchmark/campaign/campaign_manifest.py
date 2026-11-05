@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,29 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object: {path}")
     return value
+
+
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    """Publish a complete JSON checkpoint by same-directory atomic replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    created = False
+    try:
+        # Exclusive creation preserves the normal output umask and prevents
+        # concurrent writers in the same process from sharing a staging file.
+        with temporary.open("x", encoding="utf-8") as handle:
+            created = True
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            temporary.chmod(path.stat().st_mode & 0o777)
+        temporary.replace(path)
+    finally:
+        if created:
+            temporary.unlink(missing_ok=True)
+
 
 
 def sha256(path: Path) -> str | None:
@@ -168,6 +193,4 @@ def ensure_manifest(
                 "campaign, binary, config, or thresholds changed after freeze"
             )
         return
-    path.write_text(
-        json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json(path, current)

@@ -2,10 +2,10 @@
 
 [English](../../en/adapters/adapter-dispatch.md)
 
-[设计索引](../README.md) · [架构总览](../../../../../../docs/developer-guide/zh/aw/architecture.md)
+[设计索引](../README.md) · [架构总览](../architecture.md)
 
 `aw` 可执行程序负责发现服务、绑定实例、前台进程生命周期和清理。每个原生适配器负责
-版本与入口准入、注册文件、事件归一化和宿主返回格式。这些接口位于 CLI 私有模块，
+版本与入口准入、注册文件、事件归一化和宿主返回格式。这些接口位于 `aw-adapter`，
 服务的 `invoke_step` 增加可选的原生命令环境快照；既有请求可以省略。
 
 原生方言、回调解释和 Python/JavaScript 资产统一位于 `crates/aw-adapter/`。
@@ -52,7 +52,11 @@ CLI 与服务共用这个内部库；参数解析、RPC、信号和启动目录�
 
 ## 交付边界
 
-Qoder 要求 CLI 语义版本 >=1.1.64 并记录探测到的值；原生命令 Hook 配置与回调合同
+Qoder 记录已安装 CLI 的语义版本；原生命令 Hook 配置与回调合同
 仍需满足。OpenClaw、Hermes、QwenPaw 分别提供原生
 实现和验收证据。daemon 每实例仍最多保留 1024 个关联事件；长驻宿主必须明确该限制
 及配置的失败处理。OS 防护、通用审批和其他事件不属于本次接口提取。
+
+Pi/Claude 常驻工厂和普通 Qoder SDK Query 通过[递增调用生命周期](resident-sdk.md)
+回收完成关联，其容量按并发工作量计算。
+上文 1024 个关联边界适用于旧 binding，包括独立的可更新 Qoder SDK 路径。

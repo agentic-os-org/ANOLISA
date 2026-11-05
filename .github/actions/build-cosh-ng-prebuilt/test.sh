@@ -51,7 +51,7 @@ CARGO_HOME="$EMPTY_CARGO_HOME" \
 
 VERSION="$(
     python3 "$COMPONENT_ROOT/packaging/raw/verify-release.py" \
-        "$COMPONENT_ROOT" "$COMPONENT_ROOT/.anolisa/component.toml" \
+        "$COMPONENT_ROOT" "$COMPONENT_ROOT/packaging/anolisa/raw/component.toml" \
         --os linux --arch x86_64
 )"
 MARKER="$TEMPORARY/injected"

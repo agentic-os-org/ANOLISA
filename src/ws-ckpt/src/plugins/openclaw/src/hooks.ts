@@ -7,9 +7,10 @@
  */
 
 import crypto from "node:crypto";
-import type { OpenClawPluginApi, PluginHookMessageReceivedEvent } from "../types-shim.js";
+import { CommandExecutor } from "./commands.js";
+import type { OpenClawPluginApi, OpenClawSessionContext, PluginHookMessageReceivedEvent } from "../types-shim.js";
 import type { PluginConfig } from "./types.js";
-import { pluginState, cwdInsideWorkspace, cwdInsideWorkspaceReason } from "./state.js";
+import { pluginState, cwdInsideWorkspace, cwdInsideWorkspaceReason, workspaceRegistrationPath, takeRollbackWorkspaces } from "./state.js";
 import { mapErrorToLLMMessage } from "./btrfs-manager.js";
 import { CrontabManager } from "./cron.js";
 
@@ -51,14 +52,29 @@ export function registerHooks(api: OpenClawPluginApi, config: PluginConfig): voi
   }, { priority: 0 });
 
   // Hook: agent_end — create end-of-turn checkpoint
-  api.on("agent_end", async (_event: unknown) => {
-    if (pluginState.skipNextAutoCheckpoint) {
-      pluginState.skipNextAutoCheckpoint = false;
-      return;
-    }
+  api.on("agent_end", async (_event: unknown, context: unknown) => {
+    const restored = takeRollbackWorkspaces(context as OpenClawSessionContext | undefined);
     if (!config.autoCheckpoint) return;
     if (!pluginState.manager || !pluginState.environmentReady) return;
+    if (restored?.size) {
+      const checkpointManager = pluginState.manager;
+      const checkpointWorkspace = checkpointManager.getWorkspacePath();
+      if (checkpointWorkspace) {
+        try {
+          const registrationPath = await new CommandExecutor().resolveWorkspacePath(checkpointWorkspace);
+          if (pluginState.manager === checkpointManager
+              && checkpointManager.getWorkspacePath() === checkpointWorkspace
+              && restored.has(workspaceRegistrationPath(registrationPath))) return;
+        } catch (error) {
+          // The state was consumed above. A failed lookup must not silently
+          // suppress a different workspace or retain this turn's suppression.
+          console.warn(`[ws-ckpt] Rollback suppression lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
 
+    // A bare-selector lookup can yield while the plugin is reconfigured.
+    if (!config.autoCheckpoint || !pluginState.manager || !pluginState.environmentReady) return;
     const workspace = pluginState.resolvedConfig?.workspace;
     const cwdCheckEnd = workspace ? cwdInsideWorkspace(workspace) : undefined;
     if (cwdCheckEnd?.inside) {

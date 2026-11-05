@@ -22,7 +22,7 @@ if PLUGIN_SRC=$(find_plugin_src hermes); then
         echo "DRY-RUN: mkdir -p $(dirname "$PLUGIN_DST")"
         echo "DRY-RUN: ln -sfn $PLUGIN_SRC $PLUGIN_DST"
         if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
-            echo "DRY-RUN: HERMES_HOME=${HERMES_HOME%/} $HERMES_BIN plugins enable ws-ckpt"
+            echo "DRY-RUN: HERMES_HOME=${HERMES_HOME%/} timeout --kill-after=5s 30s $HERMES_BIN plugins enable ws-ckpt"
         else
             echo "DRY-RUN: hermes CLI not found; plugin would need manual enable"
         fi
@@ -31,13 +31,14 @@ if PLUGIN_SRC=$(find_plugin_src hermes); then
     mkdir -p "$(dirname "$PLUGIN_DST")"
     ln -sfn "$PLUGIN_SRC" "$PLUGIN_DST"
     if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
-        HERMES_HOME="${HERMES_HOME%/}" "$HERMES_BIN" plugins enable ws-ckpt || {
-            echo "Warning: hermes plugins enable failed; enable ws-ckpt manually."
+        # Gateway reload can stall; bound even a CLI that ignores SIGTERM.
+        HERMES_HOME="${HERMES_HOME%/}" timeout --kill-after=5s 30s "$HERMES_BIN" plugins enable ws-ckpt || {
+            echo "Warning: hermes plugins enable failed or timed out; enable ws-ckpt manually." >&2
         }
     else
         echo "hermes CLI not found; add 'ws-ckpt' to plugins.enabled in ${HERMES_HOME%/}/config.yaml."
     fi
-    echo "hermes ws-ckpt plugin linked and enabled: $PLUGIN_DST -> $PLUGIN_SRC"
+    echo "hermes ws-ckpt plugin linked: $PLUGIN_DST -> $PLUGIN_SRC"
     exit 0
 fi
 

@@ -14,7 +14,7 @@ pub use build_log::{BuildLogCompressor, BuildLogMetrics, BuildLogOperation, Buil
 pub use html::{HtmlExtractor, HtmlView};
 pub use json::{
     JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonMetrics,
-    JsonOperation, JsonOutcome, Recoverability,
+    JsonOperation, JsonOutcome, Recoverability, numbers_are_exact,
 };
 pub use search_results::SearchResultsCompressor;
 pub use tabular::{TabularCompressor, TabularMetrics, TabularOperation, TabularOutcome};

@@ -1,6 +1,7 @@
 //! Shared package fixtures and bounded process execution; no terminal driver.
 
-use aw_package::{Component, Manifest, Payload};
+use aw_package::Payload;
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs,
@@ -22,41 +23,38 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) fn new() -> Self {
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+        let target =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/package-fixtures");
         fs::create_dir_all(&target).unwrap();
         let directory = tempfile::tempdir_in(target).unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = directory.path().canonicalize().unwrap();
         let bundle = root.join("bundle");
-        let mut files = BTreeMap::new();
-        for name in ["bin/aw", "bin/aw-package"] {
-            let path = bundle.join("payload").join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::copy("/bin/true", &path).unwrap();
-            files.insert(
-                name.into(),
-                Payload {
-                    sha256: aw_package::digest(&path).unwrap(),
-                    mode: 0o755,
-                },
-            );
-        }
+        let mut files: BTreeMap<String, Payload> = BTreeMap::new();
+        let name = "bin/provider";
+        let path = bundle.join("payload").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy("/bin/true", &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        files.insert(
+            name.into(),
+            Payload {
+                sha256: aw_package::digest(&path).unwrap(),
+                mode: 0o755,
+            },
+        );
         fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec(&Manifest {
-                format: 1,
-                components: vec![Component {
-                    format: 1,
-                    component: "aw-core".into(),
-                    version: "0.1.0-preview.1".into(),
-                    source_commit: "a".repeat(40),
-                    os: "linux".into(),
-                    arch: std::env::consts::ARCH.into(),
-                    provider_protocol: "aw-provider/v1alpha1".into(),
-                    requires: BTreeMap::new(),
-                    files,
-                }],
-            })
+            bundle.join("package.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "package_id": "external.provider",
+                "version": "1.0.0",
+                "os": "linux",
+                "arch": std::env::consts::ARCH,
+                "files": files,
+                "dependencies": [],
+                "provider": {"protocol": "aw-provider/v1alpha1"}
+            }))
             .unwrap(),
         )
         .unwrap();
@@ -73,6 +71,7 @@ impl Fixture {
     pub(super) fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aw"));
         command.current_dir(&self.root);
+        command.env("XDG_STATE_HOME", self.root.join("package-state"));
         command
     }
 
@@ -128,7 +127,16 @@ pub(super) fn invoke(command: &Command) -> aw_exec::Output {
             environment.remove(name);
         }
     }
-    aw_exec::run(
+    let started = Instant::now();
+    let name = std::thread::current();
+    let test = name.name().unwrap_or("unnamed");
+    let arguments: Vec<_> = command.get_args().collect();
+    eprintln!(
+        "package-test start: test={test:?} program={:?} args={arguments:?} cwd={:?} deadline=30s",
+        command.get_program(),
+        command.get_current_dir(),
+    );
+    let result = aw_exec::run(
         &aw_exec::CommandSpec {
             program: command.get_program().into(),
             args: command.get_args().map(Into::into).collect(),
@@ -141,8 +149,19 @@ pub(super) fn invoke(command: &Command) -> aw_exec::Output {
             stdout_bytes: 65536,
             stderr_bytes: 65536,
         },
-        Instant::now() + Duration::from_secs(5),
+        started + Duration::from_secs(30),
         &AtomicBool::new(false),
-    )
-    .unwrap()
+    );
+    eprintln!(
+        "package-test finish: test={test:?} elapsed={:?}",
+        started.elapsed()
+    );
+    result.unwrap_or_else(|error| {
+        panic!(
+            "package command failed: program={:?} args={arguments:?} cwd={:?} elapsed={:?}: {error:?}",
+            command.get_program(),
+            command.get_current_dir(),
+            started.elapsed(),
+        )
+    })
 }

@@ -1,5 +1,140 @@
 # Changelog
 
+## 0.15.3
+
+### Fixes
+- Preserve final token usage in cost analysis and scope final answers to the latest turn.
+- Preserve ATIF developer instructions and recorded tool completion times.
+- Decode stacked HTTP content codings and keep missing throughput measurements unknown.
+- Preserve Hermes fallback call identity and clear empty Hermes histories.
+- Cover legacy guards in write-access preflight and close file-guard content-loss entries.
+- Validate resource capture quality before accepting benchmark results.
+
+### Changed
+- Keep ANOLISA discovery contract ownership in the distribution.
+
+## 0.15.2
+
+### Features
+- Enforce structured file-protection policies: classify policy paths, lower them into map entries, apply them, and enforce structured kernel deletion, rename/exchange, and ordinary file writes.
+- Advertise structured file protection as a capability.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs: `agentsight-core` owns programs, configuration and services; `agentsight-plugins` holds the DSH integration; `agentsight` remains as a compatibility package that depends on the exact-version core.
+- Programs install to the system binary directory, and `make install` consumes prebuilt files without activating services. (BREAKING)
+
+### Tests
+- Cover structured policies end to end and assert matched file guard audit rules.
+
+## 0.15.1
+
+### Breaking changes
+- Unify file installation: `make install` now installs prebuilt files without activation, `make install-core` and `make install-plugins` select programs, configuration and services or native host integration resources, local installation defaults to `PREFIX=/usr/local` with an empty `AWPRJ`, and `DESTDIR` only prepends the packaging root. `make build` still compiles components through the root Makefile.
+
+### Features
+- Enforce structured file protection: activated policies deny `unlink`, `rmdir`, boundary-crossing rename and exchange, and ordinary `write`/`pwrite` on protected regular files, with denial events naming the operation. Truncate, `O_TRUNC`, shared writable mmap and dynamic mounts stay out of scope, and no content-immutability guarantee is claimed.
+- Accept structured policies through ActPlane in enforce mode and report four supported structured capabilities in the health response; the integration guide now documents ordinary-write and Apply stability limits instead of blanket rejection.
+- Add the structured file-protection policy contract behind the above: normalized protections, static and re-resolved protected topology, race-safe path resolution, legacy `path_rename` hook support, self-owned policy activation and detach, transactional policy map staging, policy generations in pinned maps, and a structured policy map ABI.
+- Add resource limit checks.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs.
+- Split RPM file ownership into `agentsight-core` and `agentsight-plugins`; core owns service resources and installs independently.
+
+### Performance
+- Cache GenAI identifier hashes, vectorize SSL executable scans, and stream capture database queries.
+
+### Fixes
+- Explain file guard activation, report file guard capability, and validate file protection boundaries.
+- Ship per-architecture BPF objects so the enforcer payload follows the build target.
+- Attach SSL uprobes earlier to catch the first TLS connections, add verified Codex TLS offsets, and bound unknown process registration.
+- Preserve partial Qoder batch usage, usage-only batch records, bare JSON SSE usage, and the last usable batch usage.
+- Honor successful Gemini tool calls, retain Gemini function responses, and replay Gemini session previews.
+- Retain local session identity, attach local replies to their calls, disambiguate echoed tool call IDs, and compare complete repeated turns.
+- Preserve user config on schema migration and make session controls accessible.
+- Report cleanup errors from a failed activation without losing the original compile or kernel failure classification.
+- Keep partial campaign reports and worker results, lock resource build publication, reject impossible benchmark metrics, preserve missing drop counters, bound recovery evidence by phase, and verify executed regression commands.
+
+### Upgrade notes
+- The enforcer control protocol moves from v4 to v5 and is not backward compatible: a 0.15.0 client paired with a 0.15.1 enforcer has every request rejected as `UnsupportedVersion`, including health checks. Upgrade the client and the enforcer together.
+- Full and agent-file-guard upgrades replace stale v4 hook layouts instead of silently accepting unenforced ordinary-write policies.
+- Review the installation targets above before rollout: `make install` no longer activates what it installs, and deployments relying on the previous single-target behavior must call `make install-core` and `make install-plugins` explicitly.
+
+## 0.15.0
+
+### Features
+- Discover Gemini CLI JSONL chats under `~/.gemini/tmp/<project>/chats/` in the trajectory collector and local viewer, including sub-agent transcripts and project names; the viewer also opens legacy whole-file chats. Sub-agent composite IDs do not link back to the parent row.
+- Add `--stats-only` to the standalone `analyze` CLI and batch-analysis wrapper for local `perf`/`cost` statistics without API credentials or LLM requests; `accuracy --stats-only` is rejected, and omitting the option retains model-backed analysis.
+- Expose the probe-independent `PipelineCore` Rust library API for parsing, correlating and analyzing events without attaching probes, and re-export `HttpContext` as `agentsight::analyzer::HttpContext` so library callers can name the HTTP data carried by `AnalysisResult::HttpContext`; existing command syntax and capture behavior are preserved.
+
+### Fixes
+- Bound the Tokenless savings numerator by the request window when timestamps are available, excluding older optimizations when the Dashboard range narrows. Legacy local `stats.db` tables without `timestamp` retain all matching records, so their savings can still include out-of-window optimizations.
+- Count Tokenless records with a missing, null or upper-case mode as applied savings; only dry-run records are excluded.
+- Keep Anthropic server-tool and MCP tool calls, including their arguments, when a stream is reconstructed after the connection drains.
+- Treat a tool result that opens with a JVM or SQL exception as a tool failure in conversation grading and interruption detection, matching the grounding classifier.
+- Preserve non-streaming Anthropic, Responses, Gemini and legacy-completion answers and tool calls in token breakdowns instead of reporting zero output.
+- Preserve Gemini prompts, answers, tools and finish reasons when building calls from parsed messages without raw HTTP bodies.
+- Render the DeepSeek Harness `agentsight_status` tool result through text content blocks so the host and model receive the validated status.
+- Detect SSL symbols in Python executables and shared libpython images for the existing TLS capture path; retain retryable image reads and startup error causes.
+- Reject fault attempts that were not fully delivered instead of reporting a passing benchmark campaign. (#8890)
+- Recover interrupted benchmark campaigns by validating resume checkpoints, archiving unusable results and atomically replacing checkpoints. (#8857)
+- Reject invalid benchmark time controls before network/file operations and prevent PID reuse from corrupting process-survival and resource evidence. (#8889, #8856)
+- Preserve literal capture-database paths containing URI punctuation and valid JSONL records around damaged lines, with warnings for discarded records.
+- Treat missing or invalid recovery observations as gaps, reject invalid final drop counters, and report unproven recovery gates instead of claiming an improvement.
+- Read modern h2load request-latency summaries correctly, preserving mean, median, p95 and p99 without borrowing fields from adjacent rows.
+- Restore the macOS release builds so the published 0.15.0 artifacts include the macOS package.
+- Publish benchmark campaign artifacts atomically so an interrupted run cannot leave a partially written manifest.
+
+### Performance
+- Compute benchmark latency percentiles from one sorted snapshot and release unused fallback samples to reduce long-run work and memory use. (#8888)
+
+### Docs
+- Flatten the user manual layout.
+- Move the integrated ANOLISA container image sources from `docker/` to `distribution/docker/` and update the AgentSight deployment guide's entrypoint path; CLI syntax, image tags and container behavior are unchanged.
+
+## 0.14.3
+
+Combined release notes for the 0.14.2 and 0.14.3 release work. Previously shipped fixes recorded in 0.14.2 are identified separately below.
+
+### Features
+- Add read-only Hermes `state.db` trajectory collection and Claude SDK session discovery, including tool-result matching by call ID. (#8713)
+- Add Gemini CLI chat-file conversion to ATIF, including legacy JSON files and replay of conversation corrections; automatic discovery of `~/.gemini` chat files is not included. (#8801)
+- Add type, state and agent filters to interruption queries where applicable, agent-scoped summary totals, and JSON output for interruption resolution.
+- Add batch ATIF export without analysis and configurable parallel batch analysis.
+- Add `token --db`, `summary --tokenless-db`, and per-agent metrics in JSON for offline queries and scripts.
+- Add remote Tokenless statistics, refresh savings before queries, and count only savings from applied transformations.
+- Add daily skill-hotness reporting and RSS/CPU benchmark metrics.
+
+### Performance
+- Reduce capture overhead and database work, stream batch JSONL conversion, and reuse benchmark metric snapshots.
+- Add cooperative CPU pacing through `runtime_limits.cpu_budget_percent` (default 25% of one logical CPU; `0` disables pacing) and increase the default connection capacity from 32 to 128.
+
+### Fixes
+- Resolve gateway prefixes, vendor names and dated model aliases to usable tokenizers, including Gemini 2.5/latest/preview, GLM 4.5, Qwen 3.6, Kimi K2, GPT-5, and OpenAI audio/realtime families.
+- Preserve response text, reasoning, refusals, server-tool blocks and stop reasons across Anthropic, Gemini, Responses, OpenAI-compatible, GLM, Codex and DashScope providers, including incomplete, filtered and non-streaming responses.
+- Count streamed, cached and replayed token usage without duplication; retain complete token observations and fall back to raw-token counting when template rendering fails.
+- Keep parallel tool calls and results associated by choice and call ID, preserve partial tool inputs, and report tool outcomes and first-output timing accurately.
+- Preserve pending SysOM metadata and session attribution; retain main sessions, reasoning-only steps and parallel tool results during batch conversion, and isolate individual analysis failures.
+- Keep slow TLS handshakes from blocking new connections, isolate cancelled HTTP/2 streams, preserve final headers after interim HTTP responses, and report HTTP/2 first-token latency.
+- Include custom `serve --db` files in the storage budget and support BOM-prefixed storage, optimization and Tokenless configs.
+- Require credentials for storage settings and LLM-spending endpoints, use the Agent Security V2 socket, handle IPv4-mapped rule addresses, and bound Agent Security response lines.
+- Keep collected trajectories inspectable without GenAI records, refresh audit filters and trajectory savings, preserve UTF-8 previews, and retire stale model labels when content changes.
+- Improve session search, preference counting and causal evidence matching; distinguish handled tool failures from unresolved failures and require continuous evidence for recovery claims.
+- Record idle-agent OOM interruptions without duplicate kill reports, preserve truncated-turn state, and handle malformed counters, missing CPU measurements and failed reads explicitly.
+- Reuse the global Prometheus recorder and initialize metrics before workers; skip Python executables during static-SSL probing.
+
+### Previously shipped fixes recorded in 0.14.2
+- Preserve calls with no response body when an agent exits, and keep recap-only sessions inspectable with correct analyzer-row classification and per-session aggregates. These fixes were already present in 0.14.1 and are included here for the combined release summary, not as new 0.14.3 behavior. (#7271)
+
+### Upgrade notes
+- Review CPU pacing and connection limits before rollout; explicit existing connection limits are preserved, and CPU pacing is a cooperative target rather than a hard quota.
+- Scripts changing storage settings or invoking LLM-spending endpoints must supply credentials. Trajectory collection remains opt-in; Hermes collection requires access to its database and WAL files.
+
+## 0.14.2
+
+### Fixes
+- Record previously shipped fixes for calls with no response body at agent exit and recap-only session inspection, analyzer-row classification and per-session aggregates; the code was already included in 0.14.1. (#7271)
+
 ## 0.14.1
 
 ### Features

@@ -9,6 +9,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-11-02
+
+### Added
+
+- Activate managed cosh extensions through cosh's native registry when running
+  `anolisa adapter enable <component> cosh`. Status verifies the selected user
+  source and enabled state; disable releases only the matching source selection
+  and preserves system extensions and user-edited files. Use a cosh-ng build
+  supporting conditional source cleanup and restart existing cosh sessions after
+  enable or disable; resident-session loading remains `unknown`
+  ([#9352](https://github.com/agentic-os-org/ANOLISA/pull/9352)).
+
+### Changed
+
+- Ship component discovery and integration contracts with ANOLISA in RPM,
+  prebuilt archives, npm platform packages, and installer data bundles. RPM
+  install and adopt retain these contracts for adapter management and recognize
+  standalone core packages. Keep the CLI's `bin/` and `share/` directories
+  together when moving an installation. For RPM upgrades, upgrade ANOLISA and
+  all installed older component packages that own the registry files together
+  in a single DNF/Yum transaction. The enabled repositories must provide the
+  compatible CLI, component packages, and required subpackages at the same time.
+  Rollback requires matching component packages and registry data
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222)).
+- Render Agent Memory MCP command paths for the selected installation layout,
+  including paths containing quotes or backslashes, while preserving other JSON
+  fields. Agent Memory `0.2.13` raw packages require ANOLISA `0.3.21` or later
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222)).
+- Update the component catalog to Agent Memory `0.2.13`, AgentSight `0.15.1`,
+  cosh-ng `0.28.1`, OS Skills `0.6.4`, agent-sec-core `1.1.2`, SkillFS `0.5.5`,
+  Tokenless `0.9.2`, and ws-ckpt `0.6.1`.
+
+### Fixed
+
+- Preserve ANOLISA's component discovery files during raw installation,
+  update, rollback, repair, and uninstall. Existing archives can install beside
+  the registry, and obsolete ownership records no longer treat registry changes
+  as component damage or delete the registry during cleanup. This also applies
+  when recovering quarantined records. New raw packages that omit registry
+  installation require ANOLISA `0.3.21` or later
+  ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)).
+
+## [0.3.20] - 2026-10-29
+
+### Added
+
+- Add `--no-deps` to `anolisa install` for raw artifacts, including `--all`,
+  so users who manage runtime dependencies separately can skip their checks
+  and installation. Successful installs print a reminder to stderr unless
+  `--quiet` is set; batch installs print it once when any component was
+  installed. RPM rejects this option, and default dependency handling remains
+  unchanged ([#9126](https://github.com/agentic-os-org/ANOLISA/pull/9126)).
+
+### Changed
+
+- Update the component catalog to Agent Memory `0.2.11`, AgentSight `0.15.0`,
+  SkillFS `0.5.4`, and Tokenless `0.9.0`.
+
+### Fixed
+
+- Explain how to recover when adapter status or disable, including dry-run,
+  rejects a path outside the allowed framework directories. Human and JSON
+  errors now advise checking framework directory configuration and ancestor
+  symlinks, and restoring the original directory if it was redirected.
+  Boundary checks, retained installation records, and exit codes are unchanged
+  ([#9220](https://github.com/agentic-os-org/ANOLISA/pull/9220)).
+
+## [0.3.19] - 2026-10-25
+
+### Changed
+
+- Report container deployments as `container` in telemetry and
+  `anolisa register status` instead of inheriting the host's cloud product.
+  Consumers of `product_type` must accept the new value. An explicit
+  `PRODUCT_TYPE` in `/etc/anolisa-release` still takes precedence; refresh or
+  remove stale declarations when building container images
+  ([#8206](https://github.com/agentic-os-org/ANOLISA/pull/8206)).
+- Update the component catalog to Agent Memory `0.2.10`, AgentSight `0.14.3`,
+  cosh-ng `0.28.0`, Copilot Shell `2.8.0`, OS Skills `0.6.3`, SkillFS `0.5.3`,
+  Tokenless `0.8.8`, and ws-ckpt `0.6.0`.
+
+### Fixed
+
+- Preserve user-added and edited files when disabling OpenClaw and Hermes
+  skills, and refuse activation into occupied directories that ANOLISA does
+  not own. Redirected or dangling directory ancestors stop cleanup and retain
+  the installation record for retry after the original path is restored.
+  Older records without per-file ownership still use whole-directory cleanup
+  after the same path checks
+  ([#6221](https://github.com/agentic-os-org/ANOLISA/pull/6221)).
+- Keep the npm launcher working when the complete installation, including its
+  platform dependency, is moved. Existing installations can obtain the relative
+  launcher by rerunning postinstall
+  ([#8278](https://github.com/agentic-os-org/ANOLISA/pull/8278)).
+- Honor `--json` for successful telemetry enable, disable, link, unlink, upload,
+  and init operations, including `--quiet --json`. Return the standard response
+  envelope with operation-specific state while keeping warnings on stderr
+  ([#8706](https://github.com/agentic-os-org/ANOLISA/pull/8706)).
+- Warn when a Raw install or update declares a hook phase that the CLI cannot
+  execute. A non-strict hook allows the operation to proceed; a `strict = true`
+  hook refuses the operation before download or file replacement. Repair remains
+  available for older installations with unsupported hook declarations
+  ([#6447](https://github.com/agentic-os-org/ANOLISA/pull/6447)).
+
 ## [0.3.18] - 2026-10-15
 
 ### Added

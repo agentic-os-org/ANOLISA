@@ -711,20 +711,58 @@ impl CkptClient {
     }
 
     /// Query workspace checkpoint status.
+    ///
+    /// Watcher health rides a dedicated sidecar request after the status
+    /// frame (#7233, #7592 review): the bincode status layout is
+    /// wire-frozen, and an older daemon that cannot decode the sidecar
+    /// request simply drops it — `status` still succeeds and the
+    /// watcher-health fields stay absent. The sidecar is scoped to the
+    /// workspaces the report covers, so a workspace-scoped status never
+    /// imports unrelated workspaces' watcher failures.
     pub fn status(&self, workspace: Option<&str>) -> Result<CkptStatusResult, CoshError> {
         let req = WsCkptRequest::Status {
             workspace: workspace.map(|s| s.to_string()),
         };
         match self.send_request(&req)? {
-            WsCkptResponse::StatusOk { report } => Ok(CkptStatusResult {
-                uptime_secs: report.uptime_secs,
-                workspaces: report.workspaces,
-                fs_total_bytes: report.fs_total_bytes,
-                fs_used_bytes: report.fs_used_bytes,
-            }),
+            WsCkptResponse::StatusOk { report } => {
+                let watcher_health = self.fetch_watcher_health_scoped_to(&report);
+                Ok(CkptStatusResult {
+                    uptime_secs: report.uptime_secs,
+                    workspaces: report.workspaces,
+                    fs_total_bytes: report.fs_total_bytes,
+                    fs_used_bytes: report.fs_used_bytes,
+                    workspaces_without_watcher: watcher_health
+                        .as_ref()
+                        .map(|(without, _)| without.clone()),
+                    watcher_queue_overflows: watcher_health.map(|(_, overflows)| overflows),
+                })
+            }
             WsCkptResponse::Error { code, message } => Err(ws_error_to_cosh(code, message)),
             _ => Err(unexpected_response()),
         }
+    }
+
+    /// Best-effort watcher-health sidecar for [`Self::status`], restricted
+    /// to the workspaces `report` covers: the request itself is unscoped
+    /// (`WatcherHealth` is a wire-frozen unit variant), so a scoped status
+    /// would otherwise list unrelated workspaces as degraded. For a global
+    /// report the filter is the identity. `None` on any failure — an older
+    /// daemon closes the connection on the unknown request, a timeout or
+    /// socket hiccup must not fail the whole status command.
+    fn fetch_watcher_health_scoped_to(&self, report: &StatusReport) -> Option<(Vec<String>, u64)> {
+        let (workspaces_without_watcher, watcher_queue_overflows) =
+            match self.send_request(&WsCkptRequest::WatcherHealth) {
+                Ok(WsCkptResponse::WatcherHealthOk {
+                    workspaces_without_watcher,
+                    watcher_queue_overflows,
+                }) => (workspaces_without_watcher, watcher_queue_overflows),
+                _ => return None,
+            };
+        let scoped: Vec<String> = workspaces_without_watcher
+            .into_iter()
+            .filter(|degraded| report.workspaces.iter().any(|ws| &ws.ws_id == degraded))
+            .collect();
+        Some((scoped, watcher_queue_overflows))
     }
 
     /// Delete a snapshot.
@@ -1400,6 +1438,107 @@ mod tests {
         assert!(!error.message.contains(socket_path));
         assert!(!error.message.contains("failed to fill whole buffer"));
         assert!(!error.message.contains("invalid value"));
+    }
+
+    /// Frame one response the way the daemon sends it: 4-byte LE length +
+    /// bincode payload.
+    fn frame_response(response: &WsCkptResponse) -> Vec<u8> {
+        let payload = bincode::serialize(response).unwrap();
+        let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    /// Serve `answers` in order, one per accepted connection, draining each
+    /// request frame before replying (or closing, for `None`).
+    fn serve_answers(
+        socket_path: &std::path::Path,
+        answers: Vec<Option<Vec<u8>>>,
+    ) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket_path).unwrap();
+        thread::spawn(move || {
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut length = [0; 4];
+                stream.read_exact(&mut length).unwrap();
+                let mut request = vec![0; u32::from_le_bytes(length) as usize];
+                stream.read_exact(&mut request).unwrap();
+                if let Some(answer) = answer {
+                    stream.write_all(&answer).unwrap();
+                }
+                // `None` leaves the stream to drop: an older daemon closes
+                // the connection on a request it cannot decode.
+            }
+        })
+    }
+
+    #[test]
+    fn status_consumes_the_watcher_health_sidecar_scoped_to_the_report() {
+        // #7592 review: the Agent-facing status path must surface watcher
+        // degradation. The sidecar is global (its request is a wire-frozen
+        // unit variant), so a workspace-scoped status must filter it to
+        // the workspaces its report covers.
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("daemon.sock");
+        let status = frame_response(&WsCkptResponse::StatusOk {
+            report: StatusReport {
+                uptime_secs: 7,
+                workspaces: vec![WorkspaceInfo {
+                    ws_id: "ws-a".to_string(),
+                    path: "/tmp/ws-a".to_string(),
+                    snapshot_count: 1,
+                }],
+                fs_total_bytes: 1000,
+                fs_used_bytes: 500,
+            },
+        });
+        let health = frame_response(&WsCkptResponse::WatcherHealthOk {
+            workspaces_without_watcher: vec!["ws-a".to_string(), "ws-b".to_string()],
+            watcher_queue_overflows: 2,
+        });
+        let server = serve_answers(&socket_path, vec![Some(status), Some(health)]);
+
+        let socket = socket_path.to_string_lossy().into_owned();
+        let result = CkptClient::new(&socket).status(Some("ws-a")).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(result.uptime_secs, 7);
+        assert_eq!(
+            result.workspaces_without_watcher,
+            Some(vec!["ws-a".to_string()]),
+            "a scoped status must not import unrelated workspaces' watcher failures"
+        );
+        assert_eq!(result.watcher_queue_overflows, Some(2));
+    }
+
+    #[test]
+    fn status_survives_a_daemon_without_the_watcher_health_sidecar() {
+        // An older daemon cannot decode `WatcherHealth` and drops the
+        // connection: `status` must still succeed with the sidecar fields
+        // absent instead of failing.
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("daemon.sock");
+        let status = frame_response(&WsCkptResponse::StatusOk {
+            report: StatusReport {
+                uptime_secs: 7,
+                workspaces: vec![WorkspaceInfo {
+                    ws_id: "ws-a".to_string(),
+                    path: "/tmp/ws-a".to_string(),
+                    snapshot_count: 1,
+                }],
+                fs_total_bytes: 1000,
+                fs_used_bytes: 500,
+            },
+        });
+        let server = serve_answers(&socket_path, vec![Some(status), None]);
+
+        let socket = socket_path.to_string_lossy().into_owned();
+        let result = CkptClient::new(&socket).status(None).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(result.uptime_secs, 7);
+        assert_eq!(result.workspaces_without_watcher, None);
+        assert_eq!(result.watcher_queue_overflows, None);
     }
 
     #[test]

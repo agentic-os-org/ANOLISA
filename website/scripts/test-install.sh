@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="${SCRIPT_DIR}/../static/install.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/anolisa-installer-test.XXXXXX")"
+TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
 FAKE_BIN="${TEST_ROOT}/bin"
 TEST_CLI_VERSION="0.0.0-test"
 OLD_CLI_VERSION="0.0.0-old"
@@ -12,7 +13,7 @@ REAL_TAR="$(command -v tar)"
 TOOL_DIR="${TEST_ROOT}/tools"
 REQUIRED_TOOLS="
   awk bash cat chmod cp dirname env grep gzip install ln mkdir mv readlink rm sed
-  sh tar tr
+  sh stat tar tr
 "
 SYSTEM_PATH="$TOOL_DIR"
 BASE_PATH="${FAKE_BIN}:${SYSTEM_PATH}"
@@ -80,7 +81,24 @@ fi
 
 payload_dir="$(mktemp -d)"
 trap 'rm -rf "$payload_dir"' EXIT
-cat >"${payload_dir}/anolisa" <<'SCRIPT'
+binary="${payload_dir}/anolisa"
+if [ "${ANOLISA_TEST_LAYOUT:-legacy}" = packaged ]; then
+  mkdir -p "$payload_dir/bin" "$payload_dir/share/anolisa/components"
+  binary="$payload_dir/bin/anolisa"
+  for component in cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory; do
+    mkdir -p "$payload_dir/share/anolisa/components/$component"
+    printf '[component]\nname = "%s"\n' "$component" \
+      >"$payload_dir/share/anolisa/components/$component/component.toml"
+  done
+  if [ "${ANOLISA_TEST_MISSING_CONTRACT:-0}" = 1 ]; then
+    rm "$payload_dir/share/anolisa/components/ws-ckpt/component.toml"
+  fi
+  if [ "${ANOLISA_TEST_SYMLINK_SHARE:-0}" = 1 ]; then
+    mv "$payload_dir/share" "$payload_dir/linked-share"
+    ln -s linked-share "$payload_dir/share"
+  fi
+fi
+cat >"$binary" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -89,9 +107,18 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 printf '%s\n' "$*" >>"$ANOLISA_TEST_LOG"
+printf '%s\n' "${ANOLISA_DATA_DIR:-}" >"${ANOLISA_TEST_LOG}.data-dir"
+printf '%s\n' "$0" >"${ANOLISA_TEST_LOG}.binary"
+if [ "${ANOLISA_TEST_EXPECT_DATA:-0}" = 1 ]; then
+  data_root="${ANOLISA_DATA_DIR:-$(cd "$(dirname "$0")/.." && pwd)/share/anolisa}"
+  for component in cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory; do
+    test -f "$data_root/components/$component/component.toml"
+    grep -Fq "name = \"$component\"" "$data_root/components/$component/component.toml"
+  done
+fi
 SCRIPT
-chmod +x "${payload_dir}/anolisa"
-"$ANOLISA_TEST_TAR" -czf "$output" -C "$payload_dir" anolisa
+chmod +x "$binary"
+"$ANOLISA_TEST_TAR" -czf "$output" -C "$payload_dir" .
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$output" | awk '{print $1}' >"$ANOLISA_TEST_SHA_FILE"
 else
@@ -127,7 +154,7 @@ EOF
 cat >"${FAKE_BIN}/id" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
-  -u) echo 1000 ;;
+  -u) echo "${ANOLISA_TEST_EUID:-1000}" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -142,11 +169,58 @@ printf 'tampered CLI executed\n' >"$ANOLISA_TEST_TAMPER_LOG"
 exit 99
 SCRIPT
 chmod +x "${ANOLISA_INSTALL_DIR}/anolisa"
+if [ -f "$ANOLISA_TEST_PREFIX_DATADIR/components/ws-ckpt/component.toml" ]; then
+  printf 'tampered user data\n' \
+    >"$ANOLISA_TEST_PREFIX_DATADIR/components/ws-ckpt/component.toml"
+fi
+if [ "${ANOLISA_TEST_LATE_OLD_OWNER:-0}" = 1 ]; then
+  export ANOLISA_TEST_RPM_SCOPE=system ANOLISA_TEST_RPM_OWNER=ws-ckpt
+fi
 exec "$@"
 EOF
 
+cat >"${FAKE_BIN}/rpm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${ANOLISA_TEST_RPM_LOG}"
+path="${!#}"
+case "${ANOLISA_TEST_RPM_SCOPE:-none}" in
+  system) expected="$ANOLISA_TEST_PACKAGE_DATADIR" ;;
+  prefix) expected="$ANOLISA_TEST_PREFIX_DATADIR" ;;
+  *) exit 1 ;;
+esac
+if [ "$path" = "$expected/components/${ANOLISA_TEST_RPM_COMPONENT:-ws-ckpt}/component.toml" ]; then
+  printf '%s\n' "${ANOLISA_TEST_RPM_OWNER:-ws-ckpt}"
+else
+  exit 1
+fi
+EOF
+
+cat >"${FAKE_BIN}/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+path="${!#}"
+if [ "${ANOLISA_TEST_STAT_STYLE:-gnu}" = bsd ] && [ "$1" = -c ]; then
+  exit 1
+fi
+if [ "${ANOLISA_TEST_STAT_STYLE:-gnu}" = unavailable ]; then
+  exit 1
+fi
+if [ "${ANOLISA_TEST_BAD_DATA_ANCESTOR:-0}" = 1 ] &&
+  [ "$path" = "${ANOLISA_TEST_SYSTEM_DATADIR%/share/anolisa}" ]; then
+  printf '1000 755\n'
+  exit 0
+fi
+if [ "$path" = "$ANOLISA_TEST_SYSTEM_DATADIR" ]; then
+  printf '%s %s\n' "${ANOLISA_TEST_DATA_OWNER:-0}" "${ANOLISA_TEST_DATA_MODE:-755}"
+else
+  # The runner uses a temporary filesystem in this fixture, not real root data.
+  printf '0 755\n'
+fi
+EOF
+
 chmod +x "${FAKE_BIN}/curl" "${FAKE_BIN}/uname" "${FAKE_BIN}/id" \
-  "${FAKE_BIN}/sudo"
+  "${FAKE_BIN}/sudo" "${FAKE_BIN}/rpm" "${FAKE_BIN}/stat"
 
 make_cli() {
   local path="$1" version="$2"
@@ -196,7 +270,18 @@ run_install_case() {
 
   local case_root="${TEST_ROOT}/${name}"
   local install_dir="${case_root}/install"
+  local case_installer="${case_root}/install.sh"
+  local system_datadir="${case_root}/system/share/anolisa"
+  if [ "${ANOLISA_TEST_OS:-Darwin}" = Darwin ]; then
+    system_datadir="${case_root}/system-local/share/anolisa"
+  fi
   mkdir -p "$case_root"
+  # Exercise the privileged runner, but redirect every system write and every
+  # trusted-path tool lookup in this test-only copy. Never write /usr/share.
+  sed -e "s|/usr/share/anolisa|${case_root}/system/share/anolisa|g" \
+    -e "s|/usr/local/share/anolisa|${case_root}/system-local/share/anolisa|g" \
+    -e "s|PATH=/usr/sbin:/usr/bin:/sbin:/bin|PATH=${BASE_PATH}|g" \
+    "$INSTALLER" >"$case_installer"
   LAST_STATUS=0
   PATH="$case_path" \
     ANOLISA_INSTALL_DIR="$install_dir" \
@@ -204,10 +289,14 @@ run_install_case() {
     ANOLISA_TEST_SUDO_LOG="${case_root}/sudo.log" \
     ANOLISA_TEST_TAMPER_LOG="${case_root}/tampered.log" \
     ANOLISA_TEST_SHA_FILE="${case_root}/artifact.sha256" \
+    ANOLISA_TEST_RPM_LOG="${case_root}/rpm.log" \
+    ANOLISA_TEST_SYSTEM_DATADIR="$system_datadir" \
+    ANOLISA_TEST_PACKAGE_DATADIR="${case_root}/system/share/anolisa" \
+    ANOLISA_TEST_PREFIX_DATADIR="${case_root}/share/anolisa" \
     ANOLISA_TEST_TAR="$REAL_TAR" \
     ANOLISA_TEST_VERSION="$TEST_CLI_VERSION" \
     ANOLISA_VERSION="${ANOLISA_TEST_REQUEST_VERSION:-$TEST_CLI_VERSION}" \
-    bash -s -- "$@" <"$INSTALLER" >"${case_root}/stdout" \
+    bash -s -- "$@" <"$case_installer" >"${case_root}/stdout" \
       2>"${case_root}/stderr" || LAST_STATUS=$?
 }
 
@@ -265,6 +354,155 @@ run_case upgrade-component \
 run_case uninstall-component \
   "--install-mode system uninstall cosh-ng" \
   --uninstall --component cosh-ng --install-mode system
+test ! -e "${TEST_ROOT}/install-cosh-ng-system/system/share/anolisa"
+test -z "$(cat "${TEST_ROOT}/install-cosh-ng-system/commands.log.data-dir")"
+
+export ANOLISA_TEST_OS=Linux
+ANOLISA_TEST_LAYOUT=packaged run_case packaged-cli ""
+for component in cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory; do
+  test -f "${TEST_ROOT}/packaged-cli/share/anolisa/components/$component/component.toml"
+done
+test ! -e "${TEST_ROOT}/packaged-cli/system/share/anolisa"
+ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_EXPECT_DATA=1 \
+  run_case packaged-user "--install-mode user install ws-ckpt --backend raw" \
+    --component ws-ckpt --install-mode user
+
+for euid in 1000 0; do
+  name="packaged-system-$euid"
+  ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_EXPECT_DATA=1 ANOLISA_TEST_EUID="$euid" \
+    ANOLISA_DATA_DIR="${TEST_ROOT}/untrusted-user-data" \
+    run_case "$name" "--install-mode system install ws-ckpt --backend raw" \
+      --component ws-ckpt --install-mode system
+  test "$(cat "${TEST_ROOT}/$name/commands.log.data-dir")" = \
+    "${TEST_ROOT}/$name/system/share/anolisa"
+  temporary_binary="$(cat "${TEST_ROOT}/$name/commands.log.binary")"
+  test ! -e "$temporary_binary" || fail "temporary privileged CLI was retained"
+  test -f "${TEST_ROOT}/$name/system/share/anolisa/components/ws-ckpt/component.toml"
+done
+
+name=packaged-incomplete
+make_cli "${TEST_ROOT}/$name/install/anolisa" "$OLD_CLI_VERSION"
+ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_MISSING_CONTRACT=1 \
+  run_install_case "$name" "$BASE_PATH"
+test "$LAST_STATUS" -ne 0 || fail "incomplete integration data was accepted"
+assert_contains "${TEST_ROOT}/$name/stderr" "integration contract missing or unsafe" "$name"
+test "$("${TEST_ROOT}/$name/install/anolisa" --version)" = "anolisa $OLD_CLI_VERSION"
+test ! -e "${TEST_ROOT}/$name/share/anolisa"
+
+name=packaged-symlink-share
+ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_SYMLINK_SHARE=1 \
+  run_install_case "$name" "$BASE_PATH"
+test "$LAST_STATUS" -ne 0 || fail "symlinked archive data was accepted"
+assert_contains "${TEST_ROOT}/$name/stderr" "invalid CLI integration data directory" "$name"
+test ! -e "${TEST_ROOT}/$name/share/anolisa"
+
+# Both the write destination and the system registry (which takes runtime
+# precedence) must be free of every former component RPM owner before writing.
+for scope in prefix system; do
+  for owner in cosh-ng agent-sec-cli agentsight tokenless skillfs ws-ckpt agent-memory; do
+    component="$owner"
+    [ "$owner" != agent-sec-cli ] || component=sec-core
+    name="packaged-old-owner-$scope-$owner"
+    case_root="${TEST_ROOT}/$name"
+    if [ "$scope" = prefix ]; then
+      datadir="$case_root/share/anolisa"
+    else
+      datadir="$case_root/system/share/anolisa"
+    fi
+    mkdir -p "$datadir/components/$component"
+    printf 'old package contract\n' >"$datadir/components/$component/component.toml"
+    make_cli "$case_root/install/anolisa" "$OLD_CLI_VERSION"
+    ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_RPM_SCOPE="$scope" \
+      ANOLISA_TEST_RPM_OWNER="$owner" ANOLISA_TEST_RPM_COMPONENT="$component" \
+      run_install_case "$name" "$BASE_PATH" --component ws-ckpt --install-mode system
+    test "$LAST_STATUS" -ne 0 || fail "old owner $owner at $scope was accepted"
+    assert_contains "$case_root/stderr" "still owned by component RPM $owner" "$name"
+    assert_contains "$case_root/stderr" "native package manager" "$name"
+    test "$(cat "$datadir/components/$component/component.toml")" = 'old package contract'
+    test "$("$case_root/install/anolisa" --version)" = "anolisa $OLD_CLI_VERSION"
+    test ! -e "$case_root/sudo.log"
+    test ! -e "$case_root/commands.log"
+  done
+done
+
+name=packaged-late-old-owner
+ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_LATE_OLD_OWNER=1 \
+  run_install_case "$name" "$BASE_PATH" --component ws-ckpt --install-mode system
+test "$LAST_STATUS" -ne 0 || fail "privileged old-owner preflight was bypassed"
+assert_contains "${TEST_ROOT}/$name/stderr" \
+  "still owned by component RPM ws-ckpt" "$name"
+test -s "${TEST_ROOT}/$name/sudo.log"
+test ! -e "${TEST_ROOT}/$name/system/share/anolisa"
+test ! -e "${TEST_ROOT}/$name/commands.log"
+
+name=packaged-anolisa-owner
+mkdir -p "${TEST_ROOT}/$name/system/share/anolisa/components/ws-ckpt"
+printf 'old ANOLISA contract\n' \
+  >"${TEST_ROOT}/$name/system/share/anolisa/components/ws-ckpt/component.toml"
+ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_EXPECT_DATA=1 \
+  ANOLISA_TEST_RPM_SCOPE=system ANOLISA_TEST_RPM_OWNER=anolisa \
+  run_case "$name" "--install-mode system update ws-ckpt" \
+    --component ws-ckpt --install-mode system --upgrade
+
+ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_EXPECT_DATA=1 ANOLISA_TEST_STAT_STYLE=bsd \
+  run_case packaged-bsd-stat "--install-mode system install ws-ckpt --backend raw" \
+    --component ws-ckpt --install-mode system
+name=packaged-stat-unavailable
+ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_STAT_STYLE=unavailable \
+  run_install_case "$name" "$BASE_PATH" --component ws-ckpt --install-mode system
+test "$LAST_STATUS" -ne 0 || fail "unverifiable root data ownership was accepted"
+assert_contains "${TEST_ROOT}/$name/stderr" "cannot verify integration data ownership" "$name"
+test ! -e "${TEST_ROOT}/$name/system/share/anolisa"
+test ! -e "${TEST_ROOT}/$name/commands.log"
+
+for failure in owner mode symlink ancestor-symlink; do
+  name="packaged-unsafe-system-$failure"
+  case_root="${TEST_ROOT}/$name"
+  datadir="$case_root/system/share/anolisa"
+  mkdir -p "$datadir/components/ws-ckpt"
+  printf 'existing contract\n' >"$datadir/components/ws-ckpt/component.toml"
+  case "$failure" in
+    owner) export ANOLISA_TEST_DATA_OWNER=1000 ;;
+    mode) export ANOLISA_TEST_DATA_MODE=777 ;;
+    symlink)
+      mv "$datadir" "$case_root/outside"
+      ln -s "$case_root/outside" "$datadir"
+      ;;
+    ancestor-symlink)
+      mv "$case_root/system/share" "$case_root/outside"
+      ln -s "$case_root/outside" "$case_root/system/share"
+      ;;
+  esac
+  ANOLISA_TEST_LAYOUT=packaged \
+    run_install_case "$name" "$BASE_PATH" --component ws-ckpt --install-mode system
+  test "$LAST_STATUS" -ne 0 || fail "unsafe system data $failure was accepted"
+  if [ "$failure" = owner ] || [ "$failure" = mode ]; then
+    assert_contains "$case_root/stderr" "must be root-owned" "$name"
+  else
+    assert_contains "$case_root/stderr" "must not be a symlink" "$name"
+  fi
+  test "$(cat "$datadir/components/ws-ckpt/component.toml")" = 'existing contract'
+  test ! -e "$case_root/commands.log"
+  unset ANOLISA_TEST_DATA_OWNER ANOLISA_TEST_DATA_MODE
+done
+
+name=packaged-darwin-system
+ANOLISA_TEST_OS=Darwin ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_EXPECT_DATA=1 \
+  run_case "$name" "--install-mode system install tokenless --backend raw" \
+    --component tokenless --install-mode system
+test "$(cat "${TEST_ROOT}/$name/commands.log.data-dir")" = \
+  "${TEST_ROOT}/$name/system-local/share/anolisa"
+test -f "${TEST_ROOT}/$name/system-local/share/anolisa/components/tokenless/component.toml"
+test ! -e "${TEST_ROOT}/$name/system/share/anolisa"
+name=packaged-darwin-user-owned-prefix
+mkdir -p "${TEST_ROOT}/$name/system-local"
+ANOLISA_TEST_OS=Darwin ANOLISA_TEST_LAYOUT=packaged ANOLISA_TEST_BAD_DATA_ANCESTOR=1 \
+  run_install_case "$name" "$BASE_PATH" --component tokenless --install-mode system
+test "$LAST_STATUS" -ne 0 || fail "user-owned Darwin system data ancestor was accepted"
+assert_contains "${TEST_ROOT}/$name/stderr" "must be root-owned" "$name"
+test ! -e "${TEST_ROOT}/$name/system-local/share/anolisa"
+test ! -e "${TEST_ROOT}/$name/commands.log"
+unset ANOLISA_TEST_OS
 
 ANOLISA_TEST_ARCH=x86_64 run_case intel-pinned \
   "--install-mode user install cosh-ng --backend raw" \
@@ -451,18 +689,8 @@ expect_rejected() {
   shift 2
 
   local case_root="${TEST_ROOT}/${name}"
-  mkdir -p "$case_root"
-  if PATH="$BASE_PATH" \
-    ANOLISA_INSTALL_DIR="${case_root}/install" \
-    ANOLISA_TEST_LOG="${case_root}/commands.log" \
-    ANOLISA_TEST_SUDO_LOG="${case_root}/sudo.log" \
-    ANOLISA_TEST_TAMPER_LOG="${case_root}/tampered.log" \
-    ANOLISA_TEST_SHA_FILE="${case_root}/artifact.sha256" \
-    ANOLISA_TEST_TAR="$REAL_TAR" \
-    ANOLISA_TEST_VERSION="$TEST_CLI_VERSION" \
-    ANOLISA_VERSION="$TEST_CLI_VERSION" \
-    bash -s -- "$@" <"$INSTALLER" \
-    >"${case_root}/stdout" 2>"${case_root}/stderr"; then
+  run_install_case "$name" "$BASE_PATH" "$@"
+  if [ "$LAST_STATUS" -eq 0 ]; then
     echo "case '$name' unexpectedly succeeded" >&2
     exit 1
   fi

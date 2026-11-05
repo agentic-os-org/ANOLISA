@@ -317,6 +317,12 @@ jobs:
           merge-multiple: true
           path: /tmp/python-wheels-preview
 
+      - name: Select Python 3.11
+        if: inputs.component == 'tokenless'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Verify Tokenless Python wheels
         if: inputs.component == 'tokenless'
         env:

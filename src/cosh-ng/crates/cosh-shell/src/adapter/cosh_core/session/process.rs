@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::process::{Child, ChildStdin, Output, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -363,7 +363,7 @@ fn spawn(program: &str, deadline: Instant) -> io::Result<Child> {
                 "cosh-core session-control deadline elapsed before spawn",
             ));
         }
-        let mut command = Command::new(program);
+        let mut command = crate::adapter::command_with_trusted_startup_path(program);
         command
             .arg("--session-control")
             .stdin(Stdio::piped())

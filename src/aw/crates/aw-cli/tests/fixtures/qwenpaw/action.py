@@ -24,7 +24,7 @@ if protocol == "provider":
         (root / (event["name"] + "-provider-env.json")).write_text(json.dumps({
             key: os.environ.get(key) for key in ["PROFILE_SECRET", "REMOVED_BY_NATIVE_HOST"]
         }))
-        reply["effects"] = [{"type": "block", "reason_code": "fixture_denial"}] if (
+        reply["effects"] = [{"type": "block", "reason_code": "fixture_denial", "text": event["tool"]["input"].get("reason", "security policy denied the tool")}] if (
             event["name"] == "tool.before" and event["tool"]["input"]["deny"]
         ) else []
     print(json.dumps(reply))
@@ -38,8 +38,9 @@ else:
     with (root / "order.jsonl").open("a") as output:
         output.write(json.dumps(label) + "\n")
     if label.startswith("budget-"):
-        time.sleep(.35)
-        (root / (label + "-completed")).write_text("yes")
+        (root / (label + "-started")).write_text(str(time.monotonic()))
+        time.sleep(int(sys.argv[5]) / 1000)
+        (root / (label + "-completed")).write_text(str(time.monotonic()))
     if label == "barrier":
         identifier = request["tool_call"]["id"]
         (root / ("barrier-" + identifier)).write_text("entered")

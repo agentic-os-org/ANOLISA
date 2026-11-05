@@ -66,7 +66,9 @@ async def worker() -> None:
         async def check_permissions(
             self, tool_input: dict[str, Any], context: Any
         ) -> PermissionDecision:
-            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+            return PermissionDecision(
+                behavior=PermissionBehavior.ALLOW, message="Cancellation fixture allows the tool"
+            )
 
         async def call(self, mode: str) -> Any:
             if mode.startswith("rpc-before-"):
@@ -312,7 +314,12 @@ async def worker() -> None:
 
         async def finalizing_spawn(*args: Any, **kwargs: Any) -> Any:
             nonlocal close_child
-            if "--close-event" not in args and args[args.index("--step") + 1] == "after-middle":
+            # Scope ledger commands (register/finish) carry no hook route.
+            if (
+                "--step" in args
+                and "--close-event" not in args
+                and args[args.index("--step") + 1] == "after-middle"
+            ):
                 injected.append("after-middle")
                 raise OSError(errno.EMFILE, "fixture finalization gap")
             child = await create(*args, **kwargs)

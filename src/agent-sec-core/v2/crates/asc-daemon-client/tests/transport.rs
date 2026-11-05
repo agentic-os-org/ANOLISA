@@ -135,7 +135,7 @@ const RESPONSE: &[u8] =
 #[cfg(target_os = "linux")]
 #[test]
 fn untrusted_server_is_rejected_before_request_bytes_are_sent() {
-    let uid = rustix::process::geteuid().as_raw();
+    let uid = nix::unistd::geteuid().as_raw();
     if uid == 0 {
         // Root runs the cross-UID fake-server fixture in the installed E2E suite.
         return;

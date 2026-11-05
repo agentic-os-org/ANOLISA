@@ -83,6 +83,8 @@ pub mod interruption;
 #[cfg(target_os = "linux")]
 pub mod parser;
 #[cfg(target_os = "linux")]
+pub mod pipeline_core;
+#[cfg(target_os = "linux")]
 pub mod probes;
 #[cfg(target_os = "linux")]
 pub mod response_map;

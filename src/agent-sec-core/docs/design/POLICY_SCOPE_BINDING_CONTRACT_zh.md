@@ -3,7 +3,7 @@
 文档类型：`[TARGET V2][IMPLEMENTED]` 对象与生命周期契约；第 7 节为 `[IMPLEMENTED]` 通用规则结构与首阶段执行边界。
 本契约的对象职责、revision 与快照生命周期与
 [AgentSecCore 安全策略语言](https://alidocs.dingtalk.com/i/nodes/20eMKjyp810mMdK4HrdLaNnXJxAZB1Gv)
-一致；策略内容已使用通用 rules 结构，执行能力仍限定为文件删除 block 子集，未实现完整语言语义。
+一致；策略内容已使用通用 rules 结构，原生 JSON 执行支持文件删除 block 子集，Cedar 执行支持删除/普通写入的 `forbid` 子集。
 本文替代旧设计中 Scope 仅表示 PID/cgroup、Scope 自身增版、用户手动
 Binding CRUD 和 Scope 引用阻止 Policy 更新/删除的目标语义；不改写已有测试的历史结果。
 
@@ -14,7 +14,7 @@ Binding CRUD 和 Scope 引用阻止 Policy 更新/删除的目标语义；不改
 
 **PolicyTemplate 是可被多个 Scope 引用和复用的策略。** 它具有独立身份、内容 revision
 和完整规则内容；Template 表示策略可以复用于不同主体分配。本文的 Policy 与 Policy Template
-指同一个受管理的策略对象，wire 中的 `template` 字段保存该策略的规则内容。
+指同一个受管理的策略对象，wire 中的 `template` 字段保存原生 JSON 规则或携带 schema 引用的 Cedar 源码。
 “禁止删除文件”是当前支持的规则场景，不是 PolicyTemplate 的概念定义。
 同一个 PolicyTemplate revision 可以被 Scope S1、S2 分别选用，两者各自保存完整快照、
 管理自己的 Binding；删除一个 Scope 不影响另一个 Scope，也不删除来源策略。
@@ -25,7 +25,7 @@ Binding CRUD 和 Scope 引用阻止 Policy 更新/删除的目标语义；不改
 | Scope（Assignment） | 独立 Scope ID；没有 Scope revision | 不可变 selector + 指定 Policy revision 的完整快照 | create、get、list、delete、retry |
 | Binding | 系统生成 Binding ID，归属于唯一 Scope | 一个策略快照、来源身份、具体执行实例和部署状态 | 只读查询；不提供手动 create/update/delete |
 
-策略语言中的 `spec_version` 是格式版本，当前 wire 在策略内容中使用 `specVersion`。Policy `revision` 是内容版本。Policy 内容变化沿用 ID 并
+原生 JSON 的 `specVersion` 是格式版本，Cedar 的 schema 引用选择应用 schema 版本。Policy `revision` 是内容版本。Policy 内容变化沿用 ID 并
 分配下一个 revision；相同内容的幂等写入不增版。某个 `(Policy ID, revision)` 对应
 的内容不可改写，但不要求模板库永久保存该版本。保留既有 revision 分配头，避免删除
 内容后复用版本号；不新增历史版本库、引用计数或历史 revision 的 CRUD。
@@ -54,10 +54,9 @@ StoredScope
 以上字段与当前 wire 一致；创建输入用 `policyTemplates`，保存结果用 `policySnapshots`。
 `PreparedPolicy` 只包含 `policyId`、`policyName`、`revision` 和 `template`，Scope 和 Binding
 保存同一个完整模板快照。
-每次 Apply 按 `Binding.policy.template → AgentSight Adapter → ActPlane DSL → Client`
-执行。Adapter 只读取 Binding 快照。
-当前策略内容的格式版本、规则、资源及条件目录校验在 `PolicyTemplate::validate()`；
-AgentSight 的 glob 子集、DSL 字面量、规则数和长度限制由 Adapter 拒绝检查。
+每次 Apply 按 `Binding.policy.template → Translator → 目标计划 → Client` 执行。
+Translator 只读取 Binding 快照：原生 JSON 翻译为 DSL，Cedar 经 `pst` 加载后翻译为
+结构化文件防护配置。PAP 校验源码，Translator 检查目标语义及编码限制，Client 检查运行时能力。
 Scope 没有 `revision`，消费它的请求/响应和 Binding 来源信息也不携带 `scopeRevision`。
 内部模型见 [PreparedPolicy](../../v2/crates/asc-policy-types/src/policy.rs)。
 
@@ -244,7 +243,7 @@ CRUD 按当前接口明确拒绝。WorkQueue、AttemptSchedule 和启动管理�
 
 保留 `PreparedPolicy {policyId, policyName, revision, template}`、现有 PAP 方法与 CLI 命令。
 身份、名称和内容 revision 由外层对象管理，不在规则内容中重复维护。
-下面的 `PolicyTemplate` 是现有 Rust 类型名，对应 wire 的 `template` 内容字段；
+下面的 `PolicyTemplate` 是原生 JSON 分支的 Rust 类型名，对应 `PolicySource::SecCore`；
 该类型使用通用规则结构，承载可复用策略的内容：
 
 ```text
@@ -288,7 +287,7 @@ require_confirmation 和合法历史 Event 验证该边界；保存不代表这�
 
 Scope 继续回答“谁受哪些策略约束”，选择主体并保存精确 revision 的完整快照。
 PolicyTemplate 回答“什么条件、动作、资源、效果及理由”。Binding 保存其中一个模板快照和
-固定实例身份；执行直接走 `Binding.policy.template → Adapter → DSL → Client`。
+固定实例身份；原生 JSON 执行走 `Binding.policy.template → Translator → DSL → Client`。
 PAP 进行目标无关的结构与语义校验；Adapter 检查目标能否完整实现全部规则，不重新读模板库。
 
 ### 7.3 首阶段可执行例子
@@ -320,7 +319,7 @@ PAP 进行目标无关的结构与语义校验；Adapter 检查目标能否完�
 }
 ```
 
-AgentSight Adapter 首阶段只支持上述单条 operation=delete 条件、block、file/write 和文件目标
+PEP Translator 对原生 JSON 只支持上述单条 operation=delete 条件、block、file/write 和文件目标
 的组合，不带 previous；每条规则生成 `block unlink file`，because 使用该规则的理由，
 省略时沿用现有固定理由。路径与理由必须通过 DSL 字面量检查，拒绝引号、反斜杠和控制字符，允许普通 Unicode；
 当前 ActPlane lexer 无转义语法，不使用 JSON 转义伪装成可表达的 DSL。
@@ -354,7 +353,7 @@ Scope 创建成功仅表示分配已保存，后续 Binding 可因目标不支�
 
 实现复用现有类型、Adapter、Repository 和 Runtime，没有新增 crate 或独立规则执行框架。
 领域校验回归见 [通用规则测试](../../v2/crates/asc-policy-types/tests/authoring.rs)，
-逐规则转换、拒绝及 DSL 注入边界见 [Adapter 测试](../../v2/crates/asc-policy-adapter-agentsight/tests/translation.rs)，
+逐规则转换、拒绝及 DSL 注入边界见 [Translator 测试](../../v2/crates/asc-policy-translator-agentsight/tests/translation.rs)，
 三处快照重开及旧编码拒绝见 [SQLite 契约测试](../../v2/crates/asc-policy-repository-sqlite/tests/contracts.rs)。
 [HTTP mock E2E](../../tests/v2/e2e/test_policy_delivery_e2e.py) 覆盖完整下发与含不支持规则时
 保存成功、Binding 失败且无 HTTP 调用。测试验证本地数据和 mock 请求，不代表真实内核执行。

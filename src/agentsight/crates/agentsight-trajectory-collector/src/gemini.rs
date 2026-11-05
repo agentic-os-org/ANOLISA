@@ -7,8 +7,8 @@
 //! type: user|gemini|info|error|warning, content, ...}`, with `toolCalls?`/
 //! `thoughts?`/`tokens?`/`model?` on `gemini` records) and the correction
 //! records `{$rewindTo}`, `{$patch}` and `{$set}`. Older CLIs (<= 0.38) wrote
-//! one pretty-printed JSON document with an embedded `messages` array — no
-//! line parses as JSONL, so [`legacy_document`] absorbs the whole file and
+//! one pretty-printed JSON document with an embedded `messages` array, not a
+//! record stream; [`legacy_document`] recognizes the whole file first and
 //! the replay ingests it through the partial-metadata path.
 
 use std::collections::{HashMap, HashSet};
@@ -41,9 +41,9 @@ pub fn is_gemini_chat(events: &[serde_json::Value]) -> bool {
 /// Parse a legacy (<= 0.38) conversation document from raw file content.
 ///
 /// Those CLIs wrote the conversation with `JSON.stringify(conversation,
-/// null, 2)`: multi-line pretty-printed JSON where no single line parses, so
-/// the JSONL pass comes back empty. Mirrors the CLI's own whole-file
-/// fallback: the content must parse as one partial-metadata record carrying
+/// null, 2)`. Individual lines can accidentally parse as JSON values, so
+/// callers must recognize a whole document before treating it as JSONL.
+/// The content must parse as one partial-metadata record carrying
 /// an embedded `messages` array.
 pub fn legacy_document(content: &str) -> Option<serde_json::Value> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content).trim();
@@ -241,6 +241,29 @@ fn is_message_record(event: &serde_json::Value) -> bool {
     message_id(event).is_some() && event.get("$patch").is_none()
 }
 
+/// Whether a complete history operation authoritatively removed all messages.
+pub(crate) fn explicitly_cleared(events: &[serde_json::Value]) -> bool {
+    let has_reset = events.iter().any(|event| {
+        event
+            .get("$rewindTo")
+            .is_some_and(|value| value.is_string())
+            || event
+                .pointer("/$patch/removeIds")
+                .and_then(|value| value.as_array())
+                .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|id| id.is_string()))
+            || event
+                .pointer("/$set/messages")
+                .and_then(|value| value.as_array())
+                .is_some_and(|messages| messages.is_empty())
+            || (is_partial_metadata(event)
+                && event
+                    .get("messages")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|messages| messages.is_empty()))
+    });
+    has_reset && replay_conversation(events).messages.is_empty()
+}
+
 /// The leading/conversation metadata record.
 fn is_partial_metadata(event: &serde_json::Value) -> bool {
     event.get("sessionId").and_then(|v| v.as_str()).is_some()
@@ -389,13 +412,20 @@ fn gemini_step(
                 extra: None,
             });
             if let Some(result) = call.get("result").filter(|v| !v.is_null()) {
-                let failed = call.get("status").and_then(|v| v.as_str()) == Some("error");
+                let failed = match call.get("status").and_then(|v| v.as_str()) {
+                    Some("success") => Some(false),
+                    Some("error") => Some(true),
+                    _ => None,
+                };
                 observations.push(ObservationResult {
                     source_call_id: Some(call_id.to_string()),
-                    content: Some(serde_json::Value::String(joined_text(Some(result)))),
+                    content: Some(serde_json::Value::String(tool_result_text(result, call_id))),
                     subagent_trajectory_ref: None,
-                    extra: failed.then(|| {
-                        HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(true))])
+                    extra: failed.map(|failed| {
+                        HashMap::from([(
+                            EXTRA_IS_ERROR.to_string(),
+                            serde_json::Value::Bool(failed),
+                        )])
                     }),
                 });
             }
@@ -438,6 +468,41 @@ fn gemini_step(
     }
 }
 
+// Keep the response payload (including structured JSON), without serializing
+// binary parts or leaking the function-call envelope into token estimates.
+fn tool_result_text(result: &serde_json::Value, call_id: &str) -> String {
+    let part_text = |part: &serde_json::Value| -> Option<String> {
+        // History sync stores the whole user turn's parts on each call. Keep
+        // only this call's identified responses; old ID-less parts still belong
+        // to their enclosing result, as do plain text parts.
+        if part
+            .pointer("/functionResponse/id")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| id != call_id)
+        {
+            return None;
+        }
+        if let Some(response) = part.pointer("/functionResponse/response") {
+            return Some(match response {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            });
+        }
+        part.as_str()
+            .or_else(|| part.get("text").and_then(|v| v.as_str()))
+            .map(String::from)
+    };
+    let text = match result {
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(part_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        part => part_text(part).unwrap_or_default(),
+    };
+    text.trim().to_string()
+}
+
 /// Whether a `gemini` record carries none of the mapped content; skipping
 /// them keeps step ids contiguous with the visible conversation.
 fn gemini_record_is_empty(msg: &serde_json::Value) -> bool {
@@ -458,7 +523,13 @@ fn gemini_record_is_empty(msg: &serde_json::Value) -> bool {
 fn token_metrics(tokens: Option<&serde_json::Value>) -> Option<Metrics> {
     let tokens = tokens.filter(|v| v.is_object())?;
     let prompt = tokens.get("input").and_then(|v| v.as_u64());
-    let completion = tokens.get("output").and_then(|v| v.as_u64());
+    // Gemini persists visible candidates and billed reasoning separately.
+    let visible = tokens.get("output").and_then(|v| v.as_u64());
+    let thoughts = tokens.get("thoughts").and_then(|v| v.as_u64());
+    let completion = match (visible, thoughts) {
+        (Some(output), Some(thoughts)) => output.checked_add(thoughts),
+        (output, thoughts) => output.or(thoughts),
+    };
     if prompt.is_none() && completion.is_none() {
         return None;
     }

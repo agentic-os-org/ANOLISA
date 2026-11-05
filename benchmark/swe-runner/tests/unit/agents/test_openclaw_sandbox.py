@@ -195,9 +195,9 @@ def test_sandbox_manager_can_inject_tokenless_binaries(tmp_path: Path) -> None:
     config_path.write_text('{"agents":{"list":[{"id":"main","default":true}]}}', encoding="utf-8")
     tokenless_bin = tmp_path / "host-tokenless-bin"
     tokenless_bin.mkdir()
-    (tokenless_bin / "real-rtk").write_text("#!/bin/sh\n", encoding="utf-8")
-    (tokenless_bin / "rtk").symlink_to(tokenless_bin / "real-rtk")
-    (tokenless_bin / "tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tokenless_bin / "real-tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tokenless_bin / "real-tokenless").chmod(0o755)
+    (tokenless_bin / "tokenless").symlink_to(tokenless_bin / "real-tokenless")
     extensions_dir = _tokenless_extensions_dir(tmp_path)
     spec = _spec(tmp_path)
 
@@ -222,19 +222,20 @@ def test_sandbox_manager_can_inject_tokenless_binaries(tmp_path: Path) -> None:
     )
     assert "allow" not in data["plugins"]
     assert data["plugins"]["entries"]["tokenless"]["enabled"] is True
-    injected_rtk = spec.workspace_root / ".runner" / "tokenless" / "bin" / "rtk"
-    assert injected_rtk.is_file()
-    assert not injected_rtk.is_symlink()
-    assert (spec.workspace_root / ".runner" / "tokenless" / "bin" / "tokenless").is_file()
+    injected_tokenless = spec.workspace_root / ".runner" / "tokenless" / "bin" / "tokenless"
+    assert injected_tokenless.is_file()
+    assert not injected_tokenless.is_symlink()
+    assert not (spec.workspace_root / ".runner" / "tokenless" / "bin" / "rtk").exists()
     extension_link = config_path.parent / "extensions" / "tokenless"
     assert extension_link.is_symlink()
     assert extension_link.resolve() == (extensions_dir / "tokenless").resolve()
     injection_manifest = json.loads(
         (spec.workspace_root / ".runner" / "tokenless" / "injection.json").read_text(encoding="utf-8")
     )
-    rtk_record = next(item for item in injection_manifest["binaries"] if item["name"] == "rtk")
-    assert rtk_record["source_is_symlink"] is True
-    assert rtk_record["copied_is_symlink"] is False
+    assert [item["name"] for item in injection_manifest["binaries"]] == ["tokenless"]
+    tokenless_record = injection_manifest["binaries"][0]
+    assert tokenless_record["source_is_symlink"] is True
+    assert tokenless_record["copied_is_symlink"] is False
 
 
 def test_sandbox_manager_adds_tokenless_to_existing_plugin_allowlist(tmp_path: Path) -> None:
@@ -258,8 +259,8 @@ def test_sandbox_manager_adds_tokenless_to_existing_plugin_allowlist(tmp_path: P
     )
     tokenless_bin = tmp_path / "host-tokenless-bin"
     tokenless_bin.mkdir()
-    (tokenless_bin / "rtk").write_text("#!/bin/sh\n", encoding="utf-8")
     (tokenless_bin / "tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tokenless_bin / "tokenless").chmod(0o755)
     extensions_dir = _tokenless_extensions_dir(tmp_path)
     spec = _spec(tmp_path)
 
@@ -288,13 +289,9 @@ def test_sandbox_manager_adds_tokenless_to_existing_plugin_allowlist(tmp_path: P
 def test_sandbox_manager_detects_tokenless_binaries_from_path(tmp_path: Path) -> None:
     config_path = tmp_path / "openclaw.json"
     config_path.write_text('{"agents":{"list":[{"id":"main","default":true}]}}', encoding="utf-8")
-    rtk_bin = tmp_path / "rtk-bin"
     tokenless_bin = tmp_path / "tokenless-bin"
-    rtk_bin.mkdir()
     tokenless_bin.mkdir()
-    (rtk_bin / "rtk").write_text("#!/bin/sh\n", encoding="utf-8")
     (tokenless_bin / "tokenless").write_text("#!/bin/sh\n", encoding="utf-8")
-    (rtk_bin / "rtk").chmod(0o755)
     (tokenless_bin / "tokenless").chmod(0o755)
     extensions_dir = _tokenless_extensions_dir(tmp_path)
     spec = _spec(tmp_path)
@@ -307,7 +304,7 @@ def test_sandbox_manager_detects_tokenless_binaries_from_path(tmp_path: Path) ->
     manager = OpenClawSandboxManager(config_path=config_path, profile="profile-1", cli_path="openclaw", tokenless=True)
 
     with (
-        patch.dict(os.environ, {"PATH": f"{rtk_bin}{os.pathsep}{tokenless_bin}"}, clear=True),
+        patch.dict(os.environ, {"PATH": str(tokenless_bin)}, clear=True),
         patch("swe_runner.agents.openclaw.sandbox._HOST_TOKENLESS_BIN_DIR", tmp_path / "missing-tokenless-bin"),
         patch("swe_runner.agents.openclaw.sandbox._HOST_TOKENLESS_EXTRA_BIN_DIRS", ()),
         patch("swe_runner.agents.openclaw.sandbox._HOST_OPENCLAW_EXTENSIONS_DIR", extensions_dir),
@@ -315,8 +312,8 @@ def test_sandbox_manager_detects_tokenless_binaries_from_path(tmp_path: Path) ->
     ):
         manager.configure(spec)
 
-    assert (spec.workspace_root / ".runner" / "tokenless" / "bin" / "rtk").is_file()
     assert (spec.workspace_root / ".runner" / "tokenless" / "bin" / "tokenless").is_file()
+    assert not (spec.workspace_root / ".runner" / "tokenless" / "bin" / "rtk").exists()
 
 
 def test_remove_stale_agent_containers_removes_labelled_containers(tmp_path: Path) -> None:
@@ -362,5 +359,86 @@ def test_sandbox_manager_rejects_wrong_explained_workspace(tmp_path: Path) -> No
         manager.configure(spec)
 
 
+def test_sandbox_manager_rejects_non_object_explain_json(tmp_path: Path) -> None:
+    """explain 输出为合法 JSON 但非对象（CLI 出错/警告路径的合理输出）时，
+    必须走既有的 invalid-JSON RuntimeError，而不是 AttributeError 裸崩
+    （修复前：'list' object has no attribute 'get'，实测）。
+    """
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text('{"agents":{"list":[{"id":"main","default":true}]}}', encoding="utf-8")
+    spec = _spec(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> CommandResult:
+        if cmd[:5] == ["openclaw", "--profile", "profile-1", "sandbox", "explain"]:
+            return _completed(cmd, stdout="[]")
+        return _completed(cmd)
+
+    manager = OpenClawSandboxManager(config_path=config_path, profile="profile-1", cli_path="openclaw")
+
+    with (
+        patch("swe_runner.agents.openclaw.sandbox.run_command", side_effect=fake_run),
+        pytest.raises(RuntimeError, match="returned invalid JSON"),
+    ):
+        manager.configure(spec)
+
+
 def test_build_openclaw_agent_scope_key_matches_local_agent_scope() -> None:
     assert build_openclaw_agent_scope_key("django__django-13448") == "agent:django__django-13448:main"
+
+
+class TestSubprocessTimeouts:
+    """Sandbox CLI/docker calls must be bounded.
+
+    These calls run while preparing sandboxes and inside the cleanup
+    callback (remove_agent_containers runs in prepared.cleanup()), so an
+    unresponsive CLI or docker daemon would hang the whole batch forever
+    instead of failing the instance visibly.
+    """
+
+    def _manager(self, tmp_path: Path) -> "OpenClawSandboxManager":
+        return OpenClawSandboxManager(
+            config_path=tmp_path / "openclaw.json",
+            profile="test-profile",
+            cli_path="openclaw",
+        )
+
+    def test_remove_agent_containers_bounded_by_timeout(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+        with patch("swe_runner.agents.openclaw.sandbox.run_command") as mock_run:
+            mock_run.return_value = CommandResult(
+                args=("openclaw",), stdout="", stderr="", returncode=0
+            )
+            manager.remove_agent_containers("agent-1")
+
+        timeouts = [c.kwargs.get("timeout") for c in mock_run.call_args_list]
+        assert all(t is not None and t > 0 for t in timeouts), (
+            f"unbounded subprocess calls: {timeouts}"
+        )
+
+    def test_check_agent_config_bounded_by_timeout(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+        spec = _spec(tmp_path)
+
+        def _explain(*args, **kwargs):
+            return CommandResult(
+                args=("openclaw",),
+                stdout=json.dumps(
+                    {"sandbox": {"workspaceRoot": str(spec.workspace_root)}}
+                ),
+                stderr="",
+                returncode=0,
+            )
+
+        with patch(
+            "swe_runner.agents.openclaw.sandbox.run_command", side_effect=_explain
+        ):
+            manager._check_agent_config(spec)
+
+        # the explain call itself must carry a timeout
+        with patch("swe_runner.agents.openclaw.sandbox.run_command") as mock_run:
+            mock_run.side_effect = _explain
+            manager._check_agent_config(spec)
+        timeouts = [c.kwargs.get("timeout") for c in mock_run.call_args_list]
+        assert all(t is not None and t > 0 for t in timeouts), (
+            f"unbounded subprocess calls: {timeouts}"
+        )

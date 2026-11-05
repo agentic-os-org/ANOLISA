@@ -7,7 +7,7 @@
 `TabularCompressor` consumes rectangular, header-first CSV or TSV directly.
 The first record and at least two data records must identify a unique delimiter.
 All cells remain strings; duplicate or empty headers, empty cells, row order,
-and column order survive full compaction. No JSON cleanup, numeric conversion,
+and column order survive full compaction. No JSON compaction, numeric conversion,
 TOON encoding, or constant-column extraction participates.
 
 Unnecessary quoting and record terminators can be normalized. Embedded field

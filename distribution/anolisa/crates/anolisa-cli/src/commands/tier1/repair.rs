@@ -98,7 +98,7 @@ struct RepairResultPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<String>,
     /// Manifest-only reconciliation planned or completed alongside the state
-    /// repair (`component manifest drift` when the package-owned contract no
+    /// repair (`component manifest drift` when the distribution-owned contract no
     /// longer matches the state snapshot).
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest_reconciliation: Option<&'static str>,
@@ -2752,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_drift_is_judged_against_the_package_datadir_only() {
+    fn manifest_drift_prefers_the_fhs_distribution_registry() {
         use anolisa_core::adapter::contract::{
             ContractProvenance, ContractSourceKind, write_snapshot_provenance,
         };
@@ -2816,7 +2816,7 @@ mod tests {
     }
 
     #[test]
-    fn local_manifest_is_ignored_when_the_package_contract_is_missing() {
+    fn repair_snapshots_the_local_distribution_registry_without_a_component_contract() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let component = "manifest-missing-package-contract";
@@ -2832,7 +2832,8 @@ mod tests {
             )],
         );
         let layout = common::resolve_layout(&ctx);
-        // Only a local datadir copy exists; the package publishes no contract.
+        // A source-installed ANOLISA owns this registry; the component RPM
+        // publishes no ANOLISA metadata of its own.
         let local = FsLayout::component_contract_path(&layout.datadir, component);
         fs::create_dir_all(local.parent().expect("local parent")).expect("mkdir local");
         fs::write(&local, "framework = \"local-only\"\n").expect("write local copy");
@@ -2843,13 +2844,10 @@ mod tests {
 
         repair_with_deps(component, &ctx, &fake, &fake, false).expect("repair ok");
 
-        // An absent package contract is not drift: the local datadir copy
-        // must be ignored, so no snapshot gets seeded and no partial phase
-        // is entered.
         let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
-        assert!(
-            !snapshot.exists(),
-            "an absent package contract must not seed a snapshot"
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read distribution snapshot"),
+            "framework = \"local-only\"\n"
         );
         let store = load_store(&ctx);
         assert_eq!(store.operations.len(), 1, "idempotent R3 refresh");
@@ -3122,6 +3120,70 @@ mod tests {
     }
 
     #[test]
+    fn quarantined_repair_retires_discovery_claims_before_verification_and_restore() {
+        use sha2::{Digest, Sha256};
+
+        for obsolete_sha in [Some("0".repeat(64)), None] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+            let layout = common::resolve_layout(&ctx);
+            fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+            let binary = layout.bin_dir.join("skillfs");
+            fs::write(&binary, b"healthy binary").expect("write binary");
+            let mut binary_claim = anolisa_file(binary.clone());
+            binary_claim.sha256 = Some(format!("{:x}", Sha256::digest(b"healthy binary")));
+            let registry = layout.contract_path("skillfs");
+            fs::create_dir_all(registry.parent().expect("registry parent")).expect("registry dir");
+            fs::write(&registry, "new distribution registry").expect("write registry");
+            let mut registry_claim = anolisa_file(registry.clone());
+            registry_claim.sha256 = obsolete_sha;
+            seed(
+                &ctx,
+                vec![unknown_backend_object(
+                    "skillfs",
+                    vec![binary_claim.clone(), registry_claim],
+                )],
+            );
+            let state_path = layout.state_dir.join("installed.toml");
+            let before = fs::read(&state_path).expect("state bytes");
+            assert_eq!(load_store(&ctx).quarantined[0].record.files.len(), 2);
+            let fake = FakeRpm::new("unrelated", None);
+            let mut preview = ctx.clone();
+            preview.dry_run = true;
+
+            repair_with_deps("skillfs", &preview, &fake, &fake, false)
+                .expect("obsolete registry claims must not block quarantine recovery");
+            assert_eq!(fs::read(&state_path).expect("preview state"), before);
+            assert!(
+                !layout.lock_file.exists(),
+                "preview must not acquire the install lock"
+            );
+
+            repair_with_deps("skillfs", &ctx, &fake, &fake, false).expect("restore owned record");
+
+            let restored = load_store(&ctx);
+            assert!(restored.quarantined.is_empty());
+            let record = restored
+                .find(ObjectKind::Component, "skillfs")
+                .expect("restored record");
+            let ProviderBinding::Owned { artifact } = &record.binding else {
+                panic!("expected owned record");
+            };
+            assert_eq!(
+                artifact.files,
+                vec![binary_claim],
+                "retired claims must not be saved again"
+            );
+            assert_eq!(
+                fs::read_to_string(&registry).expect("registry"),
+                "new distribution registry"
+            );
+            assert_eq!(fs::read(&binary).expect("binary"), b"healthy binary");
+            assert_eq!(fake.install_calls.get(), 0);
+        }
+    }
+
+    #[test]
     fn quarantined_restore_survives_missing_tooling() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
@@ -3194,6 +3256,20 @@ mod tests {
         );
         let layout = common::resolve_layout(&ctx);
         let state_path = layout.state_dir.join("installed.toml");
+        let registry = layout.contract_path("skillfs");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        fs::write(&registry, "new distribution registry").unwrap();
+        let mut store = StateStore::load(&state_path, 0).unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut store
+            .find_mut(ObjectKind::Component, "skillfs")
+            .unwrap()
+            .binding
+        {
+            let mut obsolete = anolisa_file(registry.clone());
+            obsolete.sha256 = Some("0".repeat(64));
+            artifact.files.push(obsolete);
+        }
+        store.save(&state_path).unwrap();
         let before = fs::read_to_string(&state_path).expect("read state");
         let fake = FakeRpm::new("unrelated", None);
 
@@ -3244,10 +3320,24 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let (state_path, binary) = seed_damaged_owned(tmp.path(), &ctx);
+        let layout = common::resolve_layout(&ctx);
+        let registry = layout.contract_path("skillfs");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        fs::write(&registry, "distribution registry").unwrap();
+        let mut store = StateStore::load(&state_path, 0).unwrap();
+        let record = store.find_mut(ObjectKind::Component, "skillfs").unwrap();
+        if let ProviderBinding::Owned { artifact } = &mut record.binding {
+            artifact.files.push(anolisa_file(registry.clone()));
+        }
+        store.save(&state_path).unwrap();
         let fake = FakeRpm::new("unrelated", None);
 
         repair_with_deps("skillfs", &ctx, &fake, &fake, false).expect("repair ok");
 
+        assert_eq!(
+            fs::read_to_string(&registry).unwrap(),
+            "distribution registry"
+        );
         // The artifact's payload was re-placed on disk.
         let placed = fs::read_to_string(&binary).expect("read replayed binary");
         assert!(placed.contains("echo skillfs"), "got: {placed}");
@@ -3259,6 +3349,7 @@ mod tests {
             .expect("record");
         match &record.binding {
             ProviderBinding::Owned { artifact } => {
+                assert!(!artifact.files.iter().any(|file| file.path == registry));
                 assert_eq!(artifact.version, "1.0.0", "replay never upgrades");
                 assert!(artifact.files.iter().any(|f| f.path == binary));
             }

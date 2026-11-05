@@ -34,8 +34,10 @@ fn run_plan(plan: &ReadonlyCompoundPlan) -> ReadonlyPipelineOutput {
         .expect("compound run")
 }
 
-// tokenless rtk wraps commands as `env TOKENLESS_* <abs rtk> <payload>`
-// or, when rtk emits the absolute path itself, `<abs rtk> <payload>`.
+// Tokenless builds that link RTK wrap commands as
+// `env TOKENLESS_* <abs tokenless> rtk <payload>`. Releases that ship a
+// standalone RTK wrap them as `env TOKENLESS_* <abs rtk> <payload>` or,
+// when rtk emits the absolute path itself, `<abs rtk> <payload>`.
 // The peel-for-assessment / keep-for-execution contract lives in
 // `readonly_interceptor`.
 
@@ -54,6 +56,32 @@ fn interceptor_parse_is_machine_independent() {
     let (env, _, payload) = peel(&bare_words).expect("bare template");
     assert!(env.is_empty());
     assert_eq!(payload, ["ps", "aux"]);
+
+    // The linked form keeps its `rtk` subcommand out of the payload.
+    let linked_words = tokens(&[
+        "env",
+        "TOKENLESS_AGENT_ID=a",
+        "/usr/bin/tokenless",
+        "rtk",
+        "ps",
+        "aux",
+    ]);
+    let (env, wrapper, payload) = peel(&linked_words).expect("linked template");
+    assert_eq!(
+        env,
+        vec![("TOKENLESS_AGENT_ID".to_string(), "a".to_string())]
+    );
+    assert_eq!(wrapper, "/usr/bin/tokenless");
+    assert_eq!(payload, ["ps", "aux"]);
+    // Any other tokenless subcommand is not an interceptor.
+    for words in [
+        &["/usr/bin/tokenless", "ps", "aux"][..],
+        &["/usr/bin/tokenless", "compress", "ps", "aux"][..],
+        &["/usr/bin/tokenless"][..],
+        &["/usr/bin/rtk-tokenless", "rtk", "ps", "aux"][..],
+    ] {
+        assert!(peel(&tokens(words)).is_none(), "{words:?}");
+    }
 
     // Foreign or unknown keys reject during pure parsing, before any
     // filesystem probe.
@@ -116,6 +144,15 @@ fn interceptor_fails_closed_off_template() {
         "env TOKENLESS_AGENT_ID=a /usr/bin/rtk find /tmp -name *cosh* 2>/dev/null",
         // stdout suppression is out of the stderr-only contract
         "env TOKENLESS_AGENT_ID=a /usr/bin/rtk ps aux >/dev/null",
+        // The linked wrapper keeps every check the standalone one has.
+        "env TOKENLESS_DATA_DIR=/tmp/chosen /usr/bin/tokenless rtk ps aux 2>/dev/null",
+        "env LD_PRELOAD=/tmp/evil.so /usr/bin/tokenless rtk ps aux 2>/dev/null",
+        "env TOKENLESS_AGENT_ID=a /tmp/tokenless rtk ps aux 2>/dev/null",
+        "env TOKENLESS_AGENT_ID=a /usr/bin/tokenless rtk rm -rf /tmp 2>/dev/null",
+        "/usr/bin/tokenless rtk grep password settings.txt 2>/dev/null",
+        // only the reviewed `rtk` subcommand interposes on a payload
+        "/usr/bin/tokenless compress ps aux 2>/dev/null",
+        "/usr/bin/tokenless ps aux 2>/dev/null",
     ] {
         assert!(build_readonly_compound_plan(command).is_none(), "{command}");
     }
@@ -210,6 +247,33 @@ fn interceptor_grants_readonly_payload_when_rtk_installed() {
     assert_eq!(bare.steps[0].env, process_session_env());
 }
 
+#[test]
+fn interceptor_grants_readonly_payload_when_tokenless_installed() {
+    // Like the standalone case above, the positive path needs tokenless
+    // in a trusted directory; the negative tests hold everywhere.
+    let Some(wrapper) = trusted_executable_dirs()
+        .iter()
+        .map(|dir| Path::new(dir).join("tokenless"))
+        .find(|path| path.is_file())
+    else {
+        return;
+    };
+    let linked = plan(&format!(
+        "env TOKENLESS_AGENT_ID=agent {} rtk ps aux 2>/dev/null",
+        wrapper.display()
+    ));
+    assert_eq!(linked.steps.len(), 1);
+    let step = &linked.steps[0];
+    assert_eq!(step.program, wrapper);
+    // The subcommand stays in the executed argv: it selects RTK.
+    assert_eq!(step.argv, vec!["tokenless", "rtk", "ps", "aux"]);
+    assert!(step.suppress_stderr);
+    assert_eq!(
+        step.env.first(),
+        Some(&("TOKENLESS_AGENT_ID".to_string(), "agent".to_string()))
+    );
+}
+
 /// Session-config passthrough (#3436 review): command text is the
 /// untrusted channel and wins on conflicts; trusted process-level
 /// `TOKENLESS_*` the command did not carry (stats switches, the
@@ -258,6 +322,7 @@ fn wrapped_payload_keeps_unwrapped_approval_verdict() {
     for wrapped in [
         "env TOKENLESS_AGENT_ID=a /usr/bin/rtk grep password settings.txt 2>/dev/null",
         "/usr/bin/rtk grep password settings.txt 2>/dev/null",
+        "env TOKENLESS_AGENT_ID=a /usr/bin/tokenless rtk grep password settings.txt 2>/dev/null",
     ] {
         assert_eq!(
             assess_shell_command(bare, policy).execution,
@@ -281,6 +346,8 @@ fn empty_payload_fails_closed_without_panicking() {
     for command in [
         "/usr/bin/rtk 2>/dev/null",
         "env TOKENLESS_AGENT_ID=a /usr/bin/rtk 2>/dev/null",
+        "/usr/bin/tokenless rtk 2>/dev/null",
+        "env TOKENLESS_AGENT_ID=a /usr/bin/tokenless rtk 2>/dev/null",
     ] {
         assert!(build_readonly_compound_plan(command).is_none(), "{command}");
         assert_eq!(

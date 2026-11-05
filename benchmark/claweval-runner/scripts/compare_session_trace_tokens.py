@@ -20,20 +20,29 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+
+def _iter_jsonl_records(path: Path) -> Iterator[Any]:
+    """Stream physical records without buffering the complete transcript."""
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            yield record
 
 
 def session_totals(path: Path) -> dict:
     n_assist = 0
     in_sum = out_sum = total_sum = cache_r = cache_w = 0
     last_total = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for rec in _iter_jsonl_records(path):
         msg = rec.get("message")
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
@@ -60,13 +69,7 @@ def trace_totals(path: Path) -> dict:
     n_assist = 0
     in_sum = out_sum = 0
     end = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for rec in _iter_jsonl_records(path):
         t = rec.get("type")
         if t == "message":
             msg = rec.get("message") or {}
@@ -117,7 +120,15 @@ def main():
         print(f"no such dir: {root}", file=sys.stderr)
         sys.exit(1)
 
-    runs = [root / args.run] if args.run else sorted(p for p in root.iterdir() if p.is_dir())
+    if args.run is not None:
+        if not args.run or args.run in {".", ".."} or Path(args.run).name != args.run:
+            ap.error("--run must name a direct child directory of --root")
+        run_dir = root / args.run
+        if not run_dir.is_dir():
+            ap.error(f"no such run directory: {args.run}")
+        runs = [run_dir]
+    else:
+        runs = sorted(p for p in root.iterdir() if p.is_dir())
 
     rows = []
     summary = {
@@ -134,6 +145,8 @@ def main():
     for run_dir in runs:
         pairs = find_pairs(run_dir)
         if not pairs:
+            if args.run is not None:
+                ap.error(f"no session/trace pairs found in selected run: {args.run}")
             continue
         for stem, sess, trace in pairs:
             summary["total_pairs"] += 1

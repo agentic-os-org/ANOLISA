@@ -1,8 +1,9 @@
-"""AgentScope 2.0.6 factory bridge; native tool scheduling retains authority."""
+"""AgentScope factory bridge; native tool scheduling retains authority."""
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import io
 import json
 import os
@@ -11,7 +12,6 @@ import stat
 import sys
 import tempfile
 from contextvars import ContextVar
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
 from uuid import uuid4
@@ -26,32 +26,128 @@ _invocation_id: ContextVar[str] = ContextVar("aw_agentscope_invocation_id")
 _pending_closes: ContextVar[dict[str, tuple[AwToolMiddleware, dict[str, Any], float]]] = ContextVar(
     "aw_agentscope_pending_closes"
 )
+_withheld: ContextVar[bool] = ContextVar("aw_agentscope_withheld", default=False)
+
+
+def _withheld_response() -> ToolResponse:
+    """Placeholder delivered to the model when a strict after check cannot run."""
+    return ToolResponse(
+        state=ToolResultState.ERROR,
+        content=[
+            TextBlock(
+                type="text",
+                text="AW post-tool check failed; result withheld by policy",
+            )
+        ],
+    )
+
+
+from aw_scope_ledger import (  # noqa: E402
+    AwTaskScope,
+    CallbackFailure,
+    _ensure_task_scope,
+)
+
+_invocation_scope: ContextVar[AwTaskScope | None] = ContextVar(
+    "aw_agentscope_invocation_scope", default=None
+)
 
 
 class AwInvocationMiddleware(MiddlewareBase):
     """Share a fresh correlation across this invocation's before/after wrappers."""
 
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self.config = config
+
+    @staticmethod
+    def _effective_input(raw_input: Any) -> Any | None:
+        """Decode the SDK-effective arguments, or None to skip registration.
+
+        Uses the same bound and parser as the tool middleware's evaluation so
+        the registered digest and the normalized hook input always agree; an
+        undecodable or out-of-domain call stays unregistered and keeps the
+        existing parser failure policy instead of minting a ledger identity.
+        """
+        try:
+            _encode_payload({"input": raw_input})
+            effective = _json_loads_with_repair(raw_input)
+            # Bound the decoded object exactly like the hook payload: a
+            # registration must stay inside the wire domain its invoke uses.
+            _encode_payload({"input": effective})
+            json.dumps(effective, allow_nan=False)
+            return effective
+        except (AgentOrientedException, RecursionError, ValueError, TypeError,
+                CallbackFailure):
+            return None
+
     async def on_acting(
         self, agent: Any, input_kwargs: dict[str, Any], next_handler: Any
     ) -> AsyncGenerator[Any, None]:
         token = _invocation_id.set(uuid4().hex)
+        invocation = _invocation_id.get()
         pending: dict[str, tuple[AwToolMiddleware, dict[str, Any], float]] = {}
         cleanup_token = _pending_closes.set(pending)
+        withheld_token = _withheld.set(False)
+        scope_token = _invocation_scope.set(None)
+        registered = False
+        call = input_kwargs.get("tool_call")
         try:
+            # Enable the ledger before the first OpenHookEvent. The process
+            # scope is keyed by the same invocation id the native payload
+            # normalizes into tool.call_id.
+            if self.config is not None:
+                scope = await _ensure_task_scope(self.config)
+                _invocation_scope.set(scope)
+                if call is not None:
+                    effective_input = self._effective_input(call.input)
+                    if effective_input is not None:
+                        # The ledger digests the SDK-effective arguments the
+                        # hook payload normalizes, not the raw model string.
+                        # A cancelled registration is booked as committed in
+                        # the scope; the drain retires whatever is booked.
+                        await scope.register(invocation, call.name, effective_input)
+                        registered = True
             async for item in next_handler():
+                # This wrapper is the outermost AW middleware, so strict
+                # withholding lands here after every after hook has observed
+                # the original response it was correlated against.
+                if isinstance(item, ToolResponse) and _withheld.get():
+                    item = _withheld_response()
                 yield item
         finally:
             try:
-                if pending:
 
-                    async def close_pending() -> None:
-                        for middleware, payload, _ in pending.values():
-                            await middleware._close_event(payload)
+                async def drain() -> None:
+                    # Pending phases close first, while the ledger still holds
+                    # the invocation identity; finish then retires both phases
+                    # and the identity server-side. A call booked in the scope
+                    # — committed or cancelled-during-registration — always
+                    # retires; an unregistered call under a usable scope never
+                    # opened a correlated event, so its cleanup stays inert.
+                    scope = _invocation_scope.get()
+                    booked = scope is not None and invocation in scope.invocations
+                    if (
+                        scope is not None
+                        and not scope.closed
+                        and not scope.failed
+                        and not registered
+                        and not booked
+                    ):
+                        return
+                    for middleware, payload, _ in pending.values():
+                        await middleware._close_event(payload)
+                    if booked and scope is not None:
+                        await scope.finish(invocation)
 
-                    cleanup = asyncio.create_task(close_pending())
+                # A cancelled registration is booked in the scope and must
+                # retire even with no pending phase and registered unset.
+                scope_now = _invocation_scope.get()
+                booked_now = scope_now is not None and invocation in scope_now.invocations
+                if registered or pending or booked_now:
+                    cleanup = asyncio.create_task(drain())
                     interrupted = None
-                    # Each phase close is bounded; cancellation must not abandon
-                    # the owned task or skip a remaining correlation.
+                    # Retirement and phase closes are bounded; cancellation
+                    # must not abandon the owned task or skip a correlation.
                     while not cleanup.done():
                         try:
                             await asyncio.shield(cleanup)
@@ -62,12 +158,10 @@ class AwInvocationMiddleware(MiddlewareBase):
                     if interrupted is not None:
                         raise interrupted
             finally:
+                _withheld.reset(withheld_token)
                 _pending_closes.reset(cleanup_token)
+                _invocation_scope.reset(scope_token)
                 _invocation_id.reset(token)
-
-
-class CallbackFailure(RuntimeError):
-    """A fixed adapter failure code, separate from a native policy denial."""
 
 
 def _encode_payload(payload: dict[str, Any]) -> bytearray:
@@ -144,6 +238,17 @@ class AwToolMiddleware(MiddlewareBase):
             raise CallbackFailure("native_input_too_deep") from error
         if asyncio.get_running_loop().time() >= deadline:
             raise TimeoutError
+        # Keep every phase on the scope that registered this invocation. A
+        # failed owner fails this call explicitly instead of rerouting its old
+        # identity to a root binding or a replacement scope.
+        scope = _invocation_scope.get()
+        if scope is not None:
+            return await scope.invoke(
+                self.hook,
+                payload,
+                deadline - asyncio.get_running_loop().time(),
+                close_event=close_event,
+            )
         proc = None
         try:
             async with asyncio.timeout_at(deadline):
@@ -179,6 +284,9 @@ class AwToolMiddleware(MiddlewareBase):
         return proc.returncode, stdout, stderr
 
     async def _close_event(self, payload: dict[str, Any]) -> None:
+        # An early phase close retires the event on the scope's own instance
+        # while the ledger keeps the invocation identity until finish; the
+        # legacy root-binding path is only used without a usable scope.
         try:
             code, _, diagnostic = await self._transport(
                 payload, deadline=asyncio.get_running_loop().time() + 3, close_event=True
@@ -240,6 +348,13 @@ class AwToolMiddleware(MiddlewareBase):
                         TextBlock(text="AW hook failed; configured failure action blocked the tool")
                     ],
                 )
+            # A strict after step must not deliver an unchecked native result,
+            # but yielding the placeholder here would change the payload outer
+            # after hooks observe under the same invocation. Flag it and let
+            # the invocation wrapper replace the completed response instead.
+            if self.hook["event"] == "tool.after" and self.hook["on_error"] == "withhold_result":
+                _withheld.set(True)
+                return None
             return None
 
     async def _evaluate(self, payload: dict[str, Any]) -> ToolResponse | None:
@@ -268,7 +383,11 @@ class AwToolMiddleware(MiddlewareBase):
             directive = json.loads(stdout) if stdout.strip() else None
         except RecursionError as error:
             raise CallbackFailure("native_output_too_deep") from error
-        except ValueError:
+        except ValueError as error:
+            # Strict after treats an undecodable reply as a failed check; report
+            # steps keep treating it as a neutral no-directive reply.
+            if self.hook["event"] == "tool.after" and self.hook["on_error"] == "withhold_result":
+                raise CallbackFailure("native_output_invalid") from error
             directive = None
         if isinstance(directive, dict) and (
             directive.get("action") in ("ask", "approve") or directive.get("decision") == "ask"
@@ -314,6 +433,9 @@ class AwToolMiddleware(MiddlewareBase):
                 return
         async for item in next_handler():
             # ToolChunk is intermediate; ToolResponse is the completed native result.
+            # A withheld replacement keeps chunks untouched: strict after checks only
+            # the completed response, and buffering chunks would need a stream gate
+            # the AgentScope middleware seam does not expose.
             if self.hook["event"] == "tool.after" and isinstance(item, ToolResponse):
                 replacement = await self._run(
                     {**payload, "tool_response": item.model_dump(mode="json")}
@@ -332,8 +454,6 @@ class AwBridge:
     """
 
     def __init__(self) -> None:
-        if version("agentscope") != "2.0.6":
-            raise RuntimeError("AW requires AgentScope 2.0.6")
         self.config = json.loads(Path(os.environ["AW_NATIVE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
@@ -346,8 +466,10 @@ class AwBridge:
                 raise ValueError("Unsupported AW native event")
             if not isinstance(hook.get("step"), str) or not hook["step"]:
                 raise ValueError("AW step must be a nonempty string")
-            if hook.get("on_error") not in {"report", "block"}:
+            if hook.get("on_error") not in {"report", "block", "withhold_result"}:
                 raise ValueError("Invalid AW failure policy")
+            if hook["on_error"] == "withhold_result" and hook["event"] != "tool.after":
+                raise ValueError("AW result withholding requires tool.after")
             if type(hook.get("replace_result")) is not bool:
                 raise ValueError("AW result replacement capability must be a boolean")
             if hook["replace_result"] and hook["event"] != "tool.after":
@@ -372,7 +494,7 @@ class AwBridge:
         ]
         agent = Agent(
             *args,
-            middlewares=[*(middlewares or []), AwInvocationMiddleware(), *additions],
+            middlewares=[*(middlewares or []), AwInvocationMiddleware(self.config), *additions],
             **kwargs,
         )
         if not self._ready:

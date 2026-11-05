@@ -8,6 +8,7 @@ use std::{
 
 use aw_exec::{CommandSpec, Limits};
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::config::Language;
 
@@ -29,6 +30,7 @@ pub(super) fn call(
     socket: &Path,
     code: &str,
     language: Language,
+    trace_context: &Value,
     timeout: Duration,
 ) -> Result<Verdict, &'static str> {
     let deadline = Instant::now()
@@ -42,6 +44,9 @@ pub(super) fn call(
     let command = CommandSpec {
         program: cli.into(),
         args: vec![
+            // The legacy context bootstrap must precede options with values.
+            "--trace-context".into(),
+            trace_context.to_string().into(),
             "--socket".into(),
             socket.into(),
             "--timeout-ms".into(),

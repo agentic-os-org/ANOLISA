@@ -482,10 +482,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    if args.chunks < 1 or args.chunk_bytes < 1 or args.chunk_delay_ms < 0:
+    parser = build_parser()
+    args = parser.parse_args()
+    if (
+        args.chunks < 1
+        or args.chunk_bytes < 1
+        or not math.isfinite(args.chunk_delay_ms)
+        or args.chunk_delay_ms < 0
+    ):
         raise SystemExit(
-            "chunks, chunk-bytes, and chunk-delay-ms must be non-negative (chunks/bytes > 0)"
+            "chunks, chunk-bytes, and chunk-delay-ms must be non-negative "
+            "(chunks/bytes > 0); chunk-delay-ms must be finite"
         )
     if args.tokens_per_second is not None or args.output_tokens is not None:
         if (

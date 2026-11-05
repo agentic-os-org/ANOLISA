@@ -27,6 +27,7 @@ from swe_runner.cli_commands import (
     evaluate_patches_command,
     run_instances_command,
 )
+from swe_runner.run.execution.orchestrator import DuplicateInstanceError
 from swe_runner.trace_extraction import ExtractionError
 
 app = typer.Typer(
@@ -62,6 +63,9 @@ def run(
     filter_regex: str | None = typer.Option(None, "--filter", help="Regex filter for instance IDs"),
     instance_id: str | None = typer.Option(
         None, "--instance-id", "-i", help="Instance ID(s), comma-separated for multiple"
+    ),
+    instances_file: Path | None = typer.Option(
+        None, "--instances-file", help="UTF-8 file of instance IDs, one per line; excludes --instance-id"
     ),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel workers (default: 1)"),
     docker_pull_registry: str | None = typer.Option(
@@ -109,6 +113,7 @@ def run(
             slice_range=slice_range,
             filter_regex=filter_regex,
             instance_id=instance_id,
+            instances_file=instances_file,
             workers=workers,
             docker_pull_registry=docker_pull_registry,
             use_skill=use_skill,
@@ -119,7 +124,7 @@ def run(
             redo=redo,
             verbose=verbose,
         )
-    except CommandUsageError as e:
+    except (CommandUsageError, DuplicateInstanceError) as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(code=1) from None
     except AgentEnvironmentError as e:
@@ -135,6 +140,17 @@ def run(
 
     console.print(f"\n[green]Done:[/green] {report.succeeded}/{report.total} succeeded")
     console.print(f"[green]Run metadata:[/green] {report.metadata_path}")
+
+    # A batch where every instance failed (agent crashes, timeouts, prepare or
+    # post-processing errors) produced no usable work. Pipelines that chain
+    # `run` into `evaluate` must be able to detect this without parsing the
+    # report, so exit non-zero instead of reporting success. Partial failures
+    # keep the historical exit code 0; the report carries the details.
+    if report.succeeded == 0:
+        console.print(
+            f"[red]All {report.total} instance(s) failed; check the run log before evaluating predictions.[/red]"
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()

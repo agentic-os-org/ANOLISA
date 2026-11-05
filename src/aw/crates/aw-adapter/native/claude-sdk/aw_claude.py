@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from importlib.metadata import version
 import json
 import logging
 import os
@@ -44,8 +43,6 @@ class Bridge:
     """Compose one foreground SDK client with its private AW launch binding."""
 
     def __init__(self) -> None:
-        if version("claude-agent-sdk") != "0.2.88":
-            raise RuntimeError("AW requires claude-agent-sdk 0.2.88")
         self.config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
@@ -65,7 +62,7 @@ class Bridge:
             ):
                 raise ValueError("Invalid AW hook route")
 
-    async def _invoke(self, hook: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    async def _transport(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1024 * 1024:
             raise CallbackFailure("native_input_limit")
@@ -103,12 +100,16 @@ class Bridge:
         if stderr:
             sys.stderr.buffer.write(stderr)
             sys.stderr.buffer.flush()
-        if proc.returncode == 2 and hook["event"] == "tool.before":
+        return proc.returncode, stdout
+
+    async def _invoke(self, hook: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        code, stdout = await self._transport(hook, payload)
+        if code == 2 and hook["event"] == "tool.before":
             reason = json.loads(stdout.strip() or b'"Tool blocked by AW policy"')
             if not isinstance(reason, str):
                 raise CallbackFailure("invalid_native_response")
             return _deny(reason)
-        if proc.returncode != 0:
+        if code != 0:
             raise CallbackFailure("invalid_native_response")
         result = json.loads(stdout.strip() or b"{}")
         if result == {}:
@@ -118,18 +119,29 @@ class Bridge:
             raise CallbackFailure("invalid_native_response")
         updated = specific.get("updatedToolOutput")
         original = payload.get("tool_response")
+        # Native MCP tools adopt a string replacement of the whole
+        # model-visible projection; the CLI keeps its own error state.
         if (
             not hook["replace_result"]
             or payload.get("hook_event_name") != "PostToolUse"
-            or payload.get("tool_name") != "Bash"
-            or not isinstance(original, dict)
-            or not isinstance(updated, dict)
-            or not isinstance(updated.get("stdout"), str)
-            or {**updated, "stdout": original.get("stdout")} != original
             or result
             != {
                 "hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}
             }
+        ):
+            raise CallbackFailure("invalid_native_response")
+        if str(payload.get("tool_name", "")).startswith("mcp__") and isinstance(
+            original, (str, list)
+        ):
+            if not isinstance(updated, str):
+                raise CallbackFailure("invalid_native_response")
+            return result
+        if (
+            payload.get("tool_name") != "Bash"
+            or not isinstance(original, dict)
+            or not isinstance(updated, dict)
+            or not isinstance(updated.get("stdout"), str)
+            or {**updated, "stdout": original.get("stdout")} != original
         ):
             raise CallbackFailure("invalid_native_response")
         return result
@@ -165,14 +177,18 @@ class Bridge:
                     str(error) if isinstance(error, CallbackFailure) else type(error).__name__,
                     hook["on_error"],
                 )
-                if event == "tool.before" and hook["on_error"] == "block":
-                    return _deny("AW hook failed; configured failure action blocked the tool")
+                result = self.failure_reply(event, hook)
+                if result:
+                    return result
+        return {}
+
+    def failure_reply(self, event: str, hook: dict[str, Any]) -> dict[str, Any]:
+        if event == "tool.before" and hook["on_error"] == "block":
+            return _deny("AW hook failed; configured failure action blocked the tool")
         return {}
 
     def options(self, options: ClaudeAgentOptions) -> ClaudeAgentOptions:
-        """Retain existing matchers and vetoes; reject unchecked argument rewrites."""
-        if options.setting_sources != [] or options.settings is not None or options.plugins:
-            raise ValueError("AW Claude SDK requires setting_sources=[] and no settings/plugins")
+        """Compose SDK callbacks; CLI-loaded Hooks retain their native scheduling."""
         if any(
             key != "strict-mcp-config" or value is not None
             for key, value in options.extra_args.items()
@@ -285,7 +301,7 @@ class Bridge:
 
 
 @asynccontextmanager
-async def create_client(options: ClaudeAgentOptions) -> AsyncIterator[ClaudeSDKClient]:
+async def _create_task_client(options: ClaudeAgentOptions) -> AsyncIterator[ClaudeSDKClient]:
     """Create one task-scoped SDK client, register AW callbacks and await initialization."""
     global _CLIENT_CREATED
     if _CLIENT_CREATED:
@@ -296,3 +312,24 @@ async def create_client(options: ClaudeAgentOptions) -> AsyncIterator[ClaudeSDKC
     async with ClaudeSDKClient(options=composed) as client:
         bridge.ready()
         yield client
+
+
+def create_client(options: ClaudeAgentOptions) -> Any:
+    """Use the public client factory in task workers and resident AW hosts."""
+    if os.environ.get("AW_CLAUDE_RESIDENT") == "1":
+        from aw_resident import ManagedClient
+        return ManagedClient(options)
+    return _create_task_client(options)
+
+
+def create_sdk_mcp_server(name: str, version: str = "1.0.0", tools: Any = None) -> Any:
+    """Create an explicitly managed in-process MCP server for a resident task client."""
+    if os.environ.get("AW_CLAUDE_RESIDENT") != "1":
+        raise RuntimeError("Managed MCP requires the AW resident entrypoint")
+    from aw_mcp import create_sdk_mcp_server as factory
+    return factory(name, version, tools)
+
+
+if __name__ == "__main__":
+    from aw_resident import main
+    main()
