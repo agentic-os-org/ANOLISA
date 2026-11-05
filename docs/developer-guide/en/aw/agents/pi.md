@@ -63,3 +63,55 @@ See the [adapter contract](https://github.com/agentic-os-org/ANOLISA/blob/main/s
 for exact callback semantics, identity, cancellation, capacity and reproducible
 SDK acceptance. Exit Agents and stop the original service before changing policy;
 retain/remove the audit state using the same local-service cleanup procedure.
+
+## Check user submissions
+
+Use the [Pi submission example](../../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)
+with a resident factory exporting `runWorker`. Replace the executable and sec-core
+socket paths, retain your application's model/auth configuration, and launch with
+`aw run --config /absolute/aw.pi-submission.yaml --agent pi -- 'Your task'`.
+The application exposes its existing factory plus this worker entrypoint:
+
+```javascript
+export async function createSession({ sdk, cwd }) {
+  return sdk.createAgentSession({ cwd, agentDir: "/absolute/existing-pi-agent-directory" });
+}
+
+export async function runWorker({ args, withSession }) {
+  await withSession({ cwd: process.cwd() }, async (session) => {
+    await session.prompt(args.join(" "));
+  });
+}
+```
+
+`session.prompt(text, options)` awaits the configured `scan_prompt` and
+`scan_user_input` steps before entering native prompt execution. The original text,
+including Chinese, whitespace and empty strings, reaches Pi unchanged. A policy
+denial or `on_error: block` failure rejects the promise; catch it to submit another
+prompt in the same session. `on_error: report` records the failed check and continues.
+A rejected check calls `preflightResult(false)` when provided.
+
+When input checking is configured, the supported source is interactive text.
+Images/attachments, `input`, `context` and `before_provider_request` extension handlers,
+expanded slash commands,
+`steer`, `followUp`, `sendUserMessage`, `sendCustomMessage`, direct Agent submission
+and concurrent prompts are rejected. Use `expandPromptTemplates: false` to submit
+literal slash text. Native prompt options are retained; model continuations and
+tool retries remain part of the existing execution and do not create submissions.
+The final Agent prompt must contain the exact checked user text. Context and
+provider-request transformations are rejected because they can rewrite that text
+after this check. Applications
+using these unsupported input paths must remove the input event or use a supported
+text-only factory. Direct `Agent.transformContext` and `Agent.convertToLlm` callbacks
+must preserve the ordered user-message content, including existing history;
+`Agent.onPayload` must leave the serialized request unchanged. AW isolates callback
+inputs/outputs and rejects rewrites before delivery. Callback slots are fixed for
+the managed session. Conversions that add user messages, including custom/summary
+messages, require a factory without input checking. Without `input.submit`, existing
+Pi input modes and callbacks remain available.
+
+Await `session.abort()`, `session.dispose()` or the factory's `close()` to cancel
+and release a managed task. Cancellation is terminal for that session: create a
+fresh factory session afterward. Teardown waits up to 12 seconds for native abort,
+pending prompt/check cleanup and disposal, then releases the AW scope. A failed
+cleanup requires worker restart. A late scan reply cannot dispatch a model request.

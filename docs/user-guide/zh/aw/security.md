@@ -83,6 +83,11 @@ Qoder SDK 和 QwenPaw 应用可从
 PII/Prompt 每项检查选择一个管理入口，避免重复扫描。当前覆盖文本与 fast L1 规则，
 ML 和会话级检测需要单独验收。
 
+Pi worker 使用 [Pi 输入检查示例](../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)
+和受管 `runWorker` 工厂，复用相同 prompt/PII 操作。
+[Pi 指南](../../../developer-guide/zh/aw/agents/pi.md#检查用户输入)
+说明字面量文本、未支持入口、拒绝后的恢复与取消行为。
+
 ## 验证检查
 
 在原生 Agent 中分两次请求执行下列命令，保持原生权限确认开启。

@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, process::Command};
 use support::{Fixture, Service};
 
+#[path = "pi/submission.rs"]
+mod submission;
+
 #[path = "pi/tool_scope.rs"]
 mod tool_scope;
 

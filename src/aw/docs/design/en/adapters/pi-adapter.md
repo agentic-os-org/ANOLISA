@@ -39,6 +39,46 @@ The worker releases installed callbacks and disposes its sessions on exit;
 AW releases the binding and removes its generated files. The shared daemon and
 durable journal remain until explicitly stopped/removed.
 
+## User submission boundary
+
+Configured `input.submit` requires `runWorker`; a legacy `run` application fails
+before its factory executes. The resident wrapper begins one execution, assigns a
+fresh AW turn UUID and reads the native session ID. `submission::normalize` emits
+`input.text`, `session_id` and `turn_id` without a synthetic tool call. All input
+steps reuse the admitted task routes and shared event budget; the tool invocation
+ledger is unchanged. A denied or failed blocking check drains the execution and
+allows another prompt. Report faults continue with the original text. Input events
+retain the Service's existing bounded correlation history.
+
+The supported boundary is literal interactive text passed to `session.prompt`.
+`input`, `context` and `before_provider_request` extension handlers, media,
+queued/alternate ingress and expanded slash
+commands are rejected before native prompt execution. The guarded `agent.prompt`
+checks that Pi's final user projection equals the scanned text. Context and payload
+handlers run after this boundary, so their presence is rejected both before and
+after the asynchronous scan. `agent.continue`
+remains available only inside that authorized execution. Tool results, model
+continuations and retries do not become input events. See the
+[Pi integration guide](../../../../../../docs/developer-guide/en/aw/agents/pi.md#check-user-submissions)
+for supported options and lifecycle calls.
+
+Direct Agent callbacks also run after the prompt guard. The boundary wraps and
+fixes `transformContext`, `convertToLlm` and `onPayload`, passing isolated values
+and returning isolated results. Message callbacks must preserve the ordered user
+content; payload callbacks must preserve the complete provider request. This
+covers returned replacements, in-place mutation and retained references. A
+violation is retained through native assistant-error conversion and rejects the
+outer prompt even when Pi consumes the callback exception. Before invoking the
+model stream, AW compares user content with the authorized prompt/history
+snapshot again and requires the guarded payload callback.
+
+Abort/dispose fences the scope and cancels the input transport before awaiting
+native teardown. The worker joins the pending prompt before releasing the scope;
+an unsuccessful cleanup poisons the worker. Scope release reclaims input events
+whose callback was interrupted before acknowledgement. Late results cannot cross
+the scope/execution checks into model transport. Ordinary policy denial leaves
+the native session untouched, allowing the next prompt after drain.
+
 ## Tool semantics
 
 The original before callback runs first. Its exceptions and denials retain their
@@ -96,7 +136,9 @@ AW-generated binding/config files remain private to the foreground launch.
 Callbacks invoke `aw hook --adapter pi` with literal arguments, bounded stdin,
 stdout, stderr and a timeout. Cancellation kills and waits for the callback's
 owned process group. Native command output may be empty or a JSON object with
-only boolean `block` and optional string `reason`; blocking is valid only before.
+only boolean `block` and optional string `reason`; blocking is valid for
+`input.submit` and `tool.before`. Resident submissions invoke the same dialect
+through `aw scope --action invoke` with their private task handle.
 Approvals, input rewriting and native result rewriting are rejected. Nonzero or
 signal exits and invalid output use the configured failure action. A native Hook
 cannot forge `aw_replacement`; only an admitted final structured replacement step
@@ -147,3 +189,20 @@ compression reaching model context, a fresh retry passing through sec-core again
 and RTK-owned output remaining unchanged. Both telemetry sinks are disabled and
 all state is local to the supplied test root. The eight bridge authority/envelope
 boundary cases also run inside the default Rust Pi gate.
+
+## Submission acceptance
+
+```bash
+cargo build --locked --manifest-path ../../providers/agent-sec-core/Cargo.toml
+python3 crates/aw-cli/tests/fixtures/pi/submission-smoke.py \
+  --aw target/debug/aw --root target/pi-sdk-validation \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/pi-submission
+```
+
+This runs Pi 0.84.2, AW and the real sec-core Provider against a local HTTP model
+and a controlled scanner CLI. It checks original text, risk/PII refusal and recovery,
+Provider exit/timeout/invalid output under block/report, input/context/provider-request extension rejection,
+alternate ingress, concurrent sessions/prompts, abort/dispose and empty resource
+usage. A separate model-endpoint assertion fails if rejected input arrives.
+The scanner fixture does not certify sec-core rules or a deployed business image.

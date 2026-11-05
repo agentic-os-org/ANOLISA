@@ -76,7 +76,11 @@ pub(crate) const QWENPAW: Profile = Profile {
 pub(crate) const PI: Profile = Profile {
     name: "pi",
     adapter: &super::super::adapters::pi::Pi,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const CLAUDE_SDK: Profile = Profile {

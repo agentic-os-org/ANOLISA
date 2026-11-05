@@ -1018,6 +1018,26 @@
     "claude-submission-cleanup": {
       "target": "aw-cli/test/claude_sdk",
       "test": "submission::submission_client_checks_and_cleanup_contracts"
+    },
+    "pi-submission": {
+      "target": "aw-cli/test/pi",
+      "test": "submission::text_submission_denial_recovers_and_preserves_session_turn_identity"
+    },
+    "pi-submission-faults": {
+      "target": "aw-cli/test/pi",
+      "test": "submission::submission_faults_apply_block_and_report_before_dispatch"
+    },
+    "pi-submission-cancel": {
+      "target": "aw-cli/test/pi",
+      "test": "submission::submission_abort_dispose_and_concurrent_prompt_never_dispatch_or_leak"
+    },
+    "pi-submission-entrypoint": {
+      "target": "aw-cli/test/pi",
+      "test": "submission::submission_requires_resident_worker_before_legacy_factory"
+    },
+    "pi-submission-projection": {
+      "target": "aw-cli/test/pi",
+      "test": "submission::submission_boundary_rejects_changed_messages_and_retains_native_continuations"
     }
   },
   "agents": {
@@ -1219,6 +1239,16 @@
             "final-replacement",
             "scope-pi-result"
           ]
+        },
+        "input.submit": {
+          "observe": [
+            "pi-submission",
+            "pi-submission-faults"
+          ],
+          "block": [
+            "pi-submission",
+            "pi-submission-faults"
+          ]
         }
       },
       "lifecycle": [
@@ -1246,13 +1276,17 @@
         "scope-pi-close",
         "resident-bridge-isolation",
         "resident-bridge-expiry",
-        "resident-bridge-generation"
+        "resident-bridge-generation",
+        "pi-submission-cancel",
+        "pi-submission-entrypoint"
       ],
       "security": [
         "security-retry",
         "scope-native-skips",
         "scope-pi-order",
-        "coverage-native-identity"
+        "coverage-native-identity",
+        "pi-submission",
+        "pi-submission-projection"
       ],
       "tokenless": [
         "final-replacement",

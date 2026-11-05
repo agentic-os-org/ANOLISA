@@ -15,7 +15,7 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
-| `pi` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -24,14 +24,17 @@ AW 为不同 Agent 共用工具检查、结果处理和自定义规则。以下�
 配置可按[工具选择步骤](configuration.md#为-hook-步骤选择工具)，原生权限和拒绝优先。
 Qoder CLI 尚未接入失败工具的 Post 回调；其他结果类型和接点限制见各 Agent 页。
 
-普通 resident Qoder SDK、QwenPaw 及 Claude SDK 前台/常驻工厂在模型请求前支持
-`input.submit` 观察与阻断，检查文本并关联会话和轮次。Claude 支持字符串或单条异步
-文本消息，拒绝或取消后完成清理再复用。受限 reloadable 模式及其他 Adapter 拒绝该事件。
+普通 resident Qoder SDK、QwenPaw、Claude SDK 前台/常驻工厂及 Pi worker 在模型请求前
+支持 `input.submit` 观察与阻断，检查完整文本并关联会话和轮次。Claude 支持字符串或
+单条异步文本消息，拒绝或取消后完成清理再复用。受限 reloadable 模式及其他 Adapter
+拒绝该事件。
 配置与验收方法见[用户提交检查](security.md#检查用户提交)。
 
 工具 PII 已在 Qoder SDK 1.0.56 / Worker 1.1.78 普通常驻 Query，以及 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App 回复中验收。输入检查先于工具执行；输出检查扫描完整结果，检查保留字段后替换一个获准文本槽，必需检查失败时停止交付。QwenPaw 对选中工具的流在 SSE/模型交付前缓冲。Qoder SDK 的受限 `--reloadable` 模式拒绝结果替换。多文本块、媒体、托管 MCP 与后台 PII 结果交付需分别验收。参见 [PII 配置](security.md#在-qoder-sdk-或-qwenpaw-中检查工具-pii)和[原生验收用例](../../../../contribute/zh/aw/testing.md#工具-pii-验收)。
 
 Qoder SDK 前台 `Read` 的文本结果支持 PII 内容替换，并保留文件元数据；图像及其他非文本 Read 结果需分别验收。
+
+Pi 输入检查要求 `runWorker` 工厂和 interactive 字面量文本。启用后拒绝媒体、`input`/`context`/`before_provider_request` 扩展处理器、展开的斜杠命令及队列/其他输入入口。输入拒绝或 block 检查故障后，同一会话可在清理完成后继续 prompt；取消和清理失败会终止任务。直接回调改写用户消息或序列化 Provider 请求也会被拒绝。
 
 ## 16 个通用 Hook
 
@@ -40,7 +43,7 @@ Qoder SDK 前台 `Read` 的文本结果支持 PII 内容替换，并保留文件
 | Hook | 状态 |
 | --- | --- |
 | `session.start` | 规划中 |
-| `input.submit` | 普通 resident Qoder SDK / QwenPaw 文本及 Claude SDK 前台/常驻文本工厂已实现 |
+| `input.submit` | 普通 resident Qoder SDK / QwenPaw 文本、Claude SDK 前台/常驻文本工厂及 Pi worker 文本输入已实现 |
 | `tool.before` | 已实现 |
 | `tool.after` | 已实现 |
 | `permission.request` | 规划中 |
@@ -89,7 +92,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 
 - 普通 Qoder SDK、QwenPaw 可配置后置故障 `withhold_result`，暂扣结果并停止后续派发；已发生的工具副作用保留。
 - AgentScope 2.0.6+ 的 tool.after 可配置 `withhold_result`：严格检查失败时在中间件链末端以错误态占位结果替换未检查原文，其余 after Hook 仍观察原始结果；仅在桥支持结果替换时准入。
-- Pi 受管 tool.after 配置 `on_error: report` 时，Provider 或传输故障保留已检查的原始结果，同一会话可继续下一次 prompt；before 故障、`block`/`withhold_result` 故障、取消、身份与清理失败仍停止任务。
+- Pi 受管 tool.after 配置 `on_error: report` 时，Provider 或传输故障保留已检查的原始结果，同一会话可继续下一次 prompt；before 故障、tool.after 的 `block`/`withhold_result` 故障、取消、身份与清理失败仍停止任务。输入拒绝及 block 输入检查故障只拒绝该次 prompt，清理后允许继续提交。
 - Claude SDK resident 的 `tool.after` 配置 `on_error: report` 时，已审计且可恢复的 Provider 故障保留原始结果并继续模型调用。范围包括原生 HTTP MCP 的文本及 `structuredContent` 结果、Bash 等内置工具；受管 SDK MCP 保留既有恢复行为。回调排空后，同一客户端可继续下一轮任务。身份/scope 失效、取消、生命周期/清理失败、before-Hook 故障、非法原生响应、未知传输详情及审计失败仍停止任务。`on_error: block` 与原生安全拒绝保留阻断语义。可恢复类别见[常驻部署](../../../developer-guide/zh/aw/deployment/resident.md)。后置检查无法撤销已执行工具。
 - 当前公共 Provider Hook 为上表两个事件。其余 14 个事件名、通用审批、输入替换、guard、Schema/BeforeModel 和 Retrieve 接入尚未开放。
 - AW 通过原生 Hook 执行策略，OS 沙箱隔离需另行部署。

@@ -15,7 +15,7 @@ export function configuration() {
     throw new Error("AW hooks must be an array");
   for (const hook of config.hooks) {
     if (
-      !["tool.before", "tool.after"].includes(hook.event) ||
+      !["input.submit", "tool.before", "tool.after"].includes(hook.event) ||
       typeof hook.step !== "string" ||
       !hook.step ||
       !["report", "block"].includes(hook.on_error) ||
@@ -307,6 +307,24 @@ export function installSessionBridge(session, scope = null) {
     }
   });
   return {
+    async submit(text, turn, signal) {
+      const payload = { event: "input.submit", text, aw_turn_id: turn,
+        session_id: identifier(session.sessionManager.getSessionId(), "session id") };
+      for (const hook of config.hooks.filter(hook => hook.event === "input.submit")) {
+        let directive;
+        try { directive = await invoke(config, hook, payload, signal); }
+        catch (error) {
+          scope.checkExecution();
+          if (signal.aborted) throw new Error("AW input check cancelled");
+          process.stderr.write(`AW input.submit/${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`);
+          if (hook.on_error === "block") throw new Error("AW input check failed; submission blocked");
+          continue;
+        }
+        scope.checkExecution();
+        if (signal.aborted) throw new Error("AW input check cancelled");
+        if (directive.block) throw new Error(directive.reason ?? "Input blocked by AW policy");
+      }
+    },
     model: (stream) => producer.wrap(stream),
     ready() {
       if (agent.beforeToolCall !== before || agent.afterToolCall !== after)

@@ -1,0 +1,49 @@
+# Pi Coding Agent/Core 0.84.2, Node.js >=22.19.0, managed runWorker factory.
+# Replace executable/socket/application paths and start sec-core separately.
+# Literal user text only; see the Pi integration guide for unsupported ingress.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata:
+  name: pi-submission
+spec:
+  daemon: {startup: on_demand, endpoint: auto, state_dir: auto}
+  execution: {guarantee: native_hook, default_event_budget_ms: 5000}
+  audit: {enabled: true, payload: metadata_only}
+  agents:
+    pi:
+      adapter: pi
+      argv: [node, /absolute/pi-worker.mjs]
+  providers:
+    security:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv:
+          - /absolute/path/to/aw-provider-sec-core
+          - --cli
+          - /absolute/path/to/agent-sec-cli
+          - --socket
+          - /absolute/path/to/sec-core.sock
+      timeout_ms: 2500
+      max_output_bytes: 4096
+      config:
+        version: 1
+        mode: block
+        prompt: {mode: block, scan_mode: fast}
+        pii: {input_mode: block, output_mode: observe}
+  events:
+    input.submit:
+      enabled: true
+      required: true
+      steps:
+        - id: prompt
+          provider: security
+          operation: scan_prompt
+          effects: [observe, block]
+          on_error: block
+        - id: user-pii
+          provider: security
+          operation: scan_user_input
+          effects: [observe, block]
+          on_error: block
