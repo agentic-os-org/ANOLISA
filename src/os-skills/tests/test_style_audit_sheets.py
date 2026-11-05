@@ -18,7 +18,14 @@ import zipfile
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
-SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+# The suite lives under src/os-skills/tests/ so the prebuilt CI job discovers
+# it; the script it drives stays next to the skill it belongs to.
+SCRIPTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "others",
+    "xlsx",
+    "scripts",
+)
 SCRIPT = os.path.join(SCRIPTS_DIR, "style_audit.py")
 
 # xf 0: theme-black font; xf 1: blue font (input role). Counts all consistent
