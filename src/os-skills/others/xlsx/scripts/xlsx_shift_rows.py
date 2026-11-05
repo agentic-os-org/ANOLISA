@@ -37,7 +37,8 @@ import sys
 import os
 import re
 import xml.etree.ElementTree as ET
-import xml.dom.minidom
+
+from xlsx_unpack import pretty_print_xml
 
 
 def col_letter(n: int) -> str:
@@ -294,11 +295,8 @@ def _write_tree(tree: ET.ElementTree, path: str) -> None:
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()
     try:
-        dom = xml.dom.minidom.parseString(raw.encode("utf-8"))
-        pretty = dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
-        lines = [line for line in pretty.splitlines() if line.strip()]
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+            fh.write(pretty_print_xml(raw.encode("utf-8")))
     except Exception:
         pass  # If pretty-print fails, leave the file as-is
 

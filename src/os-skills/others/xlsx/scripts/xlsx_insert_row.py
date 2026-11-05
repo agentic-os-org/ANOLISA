@@ -31,8 +31,9 @@ import os
 import re
 import subprocess
 import sys
-import xml.dom.minidom
 import xml.etree.ElementTree as ET
+
+from xlsx_unpack import pretty_print_xml
 
 NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -54,11 +55,8 @@ def _write_tree(tree: ET.ElementTree, path: str) -> None:
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()
     try:
-        dom = xml.dom.minidom.parseString(raw.encode("utf-8"))
-        pretty = dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
-        lines = [line for line in pretty.splitlines() if line.strip()]
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+            fh.write(pretty_print_xml(raw.encode("utf-8")))
     except Exception:
         pass
 

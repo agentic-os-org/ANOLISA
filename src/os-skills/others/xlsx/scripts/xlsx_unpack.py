@@ -23,10 +23,16 @@ def pretty_print_xml(content: bytes) -> str:
     """Pretty-print XML bytes. Returns original content on parse failure."""
     try:
         dom = xml.dom.minidom.parseString(content)
-        pretty = dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
-        # Remove the extra blank lines toprettyxml adds
-        lines = [line for line in pretty.splitlines() if line.strip()]
-        return "\n".join(lines) + "\n"
+        # Remove indentation between elements, never blank lines in cell text.
+        # Leaf text can consist entirely of whitespace and must survive too.
+        for node in dom.getElementsByTagName("*"):
+            if not any(c.nodeType == c.ELEMENT_NODE for c in node.childNodes):
+                continue
+            for child in list(node.childNodes):
+                if child.nodeType == child.TEXT_NODE and not child.data.strip():
+                    node.removeChild(child)
+                    child.unlink()
+        return dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
     except Exception:
         return content.decode("utf-8", errors="replace")
 
