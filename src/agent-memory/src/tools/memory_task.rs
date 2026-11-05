@@ -174,6 +174,16 @@ fn unquote_yaml(s: &str) -> String {
     }
 }
 
+/// Saturate a progress percentage to the `0..=100` the task file stores.
+///
+/// Callers that read the value from an external schema hold a `u32`; narrowing
+/// it with `as u8` wraps (`256` becomes `0`, which reads as "no progress"
+/// rather than "complete"). The frontmatter parser takes the same path, so a
+/// hand-edited `progress: 150` cannot come back as 150%.
+pub(crate) fn clamp_progress(progress: u32) -> u8 {
+    progress.min(100) as u8
+}
+
 /// Validate a task id before it is interpolated into `tasks/{id}.md`.
 ///
 /// Only ASCII letters, digits, `_`, and `-` are allowed. This refuses
@@ -256,7 +266,9 @@ fn parse_task(content: &str) -> Result<Task> {
                         _ => TaskStatus::InProgress,
                     };
                 }
-                "progress" => task.progress = value.parse().unwrap_or(0),
+                "progress" => {
+                    task.progress = value.parse::<u32>().map(clamp_progress).unwrap_or(0);
+                }
                 "created_at" => task.created_at = value,
                 "updated_at" => task.updated_at = value,
                 _ => {}
@@ -775,6 +787,56 @@ mod tests {
         let (_tmp, svc) = setup();
         let result = memory_task_resume(&svc, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn progress_saturates_instead_of_wrapping() {
+        for (input, expected) in [
+            (0, 0),
+            (44, 44),
+            (100, 100),
+            (101, 100),
+            (256, 100),
+            (300, 100),
+            (u32::MAX, 100),
+        ] {
+            assert_eq!(clamp_progress(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn frontmatter_progress_is_clamped_to_the_documented_range() {
+        let (_tmp, svc) = setup();
+        memory_task_save(
+            &svc,
+            "Clamped",
+            None,
+            Some(clamp_progress(300)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("clamped"),
+        )
+        .unwrap();
+        let stored = memory_task_resume(&svc, "clamped").unwrap();
+        assert!(stored.contains("100%"), "{stored}");
+
+        // A hand-edited file is the other entry point into the same field.
+        let tasks_dir = svc.mount.root.join(TASKS_DIR);
+        for (raw, expected) in [("150", 100), ("300", 100), ("44", 44), ("abc", 0)] {
+            let path = tasks_dir.join("edited.md");
+            std::fs::write(
+                &path,
+                format!(
+                    "---\nid: edited\ntitle: Edited\nstatus: in-progress\nprogress: {raw}\n---\n"
+                ),
+            )
+            .unwrap();
+            let task = parse_task(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(task.progress, expected, "progress: {raw}");
+        }
     }
 
     #[test]
