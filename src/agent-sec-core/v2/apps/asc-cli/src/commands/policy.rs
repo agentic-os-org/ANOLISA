@@ -1,7 +1,7 @@
 //! Authored Policy commands and bounded template-file decoding.
 
 use std::fs::File;
-use std::io::Read as _;
+use std::io::{self, Read as _};
 use std::path::PathBuf;
 
 use asc_daemon_protocol::method::{
@@ -33,6 +33,16 @@ pub(crate) enum PolicyCommand {
     },
     /// Delete the exact current revision.
     Delete(PolicyRevision),
+    /// Print the built-in restrictive baseline; never contacts the daemon.
+    Default(DefaultPolicy),
+}
+
+#[derive(Debug, Args)]
+/// Format selector for the embedded restrictive baseline.
+pub struct DefaultPolicy {
+    /// Print the raw Cedar text instead of the Policy template envelope.
+    #[arg(long)]
+    cedar: bool,
 }
 
 #[derive(Debug, Args)]
@@ -53,9 +63,32 @@ pub(crate) struct PolicyRevision {
     revision: Revision,
 }
 
+impl DefaultPolicy {
+    /// Renders the baseline that `policy create --file` accepts.
+    ///
+    /// The envelope names the embedded schema revision, so an exported file is
+    /// already bound to the schema this binary validates against. Cedar text is
+    /// what a human reviews; the envelope is what the create path decodes.
+    ///
+    /// # Errors
+    /// Returns the write failure of `out`.
+    pub fn render(&self, out: &mut impl io::Write) -> io::Result<()> {
+        let source = asc_policy_cedar::default_policy::default_policy_source();
+        if self.cedar {
+            return writeln!(out, "{}", source.text);
+        }
+        let template = PolicySource::Cedar(source);
+        let envelope = serde_json::to_string_pretty(&template).map_err(io::Error::other)?;
+        writeln!(out, "{envelope}")
+    }
+}
+
 impl PolicyCommand {
     pub(super) fn request(&self) -> Result<DaemonRequest, InputError> {
         match self {
+            // The baseline is embedded, so the command stays usable on hosts
+            // that never deploy a daemon.
+            Self::Default(_) => Err(InputError::LocalCommand),
             Self::Create(input) => encode(
                 POLICY_TEMPLATES_CREATE,
                 &CreatePolicyParams {
@@ -110,6 +143,23 @@ mod tests {
     use super::*;
     use crate::Cli;
     use crate::commands::Command;
+
+    #[test]
+    fn default_policy_prints_without_a_daemon() {
+        let cli = Cli::parse_from(["agent-sec-cli", "policy", "default"]).expect("argv parses");
+        assert!(cli.socket().is_none());
+        assert!(matches!(cli.plan(), crate::Plan::PolicyDefault(_)));
+        assert!(matches!(cli.request(), Err(InputError::LocalCommand)));
+
+        let crate::Plan::PolicyDefault(command) = cli.plan() else {
+            unreachable!("the plan was just checked");
+        };
+        let mut envelope = Vec::new();
+        command.render(&mut envelope).expect("renders to memory");
+        let decoded = asc_policy_types::authoring::source_serde::from_slice(&envelope)
+            .expect("the printed envelope decodes");
+        assert!(matches!(decoded, PolicySource::Cedar(_)));
+    }
 
     /// Returns the template path `argv` parsed into, or panics if it did not
     /// resolve to a `policy create`.
