@@ -116,7 +116,7 @@ Release package targets:
 | macOS | aarch64 (Apple Silicon) | `@anolisa/tokenless-darwin-arm64` |
 | Windows | x86_64 | `@anolisa/tokenless-win32-x64` |
 
-Tokenless 0.9.3 builds packages for all five targets. At 0.9.3 release preparation, the npm registry's latest root package and platform packages are 0.9.1. Generating release assets does not publish them to npm: npm installation requires the root package and the matching platform package at the same version. Check availability with `npm view anolisa-tokenless version` and `npm view @anolisa/tokenless-darwin-x64 version` or `npm view @anolisa/tokenless-win32-x64 version`. See [Platform support](#platform-support) for the available installation routes.
+Since 0.9.0, every Tokenless version on npm includes the root package and all five platform packages. npm publication is a separate step after the GitHub release, so a new version can reach npm later. npm installation requires the root package and the matching platform package at the same version. Check availability with `npm view anolisa-tokenless version` and `npm view @anolisa/tokenless-darwin-x64 version` or `npm view @anolisa/tokenless-win32-x64 version`. See [Platform support](#platform-support) for the available installation routes.
 
 #### Method C: curl standalone install
 
