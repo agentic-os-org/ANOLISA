@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -164,7 +165,43 @@ _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
 
 def tokenless_retrieve_command_available() -> bool:
     """Return whether a Marker command can invoke bare ``tokenless``."""
-    return not _QWENWORK_PRIVATE_RUNTIME and shutil.which("tokenless") is not None
+    return _QWENWORK_RECOVERY is not None or (
+        not _QWENWORK_PRIVATE_RUNTIME and shutil.which("tokenless") is not None
+    )
+
+
+def _bare_retrieve_hash(command: str) -> str | None:
+    if not _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command):
+        return None
+    return re.search(r"[0-9a-fA-F]{24}", shlex.split(command)[2]).group().lower()
+
+
+def _qwenwork_retrieve_command(key: str) -> str | None:
+    if _QWENWORK_RECOVERY is None:
+        return None
+    runtime = _QWENWORK_RECOVERY
+    arguments = ["/usr/bin/env"]
+    for name in (
+        "TOKENLESS_AGENT_ID",
+        "TOKENLESS_SESSION_ID",
+        "TOKENLESS_TOOL_USE_ID",
+        "TOKENLESS_DATA_DIR",
+        "TOKENLESS_STASH_DB",
+        "DSH_TOKENLESS_STASH_DB",
+    ):
+        arguments.append(f"{name}={runtime[name]}")
+    arguments.extend((runtime["binary"], "retrieve", key))
+    return " ".join(shlex.quote(argument) for argument in arguments)
+
+
+def rewrite_qwenwork_retrieve(tool_name: str, arguments: dict) -> dict | None:
+    """Anchor a standalone recovery command to the same private runtime as its Hook."""
+    command = arguments.get("command")
+    if tool_name not in SHELL_TOOLS or not isinstance(command, str):
+        return None
+    key = _bare_retrieve_hash(command)
+    rewritten = _qwenwork_retrieve_command(key) if key is not None else None
+    return {**arguments, "command": rewritten} if rewritten is not None else None
 
 
 def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
@@ -174,7 +211,19 @@ def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
     command = arguments.get("command")
     if not isinstance(command, str):
         return False
-    return _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command) is not None
+    if _bare_retrieve_hash(command) is not None:
+        return True
+    if _QWENWORK_RECOVERY is None:
+        return False
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+    if not arguments or not re.fullmatch(r"[0-9a-f]{24}", arguments[-1]):
+        return False
+    # Only our exact command is recovery; pipelines and user-supplied wrappers
+    # must not inherit the exemption from response compression.
+    return command == _qwenwork_retrieve_command(arguments[-1])
 
 
 # Layer 3: API tools (zero-truncation).
@@ -347,6 +396,52 @@ _QWENWORK_WORKSPACE_SHELLS = frozenset(
     }
 )
 _QWENWORK_PRIVATE_RUNTIME = False
+_QWENWORK_RECOVERY: dict[str, str] | None = None
+
+
+def _prepare_qwenwork_recovery(plugin_root: str, payload: dict) -> dict[str, str] | None:
+    if sys.platform != "darwin" or not os.path.isabs(plugin_root):
+        return None
+    root = Path(plugin_root)
+    binary = root / "bin/tokenless"
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return None
+    required = (root / "hooks/run-hook.sh", root / "hooks/shared/rewrite_hook.py")
+    if not all(path.is_file() and os.access(path, os.R_OK) for path in required):
+        return None
+    session_id = payload.get("session_id")
+    call_id = resolve_tool_call_id("qwenwork", payload)
+    if not isinstance(session_id, str) or not session_id or not call_id:
+        return None
+    try:
+        data_dir = resolve_data_directory()
+        hooks = json.loads((root / "hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
+        covered = set()
+        for group in hooks:
+            if any(
+                hook.get("type") == "command"
+                and "rewrite_hook.py" in shlex.split(hook.get("command", ""))
+                for hook in group.get("hooks", [])
+            ):
+                covered.update(
+                    tool
+                    for tool in {"Bash", *_QWENWORK_WORKSPACE_SHELLS}
+                    if re.fullmatch(group.get("matcher", ".*"), tool)
+                )
+        if covered != {"Bash", *_QWENWORK_WORKSPACE_SHELLS}:
+            return None
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, re.error):
+        return None
+    return {
+        "binary": str(binary),
+        "TOKENLESS_AGENT_ID": "qwenwork",
+        "TOKENLESS_SESSION_ID": session_id,
+        "TOKENLESS_TOOL_USE_ID": call_id,
+        "TOKENLESS_DATA_DIR": data_dir,
+        # Empty values also override any different defaults in the model shell.
+        "TOKENLESS_STASH_DB": os.environ.get("TOKENLESS_STASH_DB", ""),
+        "DSH_TOKENLESS_STASH_DB": os.environ.get("DSH_TOKENLESS_STASH_DB", ""),
+    }
 
 
 def _windows_profile_directory() -> str:
@@ -441,7 +536,8 @@ def resolve_data_directory() -> str:
 
 def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
     """Map QwenWork workspace shell events to the shared Bash contract."""
-    global _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME
+    global _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME, _QWENWORK_RECOVERY
+    _QWENWORK_RECOVERY = None
     if agent_id != "qwenwork":
         return input_data
 
@@ -452,6 +548,8 @@ def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
         _resolved_cache.clear()
         # The hook's private PATH is not the model's shell PATH.
         _QWENWORK_PRIVATE_RUNTIME = True
+
+    _QWENWORK_RECOVERY = _prepare_qwenwork_recovery(plugin_root, input_data)
 
     tool_name = input_data.get("tool_name")
     if not isinstance(tool_name, str) or tool_name not in _QWENWORK_WORKSPACE_SHELLS:
