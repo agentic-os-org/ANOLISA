@@ -283,10 +283,57 @@ fn thousands_separator_does_not_spawn_fragment_claims() {
 }
 
 #[test]
+fn path_ownership_covers_every_bracketed_segment() {
+    let path = "/a[200,404]x[500,600].txt";
+    let claims = extract_claims(path);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+    assert!(number_values(path).is_empty(), "{claims:?}");
+
+    let list = r#"[100,"/a[200,404]x[500,600].txt",700]"#;
+    let claims = extract_claims(list);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Quoted),
+        vec!["/a[200,404]x[500,600].txt"]
+    );
+    assert_eq!(number_values(list), vec![100.0, 700.0], "{claims:?}");
+}
+
+#[test]
+fn attached_path_suffixes_after_numeric_brackets_stay_whole() {
+    for (text, path) in [
+        ("path=/tmp/a;[200,404].txt", "/tmp/a;[200,404].txt"),
+        ("path=/tmp/a;[200,404]/b", "/tmp/a;[200,404]/b"),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{text}");
+        assert!(number_values(text).is_empty(), "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn key_prefixed_short_paths_own_their_brackets() {
+    let text = "path=/a[200,404]";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec![text.trim_start_matches("path=")]
+    );
+    assert!(number_values(text).is_empty(), "{claims:?}");
+}
+
+#[test]
 fn attached_paths_do_not_swallow_following_fields() {
     let claims = extract_claims("path=/tmp,count=500");
     assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
     assert_eq!(number_values("path=/tmp,count=500"), vec![500.0]);
+}
+
+#[test]
+fn attached_bracketed_paths_keep_their_commas_when_fields_follow() {
+    let text = "path=/a[200,404],count=500";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/a[200,404]"]);
+    assert_eq!(number_values(text), vec![500.0]);
 }
 
 #[test]
@@ -364,6 +411,28 @@ fn standalone_relative_paths_do_not_drop_equals_prefixed_segments() {
 }
 
 #[test]
+fn standalone_bracketed_paths_keep_semicolons_and_pipes() {
+    for separator in [';', '|'] {
+        let path = format!("/tmp/a[100,200]{separator}x[300,400].txt");
+        let claims = extract_claims(&path);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![path.clone()],
+            "{path}"
+        );
+        assert!(number_values(&path).is_empty(), "{path}: {claims:?}");
+    }
+}
+
+#[test]
+fn standalone_paths_keep_equals_before_numeric_brackets() {
+    let path = "/tmp/a=b[200,404].txt";
+    let claims = extract_claims(path);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+    assert!(number_values(path).is_empty(), "{claims:?}");
+}
+
+#[test]
 fn undecorated_urls_keep_trailing_asterisks() {
     let url = "https://example.test/x*";
     let claims = extract_claims(url);
@@ -421,6 +490,13 @@ fn balanced_url_parentheses_are_url_content() {
     let url = "https://a/b(c)";
     let claims = extract_claims(url);
     assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url]);
+}
+
+#[test]
+fn standalone_paths_keep_terminal_brackets() {
+    let path = "/tmp/a[200]";
+    let claims = extract_claims(path);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
 }
 
 #[test]

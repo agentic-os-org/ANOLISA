@@ -98,26 +98,15 @@ const MAGNITUDES: &[(&str, f64)] = &[
     ("k", 1_000.0),
 ];
 
-/// Remove commas that group digits, leaving every other comma in place.
-///
-/// A comma directly between two digits is a thousands separator, not structure.
-/// Splicing those out before the structural split is what lets `数**：244,781`
-/// keep its number: that token cannot pass the stands-alone guard because of its
-/// prefix, and splitting it on the comma would invent a claim of "244". A comma
-/// doing real work, as between two JSON fields, is untouched.
-fn splice_digit_groups(word: &str) -> String {
-    let chars: Vec<char> = word.chars().collect();
-    let mut out = String::with_capacity(word.len());
-    for (i, &c) in chars.iter().enumerate() {
-        let grouping = matches!(c, ',' | '，')
-            && i > 0
-            && chars[i - 1].is_ascii_digit()
-            && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit());
-        if !grouping {
-            out.push(c);
-        }
-    }
-    out
+/// Whether a comma joins two digits and is therefore numeric grouping rather
+/// than structure. Path-owned brackets mask this test during structural splitting.
+fn is_digit_group_separator(chars: &[char], index: usize) -> bool {
+    matches!(chars[index], ',' | '，')
+        && index > 0
+        && chars[index - 1].is_ascii_digit()
+        && chars
+            .get(index + 1)
+            .is_some_and(|next| next.is_ascii_digit())
 }
 
 /// Parse a human-written number into its value.
@@ -214,6 +203,45 @@ fn is_url_terminator(c: char) -> bool {
 
 fn is_url_trailing_punctuation(c: char) -> bool {
     matches!(c, '.' | ',' | ')' | ']' | '。' | '，')
+}
+
+fn url_scheme_len(chars: &[char], index: usize) -> Option<usize> {
+    const HTTP: &[char] = &['h', 't', 't', 'p', ':', '/', '/'];
+    const HTTPS: &[char] = &['h', 't', 't', 'p', 's', ':', '/', '/'];
+    if chars[index..].starts_with(HTTPS) {
+        Some(HTTPS.len())
+    } else if chars[index..].starts_with(HTTP) {
+        Some(HTTP.len())
+    } else {
+        None
+    }
+}
+
+fn decorated_url_end_chars(chars: &[char], index: usize, scheme_len: usize) -> usize {
+    let bold = index >= 2 && chars[index - 2..index] == ['*', '*'];
+    let parenthesized = index > 0 && chars[index - 1] == '(';
+    let mut paren_depth = usize::from(parenthesized);
+    let mut end = index + scheme_len;
+    while end < chars.len() {
+        let c = chars[end];
+        if is_url_terminator(c) || (bold && c == '*' && chars.get(end + 1) == Some(&'*')) {
+            break;
+        }
+        if parenthesized {
+            match c {
+                '(' => paren_depth += 1,
+                ')' => {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        end += 1;
+    }
+    end
 }
 
 fn single_quote_opens(chars: &[char], index: usize) -> bool {
@@ -324,6 +352,26 @@ fn quoted_chars(chars: &[char]) -> Vec<bool> {
     quoted
 }
 
+fn matching_bracket_pairs(chars: &[char], quoted: &[bool]) -> Vec<(usize, usize)> {
+    let mut matches = Vec::new();
+    let mut open_brackets = Vec::new();
+    for (index, c) in chars.iter().enumerate() {
+        if quoted[index] {
+            continue;
+        }
+        match c {
+            '[' => open_brackets.push(index),
+            ']' => {
+                if let Some(open) = open_brackets.pop() {
+                    matches.push((open, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    matches
+}
+
 fn decorated_url_end(text: &str, start: usize) -> usize {
     let rest = &text[start..];
     let bold = text[..start].ends_with("**");
@@ -375,6 +423,503 @@ fn trim_url_trailing_punctuation(url: &str) -> &str {
         end = index;
     }
     &url[..end]
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListItemCompleteness {
+    Empty,
+    Complete,
+    Incomplete,
+}
+
+struct PathItemIndex<'a> {
+    chars: &'a [char],
+    byte_offsets: Vec<usize>,
+    next_content: Vec<usize>,
+    next_equals: Vec<usize>,
+    previous_content: Vec<usize>,
+    date_ends: Vec<usize>,
+    last_slash: Vec<usize>,
+    slashes: Vec<usize>,
+    digits: Vec<usize>,
+    dashes: Vec<usize>,
+    schemes: Vec<usize>,
+    equals: Vec<usize>,
+    structural_separators: Vec<usize>,
+    brackets: Vec<usize>,
+    numeric_group_blockers: Vec<usize>,
+    list_separators: Vec<bool>,
+    list_item_separators: Vec<bool>,
+    path_commas: Vec<bool>,
+    list_item_starts: Vec<usize>,
+    list_item_ends: Vec<usize>,
+    item_starts: Vec<usize>,
+    item_ends: [Vec<usize>; 2],
+}
+
+impl<'a> PathItemIndex<'a> {
+    fn new(chars: &'a [char]) -> Self {
+        let len = chars.len();
+        let mut byte_offsets = vec![0; len + 1];
+        let mut attached_equals = vec![false; len];
+        let mut token_start = 0;
+        let mut segment_start = 0;
+        let mut token_attached = false;
+        let mut seen_equals = false;
+        let mut last_slash = vec![usize::MAX; len + 1];
+        let mut slashes = vec![0; len + 1];
+        let mut digits = vec![0; len + 1];
+        let mut dashes = vec![0; len + 1];
+        let mut schemes = vec![0; len + 1];
+        let mut equals = vec![0; len + 1];
+        let mut structural_separators = vec![0; len + 1];
+        let mut brackets = vec![0; len + 1];
+        let mut numeric_group_blockers = vec![0; len + 1];
+        let list_separators = vec![false; len];
+        let list_item_separators = vec![false; len];
+        let path_commas = vec![false; len];
+        let mut matching_opens = vec![None; len];
+        let mut matching_closes = vec![None; len];
+        let mut open_brackets = Vec::new();
+        for (index, c) in chars.iter().enumerate() {
+            byte_offsets[index + 1] = byte_offsets[index] + c.len_utf8();
+            if c.is_whitespace() {
+                token_start = index + 1;
+                segment_start = token_start;
+                token_attached = false;
+                seen_equals = false;
+            }
+            match c {
+                '=' => {
+                    if !seen_equals {
+                        token_attached = slashes[index] == slashes[token_start];
+                        seen_equals = true;
+                    }
+                    attached_equals[index] =
+                        token_attached && slashes[index] == slashes[segment_start];
+                    if attached_equals[index] {
+                        segment_start = index + 1;
+                    }
+                }
+                ',' | '，' | ';' | '|' if token_attached => segment_start = index + 1,
+                _ => {}
+            }
+            last_slash[index + 1] = if *c == '/' { index } else { last_slash[index] };
+            slashes[index + 1] = slashes[index] + usize::from(*c == '/');
+            digits[index + 1] = digits[index] + usize::from(c.is_ascii_digit());
+            dashes[index + 1] = dashes[index] + usize::from(*c == '-');
+            schemes[index + 1] =
+                schemes[index] + usize::from(chars[index..].starts_with(&[':', '/', '/']));
+            equals[index + 1] = equals[index] + usize::from(*c == '=');
+            structural_separators[index + 1] =
+                structural_separators[index] + usize::from(STRUCTURAL_SEPARATORS.contains(c));
+            brackets[index + 1] = brackets[index] + usize::from(matches!(c, '[' | ']'));
+            numeric_group_blockers[index + 1] = numeric_group_blockers[index]
+                + usize::from(
+                    !c.is_ascii_digit()
+                        && !matches!(c, ',' | '_' | ' ' | '\u{a0}' | '，' | '\u{3000}'),
+                );
+            match c {
+                '[' => open_brackets.push(index),
+                ']' => {
+                    if let Some(open) = open_brackets.pop() {
+                        matching_opens[index] = Some(open);
+                        matching_closes[open] = Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut item_starts = vec![0; len + 1];
+        for start in 1..=len {
+            let previous = start - 1;
+            item_starts[start] = match chars[previous] {
+                c if c.is_whitespace() || matches!(c, '[' | ',' | '，' | '"' | '\'') => start,
+                '=' if attached_equals[previous] => start,
+                ']' => matching_opens[previous].map_or(start, |open| item_starts[open]),
+                _ => item_starts[previous],
+            };
+        }
+        let mut item_ends = [vec![len; len + 1], vec![len; len + 1]];
+        for end in (0..len).rev() {
+            for attached in [false, true] {
+                let table = usize::from(attached);
+                let c = chars[end];
+                let boundary = c.is_whitespace()
+                    || matches!(c, ']' | ',' | '，' | '"' | '\'')
+                    || (attached && (matches!(c, ';' | '|') || attached_equals[end]));
+                let next = if boundary {
+                    end
+                } else if c == '[' {
+                    matching_closes[end].map_or(end, |close| item_ends[table][close + 1])
+                } else {
+                    item_ends[table][end + 1]
+                };
+                item_ends[table][end] = next;
+            }
+        }
+
+        let quoted = quoted_chars(chars);
+        let mut list_matching_opens = vec![None; len];
+        let mut list_matching_closes = vec![None; len];
+        let mut list_open_brackets = Vec::new();
+        for (index, c) in chars.iter().enumerate() {
+            if quoted[index] {
+                continue;
+            }
+            match c {
+                '[' => list_open_brackets.push(index),
+                ']' => {
+                    if let Some(open) = list_open_brackets.pop() {
+                        list_matching_opens[index] = Some(open);
+                        list_matching_closes[open] = Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut list_item_starts = vec![0; len + 1];
+        for start in 1..=len {
+            let previous = start - 1;
+            list_item_starts[start] = match chars[previous] {
+                c if !quoted[previous] && matches!(c, '[' | ',' | '，') => start,
+                ']' if !quoted[previous] => {
+                    list_matching_opens[previous].map_or(start, |open| list_item_starts[open])
+                }
+                _ => list_item_starts[previous],
+            };
+        }
+        let mut list_item_ends = vec![len; len + 1];
+        for end in (0..len).rev() {
+            list_item_ends[end] = match chars[end] {
+                c if !quoted[end] && matches!(c, ']' | ',' | '，') => end,
+                '[' if !quoted[end] => {
+                    list_matching_closes[end].map_or(end, |close| list_item_ends[close + 1])
+                }
+                _ => list_item_ends[end + 1],
+            };
+        }
+
+        let mut next_content = vec![len; len + 1];
+        let mut next_equals = vec![len; len + 1];
+        for index in (0..len).rev() {
+            if !is_decoration(chars[index]) {
+                next_content[index] = index;
+            } else {
+                next_content[index] = next_content[index + 1];
+            }
+            next_equals[index] = if chars[index] == '=' {
+                index
+            } else {
+                next_equals[index + 1]
+            };
+        }
+        let mut previous_content = vec![0; len + 1];
+        let mut date_ends = vec![0; len + 1];
+        for (index, c) in chars.iter().enumerate() {
+            previous_content[index + 1] = if is_decoration(*c) {
+                previous_content[index]
+            } else {
+                index + 1
+            };
+            date_ends[index + 1] = if matches!(c, '年' | '月' | '日') {
+                date_ends[index]
+            } else {
+                index + 1
+            };
+        }
+        let mut paths = Self {
+            chars,
+            byte_offsets,
+            next_content,
+            next_equals,
+            previous_content,
+            date_ends,
+            last_slash,
+            slashes,
+            digits,
+            dashes,
+            schemes,
+            equals,
+            structural_separators,
+            brackets,
+            numeric_group_blockers,
+            list_separators,
+            list_item_separators,
+            path_commas,
+            list_item_starts,
+            list_item_ends,
+            item_starts,
+            item_ends,
+        };
+        let mut completeness_cache = std::collections::HashMap::new();
+        let mut detected_item_starts = vec![0; len + 1];
+        let mut open_brackets = Vec::new();
+        for (index, c) in chars.iter().enumerate() {
+            if !quoted[index] {
+                match c {
+                    '[' => open_brackets.push(index),
+                    ']' => {
+                        open_brackets.pop();
+                    }
+                    ',' | '，' if !open_brackets.is_empty() => {
+                        let left = (detected_item_starts[index], index);
+                        let right = (index + 1, paths.list_item_ends[index + 1]);
+                        let combined = paths.list_item_content_range(left.0, right.1);
+                        if combined.0 < combined.1
+                            && paths.classifies_as_path(combined.0, combined.1)
+                        {
+                            let left = list_item_completeness(
+                                &paths,
+                                left.0,
+                                left.1,
+                                &mut completeness_cache,
+                            );
+                            let right = list_item_completeness(
+                                &paths,
+                                right.0,
+                                right.1,
+                                &mut completeness_cache,
+                            );
+                            paths.path_commas[index] = !(left == ListItemCompleteness::Complete
+                                && right == ListItemCompleteness::Complete);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            detected_item_starts[index + 1] = match c {
+                '[' if !quoted[index] => index + 1,
+                ',' | '，' if !quoted[index] && !paths.path_commas[index] => index + 1,
+                ']' if !quoted[index] => {
+                    list_matching_opens[index].map_or(index + 1, |open| detected_item_starts[open])
+                }
+                _ => detected_item_starts[index],
+            };
+        }
+
+        for start in 1..=len {
+            let previous = start - 1;
+            paths.item_starts[start] = match chars[previous] {
+                c if c.is_whitespace() || matches!(c, '[' | '"' | '\'') => start,
+                c if matches!(c, ',' | '，') && !paths.path_commas[previous] => start,
+                '=' if attached_equals[previous] => start,
+                ']' => matching_opens[previous].map_or(start, |open| paths.item_starts[open]),
+                _ => paths.item_starts[previous],
+            };
+        }
+        for end in (0..len).rev() {
+            for attached in [false, true] {
+                let table = usize::from(attached);
+                let c = chars[end];
+                let path_comma = matches!(c, ',' | '，') && paths.path_commas[end];
+                let boundary = c.is_whitespace()
+                    || matches!(c, ']' | '"' | '\'')
+                    || (matches!(c, ',' | '，') && !path_comma)
+                    || (attached && (matches!(c, ';' | '|') || attached_equals[end]));
+                let next = if boundary {
+                    end
+                } else if c == '[' {
+                    matching_closes[end].map_or(end, |close| paths.item_ends[table][close + 1])
+                } else {
+                    paths.item_ends[table][end + 1]
+                };
+                paths.item_ends[table][end] = next;
+            }
+        }
+
+        for start in 1..=len {
+            let previous = start - 1;
+            let next = match chars[previous] {
+                c if !quoted[previous] && c == '[' => start,
+                c if !quoted[previous]
+                    && matches!(c, ',' | '，')
+                    && !paths.path_commas[previous] =>
+                {
+                    start
+                }
+                ']' if !quoted[previous] => {
+                    list_matching_opens[previous].map_or(start, |open| paths.list_item_starts[open])
+                }
+                _ => paths.list_item_starts[previous],
+            };
+            paths.list_item_starts[start] = next;
+        }
+        for end in (0..len).rev() {
+            let next = match chars[end] {
+                c if !quoted[end] && c == ']' => end,
+                c if !quoted[end] && matches!(c, ',' | '，') && !paths.path_commas[end] => end,
+                '[' if !quoted[end] => {
+                    list_matching_closes[end].map_or(end, |close| paths.list_item_ends[close + 1])
+                }
+                _ => paths.list_item_ends[end + 1],
+            };
+            paths.list_item_ends[end] = next;
+        }
+
+        let mut open_brackets = Vec::new();
+        for (index, c) in chars.iter().enumerate() {
+            if quoted[index] {
+                continue;
+            }
+            match c {
+                '[' => open_brackets.push(index),
+                ']' => {
+                    if let Some(open) = open_brackets.pop()
+                        && paths.list_separators[open]
+                        && let Some(&parent) = open_brackets.last()
+                    {
+                        paths.list_separators[parent] = true;
+                    }
+                }
+                ',' | '，' if !open_brackets.is_empty() && !paths.path_commas[index] => {
+                    let separates = if !is_digit_group_separator(chars, index) {
+                        true
+                    } else {
+                        let (left, right) = list_item_ranges_around_comma(&paths, index);
+                        let left =
+                            list_item_completeness(&paths, left.0, left.1, &mut completeness_cache);
+                        let right = list_item_completeness(
+                            &paths,
+                            right.0,
+                            right.1,
+                            &mut completeness_cache,
+                        );
+                        left != ListItemCompleteness::Incomplete
+                            && right != ListItemCompleteness::Incomplete
+                            && (left == ListItemCompleteness::Complete
+                                || right == ListItemCompleteness::Complete)
+                    };
+                    paths.list_item_separators[index] = separates;
+                    if let Some(&open) = open_brackets.last() {
+                        paths.list_separators[open] |= separates;
+                    }
+                }
+                _ => {}
+            }
+        }
+        paths
+    }
+
+    fn count(prefix: &[usize], start: usize, end: usize) -> usize {
+        prefix[end] - prefix[start]
+    }
+
+    fn classification_range(&self, start: usize, end: usize) -> (usize, usize) {
+        (self.next_content[start], self.previous_content[end])
+    }
+
+    fn list_item_content_range(&self, mut start: usize, mut end: usize) -> (usize, usize) {
+        while start < end && self.chars[start].is_whitespace() {
+            start += 1;
+        }
+        while start < end && self.chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        if start == end {
+            return (0, 0);
+        }
+        let (start, end) = self.classification_range(start, end);
+        if start < end { (start, end) } else { (0, 0) }
+    }
+
+    fn has_equals(&self, start: usize, end: usize) -> bool {
+        Self::count(&self.equals, start, end) > 0
+    }
+
+    fn has_slash(&self, start: usize, end: usize) -> bool {
+        Self::count(&self.slashes, start, end) > 0
+    }
+
+    fn has_list_separator(&self, open: usize) -> bool {
+        self.list_separators[open]
+    }
+
+    fn has_attached_key(&self, start: usize, end: usize) -> bool {
+        let equals = self.next_equals[start];
+        equals > start
+            && equals < end
+            && Self::count(&self.structural_separators, start, equals) == 0
+            && !self.has_slash(start, equals)
+            && Self::count(&self.schemes, start, equals) == 0
+    }
+
+    fn classifies_as_path(&self, start: usize, end: usize) -> bool {
+        let (start, end) = self.classification_range(start, end);
+        if start >= end || self.byte_offsets[end] - self.byte_offsets[start] <= 2 {
+            return false;
+        }
+        let slashes = Self::count(&self.slashes, start, end);
+        if slashes == 0 || url_scheme_len(self.chars, start).is_some() {
+            return false;
+        }
+
+        let date_end = self.date_ends[end].max(start);
+        let digits = Self::count(&self.digits, start, date_end);
+        let dashes = Self::count(&self.dashes, start, date_end);
+        let is_iso = dashes >= 2 && digits >= 6 && self.chars[start].is_ascii_digit();
+        let is_marked_year = self.byte_offsets[date_end] - self.byte_offsets[start] == 4
+            && digits == 4
+            && matches!(
+                (self.chars[start], self.chars[start + 1]),
+                ('1', '9') | ('2', '0') | ('2', '1')
+            )
+            && date_end != end;
+        if is_iso || is_marked_year || Self::count(&self.schemes, start, end) > 0 {
+            return false;
+        }
+
+        if self.chars[start] == '/'
+            || (self.chars[start] == '.' && self.chars[start + 1] == '/')
+            || (self.chars[start] == '~' && self.chars[start + 1] == '/')
+            || slashes >= 2
+        {
+            return true;
+        }
+
+        let tail_start = self.last_slash[end] + 1;
+        let scan_start = end.saturating_sub(7).max(tail_start);
+        let Some(dot) = (scan_start..end)
+            .rev()
+            .find(|index| self.chars[*index] == '.')
+        else {
+            return false;
+        };
+        dot > tail_start
+            && dot + 1 < end
+            && self.byte_offsets[end] - self.byte_offsets[dot + 1] <= 6
+            && self.chars[dot + 1..end]
+                .iter()
+                .all(|c| c.is_ascii_alphanumeric())
+    }
+
+    fn classifies_as_attached_path(&self, start: usize, end: usize) -> bool {
+        if !self.has_attached_key(start, end) {
+            return false;
+        }
+        let mut value_start = self.next_equals[start] + 1;
+        while value_start < end {
+            let c = self.chars[value_start];
+            let relative_path = c == '.'
+                && (self.chars[value_start..].starts_with(&['.', '/'])
+                    || self.chars[value_start..].starts_with(&['.', '.', '/']));
+            if relative_path || !is_decoration(c) {
+                break;
+            }
+            value_start += 1;
+        }
+        self.classifies_as_path(value_start, end)
+    }
+}
+
+fn path_item_start(paths: &PathItemIndex<'_>, open: usize) -> usize {
+    paths.item_starts[open]
+}
+
+fn path_item_end(paths: &PathItemIndex<'_>, item_start: usize, close: usize) -> usize {
+    let attached = usize::from(item_start > 0 && paths.chars[item_start - 1] == '=');
+    paths.item_ends[attached][close + 1]
 }
 
 fn trim_attached_decoration(value: &str) -> &str {
@@ -729,6 +1274,214 @@ fn classify_attached_value(mut word: &str) -> Option<Claim> {
     }
 }
 
+fn bracket_belongs_to_path(
+    chars: &[char],
+    open: usize,
+    close: usize,
+    paths: &PathItemIndex<'_>,
+    preserve_attached_decoration: bool,
+) -> bool {
+    let item_start = path_item_start(paths, open);
+    if open == item_start {
+        if !preserve_attached_decoration || item_start == 0 || chars[item_start - 1] != '=' {
+            return false;
+        }
+        let item_end = path_item_end(paths, item_start, close);
+        if !paths.has_slash(item_start, item_end)
+            || paths.has_list_separator(open)
+            || !paths.classifies_as_path(item_start, item_end)
+        {
+            return false;
+        }
+        let mut attached_start = item_start - 1;
+        while attached_start > 0 {
+            let c = chars[attached_start - 1];
+            if c.is_whitespace() || STRUCTURAL_SEPARATORS.contains(&c) {
+                break;
+            }
+            attached_start -= 1;
+        }
+        return paths.classifies_as_attached_path(attached_start, item_end);
+    }
+    let item_end = path_item_end(paths, item_start, close);
+    if !paths.has_slash(item_start, item_end) {
+        return false;
+    }
+    if !paths.has_slash(item_start, open) && paths.has_list_separator(open) {
+        return false;
+    }
+    if !paths.has_equals(item_start, item_end) {
+        return paths.classifies_as_path(item_start, item_end);
+    }
+    if paths.classifies_as_path(item_start, item_end) {
+        return true;
+    }
+    paths.classifies_as_attached_path(item_start, item_end)
+}
+
+fn list_item_ranges_around_comma(
+    paths: &PathItemIndex<'_>,
+    index: usize,
+) -> ((usize, usize), (usize, usize)) {
+    let left_start = paths.list_item_starts[index];
+    let right_end = paths.list_item_ends[index + 1];
+    ((left_start, index), (index + 1, right_end))
+}
+
+fn list_item_completeness(
+    paths: &PathItemIndex<'_>,
+    start: usize,
+    end: usize,
+    cache: &mut std::collections::HashMap<(usize, usize), ListItemCompleteness>,
+) -> ListItemCompleteness {
+    let range = paths.list_item_content_range(start, end);
+    if range.0 == range.1 {
+        return ListItemCompleteness::Empty;
+    }
+    if paths.classifies_as_path(range.0, range.1) {
+        return ListItemCompleteness::Complete;
+    }
+    let has_equals = paths.has_equals(range.0, range.1);
+    if has_equals && !paths.has_attached_key(range.0, range.1) {
+        return ListItemCompleteness::Incomplete;
+    }
+    if paths.has_slash(range.0, range.1) && !has_equals {
+        return ListItemCompleteness::Incomplete;
+    }
+    if !has_equals && PathItemIndex::count(&paths.brackets, range.0, range.1) > 0 {
+        return ListItemCompleteness::Incomplete;
+    }
+    if !has_equals
+        && PathItemIndex::count(&paths.numeric_group_blockers, range.0, range.1) == 0
+        && PathItemIndex::count(&paths.digits, range.0, range.1) > 0
+    {
+        return ListItemCompleteness::Complete;
+    }
+    if let Some(completeness) = cache.get(&range) {
+        return *completeness;
+    }
+    let item: String = paths.chars[range.0..range.1].iter().collect();
+    let completeness = if complete_list_item(&item) {
+        ListItemCompleteness::Complete
+    } else {
+        ListItemCompleteness::Incomplete
+    };
+    cache.insert(range, completeness);
+    completeness
+}
+
+fn complete_list_item(item: &str) -> bool {
+    let item = trim_decoration(item.trim());
+    parse_number(item).is_some()
+        || as_version(item).is_some()
+        || as_date(item).is_some()
+        || as_path(item).is_some()
+        || classify_attached_value(item).is_some_and(|claim| {
+            matches!(
+                claim.class,
+                ClaimClass::Number | ClaimClass::Version | ClaimClass::Date
+            )
+        })
+}
+
+/// Split serialized structure without consuming URLs or the brackets and commas
+/// that belong to a path. URL terminators delimit the URL, so fields after a
+/// quoted URL remain visible to the suffix scan.
+fn structural_segments(word: &str) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let quoted = quoted_chars(&chars);
+    let matched_brackets = matching_bracket_pairs(&chars, &quoted);
+    let mut quoted_paths = vec![false; chars.len()];
+    let mut index = 0;
+    while index < chars.len() {
+        if !quoted[index] {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && quoted[index] {
+            index += 1;
+        }
+        let candidate: String = chars[start..index].iter().collect();
+        if classify_word(trim_attached_decoration(&candidate))
+            .is_some_and(|claim| claim.class == ClaimClass::Path)
+        {
+            quoted_paths[start..index].fill(true);
+        }
+    }
+    let paths = PathItemIndex::new(&chars);
+    let mut path_deltas = vec![0i32; chars.len() + 1];
+    let mut path_item_until = 0;
+    let mut rejected_path_item = None;
+    for (open, close) in matched_brackets {
+        if close < path_item_until {
+            continue;
+        }
+        let item_start = path_item_start(&paths, open);
+        let item_end = path_item_end(&paths, item_start, close);
+        let cacheable = open != item_start;
+        let item = (item_start, item_end);
+        let path_owned = if cacheable && rejected_path_item == Some(item) {
+            false
+        } else {
+            bracket_belongs_to_path(&chars, open, close, &paths, false)
+        };
+        rejected_path_item = (cacheable && !path_owned).then_some(item);
+        path_item_until = if path_owned { item_end } else { close + 1 };
+        if path_owned {
+            path_deltas[open] += 1;
+            path_deltas[path_item_until] -= 1;
+        }
+    }
+
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut current_starts_with_digit = None;
+    let mut path_depth = 0;
+    let mut index = 0;
+    while index < chars.len() {
+        path_depth += path_deltas[index];
+        let path_char = path_depth > 0 || quoted_paths[index];
+        if !path_char && let Some(scheme_len) = url_scheme_len(&chars, index) {
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+                current_starts_with_digit = None;
+            }
+            index = decorated_url_end_chars(&chars, index, scheme_len);
+            continue;
+        }
+        let c = chars[index];
+        let digit_group = !path_char && is_digit_group_separator(&chars, index);
+        let follows_date = digit_group
+            && current_starts_with_digit == Some(true)
+            && current
+                .get(current.len().saturating_sub(10)..)
+                .is_some_and(|suffix| as_date(suffix).is_some());
+        if digit_group && !follows_date {
+            index += 1;
+            continue;
+        }
+        let identifier_colon = c == ':'
+            && (chars.get(index + 1) == Some(&':') || (index > 0 && chars[index - 1] == ':'));
+        if !path_char && !identifier_colon && STRUCTURAL_SEPARATORS.contains(&c) {
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+                current_starts_with_digit = None;
+            }
+        } else {
+            if current_starts_with_digit.is_none() && !is_decoration(c) {
+                current_starts_with_digit = Some(c.is_ascii_digit());
+            }
+            current.push(c);
+        }
+        index += 1;
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
 fn classify_structural_segment(segment: &str) -> Option<Claim> {
     let claim = classify_word(segment);
     if segment.contains('/') {
@@ -789,9 +1542,8 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         }
         if word_stands_alone && let Some(attached) = attached_after_residue {
             let prefix = &json_word[..json_word.len() - attached.len()];
-            let degrouped = splice_digit_groups(prefix);
-            for segment in degrouped.split(STRUCTURAL_SEPARATORS) {
-                if let Some(claim) = classify_structural_segment(segment) {
+            for segment in structural_segments(prefix) {
+                if let Some(claim) = classify_structural_segment(&segment) {
                     claims.push(claim);
                 }
             }
@@ -821,9 +1573,8 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                     if let Some(claim) = classify_attached_value(field).or_else(complete_path) {
                         claims.push(claim);
                     } else {
-                        let degrouped = splice_digit_groups(field);
-                        for segment in degrouped.split(STRUCTURAL_SEPARATORS) {
-                            if let Some(claim) = classify_structural_segment(segment) {
+                        for segment in structural_segments(field) {
+                            if let Some(claim) = classify_structural_segment(&segment) {
                                 claims.push(claim);
                             }
                         }
@@ -833,9 +1584,8 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 && !json_word.starts_with("https://")
                 && json_word.contains(STRUCTURAL_SEPARATORS)
             {
-                let degrouped = splice_digit_groups(json_word);
-                for segment in degrouped.split(STRUCTURAL_SEPARATORS) {
-                    if let Some(claim) = classify_structural_segment(segment) {
+                for segment in structural_segments(json_word) {
+                    if let Some(claim) = classify_structural_segment(&segment) {
                         claims.push(claim);
                     }
                 }
