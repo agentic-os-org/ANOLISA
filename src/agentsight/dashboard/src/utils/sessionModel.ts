@@ -34,7 +34,7 @@ function trajectoryLastActiveMs(t: TrajectorySummary): number | null {
 
 /** Trailing 36-char UUID of a Codex rollout stem (`rollout-<ts>-<uuid>`). */
 const TRAILING_UUID_RE =
-  /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+  /^rollout-.+-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 
 /**
  * Merge eBPF-captured sessions with log-collected trajectories by session_id.
