@@ -8,6 +8,14 @@ fn texts_of(claims: &[Claim], class: ClaimClass) -> Vec<String> {
         .collect()
 }
 
+fn number_values(text: &str) -> Vec<f64> {
+    extract_claims(text)
+        .iter()
+        .filter(|c| c.class == ClaimClass::Number)
+        .filter_map(|c| c.value)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The over-flagging guard: trivial arithmetic must produce nothing to ground
 // ---------------------------------------------------------------------------
@@ -272,6 +280,20 @@ fn thousands_separator_does_not_spawn_fragment_claims() {
         vec!["244,618"],
         "a grouped number is one fact, not three"
     );
+}
+
+#[test]
+fn undecorated_urls_keep_trailing_asterisks() {
+    let url = "https://example.test/x*";
+    let claims = extract_claims(url);
+    assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url]);
+}
+
+#[test]
+fn balanced_url_parentheses_are_url_content() {
+    let url = "https://a/b(c)";
+    let claims = extract_claims(url);
+    assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url]);
 }
 
 #[test]
