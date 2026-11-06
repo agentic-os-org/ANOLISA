@@ -112,6 +112,9 @@ cgroup v1、不改挂载。nftables `socket cgroupv2` 仅在实际规则应用�
 `{"credential":"github"}`，enable/disable 成功返回 `{}`。
 参阅 [Secret Gateway 设计](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md)。
 
+网关可通过 `agent_sec_pii_scan` 开启请求正文扫描，默认关闭。
+参阅[外发 PII 演示](../../docs/user-guide/zh/agent-sec-core/index.md#gateway-外发-pii-演示)。
+
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
