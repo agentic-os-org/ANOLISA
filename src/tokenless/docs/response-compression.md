@@ -156,7 +156,9 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 `command` 字段；Core（`post_tool/file_read.rs`）把只打印本地文件的命令（`cat`、`head`、`tail`、
 `nl`、`less`、`more`、`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）
 改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样，
-且跳过新增的纯路径列表策略。`Grep` 工具输出只允许进入无损的 Search Results 路径共享。
+且跳过新增的纯路径列表策略。`Grep` 工具及通过 `command` 识别出的原生 `grep`、`rg` 输出
+只允许进入无损的 Search Results 路径共享。格式识别由统一搜索压缩入口负责；关闭搜索压缩、
+格式不支持或无收益时原样返回，即使设置 `force_json` 也不会转入其他压缩器。
 纯路径列表按内容识别，允许非文件来源的命令或 API 结果，不依赖 `find` 或特定工具名。
 通过入口后按下表静态派发，每个领域各调用一次：
 
@@ -165,7 +167,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无 | `JsonCompressor`：Record Reduction、截断、Compact JSON 与可选 TOON | 启用 |
 | `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：保留全部单元格的 CSV/TSV 压紧，无收益时原样返回，不写 Stash | 启用 |
-| `search_results` | 宿主支持文本替换；带行号记录要求 `api_response`，纯路径列表允许 `api_response` 或 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
+| `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 关闭，`TOKENLESS_DIFF_COMPRESSION_ENABLED=true` 开启 |
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |
 
@@ -178,11 +180,11 @@ Diff 与 HTML 领域要求至少节省 16 个 Token 才采用结果，其他领�
 全部路径、顺序、重复项均保留。空行、混合输出、NUL 分隔或歧义格式透传；完整视图的字节数
 和估算 Token 均减少才采用。检测器只采样完整行，压缩器仍验证全部输入。
 
-PreTool 让包含已识别原生 `find` 调用的整条命令跳过 RTK，包括复合命令及 RTK 内置透明前缀：
+PreTool 让包含已识别原生 `find`、`grep`、`rg` 调用的整条命令跳过 RTK，包括复合命令及 RTK 内置透明前缀：
 `env`、`command`、`exec`、`noglob`、`nocorrect`、`builtin`、`timeout`、`time`、`nice`、`nohup`
 和 `uv run`；支持嵌套及反斜杠换行续行，进程 Wrapper 的未知参数会停止识别。
-不读取自定义 `hooks.transparent_prefixes`，这些前缀中的 `find` 仍可能被 RTK 改写。
-关闭搜索路径共享只停止后置压缩，仍保留原生 `find` 的完整输出；混合或不支持的输出因此可能不压缩。
+不读取自定义 `hooks.transparent_prefixes`，这些前缀中的调用仍可能被 RTK 改写。
+关闭搜索路径共享只停止后置压缩，仍保留原生搜索和 `find` 的完整输出；混合或不支持的输出因此可能不压缩。
 同一 PreTool 保护也覆盖原生 `head`、`tail` 的所有参数：只要识别到其中一个调用，
 整条命令（含 Pipeline、复合命令）就跳过改写。RTK 的 `read --max-lines` 使用结构截断，
 可能遗漏 `head` 请求行范围内的函数体；`tail` 按相同原生执行策略保留。显式 `rtk` 调用不受此规则保护。
@@ -230,7 +232,21 @@ Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON
 
 Qoder 通过原生插件目录 `hooks/hooks.json` 加载 hook，并在运行时展开 `${QODER_PLUGIN_ROOT}`。插件内的 `hooks/run-hook.sh` 再从 ANOLISA adapter 目录定位共享的 `compress_response_hook.py`，无需改写 `~/.qoder/settings.json` 或将机器相关绝对路径写入插件缓存。
 
-Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。仅当压缩文本回填到原生 Bash `stdout` 时返回对象，其他结果形态沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。原生 Bash 只把字符串 `stdout` 交给 Core，包括较短或为空的值；压缩后回填到原对象，`stderr` 和其他字段保持不变。其他结果形态沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+
+这也意味着原生 Bash 对象中的独立 `stderr` 字段不再压缩或生成检索标记；Hook 返回 `{}`
+表示不替换工具结果，不表示给模型返回空文本。Qoder 1.1.78 的真实 Bash 探针中，进程的
+stdout/stderr 合并进入 `tool_response.stdout`，`tool_response.stderr` 为空：
+
+| 实际命令 | 原生结果 | 下一次模型请求中的工具文本 |
+| --- | --- | --- |
+| `printf 'RAW_STDERR\n' >&2` | `stdout="RAW_STDERR"`，`stderr=""` | `RAW_STDERR` |
+| `printf 'RAW_STDERR_FAILURE\n' >&2; exit 7` | `stdout="RAW_STDERR_FAILURE"`，`stderr=""`，`exitCode=7` | `Exit code 7` 加原始错误文本 |
+| GCC 编译引用未定义符号的 C 文件 | `stdout` 含完整编译诊断，`stderr=""`，`exitCode=1` | `Exit code 1` 加完整编译诊断 |
+
+这些探针使用真实 Qoder CLI 和本地模型端点捕获后续请求，没有付费模型调用。两个失败命令
+均未调用 `PostToolUse`。成功命令中，只修改对象的 `stderr` 不改变模型文本；修改 `stdout`
+则会替换模型文本。以上是该版本的观测结果，不把手工构造的分离 stderr 信封当作原生载荷。
 
 ### 路径 5：Claude Code 插件（`PostToolUse` hook）
 

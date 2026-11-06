@@ -385,9 +385,9 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
 | Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
-| 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
+| 搜索路径共享 | 在带行号的 API 搜索记录（含 Claude 原生 Grep）及已识别的原生 Shell 搜索中共享连续路径，或在命令与 API 的纯路径列表中共享目录前缀；保留全部已收到记录 | 默认开启；要求文本替换和更小的字节可逆视图；文件读取跳过路径列表策略 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
-| 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
+| 命令重写 | 有匹配规则时使用 RTK 改写，再向框架提交通过 `tokenless rtk` 执行的 Shell 输入 | 已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式；关闭搜索路径共享不会恢复这些调用的改写；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
 | Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容、Record Reduction 背后的完整原始数组，被省略的 Build Log 进度区间 | 默认 TTL 一小时、最多 10,000 个有效条目；JSON 字段名称和空值本身不会触发 Stash 写入 |
 
@@ -446,7 +446,7 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 2. Read/Glob/LSP/NotebookRead 等文件内容工具及别名保留原文。Claude Code 原生 `Grep` 的无上下文 content 模式结果可以使用无损搜索路径共享。非文件来源的命令和 API 结果也可按内容共享纯路径列表，不扩大文件读取的适用范围（见[控制搜索路径共享](#控制搜索路径共享)）。
 3. 响应长度达到最小阈值。Core 在共享响应 Hook、OpenClaw 和 Hermes 路径上跳过短于 200 字符的响应。长度按字符数而非字节数计算。
 4. 内容命中受支持的压缩域。按阈值截断的响应压缩只处理 JSON 对象和数组；纯文本只有命中匹配的文本压缩器才会被压缩，且各路径可触发的压缩器不同：
-   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 记录与非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及需显式开启的 Git Diff 上下文裁剪），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。
+   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 记录、已识别 Shell 搜索及非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及需显式开启的 Git Diff 上下文裁剪），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。Qoder 原生 Bash 始终选择字符串 `stdout`，包括较短或为空的值；`stderr` 及其他字段保持不变。独立的 `stderr` 字段不压缩，也不生成检索标记。真实 Qoder 1.1.78 Bash 探针中，进程 stderr 合并进入 `stdout`；失败命令保留错误文本且未调用 PostToolUse。空 Hook 响应表示不替换，不表示工具结果为空。
    - **4b. OpenClaw**：纯字符串、或内容恰好是单个合法文本块的 `toolResult` 消息走可替换的文本路径。其余 `toolResult`（多个文本块、图片块、空或无效 content）原样跳过——Plugin 直接返回、不调用 Core，这类结果既不压缩也不产生统计。非 `toolResult` 的对象和数组——包括 `{"stdout": ...}` 这类 Shell 信封——整体作为结构化 JSON 传给 Core 且禁用文本替换，信封保持顶层结构，只适用 JSON 域压缩。
    - **4c. Hermes**：对 Shell 工具，Hermes 会拆出信封中的 `output` 字段，把该文本送入 Core 并允许替换，压缩后再回填到同一信封；其他工具的结果直接传递。
 
@@ -474,16 +474,16 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 
 ### 控制搜索路径共享
 
-带行号的 API 搜索记录，以及命令或 API 的纯路径列表默认开启搜索路径共享。在 Agent 进程环境中设置 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`，
+带行号的 API 搜索记录、已识别的原生 Shell 搜索，以及命令或 API 的纯路径列表默认开启搜索路径共享。在 Agent 进程环境中设置 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`，
 可通过 CLI 关闭该功能。未设置或为空时保持开启，`1`、`true`、`yes`（不区分大小写）也表示开启；
 其他值均关闭。该设置独立于 `config.json`。Python SDK 可使用
 `TokenlessConfig(search_path_sharing_enabled=False)` 关闭；Rust 将
 `RuntimeConfig.search_path_sharing_enabled` 设为 `false`。所有入口均默认开启。
 
-关闭此功能时搜索列表原样返回。其他工具名仍可使用 JSON、表格和日志压缩。精确名称 `Grep`
-始终排除这些压缩器以保留已收到命中，即使路径共享关闭也不例外。因此，自定义 `Grep` 工具
-无法通过此开关恢复此功能引入前的 JSON、表格和日志压缩。支持的无上下文 Claude Grep 结果
-保留全部已收到命中。带行号的搜索记录要求 API 来源；纯路径列表也允许命令输出，包括没有 RTK 的 Bash。
+精确工具名 `Grep` 和识别为原生 `grep`、`rg` 的 Shell 命令只使用搜索压缩器，
+不受内容检测结果或 `force_json` 影响。关闭搜索路径共享、格式不支持或候选无收益时
+原样返回，不会转入 JSON、表格或日志压缩器。其他工具保留既有路由。
+带行号的搜索记录接受这些已识别 Shell 搜索及 API 来源；纯路径列表也接受其他命令输出。
 文件内容和文件读取跳过路径列表策略；既有文件读取的 JSON、表格和日志处理仍可用。
 其他非文件来源工具结果无论工具名称如何，都可使用同一 Core 能力。
 
@@ -493,10 +493,10 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 `trailing_newline` 为 true 时追加该行尾。无需 Stash 或恢复调用。混合输出、空行、NUL 分隔、
 歧义格式，以及扣除完整格式开销后字节数或估算 Token 无收益的候选均透传。
 
-直接调用或经 [RTK 内置前缀](cli-reference.md#shell-重写) 调用的原生 `find`，使整条命令（含复合命令）
+直接调用或经 [RTK 内置前缀](cli-reference.md#shell-重写) 调用的原生 `find`、`grep`、`rg`，使整条命令（含复合命令）
 跳过 RTK 改写。支持嵌套和 Shell 反斜杠换行续行；不会读取自定义 `hooks.transparent_prefixes`，
-此类前缀下的 `find` 仍可能被改写。关闭路径共享会停止压缩，但保留内置前缀保护，使后续读取
-仍可使用完整路径。混合或无收益的原生输出因此可能不压缩。
+此类前缀下的调用仍可能被改写。关闭路径共享会停止压缩，但保留内置前缀保护，使后续读取
+仍可使用完整命中和路径。混合或无收益的原生输出因此可能不压缩。
 整任务节省取决于工作负载；搜索结果变小并不保证总 Token 用量更低。
 
 ### CSV/TSV 压紧保留完整表格
@@ -525,8 +525,9 @@ Claude Code 2.1.121 及更新版本的原生 Grep 文本结果可以共享重复
 `File="..."` 头提供后续 `line:text` 记录的完整路径，直到下一个文件头。
 收到的全部记录、源码正文、空白和换行均保留。仅采用更小的表示，不需要 Stash 条目或回取命令。
 
-首版支持至少三条记录的无上下文 `path:line:text` 列表，路径不能包含冒号。
-上下文查询、计数/文件列表模式、不支持的格式和文件读取保持现有行为；Bash 搜索继续经过 RTK。
+压缩器支持至少三条记录的无上下文 `path:line:text` 列表（路径不能包含冒号），以及上文的纯路径列表。
+计数、空输出、单文件 `line:text` 和不支持的格式原样返回。已识别的 Bash `grep`、`rg`
+命令保持原生执行，并共用此搜索专用 PostTool 通路。文件读取策略不变。
 Grep 可能在 Tokenless 收到结果前已经应用宿主限额，路径共享无法恢复此前未交付的命中。
 首次结果变短不保证整个任务的总消耗下降。
 

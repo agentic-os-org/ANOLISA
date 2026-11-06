@@ -209,7 +209,7 @@ async def main() -> None:
         shell_call = ToolCallBlock(
             id="call-shell",
             name="shell",
-            input=json.dumps({"command": "grep needle file.txt"}),
+            input=json.dumps({"command": "git status"}),
         )
         shell_events = [event async for event in agent._acting(shell_call)]
         assert len(shell_events) == 2
@@ -220,6 +220,17 @@ async def main() -> None:
         assert f"TOKENLESS_SESSION_ID={agent.state.session_id}" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
         assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
+
+        _SHELL_COMMANDS.clear()
+        for index, command in enumerate(("grep needle file.txt", "rg 'foo|bar' src")):
+            search_call = ToolCallBlock(
+                id=f"call-search-{index}",
+                name="shell",
+                input=json.dumps({"command": command}),
+            )
+            search_events = [event async for event in agent._acting(search_call)]
+            assert len(search_events) == 2
+        assert _SHELL_COMMANDS == ["grep needle file.txt", "rg 'foo|bar' src"]
 
         tool_call = ToolCallBlock(id="call-large", name="large_result", input="{}")
         events = [event async for event in agent._acting(tool_call)]

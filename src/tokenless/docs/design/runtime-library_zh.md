@@ -44,6 +44,24 @@ PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，�
 不会读取自定义 `hooks.transparent_prefixes`，因此这些前缀下的调用仍可能被改写。
 该规则独立于搜索路径共享开关，保留现有 PostTool 文件读取策略。
 
+同一原生命令识别覆盖 `grep`、`rg` 的所有模式；`git grep`、`xargs grep` 和自定义 Wrapper
+前缀不在此识别范围。PostTool 复用该解析器识别 `command_output` 来源的搜索，
+与原生 `Grep` 工具一样，只调用 `SearchResultsCompressor`。统一入口识别带路径和行号的
+匹配记录及纯路径列表，格式识别和收益判断都保留在压缩器内部。关闭搜索压缩或没有候选时
+原样返回，即使设置 `force_json` 也不尝试其他领域压缩器。Qoder 原生 Bash Adapter 只将
+`stdout` 交给 Core，即使它较短、为空或 `stderr` 更长；回填结果时保留其他所有字段。
+
+此保护覆盖包含已识别搜索的复合命令的完整输出。例如，`grep -q needle Cargo.toml && cargo build`
+也会保留完整构建日志，因为 Hook 不提供各子命令的输出边界。在能保证搜索匹配完整的混合输出
+分块处理实现之前，这会有意降低既有构建/测试日志及其他领域的压缩覆盖率。
+`rg -l TODO src | xargs cat` 等 Pipeline 也保留输出，尽管最终内容是文件正文而非路径列表。
+Tokenless 不增加截断回退，宿主自身的输出限制仍然有效。`max_input_bytes` 限制压缩工作量，
+超限时原样返回，不限制返回文本体积。
+
+搜索压缩器开启但没有候选时，使用公共仲裁的 `no_savings`；连接持久化 Store 时，Stash
+计数为零。关闭搜索压缩或命中生命周期门槛时仍为透传。API 和文件读取结果上的 `command`
+元数据不会开启 Shell 搜索保护；精确工具名 `Grep` 保留其原生搜索契约。
+
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
 在模型调用之间保持 Retrieve Tool 静态，把 Marker 集合保存在框架 Session 状态中；`retrieve` 只授权该集合
@@ -84,8 +102,9 @@ python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-polic
 ## 搜索路径共享
 
 PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `search_results` 的内容交给
-`SearchResultsCompressor`。这是按内容派发的 Core 能力，不依赖命令名或 Agent ID；
-带行号的搜索记录仍要求来源为 `api_response`。
+`SearchResultsCompressor`。原生 `Grep` 和识别出的 Shell `grep`、`rg` 直接调用此压缩器，
+不要求内容检测先判为搜索结果。其他工具保留按内容派发：带行号记录要求 `api_response`
+来源，纯路径列表也接受命令输出。
 成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
 行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；
 任意不支持的记录都会拒绝整份候选。字节数与估算 Token 均减少后，再经过现有 Runtime 仲裁。
@@ -99,8 +118,9 @@ PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `
 不带前缀的相对根目录仅接受字母、数字、`.`、`_`、`-`；以 `/`、`./`、`../` 开头的路径
 可包含空格、引号和反斜杠，通过 JSON 字符串编码。压缩器不读取文件，也不规范化路径。
 `file_content` 和 `file_read` 均跳过此路径列表策略；既有文件读取的 JSON、表格、日志处理不变。
-既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
-不会把路径中间或 CRLF 中间的字节截断片段视为记录。完整输入的路径列表候选只生成一次，随后复用到仲裁。
+对于搜索专用通路之外的工具，既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
+不会把路径中间或 CRLF 中间的字节截断片段视为记录。搜索专用通路之外，资格检查先解析完整路径列表，
+压缩器再解析并生成候选，随后进入公共仲裁。
 
 路径列表视图以 `[Path list; all received paths retained; full path = base + each paths entry]`
 开头，随后是含 `base`、`paths`、`line_ending`、`trailing_newline` 的紧凑 JSON。

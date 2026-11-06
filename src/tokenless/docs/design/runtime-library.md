@@ -52,6 +52,29 @@ Custom `hooks.transparent_prefixes` are not inspected, so calls behind those pre
 be rewritten. The rule is independent of search path sharing and retains the existing PostTool
 file-read policy.
 
+The same native-command recognition covers every `grep` and `rg` mode. `git grep`,
+`xargs grep`, and custom wrapper prefixes are outside this recognition. PostTool reuses
+that parser for `command_output` searches and routes them, like the native `Grep` tool, only to
+`SearchResultsCompressor`. Its unified entry recognizes numbered path matches and path lists;
+format recognition and savings checks stay inside the compressor. Disabled search compression
+or no candidate returns the original, including with `force_json`, without trying another domain.
+Qoder's native Bash adapter sends only `stdout` to Core, even when it is short or empty or
+`stderr` is larger, and preserves every other field when rewrapping the result.
+
+This protection covers the complete output of any compound command containing a recognized
+search. For example, `grep -q needle Cargo.toml && cargo build` also keeps its build log
+unchanged: the hook supplies no per-command output boundaries. This deliberately reduces
+existing build/test and other domain compression coverage until mixed-output regions can be
+handled without omitting search matches. Pipelines such as `rg -l TODO src | xargs cat` also
+retain their output, even though the final content is file text rather than a path list.
+Tokenless adds no truncation fallback; host output limits still apply. `max_input_bytes`
+limits compression work and passes oversized input through rather than capping returned text.
+
+An enabled search compressor that produces no candidate uses the common `no_savings`
+arbitration and zero Stash counters when a persistent store is attached. Disabled search compression
+and lifecycle gates still pass through. Command metadata on API and file-read results does
+not activate shell-search protection; the exact native tool name `Grep` retains its contract.
+
 The SDK never stores a process-global current session. `before_model` returns the exact visible
 marker set. An adapter declares whether it has a marker-authorized recovery path and owns any
 Agent-facing command or tool declaration. AgentScope keeps its Retrieve tool static across model
@@ -101,9 +124,10 @@ checks transport behavior, not model answer quality or billing savings.
 
 ## Search path sharing
 
-PostTool routes detected `search_results` through `SearchResultsCompressor` when search path
-sharing is enabled and text replacement is available. Routing depends on content, not the command
-or agent name. Numbered search records require `api_response` origin. Successful `path:line:text` listings with at least three records can share full
+PostTool routes native `Grep` and recognized shell `grep`/`rg` output directly through
+`SearchResultsCompressor` when search path sharing and text replacement are available.
+Other tools retain content-based routing: numbered records require `api_response` origin,
+and plain path lists also accept command output. Successful `path:line:text` listings with at least three records can share full
 paths across consecutive rows. Line numbers, row text, order and line endings remain byte-reversible.
 The input contract excludes colons in paths and context listings. Unsupported rows reject the whole
 candidate; byte length and estimated tokens must both decrease before normal Runtime arbitration.
@@ -119,9 +143,10 @@ the candidate. Bare relative roots use letters, digits, `.`, `_`, or `-`; paths 
 `./`, or `../` can include spaces and quoted or backslash characters, encoded as JSON strings.
 The compressor never reads files or normalizes paths. Both `file_content` and `file_read` origins
 bypass this path-list strategy; existing file-read JSON, table, and log handling is unchanged.
-Established source and table detection takes precedence over plain path-list detection. A bounded
+For tools outside the search-only route, established source and table detection takes precedence over plain path-list detection. A bounded
 path probe stops at its last complete line so a byte cut inside a path or CRLF is not a record.
-The selected path-list candidate is built once from the full input and reused for arbitration.
+Outside the dedicated search route, eligibility checks parse the full path list before the
+compressor parses it to build a candidate. The candidate then goes through common arbitration.
 
 The path-list view starts with
 `[Path list; all received paths retained; full path = base + each paths entry]`, followed by compact

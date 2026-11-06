@@ -83,9 +83,9 @@ from hook_utils import (
 
 # -- constants ---------------------------------------------------------------
 
-# Shell tool envelopes carry the log in one dominant text field. Qoder uses
-# Core's 200-character floor: its smaller build logs were otherwise sent as
-# log-blind JSON. Other hosts keep the existing 2000-character rewrap gate.
+# Native Qoder Bash always uses stdout; Core decides whether to compress it.
+# Other Qoder shell shapes use a 200-character dominant-field gate. Other
+# hosts keep the existing 2000-character rewrap gate.
 # Bash Git diffs also need the text slot below either gate.
 _SHELL_TEXT_FIELDS = ("stdout", "stderr")
 _SHELL_UNWRAP_MIN_CHARS = 2_000
@@ -147,7 +147,7 @@ def _emit_attribution_or_skip(env_attribution: str) -> None:
 
 
 def _shell_text_field(tool_name: str, envelope, agent_id: str) -> tuple | None:
-    """The dominant text field of a shell tool's envelope, or ``None``.
+    """The host-visible text field of a shell tool's envelope, or ``None``.
 
     Shell envelopes (``{"stdout": …, "stderr": …}``) are JSON to the entry
     point, which would compress them log-blind. Unwrapping the largest text
@@ -156,10 +156,19 @@ def _shell_text_field(tool_name: str, envelope, agent_id: str) -> tuple | None:
     is untouched (adapters own envelope knowledge, §4.5). Only the single
     largest field is compressed — one Tokenless subprocess per invocation
     (§5.6) — the other field stays byte-identical in the envelope. The host
-    renderer determines which fields become model-visible content.
+    renderer determines which fields become model-visible content. Qoder's
+    native Bash renderer requires stdout; its other fields are never compressed.
     """
     if tool_name not in SHELL_TOOLS or not isinstance(envelope, dict):
         return None
+    # Qoder's native Bash object renderer consumes stdout. Keep every other
+    # field intact, including when stdout is empty or stderr is larger.
+    if (
+        agent_id == _QODER_AGENT_ID
+        and tool_name == "Bash"
+        and isinstance(envelope.get("stdout"), str)
+    ):
+        return ("stdout", envelope["stdout"])
     min_chars = (
         _QODER_SHELL_UNWRAP_MIN_CHARS if agent_id == _QODER_AGENT_ID else _SHELL_UNWRAP_MIN_CHARS
     )

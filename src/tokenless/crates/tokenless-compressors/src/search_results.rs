@@ -28,12 +28,16 @@ impl SearchResultsCompressor {
 
     /// Returns a smaller, byte-reversible view, or no candidate.
     ///
-    /// Requires at least three records, each with a path containing `/` or
+    /// Supports plain path lists and numbered matches. Numbered matches require
+    /// at least three records, each with a path containing `/` or
     /// `.` and no colon or line ending. Unsupported records reject the whole
     /// input. Row suffixes, including line numbers and line endings, are copied
     /// verbatim; only consecutive identical paths share a JSON-quoted header.
     #[must_use]
     pub fn compress(&self, input: &str) -> Option<String> {
+        if let Some(output) = self.compress_paths(input) {
+            return Some(output);
+        }
         let mut output = String::from(HEADER);
         let mut previous_path = None;
         let mut records = 0;

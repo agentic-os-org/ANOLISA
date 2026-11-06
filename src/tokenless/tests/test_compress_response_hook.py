@@ -1171,9 +1171,9 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertIsInstance(updated, dict, "Qoder must retain the structured tool result")
         self.assertEqual(updated, self._bash_envelope(log[:40], ""))
 
-    def test_qoder_uses_text_slot_at_200_chars(self) -> None:
+    def test_qoder_uses_stdout_text_slot_even_below_compression_threshold(self) -> None:
         binary = _create_mock_tokenless(self.tmpdir, "no-savings")
-        for length in (199, 200):
+        for length in (0, 199, 200):
             with self.subTest(length=length):
                 stdout = "x" * length
                 envelope = self._bash_envelope(stdout, "")
@@ -1186,12 +1186,9 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
                 self.assertEqual(result, {})
                 with open(os.path.join(self.tmpdir, "request.json")) as captured:
                     request = json.load(captured)
-                expected = stdout if length == 200 else json.dumps(
-                    envelope, separators=(",", ":"), ensure_ascii=False
-                )
-                self.assertEqual(request["content"], expected)
+                self.assertEqual(request["content"], stdout)
 
-    def test_qoder_stderr_rewrap_remains_visible_as_json_text(self) -> None:
+    def test_qoder_stderr_only_output_keeps_the_original_envelope(self) -> None:
         stderr = "error: build failed\n" * 30
         envelope = self._bash_envelope("", stderr)
         result = _run_hook(
@@ -1201,15 +1198,13 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
             isolated_home=self.isolated_home,
         )
         with open(os.path.join(self.tmpdir, "request.json")) as captured:
-            self.assertEqual(json.load(captured)["content"], stderr)
-        updated = result["hookSpecificOutput"]["updatedToolOutput"]
-        self.assertIsInstance(updated, str)
-        self.assertEqual(json.loads(updated), self._bash_envelope("", stderr[:40]))
+            self.assertEqual(json.load(captured)["content"], "")
+        self.assertEqual(result, {})
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
-    def test_qoder_keeps_unselected_stderr_when_both_streams_are_long(self) -> None:
+    def test_qoder_compresses_only_stdout_even_when_stderr_is_longer(self) -> None:
         stdout = "build step\n" * 30
-        stderr = "warning\n" * 25
+        stderr = "warning\n" * 100
         envelope = self._bash_envelope(stdout, stderr)
         result = _run_hook(
             {"tool_name": "Bash", "tool_response": envelope},
