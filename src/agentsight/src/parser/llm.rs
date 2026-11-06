@@ -135,7 +135,12 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
                     .join("\n")
             })
             .filter(|s| !s.is_empty());
-        return Some((arr.clone(), system_text));
+        return Some((
+            arr.iter()
+                .filter_map(gemini_content_to_text_message)
+                .collect(),
+            system_text,
+        ));
     }
     if let Some(input) = body.get("input") {
         if let Some(arr) = input.as_array() {
@@ -213,6 +218,28 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
         }
     }
     None
+}
+
+/// Convert Gemini text parts to the canonical message shape used by every
+/// downstream text reader. An empty content string keeps textless turns
+/// renderable by strict chat templates.
+fn gemini_content_to_text_message(content: &Value) -> Option<Value> {
+    let parts = content.get("parts").and_then(|p| p.as_array())?;
+    let text = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let role = match content.get("role").and_then(|r| r.as_str()) {
+        Some("model") => "assistant",
+        Some(role) => role,
+        None => "user",
+    };
+    Some(serde_json::json!({
+        "role": role,
+        "content": text,
+    }))
 }
 
 /// Normalize the tool definitions from a parsed request body.
@@ -651,13 +678,19 @@ mod tests {
     fn test_extract_messages_view_gemini_contents() {
         let body = serde_json::json!({
             "contents": [
-                {"role": "user", "parts": [{"text": "Hello"}]},
-                {"role": "model", "parts": [{"text": "Hi there"}]}
+                {"role": "user", "parts": [{"text": "Hello"}, {"text": "again"}]},
+                {"role": "model", "parts": [{"text": "Hi there"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "list_dir", "args": {}}}]}
             ],
             "systemInstruction": {"parts": [{"text": "Be concise"}]}
         });
         let (msgs, instructions) = extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "Hello\nagain");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "Hi there");
+        assert_eq!(msgs[2]["content"], "");
         assert_eq!(instructions.as_deref(), Some("Be concise"));
     }
 

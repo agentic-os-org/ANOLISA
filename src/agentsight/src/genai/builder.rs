@@ -1695,6 +1695,59 @@ mod tests {
         assert!(pending.user_query.as_deref() == Some("hello"));
     }
 
+    #[test]
+    fn test_build_pending_from_request_gemini_uses_user_text_for_crash_ids() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "first question"}]},
+                {"role": "model", "parts": [{"text": "answer"}]},
+                {"role": "user", "parts": [{"text": "second question"}]}
+            ]
+        }"#;
+        let req = make_request("/v1beta/models/gemini-2.5-pro:generateContent", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::from([(1_u32, "gemini-agent".to_string())]);
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("Gemini request creates a pending row");
+
+        assert_eq!(pending.user_query.as_deref(), Some("second question"));
+        let expected_session = crate::genai::id_resolver::crash_fallback_id(
+            "session",
+            "gemini-agent",
+            1,
+            "first question",
+            0,
+        );
+        let expected_conversation = crate::genai::id_resolver::crash_fallback_id(
+            "conversation",
+            "gemini-agent",
+            1,
+            "second question",
+            2,
+        );
+        assert_eq!(
+            pending.session_id.as_deref(),
+            Some(expected_session.as_str())
+        );
+        assert_eq!(
+            pending.conversation_id.as_deref(),
+            Some(expected_conversation.as_str())
+        );
+
+        let input: serde_json::Value = serde_json::from_str(
+            pending
+                .input_messages
+                .as_deref()
+                .expect("messages are recorded"),
+        )
+        .expect("input messages are valid JSON");
+        assert_eq!(input[0]["content"], "first question");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["content"], "second question");
+    }
+
     /// A SysOM POP request keeps its LLM parameters inside `llmParamString`.
     /// The pending builder read the wrapper only, so a drained SysOM call
     /// lost its model, streaming flag, messages and user query — every

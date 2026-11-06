@@ -1270,6 +1270,35 @@ mod tests {
         assert_eq!(rendered, "<|im_start|>user\nhello<|im_end|>\n");
     }
 
+    /// Exact equality with the canonical shape proves this uses conversation
+    /// text rather than the serialized-Gemini fallback, which also counts > 0.
+    #[test]
+    fn gemini_text_matches_canonical_token_count() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "first question"}]},
+                {"role": "model", "parts": [{"text": "answer"}]},
+                {"role": "user", "parts": [{"text": "second question"}]}
+            ]
+        });
+        let canonical = json!({
+            "messages": [
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "second question"}
+            ]
+        });
+
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("Gemini request is counted");
+        let expected = crate::analyzer::count_request_tokens(&canonical, &tokenizer, &tokenizer)
+            .expect("canonical request is counted");
+        assert_eq!(count.total_tokens, expected.total_tokens);
+        assert_eq!(count.by_role, expected.by_role);
+        assert!(!count.by_role.contains_key("model"));
+    }
+
     #[test]
     fn tool_definition_tokens_are_counted_without_tool_messages() {
         // The first request of a tool-using agent carries `tools` but no
