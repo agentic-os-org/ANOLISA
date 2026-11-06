@@ -81,26 +81,29 @@ def test_legacy_removal_replaces_v1_runtime_when_v2_artifacts_exist(tmp_path):
     assert not sandbox.exists()
 
 
-def test_user_uninstall_leaves_the_shared_host_runtime_alone():
+def test_unified_user_uninstall_requires_component_specific_removal():
     result = _run(
         [
             "bash",
             str(REPO_ROOT / "scripts/build-all.sh"),
             "--dry-run",
+            "--user",
             "--component",
             "sec-core",
             "--uninstall",
         ],
-        check=True,
     )
 
-    assert "uninstall-source-v2-assets INSTALL_PROFILE=user" in result.stdout
-    assert "uninstall-source-v2-sandbox INSTALL_PROFILE=user" in result.stdout
-    assert "uninstall-source-v2-host" not in result.stdout
-    assert "uninstall-all-source-v2 INSTALL_PROFILE=system" not in result.stdout
+    assert result.returncode != 0
+    assert "uninstall" in result.stderr.lower()
+    assert "component" in result.stderr.lower()
+    assert "DRY-RUN:" not in result.stdout
+    assert "make " not in result.stdout
+    assert "rm " not in result.stdout
+    assert "systemctl " not in result.stdout
 
 
-def test_system_uninstall_removes_the_host_runtime():
+def test_unified_system_uninstall_requires_component_specific_removal():
     result = _run(
         [
             "bash",
@@ -111,7 +114,12 @@ def test_system_uninstall_removes_the_host_runtime():
             "sec-core",
             "--uninstall",
         ],
-        check=True,
     )
 
-    assert "uninstall-all-source-v2 INSTALL_PROFILE=system" in result.stdout
+    assert result.returncode != 0
+    assert "uninstall" in result.stderr.lower()
+    assert "component" in result.stderr.lower()
+    assert "DRY-RUN:" not in result.stdout
+    assert "make " not in result.stdout
+    assert "rm " not in result.stdout
+    assert "systemctl " not in result.stdout

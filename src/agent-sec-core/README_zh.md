@@ -277,15 +277,23 @@ sudo anolisa --install-mode system adopt sec-core
 ./scripts/build-all.sh --component sec-core
 ```
 
-安装文件前，源码构建入口会检查 Node.js 20 或更高版本、Python 3、bubblewrap、GnuPG 和
-`jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
-集成资源仍安装到用户目录。Python hook 使用宿主的 `python3`；Qoder 插件安装器当前
-要求 Python >= 3.11, < 3.12。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
-然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
-`--ignore-deps` 跳过检查。
+仓库脚本会为构建准备 Node.js 22 或更高版本和系统 `python3`，再在安装到宿主前
+检查声明的运行时依赖。后端只支持 system 文件安装；使用 `--no-install` 可以只编译
+而不安装。已准备好依赖的主机可以用 `--ignore-deps` 跳过依赖准备与检查。
+Agent hook 使用宿主的 `python3`；Qoder 插件安装器要求 Python >= 3.11, < 3.12。
 
-源码构建不会在 ANOLISA 状态中注册组件。请使用已安装的集成脚本，不要继续执行
-`anolisa adapter enable`。具体入口见
+默认源码布局使用 `PREFIX=/usr/local`、`AWPRJ=anolisa`：程序安装到
+`/usr/local/bin`，框架资源安装到
+`/usr/local/share/anolisa/agent-sec-core/adapters`。文件安装不会启动 daemon，也不
+修改框架的用户配置。已有源码安装请先按
+[旧 systemd unit 迁移](../../docs/user-guide/zh/agent-sec-core/index.md#迁移旧源码安装的服务)
+保留管理员设置并处理旧 `/etc/systemd/system` 覆盖项。部署接入前，再按
+[daemon 启动与健康检查](../../docs/user-guide/zh/agent-sec-core/index.md#启动源码安装的-daemon)
+完成验证。自定义 prefix 和 namespace 时，在仓库根目录运行
+`make -C src/agent-sec-core layout`，以输出的布局为准。
+
+源码构建不会在 ANOLISA 状态中注册组件。请使用框架的用户运行已安装的接入脚本，
+不要加 `sudo`，也不要继续执行 `anolisa adapter enable`。具体入口见
 [源码集成入口](../../docs/user-guide/zh/agent-sec-core/index.md#源码集成入口)。
 
 通过 ANOLISA 管理的 raw 包或已执行 `adopt` 的 RPM 会放置框架 adapter。

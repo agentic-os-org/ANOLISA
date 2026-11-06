@@ -31,10 +31,17 @@ and existing build and test entry points.
 ## 2. Development Commands
 
 ```bash
-# Unified build (Linux — select maintained components explicitly)
-./scripts/build-all.sh --component sec-core --component tokenless  # deps, build, and user install
-./scripts/build-all.sh --component sec-core --no-install           # install deps and build, skip component install
-./scripts/build-all.sh --component sec-core --ignore-deps          # pre-provisioned hosts: skip dependency setup and runtime verification
+# Unified build (Linux; six backends including sec-core V2, AW and matching Providers)
+./scripts/build-all.sh --all --no-install                         # prepare build dependencies and compile
+./scripts/build-all.sh --all                                     # prepare, compile and install system files
+./scripts/build-all.sh --all --user --supported-only               # install cosh-ng, tokenless, AW and Tokenless Provider; report skipped system-only targets
+./scripts/build-all.sh --all --user --supported-only --check-deps  # read-only check of the user subset
+./scripts/build-all.sh --all --user --no-install                   # compile all default targets; never install system dependencies by default
+./scripts/build-all.sh --component tokenless --user --install-system-deps # explicitly allow system build packages; component files stay in user paths
+./scripts/build-all.sh --component agent-sec-core --component tokenless --no-install
+./scripts/build-all.sh --all --prefix /usr --destdir "$PWD/target/pkgroot" # stage package paths without service activation
+./scripts/build-all.sh --all --check-deps                         # check build dependencies without changing the host
+./scripts/build-all.sh --component agent-sec-core --ignore-deps --no-install
 
 # Partial convenience test suites (may skip unavailable suites)
 ./tests/run-all-tests.sh --filter sec     # agent-sec-core only
@@ -49,11 +56,10 @@ cargo fmt --all -- --check
 # Select the closest targeted test from src/cosh-ng/CONTRIBUTING.md.
 # Full gates require a large/cross-cutting change and an explicit request.
 
-# agent-sec-core (Linux only; Python 3.11.6 + uv, per-component)
+# agent-sec-core (Linux only; V2 Rust CLI/daemon and sandbox, per-component)
 cd src/agent-sec-core
-make build-all
-uv run --project agent-sec-cli python --version  # must report 3.11.6
-make test         # Python + Rust sandbox + OpenClaw plugin tests
+make build        # V2 artifacts; no uv or fixed Python runtime required
+make test-rust-v2  # V2 Rust tests; Python-specific tests have separate requirements
 
 # agentsight (Linux full eBPF; macOS trajectory/serve only, per-component)
 cd src/agentsight
@@ -110,6 +116,17 @@ cargo test
 python3 src/aw/scripts/check.py   # from the repository root: CI behavior tests,
                                   # fmt, clippy, locked tests, digest vectors, rustdoc
 ```
+
+`build-all.sh` defaults to system source installation under `/usr/local`;
+`--user` defaults to `$HOME/.local`. Use `--prefix /usr` when staging distribution
+package paths. The script selects matching AW Providers automatically for selected backends.
+Discovery uses `providers/<canonical-backend>/Makefile` and the `aw-provider-*`
+package name from that directory's `Cargo.toml`; `sec-core` resolves to
+`agent-sec-core`, whose Provider is named `aw-provider-sec-core`. A partial build
+such as `--component tokenless` includes its Provider, while an explicitly
+selected Provider does not select its backend. In user mode, `--supported-only`
+filters backends before attaching their Providers, so skipping `agent-sec-core`
+also omits its Provider unless that Provider was explicitly selected.
 
 ## 3. Rust Common Conventions
 

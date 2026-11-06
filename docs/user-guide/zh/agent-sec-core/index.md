@@ -75,23 +75,136 @@ sudo anolisa --install-mode system adopt sec-core
 ./scripts/build-all.sh --component sec-core
 ```
 
-在组件目录中构建 V2 并安装到系统：
+也可以在仓库根目录使用组件目标：
 
 ```bash
-cd src/agent-sec-core
-make build
-sudo make install
+make -C src/agent-sec-core build
+sudo make -C src/agent-sec-core install
 ```
 
-安装文件前，仓库脚本会检查 Node.js 20 或更高版本、Python 3、bubblewrap、
-GnuPG 和 `jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
-集成资源仍安装到用户目录。Python hook 使用宿主的 `python3`；Qoder 插件安装器当前
-要求 Python >= 3.11, < 3.12。user mode 会一次性列出缺少的系统 runtime package 和安装命令，
-然后退出；安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
-`--ignore-deps` 跳过检查。
+仓库脚本会为构建准备 Node.js 22 或更高版本和系统 `python3`，再在安装到宿主前
+检查声明的运行时依赖。agent-sec-core 后端只支持 system 文件安装；使用
+`--no-install` 可以只编译而不安装。已准备好依赖的主机可以用 `--ignore-deps`
+跳过依赖准备与检查。Python hook 使用宿主的 `python3`；Qoder 插件安装器要求
+Python >= 3.11, < 3.12。
+
+两个入口都默认使用 `PREFIX=/usr/local`、`AWPRJ=anolisa`。程序安装到
+`/usr/local/bin`，框架资源安装到
+`/usr/local/share/anolisa/agent-sec-core/adapters`。文件安装不会启动 daemon，也不
+修改框架的用户配置。部署接入前，请先启动 daemon 并检查健康状态。
 
 源码构建不会在 ANOLISA 状态中注册 `sec-core`。这种安装方式不能继续执行
 `anolisa adapter enable`，请使用下文的源码集成脚本。
+
+### 迁移旧源码安装的服务
+
+旧版 `build-all.sh` 会把完整 unit 安装到
+`/etc/systemd/system/agent-sec-core.service`。该文件优先于新布局中
+`PREFIX/lib/systemd/system` 下的 unit；仅重新加载或启动服务不会完成切换。
+全新安装可以跳过本节。
+
+先检查当前加载的 unit、覆盖项和启用状态。自定义过安装路径时，请使用
+`make layout` 输出中的实际 `UNITDIR`：
+
+```bash
+ASC_PREFIX=/usr/local
+ASC_UNIT_FILE="$ASC_PREFIX/lib/systemd/system/agent-sec-core.service"
+make -C src/agent-sec-core layout PREFIX="$ASC_PREFIX" AWPRJ=anolisa
+systemd-analyze unit-paths
+systemctl show agent-sec-core.service -p FragmentPath -p DropInPaths -p ExecStart
+systemctl is-enabled agent-sec-core.service || true
+sudo systemctl cat agent-sec-core.service
+```
+
+如果状态为 `masked` 或 `masked-runtime`，请停在这里，由管理员决定是否调整该
+策略。如果当前 fragment 已指向 `ASC_UNIT_FILE`，不需要移走 unit。只有确认
+`/etc` 下的文件或链接是已过时的源码安装覆盖项后，才继续以下步骤。
+
+变更前先备份。以下命令同时保留链接及其内容，以及现有管理员 drop-in：
+
+```bash
+ASC_BACKUP_DIR="/var/backups/agent-sec-core/source-unit-$(date +%Y%m%d-%H%M%S)"
+sudo install -d -m 0700 "$ASC_BACKUP_DIR"
+sudo cp -a /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/legacy-unit"
+sudo cp -Lp /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/legacy-unit.contents"
+if sudo test -d /etc/systemd/system/agent-sec-core.service.d; then
+  sudo cp -a /etc/systemd/system/agent-sec-core.service.d "$ASC_BACKUP_DIR/"
+fi
+sudo diff -u /etc/systemd/system/agent-sec-core.service "$ASC_UNIT_FILE" || true
+```
+
+另行备份旧服务实际使用的配置。检查并把需要保留的设置合并到实际
+`CONFIGDIR/skillsec.json`，或在经过审查的覆盖项中有意保留旧配置路径。保留管理员
+drop-in 文件，并检查每个 `DropInPaths` 项：重置 `ExecStart` 的覆盖项仍可能选择
+旧 binary，或遗漏新的 `--skillsec-config` 参数。继续之前，使用
+`sudo systemctl edit agent-sec-core.service` 把完整旧 unit 中需要保留的定制迁入
+经过审查的 drop-in。
+
+完成比较、配置合并和管理员审查后，停止服务，只把过时的 `/etc` 覆盖项移入备份：
+
+```bash
+sudo systemctl stop agent-sec-core.service
+sudo mv /etc/systemd/system/agent-sec-core.service "$ASC_BACKUP_DIR/retired-override"
+```
+
+如果原来已启用、且仍希望开机启动，请在建立链接**之前**用新 unit 的绝对路径
+刷新现有启动链接。原来未启用时跳过此命令；仅运行时启用的情况使用 `--runtime`：
+
+```bash
+sudo systemctl reenable "$ASC_UNIT_FILE"
+```
+
+只有新的 `UNITDIR` 不在上文输出的 unit 搜索路径中时，才建立链接。否则跳过
+此命令：把同名 unit 链接回自身的搜索路径可能形成 unit alias 循环。
+
+```bash
+sudo systemctl link "$ASC_UNIT_FILE"
+```
+
+重新加载并重启经过审查的 unit：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart agent-sec-core.service
+systemctl show agent-sec-core.service -p FragmentPath -p DropInPaths -p ExecStart
+```
+
+确认 `FragmentPath` 指向预期 unit，`ExecStart` 使用预期 daemon 和配置。保留备份，
+部署接入前继续执行下文的健康等待。安装器不会自动执行这些迁移操作。
+
+### 启动源码安装的 daemon
+
+使用安装时选择的 prefix：
+
+```bash
+ASC_PREFIX=/usr/local
+export PATH="$ASC_PREFIX/bin:$PATH"
+sudo systemctl daemon-reload
+sudo systemctl start agent-sec-core.service
+sudo timeout 60 sh -c '
+  until AGENT_SEC_HEALTH_TIMEOUT_SECONDS=2 "$1/bin/agent-sec-daemon-health"; do
+    sleep 1
+  done
+' sh "$ASC_PREFIX"
+```
+
+健康检查最多等待 60 秒，确认 daemon 的 RPC 端点可响应后再继续。如果超时，请查看
+服务诊断：
+
+```bash
+sudo systemctl status agent-sec-core.service --no-pager
+sudo journalctl -u agent-sec-core.service -n 80 --no-pager
+```
+
+自定义 prefix、namespace 或其他路径时，使用与安装一致的 Make 参数检查布局：
+
+```bash
+make -C src/agent-sec-core layout PREFIX=/usr/local AWPRJ=anolisa
+```
+
+下文使用输出中的 `ADAPTERDIR` 和 `EXTENSIONDIR`。若 `UNITDIR` 不在 systemd
+的 unit 搜索路径中，请先执行
+`sudo systemctl link /absolute/path/to/agent-sec-core.service`，再重新加载并启动服务。
 
 ## 快速开始
 
@@ -488,26 +601,44 @@ anolisa adapter enable sec-core openclaw
 
 ### 源码集成入口
 
-默认源码构建会把 Cosh-NG 扩展直接安装到
-`~/.copilot-shell/extensions/agent-sec-core`，无需再执行启用命令。其他集成请
-运行用户目录中对应的脚本。
+请按需选择接入脚本，以拥有目标框架配置的用户运行，不要加 `sudo`。将下列值设为
+安装时的 prefix 和 namespace；若显式覆盖了 `ADAPTERDIR`，请使用 `make layout`
+输出的路径：
 
 ```bash
+ASC_PREFIX=/usr/local
+ASC_AWPRJ=anolisa
+ASC_ADAPTER_DIR="$ASC_PREFIX/share/$ASC_AWPRJ/agent-sec-core/adapters"
+export PATH="$ASC_PREFIX/bin:$PATH"
+
 # OpenClaw
-bash ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/openclaw/scripts/deploy.sh"
 
 # Hermes
-bash ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/hermes/scripts/deploy.sh"
 
 # Qwen Code
-bash ~/.local/lib/anolisa/sec-core/qwen-code-extension/scripts/deploy.sh
+bash "$ASC_ADAPTER_DIR/qwencode/scripts/deploy.sh"
 
 # Codex
-bash ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+bash "$ASC_ADAPTER_DIR/codex/install.sh"
 
 # Qoder
-bash ~/.local/lib/anolisa/sec-core/qoder-plugin/install.sh
+bash "$ASC_ADAPTER_DIR/qoder/install.sh"
 ```
+
+默认 Cosh-NG 扩展放置在
+`/usr/local/share/anolisa/extensions/agent-sec-core`。文件安装不写入 Cosh 的用户配置。
+请在 Cosh prompt 中检查并启用：
+
+```text
+/extensions list
+/extensions enable agent-sec-core
+/extensions reload
+```
+
+自定义扩展位置或已存在同名用户副本时，请按
+[Cosh 扩展发现与来源选择](../cosh-ng/core/extensions.md)操作。
 
 ### OpenClaw
 
@@ -682,7 +813,7 @@ CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 
 ### Cosh-NG
 
-Cosh-NG 使用的 adapter ID 为 `cosh`，扩展仍从现有的 `.copilot-shell` 目录加载。
+Cosh-NG 使用的 adapter ID 为 `cosh`，会发现用户和系统扩展目录。
 
 通过安装包部署时，在目标用户的配置中启用 adapter。
 
@@ -694,6 +825,7 @@ Cosh-NG 启动时会加载 hook。
 
 扩展路径：
 - 用户安装：`~/.copilot-shell/extensions/agent-sec-core/`
+- 默认源码安装：`/usr/local/share/anolisa/extensions/agent-sec-core/`
 - RPM 安装：`/usr/share/anolisa/extensions/agent-sec-core/`
 
 ## 常见问题

@@ -383,6 +383,10 @@ ANOLISA is released under the [Apache License 2.0](LICENSE).
 [Changelog](https://agentic-os.sh/changelog/) ·
 [For Agents](https://agentic-os.sh/agents/)
 
+The unified source build requires Bash 4.4 or newer. For restricted networks,
+configure `NODE_DIST_MIRROR` and `RUSTUP_INIT_SCRIPT_URL` as described in
+[download sources](docs/user-guide/en/getting-started/building.md#download-sources).
+
 Security references for Agent Security Core:
 [AARM registry entry (Aligned)](https://aarm.dev/builders/agentseccore-anolisa) ·
 [OWASP Agentic Top 10 control mapping](docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md).

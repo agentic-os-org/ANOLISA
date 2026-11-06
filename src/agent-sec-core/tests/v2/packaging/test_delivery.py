@@ -77,7 +77,7 @@ class DeliveryTests(unittest.TestCase):
         if executable:
             destination.chmod(0o755)
 
-    def make(self, *arguments, env_overrides=None):
+    def make(self, *arguments, env_overrides=None, source=None):
         environment = os.environ.copy()
         for name in (
             "MAKEFLAGS",
@@ -125,7 +125,7 @@ class DeliveryTests(unittest.TestCase):
                 "make",
                 "--no-print-directory",
                 "-C",
-                str(self.source),
+                str(source if source is not None else self.source),
                 *arguments,
             ],
             check=False,
@@ -246,6 +246,59 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse(any(path.name == "anolisa" for path in stage.rglob("*")))
         self.assertFalse((self.source / ".anolisa").exists())
         self.assertFalse((self.source / "packaging/anolisa").exists())
+
+    def test_checkout_license_installs_as_a_regular_file(self):
+        license_path = ROOT / "LICENSE"
+        original_link = license_path.readlink() if license_path.is_symlink() else None
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                destination = self.base / (
+                    "checkout-stage" if staged else "checkout-prefix"
+                )
+                arguments = (
+                    ("PREFIX=/usr", f"DESTDIR={destination}")
+                    if staged
+                    else (f"PREFIX={destination}",)
+                )
+                result = self.make(
+                    "install",
+                    *arguments,
+                    f"BUILD_DIR={self.build}",
+                    source=ROOT,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                prefix = destination / "usr" if staged else destination
+                installed = prefix / "share/anolisa/agent-sec-core/LICENSE"
+                self.assertFalse(installed.is_symlink())
+                self.assertEqual(installed.read_bytes(), license_path.read_bytes())
+                if original_link is not None:
+                    self.assertEqual(license_path.readlink(), original_link)
+
+    def test_broken_license_link_is_rejected_before_writing(self):
+        license_path = self.source / "LICENSE"
+        license_path.unlink()
+        license_path.symlink_to(self.base / "missing-license-input")
+        stage = self.base / "missing-license"
+
+        result = self.make("install", f"DESTDIR={stage}")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(stage.exists())
+
+    def test_license_destination_symlink_is_rejected_before_writing(self):
+        stage = self.base / "license-link"
+        license_path = stage / "usr/share/anolisa/agent-sec-core/LICENSE"
+        license_path.parent.mkdir(parents=True)
+        outside = self.base / "outside-license"
+        outside.write_text("leave unchanged\n")
+        license_path.symlink_to(outside)
+
+        result = self.make("install", f"DESTDIR={stage}")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink", result.stderr)
+        self.assertEqual(outside.read_text(), "leave unchanged\n")
+        self.assertFalse((stage / "usr/bin").exists())
 
     def test_namespace_and_independent_binary_resource_roots(self):
         stage = self.base / "custom"

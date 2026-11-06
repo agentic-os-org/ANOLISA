@@ -7,12 +7,18 @@ on:
       - 'release/agent-sec-core/**'
     paths:
       - 'src/agent-sec-core/**'
+      - 'providers/agent-sec-core/**'
       - 'scripts/build-all.sh'
+      - 'scripts/lib/**'
       - '.github/workflows/sec-core-source-code-build.yaml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 env:
   RUSTUP_DIST_SERVER: https://static.rust-lang.org
@@ -45,7 +51,6 @@ jobs:
           session    sufficient   pam_permit.so
           EOF
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v8.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -77,14 +82,13 @@ jobs:
       - name: Build and install
         run: |
           build_status=0
-          ./scripts/build-all.sh --component sec-core || build_status=$?
+          ./scripts/build-all.sh --component sec-core --prefix /usr || build_status=$?
           if (( build_status != 0 )); then
             echo "::group::sec-core build failure log"
-            tail -n 200 target/build.log 2>/dev/null || echo "target/build.log is unavailable"
+            tail -n 200 target/build-all/build.log 2>/dev/null || echo "target/build-all/build.log is unavailable"
             echo "::endgroup::"
             exit "$build_status"
           fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Verify CLI
         run: |
           agent-sec-cli --version
@@ -106,19 +110,32 @@ jobs:
         run: agent-sec-daemon --help
       - name: Verify V2 source runtime
         run: |
-          test -x /usr/local/bin/agent-sec-cli
-          test -x /usr/local/bin/agent-sec-daemon
-          test -x /usr/local/bin/agent-sec-daemon-health
-          test -f /etc/systemd/system/agent-sec-core.service
-          grep -Fx 'ExecStart="/usr/local/bin/agent-sec-daemon" serve' /etc/systemd/system/agent-sec-core.service
+          test -x /usr/bin/agent-sec-cli
+          test -x /usr/bin/agent-sec-daemon
+          test -x /usr/bin/agent-sec-daemon-health
+          test -f /usr/lib/systemd/system/agent-sec-core.service
+          grep -Fx 'ExecStart="/usr/bin/agent-sec-daemon" serve --skillsec-config "/etc/agent-sec/skillsec.json"' /usr/lib/systemd/system/agent-sec-core.service
           test ! -e "$HOME/.local/lib/anolisa/sec-core/venv"
           test ! -e "$HOME/.local/bin/agent-sec-cli"
           test ! -e "$HOME/.local/bin/agent-sec-daemon"
           test ! -e /usr/lib/systemd/user/agent-sec-core.service
+      - name: Start and verify installed V2 system service
+        run: |
           if [[ -d /run/systemd/system ]]; then
+            trap 'sudo systemctl stop agent-sec-core.service' EXIT
+            sudo systemctl daemon-reload
+            sudo systemctl start agent-sec-core.service
             sudo systemctl is-active --quiet agent-sec-core.service
-            sudo env AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock \
-              AGENT_SEC_HEALTH_TIMEOUT_SECONDS=2 agent-sec-daemon-health
+            # Type=simple becomes active before the daemon binds its RPC socket.
+            if ! sudo timeout --kill-after=5s 30s bash -c '
+              until env AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock \
+                  AGENT_SEC_HEALTH_TIMEOUT_SECONDS=2 /usr/bin/agent-sec-daemon-health; do
+                sleep 0.2
+              done
+            '; then
+              sudo journalctl -u agent-sec-core.service --no-pager -n 100 >&2 || true
+              exit 1
+            fi
           fi
       - name: Verify sandbox
         run: linux-sandbox --help
@@ -136,33 +153,33 @@ jobs:
       - name: Verify deployment
         run: |
           echo "=== Skills ==="
-          ls ~/.copilot-shell/skills/
+          ls /usr/share/anolisa/skills/
           echo "=== Cosh Extension ==="
-          ls ~/.copilot-shell/extensions/agent-sec-core/
-          ls ~/.copilot-shell/extensions/agent-sec-core/hooks/
+          ls /usr/share/anolisa/extensions/agent-sec-core/
+          ls /usr/share/anolisa/extensions/agent-sec-core/hooks/
           echo "=== OpenClaw Plugin ==="
-          ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/
-          ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/dist/
-          ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/
-          test -x ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+          ls /usr/share/anolisa/agent-sec-core/adapters/openclaw/
+          ls /usr/share/anolisa/agent-sec-core/adapters/openclaw/dist/
+          ls /usr/share/anolisa/agent-sec-core/adapters/openclaw/scripts/
+          test -x /usr/share/anolisa/agent-sec-core/adapters/openclaw/scripts/deploy.sh
           echo "=== Hermes Plugin ==="
-          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/
-          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/plugin.yaml
-          ls ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
-          test -x ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+          ls /usr/share/anolisa/agent-sec-core/adapters/hermes/src/
+          ls /usr/share/anolisa/agent-sec-core/adapters/hermes/src/plugin.yaml
+          ls /usr/share/anolisa/agent-sec-core/adapters/hermes/scripts/deploy.sh
+          test -x /usr/share/anolisa/agent-sec-core/adapters/hermes/scripts/deploy.sh
           echo "=== Codex Plugin ==="
-          ls ~/.local/lib/anolisa/sec-core/codex-plugin/
-          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/
-          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
-          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
-          ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
-          ls ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
-          test -x ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
-          ls ~/.local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
+          ls /usr/share/anolisa/agent-sec-core/adapters/codex/
+          ls /usr/share/anolisa/agent-sec-core/adapters/codex/hooks-plugin/hooks/
+          ls /usr/share/anolisa/agent-sec-core/adapters/codex/hooks-plugin/hooks/code_scanner_hook.py
+          ls /usr/share/anolisa/agent-sec-core/adapters/codex/hooks-plugin/hooks/skill_ledger_hook.py
+          ls /usr/share/anolisa/agent-sec-core/adapters/codex/hooks-plugin/.codex-plugin/plugin.json
+          ls /usr/share/anolisa/agent-sec-core/adapters/codex/install.sh
+          test -x /usr/share/anolisa/agent-sec-core/adapters/codex/install.sh
+          ls /usr/share/anolisa/agent-sec-core/adapters/codex/.agents/plugins/marketplace.json
           echo "=== V2 source runtime ==="
-          test -x /usr/local/bin/agent-sec-cli
-          test -x /usr/local/bin/agent-sec-daemon
-          test -x /usr/local/bin/agent-sec-daemon-health
+          test -x /usr/bin/agent-sec-cli
+          test -x /usr/bin/agent-sec-daemon
+          test -x /usr/bin/agent-sec-daemon-health
           test ! -e ~/.local/lib/anolisa/sec-core/venv
       - name: Start V2 daemon for source E2E
         run: |
@@ -204,21 +221,31 @@ jobs:
           echo "agent-sec-daemon did not accept connections" >&2
           cat "$daemon_log" >&2
           exit 1
+      # Python and uv are test-only dependencies, installed after the V2 build.
+      - name: Prepare V2 E2E test runner
+        uses: astral-sh/setup-uv@v8.0.0
       - name: Run V2 E2E tests
         run: |
+          # Installed-layout E2E fixtures retain their adapter names below /opt.
+          # Every fixture points to files installed by the public Makefile.
           test ! -e /opt/agent-sec && test ! -L /opt/agent-sec
-          sudo ln -s "$HOME/.local/lib/anolisa/sec-core" /opt/agent-sec
-          cosh_hooks=/usr/share/anolisa/extensions/agent-sec-core/hooks
-          test -d "$HOME/.copilot-shell/extensions/agent-sec-core/hooks"
-          test ! -e "$cosh_hooks" && test ! -L "$cosh_hooks"
-          sudo install -d -m 0755 "$(dirname "$cosh_hooks")"
-          sudo ln -s "$HOME/.copilot-shell/extensions/agent-sec-core/hooks" "$cosh_hooks"
-          trap 'sudo rm -f /opt/agent-sec /usr/share/anolisa/extensions/agent-sec-core/hooks' EXIT
+          sudo install -d -m 0755 /opt/agent-sec
+          trap 'sudo rm -rf /opt/agent-sec' EXIT
+          adapter_root=/usr/share/anolisa/agent-sec-core/adapters
+          for mapping in codex:codex-plugin qoder:qoder-plugin \
+              qwencode:qwen-code-extension hermes:hermes-plugin openclaw:openclaw-plugin; do
+            adapter="${mapping%%:*}"
+            fixture="${mapping#*:}"
+            test -d "$adapter_root/$adapter"
+            sudo ln -s "$adapter_root/$adapter" "/opt/agent-sec/$fixture"
+          done
+          test -d /usr/share/anolisa/extensions/agent-sec-core/hooks
+          sudo ln -s /usr/share/anolisa/extensions/agent-sec-core /opt/agent-sec/cosh-extension
           sudo env "PATH=$PATH" "UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR" \
             "AGENT_SEC_DATA_DIR=$AGENT_SEC_DATA_DIR" \
             "AGENT_SEC_DAEMON_SOCKET=$AGENT_SEC_DAEMON_SOCKET" \
-            PII_HOOK_ASSET_ROOT="$HOME/.local/lib/anolisa/sec-core" \
-            PII_COSH_HOOK_DIR="$HOME/.copilot-shell/extensions/agent-sec-core/hooks" \
+            PII_HOOK_ASSET_ROOT=/opt/agent-sec \
+            PII_COSH_HOOK_DIR=/usr/share/anolisa/extensions/agent-sec-core/hooks \
             uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
       - name: Show V2 daemon log after E2E failure
         if: failure()
@@ -251,7 +278,6 @@ jobs:
     runs-on: anolisa-k8s-general-ci-x64
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v8.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -282,10 +308,10 @@ jobs:
       - name: Build and install in system mode
         run: |
           build_status=0
-          ./scripts/build-all.sh --component sec-core --system || build_status=$?
+          ./scripts/build-all.sh --component sec-core --system --prefix /usr || build_status=$?
           if (( build_status != 0 )); then
             echo "::group::sec-core build failure log"
-            tail -n 200 target/build.log 2>/dev/null || echo "target/build.log is unavailable"
+            tail -n 200 target/build-all/build.log 2>/dev/null || echo "target/build-all/build.log is unavailable"
             echo "::endgroup::"
             exit "$build_status"
           fi
@@ -322,42 +348,55 @@ jobs:
       - name: Verify system deployment
         run: |
           echo "=== System binaries ==="
-          test -x /usr/local/bin/agent-sec-cli
-          test -x /usr/local/bin/agent-sec-daemon
-          test -x /usr/local/bin/agent-sec-daemon-health
-          test -x /usr/local/bin/linux-sandbox
+          test -x /usr/bin/agent-sec-cli
+          test -x /usr/bin/agent-sec-daemon
+          test -x /usr/bin/agent-sec-daemon-health
+          test -x /usr/bin/linux-sandbox
           echo "=== Cosh Extension ==="
           test -d /usr/share/anolisa/extensions/agent-sec-core/hooks
           echo "=== OpenClaw Plugin ==="
-          test -d /usr/local/lib/anolisa/sec-core/openclaw-plugin/dist
-          test -x /usr/local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+          test -d /usr/share/anolisa/agent-sec-core/adapters/openclaw/dist
+          test -x /usr/share/anolisa/agent-sec-core/adapters/openclaw/scripts/deploy.sh
           echo "=== Hermes Plugin ==="
-          test -f /usr/local/lib/anolisa/sec-core/hermes-plugin/src/plugin.yaml
-          test -x /usr/local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+          test -f /usr/share/anolisa/agent-sec-core/adapters/hermes/src/plugin.yaml
+          test -x /usr/share/anolisa/agent-sec-core/adapters/hermes/scripts/deploy.sh
           echo "=== Codex Plugin ==="
-          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
-          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
-          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
-          test -x /usr/local/lib/anolisa/sec-core/codex-plugin/install.sh
-          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
+          test -f /usr/share/anolisa/agent-sec-core/adapters/codex/hooks-plugin/hooks/code_scanner_hook.py
+          test -f /usr/share/anolisa/agent-sec-core/adapters/codex/hooks-plugin/hooks/skill_ledger_hook.py
+          test -f /usr/share/anolisa/agent-sec-core/adapters/codex/hooks-plugin/.codex-plugin/plugin.json
+          test -x /usr/share/anolisa/agent-sec-core/adapters/codex/install.sh
+          test -f /usr/share/anolisa/agent-sec-core/adapters/codex/.agents/plugins/marketplace.json
           echo "=== Skills ==="
           test -d /usr/share/anolisa/skills
           echo "=== V2 system service ==="
-          test -f /etc/systemd/system/agent-sec-core.service
-          grep -Fx 'ExecStart="/usr/local/bin/agent-sec-daemon" serve' /etc/systemd/system/agent-sec-core.service
-          test ! -e /usr/local/lib/anolisa/sec-core/venv
+          test -f /usr/lib/systemd/system/agent-sec-core.service
+          grep -Fx 'ExecStart="/usr/bin/agent-sec-daemon" serve --skillsec-config "/etc/agent-sec/skillsec.json"' /usr/lib/systemd/system/agent-sec-core.service
+          test ! -e /usr/share/anolisa/agent-sec-core/venv
           test ! -e /usr/lib/systemd/user/agent-sec-core.service
+      - name: Start and verify installed V2 system service
+        run: |
           if [[ -d /run/systemd/system ]]; then
+            trap 'sudo systemctl stop agent-sec-core.service' EXIT
+            sudo systemctl daemon-reload
+            sudo systemctl start agent-sec-core.service
             sudo systemctl is-active --quiet agent-sec-core.service
-            sudo env AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock \
-              AGENT_SEC_HEALTH_TIMEOUT_SECONDS=2 agent-sec-daemon-health
+            # Type=simple becomes active before the daemon binds its RPC socket.
+            if ! sudo timeout --kill-after=5s 30s bash -c '
+              until env AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock \
+                  AGENT_SEC_HEALTH_TIMEOUT_SECONDS=2 /usr/bin/agent-sec-daemon-health; do
+                sleep 0.2
+              done
+            '; then
+              sudo journalctl -u agent-sec-core.service --no-pager -n 100 >&2 || true
+              exit 1
+            fi
           fi
       - name: Verify system install as regular user
         run: |
           sudo useradd -m -s /bin/bash secprobe || true
           sudo -u secprobe env PATH=/usr/local/bin:/usr/bin:/bin node --version
-          sudo -u secprobe /usr/local/bin/agent-sec-cli --version
-          sudo -u secprobe /usr/local/bin/agent-sec-cli scan-code --help >/dev/null
+          sudo -u secprobe /usr/bin/agent-sec-cli --version
+          sudo -u secprobe /usr/bin/agent-sec-cli scan-code --help >/dev/null
       - name: Start V2 daemon for source E2E
         run: |
           runtime_dir="$(sudo mktemp -d /tmp/agent-sec-core-ci.XXXXXX)"
@@ -398,15 +437,30 @@ jobs:
           echo "agent-sec-daemon did not accept connections" >&2
           cat "$daemon_log" >&2
           exit 1
+      # Python and uv are test-only dependencies, installed after the V2 build.
+      - name: Prepare V2 E2E test runner
+        uses: astral-sh/setup-uv@v8.0.0
       - name: Run V2 E2E tests
         run: |
+          # Installed-layout E2E fixtures retain their adapter names below /opt.
+          # Every fixture points to files installed by the public Makefile.
           test ! -e /opt/agent-sec && test ! -L /opt/agent-sec
-          sudo ln -s /usr/local/lib/anolisa/sec-core /opt/agent-sec
-          trap 'sudo rm -f /opt/agent-sec' EXIT
+          sudo install -d -m 0755 /opt/agent-sec
+          trap 'sudo rm -rf /opt/agent-sec' EXIT
+          adapter_root=/usr/share/anolisa/agent-sec-core/adapters
+          for mapping in codex:codex-plugin qoder:qoder-plugin \
+              qwencode:qwen-code-extension hermes:hermes-plugin openclaw:openclaw-plugin; do
+            adapter="${mapping%%:*}"
+            fixture="${mapping#*:}"
+            test -d "$adapter_root/$adapter"
+            sudo ln -s "$adapter_root/$adapter" "/opt/agent-sec/$fixture"
+          done
+          test -d /usr/share/anolisa/extensions/agent-sec-core/hooks
+          sudo ln -s /usr/share/anolisa/extensions/agent-sec-core /opt/agent-sec/cosh-extension
           sudo env "PATH=$PATH" "UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR" \
             "AGENT_SEC_DATA_DIR=$AGENT_SEC_DATA_DIR" \
             "AGENT_SEC_DAEMON_SOCKET=$AGENT_SEC_DAEMON_SOCKET" \
-            PII_HOOK_ASSET_ROOT=/usr/local/lib/anolisa/sec-core \
+            PII_HOOK_ASSET_ROOT=/opt/agent-sec \
             PII_COSH_HOOK_DIR=/usr/share/anolisa/extensions/agent-sec-core/hooks \
             uv run --python 3.11.6 --no-project --with pytest --with pyyaml make -C src/agent-sec-core test-e2e-source-build-v2
       - name: Show V2 daemon log after E2E failure
