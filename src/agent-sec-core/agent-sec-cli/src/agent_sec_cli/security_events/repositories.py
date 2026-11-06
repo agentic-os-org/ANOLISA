@@ -137,7 +137,10 @@ class SecurityEventRepository:
         stmt = (
             select(SecurityEventRecord)
             .where(*conditions)
-            .order_by(SecurityEventRecord.timestamp_epoch.desc())
+            .order_by(
+                SecurityEventRecord.timestamp_epoch.desc(),
+                SecurityEventRecord.event_id.desc(),
+            )
             .limit(limit)
             .offset(offset)
         )
@@ -294,7 +297,10 @@ class SecurityEventRepository:
             source = (
                 select(SecurityEventRecord.event_id)
                 .where(*conditions)
-                .order_by(SecurityEventRecord.timestamp_epoch.desc())
+                .order_by(
+                    SecurityEventRecord.timestamp_epoch.desc(),
+                    SecurityEventRecord.event_id.desc(),
+                )
                 .offset(offset)
                 .subquery()
             )
@@ -367,7 +373,10 @@ class SecurityEventRepository:
             source = (
                 select(column.label("group_value"))
                 .where(*conditions)
-                .order_by(SecurityEventRecord.timestamp_epoch.desc())
+                .order_by(
+                    SecurityEventRecord.timestamp_epoch.desc(),
+                    SecurityEventRecord.event_id.desc(),
+                )
                 .offset(offset)
                 .subquery()
             )
@@ -424,7 +433,10 @@ class SecurityEventRepository:
         latest_stmt = (
             select(SecurityEventRecord)
             .where(*conditions)
-            .order_by(SecurityEventRecord.timestamp_epoch.desc())
+            .order_by(
+                SecurityEventRecord.timestamp_epoch.desc(),
+                SecurityEventRecord.event_id.desc(),
+            )
             .limit(latest_limit)
         )
 

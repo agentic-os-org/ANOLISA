@@ -381,6 +381,30 @@ class TestSqliteEventReader:
         assert summary.by_run == {"run-1": 1, "run-2": 1}
         assert [event.event_id for event in summary.latest_events] == ["newer-deny"]
 
+    def test_query_and_summary_use_event_id_for_equal_timestamps(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        for event_id in ("event-a", "event-z"):
+            writer.write(
+                SecurityEvent(
+                    event_id=event_id,
+                    event_type="scan",
+                    category="code_scan",
+                    timestamp="2026-05-19T00:00:00+00:00",
+                    details={},
+                )
+            )
+
+        assert [event.event_id for event in reader.query()] == [
+            "event-z",
+            "event-a",
+        ]
+        summary = reader.summary(latest_limit=2)
+        assert [event.event_id for event in summary.latest_events] == [
+            "event-z",
+            "event-a",
+        ]
+
     def test_query_rejects_naive_time_range_at_repository_boundary(
         self, writer: SqliteEventWriter, reader: SqliteEventReader
     ) -> None:
