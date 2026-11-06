@@ -2682,18 +2682,33 @@ fn replace_embedded_json_claims(
     EmbeddedJsonReplacement::Complete
 }
 
-fn push_borrowed_claim(claims: &mut Vec<Claim>, claim: ClaimRef<'_>) {
-    claims.push(claim.to_claim());
+type EarlyClaimSet<'a> = std::collections::HashMap<ClaimClass, std::collections::HashSet<&'a str>>;
+
+fn push_borrowed_claim<'a>(
+    claims: &mut Vec<Claim>,
+    early_seen: &mut Option<EarlyClaimSet<'a>>,
+    claim: ClaimRef<'a>,
+) {
+    let is_new = early_seen
+        .as_mut()
+        .is_none_or(|seen| seen.entry(claim.class).or_default().insert(claim.text));
+    if is_new {
+        claims.push(claim.to_claim());
+    }
 }
 
-fn push_structural_claims<'a>(claims: &mut Vec<Claim>, word: &'a str) {
+fn push_structural_claims<'a>(
+    claims: &mut Vec<Claim>,
+    early_seen: &mut Option<EarlyClaimSet<'a>>,
+    word: &'a str,
+) {
     if !needs_indexed_structural_scan(word)
         && !word.contains("http://")
         && !word.contains("https://")
         && !word.chars().any(|c| STRUCTURAL_SEPARATORS.contains(&c))
     {
         if let Some(claim) = classify_structural_segment_ref(word) {
-            push_borrowed_claim(claims, claim);
+            push_borrowed_claim(claims, early_seen, claim);
         }
         return;
     }
@@ -2701,7 +2716,7 @@ fn push_structural_claims<'a>(claims: &mut Vec<Claim>, word: &'a str) {
         match segment {
             Cow::Borrowed(segment) => {
                 if let Some(claim) = classify_structural_segment_ref(segment) {
-                    push_borrowed_claim(claims, claim);
+                    push_borrowed_claim(claims, early_seen, claim);
                 }
             }
             Cow::Owned(segment) => {
@@ -2730,9 +2745,18 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
     let normalized = separate_bracketed_comma_lists(text);
     let has_double_quotes = text.contains('"');
     let embedded_json_possible = root_json.is_none() && has_double_quotes;
+    let mut early_seen =
+        (root_json.is_none() && !has_double_quotes).then(std::collections::HashMap::new);
+    let mut processed_words = std::collections::HashSet::new();
+    let mut recent_fields = Vec::new();
     let mut pending_embedded_json: Option<(usize, String)> = None;
     for word in normalized.split_whitespace() {
+        // A word completed without pending JSON can only repeat claims removed by dedup.
+        if pending_embedded_json.is_none() && processed_words.contains(word) {
+            continue;
+        }
         let word_claim_start = claims.len();
+        let word_cacheable = root_json.is_none() && pending_embedded_json.is_none();
         let json_word = word;
         let attached_after_residue = if root_json.is_none() && split_attached_value(word).is_none()
         {
@@ -2772,7 +2796,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         });
         let word_stands_alone = whole_word_claim.is_some();
         if let Some(claim) = whole_word_claim {
-            push_borrowed_claim(&mut claims, claim);
+            push_borrowed_claim(&mut claims, &mut early_seen, claim);
         }
         // Tool output is JSON far more often than prose, and its structure glues
         // values to their surroundings: `stargazers_count=242391`, or
@@ -2786,7 +2810,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // can still carry independent serialized fields.
         if word_stands_alone && let Some(attached) = attached_after_residue {
             let prefix = &json_word[..json_word.len() - attached.len()];
-            push_structural_claims(&mut claims, prefix);
+            push_structural_claims(&mut claims, &mut early_seen, prefix);
         }
         let mut field_json_replay = false;
         if !word_stands_alone {
@@ -2799,15 +2823,19 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 field_json_replay = pending_embedded_json.is_none();
                 let last_field = fields.len().checked_sub(1);
                 for (index, field) in fields.into_iter().enumerate() {
+                    // Without embedded JSON, a repeated field cannot add a new claim.
+                    if !embedded_json_possible && recent_fields.contains(&field) {
+                        continue;
+                    }
                     let field_claim_start = claims.len();
                     let complete_path = || {
                         classify_complete_word_ref(trim_attached_decoration(field))
                             .filter(|claim| claim.class == ClaimClass::Path)
                     };
                     if let Some(claim) = classify_attached_value_ref(field).or_else(complete_path) {
-                        push_borrowed_claim(&mut claims, claim);
+                        push_borrowed_claim(&mut claims, &mut early_seen, claim);
                     } else {
-                        push_structural_claims(&mut claims, field);
+                        push_structural_claims(&mut claims, &mut early_seen, field);
                     }
                     if embedded_json_possible {
                         let replacement =
@@ -2839,9 +2867,17 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                             }
                         }
                     }
+                    if !embedded_json_possible {
+                        if recent_fields.len() == 4 {
+                            recent_fields.rotate_left(1);
+                            recent_fields[3] = field;
+                        } else {
+                            recent_fields.push(field);
+                        }
+                    }
                 }
             } else {
-                push_structural_claims(&mut claims, json_word);
+                push_structural_claims(&mut claims, &mut early_seen, json_word);
             }
         }
         // Segmented fields already replayed their JSON; a whole-word pass would
@@ -2880,6 +2916,9 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                     }
                 }
             }
+        }
+        if word_cacheable && pending_embedded_json.is_none() {
+            processed_words.insert(json_word);
         }
     }
     // In valid JSON, a comma separates values rather than grouping digits.
@@ -3181,11 +3220,17 @@ fn extract_quoted(text: &str) -> Vec<Claim> {
 /// Drop repeats, keeping first-appearance order so the earliest mention of a
 /// fact is the one a finding points at.
 fn dedup(claims: Vec<Claim>) -> Vec<Claim> {
-    let mut seen = std::collections::HashSet::new();
-    claims
+    let mut seen = std::collections::HashMap::new();
+    for (position, claim) in claims.into_iter().enumerate() {
+        seen.entry((claim.class, claim.text))
+            .or_insert((position, claim.value));
+    }
+    let mut claims: Vec<_> = seen
         .into_iter()
-        .filter(|c| seen.insert((c.class, c.text.clone())))
-        .collect()
+        .map(|((class, text), (position, value))| (position, Claim { text, class, value }))
+        .collect();
+    claims.sort_unstable_by_key(|(position, _)| *position);
+    claims.into_iter().map(|(_, claim)| claim).collect()
 }
 
 #[cfg(test)]
