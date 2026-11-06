@@ -342,8 +342,15 @@ fn check_orphan_statistics(dim: &str) {
     if dim == "perf" {
         assert_eq!(mixed_stats, human_stats);
     } else {
-        assert_eq!(mixed_stats["calls"], human_stats["calls"]);
-        assert_eq!(mixed_stats["headroom"], human_stats["headroom"]);
+        // The human reply is still the only boundary. Its preserved tool
+        // evidence is replayed into the existing next call, not a new call.
+        let mut expected_calls = human_stats["calls"].clone();
+        expected_calls[1]["tool_results"] = json!(4);
+        assert_eq!(mixed_stats["calls"], expected_calls);
+        let mut expected_headroom = human_stats["headroom"].clone();
+        assert_eq!(expected_headroom["total_input_tok"], 3);
+        expected_headroom["total_input_tok"] = json!(7);
+        assert_eq!(mixed_stats["headroom"], expected_headroom);
     }
     // A partial transcript containing only results still parses as an empty conversation.
     assert_eq!(batch_statistics(&[orphan], dim), {

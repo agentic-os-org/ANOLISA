@@ -116,6 +116,8 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
 
     // Accumulators for content categories.
     let mut tool_result_chars: usize = 0;
+    // Replayed user context is content, but is not a captured call's result.
+    let mut agent_result_chars: usize = 0;
     let mut tool_input_chars: usize = 0;
     let mut thinking_chars: usize = 0;
     let mut text_chars: usize = 0;
@@ -151,11 +153,6 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
                         .entry((call.function_name.clone(), sig))
                         .or_insert(0) += 1;
                 }
-                for result in step.results() {
-                    let chars = result.content.as_deref().unwrap_or("").chars().count();
-                    tool_result_chars += chars;
-                    total_chars += chars;
-                }
             }
             "user" => {
                 let chars = step.message.as_deref().unwrap_or("").chars().count();
@@ -168,6 +165,14 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
                 total_chars += chars;
             }
             _ => {}
+        }
+        for result in step.results() {
+            let chars = result.content.as_deref().unwrap_or("").chars().count();
+            tool_result_chars += chars;
+            if step.source == "agent" {
+                agent_result_chars += chars;
+            }
+            total_chars += chars;
         }
     }
 
@@ -200,8 +205,8 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
         .iter()
         .filter(|(_, &count)| count >= REDUNDANT_MIN_COUNT)
         .map(|((name, sig), &count)| {
-            let avg_result_chars = if tool_result_chars > 0 && !tool_sig_counts.is_empty() {
-                tool_result_chars / tool_sig_counts.values().sum::<usize>().max(1)
+            let avg_result_chars = if agent_result_chars > 0 && !tool_sig_counts.is_empty() {
+                agent_result_chars / tool_sig_counts.values().sum::<usize>().max(1)
             } else {
                 0
             };
@@ -574,21 +579,21 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     },
                     parse_usage(step),
                 );
-
-                // Tool results become replayed history for subsequent steps.
-                for result in step.results() {
-                    let toks = estimate_tokens(result.content.as_deref().unwrap_or(""));
-                    b.hist_tool += toks;
-                    if toks > TOOL_TRIM_MIN {
-                        b.hist_trimmable += (toks as f64 * TOOL_TRIM_FRAC).round() as usize;
-                    }
-                }
             }
             "user" => {
                 user_turn += 1;
                 b.hist_user += estimate_tokens(step.message.as_deref().unwrap_or(""));
             }
             _ => {} // system steps feed the static region, already injected
+        }
+        // Replayed context can carry observations on a user step when the
+        // issuing call predates the captured conversation.
+        for result in step.results() {
+            let toks = estimate_tokens(result.content.as_deref().unwrap_or(""));
+            b.hist_tool += toks;
+            if toks > TOOL_TRIM_MIN {
+                b.hist_trimmable += (toks as f64 * TOOL_TRIM_FRAC).round() as usize;
+            }
         }
     }
 
@@ -1219,8 +1224,9 @@ pub(crate) fn extract_waste_candidates_from(
     // Second pass over ATIF steps for evidence: tool outputs and large user
     // inputs. The agent-step ordinal is the replay step index. (Backtrack
     // signals live in the turn ledger, keyed by the same ordinal.)
-    let mut tool_outputs: Vec<(usize, String, usize, String)> = Vec::new(); // step, name, tokens, snippet
-                                                                            // (first replay turn, replays, tokens, snippet)
+    // (step, name, tokens, snippet, replays)
+    let mut tool_outputs: Vec<(usize, String, usize, String, usize)> = Vec::new();
+    // (first replay turn, replays, tokens, snippet)
     let mut user_inputs: Vec<(usize, usize, usize, String)> = Vec::new();
 
     let mut turn_idx: i64 = -1;
@@ -1261,7 +1267,13 @@ pub(crate) fn extract_waste_candidates_from(
                                     .map(|c| c.function_name.clone())
                             })
                             .unwrap_or_else(|| "unknown".to_string());
-                        tool_outputs.push((step_no, name, toks, trunc(text, SNIPPET_CHARS)));
+                        tool_outputs.push((
+                            step_no,
+                            name,
+                            toks,
+                            trunc(text, SNIPPET_CHARS),
+                            total_steps.saturating_sub(step_no + 1),
+                        ));
                     }
                 }
             }
@@ -1286,8 +1298,24 @@ pub(crate) fn extract_waste_candidates_from(
             }
             _ => {}
         }
+        if !step.is_agent() {
+            let first_replay = (turn_idx + 1) as usize;
+            for result in step.results() {
+                let text = result.content.as_deref().unwrap_or("");
+                let tokens = estimate_tokens(text);
+                if tokens >= TOOL_TRIM_MIN && first_replay < total_steps {
+                    tool_outputs.push((
+                        first_replay,
+                        "replayed context".into(),
+                        tokens,
+                        trunc(text, SNIPPET_CHARS),
+                        total_steps - first_replay,
+                    ));
+                }
+            }
+        }
     }
-    tool_outputs.sort_by_key(|out| std::cmp::Reverse(out.2));
+    tool_outputs.sort_by_key(|out| std::cmp::Reverse((out.2 * out.4, out.2)));
 
     // Agent-first: Rust only computes ratio metrics as evidence; every candidate
     // with underlying data goes to the LLM, which checks the admission criteria
@@ -1405,12 +1433,12 @@ pub(crate) fn extract_waste_candidates_from(
         let facts = tool_outputs
             .iter()
             .take(EVIDENCE_TOP_N)
-            .map(|(s, n, tk, _)| format!("step {} {} {} tok", s, n, fmt_k(*tk)))
+            .map(|(s, n, tk, _, _)| format!("step {} {} {} tok", s, n, fmt_k(*tk)))
             .collect::<Vec<_>>()
             .join("；");
         let top_m9 = tool_outputs
             .first()
-            .map(|(step, _, toks, _)| bill_share(toks * total_steps.saturating_sub(*step + 1)))
+            .map(|(_, _, toks, _, replays)| bill_share(toks * replays))
             .unwrap_or(0.0);
         candidates.push(WasteCandidate {
             id: "tool_output".into(),
