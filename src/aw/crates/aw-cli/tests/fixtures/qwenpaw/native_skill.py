@@ -28,6 +28,12 @@ class SkillTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
+    def failure_log(self):
+        return self.assertLogs(PLUGIN.__name__, level="ERROR")
+
+    def selection_metadata(self):
+        return sys.modules[SPEC.name + ".aw_skill"].metadata()
+
     def skill(self, directory, body):
         path = self.root / directory
         path.mkdir()
@@ -96,7 +102,7 @@ class SkillTests(unittest.IsolatedAsyncioTestCase):
         directory = self.skill("first", "ORIGINAL")
         async def edit(agent, payload):
             (directory / "SKILL.md").write_text("changed")
-        with self.assertLogs(PLUGIN.__name__, level="ERROR"):
+        with self.failure_log():
             _, entered, result = await self.execute([str(directory)], before=edit)
         self.assertFalse(entered)
         self.assertEqual(result[0].state.value, "denied")
@@ -141,7 +147,7 @@ class SkillTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertEqual(sys.modules[SPEC.name + ".aw_skill"].metadata(), {})
+        self.assertEqual(self.selection_metadata(), {})
 
     async def test_concurrent_native_calls_keep_their_own_skill_snapshots(self):
         first = self.skill("first", "ONE")

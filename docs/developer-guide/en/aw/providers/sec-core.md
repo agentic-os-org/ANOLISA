@@ -287,11 +287,11 @@ and does not remove Hooks. Keeping both tool registrations causes duplicate scan
 
 ## Validate Skills before loading
 
-The [SDK policy example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
-uses the same Provider for Qoder SDK and QwenPaw. Set `config.skill: true` and
+Reuse the Provider from the [SDK policy example](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
+for Qoder SDK, QwenPaw and AgentScope. Set `config.skill: true` and
 add a `tool.before` step with `operation: check_skill`, `effects: [observe, block]`,
-`on_error: block`, and selectors `native:qoder-sdk:Skill` and
-`native:qwenpaw:Skill`. The shared `mode: block` allows only `pass`.
+`on_error: block`, and selectors `native:qoder-sdk:Skill`,
+`native:qwenpaw:Skill` and `native:agentscope:Skill`. The shared `mode: block` allows only `pass`.
 `tools` continues to map code inputs; Skill checks do not need an input pointer.
 A Skill-only Provider may omit `tools` when `skill: true`.
 
@@ -320,9 +320,9 @@ is an error. Risk decisions and failed checks remain separate in AW auditing.
 Choose either AW or the native Skill Ledger Hook for this check to avoid
 performing it twice. Existing native permission refusals retain authority.
 
-Skill checking requires ordinary resident `aw run`; `--reloadable` admission
-rejects it. Idle updates of ordinary resident policies retain their existing
-task snapshot boundary. Resolution and pinning run only when a Skill check is
+Skill checking uses the supported ordinary `aw run` factories; Qoder SDK and
+QwenPaw `--reloadable` admission rejects it. Idle updates retain each Adapter's
+existing support and task snapshot boundary. Resolution and pinning run only when a Skill check is
 selected; other policies keep native Skill behavior.
 
 Qoder SDK 1.0.56 / Worker 1.1.78 checks a unique local asset among the catalogs
@@ -354,7 +354,8 @@ produce resolution errors. Plugin-qualified names and built-in Skill sources
 are unsupported. The checked public Hook argument snapshot retains the Adapter's
 existing contract for subsequent native argument changes.
 
-QwenPaw 2.2.2.post1 / AgentScope 2.0.10 uses the actual SkillViewer and activated
+Standalone AgentScope 2.0.6 and QwenPaw 2.2.2.post1 / AgentScope 2.0.10 use
+the same actual SkillViewer resolver and activated
 Toolkit groups. Native duplicate-name precedence selects the object. AW verifies
 that its in-memory markdown matches `SKILL.md`, checks its canonical directory,
 and pins that object for this invocation. Source edits during checking block
@@ -362,8 +363,13 @@ loading. Unavailable or memory-only sources fail resolution. Concurrent calls
 retain separate snapshots. AW decodes supplied files with AgentScope's UTF-8-SIG
 semantics, including BOM. The stock QwenPaw 2.2.2.post1 App runtime cache itself
 skips BOM assets before AW runs; that native loading path remains unsupported.
-Read-file loading, automatic context injection and
-Skill-internal commands require their own policies.
+Standalone AgentScope 2.0.6 also skips BOM files in its native loader. Its
+`skill-objects` suite checks the actual Toolkit; `skill-provider` exercises
+the real AW and sec-core Provider with a controlled Ledger CLI and model HTTP
+endpoint, including trust states, backend failure, timeout and next-model
+instruction withholding. Real signing/daemon authorization stays covered by
+the Qoder SDK/QwenPaw Ledger suites. Read-file loading, automatic context
+injection and Skill-internal commands require their own policies.
 
 Hermes local chat uses `native:hermes:skill_view` with the same Provider and
 `check_skill` step. The Adapter obtains the actual native registry handler and
