@@ -4,8 +4,9 @@
 
 The read-only BPF Source captures synthetic OpenSSL writes and correlates real
 AW fixture identities. Paced fixtures pass, supporting further low-rate pilot
-validation. Actual Qoder/SDK compatibility has not been tested. Pilot scope and
-remaining integration work are in [Hook integration](ARCHITECTURE_NOTES.md).
+validation. SDK experiments now cover tool-dispatch protection and local model
+transport without native Hooks. Pilot scope and remaining integration work are in
+[Hook integration](ARCHITECTURE_NOTES.md).
 
 ## Tested scope
 
@@ -13,7 +14,7 @@ Tests ran on 2026-11-07 on Linux x86-64, kernel 6.6.102, OpenSSL 3.0.12,
 Python 3.11.6, Clang 17, GCC 12.3 and libbpf 1.2.2. AW was built from the baseline
 in [SOURCE.md](SOURCE.md). The fixture sends synthetic bytes to a loopback TLS
 receiver and verifies its byte count and SHA-256. No model account or real Agent
-traffic was involved. Existing Yama=0, perf_event_paranoid=2 and
+traffic was involved in that OpenSSL matrix. Existing Yama=0, perf_event_paranoid=2 and
 unprivileged_bpf_disabled=2 remained unchanged.
 
 | Coverage | Result |
@@ -21,7 +22,7 @@ unprivileged_bpf_disabled=2 remained unchanged.
 | Bounded event matrix | 69/69 pass: two SSL APIs, 1/4/8/16 threads, new threads, four creation waves, size boundaries, count/rate caps and backpressure |
 | Lifecycle | 21/21 pass: same-PID executable change and 20 repeated target exits |
 | Strengthened kill/exit regression | 12/12 pass |
-| Unit checks | 13/13 pass on native x86-64 and local AArch64 |
+| Unit checks | 30/30 pass on native x86-64 and local AArch64, including SDK classification, auth relay and artifact checks |
 | Real AW registration | 200 uniquely associated events; 200 events retain same-PID multi-instance ambiguity; owner exit clears bindings |
 | Collector death | All eight main-matrix SIGKILL targets complete with receiver-confirmed bytes; final loss summary is absent |
 | Buffer handling | Per-thread alternating reuse and shared immutable buffers pass; concurrent mutation remains non-atomic |
@@ -31,6 +32,55 @@ The AW fixture uses the existing empty-route Qoder SDK lifecycle profile and
 same-PID exec. It establishes registration/correlation behavior, without real SDK
 Hooks or child-Worker adoption. Kernel payload-read failure has unit projection
 coverage only. Live AgentSight coexistence and actual PID reuse remain untested.
+
+## SDK boundaries without native Hooks
+
+Pinned versions: Qoder SDK 1.0.56 / Worker 1.1.78, Claude Agent SDK 0.2.88,
+LangChain Core 1.7.6 / OpenAI integration 1.0.3, Python MCP 1.26.0,
+JavaScript MCP 1.32.2 and Node 22.22.0.
+
+Qoder used a preinstalled SDK tree whose Worker metadata identifies linux-arm64.
+The x86-64 experiment executed its JavaScript authentication, catalog and model
+selection paths; native platform assets and a fresh x86-64 Worker installation
+were not validated. The account gate below prevents a model-transport conclusion.
+
+| Experiment | Actual result | Supported conclusion |
+| --- | --- | --- |
+| OS launcher + three SDK tool dispatchers | 30/30 cases pass, including allow/deny and five side-effect types | Seccomp rejects subsequent exec and write-opening files with EPERM; tool bodies have already entered |
+| LangChain startup injection | 20/20 sync/async cases pass | Patching `BaseTool.run/arun` blocks before the tool body; allowed calls retain their effects |
+| Direct LangChain function call | 1/1 counterexample passes | Calling `.func()` bypasses that runtime entry guard |
+| Launcher parent-death cleanup | 3/3 focused cases pass after the parent-identity race fix | Baseline exec, denied exec and supervisor SIGKILL cleanup verified |
+| LangChain local model call | Completed; 2 SSL_write_ex events, 644 bytes, 2 digests, zero drops | One digest matches the entire 101-byte request body received by the local server |
+| Claude Agent SDK local model call | Completed; actual bundled CLI sender is `UNSUPPORTED` | Sender socket ownership verified; Python frontend has zero hits and the sender lacks supported dynamic libssl |
+| Qoder authenticated local direct model | Authentication and catalog succeed; account custom-provider capability is disabled, so the case is `BLOCKED` | Model policy runs once, but no local TLS connection or collection starts; transport coverage remains unverified |
+
+The 51 tool cases use real SDK dispatch APIs with synthetic calls and no model
+roundtrip. File/exec denial is a fixed syscall policy. Memory-only tools and
+writes through inherited descriptors still succeed; a mixed tool mutates memory
+before its file write is denied. This policy is not a complete sandbox or a
+semantic `tool.before` event. The LangChain guard is a version-pinned startup
+adapter with a preset decision, without an AW policy call or formal action receipt.
+The final 51-case rerun includes the launcher cleanup fix and stricter artifact
+checks: denied files must be absent; blocked inherited descriptors stay empty.
+Five regression tests reject empty or partially written artifacts as proof of denial.
+
+Transport tests use actual SDK model calls to a loopback synthetic TLS server,
+private HOME directories and no native Hooks. Socket ownership identifies the
+real sender before TLS proceeds. Model completion, probe support and capture
+accounting are checked separately. Qoder uses an operator-authorized credential
+only for allowlisted official authentication and read-only bootstrap metadata.
+Inference egress stays blocked. Its public `settings.providers` direct path keeps
+the real account capability check; the tested account did not meet it. Inline
+`resolveModel` objects select server-side BYOK and cannot route that server to the
+fixture loopback. Both offline authentication and authenticated capability blocks
+return nonzero and are not counted as capture success. The final Qoder call ended
+with `error_during_execution`; the refined BLOCKED classification was verified
+by replaying its recorded capability/result evidence and unit tests, without
+repeating authentication. SDK classification, relay
+and artifact checks are included in the local/native Python test suite. These runs do not
+establish Qoder CLI compatibility, arbitrary running-Agent attachment or AW
+registration of real SDK Workers. SDK latency/CPU overhead and a production
+pilot have not been measured.
 
 ## Workload envelope
 
@@ -63,8 +113,10 @@ the target with SIGTRAP. The original native acceptance had five such failures.
 This failure applies even to small deployments, and payload rewrite remains
 unavailable. BPF collector-death results apply only to the read-only Source.
 
-Next validate pinned Qoder/SDK versions, one managed Worker and one active Query
-at the chosen task rate. Confirm the actual TLS sender, process ownership,
+Next use an eligible account to continue Qoder direct-model validation and
+complete support for the unsupported Claude
+sender path, then validate one managed Worker and one active Query at the chosen
+task rate. Confirm process ownership,
 collection lifecycle and fixed privilege assets before a restricted read-only
 pilot. Extreme-concurrency optimization can follow separately.
 

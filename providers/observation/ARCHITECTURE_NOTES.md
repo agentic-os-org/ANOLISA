@@ -28,20 +28,41 @@ and [SDK](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) guides.
 | `tool.after` observe/replace | No tool result or authorized replacement slot | A result-delivery boundary with adoption confirmation |
 | Model request checks/rewrite | TLS entry metadata with unknown send adoption | Request reassembly, protocol semantics, authorized actions and receiver validation; unimplemented |
 
-Transport observation can run independently of native Hooks. Actual Qoder CLI
-and SDK Worker TLS paths have not been validated here. The resolver recognizes
-dynamic symbols in mapped `libssl.so`; static linking, other TLS libraries,
-other ABIs or a different sender process may be unsupported. Product names or
-the use of Node do not establish compatibility.
+Transport observation runs independently of native Hooks. Real LangChain model
+calls now pass capture validation. Claude Agent SDK completes its local model
+call, but its actual bundled sender lacks supported dynamic libssl. Qoder's
+authenticated direct-model fixture is blocked by the tested account's custom
+provider capability; its transport path remains unverified. See the
+[measured SDK matrix](POC_REPORT.md#sdk-boundaries-without-native-hooks).
+The resolver recognizes mapped `libssl.so` symbols; static linking, other TLS
+libraries and other ABIs require separate support.
 
-The current Source cannot fully replace Qoder unified Hooks. Digests contain no
-tool name, call ID or model-message structure, and TLS fragments do not map
-one-to-one to application events. Lower concurrency simplifies ownership and
-capacity validation; semantic boundaries still need implementation. A future
-fixed-version runtime-instrumentation Adapter could replace native Hooks by
-intercepting actual input/execution/result boundaries, constructing unified
-events, calling AW synchronously and verifying block or replace_result adoption.
-That requires separate development and acceptance; SSL_write hits do not prove it.
+## High-code SDK tools: two enforcement boundaries
+
+A tool that computes in memory can produce no TLS or OS operation with tool
+semantics. A transport digest contains no tool name, arguments or call identity.
+The following experiments therefore validate their own execution boundaries:
+
+| Mechanism | Verified behavior | Remaining work for unified Hooks |
+| --- | --- | --- |
+| External OS launcher | Across Qoder SDK, Claude Agent SDK and LangChain dispatchers, seccomp denies exec and write-open operations | Define the supported side-effect policy and lifecycle; tool bodies already entered, memory and inherited-FD effects remain possible |
+| Version-pinned runtime injection | LangChain sync/async `BaseTool.run/arun` checks block before tool entry without native callbacks | Build a registered Adapter with call identity, arguments, synchronous AW decisions, timeout policy and adoption checks; direct function calls bypass the current guard |
+| Read-only TLS Source | Captures supported sender writes without SDK hooks | Supply provenance and Coverage to a query consumer; no automatic tool invocation or enforcement boundary |
+
+This supports continuing with a controlled-start, fixed-version runtime Adapter
+for semantic checks, supplemented by OS side-effect restrictions and transport
+evidence. The experiment does not intercept every arbitrary already-running
+Agent. Qoder and Claude runtime tool-entry guards remain to be tested in their
+full Agent loops; current cases exercise actual SDK tool dispatch only. Qoder's
+and Claude's existing AW MCP adapters already place checks before registered tool
+handlers, providing an implementation reference for a new optional entry adapter.
+
+For a small first scope, support one known tool dispatcher and one active Query.
+Admission must declare that exact path. Reject an unsupported SDK version or
+missing guard before admitting the protected task; do not infer universal tool
+coverage from process discovery. The current fixture guard only returns a preset
+block result and has no AW control authority. This experiment leaves production
+Adapter contracts and native capabilities unchanged.
 
 ## Framework responsibilities
 
@@ -91,8 +112,8 @@ The first acceptance should establish usefulness on real low-rate tasks.
 | Fix the privilege entrypoint | Pin reviewed program/object assets, constrain attachment targets and handle helper/collector exits and permission failures |
 | Connect the query consumer | Implement the read-only identity bridge and independent Provider; test missing/unknown evidence consumption |
 
-Paced TLS fixtures pass, but actual Qoder/SDK attachment and a restricted
-production pilot have not run. The lab helper loads operator-selected shared
+Paced TLS fixtures and LangChain model transport pass; Qoder model transport,
+Claude sender support and a restricted production pilot remain open. The lab helper loads operator-selected shared
 libraries and BPF objects using existing sudo authorization; persistent use must
 restrict this to reviewed assets. README commands launch synthetic fixtures only.
 Completing this restricted acceptance can support a separately approved read-only

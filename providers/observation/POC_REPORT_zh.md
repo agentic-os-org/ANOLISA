@@ -3,7 +3,8 @@
 [English](POC_REPORT.md)
 
 只读 BPF Source 已采集合成 OpenSSL 写入并关联真实 AW fixture 身份。带间隔的用例
-通过，可以继续验证低频试点；真实 Qoder/SDK 兼容性尚未实测。试点范围与剩余接入工作
+通过，可以继续验证低频试点；SDK 实验已覆盖无原生 Hook 的工具分发保护与本机模型
+传输。试点范围与剩余接入工作
 见[统一 Hook 接入说明](ARCHITECTURE_NOTES_zh.md)。
 
 ## 已测范围
@@ -11,7 +12,7 @@
 2026-11-07 在 Linux x86-64 上运行，内核 6.6.102、OpenSSL 3.0.12、Python 3.11.6、
 Clang 17、GCC 12.3、libbpf 1.2.2。AW 从 [SOURCE.md](SOURCE.md) 固定基线构建。
 Fixture 向本机 TLS 服务端发送合成字节，核对接收字节数和 SHA-256，未使用模型账号或
-真实 Agent 流量。原有 Yama=0、perf_event_paranoid=2、unprivileged_bpf_disabled=2
+真实 Agent 流量；该说明对应 OpenSSL 矩阵。原有 Yama=0、perf_event_paranoid=2、unprivileged_bpf_disabled=2
 保持不变。
 
 | 覆盖 | 结果 |
@@ -19,7 +20,7 @@ Fixture 向本机 TLS 服务端发送合成字节，核对接收字节数和 SHA
 | 有界事件矩阵 | 69/69 通过：两种 SSL API、1/4/8/16 线程、新线程、四轮线程创建、大小边界、数量/速率上限及拥塞 |
 | 生命周期 | 21/21 通过：同 PID 可执行文件变化、20 次重复目标退出 |
 | 加强强杀/退出回归 | 12/12 通过 |
-| 单测 | 原生 x86-64、本地 AArch64 均 13/13 通过 |
+| 单测 | 原生 x86-64、本地 AArch64 均 30/30 通过，含 SDK 分类、认证代理及副作用检查 |
 | 真实 AW 登记 | 单实例 200 条关联正确，同 PID 多实例 200 条保留歧义；owner 退出后 binding 归零 |
 | 采集器强杀 | 主矩阵 8 次 SIGKILL 后目标均完成且服务端字节正确；缺少最终丢失 summary |
 | 缓冲区 | 每线程交替复用、共享只读缓冲区通过；并发修改仍为非原子快照 |
@@ -28,6 +29,45 @@ Fixture 向本机 TLS 服务端发送合成字节，核对接收字节数和 SHA
 AW fixture 使用现有 Qoder SDK 空路由生命周期 profile 和同 PID exec，验证登记与
 关联行为，未验证真实 SDK Hook 或子 Worker 接管。内核读取正文失败仅覆盖单测投影；
 真实 AgentSight 共存和实际 PID 复用尚未测试。
+
+## 不使用原生 Hook 的 SDK 验证
+
+固定版本为 Qoder SDK 1.0.56 / Worker 1.1.78、Claude Agent SDK 0.2.88、
+LangChain Core 1.7.6 / OpenAI 集成 1.0.3、Python MCP 1.26.0、JavaScript MCP 1.32.2、
+Node 22.22.0。
+
+Qoder 使用预装 SDK 树，Worker 元数据标记为 linux-arm64。本次 x86-64 实验执行了
+其中的 JavaScript 认证、目录及模型选择路径；原生平台资产和全新 x86-64 Worker 安装
+未验收。下述账号能力门槛阻止了模型传输验证。
+
+| 实验 | 实际结果 | 能支持的结论 |
+| --- | --- | --- |
+| OS launcher + 三种 SDK 工具分发 | 30/30 通过，覆盖 allow/deny 和五类副作用 | Seccomp 以 EPERM 拒绝后续 exec 和写方式打开文件；工具函数已经进入 |
+| LangChain 启动注入 | 同步/异步 20/20 通过 | 在 `BaseTool.run/arun` 检查可阻断工具体进入；allow 保留原副作用 |
+| LangChain 直接调用原函数 | 1/1 反例通过 | `.func()` 直接调用绕过该运行时入口检查 |
+| Launcher 父进程退出清理 | 修复父进程身份竞态后 3/3 专项通过 | 验证基线 exec、拒绝 exec、supervisor SIGKILL 后子进程终止回收 |
+| LangChain 本机模型调用 | 完成；2 次 SSL_write_ex、644 字节、2 个摘要、零丢失 | 一个摘要与服务端收到的完整 101 字节请求体一致 |
+| Claude Agent SDK 本机模型调用 | 完成；实际 bundled CLI 发送进程为 `UNSUPPORTED` | Socket 归属已核对；Python 前端零命中，发送进程缺少受支持的动态 libssl |
+| Qoder 认证后的本机直连模型 | 认证与目录读取成功；账号未开放自定义 Provider，记为 `BLOCKED` | 模型选择回调执行一次，但本机 TLS 连接和采集均未启动，传输覆盖未验证 |
+
+51 项工具用例通过真实 SDK 分发 API 发起合成调用，未运行模型驱动的 Agent 循环。
+文件/exec 拒绝采用固定 syscall 策略。纯内存工具和继承可写 FD 仍可产生副作用；
+混合工具在文件写入被拒绝前已经修改内存。该策略只覆盖列出的 syscall，不构成完整
+沙箱或语义 `tool.before` 事件。LangChain 检查是固定版本的启动适配器，使用预设决策，
+尚未调用 AW 策略或形成正式动作回执。最终 51 项真实复跑已包含 launcher 清理修正
+和严格副作用断言：拒绝的文件必须不存在，阻断的继承 FD 必须保持空文件；五项回归单测
+确保空文件或部分写入不会被当作阻断成功。
+
+传输测试通过真实 SDK 向本机合成 TLS 模型服务发请求，使用私有 HOME 且不启用原生
+Hook；在 TLS 继续前用 Socket 归属核对实际发送进程。模型完成、探针支持、采集核算分别
+判断。Qoder 使用操作者授权凭据，仅向精确放行的官方认证及只读初始化接口发送请求，
+外部推理始终禁止。公开 `settings.providers` 直连路径保留真实账号能力检查，实测账号
+未满足该条件。内联 `resolveModel` 对象采用服务端 BYOK，无法将该服务端路由到 fixture
+的 loopback。离线认证阻塞和认证后的能力阻塞均返回非零，未计为采集通过。SDK 分类、
+代理和副作用检查已纳入本地及原生 Python 单测。最终 Qoder 调用返回
+`error_during_execution`；细化后的 BLOCKED 分类通过该次能力/结果证据回放和单测验证，
+未为分类调整重复认证。当前结果不覆盖 Qoder CLI、任意运行中 Agent 的通用
+附着，以及真实 SDK Worker 的 AW 登记；SDK 延迟/CPU 开销和生产试点尚未测量。
 
 ## 负载范围
 
@@ -55,8 +95,9 @@ ptrace 对照保持默认关闭：强杀 tracer 可导致目标 SIGTRAP，原生
 失败。该故障在小规模部署中仍成立，payload 改写继续关闭。BPF 采集器强杀结果仅适用于
 只读 Source。
 
-下一步按固定 Qoder/SDK 版本、一个受管 Worker、一个活跃 Query 和选定任务速率验收，
-确认真实 TLS 发送进程、归属、采集生命周期及固定权限资产，再开展受限只读试点。
+下一步使用具备所需能力的账号继续 Qoder 直连验证，补齐 Claude 未支持的发送路径，
+再按一个受管 Worker、
+一个活跃 Query 和选定任务速率验收归属、采集生命周期及固定权限资产，开展受限只读试点。
 极端并发优化可独立后置。
 
 复现命令见 [README](README_zh.md)。原生 C/BPF 警告检查、Black、Python 单测、文档
