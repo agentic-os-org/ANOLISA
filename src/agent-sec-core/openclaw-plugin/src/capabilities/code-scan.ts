@@ -8,6 +8,65 @@ import {
   truncateApprovalText,
 } from "../utils.js";
 
+/** Tools that can disable or remove a plugin without running a shell command. */
+const PLUGIN_ADMIN_TOOLS = new Set(["plugins", "tool_call", "openclaw"]);
+/** Actions that would remove agent-sec's protection from the gateway. */
+const SELF_PROTECT_ACTIONS = new Set(["disable", "uninstall"]);
+/** Plugin ids that carry agent-sec's protections. */
+const SELF_PROTECT_TARGETS = new Set(["agent-sec", "agent-sec-core", "sec-core", "agent-security"]);
+/** `agent-sec` as a whole token, e.g. inside `global:agent-sec/dist/index.js`. */
+const SELF_PROTECT_TARGET_TOKEN = /(^|[^a-z0-9_-])agent-sec([^a-z0-9_-]|$)/;
+
+type PluginMutation = { action: string; target: string };
+
+function firstString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === "string");
+}
+
+/**
+ * Match the plugin ids that carry agent-sec, ignoring a version, scope or
+ * resolved path: `agent-sec`, `agent-sec@1.1.2`, `global:agent-sec/dist/x.js`.
+ */
+function isSelfProtectTarget(target: string): boolean {
+  const normalized = target.trim().toLowerCase();
+  const lastSegment = normalized.split("/").pop() ?? normalized;
+  const name = (lastSegment.split("@")[0] ?? lastSegment).split(":").pop() ?? lastSegment;
+  return SELF_PROTECT_TARGETS.has(name) || SELF_PROTECT_TARGET_TOKEN.test(normalized);
+}
+
+/**
+ * Detect a plugin disable or uninstall issued through a native admin tool.
+ *
+ * The gateway dispatches `before_tool_call` for the `plugins` tool with the
+ * action in `params`, and for the `tool_call` wrapper with the same fields one
+ * level down in `args`; both the `pluginId` and `name` spellings are accepted
+ * because the model uses them interchangeably. These arguments are not shell
+ * text, so scan-code has nothing to inspect and the block must happen here.
+ */
+function extractPluginMutation(event: {
+  toolName: string;
+  params?: Record<string, unknown>;
+}): PluginMutation | undefined {
+  if (!PLUGIN_ADMIN_TOOLS.has(event.toolName)) return undefined;
+  const params = (event.params ?? {}) as Record<string, unknown>;
+  const args = (params.args && typeof params.args === "object" ? params.args : {}) as Record<
+    string,
+    unknown
+  >;
+  const action = firstString(params.action, args.action);
+  const target = firstString(
+    params.pluginId,
+    params.packageName,
+    params.name,
+    args.pluginId,
+    args.packageName,
+    args.name,
+  );
+  if (action === undefined || !SELF_PROTECT_ACTIONS.has(action.toLowerCase())) return undefined;
+  if (target === undefined || !isSelfProtectTarget(target)) return undefined;
+  return { action: action.toLowerCase(), target };
+}
+
 export const codeScan: SecurityCapability = {
   id: "scan-code",
   name: "Code Scanner",
@@ -49,6 +108,18 @@ export const codeScan: SecurityCapability = {
       try {
         if (!hookEnabled) {
           return undefined;
+        }
+
+        // Self-protect first: the native plugin tools carry no shell text, so
+        // the scanner below never sees an attempt to disable this plugin.
+        const mutation = extractPluginMutation(event);
+        if (mutation) {
+          const msg = `[agent-sec-core] 自我保护：该操作将禁用 agent-sec 安全插件（${mutation.action} ${mutation.target}）。出于安全原因，AI agent 无法执行此操作。`;
+          report("warn", `SELF-PROTECT block (${event.toolName}) — ${mutation.action} ${mutation.target}`, {
+            outcome: "self-protect-native",
+            decision: "block",
+          });
+          return { block: true, blockReason: msg };
         }
 
         // 只拦截 shell 类工具
