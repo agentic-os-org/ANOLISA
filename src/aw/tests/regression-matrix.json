@@ -1046,6 +1046,10 @@
     "submit-qoder-cli": {
       "target": "aw-cli/test/launcher",
       "test": "qoder_version::qoder_submission_checks_native_identity_and_failure_actions"
+    },
+    "hermes-submission": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "adapters::hermes::tests::submission_requires_native_text_identity_and_quiet_query"
     }
   },
   "agents": {
@@ -1190,6 +1194,14 @@
           ],
           "replace_result": [
             "final-replacement"
+          ]
+        },
+        "input.submit": {
+          "observe": [
+            "hermes-submission"
+          ],
+          "block": [
+            "hermes-submission"
           ]
         }
       },

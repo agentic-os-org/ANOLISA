@@ -16,6 +16,7 @@ parser.add_argument("--event")
 parser.add_argument("--step")
 parser.add_argument("--on-error")
 parser.add_argument("--literal")
+parser.add_argument("--close-event")
 args = parser.parse_args()
 payload = json.loads(sys.stdin.read())
 with Path(os.environ["AW_HERMES_TRACE"]).open("a") as handle:
@@ -23,6 +24,10 @@ with Path(os.environ["AW_HERMES_TRACE"]).open("a") as handle:
         "profile_sentinel": os.environ.get("AW_HERMES_PROFILE_SENTINEL"),
         "tmpdir": os.environ.get("TMPDIR"), "home": os.environ.get("HOME"),
         "literal": args.literal}) + "\n")
+if args.close_event:
+    raise SystemExit(0)
+if args.step == "error":
+    raise SystemExit(7)
 if args.step == "compress":
     print(json.dumps({"aw_replacement": "compact"}))
     raise SystemExit(0)

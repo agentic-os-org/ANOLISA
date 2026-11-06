@@ -63,7 +63,7 @@ Explicit Adapters can use `aw instance` to register, confirm Ready, query and re
 | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |

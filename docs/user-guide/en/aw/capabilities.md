@@ -13,7 +13,7 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 | --- | --- | --- | --- | --- | --- | --- |
 | `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |

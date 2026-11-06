@@ -98,6 +98,8 @@ and a managed `runWorker` factory. It enables the same prompt/PII operations.
 The [Pi guide](../../../developer-guide/en/aw/agents/pi.md#check-user-submissions)
 explains literal text, unsupported input paths, refusal recovery and cancellation.
 
+Hermes quiet single-query CLI supports the same prompt/PII checks. Use the [Hermes submission example](../../../../src/aw/crates/aw-service/examples/aw.hermes-submission.yaml) and [entrypoint instructions](../../../developer-guide/en/aw/agents/hermes.md#check-user-submissions).
+
 ## Verify checks
 
 Ask the native Agent to execute these commands in separate requests, keeping native permission

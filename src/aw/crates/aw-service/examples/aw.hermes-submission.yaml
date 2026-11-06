@@ -1,0 +1,43 @@
+# Replace executable/socket paths; start the sec-core daemon separately.
+# Install the AW plugin into the existing Hermes profile before launching.
+apiVersion: aw/v1alpha1
+kind: AWConfiguration
+metadata: {name: hermes-submission}
+spec:
+  daemon: {startup: on_demand, endpoint: auto, state_dir: auto}
+  execution: {guarantee: native_hook, default_event_budget_ms: 5000}
+  audit: {enabled: true, payload: metadata_only}
+  agents:
+    hermes:
+      adapter: hermes
+      argv: [/absolute/venv/bin/hermes, chat, --oneshot, --quiet]
+  providers:
+    security:
+      protocol: aw-provider/v1alpha1
+      transport:
+        type: stdio
+        location: agent
+        argv: [/absolute/bin/aw-provider-sec-core, --cli, /absolute/bin/agent-sec-cli,
+               --socket, /absolute/run/sec-core.sock]
+      timeout_ms: 2000
+      max_output_bytes: 4096
+      config:
+        version: 1
+        mode: block
+        prompt: {mode: block, scan_mode: fast}
+        pii: {input_mode: block, output_mode: observe}
+  events:
+    input.submit:
+      enabled: true
+      required: true
+      steps:
+        - id: prompt
+          provider: security
+          operation: scan_prompt
+          effects: [observe, block]
+          on_error: block
+        - id: user-pii
+          provider: security
+          operation: scan_user_input
+          effects: [observe, block]
+          on_error: block

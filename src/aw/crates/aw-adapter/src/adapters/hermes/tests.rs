@@ -648,3 +648,39 @@ fn binding() -> NativeContext {
         cwd: "/work".into(),
     }
 }
+
+#[test]
+fn submission_requires_native_text_identity_and_quiet_query() {
+    let native = json!({"hook_event_name":"AWInputSubmit", "cwd":binding().cwd,
+        "session_id":"session", "aw_turn_id":"turn", "input_text":"hello"});
+    let event = Hermes
+        .normalize(&binding(), "input.submit", &native)
+        .unwrap();
+    assert_eq!(event["input"]["text"], "hello");
+    assert_eq!(event["turn_id"], "turn");
+    assert!(event.get("tool").is_none());
+    for field in ["session_id", "aw_turn_id", "input_text"] {
+        let mut missing = native.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(Hermes
+            .normalize(&binding(), "input.submit", &missing)
+            .is_err());
+    }
+    for args in [
+        vec!["chat", "--quiet", "--query", "hello"],
+        vec!["chat", "-Q", "--query-file=/tmp/prompt"],
+    ] {
+        assert!(
+            check_submission_args(&args.iter().map(OsString::from).collect::<Vec<_>>()).is_ok()
+        );
+    }
+    for args in [
+        vec!["chat"],
+        vec!["chat", "--query", "hello"],
+        vec!["chat", "--quiet", "--query", "hello", "--image=a.png"],
+    ] {
+        assert!(
+            check_submission_args(&args.iter().map(OsString::from).collect::<Vec<_>>()).is_err()
+        );
+    }
+}

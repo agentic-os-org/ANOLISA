@@ -28,7 +28,7 @@ pub(super) fn callback(args: &Arguments) -> Exit {
             if (args
                 .flags
                 .get("--adapter")
-                .is_some_and(|v| v == "claude-sdk")
+                .is_some_and(|v| matches!(v.as_str(), "claude-sdk" | "hermes"))
                 && args
                     .flags
                     .get("--event")

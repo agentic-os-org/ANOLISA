@@ -81,6 +81,9 @@ impl Adapter for Hermes {
                 "Hermes callback event or working directory differs from its binding".into(),
             );
         }
+        if event == "input.submit" {
+            return super::submission::normalize(binding, native, "hermes", "input_text");
+        }
         let session = identifier(&native["session_id"], "session_id")?;
         let call = identifier(&native["extra"]["tool_call_id"], "extra.tool_call_id")?;
         let request = identifier(&native["extra"]["api_request_id"], "extra.api_request_id")?;
@@ -284,6 +287,9 @@ impl PreparedLaunch for Prepared {
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if !self.native_steps(steps, "input.submit").is_empty() {
+            check_submission_args(&self.input.command.args)?;
+        }
         for event in ["tool.before", "tool.after"] {
             if !self.native_steps(steps, event).is_empty() {
                 let budget = self.budget(event)?;
@@ -300,7 +306,8 @@ impl PreparedLaunch for Prepared {
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
         let mut events = BTreeMap::new();
         let mut hooks = Vec::new();
-        for event in ["tool.before", "tool.after"] {
+        let mut submissions = Vec::new();
+        for event in ["input.submit", "tool.before", "tool.after"] {
             let selected = self.native_steps(context.steps, event);
             if selected.is_empty() {
                 continue;
@@ -316,7 +323,12 @@ impl PreparedLaunch for Prepared {
                 }) {
                     hook["skill_check"] = json!(true);
                 }
-                hooks.push(hook);
+                let callbacks = if event == "input.submit" {
+                    &mut submissions
+                } else {
+                    &mut hooks
+                };
+                callbacks.push(hook);
             }
             events.insert(
                 event.into(),
@@ -341,7 +353,7 @@ impl PreparedLaunch for Prepared {
             "binding":context.binding_path.to_str().ok_or("Hermes binding path must be UTF-8")?,
             "profile":self.profile.to_str().ok_or("Hermes profile path must be UTF-8")?,
             "cwd":self.input.command.cwd.to_str().ok_or("Hermes working directory must be UTF-8")?,
-            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "revision":self.revision});
+            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "submissions":submissions, "revision":self.revision});
         let path = context
             .files
             .write("hermes-launch.json", &serde_json::to_vec(&launch)?)?;
@@ -387,7 +399,8 @@ impl Prepared {
         adapter::native_steps(
             steps,
             event,
-            adapter::observation_enabled(&self.input.document, &self.input.target),
+            event != "input.submit"
+                && adapter::observation_enabled(&self.input.document, &self.input.target),
         )
     }
 
@@ -417,10 +430,31 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 
 fn event_name(event: &str) -> Result<&'static str> {
     match event {
+        "input.submit" => Ok("AWInputSubmit"),
         "tool.before" => Ok("pre_tool_call"),
         "tool.after" => Ok("post_tool_call"),
         _ => Err("unsupported Hermes hook event".into()),
     }
+}
+
+fn check_submission_args(args: &[OsString]) -> Result<()> {
+    let options: Vec<_> = args
+        .iter()
+        .filter_map(|arg| arg.to_str())
+        .map(|arg| arg.split('=').next().unwrap_or(arg))
+        .collect();
+    if !options
+        .iter()
+        .any(|arg| matches!(*arg, "--query" | "-q" | "--query-file"))
+        || !options.iter().any(|arg| matches!(*arg, "--quiet" | "-Q"))
+        || options.contains(&"--image")
+    {
+        return Err(
+            "Hermes input.submit requires --quiet with --query or --query-file and no --image"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn check_args(args: &[OsString]) -> Result<()> {

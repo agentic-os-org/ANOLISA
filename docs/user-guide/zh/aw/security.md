@@ -90,6 +90,8 @@ Pi worker 使用 [Pi 输入检查示例](../../../../src/aw/crates/aw-service/ex
 [Pi 指南](../../../developer-guide/zh/aw/agents/pi.md#检查用户输入)
 说明字面量文本、未支持入口、拒绝后的恢复与取消行为。
 
+Hermes quiet 单查询 CLI 支持相同的 prompt/PII 检查。使用 [Hermes 输入示例](../../../../src/aw/crates/aw-service/examples/aw.hermes-submission.yaml)，按[入口说明](../../../developer-guide/zh/aw/agents/hermes.md#检查用户提交)运行。
+
 ## 验证检查
 
 在原生 Agent 中分两次请求执行下列命令，保持原生权限确认开启。

@@ -57,3 +57,16 @@ This supports the main `SKILL.md` of directory-based `skill_view` calls. Plugin-
 sources, legacy flat files and `file_path` references return resolution errors;
 `on_error: block` denies their loading. Slash commands, preload, direct file reads
 and inline Skill commands need their own policy boundaries.
+
+## Check user submissions
+
+Use the [submission configuration](../../../../../src/aw/crates/aw-service/examples/aw.hermes-submission.yaml), set the Hermes, sec-core Provider, CLI and socket paths, then install the plugin with the same profile. It runs `scan_prompt` and `scan_user_input` before the quiet single-query CLI constructs its Agent:
+
+```bash
+aw run --config /absolute/aw.hermes-submission.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile -- --query 'Summarize the current task.'
+```
+
+The configured argv includes `chat --oneshot --quiet`. `--query-file /absolute/prompt.txt` can replace `--query`. A policy denial exits the CLI with code 2 and zero model calls; the checked text never enters the native conversation. Callback faults follow `on_error`, and pending scanners are closed before dispatch or rejection. Inputs must be nonblank UTF-8 text and fit within 256 KiB of encoded callback data.
+
+Enabling `input.submit` requires a quiet query and rejects interactive chat or `--image`. This boundary checks the text after native query-file parsing and before image routing; later native context or Skill expansion retains its separate contract. Native API request plugins remain responsible for their own rewrites. Without submission steps, the existing native chat options remain available. Python factories, gateway sessions and interactive `/steer` are outside this CLI entrypoint.
