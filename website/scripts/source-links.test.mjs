@@ -23,6 +23,10 @@ test('GitHub source links reject MDX heading IDs in both languages', async (t) =
   }
   assert.match(await checkMarkdownSourceLink(root, 'entry.md', 'missing/index.md'),
     /missing Markdown target/);
+  assert.match(await checkMarkdownSourceLink(root, 'entry.md', '../outside.md'),
+    /leaves the repository root/);
+  assert.deepEqual(resolveMarkdownSourceLink(root, 'entry.md', '../outside.md'),
+    {invalid: true, reason: 'outside repository'});
 });
 
 test('GitHub anchors include formatted headings and explicit HTML anchors, excluding code', () => {
