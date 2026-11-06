@@ -283,10 +283,79 @@ fn thousands_separator_does_not_spawn_fragment_claims() {
 }
 
 #[test]
+fn attached_paths_do_not_swallow_following_fields() {
+    let claims = extract_claims("path=/tmp,count=500");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    assert_eq!(number_values("path=/tmp,count=500"), vec![500.0]);
+}
+
+#[test]
+fn attached_dates_do_not_swallow_following_fields() {
+    for separator in [',', ';', '|'] {
+        let text = format!("date=2024-01-01{separator}count=500");
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Date),
+            vec!["2024-01-01"],
+            "{text}"
+        );
+        assert_eq!(number_values(&text), vec![500.0], "{text}");
+    }
+}
+
+#[test]
+fn attached_values_trim_sentence_decoration() {
+    for text in ["path=/tmp.", "path=/tmp,"] {
+        let claims = extract_claims(text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    }
+    let claims = extract_claims("date=2024-01-01.");
+    assert_eq!(texts_of(&claims, ClaimClass::Date), vec!["2024-01-01"]);
+}
+
+#[test]
+fn attached_relative_paths_keep_leading_dots() {
+    for (text, expected) in [
+        ("path=./report.txt", "./report.txt"),
+        ("path=../report.txt", "../report.txt"),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![expected],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn attached_field_boundaries_do_not_depend_on_claim_values() {
+    let text = "path=/tmp,count=42";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    assert!(number_values(text).is_empty(), "{claims:?}");
+
+    let text = "date=2024-01-01,url=https://x";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Date), vec!["2024-01-01"]);
+    assert_eq!(texts_of(&claims, ClaimClass::Url), vec!["https://x"]);
+}
+
+#[test]
 fn undecorated_urls_keep_trailing_asterisks() {
     let url = "https://example.test/x*";
     let claims = extract_claims(url);
     assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url]);
+}
+
+#[test]
+fn first_url_determines_attached_url_end() {
+    let text = "u=(http://a),n=500,v=https://b";
+    let claims = extract_claims(text);
+    let urls = texts_of(&claims, ClaimClass::Url);
+    assert!(urls.contains(&"http://a".to_string()), "{claims:?}");
+    assert!(urls.contains(&"https://b".to_string()), "{claims:?}");
+    assert_eq!(number_values(text), vec![500.0], "{claims:?}");
 }
 
 #[test]
