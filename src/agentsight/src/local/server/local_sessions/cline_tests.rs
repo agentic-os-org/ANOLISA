@@ -55,8 +55,9 @@ async fn discovered_cline_sessions_are_readable() {
     fs::write(
         task.join("ui_messages.json"),
         json!([
-            {"ts":1763071200000i64,"type":"say","say":"task","text":"inspect auth","conversationHistoryIndex":0},
-            {"ts":1763071201000i64,"type":"say","say":"api_req_started","text":"{\"tokensIn\":10,\"tokensOut\":5,\"cost\":0.01}","conversationHistoryIndex":1}
+            // These UI records precede the first API user message.
+            {"ts":1763071200000i64,"type":"say","say":"task","text":"inspect auth","conversationHistoryIndex":-1},
+            {"ts":1763071201000i64,"type":"say","say":"api_req_started","text":"{\"tokensIn\":10,\"tokensOut\":5,\"cost\":0.01}","conversationHistoryIndex":-1}
         ])
         .to_string(),
     )
@@ -101,6 +102,12 @@ async fn discovered_cline_sessions_are_readable() {
             assert_eq!(document["extra"]["project"], "demo-app");
             assert_eq!(document["steps"][0]["message"], "inspect auth");
             assert_eq!(document["final_metrics"]["total_prompt_tokens"], 10);
+            let response = &document["steps"][1];
+            assert_eq!(response["source"], "agent");
+            assert_eq!(response["message"], "done");
+            assert_eq!(response["metrics"]["prompt_tokens"], 10);
+            assert_eq!(response["metrics"]["completion_tokens"], 5);
+            assert_eq!(response["timestamp"], "2025-11-13T22:00:01.000Z");
         } else {
             assert_eq!(body.as_ref(), fs::read(&api_path).unwrap());
         }
