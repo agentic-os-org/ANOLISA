@@ -646,8 +646,9 @@ mod tests {
         std::fs::write(
             task.join("ui_messages.json"),
             serde_json::json!([
-                {"ts":1763071200000i64,"type":"say","say":"task","text":"inspect auth","conversationHistoryIndex":0},
-                {"ts":1763071201000i64,"type":"say","say":"api_req_started","text":"{\"tokensIn\":10,\"tokensOut\":5,\"cost\":0.01}","conversationHistoryIndex":1}
+                // These UI records precede the first API user message.
+                {"ts":1763071200000i64,"type":"say","say":"task","text":"inspect auth","conversationHistoryIndex":-1},
+                {"ts":1763071201000i64,"type":"say","say":"api_req_started","text":"{\"tokensIn\":10,\"tokensOut\":5,\"cost\":0.01}","conversationHistoryIndex":-1}
             ])
             .to_string(),
         )
@@ -671,6 +672,12 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
         assert_eq!(doc["session_id"], "task-123");
         assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
+        let response = &doc["steps"][1];
+        assert_eq!(response["source"], "agent");
+        assert_eq!(response["message"], "done");
+        assert_eq!(response["metrics"]["prompt_tokens"], 10);
+        assert_eq!(response["metrics"]["completion_tokens"], 5);
+        assert_eq!(response["timestamp"], "2025-11-13T22:00:01.000Z");
     }
 
     #[test]

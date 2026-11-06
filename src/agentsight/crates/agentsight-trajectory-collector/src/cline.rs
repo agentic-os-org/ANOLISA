@@ -82,6 +82,7 @@ pub fn task_projects(tasks_root: &Path) -> HashMap<String, String> {
 #[derive(Debug, Clone, Copy)]
 struct RequestUsage {
     ts_ms: Option<i64>,
+    has_usage: bool,
     prompt: u64,
     completion: u64,
     cache_read: u64,
@@ -184,15 +185,17 @@ pub fn append_ui_records(session_path: &Path, events: &mut Vec<serde_json::Value
 /// `MessageParam`s) and share the converter with Qoder/Claude Code. Ui
 /// records contribute timestamps — via `conversationHistoryIndex` when
 /// present, else the surrounding request's ts — and per-assistant-record
-/// usage from `api_req_started`. Usage pairing is sequential, so an
-/// interruption annotation record may absorb the next request's metrics;
-/// the trajectory totals always sum every request exactly once.
+/// usage from `api_req_started`. History indexes anchor requests to their
+/// responses; index-less histories retain sequential request slots. The
+/// trajectory totals always sum every request exactly once.
 pub fn convert_cline_events(
     events: &[serde_json::Value],
     agent_name: &str,
 ) -> Result<AtifTrajectory> {
+    let api_records: Vec<&serde_json::Value> = events.iter().filter(|e| is_api_record(e)).collect();
     let mut requests: VecDeque<RequestUsage> = VecDeque::new();
-    let mut ts_by_api_index: HashMap<u64, i64> = HashMap::new();
+    let mut indexed_requests: HashMap<usize, RequestUsage> = HashMap::new();
+    let mut ts_by_api_index: HashMap<usize, i64> = HashMap::new();
     let mut cost_sum = 0.0f64;
     let mut cost_seen = false;
     let mut usage_seen = false;
@@ -202,34 +205,56 @@ pub fn convert_cline_events(
     let mut totals = (0u64, 0u64, 0u64, 0u64); // prompt, completion, cache_read, cache_write
 
     for event in events.iter().filter(|e| is_ui_record(e)) {
+        let is_req_start = event.get("say").and_then(|v| v.as_str()) == Some("api_req_started");
         if let (Some(idx), Some(ts)) = (
             event
                 .get("conversationHistoryIndex")
-                .and_then(|v| v.as_u64()),
+                .and_then(|v| v.as_i64()),
             event.get("ts").and_then(|v| v.as_i64()),
         ) {
-            ts_by_api_index.entry(idx).or_insert(ts);
+            if !is_req_start {
+                // UI text can be saved while the API history still ends at
+                // the user record. The initial task precedes even that row.
+                let is_task = event.get("say").and_then(|v| v.as_str()) == Some("task");
+                let target = if is_task && idx == -1 {
+                    Some(0)
+                } else {
+                    usize::try_from(idx).ok()
+                };
+                if let Some(index) = target {
+                    let index = if !is_task
+                        && api_records
+                            .get(index)
+                            .and_then(|r| r.get("role"))
+                            .and_then(|r| r.as_str())
+                            == Some("user")
+                    {
+                        index.saturating_add(1)
+                    } else {
+                        index
+                    };
+                    ts_by_api_index.entry(index).or_insert(ts);
+                }
+            }
         }
-        let is_req_start = event.get("say").and_then(|v| v.as_str()) == Some("api_req_started");
         if !is_req_start {
             continue;
         }
         let text = event.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let Ok(usage) = serde_json::from_str::<serde_json::Value>(text) else {
-            continue;
-        };
+        let usage =
+            serde_json::from_str::<serde_json::Value>(text).unwrap_or(serde_json::Value::Null);
         let prompt = usage.get("tokensIn").and_then(|v| v.as_u64());
         let completion = usage.get("tokensOut").and_then(|v| v.as_u64());
-        if prompt.is_none() && completion.is_none() {
-            // Placeholders and failed requests carry no usage.
-            continue;
-        }
         if let Some(cost) = usage.get("cost").and_then(|v| v.as_f64()) {
             cost_sum += cost;
             cost_seen = true;
         }
         let req = RequestUsage {
             ts_ms: event.get("ts").and_then(|v| v.as_i64()),
+            has_usage: prompt.is_some()
+                || completion.is_some()
+                || usage.get("cacheReads").and_then(|v| v.as_u64()).is_some()
+                || usage.get("cacheWrites").and_then(|v| v.as_u64()).is_some(),
             prompt: prompt.unwrap_or(0),
             completion: completion.unwrap_or(0),
             cache_read: usage
@@ -245,11 +270,38 @@ pub fn convert_cline_events(
         totals.1 += req.completion;
         totals.2 += req.cache_read;
         totals.3 += req.cache_write;
-        usage_seen = true;
-        requests.push_back(req);
+        usage_seen |= req.has_usage;
+        if let Some(index) = event
+            .get("conversationHistoryIndex")
+            .and_then(|v| v.as_i64())
+        {
+            // Request markers are written before the next user API record;
+            // older writers can instead point at that user record itself.
+            let anchor_is_user = usize::try_from(index)
+                .ok()
+                .and_then(|i| api_records.get(i))
+                .and_then(|r| r.get("role"))
+                .and_then(|r| r.as_str())
+                == Some("user");
+            if let Some(response) = index
+                .checked_add(if anchor_is_user { 1 } else { 2 })
+                .and_then(|i| usize::try_from(i).ok())
+                .filter(|i| {
+                    api_records
+                        .get(*i)
+                        .and_then(|r| r.get("role"))
+                        .and_then(|r| r.as_str())
+                        == Some("assistant")
+                })
+            {
+                indexed_requests.insert(response, req);
+            }
+        } else {
+            // Preserve failed/unfinished request slots even without tokens.
+            requests.push_back(req);
+        }
     }
 
-    let api_records: Vec<&serde_json::Value> = events.iter().filter(|e| is_api_record(e)).collect();
     let mut wrapped = Vec::with_capacity(api_records.len());
     for (index, record) in api_records.iter().enumerate() {
         let role = record.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -268,12 +320,16 @@ pub fn convert_cline_events(
         };
 
         let mut message = serde_json::json!({"role": role, "content": content});
+        let response_index = if role == "user" {
+            index.saturating_add(1)
+        } else {
+            index
+        };
+        let indexed = indexed_requests.get(&response_index);
+        let request = indexed.or_else(|| requests.front());
         if role == "assistant" {
-            // Each successful request produces exactly one assistant record,
-            // so sequential pairing recovers per-step usage; the consumed
-            // request also dates the response when no index mapping exists.
-            if let Some(req) = requests.front() {
-                if req.prompt > 0 || req.completion > 0 {
+            if let Some(req) = request {
+                if req.has_usage {
                     message["usage"] = serde_json::json!({
                         // Anthropic usage excludes cache from input_tokens;
                         // the shared converter folds the cache fields back in.
@@ -286,11 +342,11 @@ pub fn convert_cline_events(
             }
         }
         let timestamp = ts_by_api_index
-            .get(&(index as u64))
+            .get(&index)
             .copied()
-            .or_else(|| requests.front().and_then(|req| req.ts_ms))
+            .or_else(|| request.and_then(|req| req.ts_ms))
             .and_then(iso_from_ms);
-        if role == "assistant" {
+        if role == "assistant" && indexed.is_none() {
             // Consumed only after both the user turn ahead (which peeked the
             // same request for its timestamp) and this response used it.
             requests.pop_front();
