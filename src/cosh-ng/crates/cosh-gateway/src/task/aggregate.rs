@@ -230,7 +230,11 @@ impl TaskAggregate {
             && self.planned_executions.is_empty()
             && matches!(
                 self.run_outcome,
-                RunOutcome::None | RunOutcome::Active | RunOutcome::Suspended | RunOutcome::Failed
+                RunOutcome::None
+                    | RunOutcome::Active
+                    | RunOutcome::Suspended
+                    | RunOutcome::Failed
+                    | RunOutcome::Uncertain
             )
     }
 
@@ -372,9 +376,11 @@ impl TaskAggregate {
                 if self.state == TaskState::Running && self.run_outcome != RunOutcome::Active {
                     return self.invalid(event);
                 }
-                if self.cancellation_requested {
-                    return self.invalid(event);
-                }
+                // The request flag is monotone: a durable cancel can race a
+                // retryable RunFailed and leave the re-requested Run already
+                // cancellation-requested, so re-requesting the same active Run
+                // reduces as an idempotent no-op instead of wedging the Task
+                // between the rejected duplicate and the refused retry.
                 self.cancellation_requested = true;
             }
             TaskEvent::RunCancelled { run_id, .. } => {
@@ -392,10 +398,10 @@ impl TaskAggregate {
                 if self.run_outcome == RunOutcome::Succeeded {
                     return self.invalid(event);
                 }
-                if !self.cancellation_requested
-                    || self.run_outcome == RunOutcome::Uncertain
-                    || !self.planned_executions.is_empty()
-                {
+                // An uncertain Run outcome still converges through durable
+                // cancellation once nothing is planned: retrying would
+                // blind-side the executor, but the ledger can settle.
+                if !self.cancellation_requested || !self.planned_executions.is_empty() {
                     return self.invalid(event);
                 }
                 self.state = TaskState::Suspended;

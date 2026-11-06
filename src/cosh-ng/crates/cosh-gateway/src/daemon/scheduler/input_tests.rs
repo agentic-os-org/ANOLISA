@@ -1373,101 +1373,101 @@ fn released_suspended_run_is_not_recovered_again_or_allowed_to_starve_queued_wor
 }
 
 #[test]
-fn uncertain_suspended_run_rejects_cancellation_without_partial_events() {
+fn uncertain_suspended_run_settles_cancellation_atomically() {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let database = root.path().join("gateway.db");
     let installation = InstallationId::new();
     let actor_id = actor_id_for_uid(&installation, 1000).unwrap();
-    let mut coordinator = TaskCoordinator::open(&database, Some(installation.clone())).unwrap();
+    let mut coordinator = TaskCoordinator::open(&database, Some(installation)).unwrap();
     let task = coordinator
         .submit(&actor_id, submission("uncertain-cancel"))
         .unwrap();
-    drop(coordinator);
-    let probe = Arc::new(Mutex::new(InputProbe::default()));
-    let mut scheduler = TaskScheduler::open(
-        &database,
-        Some(installation),
-        BoundedOpaque::new("uncertain-cancel-worker").unwrap(),
-        InputFactory {
-            probe,
-            fail_dispatch: false,
-        },
-    )
-    .unwrap();
-    let started_at = now_ms().unwrap().saturating_add(1);
-    scheduler.tick(started_at).unwrap();
-    let running = scheduler
-        .coordinator
-        .store
-        .load_task(&task.task_id)
-        .unwrap();
-    let run_id = running.active_run_id().unwrap().clone();
-    let execution_id = ExecutionId::new();
-    let committed_at_ms = now_ms().unwrap().saturating_add(1).max(started_at + 1);
-    let planned = scheduler.coordinator.event(
+    let queued = coordinator.store.load_task(&task.task_id).unwrap();
+    let run_id = queued.active_run_id().unwrap().clone();
+    let committed_at_ms = now_ms().unwrap().saturating_add(1);
+    let started = coordinator.event(
         &actor_id,
         &task.task_id,
         Some(&run_id),
-        running.revision().saturating_add(1),
+        queued.revision().saturating_add(1),
+        committed_at_ms,
+        TaskEvent::RunStarted {
+            run_id: run_id.clone(),
+        },
+    );
+    let execution_id = ExecutionId::new();
+    let planned = coordinator.event(
+        &actor_id,
+        &task.task_id,
+        Some(&run_id),
+        queued.revision().saturating_add(2),
         committed_at_ms,
         TaskEvent::ExecutionPlanned {
             execution_id: execution_id.clone(),
             permit_id: PermitId::new(),
         },
     );
-    let uncertain = scheduler.coordinator.event(
+    let uncertain = coordinator.event(
         &actor_id,
         &task.task_id,
         Some(&run_id),
-        running.revision().saturating_add(2),
+        queued.revision().saturating_add(3),
         committed_at_ms,
         TaskEvent::ExecutionUncertain {
             execution_id,
             reason: UncertaintyCode::TransportLost,
         },
     );
-    scheduler
-        .coordinator
+    coordinator
         .store
         .commit_task(&TaskCommit {
             actor_id: actor_id.clone(),
             idempotency_key: IdempotencyKey::new("make-execution-uncertain").unwrap(),
             command_digest: digest_json(&("make_execution_uncertain", &task.task_id)).unwrap(),
-            expected_revision: Some(running.revision()),
-            events: vec![planned, uncertain],
+            expected_revision: Some(queued.revision()),
+            events: vec![started, planned, uncertain],
             outbox: Vec::new(),
             committed_at_ms,
         })
         .unwrap();
-    let before = scheduler
-        .coordinator
-        .store
-        .load_task(&task.task_id)
-        .unwrap();
+    let before = coordinator.store.load_task(&task.task_id).unwrap();
     assert_eq!(before.state(), TaskState::Suspended);
-    assert!(scheduler
-        .coordinator
+    // A lost transport holds the Run lease only briefly; once it lapses and
+    // no Runtime binding remains, the guarded suspended-cancel path settles.
+    let lease_at = now_ms().unwrap().saturating_add(2);
+    let lease = LeaseCommand {
+        command: LedgerCommand {
+            actor_id: actor_id.clone(),
+            idempotency_key: IdempotencyKey::new("uncertain-run-lease").unwrap(),
+            command_digest: digest_json(&(("uncertain-run-lease"), &task.task_id, &run_id))
+                .unwrap(),
+            committed_at_ms: lease_at,
+        },
+        task_id: task.task_id.clone(),
+        run_id: run_id.clone(),
+        lease_owner: BoundedOpaque::new("uncertain-cancel-worker").unwrap(),
+        expires_at_ms: lease_at + 5,
+    };
+    coordinator.store.acquire_run_lease(&lease).unwrap();
+    std::thread::sleep(Duration::from_millis(10));
+    let cancelled = coordinator
         .cancel(
             &actor_id,
             crate::daemon::CancelTask {
                 request_id: RequestId::new(),
-                idempotency_key: IdempotencyKey::new("reject-uncertain-cancel").unwrap(),
+                idempotency_key: IdempotencyKey::new("settle-uncertain-cancel").unwrap(),
                 task_id: task.task_id.clone(),
                 run_id,
                 expected_revision: Some(before.revision()),
             },
         )
-        .is_err());
-    let after = scheduler
-        .coordinator
-        .store
-        .load_task(&task.task_id)
         .unwrap();
-    assert_eq!(after, before);
-    assert!(!after.cancellation_requested());
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    let after = coordinator.store.load_task(&task.task_id).unwrap();
+    assert_eq!(after.state(), TaskState::Cancelled);
+    assert!(after.cancellation_requested());
 }
-
 #[test]
 fn shutdown_recovers_input_committed_before_memory_installation() {
     let root = tempfile::tempdir().unwrap();
