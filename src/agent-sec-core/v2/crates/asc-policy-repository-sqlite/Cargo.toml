@@ -32,6 +32,7 @@ tempfile = { workspace = true, optional = true }
 asc-policy-cedar.workspace = true
 asc-agentsight-client.workspace = true
 asc-pcp.workspace = true
+nix.workspace = true
 tempfile.workspace = true
 
 [lints]

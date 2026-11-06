@@ -670,6 +670,7 @@ dependencies = [
  "asc-policy-types",
  "asc-sqlite-kernel",
  "fail",
+ "nix",
  "rusqlite",
  "rustix",
  "serde",
