@@ -45,6 +45,8 @@ pub struct TrajectoryRecord {
     pub source: String,
     pub is_subagent: bool,
     pub file_path: String,
+    /// Scan identity: bytes for single-file sources, a fingerprint for Hermes
+    /// and Cline. Cline uses negative values to invalidate legacy byte counts.
     pub file_size: i64,
     pub file_mtime_ns: i64,
 }
