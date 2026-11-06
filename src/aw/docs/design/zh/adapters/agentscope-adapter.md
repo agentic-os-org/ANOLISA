@@ -43,7 +43,7 @@ Bridge 不 monkeypatch SDK，也不自动发现应用里的任意 Agent。**每�
 
 ## 输入提交与轮次归属
 
-配置 `input.submit` 后，工厂构造公共 `Agent` 子类 `AwSubmissionAgent`，以
+常驻工厂构造公共 `Agent` 子类 `AwSubmissionAgent`，以
 `reply`、`reply_stream` 包围原生入口并管理完整轮次。`AwSubmissionMiddleware.on_reply`
 在业务中间件之后、原生 memory/模型操作之前检查实际用户文本。Adapter 通过共享
 submission 合同归一化 `session_id`、`aw_turn_id`、`input_text`，输入事件没有工具身份。
@@ -154,16 +154,14 @@ dispatch 旁路不经过这里，需要独立接点。框架终态成功与内�
 
 首版支持一个前台 Python worker，不支持 fork 型 Gunicorn supervisor、子 worker
 自动接线或远端沙箱。常驻业务服务需要显式处理每个 worker/会话的 launch 与 binding
-归属。未配置 `input.submit` 时，Bridge 在首个 hook 事件前打开一个 task scope 并启用 invocation
-ledger，进程退出时关闭：每次工具调用以 invocation id 按严格递增序列
-register、各 phase 完成后 finish，关联容量按调用回收，长调用历史不再向
-1024 事件实例上限累积。注册使用与 hook 求值相同的解码后 SDK 生效参数，
-注册摘要与归一化 hook 输入始终一致；进程内 scope 打开与 ledger 交付
-串行化，并发首调用共享同一 scope 与同一序列。重放注册按序列拒绝。Hook 传输与清理
-固定使用调用注册时的 scope；owner 失败时按配置的 Hook 策略报告失败，不会把现有调用
-重路由到 legacy root binding 或替代 scope。只有没有注册 scope owner 的调用才使用
-legacy root binding 路径；后续调用必须等待待清理 scope 成功关闭后才能打开新 scope。
-session ID 改变本身不重置任何预算。不隐含远端命令取消、热加载或 OS 隔离能力。
+归属。每次公开 reply 先保留 root 请求占用，打开子 Scope，读取不可变策略并验证原生
+路由，再确认 ACK 后开始模型与工具派发。工具注册和退休复用原有 Scope ledger。
+middleware 按该轮快照构造，保留业务顺序，更新不会修改活跃调用的配置。
+
+回复在原生任务与回调排空后关闭子 Scope，再确认释放请求占用。打开响应丢失时保持
+占用；释放结果未确认时，下一次回复前重试。`aw update` 复用公共空闲准入与原子激活，
+下一次回复采用新策略并保留同一个 Agent。SDK、模型和启动项变化仍需重启；常驻 Scope
+暂不承接原生 evidence 采集。操作见[策略更新](../../../../../../docs/developer-guide/zh/aw/deployment/policy-updates.md)。
 
 已有 `native-hook/v1alpha1`、结构化 Provider 和默认布尔 Hook 均可使用。布尔 Hook
 返回 `true` 时产生配置的 effects；before 的 `effects: [observe, block]` 匹配 true 即

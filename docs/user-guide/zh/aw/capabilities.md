@@ -81,7 +81,8 @@ Hermes 本地 chat 通过同一 `tool.before` 检查支持目录型 `skill_view`
 | QwenPaw App | 显式包装 MCP 客户端调用 | 普通常驻模式支持，全部 reply 排空后更新 |
 | Claude SDK resident | 进程内 handler，可压缩成功单文本结果，`report` 故障保留原始结果 | 修改需重启 |
 | Pi SDK | 通过受管自定义工具接入 MCP 客户端 | 修改需重启 |
-| Qoder CLI、OpenClaw、Hermes、AgentScope SDK | 覆盖已暴露的原生工具回调 | 普通模式修改需重启 |
+| AgentScope SDK | 覆盖已暴露的原生工具回调 | 普通工厂回复的 Scope 清理后支持更新 |
+| Qoder CLI、OpenClaw、Hermes | 覆盖已暴露的原生工具回调 | 普通模式修改需重启 |
 
 Qoder TUI、Qoder SDK 和 QwenPaw 另有受限更新模式，版本与部署步骤见[策略更新](../../../developer-guide/zh/aw/deployment/policy-updates.md)。
 MCP 工具需按实际输入语义配置安全检查，接线见 [Qoder SDK / QwenPaw MCP](../../../../src/aw/docs/design/zh/adapters/structured-mcp.md) 与 [Claude SDK MCP](../../../../src/aw/docs/design/zh/adapters/claude-mcp.md)。

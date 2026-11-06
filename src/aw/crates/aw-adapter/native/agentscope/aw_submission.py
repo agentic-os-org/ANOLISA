@@ -17,7 +17,7 @@ from agentscope.event import (
 from agentscope.message import Msg, TextBlock
 from agentscope.middleware import MiddlewareBase
 
-from aw_scope_ledger import CallbackFailure, open_turn_scope, turn_scope, wait_owned
+from aw_scope_ledger import CallbackFailure, close_turn_scope, open_turn_scope, turn_scope, wait_owned
 
 
 class SubmissionDenied(RuntimeError):
@@ -62,15 +62,15 @@ class AwSubmissionMiddleware(MiddlewareBase):
         owner = _turn.get()
         if owner is None or owner["agent"] is not agent:
             raise CallbackFailure("aw_reply_requires_factory_entrypoint")
+        config = owner["scope"].config
+        hooks = [hook for hook in config["hooks"] if hook["event"] == "input.submit"]
         # Unsupported native shapes are rejected even for report-only scans.
-        text = submission_text(input_kwargs["inputs"])
+        text = submission_text(input_kwargs["inputs"]) if hooks else None
         if text is not None:
             payload = {"event": "input.submit", "session_id": owner["session"],
                        "aw_turn_id": owner["id"], "input_text": text}
             deadline = None
-            for hook in self.config["hooks"]:
-                if hook["event"] != "input.submit":
-                    continue
+            for hook in hooks:
                 if deadline is None:
                     deadline = asyncio.get_running_loop().time() + (hook["budget_ms"] + 3000) / 1000
                 try:
@@ -84,7 +84,7 @@ class AwSubmissionMiddleware(MiddlewareBase):
                     if code != 0 or stdout.strip():
                         raise CallbackFailure("invalid_submission_response")
                 except (OSError, TimeoutError, CallbackFailure) as error:
-                    AwToolMiddleware(self.config, hook)._log_failure(type(error).__name__)
+                    AwToolMiddleware(config, hook)._log_failure(type(error).__name__)
                     if hook["on_error"] == "block":
                         raise SubmissionDenied("AW input check failed; submission blocked") from error
         async with aclosing(next_handler()) as stream:
@@ -175,7 +175,11 @@ class AwSubmissionAgent(Agent):
     async def _aw_reply(self) -> AsyncGenerator[None, None]:
         if self._aw_pid != os.getpid():
             raise CallbackFailure("aw_reply_worker_changed")
-        if self._aw_busy or _turn.get() is not None:
+        parent = _turn.get()
+        checked_parent = parent is not None and any(
+            hook["event"] == "input.submit" for hook in parent["scope"].config["hooks"]
+        )
+        if self._aw_busy or checked_parent:
             raise CallbackFailure("aw_concurrent_or_nested_reply_unsupported")
         session = self.state.session_id
         if not isinstance(session, str) or not session.strip() or len(session.encode()) > 512:
@@ -191,12 +195,12 @@ class AwSubmissionAgent(Agent):
         finally:
             try:
                 if scope is not None:
-                    cleanup = asyncio.create_task(scope.close())
+                    cleanup = asyncio.create_task(close_turn_scope(scope))
                     interrupted = await wait_owned(cleanup)
                     cleanup.result()
                     if interrupted is not None:
                         raise interrupted
-                    if not scope.closed:
+                    if not scope.closed or scope.reservation is not None:
                         error = sys.exc_info()[1]
                         if error is None or isinstance(error, GeneratorExit):
                             raise CallbackFailure("aw_scope_cleanup_failed")

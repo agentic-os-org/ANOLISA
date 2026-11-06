@@ -49,10 +49,9 @@ No native permission gate is replaced or relaxed.
 
 ## Submission and turn ownership
 
-With `input.submit` configured, the factory constructs `AwSubmissionAgent`, a
-public `Agent` subclass. Its `reply` and `reply_stream` wrap the native entry in
-one turn lifetime; `AwSubmissionMiddleware.on_reply` checks the effective user
-text after existing middleware and before native memory/model work. The Adapter
+The resident factory constructs `AwSubmissionAgent`, a public `Agent` subclass. Its `reply` and `reply_stream` wrap the native entry in
+one turn lifetime; when `input.submit` is configured,
+`AwSubmissionMiddleware.on_reply` checks the effective user text after existing middleware and before native memory/model work. The Adapter
 normalizes `session_id`, `aw_turn_id` and `input_text` through the shared submission
 contract, without a synthetic tool identity. All input steps use one deadline.
 Denials raise `SubmissionDenied`; ordinary scan failures adopt block/report.
@@ -212,23 +211,18 @@ success is separate from business failure encoded in returned content.
 This first contract supports one foreground Python worker, not a forking
 Gunicorn supervisor, automatic attachment in child workers or remote sandboxes.
 A long-lived business service needs explicit per-worker/session launch and
-binding ownership. Without `input.submit`, the bridge opens one task scope and enables the
-invocation ledger before its first hook event, closing it at process exit:
-each tool call registers under its invocation id with a strictly increasing
-sequence and finishes when its phases complete, so correlation capacity is
-recycled per call and long histories no longer accumulate toward the
-1024-event instance limit. Registration decodes the SDK-effective arguments
-with the same pinned parser as hook evaluation, so the registered digest and
-the normalized hook input always agree; scope opening and ledger deliveries
-are serialized within the process, so concurrent first calls share one scope
-and one sequence. Replayed registrations are rejected by sequence. Hook
-transport and cleanup retain the invocation's registration scope; a failed
-owner reports a Hook failure under the configured policy and is never rerouted
-to the legacy root binding or a replacement scope. Only calls without a
-registered scope owner use the legacy root-binding path. Subsequent calls may
-open a fresh scope after pending cleanup succeeds. Session IDs alone never
-reset any budget. No remote command cancellation, hot reload or OS isolation
-is implied.
+binding ownership. Each public reply reserves root occupancy, opens a child Scope,
+fetches its immutable policy, validates the native routes and acknowledges them
+before model or tool dispatch. Tool invocation registration and retirement reuse
+the existing Scope ledger. Middleware is constructed from that reply's snapshot,
+so policy updates preserve application ordering and never mutate active calls.
+
+The reply closes its child after native tasks and callbacks drain, then confirms
+reservation release. Missing open responses keep occupancy fenced; release with
+an unknown outcome is retried before another reply. `aw update` reuses the common
+idle admission and atomic policy activation. Changes apply to the next reply of
+the same Agent; SDK/model/launch changes still require restart. Native evidence
+capture remains unsupported in resident scopes. See [policy updates](../../../../../../docs/developer-guide/en/aw/deployment/policy-updates.md).
 
 The existing `native-hook/v1alpha1`, structured Provider and default Boolean Hook
 contracts all remain available. A Boolean Hook `true` emits its configured

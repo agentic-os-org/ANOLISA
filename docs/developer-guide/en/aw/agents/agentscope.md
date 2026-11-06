@@ -25,7 +25,7 @@ The example uses a deterministic offline model and a local Echo tool. It needs n
 credentials. Its before Boolean Hook returns false (no block match) and after
 returns true (observe). Change the before command to `printf true` to deny the
 tool; the native final response becomes denied and after observes that denial.
-Stop the service before editing its configuration.
+For a resident worker, apply policy changes between replies with `aw update`.
 
 For an existing application, use `AwBridge().create_agent(...)` in **every** public
 factory, passing the existing middleware list unchanged. Existing trusted
@@ -39,8 +39,7 @@ Before waits and can block before a tool side effect. After awaits one final
 stream chunks. Native parameter/permission rejections before `on_acting`, direct
 Toolkit calls and external execution requests need separate integration. The
 launcher supports one foreground worker; forking Gunicorn supervisors and
-multi-worker/remote deployment are outside this contract. Tool invocation records are retired after each call; input-enabled replies also
-release their Scope at turn completion.
+multi-worker/remote deployment are outside this contract. Tool invocation records are retired after each call; each factory reply releases its Scope at turn completion.
 
 For PreTool retry suggestions and final PostTool compression, copy the
 [SDK lifecycle example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml),
@@ -80,7 +79,7 @@ as a new submission. Direct private `_reply` calls and nested sub-Agent dispatch
 are unsupported when checks are enabled. Concurrent replies on the same Agent
 raise `CallbackFailure`; distinct Agent instances may run concurrently in one
 foreground worker with isolated turn scopes. With no input route, the factory
-retains the previous native input and process-scope behavior.
+retains native input semantics; each reply still uses its own Scope.
 
 A policy denial raises `aw_submission.SubmissionDenied`; it makes no model
 request and inserts no input into memory. Provider errors obey `on_error: block`
@@ -112,3 +111,24 @@ A parked native reply and its later continuation are separate AW turns. Complete
 chunks and publish the checked final content after all checks and invocation
 cleanup. Both `reply_stream` consumers and the model receive the adopted text or
 the withheld placeholder. Targets with no strict after route retain native intermediate chunks.
+
+## Update a resident worker
+
+Ordinary `aw run` supports policy updates after all `reply` / `reply_stream` calls
+and their cleanup complete. Keep the Agent and its state; the next reply obtains
+an immutable policy snapshot before checking input or dispatching tools. Existing
+application middleware retains its ordering. Adding or removing input routes and
+tool routes takes effect together.
+
+```bash
+aw update --config current.yaml --agent agentscope --policy next.yaml
+aw status --config current.yaml
+```
+
+Pause dispatch before updating. Model execution, active tool tasks and unconfirmed
+cleanup keep the instance busy. Explicitly close partially consumed reply streams.
+A lost scope-open response fences later replies until the worker is restarted; a
+confirmed child close with an unconfirmed reservation release is retried before
+the next reply. Native evidence capture remains outside resident policy scopes.
+See [policy updates](../deployment/policy-updates.md) for eligible configuration
+fields and revision selection.
