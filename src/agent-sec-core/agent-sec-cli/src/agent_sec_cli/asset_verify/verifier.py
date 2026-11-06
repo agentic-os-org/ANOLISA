@@ -22,6 +22,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
+    ErrManifestInvalid,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigInvalid,
@@ -294,9 +295,36 @@ def verify_signature(
 
 def verify_manifest_hashes(skill_dir: str, manifest: dict, skill_name: str) -> None:
     """Verify manifest hashes and reject unsigned files."""
+    # The signature only certifies the manifest bytes, not its structure; a
+    # trusted key holder can sign any content. Validate the shape up front so
+    # a malformed manifest fails with a structured error instead of a raw
+    # KeyError/TypeError that carries no skill name or context.
+    if not isinstance(manifest, dict):
+        raise ErrManifestInvalid(
+            skill_name, f"expected a JSON object, got {type(manifest).__name__}"
+        )
+    files = manifest.get("files", [])
+    if not isinstance(files, list):
+        raise ErrManifestInvalid(
+            skill_name, f"'files' must be a list, got {type(files).__name__}"
+        )
+    for index, file_entry in enumerate(files):
+        if not isinstance(file_entry, dict):
+            raise ErrManifestInvalid(
+                skill_name,
+                f"files[{index}] must be an object, got {type(file_entry).__name__}",
+            )
+        for field in ("path", "hash"):
+            if not isinstance(file_entry.get(field), str):
+                raise ErrManifestInvalid(
+                    skill_name,
+                    f"files[{index}].{field} must be a string, "
+                    f"got {type(file_entry.get(field)).__name__}",
+                )
+
     manifest_paths: set[str] = set()
 
-    for file_entry in manifest.get("files", []):
+    for file_entry in manifest["files"]:
         rel_path = file_entry["path"]
         expected_hash = file_entry["hash"]
         manifest_paths.add(rel_path)
@@ -328,8 +356,11 @@ def verify_skill(skill_dir: str, trusted_keys: list) -> tuple[bool, str]:
 
     verify_signature(manifest_path, sig_path, trusted_keys, skill_name)
 
-    with open(manifest_path, "r") as f:
-        manifest = json.load(f)
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ErrManifestInvalid(skill_name, str(exc)) from exc
 
     verify_manifest_hashes(skill_dir, manifest, skill_name)
 

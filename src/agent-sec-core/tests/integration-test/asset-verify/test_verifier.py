@@ -26,6 +26,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
+    ErrManifestInvalid,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigMissing,
@@ -119,6 +120,64 @@ class TestVerifyManifestHashes(unittest.TestCase):
 
         manifest = {"files": [{"path": "main.py", "hash": self.file_hash}]}
         verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+
+
+class TestMalformedManifest(unittest.TestCase):
+    """A signature-valid but structurally invalid manifest must fail with a
+    structured ErrManifestInvalid, not a raw KeyError/AttributeError that
+    carries no skill name or context."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        with open(os.path.join(self.tmpdir, "main.py"), "w") as f:
+            f.write("print('hello')")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_malformed_shapes_raise_structured_error(self):
+        shapes = [
+            [],
+            {"files": "abc"},
+            {"files": [{"path": "main.py"}]},
+            {"files": [{"hash": "deadbeef"}]},
+            {"files": [{"path": 123, "hash": "deadbeef"}]},
+            {"files": [{"path": "main.py", "hash": 42}]},
+        ]
+        for manifest in shapes:
+            with self.subTest(manifest=manifest):
+                with self.assertRaises(ErrManifestInvalid) as ctx:
+                    verify_manifest_hashes(self.tmpdir, manifest, "test_skill")
+                self.assertIn("ERR_MANIFEST_INVALID", str(ctx.exception))
+                self.assertIn("test_skill", str(ctx.exception))
+
+    def _write_signing_dir(self, manifest_bytes):
+        signing_dir = os.path.join(self.tmpdir, ".skill-meta")
+        os.makedirs(signing_dir)
+        with open(os.path.join(signing_dir, "Manifest.json"), "wb") as f:
+            f.write(manifest_bytes)
+        with open(os.path.join(signing_dir, ".skill.sig"), "w") as f:
+            f.write("sig")
+
+    def test_verify_skill_reports_invalid_json_manifest(self):
+        self._write_signing_dir(b"{not json")
+        with patch(
+            "agent_sec_cli.asset_verify.verifier.verify_signature",
+            return_value=True,
+        ):
+            with self.assertRaises(ErrManifestInvalid) as ctx:
+                verify_skill(self.tmpdir, [])
+        self.assertIn("ERR_MANIFEST_INVALID", str(ctx.exception))
+
+    def test_verify_skill_reports_non_utf8_manifest(self):
+        self._write_signing_dir(b"\xff\xfe{bad utf-8")
+        with patch(
+            "agent_sec_cli.asset_verify.verifier.verify_signature",
+            return_value=True,
+        ):
+            with self.assertRaises(ErrManifestInvalid) as ctx:
+                verify_skill(self.tmpdir, [])
+        self.assertIn("ERR_MANIFEST_INVALID", str(ctx.exception))
 
 
 class TestVerifySkill(unittest.TestCase):

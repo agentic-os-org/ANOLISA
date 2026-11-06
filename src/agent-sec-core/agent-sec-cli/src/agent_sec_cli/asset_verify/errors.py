@@ -56,6 +56,15 @@ class ErrUnexpectedFile(SkillVerifyError):
         )
 
 
+class ErrManifestInvalid(SkillVerifyError):
+    code = 15
+
+    def __init__(self, skill_name: str, detail: str) -> None:
+        super().__init__(
+            f"ERR_MANIFEST_INVALID: Malformed Manifest.json in '{skill_name}': {detail}"
+        )
+
+
 class ErrConfigMissing(SkillVerifyError):
     code = 20
 
