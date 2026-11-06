@@ -203,6 +203,13 @@ def main() -> None:
         )
         print(_allow())
         return
+    if not isinstance(scan_result, dict):
+        # A non-object ScanResult (null, array, string, number) has no
+        # verdict to map; the qwen/qoder siblings and the hermes
+        # capability already degrade this shape to fail-open.
+        print("[prompt-scanner] CLI returned a non-object scan result", file=sys.stderr)
+        print(_allow())
+        return
 
     # 5. Format and print cosh output
     print(_format_cosh(scan_result))
