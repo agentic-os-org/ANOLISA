@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Response framing regressions through Parser → Aggregator → Analyzer → GenAI → SQLite.
 mod common;
 

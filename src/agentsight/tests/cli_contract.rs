@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! CLI agent-contract integration tests.
 //!
 //! `discover` / `token` are the machine-facing surface agents and scripts
