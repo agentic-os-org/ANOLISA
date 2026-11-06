@@ -1,6 +1,7 @@
 # Replace all absolute paths before use. Run the sec-core daemon separately.
 # Qoder: SDK 1.0.56 / Worker 1.1.78, Node.js >=22, AW bridge factories.
 # QwenPaw: 2.2.2.post1 / AgentScope 2.0.10, initialized QWENPAW_WORKING_DIR.
+# Skill roots must be authorized and accessible in the separately managed daemon.
 # Use ordinary aw run; strict Post and private execution require resident mode.
 # Custom scripts read one normalized event and print a JSON boolean with exit 0.
 # The before script returns true to block; the after script returns true to observe.
@@ -16,6 +17,8 @@ spec:
   agents:
     qoder-sdk:
       adapter: qoder-sdk
+      # Allow Query/callback drain and native daemon shutdown before forced cleanup.
+      shutdown_grace_ms: 90000
       argv: [/absolute/path/to/node, /absolute/application/worker.mjs]
     qwenpaw:
       adapter: qwenpaw
@@ -37,7 +40,11 @@ spec:
       config:
         version: 1
         mode: block
+        skill: true
         unmapped_tool: error
+        prompt: {mode: block, scan_mode: fast}
+        pii: {input_mode: block, output_mode: observe}
+        # SDK Bash normalizes to bash; Qoder CLI keeps Bash instead.
         tools:
           bash: {language: bash, input_pointer: /command}
           execute_shell_command: {language: bash, input_pointer: /command}
@@ -56,6 +63,20 @@ spec:
       timeout_ms: 1000
       max_output_bytes: 32
   events:
+    input.submit:
+      enabled: true
+      required: true
+      steps:
+        - id: scan-prompt
+          provider: security
+          operation: scan_prompt
+          effects: [observe, block]
+          on_error: block
+        - id: scan-user-pii
+          provider: security
+          operation: scan_user_input
+          effects: [observe, block]
+          on_error: block
     tool.before:
       enabled: true
       required: true
@@ -63,8 +84,16 @@ spec:
         - id: scan-shell
           provider: security
           operation: scan_code
+          # Unlisted native tools and MCP calls skip this scanner.
           match:
             tools: ["native:qoder-sdk:Bash", "native:qwenpaw:execute_shell_command"]
+          effects: [observe, block]
+          on_error: block
+        - id: check-skill
+          provider: security
+          operation: check_skill
+          match:
+            tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill"]
           effects: [observe, block]
           on_error: block
         - id: custom-before

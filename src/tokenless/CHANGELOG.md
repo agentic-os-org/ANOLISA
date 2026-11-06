@@ -9,6 +9,59 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-06
+
+### Changed
+
+- **Breaking for source installations:** `make install`, framework registration, and removal now default to `AWPRJ=anolisa`, placing adapters and extensions in the shared ANOLISA namespace. To keep or remove an existing independent installation, pass `AWPRJ=` explicitly with the same profile and path overrides used for installation. Installation rejects resources owned by another installation; removal preserves them and warns. RPM/raw layouts and runtime configuration paths are unchanged ([#9462](https://github.com/agentic-os-org/ANOLISA/pull/9462)).
+
+### Fixed
+
+- JSON depth limits now preserve numeric, Boolean, and null leaves with their original types instead of replacing them with string markers. These leaves no longer create Stash entries or count as truncations; objects, arrays, and strings keep their existing depth-limit behavior ([#7743](https://github.com/agentic-os-org/ANOLISA/pull/7743)).
+- Recognized native `grep` and `rg` calls, including supported wrappers and compound commands containing them, now bypass RTK rewriting and use only lossless search compression in PostTool. Every received match is retained; disabled search compression, unsupported formats, and no savings preserve the original output even with `force_json`. Mixed command output also stays unchanged when search boundaries cannot be identified, which can increase result size ([#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)).
+- Qoder native Bash compression now replaces only string `stdout`, including short or empty values, preserving `stderr`, exit status, and every other result field ([#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)).
+- QwenWork on macOS can retrieve stashed output through its private plugin executable even when the model shell has no global `tokenless` command. Standalone `tokenless retrieve <HASH>` calls use the Hook's data directory and session identifiers, and recovered output bypasses further compression. Recovery requires the private executable, valid state directory, and registered rewrite Hook; Windows and other hosts retain their existing behavior ([#9622](https://github.com/agentic-os-org/ANOLISA/pull/9622)).
+- AgentScope 1.x and 2.x retain complete tool results when optional PostTool compression fails, including protocol errors and incompatible SDK wheel signatures. The adapter logs the failure without exposing partial replacement text or recovery hints; cancellation still propagates ([#8928](https://github.com/agentic-os-org/ANOLISA/pull/8928)).
+
+## [0.9.3] - 2026-11-05
+
+### Added
+
+- `tokenless rtk` runs RTK v0.49.0 with the Tokenless patches from inside the `tokenless` executable; `tokenless rtk --version` reports the bundled version ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+
+### Changed
+
+- **Breaking:** The npm, RPM (`tokenless-core`), ANOLISA raw, Windows ZIP, and Python wheel packages ship only `tokenless` and no longer install a separate `rtk`. PreTool rewrites commands to `tokenless rtk <command>`, naming the running `tokenless` by absolute path, so a rewrite and its execution use the same RTK build; it no longer looks for `rtk` on `PATH`. Scripts that call `rtk` directly must call `tokenless rtk` instead. Upgrades remove the `rtk` helper and link that earlier Tokenless releases installed and keep an RTK installed separately ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- **Breaking for Rust callers:** `TokenlessRuntime::pre_tool` has been removed. Short-lived processes keep `dispatch_with_store`; long-running hosts run `tokenless compress` instead, because RTK expects one process per command ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- The Python SDK's `pre_tool()` runs the bundled `tokenless compress` instead of `rtk rewrite`. A timeout or child failure now logs one warning and returns the original arguments as passthrough instead of raising `TokenlessError`, so the tool call still runs ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- A PreTool rewrite still has 5 seconds. On timeout, the processes RTK started, such as a stalled `git`, now end with it ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- Every framework integration runs RTK through the single `tokenless` executable. Claude Code, Qwen Code, Qoder CLI, QwenWork, OpenCode, Cosh-NG, OpenClaw, and Hermes already rewrote through `tokenless compress` and now receive `tokenless rtk` commands. The Codex PreToolUse hook, which ran `rtk rewrite` directly, now rewrites through `tokenless compress` as well, and QwenPaw and AgentScope do so through the Python SDK. Claude Code and Qwen Code detection and QwenWork installation no longer require `rtk`. Hermes treats `tokenless rtk` wrappers as RTK-owned output and no longer recognizes bare `rtk` wrappers. DeepSeek Harness only compresses tool results and is unaffected ([#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- Building from source, including the curl installer's source-build path, needs Rust 1.91 or later plus `git` and `patch` to fetch and patch the pinned RTK source. An existing `third_party/rtk` checkout made from other patches is rejected; run `just clean-rtk` once to recreate it ([#9279](https://github.com/agentic-os-org/ANOLISA/pull/9279), [#9281](https://github.com/agentic-os-org/ANOLISA/pull/9281), [#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)).
+- ANOLISA raw packages require ANOLISA 0.3.21 or later, which provides the Tokenless discovery registry ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)).
+
+### Fixed
+
+- HTML rendering handles long backtick runs in code blocks without rescanning them for each possible fence length, which could exhaust the PostTool time budget. Rendered content and recovery are unchanged ([#9396](https://github.com/agentic-os-org/ANOLISA/pull/9396)).
+- PreTool and PostTool recognize QwenWork's qualified workspace Shell name `mcp__qw-builtin__mcp__workspace__bash`, so its plain-text results reach the existing compression path, including TOON for JSON bodies ([#9459](https://github.com/agentic-os-org/ANOLISA/pull/9459)).
+
+## [0.9.2] - 2026-11-05
+
+### Changed
+
+- Choose the CLI and framework integrations separately using the core and plugins RPMs.
+- Use the selected installation paths for adapter registration and removal.
+
+## [0.9.1] - 2026-10-29
+
+### Fixed
+
+- Qoder retains the native Bash result envelope when compressing stdout, preserving exit status and telemetry fields without serializing them into the model's text. Other result shapes keep their existing replacement behavior ([#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)).
+- Recognized `head` and `tail` commands, including supported wrappers and compound commands containing them, now execute natively so the requested line window is preserved. Explicit RTK calls and custom RTK wrapper prefixes retain their existing behavior ([#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)).
+- QwenWork workspace hooks now use the system user's `~/.tokenless` directory by default and honor an absolute `TOKENLESS_DATA_DIR`, keeping state in one location across working-directory changes. Existing workspace history is not migrated automatically. Install and detect commands report the resolved directory and explain that Shell sandbox permissions can prevent RTK statistics and execution receipts from being saved ([#9215](https://github.com/agentic-os-org/ANOLISA/pull/9215)).
+- Verbose unittest and Django test logs now compress repeated successful test records while preserving summaries, nonpassing outcomes, tracebacks, and database setup output. The original remains retrievable; multiline descriptions and unknown output are retained ([#9083](https://github.com/agentic-os-org/ANOLISA/pull/9083)).
+- HTML tables with `rowspan="0"` now keep cells under the correct column headers through the end of each row group. Original-page retrieval remains byte-exact ([#9012](https://github.com/agentic-os-org/ANOLISA/pull/9012)).
+- Windows builds now stage the current Tokenless and RTK executables from Cargo's resolved target directories, avoiding missing or stale artifacts when environment or configuration settings redirect build output ([#9018](https://github.com/agentic-os-org/ANOLISA/pull/9018)).
+
 ## [0.9.0] - 2026-10-25
 
 ### Added

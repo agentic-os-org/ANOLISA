@@ -1,4 +1,4 @@
-//! OpenClaw 2026.9.6 Gateway plugin registration with persistent native state.
+//! OpenClaw Gateway plugin registration with persistent native state.
 
 use super::super::{
     adapter::{
@@ -7,8 +7,7 @@ use super::super::{
     },
     read_file, Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -23,7 +22,6 @@ use std::{
     time::Duration,
 };
 
-const VERSION: &str = "2026.9.6";
 const PLUGIN: &str = "aw-native-hooks";
 const MAX_BUDGET_MS: u64 = 12000;
 
@@ -41,6 +39,7 @@ pub(crate) struct OpenClaw;
 
 struct Prepared {
     input: LaunchInput,
+    version: String,
     settings: Value,
     profile: PathBuf,
     _lock: File,
@@ -91,11 +90,14 @@ impl Adapter for OpenClaw {
         check_settings(&settings)?;
         let (profile, lock) = lock_profile(Path::new(state_path))?;
         let version = adapter::Probe(cancelled).version_output(&input.command, &version_args)?;
-        if version.split_whitespace().take(2).collect::<Vec<_>>() != ["OpenClaw", VERSION] {
-            return Err(format!("OpenClaw {VERSION} is required by this adapter").into());
-        }
+        let version = version
+            .strip_prefix("OpenClaw ")
+            .and_then(|value| value.split_whitespace().next())
+            .ok_or("OpenClaw --version must identify OpenClaw and its version")?;
+        let version = crate::version::reported(version, "OpenClaw")?;
         Ok(Box::new(Prepared {
             input,
+            version,
             settings,
             profile,
             _lock: lock,
@@ -164,7 +166,7 @@ impl Adapter for OpenClaw {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::OPENCLAW.capabilities(VERSION, "gateway")
+        super::super::adapter::catalog::OPENCLAW.capabilities(&self.version, "gateway")
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
@@ -459,7 +461,7 @@ mod tests {
 
     #[test]
     fn generated_profile_marks_only_the_admitted_replacement_step() {
-        use aw_provider::admission::StepExecution;
+        use aw_core::admission::StepExecution;
         let parent =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tokenless-validation");
         fs::create_dir_all(&parent).unwrap();
@@ -488,6 +490,7 @@ mod tests {
             })
             .collect();
         let mut prepared = Prepared {
+            version: "2026.10.1".into(),
             input: LaunchInput {
                 document: json!({"spec":{"execution":{"default_event_budget_ms":1000},"events":{}}}),
                 target: "openclaw".into(),

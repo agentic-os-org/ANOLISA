@@ -30,7 +30,21 @@ YELLOW = "\033[1;33m"
 BLUE = "\033[0;34m"
 NC = "\033[0m"
 
-SANDBOX = shutil.which("linux-sandbox") or "/usr/local/bin/linux-sandbox"
+
+def _find_linux_sandbox() -> str:
+    """Respect PATH before falling back to system and legacy install locations."""
+    candidates = (
+        shutil.which("linux-sandbox"),
+        "/usr/bin/linux-sandbox",
+        "/usr/local/bin/linux-sandbox",
+    )
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "/usr/bin/linux-sandbox"
+
+
+SANDBOX = _find_linux_sandbox()
 # 是否显示详细输出 (通过 -v 或 --verbose 参数启用)
 VERBOSE = False
 

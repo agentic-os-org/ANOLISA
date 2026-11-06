@@ -19,6 +19,8 @@ enum Layout {
     /// Gemini sessions under `<root>/<project>/chats/`, with sub-agent
     /// transcripts under `chats/<parent-session>/`; files use `.jsonl` or `.json`.
     Chats,
+    /// Cline API histories under `tasks/<task-id>/`.
+    ClineTasks,
 }
 
 /// Known local session roots relative to a home directory.
@@ -76,6 +78,18 @@ const SESSION_ROOTS: &[SessionRoot] = &[
         rel_dir: ".gemini/tmp",
         source: "gemini-cli",
         layout: Layout::Chats,
+        scan_subdirs: &[],
+    },
+    SessionRoot {
+        rel_dir: crate::cline::LINUX_TASKS_ROOT,
+        source: "cline",
+        layout: Layout::ClineTasks,
+        scan_subdirs: &[],
+    },
+    SessionRoot {
+        rel_dir: crate::cline::MACOS_TASKS_ROOT,
+        source: "cline",
+        layout: Layout::ClineTasks,
         scan_subdirs: &[],
     },
 ];
@@ -305,7 +319,10 @@ fn root_from_path(dir: &Path) -> ScanRoot {
     // A `.gemini` config without the `tmp` segment is normalized onto the
     // runtime root the CLI actually writes chats under (reaching this point
     // means no known root — including `.gemini/tmp` — matched the path).
-    let dir = if path.contains(".gemini") {
+    let is_cline = path.contains(crate::cline::STORAGE_DIR);
+    let dir = if is_cline && !dir.ends_with("tasks") {
+        dir.join("tasks")
+    } else if path.contains(".gemini") {
         dir.join("tmp")
     } else {
         dir.to_path_buf()
@@ -314,14 +331,16 @@ fn root_from_path(dir: &Path) -> ScanRoot {
     ScanRoot {
         dir,
         source,
-        layout: if path.contains(".codex") {
+        layout: if is_cline {
+            Layout::ClineTasks
+        } else if path.contains(".codex") {
             Layout::Flat
         } else if path.contains(".gemini") {
             Layout::Chats
         } else {
             Layout::PerProject
         },
-        scan_subdirs: if path.contains(".codex") || path.contains(".gemini") {
+        scan_subdirs: if is_cline || path.contains(".codex") || path.contains(".gemini") {
             &[]
         } else {
             &["transcript"]
@@ -332,7 +351,9 @@ fn root_from_path(dir: &Path) -> ScanRoot {
 /// Derive the source label from a session root path.
 fn source_from_path(dir: &Path) -> String {
     let path = dir.to_string_lossy().to_lowercase();
-    if path.contains(".qoderwork") {
+    if path.contains(crate::cline::STORAGE_DIR) {
+        "cline".to_string()
+    } else if path.contains(".qoderwork") {
         "qoderwork".to_string()
     } else if path.contains(".qoder") {
         "qoder".to_string()
@@ -355,6 +376,7 @@ fn discover_in_root(root: &ScanRoot) -> Vec<DiscoveredSession> {
         Layout::PerProject => discover_in_projects_dir(root),
         Layout::Flat => discover_in_flat_dir(root),
         Layout::Chats => discover_in_chats_dir(root),
+        Layout::ClineTasks => discover_in_cline_tasks(root),
     }
 }
 
@@ -435,6 +457,44 @@ fn discover_in_flat_dir_recursive(
             source: source.to_string(),
         });
     }
+}
+
+fn discover_in_cline_tasks(root: &ScanRoot) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+    let projects = crate::cline::task_projects(&root.dir);
+    let entries = match std::fs::read_dir(&root.dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!(
+                "Trajectory scan: failed to read {}: {error}",
+                root.dir.display()
+            );
+            return sessions;
+        }
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let path = entry.path().join(crate::cline::API_HISTORY_FILENAME);
+        if !path.is_file() {
+            continue;
+        }
+        let Some(session_id) = crate::cline::task_session_id(&path) else {
+            continue;
+        };
+        sessions.push(DiscoveredSession {
+            path,
+            project: projects
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_else(|| "(default)".to_string()),
+            session_id,
+            is_subagent: false,
+            source: root.source.clone(),
+        });
+    }
+    sessions
 }
 
 /// Discover sessions within a Gemini CLI root: `<root>/<project>/chats/`.
@@ -923,6 +983,52 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_cline_tasks_layout() {
+        let base = tmp_projects_dir("cline");
+        let storage = base
+            .join("custom/User/globalStorage")
+            .join(crate::cline::STORAGE_DIR);
+        let root = storage.join("tasks");
+        for task_id in ["task-123", "task-fallback"] {
+            let task = root.join(task_id);
+            std::fs::create_dir_all(&task).unwrap();
+            std::fs::write(task.join(crate::cline::API_HISTORY_FILENAME), "{}").unwrap();
+            std::fs::write(task.join("ui_messages.json"), "[]").unwrap();
+            std::fs::write(task.join("task_metadata.json"), "{}").unwrap();
+        }
+        let state = storage.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("taskHistory.json"),
+            serde_json::json!([{
+                "id": "task-123",
+                "cwdOnTaskInitialization": "/workspace/demo-app"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+
+        let sessions = discover_sessions(Some(std::slice::from_ref(&storage)));
+        assert_eq!(sessions.len(), 2, "Cline API histories: {sessions:?}");
+        assert!(sessions.iter().all(|session| {
+            session.source == "cline"
+                && session.path.file_name().unwrap() == crate::cline::API_HISTORY_FILENAME
+        }));
+        let mapped = sessions
+            .iter()
+            .find(|session| session.session_id == "task-123")
+            .unwrap();
+        assert_eq!(mapped.project, "demo-app");
+        let fallback = sessions
+            .iter()
+            .find(|session| session.session_id == "task-fallback")
+            .unwrap();
+        assert_eq!(fallback.project, "(default)");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn test_discover_known_claude_root_source() {
         let base = tmp_projects_dir("claude");
         let root = base.join(".claude").join("projects");
@@ -1062,6 +1168,12 @@ mod tests {
         assert_eq!(
             source_from_path(Path::new("/home/u/.qoder/projects")),
             "qoder"
+        );
+        assert_eq!(
+            source_from_path(Path::new(
+                "/home/u/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks"
+            )),
+            "cline"
         );
     }
 

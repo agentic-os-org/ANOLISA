@@ -1,16 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 use ws_ckpt_common::backend::{CreateAdmissionRefused, DiffError, SnapshotDeleteOutcome};
 use ws_ckpt_common::{ChangeType, DiffEntry};
 
-use crate::util::unescape_proc_mount;
+use crate::util::{proc_mounts_in, unescape_proc_mount};
 
 /// init_workspace backup path (#673).
 pub fn backup_path_for(original_path: &str) -> String {
@@ -606,20 +607,23 @@ pub async fn get_subvolume_id(path: &Path) -> Result<u64> {
 /// kernel cleaner ("zombie" subvolumes) on the filesystem containing
 /// `fs_root`. These keep pinning backend space until drained (#3053).
 pub async fn list_deleted_subvolumes(fs_root: &Path) -> Result<Vec<u64>> {
-    let output = Command::new("btrfs")
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .args(["subvolume", "list", "-d"])
-        .arg(fs_root)
-        .output()
-        .await
-        .context("failed to execute btrfs subvolume list -d")?;
+    let mut command = Command::new("btrfs");
+    let output = run_deleted_subvolumes_command(&mut command, fs_root).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("btrfs subvolume list -d failed: {}", stderr.trim());
     }
     parse_deleted_subvolume_ids(&String::from_utf8_lossy(&output.stdout))
         .context("failed to parse btrfs subvolume list -d output")
+}
+
+async fn run_deleted_subvolumes_command(
+    command: &mut Command,
+    fs_root: &Path,
+) -> Result<std::process::Output> {
+    run_read_only_btrfs_command(command, &["subvolume", "list", "-d"], fs_root)
+        .await
+        .context("failed to execute btrfs subvolume list -d")
 }
 
 /// Parse `btrfs subvolume list -d` output and return ids of true zombie
@@ -2121,16 +2125,8 @@ pub async fn get_filesystem_usage(mount_path: &Path) -> Result<(u64, u64)> {
 }
 
 async fn get_filesystem_usage_details(mount_path: &Path) -> Result<FilesystemUsage> {
-    // LC_ALL/LANG pinned to C: parsing matches English field names; a
-    // localized btrfs-progs output must fail closed into guarded deletion.
-    let output = Command::new("btrfs")
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .args(["filesystem", "usage", "-b"])
-        .arg(mount_path)
-        .output()
-        .await
-        .context("failed to execute btrfs filesystem usage")?;
+    let mut command = Command::new("btrfs");
+    let output = run_filesystem_usage_command(&mut command, mount_path).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2138,6 +2134,84 @@ async fn get_filesystem_usage_details(mount_path: &Path) -> Result<FilesystemUsa
     }
 
     parse_filesystem_usage_details(&String::from_utf8_lossy(&output.stdout))
+}
+
+async fn run_filesystem_usage_command(
+    command: &mut Command,
+    mount_path: &Path,
+) -> Result<std::process::Output> {
+    run_read_only_btrfs_command(command, &["filesystem", "usage", "-b"], mount_path)
+        .await
+        .context("failed to execute btrfs filesystem usage")
+}
+
+async fn run_read_only_btrfs_command(
+    command: &mut Command,
+    args: &[&str],
+    fs_root: &Path,
+) -> std::io::Result<std::process::Output> {
+    async fn read_pipe<R: AsyncRead + Unpin>(pipe: &mut Option<R>) -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        if let Some(pipe) = pipe {
+            pipe.read_to_end(&mut bytes).await?;
+        }
+        Ok(bytes)
+    }
+
+    // Bound optional health children through reaping, including kernel waits.
+    // Workspace mutations must never queue behind that health-only capacity.
+    let probe_slot = crate::health_probe::acquire_slot().await;
+    // Both parsers rely on English btrfs-progs field names.
+    let mut child = command
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .args(args)
+        .arg(fs_root)
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (keep_alive, cancelled) = tokio::sync::oneshot::channel::<()>();
+    // Keep ownership through caller cancellation: kill_on_drop alone leaves
+    // reaping to Tokio's best-effort orphan queue instead of an awaited wait.
+    let owner = tokio::spawn(async move {
+        let _probe_slot = probe_slot;
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let output = tokio::select! {
+            output = async {
+                let (status, stdout, stderr) = tokio::try_join!(
+                    child.wait(),
+                    read_pipe(&mut stdout_pipe),
+                    read_pipe(&mut stderr_pipe),
+                )?;
+                Ok(std::process::Output { status, stdout, stderr })
+            } => output,
+            _ = cancelled => Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "read-only btrfs probe cancelled",
+            )),
+        };
+        drop(stdout_pipe);
+        drop(stderr_pipe);
+        if output.is_err() {
+            let kill_error = child.start_kill().err();
+            // A killed child may remain in uninterruptible kernel sleep. Keep the
+            // health admission slot until it is reaped to avoid accumulating probes;
+            // refreshes and diagnostics can time out while the slot is occupied.
+            // Business queries bypass this admission slot.
+            child.wait().await.map_err(|error| {
+                warn!(%error, ?kill_error, "Failed to reap read-only Btrfs probe");
+                std::io::Error::other(format!("failed to reap read-only btrfs probe: {error}"))
+            })?;
+        }
+        output
+    });
+    let output = owner.await.map_err(|error| {
+        std::io::Error::other(format!("read-only btrfs probe task failed: {error}"))
+    })?;
+    drop(keep_alive);
+    output
 }
 
 /// Parse btrfs filesystem usage -b output to extract total and used bytes.
@@ -2268,45 +2342,130 @@ pub struct MountInfo {
     pub mount_point: String,
 }
 
-/// Find the first available btrfs partition by scanning /proc/mounts.
-/// Skips read-only mounts and subvolume mounts (prefers physical /dev/ devices).
-/// Returns an error if no writable physical btrfs partition is found.
+/// Find the first writable physical btrfs mount that passes live validation.
+/// Reads `/proc/mounts` once; invalid candidates do not prevent later selection.
+/// Returns an error only when no eligible candidate passes validation.
 pub async fn find_available_btrfs_partition() -> Result<MountInfo> {
-    let file = File::open("/proc/mounts")
+    let content = tokio::fs::read_to_string("/proc/mounts")
         .await
-        .context("Failed to open /proc/mounts")?;
-    let mut lines = BufReader::new(file).lines();
+        .context("Failed to read /proc/mounts")?;
+    select_valid_btrfs_mount_in(&content, |path| async move {
+        validate_btrfs_mount_path(&path).await?;
+        validate_live_btrfs_mount(&path).await
+    })
+    .await
+}
 
-    let mut found_ro = false;
-
-    while let Some(line) = lines.next_line().await? {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 && parts[2] == "btrfs" {
-            // Skip read-only mounts
-            if parts.len() >= 4 && parts[3].split(',').any(|opt| opt == "ro") {
-                found_ro = true;
-                continue;
-            }
-            // Skip subvolume mounts: prefer physical device partitions (/dev/xxx)
-            if !parts[0].starts_with("/dev/") {
-                continue;
-            }
-            // Skip loop devices (created by BtrfsLoop backend)
-            if parts[0].starts_with("/dev/loop") {
-                continue;
-            }
-            return Ok(MountInfo {
-                device: unescape_proc_mount(parts[0]),
-                mount_point: unescape_proc_mount(parts[1]),
-            });
+async fn select_valid_btrfs_mount_in<F, Fut>(content: &str, mut validate: F) -> Result<MountInfo>
+where
+    F: FnMut(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let candidates = writable_btrfs_mounts_in(content);
+    for chosen in &candidates {
+        if let Err(error) = validate(PathBuf::from(&chosen.mount_point)).await {
+            warn!(mount_point = %chosen.mount_point, error = %error,
+                "Skipping unavailable automatically detected btrfs mount");
+            continue;
         }
+        if candidates.len() > 1 {
+            warn!(
+                candidates = ?candidates,
+                chosen_device = %chosen.device,
+                chosen_mount_point = %chosen.mount_point,
+                "Multiple writable btrfs mounts found; selecting the first validated candidate. \
+                 Pin [backend.btrfs-base] btrfs_mount to make first-install selection explicit."
+            );
+        }
+        return Ok(chosen.clone());
     }
+    bail!("No writable physical btrfs partition passed validation")
+}
 
-    if found_ro {
-        bail!("Found btrfs partition(s), but all are read-only")
-    } else {
-        bail!("No available btrfs partition found in /proc/mounts")
+fn writable_btrfs_mounts_in(content: &str) -> Vec<MountInfo> {
+    proc_mounts_in(content)
+        .into_iter()
+        .filter(|entry| entry.is_writable_physical_btrfs())
+        .map(|entry| MountInfo {
+            device: entry.device,
+            mount_point: entry.mount_point.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
+/// Validate a selected BtrfsBase mount without searching for a replacement.
+pub(crate) async fn validate_btrfs_mount(mount_point: &Path) -> Result<MountInfo> {
+    validate_btrfs_mount_path(mount_point).await?;
+    let content = tokio::fs::read_to_string("/proc/mounts")
+        .await
+        .context("Failed to read /proc/mounts while validating BtrfsBase")?;
+    let selected = validate_btrfs_mount_in(&content, mount_point)?;
+    validate_live_btrfs_mount(mount_point).await?;
+    Ok(selected)
+}
+
+async fn validate_btrfs_mount_path(mount_point: &Path) -> Result<()> {
+    if !mount_point.is_absolute() {
+        bail!("BtrfsBase mount point {:?} must be absolute", mount_point);
     }
+    let metadata = tokio::fs::metadata(mount_point).await.with_context(|| {
+        format!(
+            "BtrfsBase mount point {:?} does not exist or cannot be accessed",
+            mount_point
+        )
+    })?;
+    if !metadata.is_dir() {
+        bail!("BtrfsBase mount point {:?} is not a directory", mount_point);
+    }
+    Ok(())
+}
+
+async fn validate_live_btrfs_mount(mount_point: &Path) -> Result<()> {
+    if !is_on_btrfs(mount_point).await {
+        bail!(
+            "BtrfsBase mount point {:?} is not btrfs in the live filesystem",
+            mount_point
+        );
+    }
+    let stat = nix::sys::statvfs::statvfs(mount_point)
+        .with_context(|| format!("Failed to inspect live mount flags for {:?}", mount_point))?;
+    if stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY) {
+        bail!(
+            "BtrfsBase mount point {:?} is read-only in the live filesystem",
+            mount_point
+        );
+    }
+    Ok(())
+}
+
+fn validate_btrfs_mount_in(content: &str, mount_point: &Path) -> Result<MountInfo> {
+    let target = mount_point.components().collect::<PathBuf>();
+    if let Some(entry) = proc_mounts_in(content)
+        .into_iter()
+        .find(|entry| entry.mount_point == target)
+    {
+        if entry.fs_type != "btrfs" {
+            bail!(
+                "BtrfsBase mount point {:?} is not btrfs (mounted as {})",
+                mount_point,
+                entry.fs_type
+            );
+        }
+        if !entry.read_write {
+            bail!(
+                "BtrfsBase mount point {:?} is read-only or not mounted read-write",
+                mount_point
+            );
+        }
+        return Ok(MountInfo {
+            device: entry.device,
+            mount_point: entry.mount_point.to_string_lossy().into_owned(),
+        });
+    }
+    bail!(
+        "BtrfsBase mount point {:?} is not mounted (no exact /proc/mounts entry)",
+        mount_point
+    )
 }
 
 /// Warmup snapshot metadata cache to speed up subsequent btrfs operations.
@@ -2336,10 +2495,478 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[tokio::test]
+    async fn auto_selection_skips_live_invalid_candidates_and_stops_at_first_valid() {
+        let mounts =
+            "/dev/a /first btrfs rw 0 0\n/dev/b /second btrfs rw 0 0\n/dev/c /third btrfs rw 0 0\n";
+        let mut attempted = Vec::new();
+        let chosen = select_valid_btrfs_mount_in(mounts, |path| {
+            attempted.push(path.clone());
+            std::future::ready(if path == Path::new("/first") {
+                Err(anyhow::anyhow!("mount disappeared after the table read"))
+            } else {
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(chosen.mount_point, "/second");
+        assert_eq!(
+            attempted,
+            [PathBuf::from("/first"), PathBuf::from("/second")]
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_selection_exhausts_invalid_candidates_before_reporting_no_mount() {
+        let mounts = "/dev/a /first btrfs rw 0 0\n/dev/b /second btrfs rw 0 0\n";
+        let mut attempted = Vec::new();
+        let result = select_valid_btrfs_mount_in(mounts, |path| {
+            attempted.push(path);
+            std::future::ready(Err(anyhow::anyhow!("not live btrfs")))
+        })
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No writable physical btrfs"));
+        assert_eq!(
+            attempted,
+            [PathBuf::from("/first"), PathBuf::from("/second")]
+        );
+        attempted.clear();
+        assert!(
+            select_valid_btrfs_mount_in("none /tmp tmpfs rw 0 0\n", |path| {
+                attempted.push(path);
+                std::future::ready(Ok(()))
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            attempted.is_empty(),
+            "an ineligible entry must not be probed"
+        );
+    }
+
+    #[test]
+    fn fresh_selection_and_explicit_validation_agree_on_last_exact_stacked_entry() {
+        let mounts = "/dev/old /hidden btrfs rw 0 0\n/dev/old /readonly btrfs rw 0 0\n/dev/old /replaced btrfs rw 0 0\nnone /hidden tmpfs rw 0 0\n/dev/new /readonly btrfs ro 0 0\n/dev/new /replaced btrfs rw 0 0\n/dev/third /later btrfs rw 0 0\n";
+        let candidates = writable_btrfs_mounts_in(mounts);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].mount_point, "/replaced");
+        assert_eq!(candidates[0].device, "/dev/new");
+        assert_eq!(candidates[1].mount_point, "/later");
+        assert!(validate_btrfs_mount_in(mounts, Path::new("/hidden")).is_err());
+        assert!(validate_btrfs_mount_in(mounts, Path::new("/readonly")).is_err());
+        for candidate in candidates {
+            assert_eq!(
+                validate_btrfs_mount_in(mounts, Path::new(&candidate.mount_point))
+                    .unwrap()
+                    .device,
+                candidate.device
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_mount_requires_an_existing_absolute_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(validate_btrfs_mount(&missing)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist"));
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(validate_btrfs_mount(&file)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not a directory"));
+        assert!(validate_btrfs_mount(Path::new("relative"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("absolute"));
+    }
+
+    #[test]
+    fn fresh_mount_candidates_are_writable_physical_btrfs_in_kernel_order() {
+        let mounts = "/dev/mapper/first /mnt/first btrfs rw,relatime 0 0\n/dev/sda /mnt/ro btrfs ro 0 0\n/dev/loop0 /mnt/loop btrfs rw 0 0\nnone /mnt/nondevice btrfs rw 0 0\n/dev/sdb /mnt/ext ext4 rw 0 0\n/dev/mapper/second /mnt/with\\040spaces btrfs rw 0 0\n";
+        let candidates = writable_btrfs_mounts_in(mounts);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].device, "/dev/mapper/first");
+        assert_eq!(candidates[1].mount_point, "/mnt/with spaces");
+    }
+
+    #[test]
+    fn selected_mount_errors_remain_distinct_and_do_not_select_an_alternative() {
+        let mounts =
+            "/dev/a /valid btrfs rw 0 0\n/dev/b /ext ext4 rw 0 0\n/dev/c /readonly btrfs ro 0 0\n";
+        for (path, message) in [
+            ("/missing", "not mounted"),
+            ("/ext", "not btrfs"),
+            ("/readonly", "read-only"),
+            ("/valid/subdir", "not mounted"),
+        ] {
+            assert!(validate_btrfs_mount_in(mounts, Path::new(path))
+                .unwrap_err()
+                .to_string()
+                .contains(message));
+        }
+        assert_eq!(
+            validate_btrfs_mount_in(mounts, Path::new("/valid"))
+                .unwrap()
+                .device,
+            "/dev/a"
+        );
+    }
+
+    #[test]
+    fn selected_mount_decodes_spaces_and_checks_last_exact_entry() {
+        assert_eq!(
+            validate_btrfs_mount_in(
+                "/dev/a /with\\040spaces btrfs rw 0 0\n",
+                Path::new("/with spaces")
+            )
+            .unwrap()
+            .mount_point,
+            "/with spaces"
+        );
+        assert!(validate_btrfs_mount_in(
+            "/dev/a /mount btrfs rw 0 0\n/dev/b /mount ext4 rw 0 0\n",
+            Path::new("/mount")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("not btrfs"));
+    }
+
     static REAL_BTRFS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn lock_real_btrfs_test() -> tokio::sync::MutexGuard<'static, ()> {
         REAL_BTRFS_TEST_LOCK.lock().await
+    }
+
+    #[tokio::test]
+    async fn filesystem_usage_probe_drains_both_pipes_and_preserves_exit_status() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%200000s' o; printf '%200000s' e >&2; exit 7",
+            "_",
+        ]);
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_filesystem_usage_command(&mut command, Path::new("/mnt/test")),
+        )
+        .await
+        .expect("both output pipes must drain without deadlocking")
+        .expect("a nonzero child exit must still return its output");
+
+        let mut expected_stdout = vec![b' '; 200_000];
+        expected_stdout[199_999] = b'o';
+        let mut expected_stderr = vec![b' '; 200_000];
+        expected_stderr[199_999] = b'e';
+        assert_eq!(output.stdout.len(), 200_000);
+        assert_eq!(output.stderr.len(), 200_000);
+        assert_eq!(output.stdout, expected_stdout);
+        assert_eq!(output.stderr, expected_stderr);
+        assert_eq!(output.status.code(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn filesystem_usage_probe_preserves_spawn_error_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = Command::new(temp.path().join("missing-btrfs"));
+        let error = run_filesystem_usage_command(&mut command, Path::new("/mnt/test"))
+            .await
+            .expect_err("a nonexistent probe executable must fail");
+
+        assert!(format!("{error:#}").contains("failed to execute btrfs filesystem usage"));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().map(|err| err.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn health_probe_waits_for_cancelled_child_to_be_reaped_before_starting() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_pid_path = temp.path().join("first-probe.pid");
+        let first_pid_output = first_pid_path.clone();
+        let first = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "printf '%s\\n' \"$$\" > \"$1\"; exec sleep 30", "_"])
+                .arg(first_pid_output);
+            run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        let first_pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(&first_pid_path).await {
+                    if let Ok(pid) = pid.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first probe should record its pid before cancellation");
+        let first_proc = PathBuf::from(format!("/proc/{first_pid}"));
+        let first_proc_for_second = first_proc.clone();
+        let second_started_path = temp.path().join("second-probe.started");
+        let second_started_output = second_started_path.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "if [ -e \"$1\" ]; then printf 'first-present\\n'; else printf 'first-reaped\\n'; fi; printf started > \"$2\"",
+                    "_",
+                ])
+                .arg(first_proc_for_second)
+                .arg(second_started_output);
+            ready_tx.send(()).unwrap();
+            run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        ready_rx
+            .await
+            .expect("second probe task should be scheduled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first_was_live = first_proc.exists();
+        let second_started_before_cancel = second_started_path.exists();
+
+        first.abort();
+        assert!(first
+            .await
+            .expect_err("first probe caller should be aborted")
+            .is_cancelled());
+        let output = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .expect("second probe must complete after the canceled child is reaped")
+            .expect("second probe task should finish normally")
+            .expect("second probe should return its output");
+
+        assert!(
+            first_was_live,
+            "first probe must remain live until cancellation"
+        );
+        assert!(
+            !second_started_before_cancel,
+            "another read-only probe must not start while the first child is live"
+        );
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"first-reaped\n");
+        assert!(second_started_path.exists());
+    }
+
+    #[tokio::test]
+    async fn stalled_health_probe_does_not_block_business_queries() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("health.pid");
+        let child_pid_path = pid_path.clone();
+        let health = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", r#"printf '%s\n' "$$" > "$1"; exec sleep 30"#, "_"])
+                .arg(child_pid_path);
+            run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await {
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("health probe must start before testing business isolation");
+        let mut results = Vec::new();
+        for deleted in [false, true] {
+            let mut command = Command::new("sh");
+            command.args(["-c", r#"printf 'business-ready\n'"#, "_"]);
+            results.push(
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    if deleted {
+                        run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+                    } else {
+                        run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+                    }
+                })
+                .await,
+            );
+        }
+        let proc_entry = PathBuf::from(format!("/proc/{pid}"));
+        let health_was_live = proc_entry.exists();
+        health.abort();
+        assert!(health.await.unwrap_err().is_cancelled());
+        for _ in 0..100 {
+            if !proc_entry.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !proc_entry.exists(),
+            "health child must be reaped after cancellation"
+        );
+        assert!(
+            health_was_live,
+            "business queries must finish while the health probe is live"
+        );
+        for result in results {
+            let output = result
+                .expect("a stalled health probe must not queue business queries")
+                .expect("business query must return its output");
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"business-ready\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_health_owner_does_not_queue_business_queries() {
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(crate::health_probe::scope(async move {
+            let slot = crate::health_probe::acquire_slot().await;
+            // Model an owner whose child remains in a kernel wait after cancellation.
+            let owner = tokio::spawn(async move {
+                let _slot = slot;
+                release_rx.await.unwrap();
+            });
+            held_tx.send(owner).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        let owner = tokio::time::timeout(Duration::from_secs(5), held_rx)
+            .await
+            .expect("health owner must acquire capacity")
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+
+        let temp = tempfile::tempdir().unwrap();
+        let started = temp.path().join("next-health.started");
+        let started_output = started.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let next_health = tokio::spawn(crate::health_probe::scope(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", r#"printf started > "$1""#, "_"])
+                .arg(started_output);
+            ready_tx.send(()).unwrap();
+            run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+        }));
+        ready_rx.await.unwrap();
+        let mut results = Vec::new();
+        for deleted in [false, true] {
+            let mut command = Command::new("sh");
+            command.args(["-c", "printf business-ready", "_"]);
+            results.push(
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    if deleted {
+                        run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+                    } else {
+                        run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+                    }
+                })
+                .await,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let health_started_while_held = started.exists();
+        release_tx.send(()).unwrap();
+        owner.await.unwrap();
+        let health_output = tokio::time::timeout(Duration::from_secs(5), next_health)
+            .await
+            .expect("next health child must finish after owner releases capacity")
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            !health_started_while_held,
+            "health capacity must remain occupied through owner cleanup"
+        );
+        assert!(health_output.status.success());
+        assert!(started.exists());
+        for result in results {
+            let output = result
+                .expect("business queries must bypass a canceled health owner")
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"business-ready");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_filesystem_usage_probe_kills_and_reaps_child() {
+        assert_cancelled_probe_is_reaped(false).await;
+        crate::health_probe::scope(assert_cancelled_probe_is_reaped(false)).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_deleted_subvolumes_probe_kills_and_reaps_child() {
+        assert_cancelled_probe_is_reaped(true).await;
+        crate::health_probe::scope(assert_cancelled_probe_is_reaped(true)).await;
+    }
+
+    async fn assert_cancelled_probe_is_reaped(list_deleted: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("btrfs-child.pid");
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "_"])
+            .arg(&pid_path);
+
+        let mut probe = Box::pin(async {
+            if list_deleted {
+                run_deleted_subvolumes_command(&mut command, Path::new("/mnt/test")).await
+            } else {
+                run_filesystem_usage_command(&mut command, Path::new("/mnt/test")).await
+            }
+        });
+        let pid = tokio::select! {
+            result = &mut probe => panic!("probe unexpectedly completed: {result:?}"),
+            pid = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(pid) = tokio::fs::read_to_string(&pid_path).await {
+                        if let Ok(pid) = pid.trim().parse::<u32>() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }) => pid.expect("shim should record its pid before cancellation"),
+        };
+        let cancel_started = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_millis(10), probe).await;
+        assert!(
+            result.is_err(),
+            "the injected probe child should exceed the deadline"
+        );
+
+        let proc_entry = PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..100 {
+            if !proc_entry.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !proc_entry.exists(),
+            "timed out btrfs child {pid} should be reaped after {:?}; status: {:?}; stat: {:?}",
+            cancel_started.elapsed(),
+            std::fs::read_to_string(proc_entry.join("status")),
+            std::fs::read_to_string(proc_entry.join("stat")),
+        );
     }
 
     // NOTE: Real-btrfs tests require root, btrfs-progs, and the same mounted

@@ -41,6 +41,7 @@
 mod anthropic;
 pub mod gemini;
 mod openai;
+mod qoder;
 pub mod sysom;
 pub mod types;
 
@@ -48,6 +49,7 @@ pub use anthropic::AnthropicParser;
 pub use gemini::GeminiParser;
 pub use openai::OpenAIParser;
 pub(crate) use openai::ResponsesToolCalls;
+pub(crate) use qoder::QoderCliParser;
 pub use sysom::SysomParser;
 pub use types::*;
 
@@ -139,6 +141,14 @@ impl MessageParser {
             }
         }
 
+        if QoderCliParser::matches_path(path) {
+            let request = request_body.and_then(QoderCliParser::parse_request);
+            let response = response_body.and_then(QoderCliParser::parse_response);
+            if request.is_some() || response.is_some() {
+                return Some(ParsedApiMessage::OpenAICompletion { request, response });
+            }
+        }
+
         // Reaching this point means no parser claimed the path. That is only
         // surprising for a path the analyzer already knows to be an LLM
         // endpoint (the request body may simply not have parsed), so keep the
@@ -184,6 +194,14 @@ impl MessageParser {
 
         if request.is_some() || response.is_some() {
             return Some(ParsedApiMessage::SysomMessage { request, response });
+        }
+        None
+    }
+
+    /// Decode non-JSON wire bodies before message parsing and session attribution.
+    pub(crate) fn decode_request_body(path: &str, body: &[u8]) -> Option<serde_json::Value> {
+        if QoderCliParser::matches_path(path) {
+            return QoderCliParser::decode_body_bytes(body);
         }
         None
     }
@@ -248,6 +266,8 @@ impl MessageParser {
             Some("openai")
         } else if SysomParser::matches_path(path) {
             Some("sysom")
+        } else if QoderCliParser::matches_path(path) {
+            Some("qodercli")
         } else if Self::gemini_model_from_path(path).is_some() {
             Some("gemini")
         } else {

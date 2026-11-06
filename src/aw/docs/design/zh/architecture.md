@@ -10,6 +10,8 @@ AW 在原生 Agent 的工具调用前后执行策略。Adapter 接收原生回�
 每个任务固定独立 cwd 和环境，保留重放阻断记录到释放，所属进程退出后执行回收。
 原生工厂继续由 Adapter 负责，见[任务生命周期](runtime/local-service.md#常驻宿主与任务-scope)。
 
+业务自管进程通过 CLI `aw instance` 进入 Service 的登记事务。Service 核验 Unix peer、owner 启动身份和 Ready，复用生产准备与任务 Scope，释放时仅清理所属 AW 资源。见[独立登记机制](runtime/local-service.md#独立登记)。
+
 ## 使用流程
 
 ![AW 用户流程与组件架构](../../../../../docs/images/aw/architecture_zh.png)
@@ -24,44 +26,54 @@ AW 框架包含 `crates/` 下的 10 个 crate。具体 Provider 在 `providers/`
 
 | Crate | 职责 | 直接依赖的 AW crate |
 | --- | --- | --- |
-| `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、exec、host、package、provider、service |
+| `aw-cli` | 统一 `aw` 入口、启动与命令编排 | adapter、config、core、exec、host、package、provider、service |
 | `aw-service` | 本地服务、客户端与运行状态 | adapter、config、contracts、core、exec、host、provider |
-| `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、exec、provider |
-| `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、exec、provider |
-| `aw-provider` | 校验 Provider 消息和能力准入 | config |
+| `aw-adapter` | 原生注册、回调转换、阶段校验与效果采用 | config、contracts、core、exec、provider |
+| `aw-host` | 准备 Provider，执行已准入的 Hook 步骤 | config、core、exec、provider |
+| `aw-provider` | 校验 Provider 消息与视图契约 | 无 |
 | `aw-exec` | 管理进程期限、输出上限、安装文件读锁和退出清理 | 无 |
 | `aw-config` | 解析配置，校验字段和静态引用 | 无 |
-| `aw-core` | 能力计划执行器、Host/Journal 接口和 FileJournal | contracts |
+| `aw-core` | Hook 策略准入、能力计划执行器、Host/Journal 接口和 FileJournal | config、contracts、provider |
 | `aw-contracts` | Schema、规范编码和记录间一致性校验 | 无 |
-| `aw-package` | 本地包数据库、计划、持久事务和配置 API，以及 `aw-build` | config、exec |
+| `aw-package` | Provider 准入、私有扩展事务与 AW 配置 | config、exec |
 
-依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，CLI 集成测试还使用
-`aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；`aw` 在进程内调用安装 API。
-独立 `aw-package` 可执行文件已删除，Rust crate 和 `aw-build` 保留。
+依赖列省略 `aw-` 前缀。`aw-package` 的测试还依赖 `aw-service`，`aw-provider` 的测试还依赖 `aw-config`，CLI 集成测试还使用
+`aw-contracts` 和 `reqwest`。底层库不依赖 `aw-cli`；`aw` 在进程内调用配置与本地扩展管理 API。
+独立 `aw-package` 可执行文件已删除，Rust crate 保留。`make -C src/aw build`
+构建 AW CLI；`make -C distribution aw-packages VERSION=0.1.0 COMPONENTS='core sec-core tokenless' OUTPUT="$PWD/target/aw-packages"` 通过
+`distribution/packaging/aw/` 下的普通脚本组装独立归档。
+扩展记录、文件校验和持久事务位于 `aw-package` 私有 `store` 模块；
+运行时文件读锁位于 `aw-exec`，不依赖包数据库访问。
 
 公开 `aw` 命令树使用一份 typed Clap 声明生成解析与帮助；准入后的选项直接
 调用现有处理逻辑，不重新解析 argv。内部 Hook 与生命周期回调保留协议解析器
-和失败回复。软件安装、配置和卸载全部使用同一棵 `aw` 命令树；
+和失败回复。AW 扩展安装、配置和卸载使用同一棵 `aw` 命令树；
 移除另一个可执行文件不改变服务消息、Provider 效果或已有文件归属记录。
 
 ### 本地软件包操作
 
-`aw-cli` 调用 `aw-package::plan` 检查本地 bundle 或所选卸载内容。计划保存包与版本
+`aw-cli` 通过 `aw-package::plan` 管理已经过准入的本地 Provider 扩展或所选卸载内容。每个输入都必须使用 `package.json`，声明 `aw-provider/v1alpha1`，
+拒绝 `manifest.json`、AW core 和普通后端 bundle。封装暴露的是已经过准入的不透明计划，
+不是通用包检查或安装 API。文件引擎保留在 `aw-package` 私有模块中；通用软件
+管理权归发行方或原生包管理器。计划保存包与版本
 决定、精确文件变更和阻碍；生成计划不创建安装目录、锁或数据库。`plan::execute`
 按数据库、安装目录的顺序重新获取写锁，复查记录并调用同一事务实现。
 持久替换 `installed.json` 表示提交。中断的操作需要显式执行 `aw recover`，完成
 已提交操作的清理，或恢复之前的文件，不覆盖发生冲突的字节。
 
-新软件包信息保存在 `$XDG_STATE_HOME/aw/packages`（有 HOME 回退路径），或显式的
-root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
-`.aw-packages/aw-core.json` 标明数据库位置，查询和生成配置按此读取，无需猜测另一个
-用户的 XDG 目录。首次成功写入软件包时存档旧组件 JSON，再替换成旧安装器会拒绝的
-位置文件。移除最后一个包后保留空登记和位置文件，便于安全重装。RPM/DEB 后端和
+AW 扩展记录保留 `$XDG_STATE_HOME/aw/packages`（有 HOME 回退路径），或显式的
+root 管理 raw scope `/var/lib/aw/packages`。安装目录中的
+`.local-packages/installation.json` 标明数据库位置和管理者。AW 查询和写入拒绝其他
+管理者的位置文件，不沿指针进入它们的数据库，不自动搬库或重复登记所有权。
+外部安装的 Provider 通过显式 `transport.argv` 和进程协议接入，无需包记录。
+原生 RPM 仍由 RPM 管理；本地 raw 扩展流程不导入或替代其管理权。
+查询和生成配置按此读取，无需猜测另一个
+用户的 XDG 目录。移除最后一个包后保留空登记和位置文件，便于安全重装。RPM/DEB 后端和
 跨安装目录选择依赖不属于本次实现。
 
 `aw-exec::PackageLeases` 为已知可执行文件和参数中的字面绝对路径持有已有的安装目录
 读锁。CLI 保留自身 core 与 Agent 的锁，服务保留自身可执行文件的锁，Host 在其生命
-周期及所属进程清理期间持有 Provider 的锁。这个共用库不依赖 `aw-package`，不读取
+周期及所属进程清理期间持有 Provider 的锁。`aw-exec` 不依赖 `aw-package`，不读取
 集中清单，也不创建记录。它不能发现任意外部进程或 shell 动态生成的路径。包含无法
 核验读锁支持的旧 AW 可执行文件的目录仍拒绝卸载。见
 [本地包管理](packaging/package-management.md)。
@@ -75,7 +87,15 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
 
 这两个实现在仓库根目录下各自拥有 Cargo workspace 和锁文件，通过独立进程
 接入，不计入 10 个框架 crate。Tokenless Provider 的测试还依赖 sec-core Provider。
+sec-core 覆盖测试通过仅测试依赖 host、adapter 和 package 联合验证生成配置、标准化与实际 Provider 进程。
 其他团队可独立开发、分发 Provider，见[协作指南](../../../../../docs/developer-guide/zh/aw/providers/index.md)。
+
+## 原生配置归属
+
+`aw-config` 校验有序来源引用，不解析原生内容。离线编辑器只修改 AW 自有引用。
+嵌入式 Adapter 使用 `aw-adapter::configuration` 调用原生 loader，保留其结果或存活句柄，
+再通过现有 Provider 准入取得不可变范围。原生 loader 负责优先级、相对路径、凭据和更新；
+service 继续负责运行期激活与策略代次。见[编辑合同](configuration/configuration-editing.md#原生来源归属)。
 
 ## 一次 Hook 请求
 
@@ -90,6 +110,12 @@ root 管理 raw scope `/var/lib/aw/packages`。安装目录中唯一的
 原生 Hook 脚本也通过 `aw-exec` 执行，保留原始输出和退出码，不经过 Provider 握手。
 AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参与 Hook 准入。
 
+Skill 校验复用 `tool.before` 与既有的 opaque `event.native` 扩展。
+Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录、来源）或
+解析错误。sec-core Provider 调用公开的只读 Ledger 检查并映射信任状态，目录授权
+和签名由后端管理员管理。Adapter 固定或刷新实际原生对象，拒绝校验期间的源文件
+变化。字段与范围见 [Skill 集成合同](../../../../../docs/developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
+
 ### 显式策略更新
 
 `aw run --reloadable` 显式预装稳定 Adapter 入口，`aw update` 定位现有实例，
@@ -100,8 +126,11 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 
 ### `aw-core` 在哪里
 
-当前 Hook 路径是 `aw-service → aw-host → aw-exec`。服务复用
-`aw-core::journal::FileJournal` 保存审计，但不调用 `Core::prepare/execute`。
+Hook 策略准备经由 `aw_core::admission` 执行，路径为
+`Service → Core.preflight → Host.discover → Core.admit → Host.from_admitted`；
+Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
+[Core 准入](core-admission.md)。服务同时复用 `aw-core::journal::FileJournal`
+保存审计，不调用 `Core::prepare/execute`。
 
 `aw-core::Core` 是单独的能力计划执行接口。使用它的嵌入方要提供
 `ProviderHost`、`Clock` 和 `Journal`；它依赖 `aw-contracts` 校验计划和执行记录。
@@ -122,8 +151,10 @@ AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参�
 | `crates/aw-cli/src/command.rs`、`crates/aw-cli/src/command/` | 公开命令的 typed 声明、生成的帮助与处理逻辑分发 |
 | `crates/aw-service/src/server.rs`、`crates/aw-service/src/runtime/` | 本地服务与事件执行 |
 | `crates/aw-host/src/lib.rs`、`crates/aw-host/src/event.rs` | Provider 准备与调用 |
-| `crates/aw-core/src/journal.rs` | 持久审计实现 |
-| `crates/aw-package/src/{database,open_bundle,plan,transaction}.rs` | 包记录、本地包检查、预览和持久文件变更 |
+| `crates/aw-core/src/admission.rs`、`crates/aw-core/src/admission/`、`crates/aw-core/src/journal.rs` | Hook 策略准入规则/类型与持久审计实现 |
+| `crates/aw-package/src/store/{database,open_bundle,plan,transaction}.rs` | 私有扩展记录、本地校验、计划与持久文件变更 |
+| `crates/aw-package/src/configuration/`、`crates/aw-package/src/config_edit.rs` | AW 配置渲染与安全离线编辑 |
+| `../../distribution/packaging/aw/` | AW 独立归档、集成后端构建与具体配置模板 |
 | `crates/aw-exec/src/packages.rs` | 运行时对已知安装文件持有读锁 |
 | `crates/aw-contracts/src/registry.rs` | 编译进程序的契约 Schema 清单 |
 | `../../providers/agent-sec-core/`、`../../providers/tokenless/` | 具体 Provider 实现、配置示例和测试 |

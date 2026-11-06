@@ -33,6 +33,99 @@ fn summary_provider() -> MockProvider {
     MockProvider::text_only("## Objective and constraints\n- keep diagnosing memory usage")
 }
 
+#[tokio::test]
+async fn standalone_compaction_cannot_start_ecs_identity_access() {
+    use crate::provider::DispatchState;
+    use clap::Parser;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let mut config = CoreConfig::default();
+    config.session.persist_dir = temp.path().join("sessions").to_string_lossy().into_owned();
+    config.ai.active_provider = Some("trial".to_string());
+    config.ai.providers.insert(
+        "trial".to_string(),
+        crate::config::ProviderConfig {
+            provider_type: Some("aliyun".to_string()),
+            auth_source: Some("ecs_identity".to_string()),
+            ..Default::default()
+        },
+    );
+    let mut args = CliArgs::try_parse_from([
+        "cosh-core",
+        "--compact",
+        "--resume",
+        &session.session_id.to_string(),
+        "--workspace",
+        temp.path().to_str().unwrap(),
+    ])
+    .unwrap();
+    let path = store.session_file(&session.session_id);
+    let before = std::fs::read(&path).unwrap();
+    for auto in [false, true] {
+        args.auto_compact = auto;
+        args.expect_generation = auto.then_some(session.generation);
+        args.expect_revision = auto.then_some(0);
+        let error = compact_cli_inner(&args, &config)
+            .await
+            .expect_err("no interactive context");
+        assert!(matches!(error, CompactionError::Access(failure)
+            if failure.code == "EcsTrialInteractionRequired" && failure.dispatch == DispatchState::NotDispatched));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn access_failure_preserves_persisted_projection_and_transcript() {
+    use crate::provider::{DispatchState, GenerateEvent, ProviderFailure, ProviderFailureKind};
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let config = CoreConfig::default();
+    let (_, mut session) = compact(&store, &session, &summary_provider(), &config)
+        .await
+        .expect("initial projection");
+    session.messages.extend(bulky_messages(4));
+    store.persist(&mut session).unwrap();
+    let path = store.session_file(&session.session_id);
+    let before = std::fs::read(&path).unwrap();
+
+    for (code, kind) in [
+        (
+            "Sysom.ServiceNotActivated",
+            ProviderFailureKind::ActivationRequired,
+        ),
+        (
+            "Sysom.CreditsExhausted",
+            ProviderFailureKind::QuotaExhausted,
+        ),
+    ] {
+        let failure = ProviderFailure {
+            code: code.to_string(),
+            kind,
+            dispatch: DispatchState::NotDispatched,
+            request_id: Some("summary-request".to_string()),
+        };
+        let provider =
+            MockProvider::new(vec![vec![GenerateEvent::ProviderFailure(failure.clone())]]);
+        let error = compact(&store, &session, &provider, &config)
+            .await
+            .expect_err("access denied before compaction commit");
+        assert_eq!(error.code(), code);
+        assert!(matches!(error, CompactionError::Access(actual) if actual == failure));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    let provider = MockProvider::new(vec![vec![GenerateEvent::Cancelled]]);
+    assert!(matches!(
+        compact(&store, &session, &provider, &config).await,
+        Err(CompactionError::Cancelled)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 async fn compact(
     store: &SessionStore,
     session: &PersistedSession,

@@ -139,6 +139,9 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ),
             ]),
         ),
+        Command::Instance(value) => {
+            crate::cli::instance::run(&value.socket, value.connect, value.timeout_ms)
+        }
         Command::Policy => crate::runtime("policy", &Arguments::default()),
         Command::Hook(value) => crate::runtime(
             "hook",
@@ -180,6 +183,7 @@ fn config(command: Config) -> Result<Exit> {
     let (action, flags, output): (_, BTreeMap<_, _>, _) = match command {
         Config::Validate(value) => return super::validation::run(value),
         Config::Init(value) => {
+            let value = *value;
             let mut args = options([
                 ("prefix", Some(value.prefix.prefix)),
                 ("config", Some(value.config)),
@@ -188,14 +192,47 @@ fn config(command: Config) -> Result<Exit> {
                 ("node", value.node),
                 ("openclaw", value.openclaw),
                 ("provider", value.provider),
-                ("socket", value.socket),
+                ("template", value.template),
                 ("check", value.check),
                 ("effect", value.effect),
                 ("reason-code", value.reason_code),
             ]);
+            args.flags.insert(
+                "--template-vars".into(),
+                serde_json::to_string(&value.template_var)?,
+            );
             args.native = value.arguments;
             return configure(args, value.prefix.output);
         }
+        Config::NativeSources(value) => (
+            "native-sources",
+            options([
+                ("config", Some(value.configuration.config)),
+                ("agent", Some(value.agent)),
+            ])
+            .flags,
+            crate::output::Options::default(),
+        ),
+        Config::AddNativeSource(value) => (
+            "add-native-source",
+            options([
+                ("config", Some(value.target.configuration.config)),
+                ("agent", Some(value.target.agent)),
+                ("definition", Some(value.definition)),
+            ])
+            .flags,
+            value.output,
+        ),
+        Config::RemoveNativeSource(value) => (
+            "remove-native-source",
+            options([
+                ("config", Some(value.target.configuration.config)),
+                ("agent", Some(value.target.agent)),
+                ("id", Some(value.id)),
+            ])
+            .flags,
+            value.output,
+        ),
         Config::Show(value) => (
             "show",
             options([
@@ -265,6 +302,9 @@ fn config(command: Config) -> Result<Exit> {
     };
     crate::output::complete(
         match action {
+            "native-sources" => "config native-sources",
+            "add-native-source" => "config add-native-source",
+            "remove-native-source" => "config remove-native-source",
             "show" => "config show",
             "add-provider" => "config add-provider",
             "remove-provider" => "config remove-provider",

@@ -60,6 +60,16 @@ remain unavailable. Source builds are for contributors; follow the
 [developer setup](../../../../contribute/en/cosh-ng/getting-started.md)
 after the packaged options above.
 
+From `src/cosh-ng`, build and install for the current user:
+
+```bash
+make build
+make install
+```
+
+This source installation does not create the `cosh` terminal command. Use the
+RPM/raw installation above for the complete terminal.
+
 ### 2. Start the terminal
 
 Start `cosh` in the project or system directory where the Agent should work:

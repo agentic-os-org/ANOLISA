@@ -366,6 +366,51 @@ fn code_blocks_keep_language_and_verbatim_whitespace() {
 }
 
 #[test]
+fn code_block_fences_outgrow_the_longest_run_and_keep_three_tick_minimum() {
+    for (code, length) in [
+        ("", 3),
+        ("plain text", 3),
+        ("a`b", 3),
+        ("a``b", 3),
+        ("```", 4),
+        ("a``b`````c```d", 6),
+    ] {
+        let html = page(&format!(
+            "<p>{PARAGRAPH}</p><pre><code class=\"language-sh\">{code}</code></pre>"
+        ));
+        let fence = "`".repeat(length);
+        let view = HtmlExtractor.render(&html).unwrap();
+        assert_eq!(
+            body_of(&view),
+            format!("{PARAGRAPH}\n\n{fence}sh\n{code}\n{fence}"),
+            "code={code:?}"
+        );
+    }
+}
+
+#[test]
+fn code_block_fence_selection_is_bounded_for_long_backtick_runs() {
+    // A fetched page controls the run length. The old prefix-probing loop
+    // takes seconds here; the budget leaves ample room for one linear scan.
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(run.len() + 1);
+    let html = page(&format!(
+        "<p>{PARAGRAPH}</p><pre class=\"lang-sh\">a{run}b</pre>"
+    ));
+    let started = std::time::Instant::now();
+    let view = HtmlExtractor.render(&html).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        body_of(&view),
+        format!("{PARAGRAPH}\n\n{fence}sh\na{run}b\n{fence}")
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "code block rendering took {elapsed:?}"
+    );
+}
+
+#[test]
 fn inline_code_spans_containing_double_backticks_keep_one_fence() {
     let html = page(&format!(
         "<p>{PARAGRAPH}</p><p>Run <code>a``b</code>, <kbd>ctl``alt</kbd> and <samp>x `` y</samp>,          plain <code>a`b</code> stays.</p>"

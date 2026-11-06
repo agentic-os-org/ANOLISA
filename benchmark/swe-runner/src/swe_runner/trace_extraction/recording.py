@@ -56,8 +56,15 @@ def _write_trace_file(instance_id: str, trace_root: str | Path, session_data: di
 
     issue_dir = Path(trace_root) / sanitize_path_component(instance_id)
     issue_dir.mkdir(parents=True, exist_ok=True)
-    trace_file = _next_trace_file(issue_dir)
-    with open(trace_file, "w", encoding="utf-8") as f:
+    while True:
+        trace_file = _next_trace_file(issue_dir)
+        try:
+            f = open(trace_file, "x", encoding="utf-8")
+        except FileExistsError:
+            # Exclusive creation also coordinates independent recorder processes.
+            continue
+        break
+    with f:
         json.dump(session_data, f, indent=2, ensure_ascii=False)
     return trace_file
 

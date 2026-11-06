@@ -364,7 +364,7 @@ $ sudo agentsight discover
 总计: 1 个 Agent
 
 $ sudo agentsight discover --list-known | head -12
-已知 AI Agent（共 31 条规则）:
+已知 AI Agent（共 35 条规则）:
 ============================================================
 
   Hermes (custom)
@@ -674,6 +674,9 @@ or making model requests. It is mutually exclusive with `--dim`, and rejects `--
 Selection is shared with analysis: `--file`, repeatable `--dir`, `--limit` (default 10),
 and `--min-steps` (default 3). Directory scans keep the existing 1 KiB minimum file size
 and subagent exclusion; use `--file` to export a small file explicitly.
+
+`--limit` must be non-negative: `0` selects no files, and negative values fail with
+exit code 2 before discovery, analysis, or export.
 
 Each name is the full SHA-256 of the canonical absolute source path followed by
 `.atif.json`. Same-name inputs in different directories remain distinct; exporting the

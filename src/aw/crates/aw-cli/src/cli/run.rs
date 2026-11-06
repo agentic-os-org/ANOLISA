@@ -139,12 +139,12 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     if args.flags.contains_key("--reloadable") {
         aw_adapter::reload::supported(&prepared.capabilities())?;
     }
-    let resident_policy_reload =
-        !args.flags.contains_key("--reloadable") && matches!(name, "qoder-sdk" | "qwenpaw");
+    let resident_policy_reload = !args.flags.contains_key("--reloadable")
+        && matches!(name, "qoder-sdk" | "qwenpaw" | "agentscope");
     if resident_policy_reload {
         aw_adapter::reload::resident_supported(&prepared.capabilities())?;
     }
-    let steps = aw_provider::admission::preflight(&config, target, &capabilities.clone().into())?;
+    let steps = aw_core::admission::preflight(&config, target, &capabilities.clone().into())?;
     prepared.validate_steps(&steps)?;
     let configuration = Path::new(args.required("--config")?);
     let remember_connection = args.flags.contains_key("--reloadable")
@@ -198,8 +198,8 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         };
         instance = Some(binding.instance_id.clone());
         let reloadable = args.flags.contains_key("--reloadable");
-        if matches!(name, "pi" | "claude-sdk")
-            || (matches!(name, "qoder-sdk" | "qwenpaw") && !reloadable)
+        if matches!(name, "pi" | "claude-sdk" | "agentscope")
+            || (matches!(name, "qoder-sdk" | "qwenpaw" | "agentscope") && !reloadable)
         {
             service.client.call(
                 Operation::OwnInstance {
@@ -260,6 +260,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
             &SIGNAL,
             &failed,
             shutdown_grace,
+            name == "qoder-sdk",
             plan.readiness,
             |pid| {
                 if reloadable || resident_policy_reload {

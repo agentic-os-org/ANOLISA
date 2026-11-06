@@ -18,8 +18,9 @@ pub use client::Client;
 pub use runtime::process::Process as ProcessIdentity;
 pub use server::Server;
 pub use wire::{
-    Binding, Capabilities, EventHandle, Identity, LifecyclePhase, Operation, Request, Response,
-    RunOutcome, VERSION,
+    Binding, Capabilities, EventHandle, Identity, LifecyclePhase, Operation, RegistrationCommand,
+    RegistrationHandle, RegistrationKey, RegistrationOwner, RegistrationRequest, Request, Response,
+    RunOutcome, REGISTRATION_VERSION, VERSION,
 };
 
 /// Service boundary failure; remote messages contain only stable error codes.

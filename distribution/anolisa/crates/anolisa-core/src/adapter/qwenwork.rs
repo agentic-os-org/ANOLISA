@@ -563,9 +563,6 @@ fn preflight(ctx: &DriverCtx) -> Result<Vec<String>, AdapterError> {
             "Python 3.9+ is required for QwenWork; version probe failed",
         ));
     }
-    if binary("rtk", ctx).is_none() {
-        warnings.push("RTK not found; command rewriting is unavailable, response compression remains available.".to_string());
-    }
     Ok(warnings)
 }
 
@@ -575,21 +572,9 @@ fn binary(name: &str, ctx: &DriverCtx) -> Option<PathBuf> {
     }
     let mut candidates = vec![ctx.layout.bin_dir.join(name)];
     if let Some(home) = &ctx.user_home {
-        for dir in [
-            ".local/bin",
-            ".local/lib/anolisa/libexec/tokenless",
-            ".local/libexec/anolisa/tokenless",
-        ] {
-            candidates.push(home.join(dir).join(name));
-        }
+        candidates.push(home.join(".local/bin").join(name));
     }
-    for dir in [
-        "/usr/local/bin",
-        "/usr/local/libexec/anolisa/tokenless",
-        "/usr/bin",
-        "/usr/libexec/anolisa/tokenless",
-        "/usr/lib/anolisa/tokenless",
-    ] {
+    for dir in ["/usr/local/bin", "/usr/bin"] {
         candidates.push(Path::new(dir).join(name));
     }
     candidates

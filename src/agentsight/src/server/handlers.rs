@@ -6188,8 +6188,8 @@ pub async fn list_trajectory_steps(
 /// `subagent_trajectories`, and re-serialize.
 fn inject_subagents(parent_json: &str, sub_jsons: &[String]) -> String {
     let mut doc: serde_json::Value = match serde_json::from_str(parent_json) {
-        Ok(v) => v,
-        Err(_) => return parent_json.to_string(),
+        Ok(v @ serde_json::Value::Object(_)) => v,
+        _ => return parent_json.to_string(),
     };
     let subs: Vec<serde_json::Value> = sub_jsons
         .iter()
@@ -6200,6 +6200,32 @@ fn inject_subagents(parent_json: &str, sub_jsons: &[String]) -> String {
     }
     doc["subagent_trajectories"] = serde_json::Value::Array(subs);
     serde_json::to_string(&doc).unwrap_or_else(|_| parent_json.to_string())
+}
+
+#[cfg(test)]
+mod inject_subagents_tests {
+    use super::inject_subagents;
+
+    #[test]
+    fn non_object_parent_document_is_returned_unchanged() {
+        for parent in ["[]", "true", "null", "\"text\"", "42"] {
+            let sub = r#"{"session_id":"child"}"#.to_string();
+            assert_eq!(inject_subagents(parent, std::slice::from_ref(&sub)), parent);
+        }
+    }
+
+    #[test]
+    fn object_parent_still_embeds_the_subagent_documents() {
+        let parent = r#"{"schema_version":"ATIF-v1.7","session_id":"root"}"#;
+        let sub = r#"{"session_id":"child"}"#.to_string();
+        let enriched = inject_subagents(parent, &[sub]);
+        let doc: serde_json::Value = serde_json::from_str(&enriched).expect("valid JSON");
+        assert_eq!(
+            doc["subagent_trajectories"][0]["session_id"],
+            serde_json::json!("child")
+        );
+        assert_eq!(doc["session_id"], serde_json::json!("root"));
+    }
 }
 
 // ─── Skill Metrics endpoints ─────────────────────────────────────────────────

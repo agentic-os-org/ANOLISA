@@ -59,6 +59,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "asc-foundation-types"
+version = "1.2.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-os-permission-types"
+version = "1.2.0"
+dependencies = [
+ "asc-foundation-types",
+ "serde",
+]
+
+[[package]]
+name = "asc-sandbox-types"
+version = "1.2.0"
+dependencies = [
+ "asc-os-permission-types",
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -411,6 +435,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "linux-sandbox"
 version = "0.0.0"
 dependencies = [
+ "asc-sandbox-types",
  "clap",
  "dirs",
  "libc",

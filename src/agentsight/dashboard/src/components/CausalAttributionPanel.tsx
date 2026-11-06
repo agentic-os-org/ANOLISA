@@ -502,6 +502,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   // response describes the old key and must not be rendered — or filed — as
   // the new one's result.
   const requestVersion = useRef(0);
+  const runTimerRef = useRef<number | null>(null);
 
   // Stage definitions with estimated durations (seconds)
   const stages = [
@@ -516,9 +517,15 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   // any in-flight run (bump the version) and clears the previous key's case:
   // leaving it up would render the old round's verdict under the new label.
   useEffect(() => {
+    if (runTimerRef.current !== null) {
+      window.clearInterval(runTimerRef.current);
+      runTimerRef.current = null;
+    }
     requestVersion.current += 1;
     setLoading(false);
     setError(null);
+    setStageIdx(0);
+    setElapsed(0);
     const past = readHistory(sessionId, roundIndex, idKind);
     setHistory(past);
     if (past.length > 0) {
@@ -529,6 +536,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
     } else {
       setCaseData(null);
       setCached(false);
+      setComplaint('');
     }
     setSelectedAltIdx(null);
   }, [sessionId, roundIndex, idKind]);
@@ -559,6 +567,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
         return next;
       });
     }, 1000);
+    runTimerRef.current = timer;
 
     try {
       const req: CausalAttributionRequest = {
@@ -591,6 +600,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
       }
     } finally {
       window.clearInterval(timer);
+      if (runTimerRef.current === timer) runTimerRef.current = null;
       if (requestVersion.current === version) setLoading(false);
     }
   };

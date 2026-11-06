@@ -39,15 +39,25 @@ cosh-cli / cosh-core          ws-ckpt daemon
 - 最大响应限制为 64 MiB，避免耗尽内存
 - 默认超时为 5000 ms，可通过 `CkptClient::with_timeout()` 配置
 
-## 请求类型（WsCkptRequest）
+## 请求类型（Request / WsCkptRequest）
 
 bincode 按枚举变体索引序列化（第一个变体 = index 0）。**变体顺序即二进制契约，不可重排。**
+
+下面的请求、响应和错误码表以 ANOLISA `main`（`8e23424d5`）为基准，描述 `src/ws-ckpt/src/crates/common/src/lib.rs` 定义的完整守护进程协议，字段按编码顺序列出。在该版本中，`cosh-types` 的客户端副本覆盖的范围更短：
+
+| 枚举 | 守护进程（`ws-ckpt-common`） | 客户端（`cosh-types`） |
+|------|------------------------------|------------------------|
+| 请求 | `Request`，索引 0-29 | `WsCkptRequest`，索引 0-25 |
+| 响应 | `Response`，索引 0-29 | `WsCkptResponse`，索引 0-27 |
+| 错误码 | `ErrorCode`，索引 0-13 | `WsCkptErrorCode`，索引 0-13 |
+
+标为*仅守护进程*的条目在 `cosh-types` 中不存在：cosh-ng 无法编码这些请求，也无法解码这些响应。`ReloadConfigOk` 也有差异：`WsCkptResponse` 只声明 `config`，cosh-ng 解码器会跳过尾部的 `file` 字节。
 
 | 索引 | 变体 | 说明 |
 |------|------|------|
 | 0 | `Init { workspace }` | 初始化工作空间 |
 | 1 | `Checkpoint { workspace, id, message, metadata, pin }` | 创建快照 |
-| 2 | `Rollback { workspace, to }` | 回滚到指定快照 |
+| 2 | `Rollback { workspace, to, num_ancestors }` | 回滚到指定快照（`to`）或祖先快照（`num_ancestors`） |
 | 3 | `Delete { workspace, snapshot, force }` | 删除快照 |
 | 4 | `List { workspace, format }` | 列出快照 |
 | 5 | `Diff { workspace, from, to }` | 两个快照间的差异 |
@@ -55,29 +65,63 @@ bincode 按枚举变体索引序列化（第一个变体 = index 0）。**变体
 | 7 | `Cleanup { workspace, keep }` | 清理旧快照 |
 | 8 | `Config` | 获取守护进程配置 |
 | 9 | `ReloadConfig` | 重新加载配置 |
-| 10 | `Recover { workspace }` | 恢复工作空间 |
-| 11 | `HealthAdvisory` | 健康检查 |
+| 10 | `ReloadGlobalConfig` | 仅重新加载全局配置 |
+| 11 | `ReloadWorkspacePolicy { workspace }` | 重新加载单个工作空间的 `policy.toml` |
+| 12 | `ConfigOverview` | 获取全局配置和工作空间覆盖计数 |
+| 13 | `Recover { workspace }` | 将工作空间恢复为普通目录（撤销 init） |
+| 14 | `HealthAdvisory` | 查询聚合健康指标 |
+| 15 | `GetWorkspacePolicy { workspace }` | 读取工作空间级策略 |
+| 16 | `ResetWorkspacePolicy { workspace }` | 删除工作空间级 `policy.toml`，恢复继承全局配置 |
+| 17 | `PatchWorkspacePolicy { workspace, auto_cleanup, auto_cleanup_keep }` | 原子修改工作空间级策略字段 |
+| 18 | `RollbackPreview { workspace, to, num_ancestors }` | 预览回滚将产生的变更 |
+| 19 | `WorkspaceIdentityV2 { registration_path }` | 解析已注册工作空间的稳定身份 |
+| 20 | `GuardedCheckpointV2 { ws_id, expected_generation, checkpoint_id, operation_digest, message, metadata, pin }` | 创建受工作空间代际和操作身份保护的快照 |
+| 21 | `CheckpointEvidenceV2 { ws_id, expected_generation, checkpoint_id, operation_digest }` | 查询受保护快照操作的持久化证据 |
+| 22 | `GuardedRollbackPreviewV2 { registered_path, ws_id, expected_generation, target_snapshot_id }` | 预览与工作空间身份绑定的精确回滚目标 |
+| 23 | `GuardedRollbackV2 { registered_path, ws_id, expected_generation, target_snapshot_id, expected_diff_digest, operation_id, operation_digest }` | 重新校验预览并回滚到其精确目标 |
+| 24 | `GuardedRollbackEvidenceV2 { ws_id, operation_id, operation_digest }` | 查询受保护回滚操作的持久化证据 |
+| 25 | `Unregister { workspace }` | 仅在 live 子卷缺失时移除注册 |
+| 26 | `RecoverPreview { workspace }` | 在确认前解析恢复目标和删除范围（*仅守护进程*） |
+| 27 | `RecoverConfirmed { preview }` | 仅在预览仍描述同一目标时执行恢复（*仅守护进程*） |
+| 28 | `ListOrphans { workspace }` | 列出恢复后丢失原始元数据的快照（*仅守护进程*） |
+| 29 | `ListPage { orphans_only, workspace, limit, cursor }` | 读取一页快照（*仅守护进程*） |
 
-## 响应类型（WsCkptResponse）
+## 响应类型（Response / WsCkptResponse）
 
-| 变体 | 对应请求 | 关键字段 |
-|------|----------|----------|
-| `InitOk { ws_id }` | Init | 工作空间 ID |
-| `CheckpointOk { snapshot_id }` | Checkpoint | 快照 ID |
-| `RollbackOk { from, to }` | Rollback | 回滚源和目标 |
-| `DeleteOk { target }` | Delete | 被删除的快照标识 |
-| `Error { code, message }` | 任意 | 错误码 + 人类可读描述 |
-| `ListOk { snapshots }` | List | `Vec<SnapshotEntry>` |
-| `DiffOk { changes }` | Diff | `Vec<DiffEntry>` |
-| `StatusOk { report }` | Status | `StatusReport` |
-| `CleanupOk { removed }` | Cleanup | 被移除的快照 ID 列表 |
-| `ConfigOk { config }` | Config | `ConfigReport` |
-| `ReloadConfigOk` | ReloadConfig | 无载荷 |
-| `CheckpointSkipped { reason }` | Checkpoint | 跳过原因（如无变更） |
-| `RecoverOk { workspace }` | Recover | 恢复的工作空间路径 |
-| `HealthAdvisoryOk { ... }` | HealthAdvisory | 超限工作空间数、磁盘用量 |
+| 索引 | 变体 | 对应请求 | 关键字段 |
+|------|------|----------|----------|
+| 0 | `InitOk { ws_id }` | Init | 工作空间 ID |
+| 1 | `CheckpointOk { snapshot_id }` | Checkpoint | 快照 ID |
+| 2 | `RollbackOk { from, to }` | Rollback | 回滚源和目标 |
+| 3 | `DeleteOk { target }` | Delete | 被删除的快照标识 |
+| 4 | `Error { code, message }` | 任意 | 错误码 + 人类可读描述 |
+| 5 | `ListOk { snapshots }` | List、ListOrphans | `Vec<SnapshotEntry>` |
+| 6 | `DiffOk { changes }` | Diff | `Vec<DiffEntry>` |
+| 7 | `StatusOk { report }` | Status | `StatusReport` |
+| 8 | `CleanupOk { removed }` | Cleanup | 被移除的快照 ID 列表 |
+| 9 | `ConfigOk { config }` | Config | `ConfigReport` |
+| 10 | `ReloadConfigOk { config, file }` | ReloadConfig、ReloadGlobalConfig、ReloadWorkspacePolicy | 重载后的 `ConfigReport`；守护进程读取的 `Option<FileConfig>`，工作空间策略重载时为 `None` |
+| 11 | `CheckpointSkipped { reason }` | Checkpoint | 跳过原因（如无变更） |
+| 12 | `RecoverOk { workspace }` | Recover、RecoverConfirmed | 恢复的工作空间路径 |
+| 13 | `HealthAdvisoryOk { over_limit_workspace_count, fs_total_bytes, fs_used_bytes }` | HealthAdvisory | 超限工作空间数、后端磁盘用量（`fs_total_bytes == 0` 表示不可用） |
+| 14 | `WorkspacePolicyOk { ws_id, effective, local, global }` | GetWorkspacePolicy、ResetWorkspacePolicy、PatchWorkspacePolicy | 生效策略、磁盘上的覆盖项、全局默认值 |
+| 15 | `ConfigOverviewOk { config, ws_total, ws_with_override }` | ConfigOverview | `ConfigReport`、工作空间计数 |
+| 16 | `RollbackPreviewOk { to, changes }` | RollbackPreview | 回滚目标、`Vec<DiffEntry>` |
+| 17 | `WorkspaceIdentityV2Ok { protocol_version, ws_id, registered_path, generation }` | WorkspaceIdentityV2 | 协议版本、工作空间身份 |
+| 18 | `GuardedCheckpointV2Ok { evidence }` | GuardedCheckpointV2 | `GuardedCheckpointEvidenceV2` |
+| 19 | `CheckpointEvidenceV2Ok { evidence }` | CheckpointEvidenceV2 | `Option<GuardedCheckpointEvidenceV2>`；`None` 表示没有证据 |
+| 20 | `GuardedCheckpointV2Rejected { code, message }` | WorkspaceIdentityV2、GuardedCheckpointV2、CheckpointEvidenceV2 | `GuardedCheckpointRejectionCodeV2` + 描述 |
+| 21 | `GuardedRollbackPreviewV2Ok { protocol_version, registered_path, ws_id, generation, target_snapshot_id, diff_digest, changes, caller_uid }` | GuardedRollbackPreviewV2 | 工作空间身份、精确目标、差异及其摘要、调用方 UID |
+| 22 | `GuardedRollbackV2Ok { evidence }` | GuardedRollbackV2 | 证明回滚完成的 `GuardedRollbackEvidenceV2` |
+| 23 | `GuardedRollbackV2Uncertain { evidence }` | GuardedRollbackV2 | 回滚可能已开始但未确认完成时的 `GuardedRollbackEvidenceV2` |
+| 24 | `GuardedRollbackEvidenceV2Ok { evidence }` | GuardedRollbackEvidenceV2 | `Option<GuardedRollbackEvidenceV2>`；`None` 表示没有证据 |
+| 25 | `GuardedRollbackV2Rejected { code, message }` | GuardedRollbackPreviewV2、GuardedRollbackV2、GuardedRollbackEvidenceV2 | `GuardedRollbackRejectionCodeV2` + 描述 |
+| 26 | `RecoverWithWarning { workspace, warning }` | Recover、RecoverConfirmed | 恢复的工作空间路径、保留数据的警告 |
+| 27 | `UnregisterOk { workspace, retained_paths }` | Unregister | 原工作空间路径、为手动恢复保留的路径 |
+| 28 | `RecoverPreviewOk { preview }` | RecoverPreview | `RecoveryPreview`（*仅守护进程*） |
+| 29 | `ListPageOk { snapshots, next_cursor }` | ListPage | `Vec<SnapshotListItem>`、不透明续页令牌（*仅守护进程*） |
 
-## 错误码（WsCkptErrorCode）
+## 错误码（ErrorCode / WsCkptErrorCode）
 
 | 索引 | 变体 | 说明 |
 |------|------|------|
@@ -92,6 +136,9 @@ bincode 按枚举变体索引序列化（第一个变体 = index 0）。**变体
 | 8 | `SnapshotAlreadyExists` | 快照 ID 冲突 |
 | 9 | `WriteLockConflict` | 写锁冲突 |
 | 10 | `DiskSpaceInsufficient` | 磁盘空间不足 |
+| 11 | `CwdOccupied` | 有进程的工作目录位于工作空间内 |
+| 12 | `CwdScanFailed` | 工作目录扫描失败，占用状态未知 |
+| 13 | `UnsupportedWorkspacePath` | 差异路径无法表示为 UTF-8 |
 
 ## 客户端使用
 
@@ -121,7 +168,9 @@ let restored = client.restore("/home/user/project", "snap-001")?;
 |------|------|
 | 变体顺序不可变 | bincode 使用索引序列化枚举，重排即破坏线格式 |
 | 新增只能追加 | 新的 Request/Response 变体只能在末尾添加 |
-| 类型必须同步 | `cosh-types` 中的定义必须与 `ws-ckpt-common` 完全一致 |
+| 共有变体保持布局 | `cosh-types` 与 `ws-ckpt-common` 都定义的变体索引必须相同；客户端声明的字段须与守护进程对应变体的前部字段顺序和类型一致 |
+| 客户端可只覆盖前缀 | `cosh-types` 可以省略末尾变体，但必须能解码守护进程对客户端已发送请求可能返回的所有响应和错误码 |
+| 省略字段仅限末尾 | 客户端响应变体只能省略编码消息末尾的字段，且须确认解码器允许尾部字节，例如 `ReloadConfigOk.file` |
 | 超时处理 | 客户端对 read/write 设置超时，避免守护进程无响应时阻塞 |
 | 长度限制 | 响应超过 64 MiB 视为异常，立即断开 |
 | socket 路径 | 默认 `/run/ws-ckpt/ws-ckpt.sock`，可通过环境变量或 CLI 参数覆盖 |

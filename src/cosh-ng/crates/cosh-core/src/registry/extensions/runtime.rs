@@ -166,6 +166,10 @@ pub(super) enum CatalogStateMutation {
         name: String,
         enabled: bool,
     },
+    ClearUserSource {
+        name: String,
+        source_identity: String,
+    },
     SelectSource {
         name: String,
         selection: crate::extension::state::SourceSelection,
@@ -175,7 +179,9 @@ pub(super) enum CatalogStateMutation {
 impl CatalogStateMutation {
     fn name(&self) -> &str {
         match self {
-            Self::SetEnabled { name, .. } | Self::SelectSource { name, .. } => name,
+            Self::SetEnabled { name, .. }
+            | Self::SelectSource { name, .. }
+            | Self::ClearUserSource { name, .. } => name,
         }
     }
 }
@@ -186,17 +192,27 @@ pub(super) async fn catalog_state_with_candidate_health(
     config: &CoreConfig,
     ext_manager: &mut ExtensionManager,
     live_runtime: Option<&LiveExtensionRuntime>,
-) -> Result<(crate::extension::Extension, Option<RuntimePublication>), String> {
+) -> Result<
+    (
+        Option<crate::extension::Extension>,
+        Option<RuntimePublication>,
+    ),
+    String,
+> {
     let target = mutation.name().to_string();
     let pending = installer
         .begin_state_mutation()
         .map_err(|error| format!("{}: {error}", error.code()))?;
     let applied = match mutation {
         CatalogStateMutation::SetEnabled { name, enabled } => {
-            ext_manager.set_enabled(&name, enabled)
+            ext_manager.set_enabled(&name, enabled).map(|_| ())
         }
+        CatalogStateMutation::ClearUserSource {
+            name,
+            source_identity,
+        } => ext_manager.clear_user_source(&name, &source_identity),
         CatalogStateMutation::SelectSource { name, selection } => {
-            ext_manager.select_source(&name, selection)
+            ext_manager.select_source(&name, selection).map(|_| ())
         }
     };
     if let Err(error) = applied {
@@ -249,8 +265,7 @@ pub(super) async fn catalog_state_with_candidate_health(
         .list()
         .iter()
         .find(|extension| extension.name == target)
-        .cloned()
-        .ok_or_else(|| format!("extension not found after state mutation: {target}"))?;
+        .cloned();
     Ok((extension, publication))
 }
 

@@ -1,7 +1,7 @@
 //! Native policy updates retain scheduling and vetoes independently of service state.
 
 use super::*;
-use aw_provider::admission::StepExecution;
+use aw_core::admission::StepExecution;
 
 fn document(adapter: &str) -> Value {
     json!({"spec":{"agents":{"target":{"adapter":adapter}},"events":{},"execution":{"default_event_budget_ms":1000}}})
@@ -127,7 +127,7 @@ fn native_routes_use_only_the_targets_admitted_steps() {
         ]),
         failure_actions: BTreeMap::new(),
     };
-    let selected = aw_provider::admission::preflight(&config, "sdk", &capabilities).unwrap();
+    let selected = aw_core::admission::preflight(&config, "sdk", &capabilities).unwrap();
     let native = adapter::native_steps(&selected, "tool.after", false);
     assert_eq!(native.len(), 1);
     assert_eq!(native[0].step_id, "sdk");
@@ -376,4 +376,30 @@ fn qoder_sdk_reload_preserves_the_first_denial_reason() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         reason
     );
+}
+
+#[test]
+fn policy_updates_use_native_entrypoints_across_framework_releases() {
+    for (adapter, entrypoint) in [
+        ("qoder", "tui"),
+        ("qwenpaw", "app"),
+        ("qoder-sdk", "sdk-worker"),
+    ] {
+        for version in ["1.0.55", "1.0.57", "3.0.0-preview", "2026.10.29"] {
+            let mut capabilities = AdapterCapabilities {
+                adapter: adapter.into(),
+                version: version.into(),
+                entrypoint: entrypoint.into(),
+                events: BTreeMap::new(),
+                failure_actions: BTreeMap::new(),
+            };
+            assert!(supported(&capabilities).is_ok());
+            assert_eq!(
+                resident_supported(&capabilities).is_ok(),
+                adapter != "qoder"
+            );
+            capabilities.entrypoint = "unsupported".into();
+            assert!(supported(&capabilities).is_err());
+        }
+    }
 }

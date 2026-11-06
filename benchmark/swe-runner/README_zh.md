@@ -166,7 +166,7 @@ swe-runner run \
 
 过滤按以下顺序执行：
 
-1. `--instance-id`
+1. `--instance-id` 或 `--instances-file`
 2. `--filter`
 3. `--slice`
 
@@ -185,6 +185,23 @@ swe-runner run \
   --agent cosh \
   --instance-id django__django-11999,matplotlib__matplotlib-18869
 ```
+
+需要复用筛选集合时，可将实例 ID 按一行一个保存为 UTF-8 文件：
+
+```text
+# reviewed subset
+django__django-11999
+matplotlib__matplotlib-18869
+```
+
+```bash
+swe-runner run --agent cosh --instances-file selected-instances.txt
+```
+
+文件允许空行、以 `#` 开头的整行注释及 UTF-8 BOM；重复 ID 只保留第一次。
+`--instances-file` 与 `--instance-id` 互斥，空文件或无法读取的文件会在执行前
+报错。文件只读取一次，解析出的 ID 保存到 run settings。匹配实例保持数据集
+顺序，再应用 `--filter` 和 `--slice`；所选数据集中不存在的 ID 不匹配任何实例。
 
 ### 续跑与重跑
 
@@ -277,10 +294,14 @@ swe-runner run \
 
 - 在每个 OpenClaw per-case profile 中启用 `plugins.entries.tokenless.enabled`。
 - 将 host 上的 tokenless OpenClaw extension 暴露到该 profile。
-- 查找并复制 `rtk`、`tokenless` 二进制到实例 workspace 的
-  `.runner/tokenless/bin/`。
+- 查找并复制 `tokenless` 二进制到实例 workspace 的
+  `.runner/tokenless/bin/`。RTK 以 `tokenless rtk` 运行，不再需要 `rtk` 二进制。
 - 将 sandbox 内的 `/workspace/.runner/tokenless/bin` 放到 `PATH` 前部。
 - 在运行结果中写出 tokenless evidence，用于确认配置和运行期 hook 状态。
+
+Host 二进制必须是可执行的普通文件（包括指向可执行文件的 symlink）。
+不可执行的候选会被跳过，以继续查找后续安装位置。两个 helper 都解析成功后
+才会写入注入文件，复制时保留源文件权限。
 
 ### Run 参数速查
 
@@ -295,6 +316,7 @@ swe-runner run \
 | `--slice` | 无 | 实例切片，如 `0:10`、`10:`、`:5` |
 | `--filter` | 无 | 实例 ID 正则过滤 |
 | `--instance-id, -i` | 无 | 指定实例 ID，多个用逗号分隔 |
+| `--instances-file` | 无 | UTF-8 ID 文件，一行一个，与 `--instance-id` 互斥 |
 | `--workers, -w` | `1` | 并发 worker 数 |
 | `--docker-pull-registry` | 无 | Docker pull 时使用的 registry host |
 | `--use-skill` | `false` | 从 `--skills-dir` 读取 skill 资源 |
@@ -304,6 +326,10 @@ swe-runner run \
 | `--tokenless` | `false` | 启用 tokenless/rtk 注入，当前仅 `openclaw` 支持 |
 | `--redo` | `false` | 重新运行已经有 result 文件的实例 |
 | `--verbose, -v` | `false` | 写入 DEBUG 级别日志 |
+
+所选批次的 `instance_id` 必须唯一。由于工作区和输出路径按 ID 组织，重复
+ID 会在 agent 准备前报告。此约束同样适用于自定义数据集和直接调用
+`run_batch` 的方式。
 
 ## Agent adapter
 
@@ -398,6 +424,9 @@ swe-runner evaluate --namespace none
 `analyze-traces` 会读取 trace JSON，导出 per-trace 明细、per-case 汇总和
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
 从 session JSONL 补录 trace。
+
+多个 recorder 并发记录同一实例时会独占创建不同的 `traceN.json` 文件；
+即使其他写入者选择了相同编号，也不会覆盖已有 trace。
 
 分析已有 trace：
 

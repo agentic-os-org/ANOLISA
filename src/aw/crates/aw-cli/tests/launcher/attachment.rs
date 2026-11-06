@@ -1,5 +1,8 @@
 //! Native watcher fixtures exercise real install/remove commands and service admission.
 
+#[path = "attachment_evidence.rs"]
+mod evidence;
+
 #[path = "attachment_profiles.rs"]
 mod profiles;
 
@@ -158,7 +161,11 @@ fn external_install_first_hook_busy_detach_isolation_and_owned_cleanup() {
         .as_array_mut()
         .unwrap()
         .push(json!({"matcher":"unused","hooks":[{"type":"command","command":"/bin/true"}]}));
-    fs::write(&settings, edited.to_string()).unwrap();
+    // The native watcher must only observe complete settings snapshots.
+    let staged = settings.with_extension("user-edit");
+    fs::write(&staged, edited.to_string()).unwrap();
+    fs::set_permissions(&staged, fs::metadata(&settings).unwrap().permissions()).unwrap();
+    fs::rename(staged, &settings).unwrap();
     success(install(&fixture, pid, true));
     assert_eq!(service.status()["bindings"], 0);
     let cleaned: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
@@ -227,7 +234,9 @@ fn external_install_rejects_wrong_pid_and_shared_profile_without_writes() {
 #[test]
 fn cancelled_unconfirmed_install_retains_bridge_until_confirmed_cleanup() {
     let fixture = Fixture::new();
-    let document = fixture.document();
+    let mut document = fixture.document();
+    fixture.observation(&mut document, "qoder");
+    document["spec"]["agents"]["qoder"]["evidence"]["mode"] = json!("off");
     let service = Service::start(&fixture, &document);
     // Prepare the native fixture, then start its unconfirmed counterpart.
     let (process, _) = native(&fixture);
@@ -435,9 +444,13 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
     assert_eq!(service.status()["bindings"], 0);
     fs::remove_file(fail_install).unwrap();
     success(install(&fixture, pid, false));
-    assert!(profile
-        .join("plugins/aw-native/aw-attachment.json")
-        .is_file());
+    let record: Value = serde_json::from_slice(&fs::read(&ownership).unwrap()).unwrap();
+    let plugin = profile.join("plugins").join(
+        record["registration"]["descriptor"]["plugin_id"]
+            .as_str()
+            .unwrap(),
+    );
+    assert!(plugin.join("aw-attachment.json").is_file());
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
@@ -458,7 +471,6 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
         .unwrap()
         .error_for_status()
         .unwrap();
-    let plugin = profile.join("plugins/aw-native");
     let moved = profile.join("plugins/moved-aw-native");
     fs::rename(&plugin, &moved).unwrap();
     let missing = install(&fixture, pid, true);
@@ -470,7 +482,7 @@ fn external_qwenpaw_api_loads_private_descriptor_and_preserves_busy_protection()
     fs::rename(moved, &plugin).unwrap();
     success(install(&fixture, pid, true));
     assert_eq!(service.status()["bindings"], 0);
-    assert!(!profile.join("plugins/aw-native").exists());
+    assert!(!plugin.exists());
     assert!(!profile.join(".aw-attachment.json").exists());
     assert_eq!(
         fs::read(profile.join("plugins/unrelated/owned-by-user")).unwrap(),

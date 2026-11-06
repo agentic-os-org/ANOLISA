@@ -9,6 +9,7 @@ import { InterruptionPanel, ResolvedEventInfo } from '../components/Interruption
 import { EvaluationBadge } from '../components/EvaluationBadge';
 import { EvaluationPanel } from '../components/EvaluationPanel';
 import { DateTimePicker } from '../components/DateTimePicker';
+import { CopyButton } from '../components/CopyButton';
 import { SessionIdHelp } from '../components/SessionIdHelp';
 import { SessionResourceChart } from '../components/SessionResourceChart';
 import { useI18n, useLocaleTag } from '../i18n';
@@ -46,53 +47,6 @@ function shortId(id: string, len = 16): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
 }
 
-/** Copy button with a brief "Copied" feedback */
-const CopyButton: React.FC<{ text: string }> = ({ text }) => {
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handleCopy = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const done = () => {
-      setCopied(true);
-      if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => setCopied(false), 1500);
-    };
-    // Clipboard API may be unavailable over HTTP; fall back to execCommand
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-    } else {
-      fallbackCopy(text, done);
-    }
-  };
-  return (
-    <button
-      onClick={handleCopy}
-      className={`flex-shrink-0 px-1.5 py-0.5 rounded text-xs transition-colors ${
-        copied
-          ? 'bg-green-100 text-green-600'
-          : 'bg-gray-100 hover:bg-gray-200 text-gray-500 hover:text-gray-700'
-      }`}
-      title={t('common.copyFullId')}
-    >
-      {copied ? t('common.copied') : t('common.copy')}
-    </button>
-  );
-};
-
-function fallbackCopy(text: string, done: () => void) {
-  const el = document.createElement('textarea');
-  el.value = text;
-  el.style.position = 'fixed';
-  el.style.opacity = '0';
-  document.body.appendChild(el);
-  el.focus();
-  el.select();
-  try { document.execCommand('copy'); } catch {}
-  document.body.removeChild(el);
-  done();
-}
-
 /** Format token number */
 function fmtTokens(n: number): string {
   return n.toLocaleString();
@@ -102,6 +56,7 @@ function fmtTokens(n: number): string {
 
 interface TraceSubTableProps {
   sessionId: string;
+  detailsId: string;
   conversationInterruptionCounts: Map<string, ConversationInterruptionCount>;
   startNs?: number;
   endNs?: number;
@@ -110,7 +65,7 @@ interface TraceSubTableProps {
 
 const PAGE_SIZE = 10;
 
-const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationInterruptionCounts, startNs, endNs, onResolvedEvent }) => {
+const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, detailsId, conversationInterruptionCounts, startNs, endNs, onResolvedEvent }) => {
   const { t } = useI18n();
   const locale = useLocaleTag();
   const navigate = useNavigate();
@@ -226,7 +181,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
 
   if (loading)
     return (
-      <tr>
+      <tr id={detailsId}>
         <td colSpan={10} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
           {t('cl.loadingTraces')}
         </td>
@@ -234,7 +189,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
     );
   if (error)
     return (
-      <tr>
+      <tr id={detailsId}>
         <td colSpan={10} className="px-8 py-4 text-sm text-red-500 bg-blue-50">
           ⚠️ {error}
         </td>
@@ -243,7 +198,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
 
   return (
     <>
-      <tr className="bg-blue-50 border-t border-blue-100">
+      <tr id={detailsId} className="bg-blue-50 border-t border-blue-100">
         <td colSpan={10} className="px-4 lg:px-8">
           <SessionResourceChart sessionId={sessionId} startNs={startNs} endNs={endNs} />
         </td>
@@ -312,7 +267,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                     >
                       {shortId(tr.conversation_id, 18)}
                     </span>
-                    <CopyButton text={tr.conversation_id} />
+                    <CopyButton text={tr.conversation_id} showIcon={false} />
                   </div>
                 </div>
                 {/* Col 2: User query */}
@@ -693,13 +648,20 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
 
   // Restore state from URL params (set when navigating to detail page)
   const now = Date.now();
-  const initStart = Number(searchParams.get('start')) || (now - 24 * 3600 * 1000);
-  const initEnd   = Number(searchParams.get('end'))   || now;
+  const defaultPresetMs = 24 * 3600 * 1000;
+  const restoredStart = Number(searchParams.get('start'));
+  const restoredEnd = Number(searchParams.get('end'));
+  const hasCustomTimeRange = Boolean(restoredStart || restoredEnd);
+  const initStart = restoredStart || (now - defaultPresetMs);
+  const initEnd   = restoredEnd || now;
   const initAgent = searchParams.get('agent') ?? '';
 
   // Time range state
   const [startMs, setStartMs] = useState(initStart);
   const [endMs, setEndMs] = useState(initEnd);
+  const [activePresetMs, setActivePresetMs] = useState<number | null>(
+    hasCustomTimeRange ? null : defaultPresetMs,
+  );
 
   // Agent name filter
   const [agentNames, setAgentNames] = useState<string[]>([]);
@@ -953,8 +915,22 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
         {/* ── Filter bar ── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
           {/* Time range */}
-          <DateTimePicker label={t('common.startTime')} value={startMs} onChange={setStartMs} />
-          <DateTimePicker label={t('common.endTime')} value={endMs} onChange={setEndMs} />
+          <DateTimePicker
+            label={t('common.startTime')}
+            value={startMs}
+            onChange={(value) => {
+              setStartMs(value);
+              setActivePresetMs(null);
+            }}
+          />
+          <DateTimePicker
+            label={t('common.endTime')}
+            value={endMs}
+            onChange={(value) => {
+              setEndMs(value);
+              setActivePresetMs(null);
+            }}
+          />
 
           {/* Quick presets */}
           <div className="flex gap-2 flex-wrap">
@@ -966,10 +942,12 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
             ].map(({ label, ms }) => (
               <button
                 key={label}
+                aria-pressed={activePresetMs === ms}
                 onClick={() => {
                   const n = Date.now();
                   setEndMs(n);
                   setStartMs(n - ms);
+                  setActivePresetMs(ms);
                 }}
                 className="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-600 transition-colors"
               >
@@ -1186,8 +1164,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                   {(() => {
                     const sessionTotalPages = Math.max(1, Math.ceil(sessions.length / SESSION_PAGE_SIZE));
                     const pageSessions = sessions.slice(sessionPage * SESSION_PAGE_SIZE, (sessionPage + 1) * SESSION_PAGE_SIZE);
-                    return pageSessions.map((sess) => {
+                    return pageSessions.map((sess, rowIndex) => {
                     const isExpanded = expandedSession === sess.session_id;
+                    const detailsId = `session-details-${sessionPage * SESSION_PAGE_SIZE + rowIndex}`;
                     return (
                       <React.Fragment key={sess.session_id}>
                         {/* Session row */}
@@ -1201,16 +1180,28 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                         >
                           <td className="px-4 lg:px-6 py-4">
                             <div className="flex items-center gap-2">
-                              <span className="text-gray-400 text-xs flex-shrink-0">
-                                {isExpanded ? '▼' : '▶'}
-                              </span>
-                              <span
-                                className="font-mono text-sm text-gray-800 truncate"
-                                title={sess.session_id}
+                              <button
+                                type="button"
+                                aria-expanded={isExpanded}
+                                aria-controls={detailsId}
+                                aria-label={`${isExpanded ? t('common.collapse') : t('common.expand')} ${sess.session_id}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExpandedSession(isExpanded ? null : sess.session_id);
+                                }}
+                                className="flex min-w-0 items-center gap-2 rounded text-left focus:outline-none focus:ring-2 focus:ring-blue-400"
                               >
-                                {shortId(sess.session_id, 20)}
-                              </span>
-                              <CopyButton text={sess.session_id} />
+                                <span aria-hidden="true" className="text-gray-400 text-xs flex-shrink-0">
+                                  {isExpanded ? '▼' : '▶'}
+                                </span>
+                                <span
+                                  className="font-mono text-sm text-gray-800 truncate"
+                                  title={sess.session_id}
+                                >
+                                  {shortId(sess.session_id, 20)}
+                                </span>
+                              </button>
+                              <CopyButton text={sess.session_id} showIcon={false} />
                             </div>
                           </td>
                           <td className="px-4 lg:px-6 py-4 text-sm text-gray-700">
@@ -1287,6 +1278,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                           <TraceSubTable
                             key={`${sess.session_id}-${queryRangeNs[0]}`}
                             sessionId={sess.session_id}
+                            detailsId={detailsId}
                             conversationInterruptionCounts={conversationInterruptionCounts}
                             startNs={queryRangeNs[0]}
                             endNs={queryRangeNs[1]}

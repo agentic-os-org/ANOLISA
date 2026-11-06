@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 SOURCE="$TMP/tokenless"
 ADAPTERS="$SOURCE/adapters/tokenless"
-CONTRACT="$SOURCE/.anolisa/component.toml"
+CONTRACT="$SOURCE/target/packaging/anolisa/component.toml"
 # The version this fixture publishes. `make test-raw-package` runs the suite a
 # second time with a prerelease so the packer is exercised on the one version
 # shape whose two spellings differ (see WHEEL_VERSION below).
@@ -20,7 +20,7 @@ VERSION="${TOKENLESS_RAW_TEST_VERSION:-9.8.7}"
 WHEEL_VERSION="$(python3 "$ROOT/packaging/raw/wheel-version.py" "$VERSION")"
 
 mkdir -p \
-    "$SOURCE/.anolisa" \
+    "$SOURCE/target/packaging/anolisa" \
     "$ADAPTERS/common/hooks/__pycache__" \
     "$ADAPTERS/common/commands" \
     "$ADAPTERS/qwenwork/.qoder-plugin" \
@@ -181,10 +181,9 @@ if os_name == "linux":
 else:
     cpu = {"aarch64": 0x0100000C, "x86_64": 0x01000007}[arch]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
-for name in ("tokenless", "rtk"):
-    (root / name).write_bytes(content)
+(root / "tokenless").write_bytes(content)
 PY
-    chmod 0755 "$destination/tokenless" "$destination/rtk"
+    chmod 0755 "$destination/tokenless"
 }
 
 LINUX_X64="$TMP/bin-linux-x64"
@@ -279,7 +278,11 @@ mkdir -p "$EXTRACTED"
 tar -xzf "$OUT_ONE/$LINUX_ARTIFACT" -C "$EXTRACTED"
 cmp "$CONTRACT" "$EXTRACTED/.anolisa/component.toml"
 cmp "$LINUX_X64/tokenless" "$EXTRACTED/bin/tokenless"
-cmp "$LINUX_X64/rtk" "$EXTRACTED/libexec/anolisa/tokenless/rtk"
+# RTK is linked into tokenless; no standalone helper may ship.
+[ ! -e "$EXTRACTED/libexec" ] || {
+    echo "ERROR: raw package still ships libexec helpers" >&2
+    exit 1
+}
 
 # The archived QwenPaw pin keeps both spellings of the one version it was
 # stamped from: the raw workspace version in the release-tag path (the tag the
@@ -366,20 +369,25 @@ test "$(stat -c '%a' "$EXTRACTED/adapters/common/hooks/run-hook.sh")" = 755
 test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/plugin.js")" = 644
 test "$(stat -c '%a' "$EXTRACTED/adapters/opencode/scripts/install.sh")" = 755
 
-grep -Fq 'source = "bin/tokenless"' "$ROOT/.anolisa/component.toml.in"
-grep -Fq 'source = "extensions/tokenless"' "$ROOT/.anolisa/component.toml.in"
-test "$(grep -o '@VERSION@' "$ROOT/.anolisa/component.toml.in" | wc -l)" = 1
-grep -Fq 'framework = "opencode"' "$ROOT/.anolisa/component.toml.in"
-OPENCODE_CONTRACT="$(sed -n '/^framework = "opencode"$/,/^\[\[adapters\]\]$/p' "$ROOT/.anolisa/component.toml.in")"
+grep -Fq 'source = "bin/tokenless"' "$ROOT/packaging/anolisa/component.toml.in"
+if grep -Fq 'target = "{datadir}/components/tokenless/component.toml"' \
+    "$ROOT/packaging/anolisa/component.toml.in"; then
+    echo "ERROR: raw layout must leave the discovery registry to ANOLISA" >&2
+    exit 1
+fi
+grep -Fq 'source = "extensions/tokenless"' "$ROOT/packaging/anolisa/component.toml.in"
+test "$(grep -o '@VERSION@' "$ROOT/packaging/anolisa/component.toml.in" | wc -l)" = 1
+grep -Fq 'framework = "opencode"' "$ROOT/packaging/anolisa/component.toml.in"
+OPENCODE_CONTRACT="$(sed -n '/^framework = "opencode"$/,/^\[\[adapters\]\]$/p' "$ROOT/packaging/anolisa/component.toml.in")"
 grep -Fq 'when = "post_enable"' <<< "$OPENCODE_CONTRACT"
 grep -Fq 'when = "post_disable"' <<< "$OPENCODE_CONTRACT"
-grep -Fq 'source = "adapters/manifest.json"' "$ROOT/.anolisa/component.toml.in"
+grep -Fq 'source = "adapters/manifest.json"' "$ROOT/packaging/anolisa/component.toml.in"
 
 # Every adapter target the manifest ships needs a matching [[adapters]] entry,
 # otherwise the raw install silently drops that adapter. verify-release.py
 # enforces this while packaging; assert it on the shipped sources as well.
 python3 - "$ROOT/adapters/tokenless/manifest.json.in" \
-    "$ROOT/.anolisa/component.toml.in" \
+    "$ROOT/packaging/anolisa/component.toml.in" \
     "$ROOT/../../distribution/anolisa/manifests/components/tokenless/component.toml" <<'DRIFT_PY'
 import json
 import re

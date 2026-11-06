@@ -14,6 +14,8 @@
 //! Consumers (asc-capability-prompt-scan, future code/pii scanners) inject a
 //! [`ModelClient`] so their transport stays decoupled from this crate.
 
+pub mod provider;
+
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};

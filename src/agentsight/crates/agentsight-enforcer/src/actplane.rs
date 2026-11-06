@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -13,25 +14,127 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use actplane_ifc_compiler::{Compiled, compile_str};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction, HealthStatus,
-    NetworkAction, NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode,
-    ReplaceFailureCode, ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy,
-    SecurityEvent, SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
+    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction,
+    FileProtectionExclusionKind, FileProtectionTargetKind, HealthStatus, NetworkAction,
+    NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode, ReplaceFailureCode,
+    ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy, SecurityEvent,
+    SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
     classify_public_ipv4_destination,
 };
 use ebpf_ifc_engine::capability::{
     AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE, AUTH_NARROW_SCOPE,
     AUTH_REQUIRE_GATE, CapState, TARGET_CHILD, TARGET_SELF,
 };
-use ebpf_ifc_engine::{GLOBAL_ACTIVE_DOMAIN_ID, PinnedEngine, ReloadHandle, Violation};
+use ebpf_ifc_engine::{
+    GLOBAL_ACTIVE_DOMAIN_ID, INODE_GUARD_READ, INODE_GUARD_WRITE, PinnedEngine, ReloadHandle,
+    Violation,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::backend::validate_apply_policy_payload;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+mod file_protection_discovery;
+mod file_protection_manifest;
+mod file_protection_mountinfo;
+mod file_protection_policy;
+mod file_protection_resolver;
+mod file_protection_runtime;
+mod file_protection_topology;
 mod inode_policy;
+mod preexisting_maps;
+use file_protection_policy::NormalizedFileProtectionPolicy;
+use file_protection_runtime::{ActiveFileProtection, PreparedFileProtection};
 use inode_policy::InodePolicy;
+
+fn normalize_actplane_policy_payload(
+    request: &ApplyPolicy,
+) -> Result<Option<NormalizedFileProtectionPolicy>, BackendError> {
+    validate_apply_policy_payload(request)?;
+    let Some(policy) = request.file_protection_policy.as_ref() else {
+        return Ok(None);
+    };
+    if request.policy_mode != Some(PolicyMode::Enforce) {
+        return Err(BackendError::CompileFailure(
+            "structured file protection requires explicit policy_mode=enforce; audit and observe are unsupported".into(),
+        ));
+    }
+    let normalized = file_protection_policy::normalize(policy)
+        .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
+    Ok(Some(normalized))
+}
+
+/// Maps structured targets onto the identities scanned in `/proc` maps before
+/// attach: exact files by device/inode, trees by path prefix minus exclusions.
+fn structured_protected_entries(
+    policy: &NormalizedFileProtectionPolicy,
+) -> Result<Vec<preexisting_maps::ProtectedEntry>, BackendError> {
+    let mut entries = Vec::new();
+    for target in &policy.targets {
+        // Structured delete-only targets leave writes genuinely unmediated,
+        // so pre-existing write access in the binding tree must not reject
+        // them. Legacy guards need no such filter: their unlink clauses
+        // lower to write-op rules and mediate writes anyway.
+        if !target.ordinary_write {
+            continue;
+        }
+        let scope = match target.kind {
+            FileProtectionTargetKind::ExactFile => {
+                let metadata = fs::metadata(&target.path).map_err(|error| {
+                    BackendError::CompileFailure(format!(
+                        "cannot stat protected path '{}': {error}",
+                        target.path
+                    ))
+                })?;
+                preexisting_maps::ProtectedScope::Exact {
+                    dev: inode_policy::userspace_dev_to_kernel(metadata.dev()),
+                    ino: metadata.ino(),
+                }
+            }
+            FileProtectionTargetKind::DirectoryTree => {
+                let mut subtree_prefixes = Vec::new();
+                let mut exact_entries = Vec::new();
+                for exclusion in &target.exclusions {
+                    match exclusion.kind {
+                        FileProtectionExclusionKind::DirectorySubtree => {
+                            subtree_prefixes.push(format!("{}/", exclusion.path))
+                        }
+                        FileProtectionExclusionKind::ExactEntry => {
+                            exact_entries.push(exclusion.path.clone())
+                        }
+                    }
+                }
+                preexisting_maps::ProtectedScope::Tree {
+                    subtree_prefixes,
+                    exact_entries,
+                }
+            }
+        };
+        entries.push(preexisting_maps::ProtectedEntry {
+            path: target.path.clone(),
+            scope,
+        });
+    }
+    Ok(entries)
+}
+
+fn source_label(compiled: Option<&Compiled>) -> Result<u64, BackendError> {
+    match compiled {
+        Some(compiled) => compiled
+            .labels
+            .get("COMMAND")
+            .or_else(|| compiled.labels.get("AGENT"))
+            .copied()
+            .ok_or_else(|| {
+                BackendError::CompileFailure(
+                    "policy must declare a COMMAND or AGENT source label".into(),
+                )
+            }),
+        None => Ok(1),
+    }
+}
 
 // Compile-time guard: compiler and engine must agree on CConfig ABI size.
 // If this fails, one crate's CRule definition was modified without updating the other.
@@ -43,14 +146,6 @@ const _: () = assert!(
 
 /// Exact official upstream revision compiled into this adapter.
 pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
-
-fn validate_actplane_policy_payload(request: &ApplyPolicy) -> Result<(), BackendError> {
-    crate::backend::validate_apply_policy_payload(request)?;
-    if request.file_protection_policy.is_some() {
-        return Err(crate::backend::structured_file_protection_unsupported());
-    }
-    Ok(())
-}
 
 #[derive(Clone)]
 struct ActiveBinding {
@@ -65,13 +160,15 @@ struct ActiveBinding {
     label_names: HashMap<u64, String>,
     // Retain file identities through detach, including failed cleanup retries.
     inode_policy: InodePolicy,
+    file_protection: Option<Arc<Mutex<ActiveFileProtection>>>,
 }
 
 struct PreparedBinding {
     request: ApplyPolicy,
     credential_policy: Option<CredentialExfiltrationPolicy>,
-    compiled: Compiled,
+    compiled: Option<Compiled>,
     inode_policy: InodePolicy,
+    file_protection: Option<PreparedFileProtection>,
 }
 
 struct RuntimeState {
@@ -145,6 +242,11 @@ impl ActPlaneBackend {
         let drained = prepare_runtime(
             || {
                 let mut errors = inode_policy::clear(&engine);
+                if let Err(error) = engine.clear_file_protection_generations() {
+                    errors.push(format!(
+                        "clear stale structured file-protection generations: {error}"
+                    ));
+                }
                 if let Err(error) = reload.clear_runtime_state() {
                     errors.push(format!("clear stale runtime state: {error}"));
                 }
@@ -185,6 +287,16 @@ impl ActPlaneBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn structured_delete_ready(&self) -> bool {
+        self.engine.supports_file_delete_guard()
+            && ebpf_ifc_engine::bpf_lsm_active()
+            && self.in_init_pidns
+    }
+
+    fn structured_ordinary_write_ready(&self) -> bool {
+        self.structured_delete_ready() && self.engine.supports_file_permission_guard()
+    }
+
     fn cleanup_binding(
         &self,
         request: &ApplyPolicy,
@@ -214,7 +326,27 @@ impl ActPlaneBackend {
         mut request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<PreparedBinding, BackendError> {
-        validate_actplane_policy_payload(&request)?;
+        let normalized = normalize_actplane_policy_payload(&request)?;
+        let requires_ordinary_write = normalized
+            .as_ref()
+            .is_some_and(|policy| policy.targets.iter().any(|target| target.ordinary_write));
+        if normalized.is_some() && !self.structured_delete_ready() {
+            return Err(BackendError::CompileFailure(
+                "structured file protection requires the agent-file-guard profile, active BPF LSM, and init PID namespace"
+                    .into(),
+            ));
+        }
+        let requires_read = normalized
+            .as_ref()
+            .is_some_and(|policy| policy.targets.iter().any(|target| target.read));
+        if requires_read && !self.engine.supports_file_read_guard() {
+            return Err(BackendError::CompileFailure("file read protection requires attached file_open, file_permission, mmap_file and file_mprotect hooks".into()));
+        }
+        if requires_ordinary_write && !self.structured_ordinary_write_ready() {
+            return Err(BackendError::CompileFailure(
+                "ordinary write protection requires the attached file_permission hook".into(),
+            ));
+        }
         // Resolve namespace-local PID to host PID BEFORE start-time validation,
         // so that the stale-process check reads the correct /proc/<host_pid>/stat.
         let host_pid = resolve_to_host_pid(request.root_pid, request.process_start_time);
@@ -231,6 +363,40 @@ impl ActPlaneBackend {
                 pid: request.root_pid,
             });
         }
+        if let Some(policy) = normalized {
+            // Writable shared mappings held before attach bypass every LSM
+            // hook, so refuse the binding instead of claiming coverage.
+            preexisting_maps::reject_preexisting_write_access(
+                request.root_pid,
+                &structured_protected_entries(&policy)?,
+            )?;
+            let topology = file_protection_topology::prepare(
+                &policy,
+                request.root_pid,
+                request.process_start_time,
+            )?;
+            let read_entries: Vec<_> = topology
+                .direct_targets
+                .iter()
+                .filter(|record| policy.targets[record.target_id as usize - 1].read)
+                .map(|record| preexisting_maps::ProtectedEntry {
+                    path: record.path.authored_path.clone(),
+                    scope: preexisting_maps::ProtectedScope::Exact {
+                        dev: record.path.identity.dev,
+                        ino: record.path.identity.ino,
+                    },
+                })
+                .collect();
+            preexisting_maps::reject_preexisting_read_mappings(request.root_pid, &read_entries)?;
+            return Ok(PreparedBinding {
+                request,
+                credential_policy,
+                compiled: None,
+                inode_policy: InodePolicy::default(),
+                file_protection: Some(PreparedFileProtection { policy, topology }),
+            });
+        }
+
         let compiled = compile_str(&request.policy_dsl).map_err(BackendError::CompileFailure)?;
         // Surface compile-time warnings (e.g. an endpoint pattern that lowered
         // to a match-nothing matcher) so the degradation is visible instead of
@@ -241,26 +407,22 @@ impl ActPlaneBackend {
                 request.binding_id
             );
         }
-        if compiled
-            .labels
-            .get("COMMAND")
-            .or_else(|| compiled.labels.get("AGENT"))
-            .is_none()
-        {
-            return Err(BackendError::CompileFailure(
-                "policy must declare a COMMAND or AGENT source label".into(),
-            ));
-        }
+        source_label(Some(&compiled))?;
         let inode_policy = InodePolicy::prepare(
             &request.policy_dsl,
             &compiled,
             self.engine.inode_guard_mode(),
         )?;
+        preexisting_maps::reject_preexisting_write_access(
+            request.root_pid,
+            &inode_policy.protected_identities(),
+        )?;
         Ok(PreparedBinding {
             request,
             credential_policy,
-            compiled,
+            compiled: Some(compiled),
             inode_policy,
+            file_protection: None,
         })
     }
 
@@ -275,18 +437,63 @@ impl ActPlaneBackend {
             credential_policy,
             compiled,
             inode_policy,
+            file_protection,
         } = prepared;
-        let label = compiled
-            .labels
-            .get("COMMAND")
-            .or_else(|| compiled.labels.get("AGENT"))
-            .copied()
-            .ok_or_else(|| {
-                BackendError::CompileFailure(
-                    "policy must declare a COMMAND or AGENT source label".into(),
-                )
-            })?;
+        let label = source_label(compiled.as_ref())?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
+        // Exact-file ordinary-write and read protection ride the inode-guard
+        // fast path: guarded opens, reads, writes, truncates and mappings of the
+        // held inode are denied in every mediation hook without adding
+        // classification stack depth to the hooks. Identities are collected
+        // before staging, but the guards are installed only after staging
+        // succeeds: main's contract is that a staging failure returns without
+        // kernel state, and the guard stays inert until the domain is seeded
+        // below. Detach clears it with the other inode guards.
+        let guard_identities: HashMap<(u64, u32), (u32, u32)> = file_protection
+            .as_ref()
+            .map(|prepared| {
+                prepared
+                    .topology
+                    .direct_targets
+                    .iter()
+                    .filter(|record| {
+                        let target = &prepared.policy.targets[record.target_id as usize - 1];
+                        (target.ordinary_write || target.read)
+                            && target.kind == FileProtectionTargetKind::ExactFile
+                    })
+                    .fold(HashMap::new(), |mut guards, record| {
+                        let target = &prepared.policy.targets[record.target_id as usize - 1];
+                        let flags = (u32::from(target.ordinary_write) * INODE_GUARD_WRITE)
+                            | (u32::from(target.read) * INODE_GUARD_READ);
+                        let entry = guards
+                            .entry((record.path.identity.ino, record.path.identity.dev))
+                            .or_insert((record.target_id, 0));
+                        entry.1 |= flags;
+                        guards
+                    })
+            })
+            .unwrap_or_default();
+        let structured_target_count = file_protection
+            .as_ref()
+            .map_or(0, |prepared| prepared.policy.targets.len());
+        let staged_file_protection = match file_protection {
+            Some(prepared) => Some(prepared.stage(
+                &self.engine,
+                id,
+                request.binding_id,
+                &request.policy_revision,
+            )?),
+            None => None,
+        };
+        for ((ino, dev), (target_id, flags)) in guard_identities {
+            self.engine
+                .guard_inode(ino, dev, flags, id, target_id)
+                .map_err(|error| {
+                    let cleanup = self.cleanup_binding(&request, id, None);
+                    let context = format!("guard exact-file inode (flags {flags:#x})");
+                    kernel_error_with_cleanup(&context, error, cleanup)
+                })?;
+        }
         self.engine
             .seed_label_in_domain(request.root_pid, id, label)
             .map_err(|error| {
@@ -315,49 +522,49 @@ impl ActPlaneBackend {
             );
         }
 
-        let control_pid = std::process::id() as i32;
-        let control_state = CapState {
-            scope_id: 1,
-            labels: label,
-            authority_mask: AUTH_BIND_RULE
-                | AUTH_NARROW_SCOPE
-                | AUTH_ADD_LABEL
-                | AUTH_REQUIRE_GATE
-                | AUTH_DECLASSIFY
-                | AUTH_DELEGATE,
-            target_mask: TARGET_SELF | TARGET_CHILD,
-            gate_mask: u64::MAX,
-            label_mask: u64::MAX,
-            ..CapState::default()
-        };
-        // After prepare_binding, request.root_pid is already the host PID
-        // (resolve_to_host_pid was called there).  No separate kernel_pid needed.
-        if let Err(error) = self.engine.bind_state(control_pid, id, control_state) {
-            let cleanup = self.cleanup_binding(&request, id, None);
-            return Err(kernel_error_with_cleanup(
-                "bind control process",
-                error,
-                cleanup,
-            ));
-        }
-        if let Err(error) = self
-            .reload
-            .append_policy_delta(control_pid, id, &compiled.bytes)
-        {
-            let cleanup = self.cleanup_binding(&request, id, None);
-            return Err(kernel_error_with_cleanup(
-                "append policy delta",
-                error,
-                cleanup,
-            ));
-        }
-        if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
-            let cleanup = self.cleanup_binding(&request, id, None);
-            return Err(kernel_error_with_cleanup(
-                "unbind control process",
-                error,
-                cleanup,
-            ));
+        if let Some(compiled) = compiled.as_ref() {
+            let control_pid = std::process::id() as i32;
+            let control_state = CapState {
+                scope_id: 1,
+                labels: label,
+                authority_mask: AUTH_BIND_RULE
+                    | AUTH_NARROW_SCOPE
+                    | AUTH_ADD_LABEL
+                    | AUTH_REQUIRE_GATE
+                    | AUTH_DECLASSIFY
+                    | AUTH_DELEGATE,
+                target_mask: TARGET_SELF | TARGET_CHILD,
+                gate_mask: u64::MAX,
+                label_mask: u64::MAX,
+                ..CapState::default()
+            };
+            if let Err(error) = self.engine.bind_state(control_pid, id, control_state) {
+                let cleanup = self.cleanup_binding(&request, id, None);
+                return Err(kernel_error_with_cleanup(
+                    "bind control process",
+                    error,
+                    cleanup,
+                ));
+            }
+            if let Err(error) = self
+                .reload
+                .append_policy_delta(control_pid, id, &compiled.bytes)
+            {
+                let cleanup = self.cleanup_binding(&request, id, None);
+                return Err(kernel_error_with_cleanup(
+                    "append policy delta",
+                    error,
+                    cleanup,
+                ));
+            }
+            if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
+                let cleanup = self.cleanup_binding(&request, id, None);
+                return Err(kernel_error_with_cleanup(
+                    "unbind control process",
+                    error,
+                    cleanup,
+                ));
+            }
         }
 
         let binding = Binding {
@@ -370,18 +577,35 @@ impl ActPlaneBackend {
             },
             domain_id: Some(id),
         };
+        let (reasons, rule_names, label_names) = match compiled {
+            Some(compiled) => (
+                compiled.reasons,
+                compiled.meta.into_iter().map(|meta| meta.name).collect(),
+                compiled
+                    .labels
+                    .into_iter()
+                    .map(|(name, mask)| (mask, name))
+                    .collect(),
+            ),
+            None => {
+                let mut reasons = vec![String::new()];
+                let mut rule_names = vec![String::new()];
+                for target_id in 1..=structured_target_count {
+                    reasons.push(format!("structured file protection target {target_id}"));
+                    rule_names.push(format!("file-protection-target-{target_id}"));
+                }
+                (reasons, rule_names, HashMap::new())
+            }
+        };
         let mut active = ActiveBinding {
             binding: binding.clone(),
             credential_policy,
             kernel_pid: None,
-            reasons: compiled.reasons,
-            rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
-            label_names: compiled
-                .labels
-                .into_iter()
-                .map(|(name, mask)| (mask, name))
-                .collect(),
+            reasons,
+            rule_names,
+            label_names,
             inode_policy,
+            file_protection: None,
         };
         if let Err(error) = active.inode_policy.install(&self.engine, id) {
             let cleanup = self.cleanup_binding(&active.binding.request, id, None);
@@ -398,6 +622,17 @@ impl ActPlaneBackend {
                 cleanup,
             ));
         }
+        if let Some(staged) = staged_file_protection {
+            match staged.activate() {
+                Ok(file_protection) => {
+                    active.file_protection = Some(Arc::new(Mutex::new(file_protection)));
+                }
+                Err(error) => {
+                    let cleanup = self.cleanup_binding(&active.binding.request, id, None);
+                    return Err(activation_error_with_cleanup(error, cleanup));
+                }
+            }
+        }
         bindings.insert(id, active);
         Ok(binding)
     }
@@ -407,6 +642,7 @@ impl ActPlaneBackend {
         request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<Binding, BackendError> {
+        let _ = normalize_actplane_policy_payload(&request)?;
         let _lifecycle = self.lifecycle();
         let mut bindings = self.state.bindings();
         if let Some(existing) = bindings
@@ -457,8 +693,25 @@ impl ActPlaneBackend {
         else {
             return Err(BackendError::MissingBinding(binding_id));
         };
+        if let Some(file_protection) = active.file_protection.as_ref() {
+            let result = file_protection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .deactivate_and_cleanup();
+            if let Err(error) = result {
+                if let Some(stored) = bindings.get_mut(&id) {
+                    stored.binding.state = BindingState::Degraded;
+                    stored.binding.message = Some(error.to_string());
+                }
+                return Err(error);
+            }
+        }
         let cleanup = self.cleanup_binding(&active.binding.request, id, active.kernel_pid);
         if !cleanup.is_empty() {
+            if let Some(stored) = bindings.get_mut(&id) {
+                stored.binding.state = BindingState::Degraded;
+                stored.binding.message = Some(cleanup.join("; "));
+            }
             return Err(BackendError::KernelFailure(cleanup.join("; ")));
         }
         bindings.remove(&id);
@@ -479,18 +732,21 @@ impl EnforcementBackend for ActPlaneBackend {
         // state so a host without an active BPF-LSM reports file_delete_guard=false
         // (fail-closed) instead of advertising a capability that silently enforces
         // nothing.
-        capabilities.file_delete_guard = self.engine.supports_file_delete_guard()
-            && ebpf_ifc_engine::bpf_lsm_active()
-            && self.in_init_pidns;
-        capabilities.file_delete_guard_mode = if capabilities.file_delete_guard {
-            if self.engine.bpf_d_path_in_lsm_available() {
-                Some("path".into())
+        let file_guard_ready = self.structured_delete_ready();
+        capabilities.file_delete_guard = file_guard_ready;
+        capabilities.file_delete_guard_mode = file_guard_ready.then(|| {
+            if self.engine.inode_guard_mode() {
+                "inode".into()
             } else {
-                Some("inode".into())
+                "path".into()
             }
-        } else {
-            None
-        };
+        });
+        capabilities.file_entry_delete_protection = file_guard_ready;
+        capabilities.directory_tree_delete_protection = file_guard_ready;
+        capabilities.ordinary_write_protection = self.structured_ordinary_write_ready();
+        capabilities.file_read_protection =
+            file_guard_ready && self.engine.supports_file_read_guard();
+        capabilities.static_mount_topology = file_guard_ready;
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
@@ -646,19 +902,14 @@ impl Drop for ActPlaneBackend {
         let active = self
             .state
             .bindings()
-            .iter()
-            .map(|(domain_id, binding)| (*domain_id, binding.clone()))
+            .values()
+            .map(|binding| binding.binding.request.binding_id)
             .collect::<Vec<_>>();
-        for (domain_id, binding) in active {
-            let errors =
-                self.cleanup_binding(&binding.binding.request, domain_id, binding.kernel_pid);
-            if errors.is_empty() {
-                self.state.bindings().remove(&domain_id);
-            } else {
+        for binding_id in active {
+            let mut bindings = self.state.bindings();
+            if let Err(error) = self.detach_binding_locked(&mut bindings, binding_id) {
                 log::error!(
-                    "agentsight-enforcer could not clear binding {} during shutdown: {}",
-                    binding.binding.request.binding_id,
-                    errors.join("; ")
+                    "agentsight-enforcer could not clear binding {binding_id} during shutdown: {error}"
                 );
             }
         }
@@ -812,14 +1063,7 @@ fn credential_apply_request(
 }
 
 fn replacement_failure_code(error: &BackendError) -> ReplaceFailureCode {
-    match error {
-        BackendError::BindingConflict(_) | BackendError::MissingBinding(_) => {
-            ReplaceFailureCode::BindingConflict
-        }
-        BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
-        BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
-        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
-    }
+    crate::backend::backend_failure_code(error)
 }
 
 fn validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode {
@@ -1275,6 +1519,9 @@ fn operation_name(operation: u32) -> &'static str {
         4 => "recv",
         5 => "unlink",
         6 => "rename",
+        7 => "rmdir",
+        8 => "ordinary_write",
+        9 => "read",
         _ => "unknown",
     }
 }
@@ -1326,6 +1573,22 @@ fn now_ns() -> u64 {
 
 fn kernel_error(context: &str, error: std::io::Error) -> BackendError {
     BackendError::KernelFailure(format!("{context}: {error}"))
+}
+
+fn activation_error_with_cleanup(error: BackendError, cleanup: Vec<String>) -> BackendError {
+    if cleanup.is_empty() {
+        return error;
+    }
+    let diagnostic = format!("cleanup failed: {}", cleanup.join("; "));
+    match error {
+        BackendError::CompileFailure(message) => {
+            BackendError::CompileFailure(format!("{message}; {diagnostic}"))
+        }
+        BackendError::KernelFailure(message) => {
+            BackendError::KernelFailure(format!("{message}; {diagnostic}"))
+        }
+        other => BackendError::KernelFailure(format!("{other}; {diagnostic}")),
+    }
 }
 
 fn kernel_error_with_cleanup(
@@ -1464,7 +1727,9 @@ mod tests {
 
     use agentsight_enforcement_protocol::{
         ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationScope, Effect,
-        PolicyMode, SecurityEventKind, ViolationEvent,
+        FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
+        FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections, PolicyMode,
+        SecurityEventKind, ViolationEvent,
     };
     use ebpf_ifc_engine::{Provenance, Violation};
     use uuid::Uuid;
@@ -1472,6 +1737,152 @@ mod tests {
     use super::*;
 
     const _: fn(&PinnedEngine) -> std::io::Result<usize> = PinnedEngine::drain_pending_events;
+
+    #[test]
+    fn source_label_rejects_unrelated_dsl_labels_but_accepts_structured_policies() {
+        let unrelated = compile_str("source UNRELATED = exec \"**\"\n").expect("compile label");
+        assert!(matches!(
+            source_label(Some(&unrelated)),
+            Err(BackendError::CompileFailure(message))
+                if message == "policy must declare a COMMAND or AGENT source label"
+        ));
+        assert_eq!(source_label(None).expect("structured domain label"), 1);
+        for name in ["COMMAND", "AGENT"] {
+            let compiled = compile_str(&format!(
+                "source A = exec \"/other\"\nsource {name} = exec \"**\"\n"
+            ))
+            .expect("compile domain source");
+            assert_eq!(
+                source_label(Some(&compiled)).expect("declared source"),
+                compiled.labels[name]
+            );
+        }
+    }
+
+    fn structured_policy_request(path: &str) -> ApplyPolicy {
+        ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "structured-policy-test".into(),
+            session_id: None,
+            root_pid: i32::MAX,
+            process_start_time: 1,
+            policy_id: "file-protection".into(),
+            policy_revision: "1".into(),
+            policy_dsl: String::new(),
+            policy_mode: Some(PolicyMode::Enforce),
+            file_protection_policy: Some(FileProtectionPolicy {
+                version: FILE_PROTECTION_POLICY_VERSION,
+                topology_mode: FileProtectionTopologyMode::StaticAtApply,
+                targets: vec![FileProtectionTarget {
+                    path: path.into(),
+                    kind: FileProtectionTargetKind::ExactFile,
+                    protections: FileProtections {
+                        delete: true,
+                        ordinary_write: false,
+                        read: false,
+                    },
+                    exclusions: Vec::new(),
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn structured_policies_reject_non_enforcing_modes_before_path_resolution() {
+        for mode in [None, Some(PolicyMode::Observe), Some(PolicyMode::Audit)] {
+            for (delete, ordinary_write) in [(true, false), (false, true), (true, true)] {
+                let mut request = structured_policy_request("relative/invalid");
+                request.policy_mode = mode;
+                let protections = &mut request
+                    .file_protection_policy
+                    .as_mut()
+                    .expect("policy")
+                    .targets[0]
+                    .protections;
+                protections.delete = delete;
+                protections.ordinary_write = ordinary_write;
+                assert!(matches!(
+                    normalize_actplane_policy_payload(&request),
+                    Err(BackendError::CompileFailure(message))
+                        if message.contains("requires explicit policy_mode=enforce")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_dsl_payload_validation_keeps_existing_mode_behavior() {
+        let mut request = structured_policy_request("/fixture");
+        request.file_protection_policy = None;
+        request.policy_dsl = "source AGENT = exec \"**\"\n".into();
+        for mode in [
+            None,
+            Some(PolicyMode::Observe),
+            Some(PolicyMode::Audit),
+            Some(PolicyMode::Enforce),
+        ] {
+            request.policy_mode = mode;
+            assert!(
+                normalize_actplane_policy_payload(&request)
+                    .expect("DSL mode unchanged")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn actplane_structured_delete_payload_reaches_topology_preparation() {
+        let state = RuntimeState::new();
+        let request = structured_policy_request("/fixture/protected");
+
+        let normalized = normalize_actplane_policy_payload(&request)
+            .expect("structured delete payload should pass backend validation")
+            .expect("structured policy should be retained for topology preparation");
+
+        assert_eq!(normalized.targets[0].path, "/fixture/protected");
+        assert!(normalized.targets[0].delete);
+        assert!(state.bindings().is_empty());
+    }
+
+    #[test]
+    fn actplane_preparation_rejects_invalid_normalization_before_runtime_mutation() {
+        let state = RuntimeState::new();
+        let request = structured_policy_request("relative/path");
+
+        let error = normalize_actplane_policy_payload(&request)
+            .expect_err("invalid structured path must stop ActPlane preparation");
+
+        assert!(matches!(
+            error,
+            BackendError::CompileFailure(message)
+                if message.contains("target 0")
+                    && message.contains("relative/path")
+                    && message.contains("absolute")
+        ));
+        assert!(state.bindings().is_empty());
+    }
+
+    #[test]
+    fn ordinary_write_reaches_topology_preparation_without_runtime_mutation() {
+        let state = RuntimeState::new();
+        let mut request = structured_policy_request("/fixture/protected");
+        let protections = &mut request
+            .file_protection_policy
+            .as_mut()
+            .expect("structured fixture")
+            .targets[0]
+            .protections;
+        protections.delete = false;
+        protections.ordinary_write = true;
+
+        let normalized = normalize_actplane_policy_payload(&request)
+            .expect("ordinary write should pass backend validation")
+            .expect("structured policy should reach topology preparation");
+
+        assert!(!normalized.targets[0].delete);
+        assert!(normalized.targets[0].ordinary_write);
+        assert!(state.bindings().is_empty());
+    }
 
     fn active_binding() -> ActiveBinding {
         ActiveBinding {
@@ -1498,36 +1909,8 @@ mod tests {
             rule_names: vec!["block-exfiltration".into()],
             label_names: HashMap::from([(1, "CREDENTIAL".into())]),
             inode_policy: InodePolicy::default(),
+            file_protection: None,
         }
-    }
-
-    #[test]
-    fn structured_payload_is_rejected_without_resolving_a_process() {
-        use agentsight_enforcement_protocol::{
-            FILE_PROTECTION_POLICY_VERSION, FileProtectionPolicy, FileProtectionTarget,
-            FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections,
-        };
-
-        let mut request = active_binding().binding.request;
-        request.root_pid = 0;
-        request.process_start_time = 0;
-        request.policy_dsl.clear();
-        request.file_protection_policy = Some(FileProtectionPolicy {
-            version: FILE_PROTECTION_POLICY_VERSION,
-            topology_mode: FileProtectionTopologyMode::StaticAtApply,
-            targets: vec![FileProtectionTarget {
-                path: "/missing/file".into(),
-                kind: FileProtectionTargetKind::ExactFile,
-                protections: FileProtections {
-                    delete: true,
-                    ordinary_write: false,
-                },
-                exclusions: vec![],
-            }],
-        });
-        let error = validate_actplane_policy_payload(&request).expect_err("unsupported payload");
-        assert!(matches!(error, BackendError::CompileFailure(message)
-            if message == crate::backend::STRUCTURED_FILE_PROTECTION_UNSUPPORTED));
     }
 
     fn raw_violation(timestamp_ns: u64) -> Violation {
@@ -1575,7 +1958,7 @@ mod tests {
         let mut active = active_binding();
         active.reasons = compiled.reasons;
         active.rule_names = compiled.meta.into_iter().map(|meta| meta.name).collect();
-        for (op, name) in [(5, "unlink"), (6, "rename")] {
+        for (op, name) in [(5, "unlink"), (6, "rename"), (7, "rmdir")] {
             let mut raw = raw_violation(100);
             raw.op = op;
             raw.rule_id = 2;
@@ -1595,7 +1978,9 @@ mod tests {
             (2, "write"),
             (3, "connect"),
             (4, "recv"),
-            (7, "unknown"),
+            (8, "ordinary_write"),
+            (9, "read"),
+            (10, "unknown"),
         ] {
             assert_eq!(operation_name(op), name);
         }
@@ -2127,6 +2512,32 @@ mod tests {
 
         assert_eq!(drained, 3);
         assert_eq!(operations.into_inner(), ["clear", "drain"]);
+    }
+
+    #[test]
+    fn activation_failure_preserves_cleanup_diagnostics_and_error_kind() {
+        for compile_failure in [true, false] {
+            let make_error = || {
+                if compile_failure {
+                    BackendError::CompileFailure("activation failed".into())
+                } else {
+                    BackendError::KernelFailure("activation failed".into())
+                }
+            };
+            for cleanup in [vec![], vec!["unbind failed".into(), "clear failed".into()]] {
+                let failed_cleanup = !cleanup.is_empty();
+                let error = activation_error_with_cleanup(make_error(), cleanup);
+                assert_eq!(
+                    std::mem::discriminant(&error),
+                    std::mem::discriminant(&make_error())
+                );
+                assert!(error.to_string().contains("activation failed"));
+                assert_eq!(error.to_string().contains("cleanup failed"), failed_cleanup);
+                if failed_cleanup {
+                    assert!(error.to_string().contains("unbind failed; clear failed"));
+                }
+            }
+        }
     }
 
     #[test]

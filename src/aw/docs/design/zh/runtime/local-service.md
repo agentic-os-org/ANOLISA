@@ -49,6 +49,8 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `unbind` | `instance_id` | 在全部事件关闭后释放绑定 |
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
+| `enable_submissions` | `instance_id`，首个输入声明之前 | 启用递增输入轮次，关闭后回收明细 |
+| `close_input_event` | `instance_id`、`session_id`、`turn_id` | 取消并排空输入事件；顺序协议绑定回收关联明细 |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
 | `close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
 | `invoke_step` | `event_id`、`instance_id`、`step_id`、可选 `native_environment` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
@@ -59,6 +61,28 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `freeze_context` | `event_id`、`instance_id`、原始 `candidate_revision` | 一个不可变有界证据上下文，不执行步骤 |
 | `audit` | 准备阶段或事件的 `key` | 已验证的持久记录信封和 `terminal` 标志 |
 | `stop` | 无 | 确认收到停止请求；进程退出才表示清理完成 |
+
+提交事件在实例内按 `(input.submit, session_id, turn_id)` 关联，与工具调用账本独立。
+事件包含 `input.text`，不带 `tool`。同轮步骤回调保留首次输入、原生字节和截止时间；
+文本或身份变化会被拒绝。完成、关闭及打开失败的声明保留到实例释放，上限为 1,024。
+普通 QwenPaw scope 随 reply 结束，Qoder scope 随 Query 关闭释放。
+
+`close_input_event` 接收 `instance_id`、`session_id`、`turn_id`，复用工具事件的取消与
+清理链路；取消可先于打开生效，并阻止同轮重开。实例释放会取消未完成提交，等待
+Provider 进程退出。元数据审计保存会话、轮次和处置，不保存用户文本。
+
+常驻 Claude SDK 和 Pi 在首个输入声明前显式调用 `enable_submissions`，启用独立的
+输入高水位；工具调用序号保持独立。此时 `turn_id` 为从 `1` 开始、每次加一的规范
+十进制字符串，在同一绑定的所有会话间连续分配。Producer 完成本地投影和编码校验后
+才分配序号，并在拒绝、Provider 故障和取消时同样确认 `close_input_event`。
+关闭先取消并排空事件，再删除 lease 和活动身份，仅保留高水位。
+
+同时活动输入上限为 1,024，已完成输入不占累计配额。不同活动轮次可乱序关闭；
+同轮多个步骤复用原始会话、字节和截止时间。关闭先于打开时会领取下一个序号并阻止
+迟到回调。已退休序号、会话变化、跳号和从旧输入声明切换协议都会被拒绝。
+容量不足会消耗序号，但不准入事件。已有 UUID 消费者（包括前台 Claude SDK）继续
+遵守旧上限，直到采用显式协议。后续输入 Adapter 可直接复用这些服务操作，无需
+引入工具注册或新增 scope。
 
 事件句柄包含原始 `candidate_revision`。显式 `freeze_context` 只使用配置来源和
 经原生回调核对的身份，保留原始 deadline，Journal 只写元数据。详见
@@ -137,6 +161,30 @@ worker，并针对迟到 close 原子回收身份与两阶段关联。未知/已
 
 升级时先排空旧会话并停止旧 daemon，再同时更新 CLI 和 daemon 到
 `aw-service/v1alpha7`。配置与 Provider 协议版本保留。回退遵循相同的排空、停止流程。
+
+### 持续接管有效性
+
+JS/Python 共用消费者在任务确认和 invocation 准入后启动 `watch_scope`。
+`check_scope` 将原 worker PID、不可变策略 revision 绑定到已有任务 owner，
+外层 binding 固定服务与任务代次。覆盖内登记和 Hook 派发重新检查有效性。
+Qoder 核对已安装的生产、控制派发和传输函数；QwenPaw 核对已有 middleware、
+parser 和 Toolkit 派发接点。
+
+空闲检查在上次检查完成两秒后运行，每次 CLI 调用限时六秒。连续十五秒未成功检查时，
+服务拒绝该 scope 的执行，即使 worker 仍然存活。接点失败或策略代次不匹配会永久
+阻断该 scope，重新连接不能恢复它。这些检查保留声明的覆盖边界：AW 范围外原生
+能力继续沿用自身授权行为。
+
+故障取消活动 Provider 工作，同时保留存活任务的归属，直到原生回调、工作和凭据
+完成清理。已登记 invocation 仍可回收；独立兄弟 scope 分别保持自身有效性。
+并发关闭等待同一次清理，迟到的 open 响应被关闭且不再确认。
+恢复需先完成清理，再创建新 scope，有副作用的调用不会自动重放。
+
+`status.instances[].scope_validity` 分别报告 `native_alive` 和 `covered_bridge`，
+后者取值为 `pending`、`ready`、`failed`、`unavailable`、`unmonitored`。
+`inspect.service.resident_scopes` 汇总任务数量；旧服务未提供的数据为 `null`。
+启动 `ready` 不能证明持续有效。新消费者在任务准入时拒绝不支持 watch 操作的服务；
+升级需排空现有任务，再统一更新 CLI、Adapter 和服务。
 
 ## 共享事件生命周期
 
@@ -252,13 +300,13 @@ SIGINT/SIGTERM，取消活跃工作并等待连接和事件 worker。成功的 `
 
 ## 源码入口
 
-- [用户命令与本地演示](../../../../../../docs/developer-guide/zh/aw/native-agents.md#运行本地服务演示)
+- [用户命令与本地演示](../../../../../../docs/developer-guide/zh/aw/local-service.md)
 - [公共 API](../../../../crates/aw-service/src/lib.rs)、
   [Client](../../../../crates/aw-service/src/client.rs) 和
   [Server](../../../../crates/aw-service/src/server.rs)
 - [Runtime](../../../../crates/aw-service/src/runtime.rs) 与
   [审计元数据](../../../../crates/aw-service/src/audit.rs)
-- [开发检查](../../../../CONTRIBUTING_zh.md#运行时验收)
+- [开发检查](../../../../CONTRIBUTING_zh.md#构建与检查)
 
 ## 布尔命令投影
 
@@ -310,3 +358,15 @@ SIGTERM 的后代。原生命令和成功交换仍立即清理。调用方遭意
 
 `unbind` 对 reloadable 实例在同一准入锁下检查完整请求/工具空闲状态并关闭准入；
 忙碌时返回 `busy`。`release_instance` 仍是取消并回收的内部清理操作，不能替代 detach 的空闲检查。
+
+## 独立登记
+
+`Operation::Registration` 提供经过身份核验的登记、查询、Ready 与释放，业务保留进程所有权。类型定义在 `wire/registration.rs`，事务由 `runtime/registration.rs` 协调。稳定 CLI 信封和接入顺序以[独立实例合同](../../../../../../docs/developer-guide/zh/aw/deployment/independent-instances.md)为准。
+
+请求 key 绑定业务 PID/启动身份与客户端 request ID。Service 核验直接 owner 或直接 CLI 子进程的 Unix peer，保存完整登记输入的摘要。同一 key 下 target、能力、cwd 或环境变化均为冲突。新 key 与 `Bind` 共用 `bind_id` 准备：Core preflight、Host discovery、Core admission 和 Host 构造消费同一份准备证据与资源。配置摘要相同不会跨实例共享准备资源；普通 Adapter 路由投影在 Provider 发现前检查接线约束。
+
+准备期间预留及其 owner 已可见，取消、owner 退出和连接丢失传递至准备取消标记。准备成功开启 30 秒原生确认窗口；响应送达不改变 Ready 状态或释放预留，响应写入失败仍保留可查询记录。Ready 在实例/owner 锁内校验准确的不可变策略 revision，持久写入生命周期记录后提交。重复登记或 Ready 不会续期；审计失败保持准入关闭，并沿用 daemon 的故障终止语义。
+
+独立根实例在 Ready 后才接受任务 Scope。worker 必须属于根进程的后代关系，Service 对每个既有实例操作核验准确的 worker 或其直接 CLI 子进程。旧 RPC 路径同样检查，因此转发句柄不能绕过独立入口。固定任务路由使用普通常驻投影，不启用策略重载；既有 `aw run` 与 attach 沿用各自准入路径。
+
+释放先关闭准入，再复用 `release_instance`：取消所属任务 Scope，等待 Provider worker 与后代回收，最后释放 Host 资源。owner 退出与未确认超时由维护循环走同一路径。客户端在原生工作完成收尾前继续持有任务，Service 不向业务进程发送终止信号。终态记录保留到本代 daemon 结束，防止重复准备。登记表最多保留 4,096 个 key，达到容量时拒绝新 key，既有去重记录继续有效。新服务代际需要显式重新登记。

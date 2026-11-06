@@ -4,10 +4,8 @@ use crate::{
     check, identifier, positive, Error, Exchange, Failure, FailureAction, Host, Invocation, Method,
     StepOutput,
 };
-use aw_provider::{
-    admission::{AdmittedStep, StepExecution},
-    Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION,
-};
+use aw_core::admission::{AdmittedStep, StepExecution};
+use aw_provider::{Reply, MAX_DEPTH, MAX_MESSAGE_BYTES, VERSION};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,7 +18,7 @@ use std::{
 ///
 /// Invoke configured steps serially or concurrently according to native Adapter
 /// semantics. Every step may be claimed once; failed attempts are not retried.
-/// The caller must collect all required results before dispatching a native tool.
+/// The caller must collect all required results before admitting a native submission or dispatching a tool.
 pub struct Event<'a> {
     host: &'a Host,
     value: Value,
@@ -40,7 +38,7 @@ impl Host {
     /// original callback deadline to count work performed before this call. Input
     /// is a locally constructed JSON value; invocation schema validation occurs
     /// before any step process starts. Adapter and configured binding must match.
-    /// Instance, session and tool IDs remain native data, not authenticated identity.
+    /// Instance, session, turn and tool IDs remain native data, not authenticated identity.
     ///
     /// # Errors
     /// Rejects expired/cancelled events, excessive input, mismatched Agent binding,
@@ -84,8 +82,8 @@ impl Host {
     ) -> Result<Event<'a>, Error> {
         let started = Instant::now();
         check(deadline, cancelled)?;
-        if value["agent"]["adapter"] != self.capabilities.adapter
-            || value["agent"]["binding_id"] != self.target
+        if value["agent"]["adapter"] != self.capabilities().adapter
+            || value["agent"]["binding_id"] != self.target()
         {
             return Err(Error::Invalid(
                 "event Agent does not match prepared binding",
@@ -95,14 +93,16 @@ impl Host {
             .as_str()
             .ok_or(Error::Invalid("missing event name"))?
             .to_owned();
-        let spec = &self.configuration.as_value()["spec"];
+        let spec = &self.configuration().as_value()["spec"];
         let configured = &spec["events"][&name];
-        if configured["enabled"] != true || !matches!(name.as_str(), "tool.before" | "tool.after") {
+        if configured["enabled"] != true
+            || !matches!(name.as_str(), "input.submit" | "tool.before" | "tool.after")
+        {
             return Err(Error::Invalid("event was not enabled and admitted"));
         }
         if native_input.is_none()
             && self
-                .steps
+                .steps()
                 .iter()
                 .any(|step| step.event == name && matches!(step.execution, StepExecution::Native))
         {
@@ -126,7 +126,11 @@ impl Host {
                 _ => {}
             }
         }
-        if crate::encode(&value)?.len() > MAX_MESSAGE_BYTES {
+        if serde_json::to_vec(&value)
+            .map_err(|_| Error::Invalid("event encoding failed"))?
+            .len()
+            > MAX_MESSAGE_BYTES
+        {
             return Err(Error::Invalid("event size limit"));
         }
         check(deadline, cancelled)?;
@@ -201,7 +205,7 @@ impl Event<'_> {
     /// Steps admitted for this event, retaining their configured order.
     pub fn steps(&self) -> impl Iterator<Item = &AdmittedStep> {
         self.host
-            .steps
+            .steps()
             .iter()
             .filter(|step| step.event == self.name)
     }
@@ -253,7 +257,7 @@ impl Event<'_> {
             .providers
             .get(&step.provider)
             .ok_or(Error::Invalid("prepared Provider is missing"))?;
-        let record = self.host.record(
+        let mut record = self.host.record(
             &step.provider,
             if matches!(step.execution, StepExecution::Native) {
                 Method::NativeHook
@@ -281,8 +285,20 @@ impl Event<'_> {
             .as_ref()
             .map(|(value, _)| value)
             .unwrap_or(&self.value);
-        let (record, result) = if !step.matches_tool(value) {
-            transport.skipped(record, value)
+        // Missing identity is an invocation failure, never evidence of non-coverage.
+        // Native hooks need the same normalized contract as structured Providers.
+        let started = Instant::now();
+        let validation = (|| -> Result<(), Failure> {
+            check(self.deadline, self.cancelled)?;
+            self.host.protocol.validate_event(value)?;
+            check(self.deadline, self.cancelled)?;
+            Ok(())
+        })();
+        record.elapsed = started.elapsed();
+        let (record, result) = if let Err(error) = validation {
+            (record, Err(error))
+        } else if !step.matches_tool(value) {
+            (record, Ok(StepOutput::Skipped))
         } else {
             match &step.execution {
                 StepExecution::Native => {
@@ -309,14 +325,14 @@ impl Event<'_> {
                         .unwrap_or(&self.value)
                         .clone();
                     if !step.execution.replaces_result() {
-                        if let Some(tool) = event["tool"].as_object_mut() {
+                        if let Some(tool) = event.get_mut("tool").and_then(Value::as_object_mut) {
                             tool.remove("result_projection");
                         }
                     }
                     let build = |budget_ms| {
                         let value = json!({
                             "api_version": VERSION, "method": "invoke", "request_id": request_id,
-                            "operation": operation, "config_revision": self.host.revision,
+                            "operation": operation, "config_revision": self.host.revision(),
                             "budget_ms": budget_ms, "allowed_effects": effects,
                             "config": provider.config, "event": event,
                         });

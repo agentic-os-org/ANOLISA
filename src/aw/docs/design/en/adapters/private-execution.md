@@ -14,9 +14,10 @@ drain; factory changes require a rolling restart.
 | Adapter | Lease boundary | Explicit consumer |
 | --- | --- | --- |
 | Qoder SDK 1.0.56 / Worker 1.1.78 | One lease per managed MCP handler invocation, owned by its Query | `bridge.executionEnvironment()` at client or subprocess creation |
+| AgentScope SDK 2.0.6 | One lease per factory reply, shared by its tools | `execution_environment()` in application-owned tools |
 | QwenPaw 2.2.2.post1 / AgentScope 2.0.10 | One lease per managed Agent reply, shared by that reply's tools | `execution_environment()` in the installed native environment extension |
 
-Both contracts use `aw.private-execution/v1`. Execution helpers return copies of
+These adapters use `aw.private-execution/v1`. Execution helpers return copies of
 the admitted environment plus declared secrets. Hook helpers return a separate
 public view. Neither helper mutates the process environment. The application
 must declare sensitive values in `secrets` and exclude their keys and values
@@ -106,6 +107,34 @@ cleanup stays pending until that finalizer settles; lease failure fences new
 requests process-wide. This ownership includes offloaded tools and their
 completion callbacks.
 
+## AgentScope reply factory
+
+Standalone AgentScope 2.0.6 accepts `AwBridge.create_agent(execution_factory=...)`
+with the same `PrivateExecution` class shipped for QwenPaw. The factory yields
+one lease per public `reply` / `reply_stream`; native tools explicitly consume
+`execution_environment()`. The integration and application example are in the
+[AgentScope guide](../../../../../../docs/developer-guide/en/aw/agents/agentscope.md#task-private-tool-credentials).
+
+The Scope owns the lease separately from the reply ContextVar. Acquisition runs
+after root reservation and before child open; the child uses the Hook environment.
+Reply execution sets and resets its ContextVar in one task, while cleanup may run
+in a shielded task. Distinct Agents have independent contexts and Scopes.
+
+Native execution retains its original arguments. Registration digests and public
+Hook payloads use the same idempotent redactor. The innermost AW tool middleware
+withholds chunks and redacts the complete result, including metadata, before
+outer Post Hooks and native model delivery. Application middleware remains trusted.
+Direct Toolkit calls and tools without explicit environment consumption need their
+own application integration.
+
+Cleanup drains native tools, closes the child, confirms lease revocation, then
+releases the root reservation. Acquisition and revocation each have a 60-second
+budget. Timeout retains the original task and reservation; a late acquisition is
+revoked once without dispatch. Failed or timed-out revocation fences new replies
+until worker restart, including when a late finalizer eventually succeeds.
+Cancellation waits for the owned operation within these bounds. Application
+factories clean up partial acquisition before raising.
+
 ## Failure and lifecycle
 
 In Qoder, an exception from the private factory, handler or redactor stops the
@@ -133,13 +162,47 @@ replacement remains unsupported.
 private execution leases. Qoder rejects `awExecutionFactory` in that mode.
 Keep native permissions and the caller-owned daemon start/stop lifecycle.
 Qoder requires `settingSources: []` and rejects settings,
-plugins, extra CLI flags and runtime executable/transport overrides. Business
+unadmitted plugins, extra CLI flags and runtime executable/transport overrides. Business
 factories depending on those inputs need an integration that satisfies the
 runtime admission contract before deployment. The public factory above provides
 the credential seam without changing those guards.
 
 See the [shared security configuration](../../../../crates/aw-service/examples/aw.sdk-security.yaml)
-and [native integration guide](../../../../../../docs/developer-guide/en/aw/native-agents.md#use-one-security-policy-for-resident-sdks)
+and [native integration guide](../../../../../../docs/developer-guide/en/aw/deployment/resident.md)
 for launch commands. The implementation contracts live in
 [Qoder private execution](../../../../crates/aw-adapter/native/qoder-sdk/private.mjs)
 and [QwenPaw private execution](../../../../crates/aw-adapter/native/qwenpaw/aw_private.py).
+
+## Native Bash consumers
+
+`awNativeExecutionFactory` owns one lease per native Bash invocation, separately
+from managed MCP's `awExecutionFactory`. Its argument and lease API is defined in
+the [Qoder SDK guide](../../../../../../docs/developer-guide/en/aw/agents/qoder-sdk.md#native-bash-command-consumers).
+The Adapter preserves these ordering invariants:
+
+1. Security inspects frozen logical input; native rules evaluate that same input.
+   Only a subsequent explicit `canUseTool` allowance publishes executable wrapper
+   arguments. The pinned Worker can skip Hook asks in bypass/auto, so admission,
+   mode changes and the effective Bash Hook mode must reject those paths.
+2. Publication records ownership before the permission response is sent. An
+   uncertain response cannot prove that a ticket is unused. Native rejection
+   before publication releases its unused lease without consumer settlement.
+3. Consumer acknowledgement precedes finite-input EOF and native shutdown.
+   Original callback drain precedes final revocation. Timeout-backgrounding,
+   result messages and background snapshots alone do not prove consumer completion;
+   typed session/tool/task identities correlate each acknowledged consumer.
+4. Normal settlement has no task-length cap. Cancellation uses the existing
+   shared 60-second budget for consumer join, native close, callback drain and
+   lease cleanup. Unconfirmed cleanup retains leases, snapshots and scope
+   ownership and fences new work until worker restart.
+
+## Execution-asset verification
+
+Every Query opens admitted files without following symlinks. Up to 64 successful
+checks are cached by path, expected digest and `(dev, ino, size, mtimeNs, ctimeNs)`;
+changed identity or digest requires a rehash. Recent one-second or whole-second
+ctime does not establish a reusable generation. Streaming reads enforce the
+actual byte limit and recheck metadata after hashing. Cache eviction only causes
+rehashing. Snapshot traversal anchors no-follow descriptors to opened directories
+and counts actual entries and bytes. Resource limits and accepted plugin fields
+are defined in the [configuration reference](../../../../../../docs/developer-guide/en/aw/configuration.md#qoder-sdk-execution-assets).

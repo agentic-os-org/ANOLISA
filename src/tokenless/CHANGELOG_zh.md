@@ -9,6 +9,59 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.4] - 2026-11-06
+
+### 变更
+
+- **源码安装的不兼容变更：** `make install`、框架注册和卸载现在默认使用 `AWPRJ=anolisa`，将适配器和扩展放入 ANOLISA 共享命名空间。要保留或卸载已有的独立安装，请显式传入 `AWPRJ=`，并沿用安装时的 profile 和路径覆盖。安装会拒绝覆盖其他安装拥有的资源；卸载会保留这些资源并发出警告。RPM/raw 布局和运行时配置路径保持不变（[#9462](https://github.com/agentic-os-org/ANOLISA/pull/9462)）。
+
+### 修复
+
+- JSON 深度限制现在保留数字、布尔值和 null 叶子的原始类型，不再将其替换为字符串标记。这些叶子不再写入 Stash，也不再计入截断次数；对象、数组和字符串沿用原有的深度限制行为（[#7743](https://github.com/agentic-os-org/ANOLISA/pull/7743)）。
+- 可识别的原生 `grep` 和 `rg` 调用现在绕过 RTK 改写，PostTool 仅使用无损搜索压缩，包括受支持的包装命令和包含这些调用的复合命令。每条收到的匹配记录均会保留；搜索压缩被禁用、格式不受支持或无法节省时，即使启用 `force_json` 也保留原始输出。无法识别搜索边界的混合命令输出同样保持原样，因此结果可能更大（[#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)）。
+- Qoder 原生 Bash 压缩现在仅替换字符串 `stdout`，包括较短或为空的值，保留 `stderr`、退出状态及所有其他结果字段（[#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)）。
+- macOS 上的 QwenWork 即使在模型 Shell 中没有全局 `tokenless` 命令，也能通过插件私有可执行文件取回 Stash 原文。独立的 `tokenless retrieve <HASH>` 调用沿用 Hook 的数据目录和会话标识，恢复后的输出不会再次压缩。恢复能力要求私有可执行文件、有效状态目录和已注册的改写 Hook；Windows 和其他宿主保持原有行为（[#9622](https://github.com/agentic-os-org/ANOLISA/pull/9622)）。
+- AgentScope 1.x 和 2.x 在可选的 PostTool 压缩失败时保留完整工具结果，包括协议错误和 SDK Wheel 签名不兼容。适配器会记录失败，不向调用方暴露部分替换文本或恢复提示；取消信号仍会向上传播（[#8928](https://github.com/agentic-os-org/ANOLISA/pull/8928)）。
+
+## [0.9.3] - 2026-11-05
+
+### 新增
+
+- `tokenless rtk` 在 `tokenless` 可执行文件内运行带 Tokenless 补丁的 RTK v0.49.0；`tokenless rtk --version` 输出内置的版本（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+
+### 变更
+
+- **不兼容变更：** npm、RPM（`tokenless-core`）、ANOLISA raw、Windows ZIP 和 Python Wheel 软件包只提供 `tokenless`，不再安装单独的 `rtk`。PreTool 将命令改写为 `tokenless rtk <命令>`，并以绝对路径指向正在运行的 `tokenless`，因此改写和执行使用同一个 RTK 构建；它不再在 `PATH` 中查找 `rtk`。直接调用 `rtk` 的脚本需改为调用 `tokenless rtk`。升级会删除早期 Tokenless 版本安装的 `rtk` 辅助程序及其链接，保留单独安装的 RTK（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- **Rust 调用方的不兼容变更：** 移除 `TokenlessRuntime::pre_tool`。短生命周期进程继续使用 `dispatch_with_store`；长期运行的宿主改为运行 `tokenless compress`，因为 RTK 假定每条命令对应一个进程（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- Python SDK 的 `pre_tool()` 改为运行内置的 `tokenless compress`，不再运行 `rtk rewrite`。超时或子进程失败时，现在记录一条警告并原样返回参数，不再抛出 `TokenlessError`，工具调用仍会执行（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- PreTool 改写的时限仍为 5 秒。超时时，RTK 启动的进程（例如卡住的 `git`）现在随改写一起结束（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- 所有框架集成都通过单一的 `tokenless` 可执行文件运行 RTK。Claude Code、Qwen Code、Qoder CLI、QwenWork、OpenCode、Cosh-NG、OpenClaw 和 Hermes 原本就通过 `tokenless compress` 改写，现在得到的是 `tokenless rtk` 命令。Codex PreToolUse Hook 原先直接运行 `rtk rewrite`，现在同样通过 `tokenless compress` 改写；QwenPaw 和 AgentScope 则经 Python SDK 完成改写。Claude Code 和 Qwen Code 的检测以及 QwenWork 的安装不再要求 `rtk`。Hermes 将 `tokenless rtk` 包装视为 RTK 产生的输出，不再识别单独的 `rtk` 包装。DeepSeek Harness 只压缩工具结果，不受影响（[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- 从源码构建（包括 curl 安装器的源码构建路径）需要 Rust 1.91 或更高版本，还需要 `git` 和 `patch` 来获取固定版本的 RTK 源码并打补丁。已有的 `third_party/rtk` 检出若来自其他补丁集会被拒绝，执行一次 `just clean-rtk` 即可重新创建（[#9279](https://github.com/agentic-os-org/ANOLISA/pull/9279)、[#9281](https://github.com/agentic-os-org/ANOLISA/pull/9281)、[#9324](https://github.com/agentic-os-org/ANOLISA/pull/9324)）。
+- ANOLISA raw 软件包要求 ANOLISA 0.3.21 或更高版本，由它提供 Tokenless 的发现注册表（[#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)）。
+
+### 修复
+
+- HTML 渲染处理代码块中较长的反引号序列时，不再为每种可能的围栏长度重复扫描，避免耗尽 PostTool 的时间预算。渲染内容和恢复行为不变（[#9396](https://github.com/agentic-os-org/ANOLISA/pull/9396)）。
+- PreTool 和 PostTool 识别 QwenWork 的限定工作区 Shell 名称 `mcp__qw-builtin__mcp__workspace__bash`，其纯文本结果可进入现有压缩路径，JSON 正文也可使用 TOON（[#9459](https://github.com/agentic-os-org/ANOLISA/pull/9459)）。
+
+## [0.9.2] - 2026-11-05
+
+### 变更
+
+- 可通过 core 和 plugins RPM 分别选择安装命令行程序与框架集成。
+- adapter 的注册和卸载使用所选的安装路径。
+
+## [0.9.1] - 2026-10-29
+
+### 修复
+
+- Qoder 压缩 stdout 时保留原生 Bash 结果封装，保留退出状态和遥测字段，不再将它们序列化到模型文本中。其他结果形态保持原有替换行为（[#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)）。
+- 可识别的 `head` 和 `tail` 命令现在保持原生执行，包括受支持的包装命令和包含它们的复合命令，从而保留请求的行范围。显式 RTK 调用和自定义 RTK 包装前缀保持原有行为（[#9226](https://github.com/agentic-os-org/ANOLISA/pull/9226)）。
+- QwenWork 工作区 Hook 默认使用系统用户的 `~/.tokenless` 目录，并遵循绝对路径的 `TOKENLESS_DATA_DIR`，在工作目录变化时仍将状态保存在同一位置。已有工作区历史不会自动迁移。安装和检测命令会报告解析后的目录，并说明 Shell 沙箱权限可能导致 RTK 统计和执行凭据无法保存（[#9215](https://github.com/agentic-os-org/ANOLISA/pull/9215)）。
+- unittest 和 Django 的详细测试日志现在可以压缩重复的成功测试记录，同时保留汇总、非通过结果、异常堆栈和数据库初始化输出。原文仍可恢复，多行描述和未知输出保持原样（[#9083](https://github.com/agentic-os-org/ANOLISA/pull/9083)）。
+- HTML 表格中的 `rowspan="0"` 现在延伸到当前行组末尾，并使单元格保持在正确的列标题下。原始页面仍可逐字节恢复（[#9012](https://github.com/agentic-os-org/ANOLISA/pull/9012)）。
+- Windows 构建现在从 Cargo 解析出的目标目录收集本次构建的 Tokenless 和 RTK 可执行文件，避免环境变量或配置重定向构建输出后出现产物缺失或误用旧文件（[#9018](https://github.com/agentic-os-org/ANOLISA/pull/9018)）。
+
 ## [0.9.0] - 2026-10-25
 
 ### 新增

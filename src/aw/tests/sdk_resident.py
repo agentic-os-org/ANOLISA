@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--npm", type=Path)
     parser.add_argument("--scenario", choices=["lifecycle", "stop-failure", "cancel", "startup",
-                        "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial", "boundaries"], default="lifecycle")
+                        "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial", "boundaries", "settings", "report"], default="lifecycle")
     parser.add_argument("--evidence-mode", choices=["auto", "off"])
     parser.add_argument("--tokenless", type=Path)
     parser.add_argument("--tokenless-provider", type=Path)
@@ -93,6 +93,18 @@ def main():
         for event, operation, effects in (("tool.before", "pre_tool", ["block"]), ("tool.after", "post_tool", ["replace_result"])):
             document["spec"]["events"][event]["steps"].append({"id": "tokenless", "provider": "tokenless",
                 "operation": operation, "effects": effects, "on_error": "block" if event == "tool.before" else "report"})
+    if args.scenario == "report":
+        assert args.agent == "claude" and args.tokenless and args.tokenless_provider
+        document["spec"]["events"]["tool.after"].update(required=False, steps=[{
+            "id": "tokenless", "provider": "tokenless", "operation": "post_tool",
+            "effects": ["replace_result"], "on_error": "report",
+        }])
+        document["spec"]["providers"]["tokenless"] = {
+            "protocol": "aw-provider/v1alpha1", "transport": {"type": "stdio", "location": "agent",
+                "argv": [sys.executable, str(fixture / "report_provider.py"),
+                         str(args.tokenless_provider.resolve()), str(args.tokenless.resolve()),
+                         str(state_parent / "tokenless")]},
+            "timeout_ms": 1200, "max_output_bytes": 1048576, "config": {"version": 1}}
     config.write_text(json.dumps(document))
     env = {**os.environ, "AW_TEST_ROOT": str(output), "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0", "AW_TEST_SCENARIO": args.scenario, "PYTHONDONTWRITEBYTECODE": "1",
            "CLAUDE_CONFIG_DIR": str(output / "host-profile"), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -148,14 +160,44 @@ def main():
         assert status["bindings"] == status["events"] == 0, status
         if args.scenario in {"mcp", "mcp-failure"}:
             events = []
+            completed = []
             for journal in (state_parent / "s/journal").glob("*.jsonl"):
                 data = journal.read_text()
                 assert "stable fixture data" not in data
                 for line in data.splitlines():
-                    event = json.loads(line)["record"].get("plan", {}).get("event")
+                    record = json.loads(line)["record"]
+                    event = record.get("plan", {}).get("event")
                     if event is not None:
                         events.append(event)
+                    if record.get("phase") == "completed":
+                        completed.append(record)
             assert events and all(event["correlation_source"] == "claude-sdk-mcp/v1" for event in events)
+            if args.scenario == "mcp-failure":
+                # Report faults keep the checked result and continue the task;
+                # the failed compression step stays visible in audit and logs.
+                assert any(record.get("status") == "error"
+                           and record.get("failure_action") == "report" for record in completed), completed
+                diagnostic = (output / "stderr.log").read_text()
+                assert "aw step failed (provider); recorded as report" in diagnostic, diagnostic[-3000:]
+            if args.scenario == "mcp":
+                # The result-control rejection of a smuggled result is recorded
+                # as a report fault instead of stopping the task: after-error
+                # and result-control each leave one diagnostic and audit record.
+                assert any(record.get("status") == "error"
+                           and record.get("failure_action") == "report" for record in completed), completed
+                diagnostic = (output / "stderr.log").read_text()
+                assert diagnostic.count("aw step failed (exit); recorded as report") == 2, diagnostic[-3000:]
+        if args.scenario == "report":
+            completed = [json.loads(line)["record"]
+                         for journal in (state_parent / "s/journal").glob("*.jsonl")
+                         for line in journal.read_text().splitlines()
+                         if json.loads(line)["record"].get("phase") == "completed"]
+            faults = [record for record in completed if record["status"] == "error"]
+            assert len(faults) == 24, faults
+            assert {record["failure"] for record in faults} == {"exit", "transport", "protocol", "provider"}
+            assert all(record["failure_action"] == "report" for record in faults)
+            assert all(record["failure_detail"] == "deadline_exceeded"
+                       for record in faults if record["failure"] == "transport")
         result = json.loads((output / "result.json").read_text())
         result["status"] = status
         result["scenario"] = args.scenario

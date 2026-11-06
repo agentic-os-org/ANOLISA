@@ -1096,7 +1096,11 @@ pub enum ExternalPathError {
     },
     /// Path is not under any allowed external root (lexically or after
     /// canonicalizing the deepest existing ancestor).
-    #[error("path '{path}' is not under any allowed external root for this driver")]
+    #[error(
+        "path '{path}' is not under any allowed external root for this driver. \
+         Check the framework directory configuration and ancestor symlinks; \
+         if a directory was redirected, restore the original directory and retry."
+    )]
     OutsideAllowedRoots {
         /// Rejected path.
         path: PathBuf,

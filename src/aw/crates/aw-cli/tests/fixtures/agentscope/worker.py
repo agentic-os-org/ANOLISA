@@ -69,7 +69,9 @@ class LocalTool(ToolBase):
     async def check_permissions(
         self, tool_input: dict[str, Any], context: Any
     ) -> PermissionDecision:
-        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+        return PermissionDecision(
+            behavior=PermissionBehavior.ALLOW, message="Fixture allows the local tool"
+        )
 
     async def call(self, mode: str, uid: str) -> Any:
         # Both before steps must have completed before a tool side effect.

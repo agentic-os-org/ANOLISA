@@ -20,6 +20,11 @@ import subprocess
 import sys
 from typing import Any
 
+from sandbox_authorization import (
+    PERMISSIONS_ENV,
+    finish_authorized,
+    prepare_authorized,
+)
 from trace_context import with_trace_context
 
 
@@ -66,7 +71,20 @@ def _log_sandbox_event(
         pass
 
 
-LINUX_SANDBOX = shutil.which("linux-sandbox") or "/usr/local/bin/linux-sandbox"
+def _find_linux_sandbox() -> str:
+    """Respect PATH before falling back to system and legacy install locations."""
+    candidates = (
+        shutil.which("linux-sandbox"),
+        "/usr/bin/linux-sandbox",
+        "/usr/local/bin/linux-sandbox",
+    )
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "/usr/bin/linux-sandbox"
+
+
+LINUX_SANDBOX = _find_linux_sandbox()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 规则收敛设计说明
@@ -289,8 +307,20 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
-        # 无法解析输入，安全放行
-        print(json.dumps({"decision": "allow"}))
+        # Preserve legacy passthrough; configured authorization must fail closed.
+        print(
+            json.dumps(
+                {"decision": "block" if PERMISSIONS_ENV in os.environ else "allow"}
+            )
+        )
+        return
+
+    event = input_data.get("hook_event_name", "PreToolUse")
+    if event == "PostToolUse":
+        print(json.dumps(finish_authorized(input_data), ensure_ascii=False))
+        return
+    if event != "PreToolUse":
+        print("{}")
         return
 
     tool_input = input_data.get("tool_input", {})
@@ -367,6 +397,13 @@ def main():
     # 沙箱内不支持 sudo/pkexec 等提权机制，因此始终以剥离后的命令入沙箱，
     # 并通过 systemMessage 告知用户 sudo 已被忽略、命令在受限环境中执行。
     sandbox_source = stripped_command if has_sudo else command
+    if PERMISSIONS_ENV in os.environ:
+        print(
+            json.dumps(
+                prepare_authorized(input_data, sandbox_source), ensure_ascii=False
+            )
+        )
+        return
 
     # 判断是否需要放开网络权限
     if network_reasons and not sandbox_reasons:

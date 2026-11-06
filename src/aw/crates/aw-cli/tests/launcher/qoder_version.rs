@@ -1,11 +1,15 @@
-//! Minimum-version Qoder launch contracts using the native-host fixture.
+//! Qoder version and submission contracts using the native-host fixture.
 
 use super::{hooks, Fixture, Service};
+use serde_json::{json, Value};
 use std::fs;
 
 #[test]
 fn qoder_versions_share_the_hook_contract_and_keep_actual_version_evidence() {
     for version in [
+        "1.1.63".to_owned(),
+        "1.1.64-preview".to_owned(),
+        "2.0.0".to_owned(),
         "1.1.64".to_owned(),
         "1.1.66".to_owned(),
         "1.1.66-preview".to_owned(),
@@ -48,16 +52,12 @@ fn qoder_versions_share_the_hook_contract_and_keep_actual_version_evidence() {
 }
 
 #[test]
-fn older_and_invalid_qoder_versions_are_rejected_before_binding() {
+fn invalid_qoder_versions_are_rejected_before_binding() {
     let fixture = Fixture::new();
     let mut document = fixture.document();
     fixture.provider(&mut document);
     let service = Service::start(&fixture, &document);
     for (version, diagnostic) in [
-        ("1.1.6", "1.1.64 or newer"),
-        ("1.1.63", "1.1.64 or newer"),
-        ("1.1.64-preview", "1.1.64 or newer"),
-        ("1.1.64-preview+build.7", "1.1.64 or newer"),
         ("unknown", "expected a bare SemVer"),
         ("1.1", "expected a bare SemVer"),
         ("1.1.066", "expected a bare SemVer"),
@@ -105,4 +105,49 @@ fn oversized_qoder_versions_are_rejected_before_binding_or_provider_discovery() 
         assert!(!fixture.root.join("qoder-version-describe.txt").exists());
     }
     service.released(&fixture);
+}
+
+#[test]
+fn qoder_submission_checks_native_identity_and_failure_actions() {
+    for (scenario, action, blocked) in [
+        ("allow", "block", false),
+        ("block", "block", true),
+        ("error", "block", true),
+        ("error", "report", false),
+        ("missing-identity", "block", true),
+    ] {
+        let fixture = Fixture::new();
+        let mut document = fixture.document();
+        fixture.provider(&mut document);
+        document["spec"]["events"] = json!({"input.submit":{"enabled":true,"steps":[
+            {"id":"scan","provider":"policy","operation":"check","effects":["observe","block"],"on_error":action},
+            {"id":"record","provider":"policy","operation":"check","effects":["observe"],"on_error":"report"}
+        ]}});
+        document["spec"]["agents"]["qoder"]["qoder"] = json!({"sequential":true});
+        fixture.save(&document);
+        let _service = Service::start(&fixture, &document);
+        let report = fixture.successful(fixture.launch(&["--scenario", scenario], None));
+        assert_eq!(report["tool_executed"], !blocked, "{scenario}: {report}");
+        let callbacks = hooks(&report, "UserPromptSubmit");
+        assert_eq!(callbacks[0]["status"], if blocked { 2 } else { 0 });
+        if scenario == "allow" {
+            assert!(callbacks.iter().all(|hook| hook["status"] == 0));
+            let requests: Vec<Value> = std::fs::read_dir(&fixture.root)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("provider-"))
+                .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
+                .filter(|request: &Value| request["method"] == "invoke")
+                .collect();
+            assert_eq!(requests.len(), 2);
+            for request in requests {
+                assert_eq!(request["event"]["turn_id"], "fixture-request");
+                assert_eq!(request["event"]["input"]["text"], "check this input");
+                assert_eq!(
+                    request["event"]["native"]["request_set_id"],
+                    "fixture-request"
+                );
+            }
+        }
+    }
 }

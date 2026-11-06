@@ -6,7 +6,9 @@
 #[path = "support/fixture.rs"]
 mod fixture;
 
-use aw_exec::{run_foreground, run_foreground_with_grace, CommandSpec};
+use aw_exec::{
+    run_foreground, run_foreground_with_grace, run_foreground_worker_with_grace, CommandSpec,
+};
 use fixture::{execute, limits, wait_until_exists, Directory, NORMAL_TIMEOUT};
 use std::{
     collections::BTreeMap,
@@ -57,6 +59,12 @@ fn foreground_helper() {
         .ok()
         .map(|value| Duration::from_millis(value.parse().unwrap()));
     let stop_mode = std::env::var("AW_FOREGROUND_STOP").unwrap_or_default();
+    let leader_signals = std::env::var_os("AW_FOREGROUND_WORKER").is_some();
+    let stop_signal = if std::env::var_os("AW_FOREGROUND_INT").is_some() {
+        libc::SIGINT
+    } else {
+        libc::SIGTERM
+    };
     // Each helper has a separate process and terminal session, so signal and
     // foreground changes never affect libtest's own process or other tests.
     let original = unsafe { libc::getpgrp() };
@@ -102,14 +110,14 @@ fn foreground_helper() {
                 }
                 if (matches!(
                     scenario.as_str(),
-                    "signal" | "stubborn" | "graceful" | "grace-stubborn"
+                    "signal" | "stubborn" | "graceful" | "grace-stubborn" | "worker"
                 ) && directory.join("ready").exists())
                     || (scenario == "tty-stubborn" && directory.join("child-terminal").exists())
                 {
                     if stop_mode == "failure-first" {
                         failed.store(true, Ordering::Release);
                     } else {
-                        signal.store(libc::SIGTERM, Ordering::Release);
+                        signal.store(stop_signal, Ordering::Release);
                     }
                     if matches!(stop_mode.as_str(), "failure-first" | "failure-after") {
                         assert!(wait_until_exists(
@@ -117,14 +125,14 @@ fn foreground_helper() {
                             deadline
                         ));
                         if stop_mode == "failure-first" {
-                            signal.store(libc::SIGTERM, Ordering::Release);
+                            signal.store(stop_signal, Ordering::Release);
                         } else {
                             failed.store(true, Ordering::Release);
                         }
                     } else if stop_mode == "repeat" {
                         while !finished.load(Ordering::Acquire) && Instant::now() < deadline {
                             thread::sleep(Duration::from_millis(100));
-                            signal.store(libc::SIGTERM, Ordering::Release);
+                            signal.store(stop_signal, Ordering::Release);
                         }
                     }
                     return;
@@ -137,6 +145,9 @@ fn foreground_helper() {
             }
         });
         let result = match grace {
+            Some(grace) if leader_signals => {
+                run_foreground_worker_with_grace(&command, &signal, &failed, grace, |_| {})
+            }
             Some(grace) => run_foreground_with_grace(&command, &signal, &failed, grace, |_| {}),
             None => run_foreground(&command, &signal),
         };
@@ -549,3 +560,6 @@ fn terminal_transfer_error_still_cleans_the_spawned_child() {
         directory.assert_reaped();
     }
 }
+
+#[path = "foreground/worker.rs"]
+mod worker;

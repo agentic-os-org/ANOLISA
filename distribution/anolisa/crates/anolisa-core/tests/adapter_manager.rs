@@ -1166,7 +1166,7 @@ fn reenable_prunes_empty_ancestors_before_directory_to_file_change() {
 #[test]
 fn disable_keeps_receipt_when_shared_skills_parent_is_redirected() {
     for framework in ["openclaw", "hermes"] {
-        for target_exists in [true, false] {
+        for (outside_home, target_exists) in [(false, true), (false, false), (true, true)] {
             let guard = OpenClawEnvGuard::acquire();
             let world = stage();
             let source_root = world
@@ -1208,7 +1208,11 @@ skills = ["sec-audit"]
 
             let skills = home.join("skills");
             let original = home.join("original-skills");
-            let target = home.join("user-skills");
+            let target = if outside_home {
+                world._root.path().join("external-skills")
+            } else {
+                home.join("user-skills")
+            };
             let user_skill = target.join("sec-audit");
             if target_exists {
                 std::fs::create_dir_all(&user_skill).expect("independent user skill");
@@ -1219,15 +1223,53 @@ skills = ["sec-audit"]
             std::fs::rename(&skills, &original).expect("move installed skills");
             std::os::unix::fs::symlink(&target, &skills).expect("redirect shared ancestor");
 
-            let disabled = manager
-                .disable(COMPONENT, Some(framework), false)
-                .expect("disable");
-            assert!(
-                !disabled.report.cleanup_complete,
-                "{:?}",
-                disabled.report.messages
-            );
-            assert!(!disabled.claim_removed);
+            if outside_home {
+                let state_path = world.layout.state_dir.join("installed.toml");
+                let state_before = std::fs::read(&state_path).expect("persisted receipt");
+                let skill_dir = skills.join("sec-audit");
+                let state = world.load_state();
+                let resource = state
+                    .find_adapter_claim(COMPONENT, framework)
+                    .expect("skill receipt")
+                    .resources
+                    .iter()
+                    .find(|resource| {
+                        matches!(&resource.kind, ClaimResourceKind::ExternalPath { path } if path == &skill_dir)
+                    })
+                    .expect("skill resource");
+                for error in [
+                    manager.status(None).expect_err("status must reject escape"),
+                    manager
+                        .disable(COMPONENT, Some(framework), true)
+                        .expect_err("dry-run must reject escape"),
+                    manager
+                        .disable(COMPONENT, Some(framework), false)
+                        .expect_err("disable must reject escape"),
+                ] {
+                    assert!(matches!(error, AdapterError::ClaimValidation(_)));
+                    let message = error.to_string();
+                    assert!(message.contains(&resource.id), "{message}");
+                    assert!(
+                        message.contains(&skill_dir.display().to_string()),
+                        "{message}"
+                    );
+                    assert!(
+                        message.contains("if a directory was redirected, restore the original directory and retry"),
+                        "{message}"
+                    );
+                }
+                assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+            } else {
+                let disabled = manager
+                    .disable(COMPONENT, Some(framework), false)
+                    .expect("disable");
+                assert!(
+                    !disabled.report.cleanup_complete,
+                    "{:?}",
+                    disabled.report.messages
+                );
+                assert!(!disabled.claim_removed);
+            }
             assert!(
                 world
                     .load_state()

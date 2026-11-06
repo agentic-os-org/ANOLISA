@@ -144,7 +144,7 @@ fn attach(
     )?;
     let capabilities = prepared.capabilities();
     aw_adapter::reload::supported(&capabilities)?;
-    let steps = aw_provider::admission::preflight(config, target, &capabilities)?;
+    let steps = aw_core::admission::preflight(config, target, &capabilities)?;
     prepared.validate_steps(&steps)?;
     let executable = std::env::current_exe()?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -243,19 +243,22 @@ fn attach(
             .get("evidence")
             .is_some()
         {
-            call(
+            let observation = call(
                 client,
                 Operation::StartObservation {
                     instance_id: instance_id.clone(),
                 },
             )?;
-            call(
-                client,
-                Operation::ReportRun {
-                    instance_id: instance_id.clone(),
-                    outcome: RunOutcome::Started { pid: native.pid },
-                },
-            )?;
+            // Disabled evidence has no observation to report against.
+            if observation["audit_key"].is_string() {
+                call(
+                    client,
+                    Operation::ReportRun {
+                        instance_id: instance_id.clone(),
+                        outcome: RunOutcome::Started { pid: native.pid },
+                    },
+                )?;
+            }
         }
         native.identity.check()?;
         native.endpoint(&record.registration)?;

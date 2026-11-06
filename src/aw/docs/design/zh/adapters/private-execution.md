@@ -11,9 +11,10 @@
 | Adapter | 租约边界 | 显式消费接点 |
 | --- | --- | --- |
 | Qoder SDK 1.0.56 / Worker 1.1.78 | 每次受管 MCP handler 调用一个租约，由所属 Query 管理 | 创建客户端或子进程时调用 `bridge.executionEnvironment()` |
+| AgentScope SDK 2.0.6 | 每次工厂回复一个租约，由该回复的工具共享 | 应用工具显式调用 `execution_environment()` |
 | QwenPaw 2.2.2.post1 / AgentScope 2.0.10 | 每次受管 Agent reply 一个租约，由该 reply 的工具共享 | 已安装的原生环境扩展调用 `execution_environment()` |
 
-两者使用 `aw.private-execution/v1` 合同。执行 helper 返回已准入环境与声明的秘密值的
+这些 Adapter 使用 `aw.private-execution/v1` 合同。执行 helper 返回已准入环境与声明的秘密值的
 副本，Hook helper 返回独立公开视图，均不修改进程环境。应用须在 `secrets` 中声明敏感值，
 并从 Hook 视图中排除其键名和值。凭据不得放入模型可见工具参数。脱敏函数须覆盖返回值
 的全部字段，包括结构化 MCP 数据与错误内容，并保留原生结果结构和错误状态。
@@ -88,6 +89,26 @@ reply 调用一次；`aw_environment_version: 1` 声明已安装原生执行扩�
 工厂；reply 清理等待该 finalizer 完成。租约失败会在进程范围封锁新请求。offload
 工具及其完成回调也在此所有权范围内。
 
+## AgentScope 回复工厂
+
+独立 AgentScope 2.0.6 支持 `AwBridge.create_agent(execution_factory=...)`，复用
+QwenPaw 的 `PrivateExecution` 类。工厂为每次公共 `reply` / `reply_stream` 提供一个
+租约，原生工具显式消费 `execution_environment()`。接线示例见
+[AgentScope 指南](../../../../../../docs/developer-guide/zh/aw/agents/agentscope.md#任务私有工具凭据)。
+
+Scope 持有租约，回复 ContextVar 仅负责执行上下文。先保留根占用，再申请凭据，最后
+使用 Hook 环境打开子 Scope。回复在同一 task 中设置与恢复 ContextVar；清理可在受保护
+的独立 task 中运行。不同 Agent 的上下文与 Scope 相互独立。
+
+原生执行保留原参数，登记摘要与公开 Hook payload 使用同一幂等脱敏函数。AW 最内层
+工具中间件暂存分片，在完整结果形成后连同 metadata 脱敏，再交给外层 Post Hook 和
+原生模型。应用中间件保持可信；直接 Toolkit 调用与未显式消费环境的工具需要应用接线。
+
+清理依次排空原生工具、关闭子 Scope、确认凭据撤销、释放根占用。申请与撤销各有
+60 秒预算。超时保留原任务与占用；晚到申请只撤销一次，不进入原生执行。
+撤销失败或超时后拒绝新回复，需要重启 worker，即使原 finalizer 随后成功也保持拒绝。
+取消在此期限内等待所属操作完成；申请失败前的局部资源由应用工厂自行清理。
+
 ## 故障与生命周期
 
 Qoder 私有工厂、handler 或脱敏器抛出异常时，会停止所属的整个 Query 及其后续工具派发。
@@ -108,10 +129,36 @@ Qoder 结果替换仍不支持。
 `--reloadable` 使用独立的空闲更新合同，不提供严格 Post 和私有执行租约；Qoder 在
 该模式拒绝 `awExecutionFactory`。保留原生权限
 及调用方负责的 daemon 启停生命周期。Qoder 要求 `settingSources: []`，拒绝 settings、
-插件、额外 CLI 参数与运行时可执行文件/transport 覆盖。依赖这些输入的业务工厂，
+未经授权的插件、额外 CLI 参数与运行时可执行文件/transport 覆盖。依赖这些输入的业务工厂，
 须在部署前完成符合运行时准入合同的接入。上面的公共工厂提供凭据接点，保留这些检查。
 
 启动命令见[统一安全配置](../../../../crates/aw-service/examples/aw.sdk-security.yaml)与
-[原生接入指南](../../../../../../docs/developer-guide/zh/aw/native-agents.md#为常驻-sdk-复用一份安全策略)。
+[原生接入指南](../../../../../../docs/developer-guide/zh/aw/deployment/resident.md)。
 实现合同位于 [Qoder 私有执行](../../../../crates/aw-adapter/native/qoder-sdk/private.mjs)与
 [QwenPaw 私有执行](../../../../crates/aw-adapter/native/qwenpaw/aw_private.py)。
+
+## 原生 Bash 消费者
+
+`awNativeExecutionFactory` 为每次原生 Bash 调用持有一份租约，与受管 MCP 的
+`awExecutionFactory` 分开。参数与租约 API 见 [Qoder SDK 指南](../../../../../../docs/developer-guide/zh/aw/agents/qoder-sdk.md#原生-bash-命令消费者)。
+Adapter 保持以下顺序不变量：
+
+1. 安全检查看到冻结的逻辑输入，原生规则检查同一份输入。随后只有显式 `canUseTool`
+   允许才能发布 wrapper 执行参数。固定 Worker 在 bypass/auto 中可能跳过 Hook ask，
+   因此创建、模式切换和 Bash Hook 实际模式均须拒绝这些路径。
+2. 发送权限回复前先登记发布所有权；回复状态不明时，无法判定票据未被使用。
+   原生拒绝发生在发布前时，回收未使用租约，无需消费者 settle。
+3. 消费者确认完成后才结束有限输入和关闭原生传输，原始回调排空后才撤销租约。
+   超时转后台、结果消息与后台快照均无法单独证明消费者结束；通过结构化 session/tool/task
+   身份关联每个已确认的消费者。
+4. 正常 settle 没有任务时长上限。取消使用既有共享 60 秒预算，涵盖消费者 join、原生关闭、
+   回调排空与租约清理。清理未确认时保留租约、快照及 scope 所有权，封锁新工作直至 worker 重启。
+
+## 执行资产验证
+
+每个 Query 以 no-follow 方式打开授权文件。进程内最多缓存 64 个成功结果，按路径、预期摘要及
+`(dev, ino, size, mtimeNs, ctimeNs)` 匹配；身份或摘要变化时重新 hash。
+最近一秒或整秒精度的 ctime 无法确定可复用的文件代次，因此重新验证。
+流式读取限制实际字节数，并在 hash 后复查元数据；缓存淘汰仅增加重新验证的成本。
+快照遍历将 no-follow descriptor 锚定到已打开目录，统计实际条目和字节。
+资源上限与插件字段范围见[配置参考](../../../../../../docs/developer-guide/zh/aw/configuration.md#qoder-sdk-执行资产)。

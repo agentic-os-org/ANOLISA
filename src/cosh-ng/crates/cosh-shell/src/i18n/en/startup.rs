@@ -26,7 +26,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "\u{1f4a1} Run \"cosh-switch\" to switch between cosh-ng and copilot-shell"
         }
         MessageId::StartupAuthHintLine => {
-            "\u{1f4a1} AI not configured — run /auth to unlock AI help, failure analysis, tips"
+            "\u{1f4a1} On ECS, ask directly to try AI Shell; use /auth to set up your preferred model."
         }
         MessageId::StartupUpgradeHintLine => {
             "\u{1f4e6} Update available: cosh-ng {current} → {latest} — run `{command}` to upgrade, then log in again"

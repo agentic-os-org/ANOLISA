@@ -2,6 +2,7 @@
 
 use super::*;
 use aw_service::{Binding, EventHandle};
+use std::collections::BTreeMap;
 
 fn register(binding: &Binding, sequence: u64, value: &Value) -> Operation {
     Operation::RegisterInvocation {
@@ -170,6 +171,26 @@ fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
         pid: std::process::id(),
     })
     .unwrap();
+    let root = binding;
+    let binding: Binding = serde_json::from_value(
+        call(Operation::OpenScope {
+            parent_id: root.instance_id.clone(),
+            pid: std::process::id(),
+            cwd: fixture.0.to_str().unwrap().into(),
+            environment: BTreeMap::new(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    call(Operation::AcknowledgeScope {
+        instance_id: binding.instance_id.clone(),
+    })
+    .unwrap();
+    let watch = call(Operation::WatchScope {
+        instance_id: binding.instance_id.clone(),
+        pid: std::process::id(),
+    })
+    .unwrap();
     call(Operation::EnableInvocations {
         instance_id: binding.instance_id.clone(),
     })
@@ -196,6 +217,13 @@ fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
         .unwrap_err()
         .to_string()
         .contains("connection_limit"));
+    call(Operation::CheckScope {
+        instance_id: binding.instance_id.clone(),
+        pid: std::process::id(),
+        policy_revision: watch["policy_revision"].as_str().unwrap().into(),
+        valid: true,
+    })
+    .unwrap();
     call(finish(&binding, 1, "native-call")).unwrap();
     let status = call(Operation::Status).unwrap();
     assert_eq!(status["resources"]["usage"]["invocations"], 0);
@@ -216,6 +244,10 @@ fn saturated_connections_reserve_capacity_for_invocation_drain_and_status() {
     }
     call(register(&binding, 2, &second)).unwrap();
     call(finish(&binding, 2, "second")).unwrap();
+    call(Operation::ReleaseInstance {
+        instance_id: root.instance_id,
+    })
+    .unwrap();
     assert!(fixture.calls("invoke").is_empty());
     fixture.assert_reaped();
 }

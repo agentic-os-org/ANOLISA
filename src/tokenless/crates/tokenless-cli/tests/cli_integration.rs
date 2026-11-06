@@ -2649,32 +2649,47 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
 
 #[test]
 #[cfg(unix)]
-fn compress_pre_tool_resolves_the_independent_rtk_binary() {
+fn compress_pre_tool_runs_rewrites_through_the_embedded_rtk() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
+    // A stray `rtk` on PATH must play no part: RTK is linked into tokenless.
     let bin_dir = tempfile::tempdir().unwrap();
-    let rtk = bin_dir.path().join("rtk");
-    std::fs::write(
-        &rtk,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'rtk 0.43.0'; exit 0; fi\nprintf 'rtk grep --count error log'\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
+    let stray = bin_dir.path().join("rtk");
+    std::fs::write(&stray, "#!/bin/sh\nexit 97\n").unwrap();
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = std::fs::metadata(&rtk).unwrap().permissions();
+        let mut permissions = std::fs::metadata(&stray).unwrap().permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&rtk, permissions).unwrap();
+        std::fs::set_permissions(&stray, permissions).unwrap();
     }
+    let path = std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    // RTK reads permission rules and its own configuration from the home directory.
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("alpha.txt"), "").unwrap();
+    let isolate = |command: &mut Command| {
+        command
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("TOKENLESS_STATS_ENABLED", "0");
+    };
+
     let request = serde_json::json!({
         "protocol_version": 2,
         "operation": "pre_tool",
         "attribution": {"agent_id": "integration-agent"},
         "input": {
             "tool_name": "Bash",
-            "arguments": {"command": "grep error log"},
+            "arguments": {"command": "ls", "timeout": 30},
             "command_field": "command",
             "capabilities": {
                 "replace_arguments": true,
@@ -2682,24 +2697,501 @@ fn compress_pre_tool_resolves_the_independent_rtk_binary() {
             }
         }
     });
-    let output = spawn_with_stdin(
-        fixture
-            .command()
-            .env(
-                "PATH",
-                std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
-                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-                ))
-                .unwrap(),
-            )
-            .env("TOKENLESS_STATS_ENABLED", "0"),
-        &["compress"],
-        &request.to_string(),
+    let mut compress = fixture.command();
+    isolate(&mut compress);
+    let output = spawn_with_stdin(&mut compress, &["compress"], &request.to_string());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success());
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["action"], "replace_arguments");
     assert_eq!(response["result"]["output_optimization"], "rtk");
+    assert_eq!(response["result"]["arguments"]["timeout"], 30);
+    let rewritten = response["result"]["arguments"]["command"].as_str().unwrap();
+    assert!(rewritten.ends_with(" rtk ls"), "{rewritten}");
+    assert!(rewritten.contains("tokenless"), "{rewritten}");
+
+    // The rewritten command is self-contained: this binary runs RTK's `ls`.
+    let mut shell = Command::new("sh");
+    isolate(&mut shell);
+    let executed = shell
+        .args(["-c", rewritten])
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&executed.stdout).contains("alpha.txt"));
+}
+
+/// How the caller of a stalled rewrite runs `tokenless compress`.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq)]
+enum StalledCaller {
+    /// Shares its process group with the CLI, as the hook adapters do.
+    SharedGroup,
+    /// Starts the CLI in a group of its own, as AW and the Python SDK do.
+    OwnGroup,
+    /// Hands the CLI a full stderr pipe that it never reads.
+    FullStderr,
+    /// Makes the CLI the first command of a job-control pipeline: the CLI
+    /// leads a group that also holds the command reading its output.
+    Pipeline,
+    /// Runs the rewrite child that `compress` starts, behind a full stderr pipe.
+    ChildBehindFullStderr,
+}
+
+/// Returns a fixture whose `workspace` has no `.claude` ancestor, so RTK asks
+/// `git` for the project root.
+#[cfg(unix)]
+fn fixture_without_claude_ancestor() -> TempDataDir {
+    let fixtures = [TempDataDir::new(), TempDataDir::new_external()];
+    for fixture in fixtures.into_iter().flatten() {
+        let root = fixture.root.canonicalize().unwrap();
+        if !root.ancestors().any(|dir| dir.join(".claude").exists()) {
+            return fixture;
+        }
+    }
+    panic!("every temporary root has a `.claude` ancestor; point TMPDIR elsewhere");
+}
+
+/// Returns `tokenless compress`, set up for a PreTool rewrite in a workspace
+/// whose `git rev-parse` never answers, as on a hung mount, and the file that
+/// the stub `git` writes its PID to. The fixture owns the workspace.
+#[cfg(unix)]
+fn compress_behind_stalled_git() -> (TempDataDir, std::process::Command, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Stdio;
+
+    let fixture = fixture_without_claude_ancestor();
+    let bin_dir = fixture.root.join("bin");
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    for dir in [&bin_dir, &home, &workspace] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let pid_file = fixture.root.join("git.pid");
+    let git = bin_dir.join("git");
+    std::fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .unwrap();
+    let mut compress = fixture.command();
+    compress.arg("compress");
+    compress
+        .current_dir(&workspace)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    (fixture, compress, pid_file)
+}
+
+/// A PreTool request that RTK rewrites only after asking `git` for the project root.
+#[cfg(unix)]
+fn stalled_git_request() -> String {
+    serde_json::json!({
+        "protocol_version": 2,
+        "operation": "pre_tool",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {
+            "tool_name": "Bash",
+            "arguments": {"command": "git status"},
+            "command_field": "command",
+            "capabilities": {"replace_arguments": true, "block_and_suggest": false}
+        }
+    })
+    .to_string()
+}
+
+/// Runs a PreTool rewrite behind a stalled `git` and checks that the CLI ends
+/// within its limit together with `git`.
+#[cfg(unix)]
+fn assert_stalled_rewrite_ends_with_git(caller: StalledCaller) {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let (_fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    if caller == StalledCaller::ChildBehindFullStderr {
+        compress.arg("--rewrite-child");
+    }
+    // AW, the SDK and a job-control shell start the CLI as a group leader, and
+    // `compress` starts its rewrite child that way too.
+    if matches!(
+        caller,
+        StalledCaller::OwnGroup | StalledCaller::Pipeline | StalledCaller::ChildBehindFullStderr
+    ) {
+        compress.process_group(0);
+    }
+    // Held open, so a write to the full pipe blocks instead of failing.
+    let mut _stderr_reader = None;
+    if matches!(
+        caller,
+        StalledCaller::FullStderr | StalledCaller::ChildBehindFullStderr
+    ) {
+        let (reader, writer) = full_pipe();
+        _stderr_reader = Some(reader);
+        compress.stderr(writer);
+    }
+
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    // A job-control shell starts the reader in the group of the pipeline's first command.
+    let mut reader = (caller == StalledCaller::Pipeline).then(|| {
+        std::process::Command::new("cat")
+            .stdin(child.stdout.take().unwrap())
+            .stdout(Stdio::null())
+            .process_group(child.id() as i32)
+            .spawn()
+            .unwrap()
+    });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    // A regression can hang the CLI for good, so the test bounds its own wait.
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            panic!("tokenless compress still running after 20 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let elapsed = started.elapsed();
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_end(&mut stdout).unwrap();
+    }
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr).unwrap();
+    }
+
+    let stderr = String::from_utf8_lossy(&stderr);
+    // A workspace below a `.claude` directory would pass without RTK running git.
+    assert!(pid_file.exists(), "RTK never ran git: {stderr}");
+    assert!(
+        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        "{elapsed:?}: {stderr}"
+    );
+    if caller == StalledCaller::ChildBehindFullStderr {
+        // The child kills its whole group, itself included.
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{stderr}");
+    } else {
+        assert_eq!(status.code(), Some(1), "{status:?}: {stderr}");
+    }
+    assert!(stdout.is_empty());
+    if !matches!(
+        caller,
+        StalledCaller::FullStderr | StalledCaller::ChildBehindFullStderr
+    ) {
+        assert!(
+            stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+            "{stderr}"
+        );
+    }
+    if let Some(reader) = &mut reader {
+        // The reader shares the CLI's group and must see end of input, not a signal.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reader_status = loop {
+            if let Some(status) = reader.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = reader.kill();
+                panic!("the pipeline's reader did not see the end of its input");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(reader_status.success(), "{reader_status:?}");
+    }
+    let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_gone(pid) {
+        assert!(Instant::now() < deadline, "stalled git {pid} survived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Returns both ends of a blocking pipe whose buffer is already full.
+#[cfg(unix)]
+fn full_pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    // SAFETY: F_GETFL and F_SETFL only read and change the flags of this descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    loop {
+        match writer.write(&[b'x'; 4096]) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("cannot fill the pipe: {error}"),
+        }
+    }
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+    (reader, writer)
+}
+
+/// Treats a zombie as gone: a container without an init process may never reap it.
+#[cfg(unix)]
+fn process_gone(pid: libc::pid_t) -> bool {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| matches!(rest.trim_start().chars().next(), Some('Z' | 'X')));
+    }
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) != 0 }
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_in_the_callers_group() {
+    // The test process survives only if the CLI spares the group it shared.
+    assert_stalled_rewrite_ends_with_git(StalledCaller::SharedGroup);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_in_its_own_group() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::OwnGroup);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_behind_a_full_stderr() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::FullStderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn compress_pre_tool_ends_a_stalled_rewrite_but_not_the_rest_of_its_pipeline() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::Pipeline);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_ends_a_stalled_rewrite_behind_a_full_stderr() {
+    assert_stalled_rewrite_ends_with_git(StalledCaller::ChildBehindFullStderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_runs_no_rtk_outside_a_process_group_of_its_own() {
+    use std::io::Write as _;
+    use std::time::{Duration, Instant};
+
+    // Started directly, the child shares this test's group, which a timeout
+    // could not end without ending the test as well.
+    let (_fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    compress.arg("--rewrite-child");
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        // SAFETY: the stub only sleeps; ending it early affects nothing else.
+        unsafe { libc::kill(pid.trim().parse().unwrap(), libc::SIGKILL) };
+        panic!("RTK ran git without owning the processes it starts: {stderr}");
+    }
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("cannot bound the RTK rewrite: `compress --rewrite-child` runs only"),
+        "{stderr}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5), "{stderr}");
+}
+
+/// Returns the PID of the rewrite child that `compress` started.
+#[cfg(target_os = "linux")]
+fn rewrite_child_of(compress: u32) -> libc::pid_t {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            // The parent PID is the second field after the parenthesized name.
+            let parent = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .and_then(|parent| parent.parse::<u32>().ok());
+            if parent == Some(compress) {
+                return entry.file_name().to_str().unwrap().parse().unwrap();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "compress started no rewrite child"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn killing_compress_leaves_no_rewrite_child_waiting_on_a_locked_stats_database() {
+    use std::io::Write as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::time::{Duration, Instant};
+
+    let (fixture, mut compress, pid_file) = compress_behind_stalled_git();
+    // Opening the stats recorder waits up to 5 s for this lock before the
+    // rewrite starts, and RTK then waits on the stalled `git`.
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let lock = rusqlite::Connection::open(fixture.data_dir.join("stats.db")).unwrap();
+    lock.execute_batch("CREATE TABLE held (x); BEGIN EXCLUSIVE;")
+        .unwrap();
+    compress
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .process_group(0);
+    let started = Instant::now();
+    let mut outer = compress.spawn().unwrap();
+    outer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let child = rewrite_child_of(outer.id());
+    // Past reading its request, the child waits on the lock.
+    std::thread::sleep(Duration::from_millis(500));
+    // As the SDK and AW do at their limits, end only the group of `compress`.
+    // SAFETY: `compress` leads its own group, which holds nothing of the test's.
+    unsafe { libc::killpg(outer.id() as libc::pid_t, libc::SIGKILL) };
+    outer.wait().unwrap();
+    let deadline = started + Duration::from_secs(7);
+    while !process_gone(child) {
+        if Instant::now() > deadline {
+            // SAFETY: the child leads its own group, which the test started.
+            unsafe { libc::killpg(child, libc::SIGKILL) };
+            panic!("rewrite child {child} outlived its deadline after compress was killed");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        let pid: libc::pid_t = pid.trim().parse().unwrap();
+        assert!(
+            process_gone(pid),
+            "stalled git {pid} survived its rewrite child"
+        );
+    }
+    drop(lock);
+}
+
+#[test]
+#[cfg(unix)]
+fn rewrite_child_ends_at_its_deadline_while_its_response_cannot_be_written() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::time::{Duration, Instant};
+
+    let (fixture, mut compress, _pid_file) = compress_behind_stalled_git();
+    // RTK takes the `.claude` directory as the project root without asking
+    // `git`, so the rewrite returns at once and the response write blocks.
+    std::fs::create_dir(fixture.root.join("workspace/.claude")).unwrap();
+    // Held open, so the write blocks instead of failing.
+    let (_stdout_reader, writer) = full_pipe();
+    compress
+        .arg("--rewrite-child")
+        .process_group(0)
+        .stdout(writer);
+    let started = Instant::now();
+    let mut child = compress.spawn().unwrap();
+    drop(compress);
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stalled_git_request().as_bytes())
+        .unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("the rewrite child still blocks writing its response after 10 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let elapsed = started.elapsed();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}: {stderr}");
+    assert!(
+        (Duration::from_secs(5)..Duration::from_secs(8)).contains(&elapsed),
+        "{elapsed:?}: {stderr}"
+    );
+    assert!(
+        stderr.contains("Error: RTK rewrite timed out after 5 seconds"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn rtk_subcommand_passes_arguments_through_verbatim() {
+    let output = tokenless_bin().args(["rtk", "--version"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("rtk "));
+
+    // Usage names the embedding command, so pasted hints stay runnable.
+    let output = tokenless_bin().args(["rtk", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: tokenless rtk"));
 }
 
 #[test]
@@ -3111,6 +3603,62 @@ fn html_extraction_is_env_gated_and_recovers_the_original_page() {
         assert!(retrieved.status.success());
         assert_eq!(retrieved.stdout, html.as_bytes());
     }
+}
+
+#[test]
+fn html_long_code_block_is_compressed_and_recovers_the_original_page() {
+    let fixture = TempDataDir::new().expect("isolated data directory");
+    let run = "`".repeat(64 * 1024);
+    let fence = "`".repeat(run.len() + 1);
+    // Removing the script must save enough to accept the complete code block,
+    // including its long fences, rather than merely returning a no-savings view.
+    let html = format!(
+        "<!DOCTYPE html><html><head><title>Code reference</title></head><body>\
+         <p>This reference preserves code examples and their exact delimiters \
+         so they can be used without changing their meaning.</p>\
+         <pre><code class=\"language-sh\">a{run}b</code></pre>\
+         <script>{}</script></body></html>",
+        "var padding = 12345;".repeat(32 * 1024)
+    );
+    let mut request: serde_json::Value =
+        serde_json::from_str(&build_log_request(&html, "success", "html-long-code")).unwrap();
+    request["input"]["tool_name"] = "WebFetch".into();
+    request["input"]["content_origin"] = "api_response".into();
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_HTML_EXTRACTION_ENABLED", "1")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request.to_string(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &response["result"];
+    assert_eq!(result["disposition"], "applied");
+    assert_eq!(result["content_type"], "html");
+    assert_eq!(
+        result["applied_operations"],
+        serde_json::json!(["html_extraction"])
+    );
+    assert_eq!(result["recoverability"], "retrievable");
+    let rendered = result["output"].as_str().unwrap();
+    assert!(rendered.contains(&format!("\n{fence}sh\na{run}b\n{fence}\n")));
+    assert!(!rendered.contains("var padding"));
+    assert!(rendered.len() < html.len());
+    assert_eq!(result["stash_keys"].as_array().unwrap().len(), 1);
+    let hash = result["stash_keys"][0].as_str().unwrap();
+    let retrieved = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["retrieve", hash])
+        .output()
+        .unwrap();
+    assert!(retrieved.status.success(), "{retrieved:?}");
+    assert_eq!(retrieved.stdout, html.as_bytes());
 }
 
 #[test]

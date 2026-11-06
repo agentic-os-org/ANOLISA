@@ -277,12 +277,55 @@ impl Probes {
         self.add_traced_pid(pid as u32)
     }
 
+    /// 未识别进程仅在确实关联到 uprobe 时注册，避免每个 exec 耗尽有界过滤表。
+    ///
+    /// 已识别 Agent 仍使用 [`Self::attach_process`]，保留全局 uprobe 的兜底覆盖。
+    ///
+    /// # Errors
+    ///
+    /// uprobe 已关联但 PID 无法注册时返回错误；无可用探针属于正常跳过。
+    pub fn attach_unclassified_process(&mut self, pid: i32) -> Result<()> {
+        if let Err(e) = self.attach_ssl_to_process(pid) {
+            log::debug!(
+                "[attach_unclassified_process] pid={pid}: no SSL attach ({e:#}); leaving the traced_processes slot free"
+            );
+            return Ok(());
+        }
+        if !self.sslsniff.has_process_attachments(pid as u32) {
+            // A queued scan has no attachment yet. Retain the pid so the
+            // completion path can claim a filter slot once the uprobes are
+            // actually installed.
+            if self.sslsniff.pid_has_pending_scan(pid as u32) {
+                self.sslsniff.defer_pid_admission(pid as u32);
+            }
+            return Ok(());
+        }
+        self.add_traced_pid(pid as u32)
+    }
+
     /// Attach SSL probes to a specific process
     pub fn attach_ssl_to_process(&mut self, pid: i32) -> Result<()> {
         self.sslsniff
             .attach_process(pid)
             .context("failed to attach sslsniff to process")?;
         Ok(())
+    }
+
+    /// Complete deferred SSL scans without blocking event consumption.
+    pub(crate) fn poll_pending_ssl(&mut self) {
+        for pid in self.sslsniff.poll_pending_scans() {
+            // The completion path only returns pids it observed alive while
+            // holding the pending admission. Registration can still race with
+            // exit; the filter reaper handles that residual case.
+            if let Err(error) = self.add_traced_pid(pid) {
+                log::error!("failed to register pid {pid} after deferred SSL attach: {error:#}");
+            }
+        }
+    }
+
+    /// Share CPU admission with the bounded executable scan worker.
+    pub(crate) fn set_cpu_budget(&self, budget: Option<Arc<crate::utils::cpu_budget::CpuBudget>>) {
+        self.sslsniff.set_cpu_budget(budget);
     }
 
     /// Start polling for events from the shared ring buffer

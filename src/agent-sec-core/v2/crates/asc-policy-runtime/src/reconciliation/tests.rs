@@ -467,6 +467,7 @@ fn delete_admitted_during_apply_waits_for_exit_and_preserves_cleanup() {
         scope_id: other.spec.scope.scope_id.clone(),
         selector: other.spec.scope.selector.clone(),
         policy_snapshots: vec![other.spec.policy.clone()],
+        owner_uid: None,
         status: asc_policy_types::scope::ScopeStatus::Active,
     })
     .unwrap();
@@ -555,6 +556,84 @@ fn shutdown_retains_actual_call_until_join_and_closes_write_admission() {
 }
 
 #[test]
+fn scope_compensation_runs_without_bindings_and_shutdown_joins_the_call() {
+    let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+    let client = Arc::new(Client::default());
+    client
+        .failures
+        .lock()
+        .unwrap()
+        .push_back(Failure::new(FailureKind::Retryable, "TEST_RETRY"));
+    let clock = Arc::new(TestClock::default());
+    let mut service = start(repo.clone(), client.clone(), clock.clone(), 1);
+    let queue = service.enqueuer();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    service
+        .set_scope_cleanup(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let repeat_registration = service.set_scope_cleanup(|| {});
+    // Always release the blocked call before propagating a regression assertion.
+    let progress = catch_unwind(AssertUnwindSafe(|| {
+        // No enqueuer: only the real compensation scan can discover this Binding.
+        let pap = PapService::new(repo.clone()).with_scope_discovery(Arc::new(Discovery));
+        let spec = record(1).binding.spec;
+        let policy = pap.create_policy("test", &spec.policy.template).unwrap();
+        let refs = [asc_policy_types::scope::PolicyReference {
+            policy_id: policy.policy_id.clone(),
+            policy_revision: policy.revision,
+        }];
+        let scope = pap
+            .create_scope_assignment(&spec.scope.selector, &refs, None)
+            .unwrap();
+        asc_pap::ScopeBindingSink::sync_instances(&pap, &scope.scope_id, &[spec.scope.process])
+            .unwrap();
+        let binding_id = pap.list_bindings(1, 0).unwrap().items[0]
+            .spec
+            .binding_id
+            .clone();
+        wait_until(|| {
+            queue.state.lock().unwrap().entries.get(&binding_id)
+                == Some(&Entry::WaitingRetry {
+                    retry_at: 100,
+                    retries: 1,
+                })
+        });
+        assert_eq!(
+            *client.calls.lock().unwrap(),
+            vec![format!("apply:{binding_id}")]
+        );
+        // Advance the core clock, not the queue: the owned timer must release the retry.
+        clock.0.store(100, Ordering::SeqCst);
+        wait_until(|| pap.get_binding(&binding_id).unwrap().status == BindingStatus::Ready);
+        assert_eq!(
+            *client.calls.lock().unwrap(),
+            vec![format!("apply:{binding_id}"), format!("apply:{binding_id}")]
+        );
+    }));
+    let (done_tx, done_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        service.shutdown().unwrap();
+        done_tx.send(()).unwrap();
+    });
+    wait_until(|| !queue.is_healthy());
+    let shutdown_pending = done_rx.recv_timeout(Duration::from_millis(100));
+    release_tx.send(()).unwrap();
+    if shutdown_pending.is_err() {
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    handle.join().unwrap();
+    assert_eq!(shutdown_pending, Err(mpsc::RecvTimeoutError::Timeout));
+    assert_eq!(repeat_registration, Err(StoreError::Invalid));
+    progress.unwrap();
+}
+
+#[test]
 fn scope_replacement_delivers_distinct_bindings_and_cleans_owned_state() {
     let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let client = Arc::new(Client::default());
@@ -640,7 +719,7 @@ fn pap_notification_observes_committed_state_and_failed_admission_never_notifies
         policy_revision: policy.revision,
     }];
     let scope = pap
-        .create_scope_assignment(&spec.scope.selector, &refs)
+        .create_scope_assignment(&spec.scope.selector, &refs, None)
         .unwrap();
     assert!(
         asc_pap::ScopeBindingSink::sync_instances(
@@ -720,6 +799,44 @@ impl ReconcileAttempt for RepeatedOutcome {
             self.core.reconcile(binding_id, schedule)
         }
     }
+}
+
+#[test]
+fn admission_deferral_preserves_budget_and_leaves_other_bindings_running() {
+    let repo =
+        Arc::new(SqlitePolicyRepository::with_binding_states(vec![record(1), record(2)]).unwrap());
+    let clock = Arc::new(TestClock::default());
+    let attempt = Arc::new(RepeatedOutcome {
+        core: core(repo.clone(), Arc::new(Client::default()), clock.clone()),
+        result: Ok(Disposition::DeferredAt { at: 0 }),
+        calls: Mutex::new(vec![]),
+    });
+    let runtime = ReconciliationRuntime::start(
+        repo.clone(),
+        attempt,
+        RuntimeConfig {
+            workers: 1,
+            max_auto_retries: 0,
+            tick_interval: Duration::from_secs(60),
+            ..RuntimeConfig::default()
+        },
+    )
+    .unwrap();
+    let queue = runtime.enqueuer();
+    for now in 0..6 {
+        wait_until(|| {
+            queue.state.lock().unwrap().entries.get(&id(1))
+                == Some(&Entry::WaitingRetry {
+                    retry_at: now + 1,
+                    retries: 0,
+                })
+                && status(&repo, 2) == Some(BindingStatus::Ready)
+        });
+        assert_eq!(repo.get_binding_state(&id(1)).unwrap(), Some(record(1)));
+        clock.0.store(now + 1, Ordering::SeqCst);
+        queue.tick(now + 1);
+    }
+    runtime.shutdown().unwrap();
 }
 
 #[test]
@@ -996,7 +1113,11 @@ fn exercise_independent_pap_crud(repo: &Arc<SqlitePolicyRepository>, q: &Arc<Wor
     let mut scopes = Vec::new();
     for pid in [99, 100] {
         let scope = pap
-            .create_scope_assignment(&asc_policy_types::scope::ScopeSelector::Pid { pid }, &refs)
+            .create_scope_assignment(
+                &asc_policy_types::scope::ScopeSelector::Pid { pid },
+                &refs,
+                None,
+            )
             .unwrap();
         let mut instance = record(1).binding.spec.scope.process;
         instance.pid = pid;

@@ -5,6 +5,8 @@ mod capabilities;
 mod common;
 mod events;
 mod events_summary;
+mod gateway;
+mod intent;
 mod observability;
 mod policy;
 mod scan_code;
@@ -19,6 +21,9 @@ use clap::Subcommand;
 use self::binding::BindingCommand;
 pub use self::capabilities::CapabilitiesCommand;
 pub use self::events::{EventsCommand, EventsRunError, EventsTransport};
+pub(crate) use self::gateway::GatewayCommand;
+pub use self::intent::IntentFailure;
+pub use self::policy::DefaultPolicy;
 use self::policy::PolicyCommand;
 use self::scan_code::ScanCodeCommand;
 pub use self::scan_pii::PiiOutputFormat;
@@ -30,6 +35,12 @@ use crate::InputError;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Run a command locally with explicitly supplied sandbox permissions.
+    #[command(subcommand)]
+    Sandbox(crate::sandbox::SandboxCommand),
+    /// Propose unapproved Cedar candidates through the daemon.
+    #[command(subcommand)]
+    Intent(intent::IntentCommand),
     /// Collect observability records through the daemon.
     #[command(subcommand)]
     Observability(observability::ObservabilityCommand),
@@ -55,9 +66,34 @@ pub(crate) enum Command {
     SkillLedger(skill_ledger::SkillLedgerCommand),
     /// Show agent-sec hook capabilities from the current CLI environment variables.
     Capabilities(CapabilitiesCommand),
+    /// Protect GitHub tokens from Agents with the secret gateway.
+    #[command(subcommand)]
+    Gateway(GatewayCommand),
 }
 
 impl Command {
+    pub(crate) const fn sandbox(&self) -> Option<&crate::sandbox::SandboxCommand> {
+        match self {
+            Self::Sandbox(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn run_intent(
+        &self,
+        socket: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Option<Result<u8, IntentFailure>> {
+        match self {
+            Self::Intent(command) => Some(command.run(socket, timeout)),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn is_intent(&self) -> bool {
+        matches!(self, Self::Intent(_))
+    }
+
     pub(crate) fn run_observability_query(
         &self,
         socket: &std::path::Path,
@@ -81,11 +117,24 @@ impl Command {
             // values are satisfied through bounded page requests), so the
             // single-request path refuses it.
             Self::Events(_) => Err(InputError::EventsBatch),
+            Self::Intent(_) => Err(InputError::IntentProposal),
             // Scan-prompt resolves its own request batch (it may read stdin
             // or a batch file), so the single-request path refuses it.
             Self::ScanPrompt(_) => Err(InputError::PromptScanBatch),
-            Self::Capabilities(_) => Err(InputError::LocalCommand),
+            Self::Capabilities(_) | Self::Sandbox(_) => Err(InputError::LocalCommand),
+            // Gateway commands own their transport: `run` execs after the response.
+            Self::Gateway(_) => Err(InputError::Gateway(
+                "gateway commands run through their own transport".into(),
+            )),
             Self::SkillLedger(command) => command.request(),
+        }
+    }
+
+    /// Returns the gateway command when this invocation manages the secret gateway.
+    pub(crate) const fn gateway(&self) -> Option<&GatewayCommand> {
+        match self {
+            Self::Gateway(command) => Some(command),
+            _ => None,
         }
     }
 
@@ -156,6 +205,14 @@ impl Command {
     pub(crate) const fn local(&self) -> Option<&CapabilitiesCommand> {
         match self {
             Self::Capabilities(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    /// Returns the baseline command when it prints embedded content locally.
+    pub(crate) const fn policy_default(&self) -> Option<&DefaultPolicy> {
+        match self {
+            Self::Policy(PolicyCommand::Default(command)) => Some(command),
             _ => None,
         }
     }

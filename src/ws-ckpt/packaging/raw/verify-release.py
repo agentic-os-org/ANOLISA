@@ -28,7 +28,7 @@ def verify(root: Path, contract_path: Path, os_name: str, arch: str) -> str:
         raise ValueError(f"raw contract does not support {os_name}/{arch}")
     if component["layout"]["modes"] != ["system"]:
         raise ValueError("ws-ckpt requires system install mode")
-    rpm = tomllib.loads((root / "component.toml").read_text())
+    rpm = tomllib.loads((root / "packaging/anolisa/rpm/component.toml").read_text())
     if rpm["component"]["name"] != "ws-ckpt" or rpm["component"]["version"] != version:
         raise ValueError("RPM component identity does not match workspace")
     plugin = root / "src/plugins/openclaw"

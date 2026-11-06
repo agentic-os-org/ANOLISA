@@ -2,14 +2,16 @@
 
 [中文版](../../zh/adapters/resident-sdk.md)
 
-Pi 0.84.2 and Claude SDK 0.2.88 / bundled CLI 2.1.161 retain a client/session
+Pi and Claude SDK retain a client/session
 across sequential executions. Independent clients run concurrently in the same
 foreground worker. One configuration selects `aw run --config aw.yaml --agent pi`
 or `--agent claude`. SYSOM integration stays in the image, startup and common
 client/MCP factories; the application owns scheduling, credentials, HTTP/SSE,
-business tools and conversation storage.
+business tools and conversation storage. Verified baselines are Pi 0.84.2 and
+Claude SDK 0.2.88 / bundled CLI 2.1.161; other releases use the same native
+factory, transport and lifecycle checks.
 
-Ordinary Qoder SDK 1.0.56 / Worker 1.1.78 Queries use the same child-scope and
+Ordinary Qoder SDK Queries, verified with SDK 1.0.56 / Worker 1.1.78, use the same child-scope and
 sequenced-invocation service contract. Each Query owns one execution until close;
 completed tool identities are retired while the Query remains open. Its
 `--reloadable` mode uses a separate request-admission path described below.
@@ -46,10 +48,10 @@ distinct. AW preserves the original tool payload; this comparison does not chang
 the separate integer-only AW metadata encoding. Tools needing exact large integers
 must represent them as strings in their schema.
 Pi uses its public model stream and the produced tool object. Claude uses a private
-loopback Anthropic Messages relay and the pinned SDK transport dispatch context.
+loopback Anthropic Messages relay and the native SDK transport dispatch context.
 MCP `_meta.claudecode/toolUseId` links the native frame to that same identity before
 the SDK removes metadata from its public handler arguments.
-Qoder uses completed model tool blocks from the pinned Worker's private partial
+Qoder uses completed model tool blocks from the Worker's private partial
 output and verifies each Hook against its native control-dispatch context. For
 child tools, a private stream-start frame reserves the native ID under an active,
 admitted parent Agent. A PreTool or permission callback can arrive before the
@@ -144,8 +146,9 @@ one MiB SSE frame/tool input, 10-second upstream connect, 30-second body,
 60-second upstream read and 600-second total request. These bound active resources;
 conversation compaction remains the application's/SDK's responsibility. Model
 transport changes need acceptance against the actual production endpoint and TLS
-configuration. The SDK transport and `_connect_inner` seams are pinned to 0.2.88;
-the native init frame must report CLI 2.1.161. The relay is validated with HTTPX
+configuration. The SDK transport and `_connect_inner` interfaces are verified with
+SDK 0.2.88. The native init frame must report valid CLI version metadata; the
+verified CLI baseline is 2.1.161. The relay is validated with HTTPX
 0.28.1. Upgrades require rerunning acceptance.
 
 Pi exports `createSession({sdk,cwd,...options})` and
@@ -167,7 +170,7 @@ with the canonical cwd and captured environment, then uses the shared scope
 transport to register, invoke and finish sequenced calls. Original application
 Hooks keep native IDs; AW callbacks receive the registered UUID. Native partial
 messages stay private unless `includePartialMessages: true` was requested.
-See the [worker guide](../../../../../../docs/developer-guide/en/aw/native-agents.md#start-a-qoder-sdk-worker)
+See the [worker guide](../../../../../../docs/developer-guide/en/aw/agents/qoder-sdk.md)
 for startup and supported options.
 
 Each Query returns a frozen public facade. The native command-queue barrier and
@@ -221,8 +224,19 @@ count and reason counters. Memory for AW correlation grows with active work;
 audit disk and SDK conversation history require separate retention. Limits need
 production concurrency measurements; increasing them does not add lifetime turns.
 
-For Pi and Claude, callback/Provider/identity faults stop resident execution even
-under `on_error: report`. Normal policy denial and Tokenless retry suggestions remain native denials;
+Claude resident `tool.after` report steps recover from completed Provider nonzero
+exits, incomplete input, Provider error replies, protocol errors and verified
+executor deadlines. The service retains the coarse `failure: transport` category
+and adds `failure_detail` (`deadline_exceeded`, `cancelled`, `cleanup`, or `other`)
+to its terminal audit and response. Response adoption permits only the deadline
+subtype of transport faults; unknown or missing details remain failures. A neutral
+reply retains the original result for native HTTP MCP and built-in tools, then the
+resident callback acknowledges invocation completion before model delivery. The
+same drained client accepts the next task. Scope, identity, cancellation,
+cleanup, malformed native directives and before-Hook failures retain fail-stop.
+Pi retains its existing audited after-report recovery.
+
+Normal policy denial and Tokenless retry suggestions remain native denials;
 fresh retries traverse native permissions and PreTool again. Unsupported compression
 classified successfully preserves the result. Security denial keeps precedence.
 Pi fences callbacks/model sends before awaiting abort during close or public
@@ -241,8 +255,12 @@ Failed audit, release or cancellation cannot revive a closing invocation.
 An alive idle client has no inferred business deadline: the application must
 close it and bound request admission. Remote side effects need tool cancellation.
 
-The launcher forwards termination to its owned group and starts forced cleanup
-after the target's `shutdown_grace_ms` grace period, defaulting to two seconds.
+Both ordinary and restricted `--reloadable` Qoder SDK launch forward external
+termination to the unreaped worker PID, preserving native daemon and callback transports for worker-owned cleanup.
+Other launch modes forward to the owned group. Internal failure still signals the
+whole group; worker exit and deadline expiry always reclaim that group. Kernel
+terminal signals follow the foreground group independently of launcher forwarding.
+The launcher starts forced cleanup after the target's `shutdown_grace_ms` grace period, defaulting to two seconds.
 Timing starts when the foreground loop first forwards an external termination
 signal; repeated signals do not reset it. Pre-forwarding waits and final process
 cleanup are outside this interval. Internal readiness/lifecycle failures retain
@@ -264,7 +282,7 @@ Resident entrypoints reject enabled AgentSight evidence before publishing ready;
 callbacks before ResultMessage and reject EOF without that terminal message.
 Claude owns and explicitly closes its response and transport iterators during
 teardown. Dispatch identity is restored only in the reader task that installed
-it. The pinned SDK transport receives cancellation before native process cleanup,
+it. The SDK transport receives cancellation before native process cleanup,
 so its GeneratorExit handler cannot defer closure to process exit. Unexpected
 reader and cleanup failures remain visible within the existing cleanup deadline.
 The native inventory retains both consumers, interrupted EOF, repeated Hook

@@ -4,7 +4,7 @@ use crate::{
     deadline,
     endpoint::{self, Endpoint},
     ipc, rejected,
-    runtime::Runtime,
+    runtime::{process::Process, Runtime},
     Operation, Request, Response, Result, VERSION,
 };
 use std::{
@@ -121,12 +121,14 @@ impl Server {
                         let Ok(peer) = endpoint::peer_credentials(&stream) else {
                             continue;
                         };
+                        // Pin the connecting process before reading a potentially slow frame.
+                        let process = Process::read(peer.pid as u32).ok();
                         let runtime = Arc::clone(&self.runtime);
                         runtime.resources.connections.fetch_add(1, Ordering::AcqRel);
                         workers.push(
                             thread::Builder::new()
                                 .name("aw-rpc".into())
-                                .spawn(move || connection(stream, runtime, peer))?,
+                                .spawn(move || connection(stream, runtime, peer, process))?,
                         );
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -159,7 +161,12 @@ impl Server {
     }
 }
 
-fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) {
+fn connection(
+    mut stream: UnixStream,
+    runtime: Arc<Runtime>,
+    peer: libc::ucred,
+    process: Option<Process>,
+) {
     struct Connection(Arc<Runtime>);
     impl Drop for Connection {
         fn drop(&mut self) {
@@ -182,7 +189,11 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) 
         .unwrap_or_else(|_| Instant::now() + stall);
     let binding = matches!(
         &request.operation,
-        Operation::Bind { .. } | Operation::OpenScope { .. }
+        Operation::Bind { .. }
+            | Operation::OpenScope { .. }
+            | Operation::Registration {
+                command: crate::RegistrationCommand::Register { .. }
+            }
     );
     let result = (|| {
         if runtime.resources.connections.load(Ordering::Acquire) > runtime.limits.connections
@@ -194,17 +205,33 @@ fn connection(mut stream: UnixStream, runtime: Arc<Runtime>, peer: libc::ucred) 
                     | Operation::Unbind { .. }
                     | Operation::CloseEvent { .. }
                     | Operation::CloseHookEvent { .. }
+                    | Operation::CloseInputEvent { .. }
                     | Operation::FinishInvocation { .. }
+                    | Operation::CheckScope { .. }
+                    | Operation::Registration {
+                        command: crate::RegistrationCommand::Query { .. }
+                            | crate::RegistrationCommand::Release { .. }
+                    }
             )
         {
             return Err(runtime.overload("connection_limit"));
         }
         if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
-            return prepare_connected(&stream, &runtime, request, expires, peer);
+            return prepare_connected(&stream, &runtime, request, expires, peer, process.as_ref());
         }
         let deadline = request.admit(&runtime.identity)?;
+        runtime.authorize_registration_peer(&request.operation, process.as_ref())?;
         if binding {
-            prepare_connected(&stream, &runtime, request, deadline, peer)
+            prepare_connected(&stream, &runtime, request, deadline, peer, process.as_ref())
+        } else if let Operation::Registration { command } = request.operation {
+            runtime.registration(
+                command,
+                process
+                    .as_ref()
+                    .ok_or_else(|| rejected("registration_peer_mismatch"))?,
+                deadline,
+                &runtime.stopped,
+            )
         } else {
             runtime.handle(request.operation, deadline, &runtime.stopped)
         }
@@ -245,6 +272,7 @@ fn prepare_connected(
     request: Request,
     deadline: Instant,
     peer: libc::ucred,
+    process: Option<&Process>,
 ) -> Result<serde_json::Value> {
     let cancelled = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
@@ -253,7 +281,15 @@ fn prepare_connected(
             .spawn_scoped(scope, || {
                 if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
                     runtime.update_policy(&request, (peer.uid, peer.pid), &cancelled)
+                } else if let Operation::Registration { command } = request.operation {
+                    runtime.registration(
+                        command,
+                        process.ok_or_else(|| rejected("registration_peer_mismatch"))?,
+                        deadline,
+                        &cancelled,
+                    )
                 } else {
+                    runtime.authorize_registration_peer(&request.operation, process)?;
                     runtime.handle(request.operation, deadline, &cancelled)
                 }
             })?;

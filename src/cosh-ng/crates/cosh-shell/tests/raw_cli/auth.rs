@@ -233,7 +233,7 @@ const MANUAL_PREPARE: &str =
 
 const FAILING_PREPARE: &str = r#"{"type":"registry_response","request_id":"reg","success":false,"error":"ecs metadata service unavailable"}"#;
 
-const SYSOM_ROW: &str = "SysOM (free trial, uses this ECS instance's RAM role)";
+const SYSOM_ROW: &str = "OS Console (ECS RAM role)";
 
 fn auth_state_response(saved_providers: &str) -> String {
     format!(

@@ -17,6 +17,8 @@ from agentscope.tool import ToolResponse, _toolkit
 
 from .aw_private import clear_execution, current_execution, public_execution, validate_execution
 from .aw_scope import Scope
+from .aw_submission import SubmissionDenied, check_submission
+from .aw_skill import skill_context
 
 
 class ResidentFailure(RuntimeError):
@@ -187,6 +189,8 @@ class ResidentMiddleware(MiddlewareBase):
         self.evaluate = evaluate
         self.context = context
         self.scope = Scope(self.config)
+        self.scope.probe = self.check_seams
+        self.scope.on_failure = self.bridge_failed
         self.active: dict[str, Invocation] = {}
         self.sequence = 0
         self.failed = False
@@ -210,6 +214,20 @@ class ResidentMiddleware(MiddlewareBase):
         self.scope.check()
         if self.failed or self.agent is None:
             raise ResidentFailure("AW Agent admission or native execution failed")
+    def bridge_failed(self, error):
+        self.failed = True
+
+    def check_seams(self):
+        if self.failed:
+            raise ResidentFailure("AW Agent native execution failed")
+        if self.agent is None:
+            raise ResidentFailure("AW Agent admission is incomplete")
+        # Native HTTP readiness can precede the plugin's assembly acknowledgement.
+        if not all(hasattr(self.agent, name) for name in (
+                "_aw_managed_acting_impl", "_aw_managed_parser",
+                "_aw_managed_toolkit", "_aw_managed_toolkit_call")):
+            self.failed = True
+            raise ResidentFailure("AW Agent native assembly is incomplete")
         if (self not in self.agent._reply_middlewares
                 or self not in self.agent._acting_middlewares
                 or self.agent._acting_impl is not self.agent._aw_managed_acting_impl
@@ -265,6 +283,8 @@ class ResidentMiddleware(MiddlewareBase):
             else:
                 await self.scope.open(cwd, self.lease.hook_environment)
             self.check()
+            await check_submission(self, input_kwargs)
+            self.check()
             stream = next_handler(**input_kwargs)
             while True:
                 self.reply_task = asyncio.current_task()
@@ -274,6 +294,8 @@ class ResidentMiddleware(MiddlewareBase):
                     break
                 self.check()
                 yield value
+        except SubmissionDenied:
+            raise
         except BaseException:
             self.failed = True
             raise
@@ -407,7 +429,7 @@ class ResidentMiddleware(MiddlewareBase):
         # A task-private redactor may need adjacent chunks to recognize a secret.
         # Withhold native/UI chunks and redact the accumulated response instead.
         return self.private or any(h["event"] == "tool.after"
-                                   and h["on_error"] == "withhold_result"
+                                   and (h["on_error"] == "withhold_result" or h.get("replace_result", False))
                                    and self.selected(h, call)
                                    for h in self.config["hooks"])
 
@@ -453,6 +475,7 @@ class ResidentMiddleware(MiddlewareBase):
         finally:
             await self.close_if_drained()
 
+    @skill_context
     async def on_acting(self, agent, input_kwargs, next_handler):
         self.check()
         call = input_kwargs["tool_call"]

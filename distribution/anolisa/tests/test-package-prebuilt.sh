@@ -53,9 +53,17 @@ run_pack linux x86_64 "$OUT_ONE"
 run_pack linux x86_64 "$OUT_TWO"
 ARCHIVE="anolisa-$VERSION-linux-x86_64.tar.gz"
 cmp "$OUT_ONE/$ARCHIVE" "$OUT_TWO/$ARCHIVE"
-test "$(tar -tzf "$OUT_ONE/$ARCHIVE" | sed '/^\.\/$/d')" = "./anolisa"
-test "$(tar -tvzf "$OUT_ONE/$ARCHIVE" | awk '$NF == "./anolisa" { print $1 }')" = \
+test "$(tar -tvzf "$OUT_ONE/$ARCHIVE" | awk '$NF == "./bin/anolisa" { print $1 }')" = \
     "-rwxr-xr-x"
+UNPACKED="$TEMPORARY/unpacked"
+mkdir -p "$UNPACKED"
+tar -xzf "$OUT_ONE/$ARCHIVE" -C "$UNPACKED"
+for component in cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory; do
+    cmp "$ROOT/manifests/components/$component/component.toml" \
+        "$UNPACKED/share/anolisa/components/$component/component.toml"
+done
+test "$(find "$UNPACKED" -type f | wc -l | tr -d ' ')" = 8
+test -x "$UNPACKED/bin/anolisa"
 
 run_pack linux aarch64 "$TEMPORARY/out-linux-arm64"
 test -f "$TEMPORARY/out-linux-arm64/anolisa-$VERSION-linux-aarch64.tar.gz"

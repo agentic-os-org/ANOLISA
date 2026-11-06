@@ -346,7 +346,7 @@ $ sudo agentsight discover
 总计: 1 个 Agent
 
 $ sudo agentsight discover --list-known | head -12
-已知 AI Agent（共 31 条规则）:
+已知 AI Agent（共 35 条规则）:
 ============================================================
 
   Hermes (custom)
@@ -647,6 +647,9 @@ python3 scripts/batch-analyze.py --file session.jsonl --export-atif ./atif-expor
 它与 `--dim` 互斥，并拒绝 `--binary`。文件选择沿用分析模式：`--file`、可重复的
 `--dir`、`--limit`（默认 10）和 `--min-steps`（默认 3）。目录扫描仍要求文件至少
 1 KiB，并排除 subagent 文件；小文件可通过 `--file` 显式导出。
+
+`--limit` 必须为非负整数：`0` 表示不处理文件，负数则在发现文件、分析或导出前
+以退出码 2 报错。
 
 文件名为源文件规范化绝对路径的完整 SHA-256 加 `.atif.json`。不同目录中的同名源文件
 不会混淆；再次导出同一路径会原子替换其旧产物。移动源文件后产物名会变化。

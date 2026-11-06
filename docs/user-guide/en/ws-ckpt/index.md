@@ -37,10 +37,32 @@ sudo anolisa --install-mode system install ws-ckpt
 sudo yum install ws-ckpt
 ```
 
+| RPM | Contents |
+|---|---|
+| `ws-ckpt` | Compatibility aggregate: exact version/release dependencies on all three packages below |
+| `ws-ckpt-core` | CLI, daemon, configuration, service unit and lifecycle, license, and documentation |
+| `ws-ckpt-plugins` | OpenClaw/Hermes bundles and detection, registration, and removal scripts; requires matching core |
+| `ws-ckpt-skills` | Bundled checkpoint skill; requires matching core |
+
+Select `sudo yum install ws-ckpt-core` for the service and CLI alone; add
+plugins or skills when needed. Core installation enables/restarts the service;
+check `systemctl status ws-ckpt.service`. Register host plugins separately as
+the Agent user. Install or upgrade local RPMs as one matching version/release
+set with `yum install /absolute/path/to/matching-rpms/*.rpm`.
+
 ### Option 3: Source build (developers)
 
+From the repository root on Linux:
+
 ```bash
-cd src/ws-ckpt && make build
+make -C src/ws-ckpt build
+```
+
+The executable is `src/ws-ckpt/src/target/release/ws-ckpt`. To install it
+system-wide after building:
+
+```bash
+sudo make -C src/ws-ckpt install
 ```
 
 ---
@@ -276,7 +298,89 @@ Inspect the cause with `sudo journalctl -u ws-ckpt -n 100 --no-pager`. After fix
 
 The daemon configuration file is located at `/etc/ws-ckpt/config.toml`. This is a system-level configuration for the ws-ckpt daemon process.
 
-There is no user-side global config file. Auto-checkpoint and cleanup behavior are controlled per-plugin:
+`backend.btrfs-loop.img_size` is an integer measured in GiB (1 GiB = 1024³
+bytes), with a minimum of **5** and a default of **30** when omitted. This is a
+configuration policy, not a universal btrfs safety guarantee. Initial creation
+is still subject to the percentage cap and available host space. Image-size
+changes take effect at the next daemon restart, not on reload.
+
+An invalid file stops daemon startup; unrelated settings are not replaced with
+defaults. CLI updates validate the complete updated configuration before
+saving, so an invalid update leaves the file unchanged. To repair a legacy
+out-of-range value without discarding other settings, for example:
+
+```bash
+ws-ckpt config -g --img-size 30
+```
+
+TOML syntax or field-type errors still require manual correction. If the daemon
+is offline, a valid correction is saved but the CLI may exit non-zero because
+it cannot verify the daemon's configuration. Fix all invalid fields before
+restarting; choose an image size that fits the workspace and retained history.
+
+There is no user-side global config file. Plugin-specific auto-checkpoint behavior is configured separately below.
+
+### Storage backend selection
+
+To use a particular native btrfs filesystem, edit `/etc/ws-ckpt/config.toml`:
+
+```toml
+[backend]
+type = "btrfs-base"
+
+[backend.btrfs-base]
+btrfs_mount = "/data"
+```
+
+`btrfs_mount` is an absolute **mount point**, not a device or the data directory.
+The mount must already exist, have an exact entry in `/proc/mounts`, use btrfs,
+and be mounted read-write. The daemon checks the live filesystem and read-only
+flags too. Data is stored in `/data/ws-ckpt-data`; do not set the option to that
+child directory. A missing, unmounted, non-btrfs or read-only selection is an
+error, even if another usable btrfs mount exists.
+
+Backend type and location are selected separately:
+
+- `[backend] type = "auto"` retains the backend type in
+  `/var/lib/ws-ckpt/state.json`. An explicit `btrfs-base` or `btrfs-loop`
+  overrides that type on restart.
+- For BtrfsBase, an explicit `btrfs_mount` takes precedence over the mount
+  derived from the persisted `data_root`. Detection is used only for a fresh
+  backend selection without a BtrfsBase root to restore. A pin also selects
+  BtrfsBase on a fresh `auto` install; it does not implicitly switch an existing
+  BtrfsLoop installation while the type remains `auto`.
+- Fresh detection chooses the first writable physical btrfs mount in kernel
+  mount-table order, excluding loop devices. When several are available, the
+  log lists all device/mount-point pairs and the choice, and recommends a pin.
+  Detection uses one mount-table snapshot and the last exact entry for stacked mounts.
+  Candidates that fail live validation are skipped in order; without any suitable
+  candidate, a fresh `auto` install uses BtrfsLoop.
+
+On restart, the recorded BtrfsBase mount must still be mounted at the same
+path. Moving it elsewhere does not cause automatic discovery of its new
+location. This policy identifies paths, not filesystem UUIDs or devices:
+replacing the filesystem mounted at the same path is the operator's
+responsibility. Legacy manifests that put the data directory in both path
+fields remain supported through their `data_root`.
+
+Changing a configured pin is an intentional root change and emits a warning;
+it is not rejected as implicit drift. An explicit backend-type switch also
+does not adopt data from the previous backend. In either case, previous
+snapshots become invisible and startup reconciliation can prune unpinned
+snapshot records from `/var/lib/ws-ckpt/indexes`. **Pointing back does not
+recover pruned records.** Stop the daemon and back up the manifest, indexes
+and snapshot data before an intentional switch. This setting does not migrate
+any data.
+
+Upgrade the CLI and daemon from the same build together; the reload reply
+contains the expanded backend configuration. Use `sudo systemctl restart ws-ckpt`
+after upgrading or editing backend settings.
+`ws-ckpt reload` warns about a changed mount pin and keeps the active root until
+restart. `ws-ckpt daemon --mount-path` configures only BtrfsLoop; it does not
+select a BtrfsBase filesystem. Malformed configuration or an unreadable
+`state.json` stops startup instead of silently choosing a default backend.
+Repair the configuration or restore the original mount/state before retrying;
+removing the manifest starts a fresh selection and is not a recovery procedure.
 
 ### OpenClaw Plugin Configuration
 
@@ -289,6 +393,12 @@ There is no user-side global config file. Auto-checkpoint and cleanup behavior a
 ```
 
 ### Hermes Plugin Configuration
+
+Hermes resolves `ws-ckpt` from the Agent's `PATH` when synchronizing
+schedules and saves the absolute executable path in crontab. For a custom
+installation prefix, add its `bin` directory to that `PATH` first. If the CLI
+is unavailable, synchronization fails and retains the existing crontab;
+removing schedules does not require the binary to remain installed.
 
 ```bash
 hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
@@ -376,6 +486,13 @@ nor plugin configuration. OpenClaw's list tool is unchanged.
 ### CLI-Based Configuration
 
 Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (per-workspace `policy.toml` overrides). Running `ws-ckpt config` without a scope prints a read-only overview; `-g` views/edits the global config; `-w` can only override `auto_cleanup` and `auto_cleanup_keep` — the remaining fields (interval / image / health check) are daemon-wide and can only be set via `-g`; `-w <workspace> --reset` removes the workspace override and falls back to the global config.
+
+Setting `ws-ckpt config -g --health-check-interval 0` disables periodic health
+diagnostics. The daemon still refreshes the advisory cache at the default
+300-second interval and after workspace or global configuration changes. CLI
+warnings are best effort: they are omitted until a
+complete sample is available and if the last successful sample is over 600
+seconds old.
 
 ```bash
 # Enable auto-cleanup, keep checkpoints for 7 days

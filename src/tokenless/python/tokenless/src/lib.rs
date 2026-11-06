@@ -8,8 +8,7 @@ use pyo3::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokenless_protocol::{
-    Attribution as ProtocolAttribution, BeforeModelRequest, PostToolRequest, PreToolRequest,
-    RetrieveRequest,
+    Attribution as ProtocolAttribution, BeforeModelRequest, PostToolRequest, RetrieveRequest,
 };
 use tokenless_runtime::{
     Attribution, CompressOptions, CompressResult, RuntimeConfig, TokenlessRuntime as NativeRuntime,
@@ -328,33 +327,6 @@ impl PyTokenlessRuntime {
         py.allow_threads(|| {
             self.inner
                 .before_model(&request, &attribution)
-                .map_err(to_python_error)
-                .and_then(encode_lifecycle_payload)
-        })
-    }
-
-    #[pyo3(signature = (
-        request_json,
-        rtk_path,
-        *,
-        agent_id="python",
-        session_id=None,
-        tool_use_id=None
-    ))]
-    fn _pre_tool_json(
-        &self,
-        py: Python<'_>,
-        request_json: &str,
-        rtk_path: PathBuf,
-        agent_id: &str,
-        session_id: Option<String>,
-        tool_use_id: Option<String>,
-    ) -> PyResult<String> {
-        let request = decode_lifecycle_payload::<PreToolRequest>(request_json)?;
-        let attribution = protocol_attribution(agent_id, session_id, tool_use_id);
-        py.allow_threads(|| {
-            self.inner
-                .pre_tool(&request, &attribution, &rtk_path)
                 .map_err(to_python_error)
                 .and_then(encode_lifecycle_payload)
         })

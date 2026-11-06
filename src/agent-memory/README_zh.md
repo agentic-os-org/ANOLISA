@@ -14,6 +14,10 @@
 - **安全** — 注入内容的 prompt 注入检测与密钥/PII 脱敏
 - **跨会话任务** — 跨会话保存/恢复/关闭任务及完整上下文
 
+关键词搜索支持 `config.toml`、`example.com` 和 `v1.2.3` 等搜索词。
+`AND`、`NOT`、`OR` 等词按普通文本搜索。多个搜索词用空格分隔；
+没有全部匹配的结果时，回退返回部分词匹配的结果。
+
 ## 快速开始
 
 ### 安装
@@ -40,6 +44,10 @@ openclaw gateway restart
 
 两个可选安装参数都从 `openclaw plugins install --help` 协商，但两个开关并不对称。只有宿主列出完整的 `--accept-capabilities` 时才传递它——当前宿主会列出，因此 `AGENT_MEMORY_ACCEPT_CAPABILITIES` 在这些宿主上仍然会改变 argv：取 `1` 时在 `openclaw plugins install <插件目录> --force` 之后追加 `--accept-capabilities`，取 `0` 时省略它，带同意门禁的宿主随后会拒绝这次安装。只有宿主仍声明 `--dangerously-force-unsafe-install` 有效时才传递该覆盖参数（OpenClaw 2026.6.1 及更早版本）。当前宿主把它标注为 deprecated no-op，两种取值下都不会收到它，因此 `AGENT_MEMORY_SAFE_INSTALL` 在这些宿主上不产生任何差别，安装期安全由运维自有的 `security.installPolicy` 决定。安装日志会说明命中的是哪一种情况。
 
+配套的 `uninstall.sh` 将插件移除与配置清理交给 OpenClaw。插件已注销时，只有 state 目录下
+两个已知插件路径均不存在才算成功。CLI 缺失、执行失败或路径残留均返回非零；脚本自身不修改
+配置，也不删除插件文件。成功条件和 RPM 卸载行为的完整说明见用户指南。
+
 ### 集成（MCP 客户端）
 
 添加到 MCP 配置（Claude Code、Cursor 等）：
@@ -59,6 +67,27 @@ openclaw gateway restart
 }
 ```
 
+### 核心操作
+
+```bash
+# 初始化命名空间
+agent-memory init
+
+# 打印解析后的配置
+agent-memory info
+```
+
+作为 MCP server 运行后，agent 通过以下工具交互：
+
+| 操作 | MCP 工具 |
+|------|----------|
+| 写入记忆 | `mem_write(path, content)` |
+| 读取记忆 | `mem_read(path)` |
+| 搜索 | `memory_search(query, mode="hybrid")` |
+| 观察 | `memory_observe(content, type)` |
+| 获取上下文 | `memory_get_context(max_tokens)` |
+| 快照 | `mem_snapshot(name)` |
+
 OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 ANOLISA
 记忆，另提供 `memory_observe` 和 `memory_get_context`。升级时请更新提示词和白名单
 中的旧工具名，重启 gateway 并开始新会话；内部 MCP 方法名和数据保持不变。
@@ -70,6 +99,13 @@ OpenClaw 插件通过 `anolisa_memory_search` 和 `anolisa_memory_get` 访问 AN
 OpenClaw 自动记录通过 `memory_capture` 在写入前检查当前采集授权，并将来源标记为
 `auto-capture`。关闭自动采集后，显式调用 `memory_observe` 仍可记录记忆。
 请同时升级服务端和适配器；旧服务端会拒绝自动采集请求，不会回退为手动写入。
+
+对于单行列表条目，`memory_summary` 的概念和文件排名在 `mem_export` / `mem_import`
+往返后仍然可用，包括名称中含逗号的条目。导入时会将 frontmatter 中的换行等 ASCII 控制字符替换为空格。
+
+在 TOML 中选择 embedding provider 后，无需重复设置后端环境变量，也可使用对应的
+`MEMORY_OPENAI_*` 或 `MEMORY_OLLAMA_*` 字段覆盖。密钥优先级和模型变更时的索引限制
+见[配置指南](../../docs/user-guide/zh/agent-memory/index.md)。
 
 ## 架构
 
@@ -109,7 +145,7 @@ Linux x86_64 和 ARM64 包包含主程序、配置、用户服务及已打包的
 `python3 packaging/raw/package.py --help` 列出必须显式传入的二进制目录、插件输出目录、
 目标架构、时间戳和 TOML 构建元数据。元数据以 `version`、`target_os`、`target_arch`、
 `binaries.agent-memory`（SHA256）和 `plugin.sha256` 绑定输入文件。
-打包器不构建或执行二进制；raw 安装契约由 `.anolisa/component.raw.toml.in` 和 Cargo.toml
+打包器不构建或执行二进制；raw 安装契约由 `packaging/anolisa/raw/component.toml.in` 和 Cargo.toml
 渲染，RPM 契约保持独立。两种安装模式均不会启动用户服务。
 通过 `python3 tests/test_raw_packaging.py` 运行打包回归测试。
 

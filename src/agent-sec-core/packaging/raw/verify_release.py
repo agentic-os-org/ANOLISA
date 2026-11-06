@@ -232,6 +232,30 @@ def verify_raw_contract(payload_root: Path) -> None:
         for dependency in dependencies
     ):
         raise SystemExit(f"ERROR: {contract_path} still requires system python3")
+    services = {service["unit"]: service for service in component.get("services", [])}
+    if "agent-sec-gateway.service" in services:
+        raise SystemExit("ERROR: raw gateway lifecycle must remain daemon-owned")
+    service = services.get("agent-sec-core.service", {})
+    if (
+        service.get("scope") != "system"
+        or service.get("enable") is not False
+        or service.get("start") is not False
+    ):
+        raise SystemExit(
+            "ERROR: agent-sec-core.service must remain disabled in the raw contract"
+        )
+    if not any(
+        hook.get("phase") == "pre_uninstall"
+        and hook.get("script") == "{datadir}/sec-core/pre-uninstall-gateway.sh"
+        and hook.get("strict") is True
+        for hook in component.get("hooks", [])
+    ):
+        raise SystemExit("ERROR: raw gateway removal requires a strict withdrawal hook")
+    for entry in component["layout"]["files"]:
+        source = payload_root / entry["source"]
+        present = source.is_dir() if entry["source"].endswith("/") else source.is_file()
+        if not present:
+            raise SystemExit(f"ERROR: raw contract source is missing: {source}")
 
 
 def verify_raw_hook_manifests(payload_root: Path) -> None:
@@ -291,6 +315,20 @@ def verify_raw_payload(payload_root: Path) -> None:
     unit = payload_root / "share/anolisa/sec-core/agent-sec-core.service.in"
     if "WantedBy=multi-user.target" not in unit.read_text(encoding="utf-8"):
         raise SystemExit("ERROR: raw payload does not contain the V2 system service")
+    gateway = payload_root / "share/anolisa/sec-core/gateway"
+    for name in (
+        "asc_gateway_addon.py",
+        "asc_gateway_policy.py",
+        "github-policy.json",
+        "mitmproxy.provenance",
+        "install-mitmproxy.sh",
+    ):
+        path = gateway / name
+        mode = 0o755 if name == "install-mitmproxy.sh" else 0o644
+        if not path.is_file() or path.stat().st_mode & 0o777 != mode:
+            raise SystemExit(
+                f"ERROR: raw gateway asset is missing or has unsafe mode: {path}"
+            )
     verify_raw_contract(payload_root)
     verify_raw_hook_manifests(payload_root)
 

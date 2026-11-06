@@ -170,7 +170,7 @@ Custom datasets must expose SWE-bench-compatible fields: `instance_id`, `repo`,
 
 Filters are applied in this order:
 
-1. `--instance-id`
+1. `--instance-id` or `--instances-file`
 2. `--filter`
 3. `--slice`
 
@@ -189,6 +189,25 @@ swe-runner run \
   --agent cosh \
   --instance-id django__django-11999,matplotlib__matplotlib-18869
 ```
+
+For a reusable selection, put one instance ID per line in a UTF-8 file:
+
+```text
+# reviewed subset
+django__django-11999
+matplotlib__matplotlib-18869
+```
+
+```bash
+swe-runner run --agent cosh --instances-file selected-instances.txt
+```
+
+Blank lines, full-line `#` comments and an optional UTF-8 BOM are accepted.
+Duplicate IDs are ignored after their first occurrence. `--instances-file`
+and `--instance-id` are mutually exclusive; empty or unreadable files stop the
+run before execution. The file is read once into the run settings. Matching
+instances retain dataset order, then `--filter` and `--slice` apply as usual;
+IDs absent from the selected dataset do not match any instance.
 
 ### Resume and Rerun
 
@@ -283,11 +302,17 @@ When enabled, runner:
 
 - Enables `plugins.entries.tokenless.enabled` in each OpenClaw per-case profile.
 - Exposes the host tokenless OpenClaw extension to that profile.
-- Finds and copies `rtk` and `tokenless` binaries into the instance workspace
-  under `.runner/tokenless/bin/`.
+- Finds and copies the `tokenless` binary into the instance workspace under
+  `.runner/tokenless/bin/`. RTK runs as `tokenless rtk`, so no `rtk` binary is
+  needed.
 - Prepends `/workspace/.runner/tokenless/bin` to `PATH` inside the sandbox.
 - Writes tokenless evidence into run results so the configuration and runtime
   hook state can be inspected.
+
+Only executable regular files (including executable symlink targets) are
+eligible host binaries. Non-executable candidates are skipped so later
+installed candidates remain available. Both helpers must resolve before any
+injected files are written; source permissions are preserved when copied.
 
 ### Run Options
 
@@ -302,6 +327,7 @@ When enabled, runner:
 | `--slice` | none | Instance slice, for example `0:10`, `10:`, `:5` |
 | `--filter` | none | Regex filter for instance IDs |
 | `--instance-id, -i` | none | Instance ID, or comma-separated instance IDs |
+| `--instances-file` | none | UTF-8 ID file, one per line; excludes `--instance-id` |
 | `--workers, -w` | `1` | Number of parallel workers |
 | `--docker-pull-registry` | none | Registry host used as the Docker pull source |
 | `--use-skill` | `false` | Load skill resources from `--skills-dir` |
@@ -311,6 +337,10 @@ When enabled, runner:
 | `--tokenless` | `false` | Enable tokenless/rtk injection; currently supported by `openclaw` |
 | `--redo` | `false` | Rerun instances that already have result files |
 | `--verbose, -v` | `false` | Write DEBUG logs |
+
+Selected batches must have unique `instance_id` values. Duplicate IDs are
+reported before agent preparation because cases share workspace and output
+paths by ID. This also applies to custom datasets and direct `run_batch` calls.
 
 ## Agent Adapters
 
@@ -408,6 +438,9 @@ swe-runner evaluate --namespace none
 `analyze-traces` reads trace JSON files and exports per-trace details,
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
 and OpenClaw profiles to collect traces from session JSONL files.
+
+Concurrent recorders targeting the same instance reserve distinct `traceN.json` files;
+an existing trace is never overwritten when another writer chooses the same number.
 
 Analyze existing traces:
 

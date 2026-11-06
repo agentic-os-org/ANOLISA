@@ -20,7 +20,7 @@ class QoderSdkNativeTests(GateFixture):
         commands = Commands(evidence, {})
         observed = []
 
-        def run(argv, cwd, **kwargs):
+        def run(argv, cwd, timeout=600, **kwargs):
             self.assertNotIn("QODER_PERSONAL_ACCESS_TOKEN", commands.environment)
             observed.append(argv)
             return "{}"
@@ -47,10 +47,20 @@ class QoderSdkNativeTests(GateFixture):
 
             def command(commands, argv, cwd, timeout=600, **kwargs):
                 if any(path in argv for path in (
+                    "crates/aw-cli/tests/fixtures/qoder_sdk/native-profile.test.mjs",
+                    "crates/aw-cli/tests/fixtures/qoder_sdk/native-command.test.mjs",
+                )):
+                    self.assertEqual(argv[-1], str(self.root / "bin/aw"))
+                if any(path in argv for path in (
+                    "crates/aw-cli/tests/fixtures/sec_core/skill_native.py",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/native.py",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/post-native.py",
+                    "crates/aw-cli/tests/fixtures/sec_core/input_submission.py",
+                    "crates/aw-cli/tests/fixtures/sec_core/tool_pii.py",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/parser.test.mjs",
                     "crates/aw-cli/tests/fixtures/qoder_sdk/daemon-native.test.mjs",
+                    "crates/aw-cli/tests/fixtures/qoder_sdk/native-profile.test.mjs",
+                    "crates/aw-cli/tests/fixtures/qoder_sdk/native-command.test.mjs",
                 )):
                     self.assertEqual(
                         commands.environment["QODER_PERSONAL_ACCESS_TOKEN"], credential
@@ -88,8 +98,8 @@ class QoderSdkNativeTests(GateFixture):
             ) as reports:
                 if credential:
                     native_acceptance.main()
-                    self.assertEqual(observed, ["setup", "native", "native", "native", "native", "native", "native"])
-                    self.assertEqual(reports.call_count, 6)
+                    self.assertEqual(observed, ["setup"] + ["native"] * 17)
+                    self.assertEqual(reports.call_count, 17)
                 else:
                     with self.assertRaisesRegex(ValueError, "requires.*Secret"):
                         native_acceptance.main()

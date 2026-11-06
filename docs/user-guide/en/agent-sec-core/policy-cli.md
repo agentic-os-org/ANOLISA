@@ -81,6 +81,158 @@ No public OTLP exporter or exporter/sampling/batch configuration is provided.
 `--otel-context` is incoming context, not an export destination.
 The CLI requires the new daemon with carrier support; upgrade the daemon first.
 
+## Intent: propose a candidate from a task
+
+`agent-sec-cli intent propose` analyzes task intent and outputs an unapproved
+composable Cedar policy candidate for human review of exact paths, directory subtrees,
+actions and conditions. It only outputs a candidate: it does not persist policy-management
+records, bind an execution process, or deploy enforcement. The Policy commands
+below use the existing JSON template format and cannot directly import this Cedar
+candidate.
+
+The LLM receives only the task text and the unified `seccore.cedarschema`,
+and directly returns `{"policy":"...","unresolved":[]}`. Rust parses the
+original Cedar, checks absolute path expressions and runs official Strict
+validation; it appends no rules. The `asc.intent.draft.v1` draft preserves the
+original response and task provenance. Neither validation nor an empty
+`unresolved` proves complete or correct interpretation; unresolved requirements
+are model-reported.
+CLI rebuilds the expected artifact from the draft with its embedded schema,
+in addition to checking versions, provenance, TTL and hashes. Upgrade CLI and daemon
+together. The generation instructions in
+[`policy-generation.md`](../../../../src/agent-sec-core/v2/crates/asc-intent/prompts/policy-generation.md)
+are embedded at build time and tagged `cedar-policy@1`; human review remains required.
+
+An administrator must set `ASC_INTENT_ENABLED=true` and `DASHSCOPE_API_KEY` in the
+daemon startup environment. Configuration changes take effect after a restart.
+`deepseek-v4.1-flash` remains the default because it responds quickly;
+explicitly setting `ASC_INTENT_MODEL` is optional. Actual latency varies with model,
+task and service. Intent is not tied to DeepSeek: set `ASC_INTENT_MODEL` to
+another available model, such as `qwen-plus`, without changing the response protocol
+or Cedar checks. The default API base is `https://dashscope.aliyuncs.com/compatible-mode/v1`.
+Set `ASC_INTENT_BASE_URL` to use another OpenAI-compatible HTTPS service; despite its
+historical name, `DASHSCOPE_API_KEY` must then contain that service's API key.
+The service must accept the JSON chat-completions request parameters and return a
+complete policy/unresolved response within the output and deadline limits.
+
+`ASC_INTENT_THINKING` accepts `disabled` (default, sends the DashScope extension
+`enable_thinking: false`) or `provider` (omits that extension). Use `provider` for
+services that do not support the extension. For example, to select another model
+in the daemon startup environment:
+
+```bash
+export ASC_INTENT_MODEL=qwen-plus
+export ASC_INTENT_THINKING=provider
+```
+
+Invalid configuration or model responses make intent unavailable without preventing
+other daemon features. Automatic model selection and local-model fallback are not
+implemented; a local small model is planned to reduce cloud costs.
+
+This feature sends only the task text to a cloud model and may incur charges.
+No file contents, directory listings or Git changes are collected, and the daemon
+does not open caller paths. Absolute paths and other sensitive text inside the task
+are sent; review the task first.
+
+```bash
+agent-sec-cli intent propose \
+  --task "Allow reading and writing the src directory tree; keep config/important.txt unchanged. Do not execute programs or use the network."
+```
+
+Only `--task` is required: it uses the default daemon endpoint and text output.
+The model must express task targets as canonical absolute paths; they may refer to
+files not yet created. Relative or ambiguous targets belong in `unresolved`, and
+users cannot supply extra path or protection rules. `--socket` or
+`AGENT_SEC_DAEMON_SOCKET` overrides the endpoint; a failed connection never falls
+back to a local model.
+
+### Policy and safety boundaries
+
+- Use only the unified schema: `file.read`, `file.write`, `file.exec` and
+  `network.use`. Modification requests carry `WriteOperation` values
+  `write/create/delete/rename/setattr`; a delete prohibition is not immutability.
+  `file.read` means content reading, not listing names or reading metadata.
+- Model output is the whole grant: no permit or forbid is appended and no model
+  rule is overridden. When a task says "do not delete a.txt", the model writes that
+  forbid itself instead of the user supplying a protection list.
+- Paths use `resource.path` and `context.input.program/cwd`, not File UIDs.
+  The frontend accepts canonical absolute literals with `==`/`!=`, or `like`
+  patterns whose only wildcard is the trailing directory `/*`. Dynamic and
+  noncanonical path expressions, unbound templates, model-supplied Subject/File
+  identities and annotations other than optional `@id` are rejected. Path
+  attributes must be read directly from those receivers; a record projection such
+  as `{r: resource}.r.path` is rejected, and an action that cannot apply to the
+  resource type fails validation, matching policy admission.
+- The prompt requires necessary identities, conditions, approvals and obligations
+  that cannot be expressed to remain in `unresolved`, without unconditional permits
+  replacing them. Tool invocation must not be substituted with program execution;
+  a bare program name must not be guessed through PATH. This is a model instruction,
+  not a deterministic completeness or conflict check.
+- Conditions can use schema fields such as `program`, `cwd`, indexed `args` with
+  `arg_count`, and optional `mode/ownerUid/ownerGid`. Optional fields require `has`
+  guards. Argument index 0 represents `argv[1]`, excluding `argv[0]`.
+- Cedar defaults to Deny without a matching permit; forbid overrides permit.
+  Ordinary permits do not restrict other policies. An exclusive requirement must
+  be expressed with native complement forbids, including its conditions; a write
+  complement must remain specific to the requested operation.
+- Pure prohibitions must not add permits. No sensitive-path blacklist, execution
+  ban or network ban is added implicitly. Inspect the actual Cedar against the task;
+  neither Strict nor model-reported `unresolved` proves that every requirement is met.
+
+### Inspect the result
+
+Default `--format text` displays the original task, model Cedar draft, `unresolved`,
+validated Cedar, safety notes and expiry. `--format cedar`
+prints the candidate Cedar with unresolved requirements in comments; `--format json` prints
+the complete result. Cedar control characters are escaped only while stdout is a terminal;
+redirected or piped output keeps the model text unchanged. If the model policy is empty,
+`artifact.text` is empty. No format prompts for input or requests approval.
+Communication defaults to 45 seconds; the model has at most 30 seconds, unaffected
+by increasing `--timeout-ms`. `--ttl` accepts `1..=1800` seconds, default `1800`,
+starting when the daemon receives the request, without automatic renewal.
+
+The model JSON response is limited to 16 KiB; `unresolved` has at most 128 nonempty
+items, each at most 4096 bytes. Final Cedar has at most 1024 policies and 256 KiB
+before Strict validation. The complete result is limited to 512 KiB.
+Exceeding any budget fails the whole request; output is never truncated.
+
+Any `unresolved` entry is printed with the candidate; nothing is left to confirm.
+A task the model or the schema cannot express is a normal result rather than a
+failure: the CLI prints the model draft with every `reasons` entry, emits no Cedar
+and exits `0`. Ctrl-C exits `130`. No run installs, records or requests an approval.
+
+Requests use `asc.intent.request.v1`; candidates use `asc.intent.candidate.v1`
+with `status: "CANDIDATE"` and `authorization_required: true`. The candidate retains
+`draft` (original `policy`, `unresolved` and task provenance), TTL, hashes and `notes`.
+`artifact` contains `language`, `text` and required `schema_sha256`. A version mismatch
+fails instead of adapting; regenerate existing candidates with a matching CLI and daemon.
+
+`candidate_hash` covers the complete candidate except the hash itself; it is not
+a signature or approval credential. CLI also reconstructs the final artifact from
+the draft, detecting replaced model output even if a hash is recomputed. Official
+Strict proves schema conformance, not task completeness,
+trusted identity or interception of actual file operations.
+
+| Intent result | Exit status |
+|---------------|-------------|
+| `candidate`, with or without `unresolved` | `0` |
+| `needs_clarification` (draft and reasons, no candidate) | `0` |
+| Input, transport, configuration, model or Cedar validation error | `1` |
+| Candidate had already expired when it was received | `2` |
+| Interrupted (Ctrl-C) | `130` |
+
+The exit status reports whether the command ran, not whether the task could be
+expressed; read `outcome` and `reasons` for that.
+
+This Cedar schema has only `file.read`, `file.write`, `file.exec` and `network.use`,
+not TTL or process identity. Trusted approval, specific process binding and expiry
+revocation remain downstream work. Enforcement must also normalize paths, handle
+symlinks/hardlinks and namespaces, authorize both rename source and destination,
+and ensure complete argument indices consistent with `arg_count` and valid
+attribute values.
+This command does not establish these conditions and must not be described as
+blocking `rm`.
+
 ## Manage Policies
 
 Create a JSON template file such as `policy.json`:
@@ -108,12 +260,13 @@ File read/write/exec rules, logical conditions, history predicates, and block/al
 require_confirmation decisions can be saved when valid. Network and AgentHook target
 formats are not yet defined and cannot be saved.
 
-The AgentSight Adapter currently executes only block + file/write + operation=delete
+For native JSON, the PEP Translator supports only block + file/write + operation=delete
 rules without history. Unsupported rules fail the entire Binding with a bounded code
 such as `RULE_1_UNSUPPORTED_EFFECT`; no supported subset is sent. Quotes, backslashes
 and control characters in `because` are rejected during translation because the target
 DSL has no escape syntax; ordinary Unicode text is preserved. An omitted reason uses
-the Adapter's default. Template creation success does not prove backend support.
+the Translator's default. Policy creation success does not establish that the target
+PEP (Policy Enforcement Point) supports these rules.
 
 The generated DSL expresses deletion prevention. Actual delete-only kernel behavior
 requires separate validation; the current ActPlane backend shares its unlink/write
@@ -142,6 +295,51 @@ Delete the Scope to withdraw its assignments. A known deleted Policy ID retains 
 revision counter; updating it recreates content at the next revision. An unknown ID
 cannot be updated.
 
+## Cedar Policy source
+
+The same `policy create` and `policy update` commands accept a JSON source
+envelope in `--file`. Save this example as `cedar-policy.json`:
+
+```json
+{
+  "language": "cedar",
+  "content": {
+    "schema": {"schemaId": "seccore.system", "revision": 1},
+    "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { context.input.operation == SecCore::WriteOperation::\"delete\" && resource.path == \"/workspace/important\" };"
+  }
+}
+```
+
+```bash
+agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.json
+agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --file cedar-policy-v2.json
+```
+
+Get/list return the saved original text and exact schema reference. Invalid
+syntax, schema or common-subset constructs return `invalid_argument` without
+changing stored policy content or revisions. Unknown schema revisions are rejected
+without fallback. Native templates remain supported in their existing shape.
+
+Policy creation success does not establish target PEP support. The current PEP
+Translator supports a Cedar `forbid` subset for deletion and ordinary-write
+restrictions; unsupported semantics reject the entire translation. Existing
+Scope/Binding snapshots retain their saved Policy revision and schema when a
+Policy is updated or deleted. Source can be reloaded into an in-memory PST;
+neither AST nor PST is stored in SQLite. An older binary cannot read new Cedar
+records, so preserve a pre-upgrade database backup when planning rollback.
+The known SDK stack-overflow limit for deeply nested source remains unresolved;
+use administrator-reviewed policies rather than untrusted generated input.
+
+Sandbox runtime authorization uses the same Policy objects with
+`schema: {schemaId: "seccore.system", revision: 1}`. The OS authorization PDP evaluates
+Agent subjects, `process.spawn` and supported permit advice. Select the baseline and
+optional task Policy IDs in the daemon's authorization configuration, as shown in
+the [sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads
+their current revisions together. Successful updates affect subsequent requests;
+missing or deleted policies stop new authorization. Existing Scope/Binding
+snapshots and accepted decisions retain their own bound versions.
+
 ## Manage Scopes
 
 Create an assignment with a Policy ID and exact revision, plus one selector:
@@ -150,6 +348,10 @@ exact normalized absolute executable path, or `--pid` for one process instance.
 Name and path selectors discover existing and future matching processes. PID
 selection pins the first observed instance and never follows PID reuse. Cgroup
 assignments are currently rejected.
+
+**Breaking change:** `scope create --cgroup-id` has been removed. Cgroup assignments
+were not supported. Scripts that pass this option now fail locally with exit code 2;
+select the intended processes with `--pid`, `--process-name`, or `--executable` instead.
 
 ```bash
 agent-sec-cli --socket "$SOCKET" scope create --process-name openclaw --policy-id "$POLICY_ID" --policy-revision 1

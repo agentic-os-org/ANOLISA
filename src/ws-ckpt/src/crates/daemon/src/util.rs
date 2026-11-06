@@ -3,8 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
@@ -70,28 +68,65 @@ pub fn unescape_proc_mount(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Return true if `mount_path` appears in `/proc/mounts`.
-pub async fn is_mounted(mount_path: &str) -> anyhow::Result<bool> {
-    let target = Path::new(mount_path);
-    let target_norm = target.components().collect::<PathBuf>();
+/// A decoded mount-table entry shared by mount detection and validation.
+#[derive(Debug)]
+pub(crate) struct ProcMount {
+    pub(crate) device: String,
+    pub(crate) mount_point: PathBuf,
+    pub(crate) fs_type: String,
+    pub(crate) read_write: bool,
+}
 
-    let file = File::open("/proc/mounts")
-        .await
-        .context("Failed to open /proc/mounts")?;
-    let mut reader = BufReader::new(file).lines();
-
-    while let Some(line) = reader.next_line().await? {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(mp) = parts.get(1) {
-            let decoded = unescape_proc_mount(mp);
-            let mp_path = Path::new(&decoded);
-            if mp_path == target || mp_path.components().collect::<PathBuf>() == target_norm {
-                return Ok(true);
-            }
-        }
+impl ProcMount {
+    /// Whether this entry is eligible for automatic BtrfsBase selection.
+    pub(crate) fn is_writable_physical_btrfs(&self) -> bool {
+        self.fs_type == "btrfs"
+            && self.read_write
+            && self.device.starts_with("/dev/")
+            && !self.device.starts_with("/dev/loop")
     }
+}
 
-    Ok(false)
+/// Decode effective mounts in table order, keeping the last exact stacked entry.
+pub(crate) fn proc_mounts_in(content: &str) -> Vec<ProcMount> {
+    let mut seen = std::collections::HashSet::new();
+    let mut mounts: Vec<_> = content
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let device = fields.next()?;
+            let mount_point = fields.next()?;
+            let fs_type = fields.next()?;
+            let options = fields.next()?;
+            let mount_point = Path::new(&unescape_proc_mount(mount_point))
+                .components()
+                .collect::<PathBuf>();
+            if !seen.insert(mount_point.clone()) {
+                return None;
+            }
+            Some(ProcMount {
+                device: unescape_proc_mount(device),
+                mount_point,
+                fs_type: fs_type.to_string(),
+                read_write: options.split(',').any(|option| option == "rw")
+                    && !options.split(',').any(|option| option == "ro"),
+            })
+        })
+        .collect();
+    mounts.reverse();
+    mounts
+}
+
+/// Return true if `mount_path` appears as an exact effective `/proc/mounts` entry.
+pub async fn is_mounted(mount_path: &str) -> anyhow::Result<bool> {
+    let content = tokio::fs::read_to_string("/proc/mounts")
+        .await
+        .context("Failed to read /proc/mounts")?;
+    let target = Path::new(mount_path).components().collect::<PathBuf>();
+    Ok(proc_mounts_in(&content)
+        .iter()
+        .any(|entry| entry.mount_point == target))
 }
 
 /// Ensure every registered workspace's user-facing path is a symlink pointing at
@@ -415,6 +450,22 @@ mod tests {
         assert!(is_mounted("/proc").await.unwrap());
         let dir = tempfile::tempdir().unwrap();
         assert!(!is_mounted(dir.path().to_str().unwrap()).await.unwrap());
+    }
+
+    #[test]
+    fn proc_mount_parser_decodes_paths_options_and_visible_stacked_entries() {
+        let content = "malformed\n/dev/old /with\\040space btrfs rw 0 0\n/dev/mapper/new\\134name /with\\040space/./ btrfs ro,rw 0 0\n/dev/sdb /tab\\011path btrfs rw,relatime 0 0\n/dev/loop0 /loop btrfs rw 0 0\nnone /nondevice btrfs rw 0 0\n/dev/sdc /prefix btrfs rwish 0 0\n";
+        let entries = proc_mounts_in(content);
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].device, "/dev/mapper/new\\name");
+        assert_eq!(entries[0].mount_point, Path::new("/with space"));
+        assert!(!entries[0].read_write, "ro must win over rw");
+        assert!(!entries[0].is_writable_physical_btrfs());
+        assert_eq!(entries[1].mount_point, Path::new("/tab\tpath"));
+        assert!(entries[1].is_writable_physical_btrfs());
+        assert!(!entries[2].is_writable_physical_btrfs());
+        assert!(!entries[3].is_writable_physical_btrfs());
+        assert!(!entries[4].read_write);
     }
 
     #[tokio::test]

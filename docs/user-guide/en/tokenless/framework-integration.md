@@ -51,7 +51,7 @@ disposition keeps the original. The hook currently routes:
 | JSON requiring record reduction or string, array, or depth truncation | Applied only when Marker command recovery is available; otherwise rejected with `recoverability_unavailable` |
 | Build/test/package logs from command output | Terminal cleanup and routine-progress reduction; every omitted run carries an in-place retrieval marker |
 | CSV/TSV tables when the host can replace output with text | Complete cell-preserving compaction only when characters and estimated tokens decrease; otherwise passthrough. No Stash writes or recovery requirement |
-| Numbered API search records, or pure path lists from non-file command/API results, when path sharing is enabled and the host can replace output with text | Lossless sharing of consecutive paths or a directory prefix; every received record is retained, without Stash or retrieval |
+| Numbered API search records, recognized native shell searches, or pure path lists from non-file command/API results, when path sharing is enabled and the host can replace output with text | Lossless sharing of consecutive paths or a directory prefix; every received record is retained, without Stash or retrieval |
 | Git diffs from command output when `TOKENLESS_DIFF_COMPRESSION_ENABLED` opts in (default off) and the host can replace output with text | Unchanged-context cropping with per-hunk selection; every changed line is kept, the complete original stays retrievable through Stash, and marginal candidates are rejected |
 | Complete HTML documents from command output or API responses (not file reads) when the host can replace output with text and Stash-backed recovery is available; enabled by default, `TOKENLESS_HTML_EXTRACTION_ENABLED=0` disables it | Main-content rendering as Markdown with removal counts in the view header; the complete original stays retrievable through Stash, and marginal candidates are rejected |
 | Long plain text, stack trace, source code, unknown | Passthrough until a matching domain compressor is connected |
@@ -101,7 +101,7 @@ sessions on x64, with Node.js/npm and Python 3.10+ installed. Windows ARM64 and
 security-workspace/VM sessions are unsupported; other Windows agents have not
 been validated.
 
-The Windows package is not yet published. For now, follow the
+Install the published package with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../../developer-guide/en/tokenless/windows.md#build-and-test-on-windows)
 to build and install the local npm packages.
 
@@ -136,8 +136,9 @@ passthrough. The adapter also accepts the macOS workspace Shell contract observe
 in QwenWorkCN 1.3.2. Linux VM execution remains unsupported; the hook dispatcher
 passes through outside macOS.
 
-PreToolUse matches `Bash`, `mcp__workspace__bash`, and
-`mcp__qw-builtin__mcp_workspace_bash`, and rewrites supported commands through RTK.
+PreToolUse matches `Bash`, `mcp__workspace__bash`,
+`mcp__qw-builtin__mcp_workspace_bash`, and `mcp__qw-builtin__mcp__workspace__bash`,
+and rewrites supported commands through RTK.
 PostToolUse has **no tool matcher**: eligible full Bash and non-Bash results enter
 the shared policy. Metadata-only callbacks from `mcp_list`, `mcp_get`, or `mcp_call`
 pass through because replacing their real output with telemetry would lose content;
@@ -150,9 +151,40 @@ ID `qwenwork`. Tool Ready and Schema hooks are not registered.
 A workspace Shell result containing exactly one plain MCP text block enters the
 text slot, enabling JSON-to-TOON compression. Multi-block, multimodal, or annotated
 block arrays pass through. Other MCP tools retain their existing structured-output
-handling. Workspace Shell statistics and Pre/Post deduplication state live in
-`<cwd>/.tokenless`; native Bash keeps its existing data location. If a standalone
-installation includes `bin/` inside the plugin, the adapter uses those binaries.
+handling. For QwenWork workspace Shell hooks, Tokenless databases and Pre/Post
+deduplication state use the default `~/.tokenless` directory or the absolute path
+specified by `TOKENLESS_DATA_DIR`. The default home comes from the operating
+system's user identity, as in the CLI/RTK, rather than `$HOME`.
+The adapter preserves that variable
+and no longer selects a workspace-local directory automatically. Existing databases in
+`<cwd>/.tokenless` are not automatically migrated; explicitly select that directory
+to query earlier records.
+
+An unset or empty `TOKENLESS_DATA_DIR` uses the default. Invalid paths (relative,
+filesystem root, parent traversal, non-directory targets, or unresolvable links)
+make workspace Shell hooks pass through without creating a data directory.
+The same applies when no system home is available and no override is set.
+
+If the Shell sandbox cannot write to the selected directory, RTK's Tokenless
+statistics and execution receipts may be missing while commands still run.
+Missing receipts conservatively skip further compression. PostTool compression
+statistics are written by the Hook process and depend on its permissions.
+Statistics can therefore be incomplete even when the Agent completes its task.
+Failed RTK records are not queued for later recovery.
+
+RTK's native database has its own path configuration, independent of
+`TOKENLESS_DATA_DIR`. Its writes are
+subject to the Shell sandbox too. The adapter keeps this behavior unchanged.
+
+Installation and detection output show the data directory and its source for the
+current process, together with this sandbox limitation. They do not test sandbox
+write access or verify that the desktop inherited terminal environment variables.
+These notices are not added to Hook results or model context. For complete RTK
+records, use a directory the Shell is authorized to write. The adapter does not
+change sandbox permissions or transfer records across that boundary.
+
+If a standalone installation includes `bin/` inside the plugin, the adapter uses
+those binaries.
 Workspace Shell and plugin-private binaries do not advertise bare
 `tokenless retrieve` recovery, since the model shell does not inherit the hook
 environment. Their PostTool compression therefore requires a lossless result.
@@ -176,8 +208,6 @@ and records file ownership. Restart QwenWorkCN and open a new session;
 check plugin activation in the application. `status` verifies application presence
 and managed files, while loading and activation remain `unknown`. Sideloading
 never changes settings, permissions, databases, or disabled/blocked plugin lists.
-Compatibility baselines are 1.2.5 native Bash and 1.3.2 workspace Shell; other
-versions produce a compatibility warning.
 
 `TOKENLESS_QWENWORK_APP` selects a non-default application bundle;
 `TOKENLESS_QWENWORK_HOME` selects its data directory. Defaults search `/Applications`
@@ -420,7 +450,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 The scripts call the framework's own plugin or extension mechanism. Follow their restart instructions. If a script is missing, fails, or reports an incompatible framework version, prefer an anolisa-managed installation.
 
-On hosts whose installer still enforces the safety scan, the OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` and `rtk` binaries through Node.js child-process APIs. Hosts that advertise the option as a deprecated no-op no longer receive it; there the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
+On hosts whose installer still enforces the safety scan, the OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` binary through Node.js child-process APIs. Hosts that advertise the option as a deprecated no-op no longer receive it; there the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
 
 ### npm with Cosh-NG
 

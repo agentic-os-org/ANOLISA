@@ -6,6 +6,7 @@
 //! is assigned to the largest databases first, so every store keeps its own
 //! safe-deletion rules while the group converges back under the limit.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -210,15 +211,31 @@ pub(crate) fn write_total_size_limit(
             serde_json::Value::from(max_total_size_mb),
         );
 
-    let mut tmp = config_path.as_os_str().to_os_string();
-    tmp.push(".tmp");
-    let tmp_path = Path::new(&tmp);
     let pretty = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
-    std::fs::write(tmp_path, pretty)
+    // Each save must own its staging file. A shared `config.json.tmp` can be
+    // renamed by another worker while it is still being written, exposing
+    // partial JSON as the live configuration and making the second save fail.
+    let tmp_path = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".agentsight-storage-{}.tmp", uuid::Uuid::new_v4()));
+    let mut temporary = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
         .map_err(|error| format!("cannot write config file: {error}"))?;
-    std::fs::rename(tmp_path, config_path)
-        .map_err(|error| format!("cannot replace config file: {error}"))?;
-    Ok(())
+    let written = temporary
+        .write_all(pretty.as_bytes())
+        .map_err(|error| format!("cannot write config file: {error}"));
+    drop(temporary);
+    let result = written.and_then(|()| {
+        std::fs::rename(&tmp_path, config_path)
+            .map_err(|error| format!("cannot replace config file: {error}"))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -408,6 +425,62 @@ mod tests {
         assert_eq!(written["storage"]["max_total_size_mb"], 900);
         assert_eq!(written["keep"], 1, "other settings must survive the merge");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn simultaneous_storage_limit_saves_keep_each_write_atomic() {
+        let base = unique_dir("parallel-save");
+        let config_path = base.join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({"storage": {}, "fixture": "x".repeat(16 * 1024)}).to_string(),
+        )
+        .unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let failures = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        (0..16)
+                            .filter_map(|_| write_total_size_limit(&config_path, 900).err())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            failures.is_empty(),
+            "separate setting saves must not share and rename one staging file: {failures:?}"
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(saved["storage"]["max_total_size_mb"], 900);
+        assert_eq!(saved["fixture"], "x".repeat(16 * 1024));
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn storage_limit_save_keeps_unowned_staging_siblings() {
+        let base = unique_dir("save-sibling");
+        let config_path = base.join("config.json");
+        let sibling = base.join("config.json.tmp");
+        std::fs::write(&config_path, r#"{"storage": {}, "fixture": 1}"#).unwrap();
+        std::fs::write(&sibling, "synthetic editor scratch file").unwrap();
+
+        write_total_size_limit(&config_path, 900).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&sibling).unwrap(),
+            "synthetic editor scratch file"
+        );
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 2);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

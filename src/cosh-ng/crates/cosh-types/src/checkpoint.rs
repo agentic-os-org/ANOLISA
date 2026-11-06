@@ -130,6 +130,35 @@ pub enum WsCkptRequest {
         /// Registered workspace path or ID.
         workspace: String,
     },
+    // The variants below round out the mirror's tail so that every index
+    // matches ws-ckpt-common exactly (bincode encodes enums by variant
+    // index). cosh-ng itself only sends `WatcherHealth`; the recovery and
+    // paging variants exist to keep it aligned — a variant appended here
+    // out of order would silently decode as a different request upstream.
+    /// Resolves recovery's exact target and deletion scope.
+    RecoverPreview {
+        workspace: String,
+    },
+    /// Recover only if the daemon's preview still describes the same target.
+    RecoverConfirmed {
+        preview: RecoveryPreview,
+    },
+    /// Lists snapshots recovered without their original metadata.
+    ListOrphans {
+        /// Omit to query all registered workspaces.
+        workspace: Option<String>,
+    },
+    /// Reads a page in ascending (created_at, workspace ID, snapshot ID) order.
+    ListPage {
+        orphans_only: bool,
+        workspace: Option<String>,
+        limit: u32,
+        cursor: Option<String>,
+    },
+    /// File-watcher health: which workspaces run without a live watcher,
+    /// and how many inotify queue overflows the shared watcher instance
+    /// observed. Consumed by the checkpoint status sidecar (#7233).
+    WatcherHealth,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -265,6 +294,28 @@ pub enum WsCkptResponse {
         workspace: String,
         /// Locations intentionally retained for manual recovery.
         retained_paths: Vec<String>,
+    },
+    // Tail variants mirrored for index fidelity with ws-ckpt-common (see
+    // the note on `WsCkptRequest`); only `WatcherHealthOk` is decoded here.
+    /// Recovery identity and snapshot scope to display before confirmation.
+    RecoverPreviewOk {
+        preview: RecoveryPreview,
+    },
+    /// Byte-bounded snapshot page with an opaque continuation token.
+    ListPageOk {
+        snapshots: Vec<SnapshotListItem>,
+        next_cursor: Option<String>,
+    },
+    /// Reply to [`WsCkptRequest::WatcherHealth`]. Field order is
+    /// wire-frozen (bincode encodes positionally).
+    WatcherHealthOk {
+        /// Workspaces currently running without a live file watcher:
+        /// change detection is degraded for them. Empty when every
+        /// workspace has a healthy watcher.
+        workspaces_without_watcher: Vec<String>,
+        /// Cumulative inotify queue overflows observed on the shared
+        /// watcher instance.
+        watcher_queue_overflows: u64,
     },
 }
 
@@ -421,11 +472,45 @@ pub struct WorkspaceIdentityV2 {
 // Auxiliary types (match ws-ckpt-common)
 // ===========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotEntry {
     pub id: String,
     pub workspace: String,
     pub meta: SnapshotMeta,
+}
+
+/// Daemon-resolved recovery target (mirrors ws-ckpt-common).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryPreview {
+    /// Registered workspace ID, or `None` for an interrupted, unregistered init.
+    pub ws_id: Option<String>,
+    /// User-visible restoration destination, never a managed storage alias.
+    pub registration_path: String,
+    /// Number of on-disk snapshot directories that recovery will delete.
+    pub snapshot_count: u32,
+    /// Fingerprint of the target and snapshot set; stale confirmation is refused.
+    pub confirmation_digest: [u8; 32],
+}
+
+/// One result in a paged snapshot listing (mirrors ws-ckpt-common).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SnapshotListItem {
+    /// Complete snapshot metadata.
+    Full(SnapshotEntry),
+    /// Identity-only fallback when complete metadata cannot fit in one frame.
+    Summary(SnapshotSummary),
+}
+
+/// Identity fields preserved when a snapshot's optional detail is too large
+/// (mirrors ws-ckpt-common).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotSummary {
+    pub id: String,
+    pub workspace: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub pinned: bool,
+    pub missing: bool,
+    pub omitted_fields: Vec<String>,
 }
 
 mod metadata_serde {
@@ -452,7 +537,7 @@ mod metadata_serde {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotMeta {
     pub message: Option<String>,
     #[serde(default, with = "metadata_serde")]
@@ -683,6 +768,16 @@ pub struct CkptStatusResult {
     pub workspaces: Vec<WorkspaceInfo>,
     pub fs_total_bytes: u64,
     pub fs_used_bytes: u64,
+    /// Watcher-health sidecar (#7233): workspaces from `workspaces` that
+    /// run without a live file watcher. `None` when the daemon could not
+    /// answer the sidecar (older daemon, timeout) — the fields are then
+    /// absent from the output instead of failing `status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspaces_without_watcher: Option<Vec<String>>,
+    /// Cumulative inotify queue overflows on the shared watcher instance
+    /// (sidecar; `None` under the same conditions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watcher_queue_overflows: Option<u64>,
 }
 
 /// Result of deleting a snapshot.
@@ -1067,6 +1162,45 @@ mod tests {
                     operation_digest: [4; 32],
                 },
             ),
+            (
+                25,
+                WsCkptRequest::Unregister {
+                    workspace: "/ws".into(),
+                },
+            ),
+            (
+                26,
+                WsCkptRequest::RecoverPreview {
+                    workspace: "/ws".into(),
+                },
+            ),
+            (
+                27,
+                WsCkptRequest::RecoverConfirmed {
+                    preview: RecoveryPreview {
+                        ws_id: Some("ws-abc123".into()),
+                        registration_path: "/ws".into(),
+                        snapshot_count: 2,
+                        confirmation_digest: [5; 32],
+                    },
+                },
+            ),
+            (28, WsCkptRequest::ListOrphans { workspace: None }),
+            (
+                29,
+                WsCkptRequest::ListPage {
+                    orphans_only: false,
+                    workspace: None,
+                    limit: 10,
+                    cursor: None,
+                },
+            ),
+            // 30: the watcher-health sidecar consumed by checkpoint
+            // status (#7233). Its index is load-bearing: an older daemon
+            // cannot decode it and closes the connection, which the client
+            // treats as "sidecar unavailable" — but a MISMATCHED index
+            // would decode as an unrelated request instead.
+            (30, WsCkptRequest::WatcherHealth),
         ];
 
         for (expected_idx, req) in &variants {
@@ -1138,6 +1272,35 @@ mod tests {
             let encoded = bincode::serialize(&response).unwrap();
             let actual = u32::from_le_bytes(encoded[..4].try_into().unwrap());
             assert_eq!(actual, expected_idx);
+        }
+    }
+
+    #[test]
+    fn watcher_health_sidecar_variants_round_trip_at_the_pinned_indices() {
+        // #7592 review: the Agent-facing checkpoint status path consumes
+        // the watcher-health sidecar, so the mirror must encode
+        // `WatcherHealth` at the exact index ws-ckpt-common assigns it and
+        // decode `WatcherHealthOk` symmetrically.
+        let request = bincode::serialize(&WsCkptRequest::WatcherHealth).unwrap();
+        assert_eq!(u32::from_le_bytes(request[..4].try_into().unwrap()), 30);
+        let decoded: WsCkptRequest = bincode::deserialize(&request).unwrap();
+        assert!(matches!(decoded, WsCkptRequest::WatcherHealth));
+
+        let response = WsCkptResponse::WatcherHealthOk {
+            workspaces_without_watcher: vec!["ws-degraded".into()],
+            watcher_queue_overflows: 3,
+        };
+        let encoded = bincode::serialize(&response).unwrap();
+        assert_eq!(u32::from_le_bytes(encoded[..4].try_into().unwrap()), 30);
+        match bincode::deserialize(&encoded).unwrap() {
+            WsCkptResponse::WatcherHealthOk {
+                workspaces_without_watcher,
+                watcher_queue_overflows,
+            } => {
+                assert_eq!(workspaces_without_watcher, vec!["ws-degraded".to_string()]);
+                assert_eq!(watcher_queue_overflows, 3);
+            }
+            _ => panic!("expected WatcherHealthOk variant"),
         }
     }
 

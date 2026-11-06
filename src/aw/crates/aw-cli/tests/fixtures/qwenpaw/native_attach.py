@@ -118,10 +118,10 @@ class NativeAttachTests(unittest.TestCase):
                     await_condition(lambda: status()["instances"][0]["tools"] > 0, 10, "active native tool")
                     rejected = install(remove=True, success=False)
                     self.assertIn(b"busy", rejected.stderr)
-                    self.assertTrue((case / "home/plugins/aw-native").is_dir())
+                    self.assertEqual(len(list((case / "home/plugins").glob("aw-native-*"))), 1)
                     self.assertEqual(future.result(timeout=45), "success")
                 await_condition(lambda: status()["instances"][0]["requests"] == 0, 5, "request cleanup")
-                plugin_tree = case / "home/plugins/aw-native"
+                plugin_tree, = (case / "home/plugins").glob("aw-native-*")
                 moved_tree = case / "home/plugins/moved-aw-native"
                 plugin_tree.rename(moved_tree)
                 missing = install(remove=True, success=False)
@@ -132,7 +132,7 @@ class NativeAttachTests(unittest.TestCase):
                 moved_tree.rename(plugin_tree)
                 self.assertTrue(json.loads(install(remove=True).stdout)["detached"])
                 self.assertEqual(status()["bindings"], 0)
-                self.assertFalse((case / "home/plugins/aw-native").exists())
+                self.assertFalse(plugin_tree.exists())
                 self.assertFalse((case / "home/.aw-attachment.json").exists())
                 self.assertFalse(list((case / "state").glob("attach-*")))
                 self.assertEqual(turn(0, "existing-session"), "success")

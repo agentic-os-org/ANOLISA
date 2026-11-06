@@ -138,6 +138,32 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.readers.append(reader)
         return reader
 
+    async def test_prompt_hook_identity_does_not_claim_a_tool_invocation(self):
+        from aw_invocations import Invocations
+
+        self.bridge.scope = SimpleNamespace(check=lambda: None, invocation_limit=256)
+        self.bridge.failure = None
+        ledger = self.bridge.invocations = Invocations(self.bridge)
+        ledger.begin()
+        prompt = {"type": "control_request", "request_id": "prompt-request", "request": {
+            "subtype": "hook_callback", "callback_id": "prompt-hook",
+            "tool_use_id": "native-input-id", "input": {"hook_event_name": "UserPromptSubmit"},
+        }}
+        tool = {"type": "control_request", "request_id": "tool-request", "request": {
+            "subtype": "hook_callback", "callback_id": "tool-hook",
+            "tool_use_id": "unissued-tool-id", "input": {"hook_event_name": "PreToolUse"},
+        }}
+        self.transport.delegate.messages = [prompt, tool, {"type": "result"}]
+        reader = self.reader()
+        self.assertEqual(await anext(reader), prompt)
+        async with ledger.callback() as ticket:
+            self.assertIsNone(ticket.call_id)
+        self.assertEqual(self.stops, [])
+        self.assertFalse(ledger.pending or ledger.active)
+        self.assertEqual(await anext(reader), {"type": "result"})
+        self.assertEqual(self.stops, ["failure", "stop"])
+        await self.transport.close()
+
     async def test_closed_transport_rejects_reconnect_before_native_launch(self):
         await self.transport.connect()
         reader = self.reader()
@@ -238,6 +264,17 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stops, [])
         self.assertTrue(self.transport.delegate.finalized)
 
+    async def test_native_init_accepts_other_cli_releases(self):
+        frames = [{"type": "system", "subtype": "init", "claude_code_version": version}
+                  for version in ("2.1.160", "2.1.162", "3.0.0-preview.1")]
+        self.transport.delegate.messages = frames
+        reader = self.reader()
+        for frame in frames:
+            self.assertEqual(await anext(reader), frame)
+        self.assertEqual(self.stops, [])
+        await reader.aclose()
+        self.assertTrue(self.transport.delegate.finalized)
+
     async def test_invalid_identity_stops_then_keeps_interrupt_reader_available(self):
         self.transport.delegate.messages = [
             {"type": "system", "subtype": "init", "claude_code_version": "invalid"},
@@ -301,6 +338,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
                     client._aw_check = lambda: None
                     client._aw_state = "connected"
                     client._aw_receiving = False
+                    client._aw_input_task = None
                     client._aw_task_started = True
                     client._aw_query_finished = False
                     client.sdk_messages = [ResultMessage()]

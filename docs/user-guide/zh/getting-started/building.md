@@ -68,13 +68,26 @@ export UV_PYTHON_INSTALL_MIRROR="https://your-mirror.example/python-build-standa
 
 ## 4. 统一构建脚本
 
+### 仓库根 Makefile
+
+先准备所选组件的依赖，并使用其支持的构建平台。在仓库根目录中执行：
+
+```bash
+make list-components
+make build COMPONENTS="cosh-ng tokenless"
+# Optionally install the build outputs
+make install COMPONENTS="cosh-ng tokenless"
+```
+
+### 依赖准备与安装脚本
+
 `scripts/build-all.sh` 是 Linux 上的便捷入口，并不负责构建整个 monorepo。请通过
 重复的 `--component` 参数选择需要的维护中组件：`skills`、`sec-core`、`tokenless`、
 `ws-ckpt`、`memory`、`cosh-ng` 和 `sight`。
 
 `anolisa`、`skillfs` 和 `ktuner` 不由该脚本构建，请按第 5 节的组件命令单独构建。
 
-默认安装模式是 user mode，各组件按自己的安装规则选择用户目录中的路径。
+该脚本默认安装到用户目录。
 首次安装系统依赖仍可能请求 `sudo`。使用 `--system`（或
 `--install-mode system`）切换到系统路径，脚本会暂存文件并可能调用 `sudo`。
 `--no-install` 只构建并暂存制品，不执行安装。
@@ -149,3 +162,16 @@ README 和开发指南。
 
 组件特有的构建细节、生成制品和运行配置应放在组件 README 或对应开发指南中。本页
 只维护仓库级入口，组件清单或脚本接口发生变化时同步更新这里。
+
+## 选择安装文件组
+
+组件提供分组安装目标时，只需后端程序可使用 `install-core`；需要框架集成或技能时，
+再运行组件提供的 `install-plugins` 或 `install-skills`：
+
+```bash
+make -C src/tokenless build
+make -C src/tokenless install-core
+```
+
+通过 AW 使用 Tokenless 时，安装 Tokenless core 和独立 Provider 即可；原生
+Tokenless 插件按需选择。

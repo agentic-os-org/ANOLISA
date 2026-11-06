@@ -1,8 +1,8 @@
 //! Cross-platform local agent session file discovery
 //!
 //! Scans well-known directories on the local machine for agent session files
-//! (Claude Code, Qoder, QoderWork, Codex, Cursor and Gemini CLI), including
-//! Gemini's legacy JSON conversations.
+//! (Claude Code, Qoder, QoderWork, Codex, Cursor, Gemini CLI and Cline),
+//! including whole-document JSON conversations.
 //! Uses `dirs::home_dir()` for cross-platform `$HOME` resolution.
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,8 @@ enum Layout {
     PerProject,
     /// Sessions stored flat: <root>/<file>.jsonl
     Flat,
+    /// Cline API histories under tasks/<task-id>/.
+    ClineTasks,
 }
 
 /// Describes where a particular agent stores its session files
@@ -79,6 +81,14 @@ static SESSION_SOURCES: &[SessionSource] = &[
         layout: Layout::PerProject,
         scan_subdirs: &["chats"],
     },
+    SessionSource {
+        agent_id: "cline",
+        agent_name: "Cline",
+        icon: "",
+        dirs: agentsight_trajectory_collector::cline::TASKS_ROOTS,
+        layout: Layout::ClineTasks,
+        scan_subdirs: &[],
+    },
 ];
 
 /// A discovered local agent session file
@@ -141,6 +151,35 @@ fn scan_source(dir: &Path, source: &SessionSource, sessions: &mut Vec<LocalSessi
             }
         }
         Layout::Flat => scan_flat_dir(dir, source, "(default)", sessions),
+        Layout::ClineTasks => scan_cline_tasks(dir, source, sessions),
+    }
+}
+
+fn scan_cline_tasks(dir: &Path, source: &SessionSource, sessions: &mut Vec<LocalSession>) {
+    let projects = agentsight_trajectory_collector::cline::task_projects(dir);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .join(agentsight_trajectory_collector::cline::API_HISTORY_FILENAME);
+        if !path.is_file() {
+            continue;
+        }
+        let Some(task_id) = agentsight_trajectory_collector::cline::task_session_id(&path) else {
+            continue;
+        };
+        let project = projects
+            .get(&task_id)
+            .map(String::as_str)
+            .unwrap_or("(default)");
+        if let Some(session) = parse_session_file(&path, source, project) {
+            sessions.push(session);
+        }
     }
 }
 
@@ -219,6 +258,18 @@ const MAX_PARSE_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 /// Skip files larger than this entirely (50 MB) — too large to parse quickly.
 const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
 
+fn session_id_for_path(path: &Path, source: &SessionSource) -> String {
+    if source.agent_id == "cline"
+        && let Some(id) = agentsight_trajectory_collector::cline::task_session_id(path)
+    {
+        return id;
+    }
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 /// Parse a JSONL session file to extract metadata for the session list.
 fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Option<LocalSession> {
     let metadata = fs::metadata(path).ok()?;
@@ -237,11 +288,7 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
     // Skip very large files — just return basic metadata
     if metadata.len() > MAX_FILE_SIZE_BYTES {
         return Some(LocalSession {
-            session_id: path
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
+            session_id: session_id_for_path(path, source),
             agent_id: source.agent_id.to_string(),
             agent_name: source.agent_name.to_string(),
             agent_icon: source.icon.to_string(),
@@ -265,26 +312,30 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
-    if source.agent_id == "gemini-cli" {
-        // Corrections can remove or replace the first user input, or the
-        // entire conversation. Preview the same replayed state as details.
-        let trajectory = super::converter::convert_jsonl_content_to_atif(&content).ok()?;
+    if matches!(source.agent_id, "gemini-cli" | "cline") {
+        // Preview the same replayed state as details. Cline conversion needs
+        // the path to merge its sibling UI stream.
+        let trajectory = if source.agent_id == "cline" {
+            super::converter::convert_jsonl_to_atif(path).ok()?
+        } else {
+            super::converter::convert_jsonl_content_to_atif(&content).ok()?
+        };
         let first_message = trajectory
             .steps
             .iter()
             .filter(|step| step.source == agentsight_atif::StepSource::User)
             .map(|step| strip_system_context(&step.message))
             .find(|text| !is_injected_user_text(text))?;
-        return Some(LocalSession {
-            session_id: trajectory
+        let session_id = if source.agent_id == "cline" {
+            session_id_for_path(path, source)
+        } else {
+            trajectory
                 .session_id
                 .filter(|id| !id.is_empty())
-                .unwrap_or_else(|| {
-                    path.file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                }),
+                .unwrap_or_else(|| session_id_for_path(path, source))
+        };
+        return Some(LocalSession {
+            session_id,
             agent_id: source.agent_id.to_string(),
             agent_name: source.agent_name.to_string(),
             agent_icon: source.icon.to_string(),
@@ -432,11 +483,7 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
     }
 
     if session_id.is_empty() {
-        session_id = path
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        session_id = session_id_for_path(path, source);
     }
 
     Some(LocalSession {

@@ -214,7 +214,9 @@ class MockServiceManager:
         if not ep:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
-        url = ep["endpoint_url"]
+        url = ep.get("endpoint_url")
+        if not url:
+            return json.dumps({"error": f"Tool {tool_name} has no configured endpoint"})
         method = ep.get("endpoint_method", "POST")
 
         # MCP wraps all parameters in a single 'kwargs' field.

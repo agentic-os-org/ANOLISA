@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-通过现有 sec-core CLI 提供命令安全检查。本目录维护桥接实现，后端由对应组件提供。
+通过公共 sec-core CLI 提供代码、PII 安全检查与 Skill 校验。本目录维护桥接实现，后端由对应组件提供。
 
 通过 Hook 步骤的 `match.tools` 选择代码工具，使用 `bash` 等标准名称或精确的
 `native:<adapter>:<name>` 选择器。Provider `config.tools` 按规范化的
@@ -10,8 +10,21 @@
 选中的工具缺少映射时默认返回错误；显式配置 `unmapped_tool: observe` 可只观察而不扫描。
 必需的安全步骤使用 `mode: block` 和 `on_error: block`，阻断风险和检查失败。
 
+随附 Qoder 示例在前后两个阶段都选择原生 `Bash`。未列出的工具保留原生行为，
+步骤记录为跳过。SDK 映射与输入提取规则见[配置指南](../../docs/developer-guide/zh/aw/providers/sec-core.md#配置-provider)。
+
+普通 resident Qoder SDK 和 QwenPaw 入口还可通过 `input.submit` 调用 `scan_prompt`
+和 `scan_user_input`。配置 Prompt、PII 阻断与 `on_error: block`，
+在模型请求前阻断注入风险、敏感用户文本及检查故障，见[提交检查配置](../../docs/developer-guide/zh/aw/providers/sec-core.md#用户提交检查)。
+
+Qoder SDK 和 QwenPaw 可在原生 `Skill` 工具加载指令前校验对象。
+Hermes 原生 `skill_view` 使用同一检查。设置 `config.skill: true`，在 `tool.before` 选择 `check_skill`；目录授权、
+信任状态与本地来源范围见 [Skill 校验](../../docs/developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
+
 维护人按 [CODEOWNERS](../../.github/CODEOWNERS) 由 @kongche-jbw 负责。
 桥接代码使用 [Apache-2.0](../../LICENSE)，后端来源见 [agent-sec-core](../../src/agent-sec-core/README_zh.md)。
+
+[工具 PII 示例](examples/aw.tool-pii.yaml)支持 Qoder SDK 与 QwenPaw。`scan_tool_input` 阻断敏感参数，`scan_tool_output` 用固定安全提示替换命中的文本槽。必需输出检查使用 `on_error: withhold_result`；扫描失败与风险命中分别处理。
 
 - [配置与运行](../../docs/developer-guide/zh/aw/providers/sec-core.md)
 - [配置示例](examples/aw.yaml)
@@ -20,9 +33,14 @@
 从仓库根目录构建和测试。
 
 ```bash
-cargo build --locked --manifest-path providers/agent-sec-core/Cargo.toml
+make -C providers/agent-sec-core build
+make -C providers/agent-sec-core install PREFIX=/usr/local DESTDIR="$PWD/target/aw-root"
 cargo test --locked --manifest-path providers/agent-sec-core/Cargo.toml
 ```
 
-Cargo 包名与二进制名保留为 `aw-provider-sec-core`。随 AW Preview 分发时使用
+Cargo 包名与二进制名保留为 `aw-provider-sec-core`。独立归档分发使用
 [构建指南](../../contribute/zh/aw/building.md)生成匹配的包。
+
+安装只复制预构建桥接程序、示例、已有私有 schema 和文档，不安装或启动后端。
+省略 `DESTDIR` 后，按调用者权限直接安装；`AWPRJ` 可为私有路径增加命名空间。
+运行配置使用最终程序的绝对 `transport.argv`。

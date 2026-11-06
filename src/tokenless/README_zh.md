@@ -5,7 +5,7 @@
 LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
 
 随包提供的 RTK 0.49.0 保留原生 `grep -l` / `-m` 语义，保守处理 Pipeline 重写，
-并让 `sudo` 命令保持原样。RTK 恢复提示使用 `rtk recall`，保留的输出以宿主 OS 用户为作用域，
+并让 `sudo` 命令保持原样。RTK 恢复提示使用 `tokenless rtk recall`，保留的输出以宿主 OS 用户为作用域，
 不按 Tokenless 租户或 Session 隔离。
 Flag 迁移、Pipeline 行为和输出恢复详见
 [随包提供的 RTK 命令](../../docs/user-guide/zh/tokenless/cli-reference.md#随包提供的-rtk-命令)。
@@ -19,12 +19,12 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
-| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
+| 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
-| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
+| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令）；已识别的构建/测试命令，以及直接或经内置 Wrapper 调用的 `find`、`head`、`tail`、`grep`、`rg`，使整条命令保持原生形式，关闭搜索路径共享也不改变此行为；RTK 自定义 Wrapper 前缀不在此保护范围 |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
 
 表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试
@@ -132,8 +132,7 @@ PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Cont
 首选 ANOLISA CLI 安装已发布的组件。
 
 安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`
-和 `rtk` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
-`PATH`。
+也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入 `PATH`。
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
@@ -156,7 +155,7 @@ sudo anolisa --install-mode system adopt tokenless
 直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
 
 另外两条公开安装路径可以独立安装 CLI，但不会写入 anolisa 组件记录。npm 路径
-提供预编译的 `tokenless` 和 `rtk` 二进制以及随包分发的 Agent adapter，需要
+提供预编译的 `tokenless` 二进制以及随包分发的 Agent adapter，需要
 Node.js 16.7+（`fs.cpSync` 自该版本起提供，也是包的 postinstall 所需版本）。
 curl 路径是独立安装脚本，优先使用 npm，失败时回退到源码构建：
 
@@ -170,8 +169,8 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 `~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh`
 下对应框架的脚本启用。curl 安装脚本会把它创建的内容记录到
 `~/.local/share/tokenless/install-receipt`，`scripts/uninstall.sh` 依据该
-回执只删除这些路径；其源码构建路径是 CLI-only（没有 `rtk`，也没有
-adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
+回执只删除这些路径；其源码构建路径是 CLI-only（没有 adapter），并需要
+Git 和 `patch` 下载固定版本的 RTK 源码。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样的步骤。
 完整的方式对照见 `docs/user-guide/zh/tokenless/index.md`。
 
 `~/.local/share/anolisa/adapters/tokenless` 与 anolisa 管理的安装共享，因此两条
@@ -186,12 +185,10 @@ adapter）。Agent 框架可以通过 `install-tokenless` OS Skill 执行同样�
 全局包都会被保留。中途失败的替换（tag 缺失、构建报错）会把原安装放回，而不是让
 机器上没有可用 CLI。
 
-当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel Mac
-仍暂无已发布的软件包：源码中保留的 `@anolisa/tokenless-darwin-x64`
-optional dependency 只是发布构建目标，不代表 registry 中已有可安装的软件包，
-因此 npm 路径无法在 Intel Mac 上提供二进制。独立安装脚本在 macOS 上也不会
-回退到源码构建——它会直接报错退出而不执行 `cargo`——所以 Intel Mac 目前没有
-受支持的安装路径。在该软件包发布之前，请使用 Linux 或 Apple Silicon macOS。
+已发布的 npm 软件包支持 Linux x86_64/aarch64、macOS Apple Silicon 和
+Intel Mac，以及 Windows x64。`@anolisa/tokenless-darwin-x64` 和
+`@anolisa/tokenless-win32-x64` 从 0.9.0 开始提供。独立安装脚本在 macOS 上使用
+npm，并拒绝回退到源码构建：它会报错退出而不执行 `cargo`。Windows 请直接使用 npm。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
 直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
@@ -277,12 +274,12 @@ cd Token-Less
 make setup
 ```
 
-源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 辅助
-二进制也位于同一个目录，并部署开发所需的全部 adapter。
+源码安装会把 `tokenless` 放在 `~/.local/bin`，并部署开发所需的全部 adapter。
+RTK 已链接进 `tokenless`，改写后的命令通过 `tokenless rtk` 执行。
 
 ### 构建 Python SDK
 
-框架开发者可以从源码构建进程内 Python API：
+框架开发者可以从源码构建 Python API：
 
 ```bash
 make python-wheel
@@ -297,8 +294,9 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 命令不包含 Python Extension。
 
 `anolisa_tokenless` 模块支持 CPython 3.11 及更高版本，但只能在构建该原生
-Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口并内置对应平台的 RTK；
-TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
+Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口，并内置对应平台的
+`tokenless` 可执行文件来运行改写后的命令；TOON 已链接进原生 Runtime，
+不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
 但目前尚未发布到 PyPI。可运行生命周期与 Stats 示例见
 [Python SDK 指南](../../docs/developer-guide/zh/sdk/tokenless/index.md)，AgentScope 挂载见
 [AgentScope SDK 集成](../../docs/developer-guide/zh/sdk/tokenless/agentscope.md)，产品 Adapter 见
@@ -358,9 +356,9 @@ Bundle 生命周期脚本额外支持最高优先级的 `TOKENLESS_OPENCODE_CONF
 
 ### 千问办公插件（Windows x64 本地模式）
 
-Windows x64 支持原生 `tokenless.exe`、`rtk.exe`、npm 启动器和千问办公 PowerShell
-Hook，不支持 Windows ARM64。Windows 软件包尚未发布，请按
-[Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并打包，
+Windows x64 支持原生 `tokenless.exe`、npm 启动器和千问办公 PowerShell
+Hook，不支持 Windows ARM64。使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。
+源码构建请参阅 [Windows 构建说明](../../docs/developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)，
 不需要 Git Bash 或 WSL。
 
 Python Adapter 注册 PowerShell Hook 命令，PreTool 同时处理 Bash 和 PowerShell 输入。
@@ -375,7 +373,13 @@ PreToolUse 匹配两种 Shell 的工具名；
 PostToolUse **监听所有工具**，按公共策略压缩符合条件的完整结果。`mcp_list`、`mcp_get`、
 `mcp_call` 仅包含遥测信息的回调保持透传，不会用遥测替换真实响应；完整 MCP 响应仍可压缩。
 保留文件内容保护和 RTK 去重。统计归属为 `qwenwork`，
-与 Qoder CLI、Qwen Code、QwenPaw 独立。
+与 Qoder CLI、Qwen Code、QwenPaw 独立。千问办公工作区 Shell Hook 的数据库和
+Pre/Post 状态使用系统用户默认的 `~/.tokenless`，或 `TOKENLESS_DATA_DIR` 指定的
+有效绝对路径；`$HOME` 不会改变默认目录。路径无效时原样放行，不创建状态。
+已有工作区数据库不会自动迁移。
+Shell 沙箱限制可能导致 RTK 统计和执行回执无法保存，但命令和宿主 Hook 压缩仍可正常工作。
+安装/检测输出会说明这一限制及当前进程的数据目录，不执行沙箱可写性检测。
+RTK 原生数据库保留自身的路径配置。
 
 运行 `anolisa install tokenless` 后，退出千问办公，再显式旁加载插件：
 
@@ -387,7 +391,7 @@ anolisa adapter status tokenless
 
 完成后重启千问办公并开启新会话，在应用内检查激活状态。CLI 验证受管理文件，
 加载和激活状态保持 `unknown`。旁加载不修改 settings，也不自动启用已禁用的插件。
-Linux VM 会话仍不受支持。工作区 Shell 的状态保存在对话工作目录中，
+Linux VM 会话仍不受支持。工作区 Shell 的状态遵循 Tokenless 数据目录设置，
 其单个 MCP 文本块按 Shell 输出处理。已有脚本管理的安装需先用原脚本卸载，再通过 CLI 启用；
 CLI 管理的副本使用 `anolisa adapter disable tokenless qwenwork` 卸载。
 安装、卸载及兼容性基线参见[千问办公集成](../../docs/user-guide/zh/tokenless/framework-integration.md#千问办公macos)。
@@ -539,13 +543,13 @@ Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值�
 应用有明确生命周期策略，否则保留默认一小时 Stash TTL，且不要依赖跨节点恢复。
 
 两个 AgentScope Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、
-环境错误提示和逐调用归属。原生 Wheel 内置 RTK 并直接链接 TOON，不搜索系统可执行文件。
+环境错误提示和逐调用归属。原生 Wheel 直接链接 TOON，并通过内置的 `tokenless` 可执行文件运行改写后的命令，不搜索系统可执行文件。
 宿主对象和流式 chunk 保持不变，只转换复制后的调用参数和最终模型可见文本。Tool Ready
 仍保持硬关闭。
 
 ## Raw 打包
 
-Raw 打包接收同一目录中已经构建好的 `tokenless` 和 `rtk`，并按照
+Raw 打包接收同一目录中已经构建好的 `tokenless`，并按照
 组件维护的稳定目录结构生成制品：
 
 ```bash
@@ -575,7 +579,7 @@ npm 打包同样从 `target/npm-prebuilt` 下读取预构建的 `linux-x64`、
 `linux-arm64`、`darwin-x64`、`darwin-arm64` 四个二进制目录，并负责校验和组装：
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 ```
 
 固定目录结构和单目标接口见 [npm/README.md](npm/README.md#packaging-for-npm)。
@@ -707,7 +711,7 @@ python3 tests/test-openclaw-gateway.py --image tokenless-openclaw-full:2f620b970
 
 ## 前置依赖
 
-- **Rust** toolchain >= 1.89 — RTK（edition 2024）所需
+- **Rust** toolchain >= 1.91 — 工作区 MSRV，RTK 同样需要
 - **just** — 用于下载并应用 RTK Patch
 - **Git** — 用于通过 justfile 下载 RTK 源码
 - **CPython 3.11+ 开发环境与 uv** — 仅构建 Python Wheel 或显式包含全部

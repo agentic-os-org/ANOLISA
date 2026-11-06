@@ -479,43 +479,66 @@ impl Analyzer {
             return results;
         }
 
-        // 2. Token analysis - extract from SSE events or non-streaming JSON body
-        let mut token_result = match result {
-            AggregatedResult::SseComplete(pair) => {
-                let pid = pair.request.source_event.pid;
-                let comm = pair.request.source_event.comm_str();
-                self.extract_token_from_sse(
-                    &pair.response.sse_events,
-                    pair.response.sse_continuation_bytes.as_deref(),
-                    pid,
-                    &comm,
-                )
+        let is_responses_sub_endpoint = match result {
+            AggregatedResult::HttpComplete(pair) | AggregatedResult::SseComplete(pair) => {
+                crate::parser::llm::is_responses_sub_endpoint(&pair.request.path)
             }
-            AggregatedResult::ResponseOnly { response, .. } if !response.sse_events.is_empty() => {
-                let pid = response.pid();
-                let comm = response.parsed.source_event.comm_str();
-                self.extract_token_from_sse(
-                    &response.sse_events,
-                    response.sse_continuation_bytes.as_deref(),
-                    pid,
-                    &comm,
-                )
-            }
-            AggregatedResult::HttpComplete(pair) => {
-                let pid = pair.request.source_event.pid;
-                let comm = pair.request.source_event.comm_str();
-                self.extract_token_from_json_body(
-                    pair.response.parsed.json_body().as_ref(),
-                    pid,
-                    &comm,
-                )
+            AggregatedResult::RequestOnly { request, .. } => {
+                crate::parser::llm::is_responses_sub_endpoint(&request.path)
             }
             AggregatedResult::Http2StreamComplete(stream) => {
-                let pid = stream.pid();
-                let comm = stream.comm();
-                self.extract_token_from_json_body(stream.response_json_body().as_ref(), pid, &comm)
+                crate::parser::llm::is_responses_sub_endpoint(&stream.path())
             }
-            _ => None,
+            _ => false,
+        };
+
+        // 2. Token analysis - extract from SSE events or non-streaming JSON body
+        let mut token_result = if is_responses_sub_endpoint {
+            None
+        } else {
+            match result {
+                AggregatedResult::SseComplete(pair) => {
+                    let pid = pair.request.source_event.pid;
+                    let comm = pair.request.source_event.comm_str();
+                    self.extract_token_from_sse(
+                        &pair.response.sse_events,
+                        pair.response.sse_continuation_bytes.as_deref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                AggregatedResult::ResponseOnly { response, .. }
+                    if !response.sse_events.is_empty() =>
+                {
+                    let pid = response.pid();
+                    let comm = response.parsed.source_event.comm_str();
+                    self.extract_token_from_sse(
+                        &response.sse_events,
+                        response.sse_continuation_bytes.as_deref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                AggregatedResult::HttpComplete(pair) => {
+                    let pid = pair.request.source_event.pid;
+                    let comm = pair.request.source_event.comm_str();
+                    self.extract_token_from_json_body(
+                        pair.response.parsed.json_body().as_ref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                AggregatedResult::Http2StreamComplete(stream) => {
+                    let pid = stream.pid();
+                    let comm = stream.comm();
+                    self.extract_token_from_json_body(
+                        stream.response_json_body().as_ref(),
+                        pid,
+                        &comm,
+                    )
+                }
+                _ => None,
+            }
         };
 
         // 5. Token consumption analysis - breakdown by message role
@@ -531,7 +554,7 @@ impl Analyzer {
 
         // 4. HTTP data export - extract raw HTTP request/response data
         if let Some(http_record) = self.extract_http_record(result) {
-            if token_result.is_none() && http_record.is_sse {
+            if !is_responses_sub_endpoint && token_result.is_none() && http_record.is_sse {
                 if let Some(body) = &http_record.response_body {
                     // An HTTP/2 SSE body has no `ParsedSseEvent`s, so the h2
                     // path never reaches `extract_token_from_sse`; this array is
@@ -602,7 +625,7 @@ impl Analyzer {
 
         if let Some(record) = token_result {
             results.push(AnalysisResult::Token(record));
-        } else {
+        } else if !is_responses_sub_endpoint {
             // Fallback: manually compute tokens using get_global_tokenizer
             if let Some(record) = self.compute_tokens_manually(result) {
                 results.push(AnalysisResult::Token(record));
@@ -635,12 +658,16 @@ impl Analyzer {
         }
         match result {
             AggregatedResult::HttpComplete(pair) => {
-                let req_body = pair.request.json_body();
+                let req_body = pair.request.json_body().or_else(|| {
+                    MessageParser::decode_request_body(&pair.request.path, pair.request.body())
+                });
                 let resp_body = pair.response.parsed.json_body();
                 self.analyze_message(&pair.request.path, req_body.as_ref(), resp_body.as_ref())
             }
             AggregatedResult::SseComplete(pair) => {
-                let req_body = pair.request.json_body();
+                let req_body = pair.request.json_body().or_else(|| {
+                    MessageParser::decode_request_body(&pair.request.path, pair.request.body())
+                });
                 // For SSE responses, parse from SSE events
                 self.analyze_message_with_sse(
                     &pair.request.path,
@@ -649,7 +676,9 @@ impl Analyzer {
                 )
             }
             AggregatedResult::RequestOnly { request, .. } => {
-                let req_body = request.json_body();
+                let req_body = request
+                    .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&request.path, request.body()));
                 self.analyze_message(&request.path, req_body.as_ref(), None)
             }
             AggregatedResult::Http2StreamComplete(stream) => {
@@ -657,7 +686,9 @@ impl Analyzer {
                 if path.is_empty() {
                     return None;
                 }
-                let req_body = stream.request_json_body();
+                let req_body = stream.request_json_body().or_else(|| {
+                    MessageParser::decode_request_body(&path, stream.request_body_str()?.as_bytes())
+                });
                 if let Some(sse_json) = stream.response_sse_json_array() {
                     return self
                         .message
@@ -1039,6 +1070,7 @@ impl Analyzer {
 
                 let request_body = req
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&req.path, req.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
@@ -1088,6 +1120,7 @@ impl Analyzer {
 
                 let request_body = req
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&req.path, req.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = req.body();
@@ -1129,6 +1162,7 @@ impl Analyzer {
             AggregatedResult::RequestOnly { request, .. } => {
                 let request_body = request
                     .json_body()
+                    .or_else(|| MessageParser::decode_request_body(&request.path, request.body()))
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
                         let body = request.body();
@@ -1157,7 +1191,10 @@ impl Analyzer {
                 })
             }
             AggregatedResult::Http2StreamComplete(stream) => {
-                let request_body = stream.request_body_str();
+                let request_body = stream.request_body_str().map(|body| {
+                    MessageParser::decode_request_body(&stream.path(), body.as_bytes())
+                        .map_or(body, |value| value.to_string())
+                });
 
                 // Try SSE parsing first, fallback to regular text if it fails
                 // This is more robust than checking content-type header (which may fail due to HPACK)
@@ -1758,6 +1795,38 @@ mod tests {
                 _ => None,
             })
             .expect("Analyzer must emit HttpRecord")
+    }
+
+    #[test]
+    fn http2_responses_retrieval_sse_usage_is_not_counted_again() {
+        let analyzer = Analyzer::new();
+        let stored_response = serde_json::json!({
+            "id": "resp_h2",
+            "object": "response",
+            "model": "gpt-4o",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 8,
+                "total_tokens": 28,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }
+        });
+        let stream =
+            build_sse_http2_stream("/v1/responses/resp_h2", br#"{}"#, Some(&stored_response));
+
+        let results = analyzer.analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream));
+        assert!(
+            results.iter().all(|result| !matches!(
+                result,
+                AnalysisResult::Token(_) | AnalysisResult::Audit(_)
+            )),
+            "HTTP/2 SSE recovery must not turn a retrieval into a second call: {results:?}"
+        );
+        assert!(results.iter().any(|result| matches!(
+            result,
+            AnalysisResult::Http(record) if record.path == "/v1/responses/resp_h2"
+        )));
     }
 
     /// An HTTP/2 SSE stream splits Anthropic usage across events and ends with a

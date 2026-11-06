@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -212,15 +213,28 @@ async def main() -> None:
                 type="tool_use",
                 id="call-shell",
                 name="shell",
-                input={"command": "grep needle file.txt"},
+                input={"command": "git status"},
             ),
         )
         assert len(_SHELL_COMMANDS) == 1
-        assert str(integration.sdk._rtk_path) in _SHELL_COMMANDS[0]
+        # The CLI names itself by its resolved path.
+        assert os.path.realpath(integration.sdk._rtk_launcher) in _SHELL_COMMANDS[0]
         assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_SESSION_ID=smoke-session" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
         assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
+
+        _SHELL_COMMANDS.clear()
+        for index, command in enumerate(("grep needle file.txt", "rg 'foo|bar' src")):
+            await agent._acting(
+                ToolUseBlock(
+                    type="tool_use",
+                    id=f"call-search-{index}",
+                    name="shell",
+                    input={"command": command},
+                ),
+            )
+        assert _SHELL_COMMANDS == ["grep needle file.txt", "rg 'foo|bar' src"]
 
         tool_call = ToolUseBlock(
             type="tool_use",

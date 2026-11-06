@@ -9,12 +9,15 @@ use asc_daemon_protocol::{DaemonRequest, DaemonResponse, RequestId, error_code};
 use asc_daemon_service::{DispatchError, DispatchRequest, RequestDispatcher, ResponseDisposition};
 
 use crate::action::CodeScanHandler;
+use crate::gateway::GatewayHandler;
 use crate::pap::PapHandler;
 use crate::pii::PiiScanHandler;
 use crate::prompt_scan::PromptScanHandler;
 use crate::query::QueryHandler;
 
 const DEFAULT_DISPATCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+/// Gateway changes wait for the data plane to load a generation and for systemd jobs.
+const GATEWAY_DISPATCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Protocol router composed over daemon application use cases.
 pub struct DaemonDispatcher {
@@ -25,8 +28,11 @@ pub struct DaemonDispatcher {
     skill_sec: crate::skill_sec::SkillSecHandler,
     prompt_scan: PromptScanHandler,
     queries: QueryHandler,
+    gateway: GatewayHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
     observability: Option<asc_daemon_core::ObservabilityService>,
+    intent: Option<Arc<asc_daemon_core::intent::IntentService>>,
+    authorization: Option<asc_daemon_core::AuthorizationService>,
 }
 
 impl DaemonDispatcher {
@@ -50,9 +56,19 @@ impl DaemonDispatcher {
             skill_sec: crate::skill_sec::SkillSecHandler::new(Arc::clone(&actions)),
             prompt_scan: PromptScanHandler::new(actions),
             queries: QueryHandler::default(),
+            gateway: GatewayHandler::default(),
             principal_policy,
             observability: None,
+            intent: None,
+            authorization: None,
         }
+    }
+
+    /// Installs the trusted policy evaluator and checked receipt sink.
+    #[must_use]
+    pub fn with_authorization(mut self, service: asc_daemon_core::AuthorizationService) -> Self {
+        self.authorization = Some(service);
+        self
     }
 
     /// Installs the explicitly configured observability ingestion application.
@@ -66,6 +82,23 @@ impl DaemonDispatcher {
     #[must_use]
     pub fn with_queries(mut self, queries: QueryHandler) -> Self {
         self.queries = queries;
+        self
+    }
+
+    /// Installs the secret-gateway control plane; without it `gateway.*` is unavailable.
+    #[must_use]
+    pub fn with_gateway(
+        mut self,
+        gateway: Arc<dyn asc_daemon_core::GatewayAdministration>,
+    ) -> Self {
+        self.gateway = GatewayHandler::new(gateway);
+        self
+    }
+
+    /// Installs the shared initial proposal use case; model calls are unavailable by default.
+    #[must_use]
+    pub fn with_intent(mut self, service: Arc<asc_daemon_core::intent::IntentService>) -> Self {
+        self.intent = Some(service);
         self
     }
 
@@ -129,6 +162,17 @@ impl DaemonDispatcher {
             );
         }
         match method_id {
+            MethodId::IntentPropose => {
+                crate::intent::handle(request_id, peer, control, self.intent.as_deref(), request)
+            }
+            MethodId::Authorization(method) => crate::authorization::handle(
+                request_id,
+                peer,
+                control,
+                self.authorization.as_ref(),
+                method,
+                request.params,
+            ),
             MethodId::Health => DaemonResponse::success(
                 request_id,
                 serde_json::json!({
@@ -155,6 +199,10 @@ impl DaemonDispatcher {
             MethodId::Query(method) => {
                 self.queries
                     .handle(request_id, &principal, method, request.params)
+            }
+            MethodId::Gateway(method) => {
+                self.gateway
+                    .handle(request_id, peer, method, request.params)
             }
             MethodId::Action(method) => match method {
                 method::ActionMethod::SkillSec => {
@@ -211,6 +259,12 @@ impl RequestDispatcher for DaemonDispatcher {
                 .map(std::time::Duration::from_millis);
         }
         let request: DaemonRequest = serde_json::from_slice(payload).ok()?;
+        if request.method == method::INTENT_PROPOSE {
+            return Some(std::time::Duration::from_secs(35));
+        }
+        if method::GATEWAY_METHODS.contains(&request.method.as_str()) {
+            return Some(GATEWAY_DISPATCH_BUDGET);
+        }
         // Prompt Scanner retains its existing fixed local-model budget.
         if request.method == method::ACTION_PROMPT_SCAN
             || request.method == method::ACTION_PROMPT_SCAN_WARMUP
@@ -261,8 +315,24 @@ impl RequestDispatcher for DaemonDispatcher {
         }
 
         let peer = PeerCredentials::new(request.peer.uid(), request.peer.gid(), request.peer.pid());
-        let decoded = serde_json::from_slice::<DaemonRequest>(&request.payload);
-        let Some(decoded) = decoded.ok().filter(|_| {
+        let decoded = serde_json::from_slice::<DaemonRequest>(&request.payload).ok();
+        // Intent carries its own byte budget, which has to be classified before the shared frame
+        // budget: the shared budget counts the LF the transport strips, so a frame that only
+        // exceeds the intent limit would otherwise be reported as a malformed envelope.
+        if decoded
+            .as_ref()
+            .is_some_and(|decoded| exceeds_intent_budget(&request.payload, &decoded.method))
+        {
+            return write_response(
+                response,
+                &DaemonResponse::<serde_json::Value>::error(
+                    request_id,
+                    error_code::RESOURCE_EXHAUSTED,
+                    "intent request exceeds byte limit",
+                ),
+            );
+        }
+        let Some(decoded) = decoded.filter(|_| {
             // After strict decoding, a small frame fits both independent budgets.
             // Transport strips LF, so reserve one byte even on this fast path.
             request.payload.len() < asc_daemon_protocol::CONTEXT_FRAME_BYTES
@@ -308,6 +378,13 @@ impl RequestDispatcher for DaemonDispatcher {
 pub(crate) fn new_request_id() -> RequestId {
     RequestId::new(uuid::Uuid::new_v4().to_string())
         .expect("UUID request identities are always non-empty")
+}
+
+/// Intent's own byte budget, counted exactly as the transport budget counts the stripped LF.
+fn exceeds_intent_budget(payload: &[u8], method_name: &str) -> bool {
+    method_name == method::INTENT_PROPOSE
+        && payload.len() + usize::from(payload.last() != Some(&b'\n'))
+            > asc_daemon_protocol::intent::INTENT_REQUEST_BYTES
 }
 
 pub(crate) fn write_response<T: serde::Serialize>(
@@ -397,5 +474,24 @@ fn record_result(result: &DaemonResponse) {
             };
             asc_observability::mark_error(category);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intent_budget_is_counted_including_the_stripped_line_feed() {
+        let budget = asc_daemon_protocol::intent::INTENT_REQUEST_BYTES;
+        let at_limit = vec![b' '; budget - 1];
+        assert!(!exceeds_intent_budget(&at_limit, method::INTENT_PROPOSE));
+        let mut over = at_limit;
+        over.push(b' ');
+        assert!(exceeds_intent_budget(&over, method::INTENT_PROPOSE));
+        assert!(!exceeds_intent_budget(&over, "health"));
+        over.pop();
+        over.push(b'\n');
+        assert!(!exceeds_intent_budget(&over, method::INTENT_PROPOSE));
     }
 }

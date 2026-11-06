@@ -396,6 +396,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
             RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
             RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
+            RawInputEvent::TrialControl { id, action } => {
+                parser.push_card_event("trial_control", &format!("{id}:{action}"))
+            }
             RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
             RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
             RawInputEvent::QuestionSubmitAttempt(id) => {

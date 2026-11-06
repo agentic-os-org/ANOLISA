@@ -184,6 +184,14 @@ async def task(index, mode, mutation=None):
                     pass
             except Exception:
                 failed = True
+            if mode == "compress-recovery":
+                # A report fault keeps the checked result and the client usable.
+                await client.query("Call the local tool again")
+                try:
+                    async for _ in client.receive_response():
+                        pass
+                except Exception:
+                    failed = True
         if mode == "deny":
             assert not calls, "Caller mutation bypassed AW denial"
         assert not (directory / "other-handler-effect").exists()
@@ -196,23 +204,27 @@ async def task(index, mode, mutation=None):
         ]
         before = [event for event in events if event["name"] == "tool.before"]
         after = [event for event in events if event["name"] == "tool.after"]
-        count = 2 if mode == "parallel" else 1
+        count = 2 if mode in {"parallel", "compress-recovery"} else 1
         assert len(before) == count, (mode, len(before))
         assert len(after) == (0 if mode in {"deny", "before-error"} else count), (mode, len(after))
         assert all(event["native"]["aw_source"] == "claude-sdk-mcp/v1" for event in events)
         assert len({event["tool"]["call_id"] for event in before}) == count
         assert all(event["tool"]["name"] == "mcp__local__touch" for event in events)
         assert len(calls) == (0 if mode in {"deny", "before-error"} else count), calls
-        assert failed == (mode in {"before-error", "after-error", "compress-error", "result-control"}), (mode, failed)
-        if mode in {"before-error", "after-error", "compress-error", "result-control"}:
+        assert failed == (mode == "before-error"), (mode, failed)
+        if mode == "before-error":
             assert len(requests) == 1, (mode, len(requests))
         else:
-            assert len(requests) == 2, (mode, len(requests))
+            assert len(requests) == (4 if mode == "compress-recovery" else 2), (mode, len(requests))
+            seen: set[str] = set()
             results = [
                 block
-                for message in requests[-1]["messages"]
+                for request in requests
+                for message in request["messages"]
                 for block in message.get("content", [])
-                if isinstance(block, dict) and block.get("type") == "tool_result"
+                if isinstance(block, dict)
+                and block.get("type") == "tool_result"
+                and not (block["tool_use_id"] in seen or seen.add(block["tool_use_id"]))
             ]
             assert len(results) == count, (mode, results)
             texts = [
@@ -223,11 +235,11 @@ async def task(index, mode, mutation=None):
                 )
                 for result in results
             ]
-            if mode in {"allow", "parallel"}:
+            if mode in {"allow", "parallel", "after-error"}:
                 assert all(
                     ORIGINAL not in text and len(text) < len(ORIGINAL) for text in texts
                 ), mode
-            if mode in {"error", "multi", "structured"}:
+            if mode in {"error", "multi", "structured", "compress-error", "compress-recovery"}:
                 assert any(ORIGINAL in text for text in texts), mode
             if mode == "error":
                 assert results[0]["is_error"] is True
@@ -237,6 +249,11 @@ async def task(index, mode, mutation=None):
                 assert "CHECKED-ORIGINAL" in json.dumps(after[0]["tool"]["result"])
                 assert "UNVERIFIED-NEW-RESULT" not in json.dumps(after[0]["tool"]["result"])
                 assert (directory / "result-mutated").exists()
+            if mode == "result-control":
+                # The hook inspected and rejected the smuggled result; the
+                # report fault is recorded (sdk_resident asserts the fault
+                # diagnostic) and the task continues with the checked result.
+                assert "UNVERIFIED-NEW-RESULT" in json.dumps(after[0]["tool"]["result"]), mode
         if mode == "parallel":
             assert finished[0].endswith("second"), finished
             assert {event["tool"]["call_id"] for event in before} == {
@@ -262,7 +279,7 @@ async def task(index, mode, mutation=None):
 
 
 async def main():
-    modes = ("compress-error",) if os.environ["AW_TEST_SCENARIO"] == "mcp-failure" else (
+    modes = ("compress-error", "compress-recovery") if os.environ["AW_TEST_SCENARIO"] == "mcp-failure" else (
         "allow", "deny", "before-error", "after-error", "error", "multi", "structured", "exception", "parallel",
         "result-mutation", "result-control")
     for index, mode in enumerate(modes):

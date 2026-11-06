@@ -19,6 +19,9 @@ import. Enhanced Bash login sessions capture the resulting PATH once, before the
 first prompt, and pass it only to provider child processes. Set
 `COSH_SHELL_BOOTSTRAP_PATH=0` to disable this startup PATH handoff.
 
+`COSH_HOME` can relocate user extensions and state; see the
+[Extension guide](../../docs/user-guide/en/cosh-ng/core/extensions.md).
+
 ## Why cosh-ng
 
 | In a conventional terminal | In cosh-ng |
@@ -131,6 +134,10 @@ for the version-specific attribute limits and Native alternative.
 $ hello
 bash: hello: command not found
 ```
+
+The ECS automatic model-access candidate can guide activation on the first model
+request and resume automatically without `/auth`; existing providers take
+precedence. The service must support ECS identity exchange. See [providers and authentication](../../docs/user-guide/en/cosh-ng/core/providers.md#automatic-model-access-on-ecs).
 
 Use `/auth` to choose a supported provider plan, `/help` to list current slash
 commands, and `/mode approval recommend` when every Agent tool call should wait

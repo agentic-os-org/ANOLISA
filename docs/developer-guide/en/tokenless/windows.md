@@ -28,17 +28,18 @@ input unchanged; exit code 2 is reserved for blocking decisions. A missing
 Python interpreter or shared hook resource therefore disables optimization for
 that invocation without requiring another dispatcher.
 
-PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`, and
-`mcp__qw-builtin__mcp_workspace_bash`; RTK decides whether to rewrite each command.
-PowerShell calls bind the native RTK executable and scope attribution variables
-to that invocation. PostTool classifies PowerShell output as command output,
+PreTool matches `Bash`, `PowerShell`, `mcp__workspace__bash`,
+`mcp__qw-builtin__mcp_workspace_bash`, and `mcp__qw-builtin__mcp__workspace__bash`;
+RTK decides whether to rewrite each command.
+PowerShell calls run RTK through the native `tokenless.exe` and scope attribution
+variables to that invocation. PostTool classifies PowerShell output as command output,
 retains file-content protection, and avoids compressing RTK output twice.
 Unsupported commands pass through.
 
-The PowerShell wrapper uses a child-scope `rtk` alias. In a rewritten compound
-command, this also binds any pre-existing bare `rtk` invocation to the managed
-binary; POSIX binding only changes calls inserted by the rewrite. Explicit
-executable paths are unaffected. The wrapper preserves `$?` and `$LASTEXITCODE`
+The PowerShell wrapper replaces each RTK call inserted by the rewrite with
+`& '<path>\tokenless.exe' rtk`. Pre-existing bare `rtk` invocations and explicit
+executable paths are unaffected. When an inserted call does not start a PowerShell
+command, the rewrite is skipped and the original command passes through. The wrapper preserves `$?` and `$LASTEXITCODE`
 after restoring attribution variables, including nonzero native exits, without
 adding stderr output or entries to `$Error`.
 When this wrapper is the final command passed to `powershell -Command` or
@@ -67,8 +68,8 @@ that separately in a QwenWork local session.
 Native binary discovery uses the executable's sibling directory and absolute
 PATH entries. Unlike Unix, Windows discovery does not check file or directory
 ACLs, ownership, or reparse points: configured installation and PATH directories
-are trusted. RTK resolution accepts only `.exe`; general dependency discovery
-also accepts `.com`, `.bat`, and `.cmd` entries from `PATHEXT`.
+are trusted. Dependency discovery accepts `.exe` and also the `.com`, `.bat`,
+and `.cmd` entries from `PATHEXT`.
 
 Windows support covers the native CLI and QwenWork adapter. npm copies other
 adapter resources but skips Claude auto-enable; other Windows adapters are not
@@ -84,14 +85,14 @@ supported. The Linux CI entry point is described below.
 
 ```powershell
 cd src/tokenless
-./scripts/build-windows.ps1
-node npm/scripts/package-npm.js --target win32-x64
+./packaging/build/build-windows.ps1
+node packaging/npm/package-npm.js --target win32-x64
 $packages = Get-ChildItem npm/dist/tokenless-win32-x64/*.tgz, npm/dist/tokenless/*.tgz
 npm install -g $packages.FullName
 ```
 
-The build script fetches and patches the pinned RTK revision and writes both
-executables to `target/npm-prebuilt/win32-x64`. Add `-Debug` for a development
+The build script fetches and patches the pinned RTK revision, links it into
+`tokenless.exe`, and writes that executable to `target/npm-prebuilt/win32-x64`. Add `-Debug` for a development
 build. The npm packages are local artifacts; this command does not publish them.
 
 For a combined release, transfer the complete `target/npm-prebuilt/win32-x64`
@@ -111,8 +112,8 @@ The Windows smoke suite invokes real PowerShell hooks and native executables;
 application UI loading and activation require a separate QwenWork local session.
 Set `TOKENLESS_TEST_QWENWORK_APP` to the installed version directory (containing
 `QwenWorkCN.exe`) to test managed Bash with the actual host manifest environment
-for both engines and both MCP aliases, and to exercise the installed OpenCode
-hook runner using Node on PATH. Set `TOKENLESS_TEST_BASH` to Git Bash's executable
+for both engines and all recognized MCP workspace-Shell aliases, and to exercise
+the installed OpenCode hook runner using Node on PATH. Set `TOKENLESS_TEST_BASH` to Git Bash's executable
 to include legacy execution tests. The database rejection fixtures use system
 temporary storage (`%SystemRoot%/Temp` on Windows, `/tmp` on Unix), independently
 of a home-backed `TEMP`/`TMP`/`TMPDIR`; they report unavailable fixtures if that
@@ -161,14 +162,14 @@ TOKENLESS_SOURCE_WORKTREE=/tmp/tokenless-windows-release/source \
     --source-repo "$root" \
     --output-dir /tmp/tokenless-windows-release/artifacts \
     --wheel-output-dir /tmp/tokenless-windows-release/wheels \
-    --version 0.9.0 --target-os windows --target-arch x86_64 \
+    --version 0.9.3 --target-os windows --target-arch x86_64 \
     --profile windows-msvc-x86_64
 ```
 
-The Windows ZIP contains `tokenless.exe`, `rtk.exe`, `LICENSE` and two npm
+The Windows ZIP contains `tokenless.exe`, `LICENSE` and two npm
 tarballs under `npm/` (the Windows-targeted root package and `win32-x64` platform
 package). It has SHA-256 and CycloneDX sidecars like the other release archives.
-CLI and RTK use a static CRT, with an import check rejecting external VC++ runtime
+The CLI uses a static CRT, with an import check rejecting external VC++ runtime
 DLLs. The separate Python wheel uses `cp311-abi3-win_amd64` and the runtime supplied
 with Windows Python. The release workflow uploads
 these assets to GitHub; it does not publish to npm or PyPI. Use all five platform

@@ -1,6 +1,6 @@
 [package]
 name = "asc-cli"
-description = "Daemon-only AgentSecCore CLI with Policy, Scope, Binding, and code scanning"
+description = "AgentSecCore daemon client and direct sandbox execution CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,8 @@ name = "agent-sec-daemon-health"
 path = "src/health.rs"
 
 [dependencies]
+asc-pep-runtime.workspace = true
+sha2 = { workspace = true }
 chrono = { workspace = true }
 crossterm = { workspace = true }
 signal-hook = { workspace = true }
@@ -24,6 +26,7 @@ unicode-width = { workspace = true }
 asc-action-types = { workspace = true }
 asc-capability-prompt-scan = { workspace = true }
 asc-model-client = { workspace = true }
+asc-intent = { workspace = true }
 dirs = { workspace = true }
 rustix = { workspace = true }
 asc-observability = { workspace = true, features = ["runtime"] }
@@ -31,6 +34,8 @@ tracing.workspace = true
 asc-daemon-client = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
+asc-os-permission-types = { workspace = true }
+asc-policy-cedar = { workspace = true }
 asc-policy-types = { workspace = true }
 asc-security-events = { workspace = true }
 clap = { workspace = true }
@@ -40,6 +45,7 @@ thiserror = { workspace = true }
 unicode-properties = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 asc-persistence-sqlite = { workspace = true }
 asc-capability-skill-sec = { workspace = true }
 asc-action-runtime = { workspace = true, features = ["testing"] }

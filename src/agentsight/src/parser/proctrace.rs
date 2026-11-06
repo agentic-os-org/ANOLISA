@@ -50,6 +50,8 @@ pub struct ParsedProcEvent {
     /// Output file descriptor for stdout events (1 = stdout, 2 = stderr).
     /// `None` for event types that carry no descriptor (exec, exit).
     pub fd: Option<u32>,
+    /// Raw wait(2) status carried by an exit event.
+    pub raw_exit_status: Option<i32>,
 }
 
 impl ProcTraceParser {
@@ -72,6 +74,7 @@ impl ProcTraceParser {
                 args: Some(args.clone()).filter(|s| !s.is_empty()),
                 stdout_data: None,
                 fd: None,
+                raw_exit_status: None,
             }),
             VariableEvent::Stdout {
                 header,
@@ -97,9 +100,13 @@ impl ProcTraceParser {
                     args: None,
                     stdout_data,
                     fd: Some(*fd),
+                    raw_exit_status: None,
                 })
             }
-            VariableEvent::Exit { header, .. } => Some(ParsedProcEvent {
+            VariableEvent::Exit {
+                header,
+                raw_exit_status,
+            } => Some(ParsedProcEvent {
                 event_type: ProcEventType::Exit,
                 pid: header.pid,
                 tid: header.tid,
@@ -111,6 +118,7 @@ impl ProcTraceParser {
                 args: None,
                 stdout_data: None,
                 fd: None,
+                raw_exit_status: Some(*raw_exit_status),
             }),
             VariableEvent::Unknown(_) => None,
         }
@@ -301,6 +309,7 @@ mod tests {
             args: None,
             stdout_data: Some(data.to_string()),
             fd: Some(1),
+            raw_exit_status: None,
         }
     }
 

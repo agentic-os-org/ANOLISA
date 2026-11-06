@@ -177,12 +177,15 @@ fn write_observation(
         // Read the actual file mtime from the filesystem rather than
         // using Utc::now(). The watcher's flush path uses
         // store::mtime_ms_of(&meta) for time-decay scoring; using a
-        // synthetic timestamp here would create a mismatch with the
-        // subsequent redundant upsert and skew decay-based ranking.
+        // synthetic timestamp here would defeat watcher deduplication
+        // and skew decay-based ranking.
         let mtime_ms = crate::safe_fs::metadata(svc.mount.root_fd.as_fd(), Path::new(&path))
             .map(|m| crate::index::store::mtime_ms_of(&m))
             .unwrap_or_else(|_| Utc::now().timestamp_millis());
-        if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n) {
+        // Match watcher attribution before its deduplication can skip this
+        // row: NULL hides it from its isolated agent and shares it with others.
+        let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+        if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n, agent_id.as_deref()) {
             tracing::warn!("synchronous reindex after observe failed for {path}: {e}");
         }
     }

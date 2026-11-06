@@ -18,6 +18,7 @@
 | `tokenless retrieve` | 取回被截断并写入 Stash 的 Payload |
 | `tokenless env-check` | 报告旧版环境检查已硬关闭 |
 | `tokenless stats` | 查询和控制本地统计 |
+| `tokenless rtk` | 运行 PreTool 改写后使用的随包 RTK 命令，见[随包提供的 RTK 命令](#随包提供的-rtk-命令) |
 
 使用当前安装版本的帮助查看最终参数定义：
 
@@ -143,40 +144,64 @@ BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增�
 
 - `0`：正常操作结果，包括透传、无收益、Dry-run、Recoverability 不可用、RTK 不适用和
   Tool Error。
-- `1`：操作失败，包括 RTK Timeout、未授权/缺失 Retrieve、Stash 或 Pipeline 失败。错误写入
+- `1`：操作失败，包括缺少 RTK 启动程序或状态目录、未授权/缺失 Retrieve、Stash 或 Pipeline 失败。错误写入
   stderr，不输出 Response JSON。
 - `2`：JSON 格式错误、不支持的协议版本，或 Envelope/Payload Shape 无效。
 
-`pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`；低于 0.35.0 的候选会被跳过，
-并继续尝试后续打包位置。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令，以及
-包含已识别原生 `find` 调用的整条命令保持原生形式，使其输出只有一个 PostTool 所有者。
-`find` 保护覆盖直接调用，以及 RTK 的内置前缀：`env`、`command`、`exec`、`noglob`、`nocorrect`、
+`pre_tool` 改写有 5 秒时限，因为 RTK 可能无时限地等待 `git`。超时后 `compress` 将错误写入
+stderr，不输出 Response JSON，退出码为 `1`；RTK 启动的进程（例如卡住的 `git`）随改写一起结束。
+Linux 和 macOS 上改写在一个子 `tokenless` 进程中进行，该进程自成一个进程组，因此超时不会向调用方的
+其他进程发送信号。这 5 秒覆盖子进程读取请求之后的全部工作，包括打开配置和存储，因此调用方只结束
+`compress` 时，子进程及其启动的进程最多再运行这么久。Windows 上改写在一个作业对象（job object）内
+进行，该作业对象随 `compress` 一起结束，因此调用方结束 `compress` 时，RTK 启动的进程也会结束。
+若 `compress` 无法建立该进程组或作业对象，它将错误写入 stderr 并以 `1` 退出，不运行 RTK。
+
+`pre_tool` 使用链接进 Tokenless 的 RTK 库改写命令，不会在 `PATH` 中查找独立的 `rtk`
+可执行文件。改写后的命令以绝对路径调用当前运行的 `tokenless`，形式为 `tokenless rtk`，
+因此始终使用同一版本的 RTK。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
+原生形式，使其输出只有一个 PostTool 所有者。包含已识别原生 `find`、`head`、`tail`、`grep` 或 `rg`
+调用的整条命令也保持原生形式。保护覆盖直接调用，以及 RTK 的内置前缀：
+`env`、`command`、`exec`、`noglob`、`nocorrect`、
 `builtin`、`timeout`、`time`、`nice`、`nohup` 和 `uv run`，支持嵌套和 Shell 反斜杠换行续行。
 进程 Wrapper 参数按随包 RTK 的语法识别，未知参数会停止识别。设置
 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 后仍保持此行为。不会读取自定义 `hooks.transparent_prefixes`，
-此类前缀下的 `find` 仍可能被 RTK 改写；其他受支持命令也仍可由 RTK 改写。Agent-facing
+此类前缀下的调用仍可能被 RTK 改写；其他受支持命令也仍可由 RTK 改写。
+
+`head` 和 `tail` 对所有参数保留原生执行语义，包括字节窗口和持续跟踪模式。
+当已识别的调用出现在 Pipeline 或复合命令中时，整条命令跳过改写。这避免了 RTK 将
+`head` 改写为 `read --max-lines` 后进行结构截断，遗漏请求行范围内的函数体。
+显式 `rtk` 命令仍按显式调用处理。此 PreTool 规则不禁用适用的 PostTool 压缩，文件读取策略不变。
+已识别的 `grep`、`rg` 所有模式保持原生执行，PostTool 只使用搜索压缩器。关闭搜索压缩、
+格式不支持或无收益时保留原文，设置 `force_json` 也不改变此行为。
+
+此保护同样覆盖包含已识别搜索的复合命令的完整输出，包括 `grep -q needle Cargo.toml && cargo build`。
+由于缺少各子命令的输出边界，目前混合的构建/测试日志保持原样，结果可能比之前的日志压缩通路更大。
+Tokenless 不截断这些结果，仅宿主自身的输出限制生效。`git grep`、`xargs grep` 和自定义 Wrapper
+前缀不在这里描述的原生 grep/rg 识别范围。
+
+Agent-facing
 `retrieve` 在读取 Stash 前根据 `visible_markers` 授权
 请求 Hash。下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
 
 ## 随包提供的 RTK 命令
 
-Tokenless 随包提供 RTK 0.49.0。以下行为适用于该二进制；如果 `PATH` 中更靠前的
-位置存在兼容的 `rtk`，实际使用的版本可能不同。直接使用这些命令时，可通过
-`rtk --version` 检查版本。
+Tokenless 链接 RTK 0.49.0，并以 `tokenless rtk` 子命令提供其命令。以下行为适用于该
+子命令；`PATH` 中单独安装的 `rtk` 可能是其他版本。可通过 `tokenless rtk --version`
+确认随包版本。
 
 ### 搜索 Flag
 
-`rtk grep` 将原生搜索 Flag 转交给 `grep`：`-l` 列出匹配文件名，`-m N` 限制每个
+`tokenless rtk grep` 将原生搜索 Flag 转交给 `grep`：`-l` 列出匹配文件名，`-m N` 限制每个
 文件的匹配数量。它们不再表示 RTK 的行长度或显示数量限制。要控制 RTK 的显示限制，
 请在 Pattern 前使用长选项 `--max-len` 和 `--max`。原先 RTK 提供的 `-t` /
-`--file-type` 选项已移除；按文件类型过滤时，使用 `rtk rg -t rust` 调用 ripgrep
-的原生功能。向 `rtk grep` 传入 `-t` 现在会显示底层 grep 不支持该选项的错误。
+`--file-type` 选项已移除；按文件类型过滤时，使用 `tokenless rtk rg -t rust` 调用 ripgrep
+的原生功能。向 `tokenless rtk grep` 传入 `-t` 现在会显示底层 grep 不支持该选项的错误。
 
 ```bash
-rtk grep -l 'TODO' src/*.rs
-rtk grep -m 3 'TODO' src/*.rs
-rtk grep --max 20 --max-len 120 'TODO' src/*.rs
-rtk rg -t rust 'TODO' src/
+tokenless rtk grep -l 'TODO' src/*.rs
+tokenless rtk grep -m 3 'TODO' src/*.rs
+tokenless rtk grep --max 20 --max-len 120 'TODO' src/*.rs
+tokenless rtk rg -t rust 'TODO' src/
 ```
 
 ### Shell 重写
@@ -186,16 +211,16 @@ RTK 支持跨多行处理已支持的命令，并对 Pipeline 应用保守规则
 受支持的输出生产者。统计或解析原始输出的 Pipeline 可能保持原样，不能保证每个
 Shell 表达式都会被重写。`sudo` 命令保持原样透传，自动重写不会将 RTK 插入特权命令。
 
-使用 `rtk rewrite 'COMMAND'` 可以查看建议的重写结果，而不执行命令。
-Tokenless 按上文规则让已识别的构建/测试命令及已识别的原生 `find` 调用（包括含此类调用的整条复合命令）
+使用 `tokenless rtk rewrite 'COMMAND'` 可以查看建议的重写结果，而不执行命令。
+Tokenless 按上文规则让已识别的构建/测试命令及原生 `find`、`head`、`tail`、`grep`、`rg` 调用（包括含此类调用的整条复合命令）
 跳过 RTK 改写。PostTool 可以共享有净收益的纯路径列表；混合输出和不支持的 `find` 格式保持原样。
 
 ### 输出恢复
 
 在默认 RTK 配置下，受支持的 Filter 会将至少 500 字节的失败输出及明确截断的输出
 保存到本地 SQLite 恢复存储。出现恢复提示时，使用提示中的 Hash 执行
-`rtk recall HASH`；`rtk recall --full HASH` 请求全部已保存的输出，`--from`、
-`--lines` 和 `--grep` 可缩小返回范围。`rtk recall --list` 列出保留的条目。
+`tokenless rtk recall HASH`；`tokenless rtk recall --full HASH` 请求全部已保存的输出，`--from`、
+`--lines` 和 `--grep` 可缩小返回范围。`tokenless rtk recall --list` 列出保留的条目。
 存储受容量及过期策略限制，因此 Recall 不是永久归档。已有的旧版 tee 配置继续
 使用基于文件的恢复模式。
 

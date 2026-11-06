@@ -41,7 +41,7 @@ async def single_input(prompt: AsyncIterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 class ManagedTransport(Transport):
-    """The pinned transport interface is the only SDK-private integration seam."""
+    """Pin native transport, settings controls and callback dispatch identity."""
 
     def __init__(self, options: ClaudeAgentOptions, bridge: Any) -> None:
         if options.can_use_tool:
@@ -50,6 +50,30 @@ class ManagedTransport(Transport):
         self.bridge = bridge
         self._reader: AsyncGenerator[dict[str, Any], None] | None = None
         self._closed = False
+
+    async def model_environment(self, query: Any) -> dict[str, str]:
+        # Let the CLI resolve inline/file, filesystem and managed source precedence.
+        response = await query._send_control_request({"subtype": "get_settings"})
+        settings = response.get("effective") if isinstance(response, dict) else None
+        environment = settings.get("env", {}) if isinstance(settings, dict) else None
+        if not isinstance(environment, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in environment.items()
+        ):
+            raise CallbackFailure("AW requires the CLI effective settings environment")
+        return dict(environment)
+
+    async def route_model(self, query: Any, endpoint: str) -> None:
+        await query._send_control_request({
+            "subtype": "apply_flag_settings",
+            "settings": {"env": {
+                "ANTHROPIC_BASE_URL": endpoint,
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            }},
+        })
+        environment = await self.model_environment(query)
+        if environment.get("ANTHROPIC_BASE_URL") != endpoint:
+            raise CallbackFailure("Native settings override the required AW model relay")
 
     async def connect(self) -> None:
         if self._closed:
@@ -91,8 +115,12 @@ class ManagedTransport(Transport):
                 ticket = None
                 try:
                     if message.get("type") == "system" and message.get("subtype") == "init":
-                        if message.get("claude_code_version") != "2.1.161":
-                            raise CallbackFailure("AW managed identities require Claude CLI 2.1.161")
+                        version = message.get("claude_code_version")
+                        if (not isinstance(version, str) or not version or len(version) > 128
+                                or not version[0].isascii() or not version[0].isdigit()
+                                or any(not char.isascii() or not (char.isalnum() or char in ".+-_!")
+                                       for char in version)):
+                            raise CallbackFailure("AW requires Claude CLI version metadata in its init frame")
                     if message.get("type") == "control_request":
                         request = message["request"]
                         kind = request.get("subtype")
@@ -101,9 +129,11 @@ class ManagedTransport(Transport):
                         tracked = kind in {"hook_callback", "can_use_tool"}
                         if kind == "hook_callback":
                             callback = "hook:" + request["callback_id"]
-                            call_id = request.get("tool_use_id") or request.get("input", {}).get(
-                                "tool_use_id"
-                            )
+                            payload = request.get("input", {})
+                            # UserPromptSubmit carries a native input identifier in
+                            # the callback envelope, outside the tool-call ledger.
+                            if payload.get("hook_event_name") != "UserPromptSubmit":
+                                call_id = request.get("tool_use_id") or payload.get("tool_use_id")
                         elif kind == "can_use_tool":
                             call_id = request.get("tool_use_id")
                         elif kind == "mcp_message":

@@ -5,9 +5,9 @@ use ws_ckpt_common::{
     default_auto_cleanup_keep, delete_workspace_policy, load_config_file, save_workspace_policy,
     ConfigReport, DaemonConfig, EffectivePolicy, ErrorCode, FileConfig, GlobalPolicySnapshot,
     PolicyFieldOp, Request, Response, StatusReport, WorkspaceInfo, WorkspacePolicy,
-    ADVISORY_SNAPSHOT_LIMIT, CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP,
-    DEFAULT_AUTO_CLEANUP_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
-    DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB, MAX_LIST_PAGE_ITEMS,
+    CONFIG_FILE_PATH, DEFAULT_AUTO_CLEANUP, DEFAULT_AUTO_CLEANUP_INTERVAL_SECS,
+    DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
+    MAX_LIST_PAGE_ITEMS,
 };
 
 /// Kernel-derived connection identity available to guarded requests.
@@ -35,6 +35,66 @@ pub(crate) async fn dispatch_with_context(
     request: Request,
     context: DispatchContext,
 ) -> Response {
+    // Every legacy arm that carries a caller-supplied snapshot id joins that
+    // id into a path under the snapshots root and uses it as an index key
+    // (#4415). The btrfs backends refuse non-single-component ids at the join
+    // (`ensure_snapshot_id_is_single_component`), but the raw id still reaches
+    // index lookups and a `try_exists` on the joined path first, any backend
+    // bound only by the join contract sees it, and blank, over-length or
+    // reserved-marker ids pass the backend check and poison the index
+    // outright. Refuse the unsafe shapes here, before bootstrap, auto-init or
+    // workspace resolution can act on the request.
+    //
+    // Two contracts, because the caller's string means two different things:
+    // - `Checkpoint.id` and `Delete.snapshot` are consumed as complete ids
+    //   (creation; exact-match lookup on both delete paths), so they get the
+    //   full `validate_snapshot_id`.
+    // - `Rollback.to`, `RollbackPreview.to` and `Diff.from`/`to` are lookup
+    //   references that `SnapshotIndex::resolve_by_prefix` expands — exact id
+    //   or unique prefix. Holding a reference to the full validator would
+    //   break legitimate prefix queries (`__live__` uniquely addresses the
+    //   valid id `__live__backup`; the CLI parser has never refused it), so
+    //   the boundary only rejects shapes no valid id can contain
+    //   (`validate_snapshot_ref`), and snapshot_mgr re-validates the resolved
+    //   final id before it drives any backend call (`ResolveError::Unsafe` →
+    //   `InvalidPath`) — which is also what keeps a pre-poisoned index key
+    //   unreachable through an innocuous prefix.
+    match &request {
+        Request::Checkpoint { id, .. } | Request::Delete { snapshot: id, .. } => {
+            if let Err(message) = ws_ckpt_common::validate_snapshot_id(id) {
+                return Response::Error {
+                    code: ErrorCode::InvalidPath,
+                    message,
+                };
+            }
+        }
+        Request::Rollback { to: Some(id), .. }
+        | Request::RollbackPreview { to: Some(id), .. }
+        | Request::Diff {
+            from: id, to: None, ..
+        } => {
+            if let Err(message) = ws_ckpt_common::validate_snapshot_ref(id) {
+                return Response::Error {
+                    code: ErrorCode::InvalidPath,
+                    message,
+                };
+            }
+        }
+        Request::Diff {
+            from, to: Some(to), ..
+        } => {
+            for id in [from.as_str(), to.as_str()] {
+                if let Err(message) = ws_ckpt_common::validate_snapshot_ref(id) {
+                    return Response::Error {
+                        code: ErrorCode::InvalidPath,
+                        message,
+                    };
+                }
+            }
+        }
+        _ => {}
+    }
+
     let result = match request {
         Request::Init { workspace } => match state.ensure_bootstrapped().await {
             Err(e) => Err(e),
@@ -217,6 +277,7 @@ pub(crate) async fn dispatch_with_context(
             Ok(()) => crate::workspace_mgr::unregister_missing_workspace(state, &workspace).await,
         },
         Request::HealthAdvisory => Ok(handle_health_advisory(state).await),
+        Request::WatcherHealth => Ok(handle_watcher_health(state).await),
         Request::WorkspaceIdentityV2 { registration_path } => {
             return crate::guarded_checkpoint::workspace_identity(state, &registration_path).await;
         }
@@ -414,6 +475,31 @@ async fn handle_status(
     })
 }
 
+/// Handle the WatcherHealth request: name the workspaces running without a
+/// live file watcher and report inotify queue overflows on the shared
+/// watcher instance (#7233).
+///
+/// A dedicated request rather than a `StatusReport` field: the report
+/// crosses the IPC in bincode frames, which encode positionally, so an
+/// inserted field would break older clients and the cosh-ng mirror of the
+/// status layout (#7592 review).
+async fn handle_watcher_health(state: &Arc<DaemonState>) -> Response {
+    // Watcher health: a workspace whose watcher failed to start (or was
+    // never started) silently loses change detection unless something
+    // names it (#7233).
+    let workspaces_without_watcher: Vec<String> = state
+        .get_all_workspace_info()
+        .await
+        .into_iter()
+        .map(|ws| ws.ws_id)
+        .filter(|ws_id| !state.has_watcher(ws_id))
+        .collect();
+    Response::WatcherHealthOk {
+        workspaces_without_watcher,
+        watcher_queue_overflows: crate::fs_watcher::shared_queue_overflows().unwrap_or(0),
+    }
+}
+
 /// Handle the Config request: return the current daemon configuration.
 fn handle_config(state: &Arc<DaemonState>) -> Response {
     Response::ConfigOk {
@@ -479,6 +565,7 @@ async fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             // (or wake them from a disabled state) so the new config takes
             // effect immediately instead of on the next polling boundary.
             state.config_notify.notify_waiters();
+            state.advisory_notify.notify_one();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
                 file: Some(file_config),
@@ -512,6 +599,7 @@ fn handle_reload_global_config(state: &Arc<DaemonState>) -> Response {
         Ok(file_config) => {
             apply_global_config(state, &file_config);
             state.config_notify.notify_waiters();
+            state.advisory_notify.notify_one();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
                 file: Some(file_config),
@@ -525,7 +613,7 @@ fn handle_reload_global_config(state: &Arc<DaemonState>) -> Response {
 }
 
 /// Apply a freshly-loaded `file_config` to the daemon's in-memory state.
-/// Caller is responsible for `config_notify.notify_waiters()` afterwards.
+/// Caller notifies the scheduler loops after applying the configuration.
 fn apply_global_config(state: &Arc<DaemonState>, file_config: &FileConfig) {
     let mut cfg = match state.config.write() {
         Ok(g) => g,
@@ -546,6 +634,20 @@ fn apply_global_config(state: &Arc<DaemonState>, file_config: &FileConfig) {
         .health_check_interval_secs
         .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS);
     cfg.backend_type = file_config.backend.r#type.clone();
+
+    let new_btrfs_mount = file_config
+        .backend
+        .btrfs_base
+        .as_ref()
+        .and_then(|b| b.btrfs_mount.as_ref());
+    if new_btrfs_mount != cfg.btrfs_mount.as_ref() {
+        tracing::warn!(
+            "BtrfsBase btrfs_mount changed from {:?} to {:?}; restart ws-ckpt to apply. \
+             The active storage root is unchanged until restart.",
+            cfg.btrfs_mount,
+            new_btrfs_mount
+        );
+    }
 
     // img_* are bootstrap-only: warn if changed but don't mutate cfg
     // (loop image size is fixed until the next restart, where
@@ -813,23 +915,18 @@ async fn handle_patch_workspace_policy(
     }
 }
 
-/// Aggregate advisory metrics. Never triggers bootstrap; backend-query failure
-/// yields zero bytes so the CLI silently skips the fs warning.
+/// Return the most recent complete daemon-side sample without waiting on workspace locks.
 async fn handle_health_advisory(state: &Arc<DaemonState>) -> Response {
-    let over_limit_workspace_count: u32 = state
-        .get_all_workspace_info()
-        .await
-        .iter()
-        .filter(|w| w.snapshot_count > ADVISORY_SNAPSHOT_LIMIT)
-        .count() as u32;
-    let (fs_total_bytes, fs_used_bytes) = match state.backend.get_usage().await {
-        Ok((total, used)) => (total, used),
-        Err(_) => (0, 0),
-    };
-    Response::HealthAdvisoryOk {
-        over_limit_workspace_count,
-        fs_total_bytes,
-        fs_used_bytes,
+    match state.health_advisory_snapshot() {
+        Some(sample) => Response::HealthAdvisoryOk {
+            over_limit_workspace_count: sample.over_limit_workspace_count,
+            fs_total_bytes: sample.fs_total_bytes,
+            fs_used_bytes: sample.fs_used_bytes,
+        },
+        None => Response::Error {
+            code: ErrorCode::InternalError,
+            message: "health advisory sample is unavailable or stale".to_string(),
+        },
     }
 }
 
@@ -839,6 +936,631 @@ mod tests {
     use std::path::PathBuf;
     use ws_ckpt_common::backend::StorageBackend;
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, ErrorCode, Request, Response};
+
+    // ── legacy IPC snapshot-id validation (#4415) ──
+
+    /// Stand-in backend that honours the trait's join contract
+    /// (`snapshots_root/ws_id/<id>`) with plain filesystem calls and records
+    /// every id it was handed, so an id that survives the dispatcher can be
+    /// observed escaping the per-workspace snapshot namespace without a real
+    /// btrfs mount. `init_workspace` mirrors the real backends' layout swap
+    /// (directory aside, subvolume in place, symlink back) so the
+    /// detached-registration and liveness guards accept the registration.
+    struct JoinRecordingBackend {
+        data_root_path: PathBuf,
+        snapshots_root_path: PathBuf,
+        creates: std::sync::Mutex<Vec<String>>,
+        deletes: std::sync::Mutex<Vec<String>>,
+        diffs: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl JoinRecordingBackend {
+        fn new(root: &std::path::Path) -> Self {
+            Self {
+                data_root_path: root.join("mount/data"),
+                snapshots_root_path: root.join("mount/snapshots"),
+                creates: std::sync::Mutex::new(Vec::new()),
+                deletes: std::sync::Mutex::new(Vec::new()),
+                diffs: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn create_ids(&self) -> Vec<String> {
+            self.creates.lock().unwrap().clone()
+        }
+
+        fn delete_ids(&self) -> Vec<String> {
+            self.deletes.lock().unwrap().clone()
+        }
+
+        /// Every `from` id a diff/preview call was handed, in call order.
+        fn diff_from_ids(&self) -> Vec<String> {
+            self.diffs.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for JoinRecordingBackend {
+        fn backend_type(&self) -> ws_ckpt_common::backend::BackendType {
+            ws_ckpt_common::backend::BackendType::BtrfsBase
+        }
+        fn data_root(&self) -> &std::path::Path {
+            &self.data_root_path
+        }
+        fn snapshots_root(&self) -> &std::path::Path {
+            &self.snapshots_root_path
+        }
+        async fn init_workspace(
+            &self,
+            original_path: &str,
+            ws_id: &str,
+        ) -> anyhow::Result<ws_ckpt_common::WorkspaceInfo> {
+            let original = std::path::Path::new(original_path);
+            assert!(original.is_dir(), "init needs a real workspace directory");
+            let subvol = self.data_root().join(ws_id);
+            tokio::fs::create_dir_all(&subvol).await?;
+            tokio::fs::create_dir_all(self.snapshots_root().join(ws_id)).await?;
+            let backup = original.with_file_name(format!(
+                ".{}.ma19-init-backup",
+                original
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("ws")
+            ));
+            tokio::fs::rename(original, &backup).await?;
+            tokio::fs::copy(backup.join("payload"), subvol.join("payload")).await?;
+            tokio::fs::symlink(&subvol, original).await?;
+            tokio::fs::remove_dir_all(&backup).await?;
+            Ok(ws_ckpt_common::WorkspaceInfo {
+                ws_id: ws_id.to_string(),
+                path: original_path.to_string(),
+                snapshot_count: 0,
+            })
+        }
+        async fn create_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            self.creates.lock().unwrap().push(snapshot_id.to_string());
+            tokio::fs::create_dir_all(self.snapshots_root().join(ws_id).join(snapshot_id)).await?;
+            Ok(())
+        }
+        async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
+            unimplemented!()
+        }
+        async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
+            self.deletes.lock().unwrap().push(snapshot_id.to_string());
+            tokio::fs::remove_dir_all(self.snapshots_root().join(ws_id).join(snapshot_id)).await?;
+            Ok(())
+        }
+        async fn recover_workspace(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &str,
+            from: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
+            self.diffs.lock().unwrap().push(from.to_string());
+            Ok(Vec::new())
+        }
+        async fn cleanup_snapshots(
+            &self,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<Vec<(String, ws_ckpt_common::backend::SnapshotDeleteOutcome)>> {
+            unimplemented!()
+        }
+        async fn fork(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn gc_generations(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<ws_ckpt_common::backend::GcResult> {
+            unimplemented!()
+        }
+        async fn check_environment(
+            &self,
+        ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
+            unimplemented!()
+        }
+        async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            Ok((1 << 40, 1 << 30))
+        }
+    }
+
+    fn legacy_id_state(
+        temp: &std::path::Path,
+        backend: Arc<dyn StorageBackend>,
+    ) -> Arc<DaemonState> {
+        Arc::new(DaemonState::new(
+            DaemonConfig {
+                mount_path: temp.join("configured-mount"),
+                ..test_config()
+            },
+            backend,
+            temp.join("state"),
+        ))
+    }
+
+    /// A real, non-empty workspace directory the stub backend can adopt.
+    fn legacy_workspace(temp: &std::path::Path) -> std::path::PathBuf {
+        let ws = temp.join("repo");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("payload"), b"workspace data").unwrap();
+        ws
+    }
+
+    fn checkpoint_request(workspace: &std::path::Path, id: &str) -> Request {
+        Request::Checkpoint {
+            workspace: workspace.to_string_lossy().into_owned(),
+            id: id.to_string(),
+            message: None,
+            metadata: None,
+            pin: false,
+        }
+    }
+
+    fn expect_invalid_path(response: Response, context: &str) {
+        match response {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InvalidPath, "{context}: {message}");
+            }
+            other => panic!("{context}: expected InvalidPath, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_checkpoint_refuses_a_traversal_id_before_any_mutation() {
+        // #4415's core shape: through the 0666 socket any local caller could
+        // hand the daemon an id that joins outside the per-workspace snapshot
+        // namespace. The real btrfs backends now refuse non-single-component
+        // ids at the join, but only after workspace resolution, auto-init and
+        // an index lookup have already run on the raw id; a dispatcher-level
+        // refusal must fire before any of that.
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+        let state = legacy_id_state(temp.path(), backend.clone());
+        let ws = legacy_workspace(temp.path());
+
+        let response = dispatch(&state, checkpoint_request(&ws, "../escape")).await;
+
+        expect_invalid_path(response, "traversal checkpoint id");
+        assert!(
+            backend.create_ids().is_empty(),
+            "no snapshot may be created for a traversal id"
+        );
+        assert!(
+            !temp.path().join("mount/snapshots/escape").exists(),
+            "the joined path must never escape the per-workspace snapshot namespace"
+        );
+        assert!(
+            state.all_workspaces().is_empty(),
+            "an unsafe id must not even auto-initialize the workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_checkpoint_refuses_blank_and_live_marker_ids() {
+        // Both shapes pass the backend's single-component check today: a
+        // whitespace-only id records a snapshot no CLI can address, and
+        // `__live__` collides with the sentinel the index's DAG code
+        // special-cases for the writable subvolume.
+        for id in [" ", ws_ckpt_common::LIVE_CHILD] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+            let state = legacy_id_state(temp.path(), backend.clone());
+            let ws = legacy_workspace(temp.path());
+
+            let response = dispatch(&state, checkpoint_request(&ws, id)).await;
+
+            expect_invalid_path(response, "blank/live-marker checkpoint id");
+            assert!(
+                backend.create_ids().is_empty(),
+                "no record may be created for {id:?}"
+            );
+            assert!(
+                state.all_workspaces().is_empty(),
+                "an unsafe id must not even auto-initialize the workspace"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_delete_of_a_pre_poisoned_traversal_key_spares_the_victim() {
+        // An index poisoned before the backend choke point existed (or on a
+        // deployment without it) still holds traversal keys. Deleting such a
+        // key must be refused at the dispatcher: the delete path resolves the
+        // joined path with `try_exists` before the backend's own refusal, and
+        // a backend bound only by the join contract would remove whatever the
+        // key addresses.
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+        let state = legacy_id_state(temp.path(), backend.clone());
+
+        let subvol = temp.path().join("mount/data/ws-victim");
+        std::fs::create_dir_all(&subvol).unwrap();
+        std::fs::write(subvol.join("payload"), b"live").unwrap();
+        // The per-workspace snapshot namespace must exist so the joined
+        // traversal path resolves through it to the victim below.
+        std::fs::create_dir_all(temp.path().join("mount/snapshots/ws-victim")).unwrap();
+        let ws_link = temp.path().join("repo-link");
+        std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
+
+        let mut index = ws_ckpt_common::SnapshotIndex::new(ws_link.clone());
+        index.snapshots.insert(
+            "../../victim".to_string(),
+            ws_ckpt_common::SnapshotMeta {
+                message: None,
+                metadata: None,
+                pinned: false,
+                created_at: chrono::Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![],
+            },
+        );
+        state
+            .register_workspace("ws-victim".to_string(), ws_link, index)
+            .unwrap();
+
+        // The directory the poisoned key addresses through the join.
+        let victim = temp.path().join("mount/victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep"), b"precious").unwrap();
+
+        let response = dispatch(
+            &state,
+            Request::Delete {
+                workspace: Some("ws-victim".to_string()),
+                snapshot: "../../victim".to_string(),
+                force: false,
+            },
+        )
+        .await;
+
+        expect_invalid_path(response, "delete of a poisoned traversal key");
+        assert!(
+            victim.join("keep").exists(),
+            "the directory the poisoned key addresses must survive"
+        );
+        assert!(
+            backend.delete_ids().is_empty(),
+            "the backend must never be handed a traversal id"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_legacy_arm_refuses_unsafe_ids_before_workspace_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = legacy_id_state(
+            temp.path(),
+            Arc::new(JoinRecordingBackend::new(temp.path())),
+        );
+        let ws = legacy_workspace(temp.path()).to_string_lossy().into_owned();
+
+        let requests = [
+            Request::Checkpoint {
+                workspace: ws.clone(),
+                id: "a/b".to_string(),
+                message: None,
+                metadata: None,
+                pin: false,
+            },
+            Request::Delete {
+                workspace: Some(ws.clone()),
+                snapshot: "..".to_string(),
+                force: false,
+            },
+            Request::Delete {
+                workspace: None,
+                snapshot: "../escape".to_string(),
+                force: false,
+            },
+            Request::Rollback {
+                workspace: ws.clone(),
+                to: Some("./x".to_string()),
+                num_ancestors: None,
+            },
+            // Blank references stay refused at the boundary: no CLI-reachable
+            // query is blank, and blank ids are the poison family the id
+            // validator rejects (`.`, `..` and `__live__` references pass the
+            // boundary instead — see the prefix-resolution regression tests).
+            Request::Rollback {
+                workspace: ws.clone(),
+                to: Some(" ".to_string()),
+                num_ancestors: None,
+            },
+            Request::RollbackPreview {
+                workspace: ws.clone(),
+                to: Some("a\\b".to_string()),
+                num_ancestors: None,
+            },
+            Request::Diff {
+                workspace: ws.clone(),
+                from: "\0".to_string(),
+                to: None,
+            },
+            Request::Diff {
+                workspace: ws,
+                from: "ok".to_string(),
+                to: Some("../x".to_string()),
+            },
+        ];
+        for request in requests {
+            let response = dispatch(&state, request).await;
+            expect_invalid_path(response, "unsafe id on a legacy arm");
+        }
+    }
+
+    /// Minimal valid snapshot record for stub indexes; `parent_id` drives the
+    /// ancestor walk.
+    fn stub_meta(parent_id: Option<&str>) -> ws_ckpt_common::SnapshotMeta {
+        ws_ckpt_common::SnapshotMeta {
+            message: None,
+            metadata: None,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: parent_id.map(str::to_string),
+            child_ids: vec![],
+        }
+    }
+
+    /// Register a stub workspace whose live subvolume, registration symlink
+    /// and snapshot index exist, so preview/diff requests run the full
+    /// resolution flow (bootstrap → workspace resolution → liveness guard →
+    /// prefix resolution → backend) against `JoinRecordingBackend`.
+    /// `build_index` populates the snapshot index before registration.
+    fn register_stub_workspace_with(
+        temp: &std::path::Path,
+        state: &DaemonState,
+        ws_id: &str,
+        build_index: impl FnOnce(&mut ws_ckpt_common::SnapshotIndex),
+    ) {
+        let subvol = temp.join("mount/data").join(ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        std::fs::write(subvol.join("payload"), b"live").unwrap();
+        std::fs::create_dir_all(temp.join("mount/snapshots").join(ws_id)).unwrap();
+        let ws_link = temp.join(format!("repo-{ws_id}"));
+        std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
+
+        let mut index = ws_ckpt_common::SnapshotIndex::new(ws_link.clone());
+        build_index(&mut index);
+        state
+            .register_workspace(ws_id.to_string(), ws_link, index)
+            .unwrap();
+    }
+
+    /// Register a stub workspace with a flat index (no head, no parent
+    /// chains) holding `snapshot_ids`.
+    fn register_stub_workspace(
+        temp: &std::path::Path,
+        state: &DaemonState,
+        ws_id: &str,
+        snapshot_ids: &[&str],
+    ) {
+        register_stub_workspace_with(temp, state, ws_id, |index| {
+            for id in snapshot_ids {
+                index.snapshots.insert(id.to_string(), stub_meta(None));
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn a_live_marker_prefix_still_resolves_to_a_legitimate_snapshot() {
+        // Regression for the P2 review finding: `__live__backup` is a valid
+        // snapshot id before and after the boundary guard, and `__live__` is
+        // its unique prefix — a query the CLI parser has always accepted and
+        // `resolve_by_prefix` has always expanded. Rejecting the reference
+        // itself as the reserved marker broke that lookup; only the resolved
+        // final id is subject to the reserved-marker rule.
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+        let state = legacy_id_state(temp.path(), backend.clone());
+        register_stub_workspace(temp.path(), &state, "ws-live", &["__live__backup"]);
+
+        let response = dispatch(
+            &state,
+            Request::RollbackPreview {
+                workspace: "ws-live".to_string(),
+                to: Some(ws_ckpt_common::LIVE_CHILD.to_string()),
+                num_ancestors: None,
+            },
+        )
+        .await;
+        match response {
+            Response::RollbackPreviewOk { to, .. } => assert_eq!(to, "__live__backup"),
+            other => panic!("expected RollbackPreviewOk, got {other:?}"),
+        }
+
+        let response = dispatch(
+            &state,
+            Request::Diff {
+                workspace: "ws-live".to_string(),
+                from: ws_ckpt_common::LIVE_CHILD.to_string(),
+                to: None,
+            },
+        )
+        .await;
+        match response {
+            Response::DiffOk { .. } => {}
+            other => panic!("expected DiffOk, got {other:?}"),
+        }
+
+        assert_eq!(
+            backend.diff_from_ids(),
+            vec!["__live__backup".to_string(), "__live__backup".to_string()],
+            "the backend must only ever see the resolved id, never the raw reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prefix_reference_cannot_revive_a_poisoned_index_key() {
+        // The boundary check on lookup references is deliberately permissive
+        // (a reference may be a unique prefix), so the resolved key re-passes
+        // the full id validation before it drives any backend call. Each
+        // (poisoned key, reference) pair below addresses an index key that
+        // predates the backend choke point; the reference itself is a shape
+        // the boundary accepts, and the refusal must come from the resolved
+        // id — with the backend never seeing either string.
+        for (poisoned, reference) in [
+            ("__live__", "__live__"),
+            ("..", ".."),
+            ("../victim", ".."),
+            ("snap/../../victim", "snap"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+            let state = legacy_id_state(temp.path(), backend.clone());
+            register_stub_workspace(temp.path(), &state, "ws-poison", &[poisoned]);
+
+            let response = dispatch(
+                &state,
+                Request::RollbackPreview {
+                    workspace: "ws-poison".to_string(),
+                    to: Some(reference.to_string()),
+                    num_ancestors: None,
+                },
+            )
+            .await;
+            expect_invalid_path(response, "preview of a poisoned key by reference");
+
+            let response = dispatch(
+                &state,
+                Request::Diff {
+                    workspace: "ws-poison".to_string(),
+                    from: reference.to_string(),
+                    to: None,
+                },
+            )
+            .await;
+            expect_invalid_path(response, "diff of a poisoned key by reference");
+
+            assert!(
+                backend.diff_from_ids().is_empty(),
+                "the backend must never see the poisoned key {poisoned:?} or the reference {reference:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ancestor_selection_refuses_poisoned_index_keys() {
+        // `ancestor(n)` returns index keys verbatim (n=1 is the head
+        // itself), so the num_ancestors branch of `resolve_rollback_target`
+        // re-validates the selected key too: an index poisoned before the
+        // guard existed must not smuggle `__live__` or `..` into the backend
+        // rollback/preview join through `-n`, while the same key addressed
+        // by name is refused.
+        fn poisoned_head(index: &mut ws_ckpt_common::SnapshotIndex) {
+            index
+                .snapshots
+                .insert(ws_ckpt_common::LIVE_CHILD.to_string(), stub_meta(None));
+            index.head = Some(ws_ckpt_common::LIVE_CHILD.to_string());
+        }
+        fn poisoned_midchain(index: &mut ws_ckpt_common::SnapshotIndex) {
+            index
+                .snapshots
+                .insert(ws_ckpt_common::LIVE_CHILD.to_string(), stub_meta(None));
+            index.snapshots.insert(
+                "snap-2".to_string(),
+                stub_meta(Some(ws_ckpt_common::LIVE_CHILD)),
+            );
+            index.head = Some("snap-2".to_string());
+        }
+
+        for (case, build_index, n) in [
+            (
+                "poisoned head",
+                poisoned_head as fn(&mut ws_ckpt_common::SnapshotIndex),
+                1u32,
+            ),
+            ("poisoned mid-chain", poisoned_midchain, 2),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+            let state = legacy_id_state(temp.path(), backend.clone());
+            register_stub_workspace_with(temp.path(), &state, "ws-ancestor", build_index);
+
+            let response = dispatch(
+                &state,
+                Request::RollbackPreview {
+                    workspace: "ws-ancestor".to_string(),
+                    to: None,
+                    num_ancestors: Some(n),
+                },
+            )
+            .await;
+            expect_invalid_path(response, case);
+            assert!(
+                backend.diff_from_ids().is_empty(),
+                "{case}: the backend must never see the poisoned key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ancestor_selection_still_resolves_a_legitimate_chain() {
+        // Guard against over-rejection: num_ancestors over clean ids keeps
+        // working — n=1 is the head itself, n=2 its parent.
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(JoinRecordingBackend::new(temp.path()));
+        let state = legacy_id_state(temp.path(), backend.clone());
+        register_stub_workspace_with(temp.path(), &state, "ws-chain", |index| {
+            index
+                .snapshots
+                .insert("snap-1".to_string(), stub_meta(None));
+            index
+                .snapshots
+                .insert("snap-2".to_string(), stub_meta(Some("snap-1")));
+            index.head = Some("snap-2".to_string());
+        });
+
+        for (n, expected) in [(1u32, "snap-2"), (2, "snap-1")] {
+            let response = dispatch(
+                &state,
+                Request::RollbackPreview {
+                    workspace: "ws-chain".to_string(),
+                    to: None,
+                    num_ancestors: Some(n),
+                },
+            )
+            .await;
+            match response {
+                Response::RollbackPreviewOk { to, .. } => assert_eq!(to, expected),
+                other => panic!("n={n}: expected RollbackPreviewOk, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            backend.diff_from_ids(),
+            vec!["snap-2".to_string(), "snap-1".to_string()],
+            "the backend must see exactly the selected ancestor ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_safe_id_still_reaches_workspace_resolution() {
+        // Guard against over-rejection: a well-formed id on an unregistered
+        // workspace must keep producing WorkspaceNotFound, not InvalidPath.
+        let temp = tempfile::tempdir().unwrap();
+        let state = legacy_id_state(
+            temp.path(),
+            Arc::new(JoinRecordingBackend::new(temp.path())),
+        );
+
+        let response = dispatch(
+            &state,
+            Request::Rollback {
+                workspace: "/nonexistent/path/12345".to_string(),
+                to: Some("snap-1".to_string()),
+                num_ancestors: None,
+            },
+        )
+        .await;
+        match response {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::WorkspaceNotFound),
+            other => panic!("expected WorkspaceNotFound, got {other:?}"),
+        }
+    }
 
     fn test_backend() -> Arc<dyn StorageBackend> {
         // Use BtrfsBase to avoid triggering lazy bootstrap in dispatch tests
@@ -858,11 +1580,45 @@ mod tests {
             auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: 30,
             img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,
             min_free_percent: 1.0,
         }
+    }
+
+    #[test]
+    fn reload_keeps_active_btrfs_mount_until_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.btrfs_mount = Some(PathBuf::from("/old-mount"));
+        let state = Arc::new(DaemonState::new(
+            config,
+            test_backend(),
+            temp.path().to_path_buf(),
+        ));
+        let original_root = state.backend.data_root().to_path_buf();
+        let file = FileConfig {
+            backend: ws_ckpt_common::BackendConfig {
+                btrfs_base: Some(ws_ckpt_common::BtrfsBaseConfig {
+                    btrfs_mount: Some(PathBuf::from("/new-mount")),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_global_config(&state, &file);
+        assert_eq!(
+            state.config_snapshot().btrfs_mount.as_deref(),
+            Some(std::path::Path::new("/old-mount"))
+        );
+        assert_eq!(state.backend.data_root(), original_root);
+        apply_global_config(&state, &FileConfig::default());
+        assert_eq!(
+            state.config_snapshot().btrfs_mount.as_deref(),
+            Some(std::path::Path::new("/old-mount"))
+        );
     }
 
     // The dispatcher routes all Request variants to handlers. For handlers that
@@ -1393,6 +2149,53 @@ mod tests {
             }
             other => panic!("expected StatusOk, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn watcher_health_names_workspaces_without_a_live_watcher() {
+        // #7233: a watcher that failed to start (or was never started) used
+        // to be invisible; the watcher-health surface must name the degraded
+        // workspaces. It is a dedicated request so the bincode status layout
+        // stays byte-compatible with older clients (#7592 review).
+        let (state, _ws_id, _ws_link, _temp) = live_topology("ws-no-watch");
+        let resp = dispatch(&state, Request::WatcherHealth).await;
+        let Response::WatcherHealthOk {
+            workspaces_without_watcher,
+            watcher_queue_overflows,
+        } = resp
+        else {
+            panic!("{resp:?}")
+        };
+        assert_eq!(
+            workspaces_without_watcher,
+            vec!["ws-no-watch".to_string()],
+            "watcher health must name workspaces running without a file watcher"
+        );
+        assert_eq!(
+            watcher_queue_overflows, 0,
+            "no inotify queue overflow has occurred in this daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_health_omits_workspaces_with_a_live_watcher() {
+        let (state, ws_id, ws_link, _temp) = live_topology("ws-live-watch");
+        state.register_watcher(
+            ws_id.clone(),
+            crate::fs_watcher::WorkspaceWatcher::start(&ws_link).unwrap(),
+        );
+        let resp = dispatch(&state, Request::WatcherHealth).await;
+        let Response::WatcherHealthOk {
+            workspaces_without_watcher,
+            ..
+        } = resp
+        else {
+            panic!("{resp:?}")
+        };
+        assert!(
+            workspaces_without_watcher.is_empty(),
+            "a workspace with a live watcher must not be listed degraded: {workspaces_without_watcher:?}"
+        );
     }
 
     fn recovery_snapshot() -> ws_ckpt_common::SnapshotMeta {
@@ -2078,8 +2881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_health_advisory_returns_health_advisory_ok() {
-        // Empty workspace set -> counter must be 0; fs bytes vary by OS.
+    async fn dispatch_health_advisory_reports_unavailable_until_first_refresh() {
         let state = Arc::new(DaemonState::new(
             test_config(),
             test_backend(),
@@ -2088,13 +2890,95 @@ mod tests {
         let req = Request::HealthAdvisory;
         let resp = dispatch(&state, req).await;
         match resp {
-            Response::HealthAdvisoryOk {
-                over_limit_workspace_count,
-                ..
-            } => {
-                assert_eq!(over_limit_workspace_count, 0);
+            Response::Error { message, .. } => {
+                assert_eq!(message, "health advisory sample is unavailable or stale");
             }
-            _ => panic!("expected HealthAdvisoryOk, got {:?}", resp),
+            _ => panic!("expected unavailable advisory error, got {:?}", resp),
         }
+    }
+
+    #[tokio::test]
+    async fn health_advisory_uses_cache_when_periodic_diagnostics_are_disabled() {
+        let mut config = test_config();
+        config.health_check_interval_secs = 0;
+        let state = Arc::new(DaemonState::new(
+            config,
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
+        state.seed_health_advisory_snapshot(2, 1_000, 750, std::time::Duration::ZERO);
+
+        assert!(matches!(
+            dispatch(&state, Request::HealthAdvisory).await,
+            Response::HealthAdvisoryOk {
+                over_limit_workspace_count: 2,
+                fs_total_bytes: 1_000,
+                fs_used_bytes: 750,
+            }
+        ));
+        state.seed_health_advisory_snapshot(
+            2,
+            1_000,
+            750,
+            std::time::Duration::from_secs(
+                ws_ckpt_common::DEFAULT_HEALTH_CHECK_INTERVAL_SECS * 2 + 1,
+            ),
+        );
+        assert!(matches!(
+            dispatch(&state, Request::HealthAdvisory).await,
+            Response::Error { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_advisory_keeps_fresh_sample_after_busy_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
+        state
+            .register_workspace(
+                "locked-ws".to_string(),
+                temp.path().to_path_buf(),
+                ws_ckpt_common::SnapshotIndex::new(temp.path().to_path_buf()),
+            )
+            .unwrap();
+        state.seed_health_advisory_snapshot(2, 1_000, 750, std::time::Duration::ZERO);
+        let workspace = state.all_workspaces().pop().unwrap();
+        let _write_guard = workspace.write().await;
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(20))
+            .await
+            .is_err());
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            dispatch(&state, Request::HealthAdvisory),
+        )
+        .await
+        .expect("advisory must not wait for workspace locks");
+        assert!(matches!(
+            response,
+            Response::HealthAdvisoryOk {
+                over_limit_workspace_count: 2,
+                fs_total_bytes: 1_000,
+                fs_used_bytes: 750,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_advisory_rejects_stale_samples() {
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            PathBuf::from("/tmp/test-state"),
+        ));
+        state.seed_health_advisory_snapshot(0, 1_000, 750, std::time::Duration::from_secs(601));
+
+        let response = dispatch(&state, Request::HealthAdvisory).await;
+        assert!(matches!(response, Response::Error { .. }));
     }
 }

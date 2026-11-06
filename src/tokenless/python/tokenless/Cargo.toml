@@ -3,6 +3,7 @@ name = "tokenless-python"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Native Python bindings for the Tokenless runtime"
 publish = false
 

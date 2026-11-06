@@ -476,21 +476,28 @@ fn resolve_rollback_target(
     num_ancestors: Option<u32>,
 ) -> Result<String, Box<Response>> {
     if let Some(n) = num_ancestors {
-        return index
-            .ancestor(n as usize)
-            .map(|(id, _)| id.clone())
-            .map_err(|e| {
-                Box::new(Response::Error {
-                    code: ErrorCode::SnapshotNotFound,
-                    message: e.to_string(),
-                })
-            });
+        // The ancestor walk returns index keys verbatim: an index poisoned
+        // before the id guard existed can carry a rejected id (`__live__`,
+        // `..`) at its head or mid-chain, and the selected key drives the
+        // same backend join as a name-resolved one — so it re-passes the
+        // full id validation too.
+        let (id, _) = index.ancestor(n as usize).map_err(|e| {
+            Box::new(Response::Error {
+                code: ErrorCode::SnapshotNotFound,
+                message: e.to_string(),
+            })
+        })?;
+        if let Err(reason) = ws_ckpt_common::validate_snapshot_id(id) {
+            return Err(Box::new(Response::Error {
+                code: ErrorCode::InvalidPath,
+                message: format!("ancestor selection resolved to a rejected id: {reason}"),
+            }));
+        }
+        return Ok(id.clone());
     }
 
     if let Some(target) = to {
-        return index
-            .resolve_by_prefix(target)
-            .map(|(id, _)| id.clone())
+        return resolve_snapshot_id(index, target)
             .map_err(|err| Box::new(snapshot_resolve_error_response(target, err)));
     }
 
@@ -922,28 +929,48 @@ pub async fn diff_snapshots(
 
 /// Resolve a snapshot reference (ID or prefix) to its ID.
 ///
+/// The reference is not necessarily the final id — `__live__` can be the
+/// unique prefix of the valid id `__live__backup` — so the dispatcher
+/// boundary only rejects shapes no valid id can contain
+/// ([`ws_ckpt_common::validate_snapshot_ref`]). The resolved key is what
+/// joins paths and drives backend calls, so it re-passes the full
+/// [`ws_ckpt_common::validate_snapshot_id`]: a pre-poisoned index key
+/// (traversal shape, `..`, reserved marker) must stay unreachable even
+/// though an innocuous-looking reference prefix-matches it.
+///
 /// Returns `ResolveError` directly so callers can map it to a user-facing
-/// `Response::Error { code: SnapshotNotFound, .. }` rather than bubbling up
-/// as an opaque `InternalError` via the dispatcher's anyhow fallback.
+/// `Response::Error` (`SnapshotNotFound` for lookup failures, `InvalidPath`
+/// for `Unsafe`) rather than bubbling up as an opaque `InternalError` via
+/// the dispatcher's anyhow fallback.
 fn resolve_snapshot_id(
     index: &ws_ckpt_common::SnapshotIndex,
     reference: &str,
 ) -> Result<String, ResolveError> {
-    index.resolve_by_prefix(reference).map(|(id, _)| id.clone())
+    let (id, _) = index.resolve_by_prefix(reference)?;
+    ws_ckpt_common::validate_snapshot_id(id).map_err(ResolveError::Unsafe)?;
+    Ok(id.clone())
 }
 
-/// Build a `SnapshotNotFound` response from a `ResolveError`.
+/// Build an error response from a `ResolveError`.
 fn snapshot_resolve_error_response(reference: &str, err: ResolveError) -> Response {
-    let message = match err {
-        ResolveError::NotFound => format!("snapshot not found: {}", reference),
-        ResolveError::Ambiguous(n) => {
-            format!("ambiguous snapshot prefix '{}': {} matches", reference, n)
-        }
+    let (code, message) = match err {
+        ResolveError::NotFound => (
+            ErrorCode::SnapshotNotFound,
+            format!("snapshot not found: {}", reference),
+        ),
+        ResolveError::Ambiguous(n) => (
+            ErrorCode::SnapshotNotFound,
+            format!("ambiguous snapshot prefix '{}': {} matches", reference, n),
+        ),
+        ResolveError::Unsafe(reason) => (
+            ErrorCode::InvalidPath,
+            format!(
+                "snapshot reference '{}' resolved to a rejected id: {}",
+                reference, reason
+            ),
+        ),
     };
-    Response::Error {
-        code: ErrorCode::SnapshotNotFound,
-        message,
-    }
+    Response::Error { code, message }
 }
 
 /// Cleanup old snapshots for a workspace, keeping the most recent `keep` unpinned ones.
@@ -1264,6 +1291,7 @@ mod tests {
             auto_cleanup_interval_secs: 86_400,
             health_check_interval_secs: 300,
             backend_type: "auto".to_string(),
+            btrfs_mount: None,
             img_size: 30,
             img_max_percent: 40.0,
             min_free_bytes: 512 * 1024 * 1024,

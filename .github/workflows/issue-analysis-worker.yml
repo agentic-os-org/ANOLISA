@@ -1,0 +1,242 @@
+name: AI / Component Issue Analysis Worker
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: number
+      target_ref:
+        default: main
+        type: string
+      publish:
+        default: false
+        type: boolean
+      skip_completed:
+        default: false
+        type: boolean
+    secrets:
+      QODER_PERSONAL_ACCESS_TOKEN:
+        required: true
+      DINGTALK_WEBHOOK:
+        required: false
+      DINGTALK_SECRET:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  ISSUE_ANALYSIS_COMPONENTS: ${{ vars.ISSUE_ANALYSIS_COMPONENTS }}
+
+concurrency:
+  group: issue-analysis-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.repository_id == '1195873793'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test .github/scripts/sec-core-issue-analysis.test.js .github/scripts/issue-analysis.test.js .github/scripts/issue-triage.test.js .github/scripts/issue-claim.test.js
+
+  analyze:
+    needs: checks
+    if: >-
+      github.repository_id == '1195873793'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      AGENT_TIMEOUT_SECONDS: '0'
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      artifact_name: issue-${{ steps.snapshot.outputs.issue_number }}-${{ github.run_id }}-${{ github.run_attempt }}
+      skip_analysis: ${{ steps.snapshot.outputs.skip_analysis }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: workflow
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set the analysis directory
+        run: echo "ANALYSIS_ROOT=$RUNNER_TEMP/issue-analysis" >> "$GITHUB_ENV"
+
+      - name: Skip prioritized issues or freeze the analysis inputs
+        id: snapshot
+        uses: actions/github-script@v7
+        env:
+          INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          INPUT_TARGET_REF: ${{ inputs.target_ref }}
+          PUBLISH_ALLOWED: ${{ inputs.publish }}
+          SKIP_COMPLETED: ${{ inputs.skip_completed }}
+        with:
+          script: |
+            const analysis = require(`${process.env.GITHUB_WORKSPACE}/workflow/.github/scripts/issue-analysis.js`);
+            await analysis.prepare({ github, context, core, env: process.env });
+
+      - name: Check model credential availability
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        env:
+          QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$QODER_PERSONAL_ACCESS_TOKEN" ]; then
+            echo 'Configure QODER_PERSONAL_ACCESS_TOKEN in this repository Actions secrets.' >&2
+            exit 1
+          fi
+
+      - name: Check out the frozen source
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ steps.snapshot.outputs.target_sha }}
+          path: target-source
+          persist-credentials: false
+
+      - name: Prepare the read-only source snapshot
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        run: |
+          node workflow/.github/scripts/issue-analysis.js stage \
+            "$ANALYSIS_ROOT" "$GITHUB_WORKSPACE/target-source"
+
+      - name: Build the pinned Qoder runtime
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        timeout-minutes: 5
+        run: docker build --tag issue-analysis:local workflow/.github/issue-analysis
+
+      - name: Analyze claims and propose priority
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        env:
+          QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          node workflow/.github/scripts/issue-analysis.js analysis \
+            "$ANALYSIS_ROOT" workflow/.github/issue-analysis/policy.md
+
+      - name: Review exceptions against the source
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        env:
+          QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          node workflow/.github/scripts/issue-analysis.js review-if-needed \
+            "$ANALYSIS_ROOT" workflow/.github/issue-analysis/policy.md
+
+      - name: Revise once when review requests changes
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        env:
+          QODER_PERSONAL_ACCESS_TOKEN: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          node workflow/.github/scripts/issue-analysis.js revise \
+            "$ANALYSIS_ROOT" workflow/.github/issue-analysis/policy.md
+
+      - name: Produce the report and writeback preview
+        if: steps.snapshot.outputs.skip_analysis != 'true'
+        run: |
+          node workflow/.github/scripts/issue-analysis.js finish "$ANALYSIS_ROOT"
+          cat "$ANALYSIS_ROOT/output/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence and phase records
+        if: always() && steps.snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-${{ steps.snapshot.outputs.issue_number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ANALYSIS_ROOT }}/output/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    outputs:
+      notification_artifact: ${{ needs.analyze.outputs.artifact_name }}-publication-${{ github.run_attempt }}
+    needs: analyze
+    if: >-
+      needs.analyze.outputs.skip_analysis != 'true' && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.analyze.outputs.artifact_name }}
+          path: ${{ runner.temp }}/issue-analysis/output
+      - name: Publish the validated decision and verify the issue
+        uses: actions/github-script@v7
+        env:
+          ANALYSIS_ROOT: ${{ runner.temp }}/issue-analysis
+          PUBLISH_ALLOWED: 'true'
+        with:
+          script: |
+            const analysis = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-analysis.js`);
+            await analysis.publish({ github, context, core, env: process.env });
+      - name: Upload publication audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.analyze.outputs.artifact_name }}-publication-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-analysis/output/
+          retention-days: 7
+          if-no-files-found: error
+
+  notify:
+    name: Notify the reviewed Issue result
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.publish.outputs.notification_artifact }}
+          path: ${{ runner.temp }}/issue-analysis/output
+      - name: Notify triagers and verify the delivery receipt
+        uses: actions/github-script@v7
+        env:
+          ANALYSIS_ROOT: ${{ runner.temp }}/issue-analysis
+          PUBLISH_ALLOWED: 'true'
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { notify } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-analysis-notification`);
+            let result;
+            try {
+              result = await notify({ github, context, core, env: process.env });
+            } catch (error) {
+              result = { status: 'failed', error: error.message };
+              throw error;
+            } finally {
+              fs.writeFileSync(path.join(process.env.ANALYSIS_ROOT, 'notification-results.json'), JSON.stringify(result));
+            }
+      - name: Upload result notification audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.publish.outputs.notification_artifact }}-notification-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-analysis/notification-results.json
+          retention-days: 7
+          if-no-files-found: warn

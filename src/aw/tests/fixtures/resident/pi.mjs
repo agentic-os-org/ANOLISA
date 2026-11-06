@@ -73,12 +73,15 @@ export async function runWorker({ createSession }) {
       catch (error) { failed = true; if (mode === "allow") throw error; }
       const stats = evidence.get(session);
       writeFileSync(join(cwd, "requests.json"), JSON.stringify(stats.requests));
-      assert.equal(failed, mode.endsWith("error"), mode);
+      // A before-tool fault stays fatal; an after-tool report fault keeps the
+      // unchecked original result and the session continues in the same turn.
+      assert.equal(failed, mode === "before-error", mode);
       assert.equal(existsSync(join(cwd, "effect")), ["allow", "after-error"].includes(mode), mode);
-      assert.equal(stats.requests.length, mode.endsWith("error") ? 1 : 2, mode);
+      assert.equal(stats.requests.length, mode === "before-error" ? 1 : 2, mode);
       assert.equal(stats.before, 1);
       assert.equal(stats.after, ["allow", "after-error"].includes(mode) ? 1 : 0);
-      if (mode.endsWith("error")) assert(!JSON.stringify(stats.requests).includes(`private-result-${index}`));
+      if (mode === "after-error")
+        assert(JSON.stringify(stats.requests).includes(`private-result-${index}`));
       const events = readFileSync(join(cwd, "events.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
       assert(events.every((item) => item.tenant === String(index)));
       assert.equal(new Set(events.map((item) => item.event.agent.instance_id)).size, 1);

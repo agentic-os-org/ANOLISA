@@ -8,13 +8,62 @@
 //! Presence probing and adoption both moved to the planner-driven pipelines
 //! (`dispatch.rs`, `adopt.rs`); only the package resolution lives here.
 
+use anolisa_core::providers::is_multiple_versions;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::rpm_select::{PinnedSelection, nevra, select_pinned_candidate};
 
 use crate::repo_config::BackendConfig;
 use crate::resolution::{
     BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolveOptions, ResolvedTarget,
+    index_rpm_packages, rpm_component_core_provide, rpm_component_provide,
 };
+
+/// Identify an installed component without changing the package chosen for a new install.
+/// The preferred package wins over installed index aliases, while multiple
+/// capability providers or multiple installed aliases remain ambiguous.
+pub(crate) fn installed_component_packages(
+    query: &dyn PackageQuery,
+    component: &str,
+    preferred: Option<&str>,
+    index: Option<&ComponentIndex>,
+) -> Result<Vec<String>, PackageQueryError> {
+    let providers = query.what_provides_installed(&rpm_component_provide(component))?;
+    if providers.len() > 1 {
+        return Ok(providers);
+    }
+    let core_providers = query.what_provides_installed(&rpm_component_core_provide(component))?;
+    if core_providers.len() > 1 {
+        return Ok(core_providers);
+    }
+    if let Some(package) = preferred {
+        match query.query_installed(package) {
+            Ok(Some(_)) => return Ok(vec![package.to_string()]),
+            Ok(None) => {}
+            // Let the normal package observer report this as multiple versions.
+            Err(err) if is_multiple_versions(&err) => return Ok(vec![package.to_string()]),
+            Err(err) => return Err(err),
+        }
+    }
+    if !providers.is_empty() {
+        return Ok(providers);
+    }
+    if !core_providers.is_empty() {
+        return Ok(core_providers);
+    }
+    let mut installed = Vec::new();
+    for package in index_rpm_packages(index, component) {
+        if preferred == Some(package.as_str()) {
+            continue;
+        }
+        match query.query_installed(&package) {
+            Ok(Some(_)) => installed.push(package),
+            Ok(None) => {}
+            Err(err) if is_multiple_versions(&err) => installed.push(package),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(installed)
+}
 
 /// Resolved RPM component/package pair.
 #[derive(Debug, Clone, PartialEq)]

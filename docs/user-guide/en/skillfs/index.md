@@ -42,9 +42,34 @@ it cannot mount SkillFS.
 # Recommended package install
 sudo anolisa --install-mode system install skillfs
 
-# Source build for developers
-cd src/skillfs
-cargo +1.86.0 build --release
+# Alternative: complete RPM installation from a configured repository
+sudo yum install skillfs
+```
+
+| RPM | Contents |
+|---|---|
+| `skillfs` | Compatibility aggregate: exact version/release dependencies on core and skills |
+| `skillfs-core` | CLI, FUSE runtime dependencies, license, and documentation |
+| `skillfs-skills` | Bundled mount skill; requires matching core |
+
+For the CLI and filesystem alone, select `sudo yum install skillfs-core`.
+No plugin RPM is emitted. Installation does not mount a filesystem; start a
+mount explicitly as described below. Install or upgrade a local RPM set in
+one transaction, using matching version/release artifacts.
+
+### Source build (developers)
+
+From the repository root on Linux:
+
+```bash
+make -C src/skillfs build
+```
+
+The executable is `src/skillfs/target/release/skillfs`. To install it
+system-wide after building:
+
+```bash
+sudo make -C src/skillfs install
 ```
 
 ## Source Layout
@@ -356,6 +381,15 @@ ordered transform pipeline before an agent sees them:
    rewrites distribution-specific literals between Ubuntu/Debian and
    Alinux/Anolis conventions.
 
+When uv is available, heuristic normalization preserves `pip install --user`
+and `pip3 install --user`: uv does not support pip's user-site installation mode.
+The flag may precede or follow package names and descriptor redirections such
+as `2>&1`. Ordinary pip installs can still be rewritten to `uv pip install`,
+including neighboring shell commands, inline code in lists or prose, and commands
+followed by parenthetical notes. Each inline code span is inspected separately.
+Interpreter-specific `python -m pip` calls remain unchanged. Unfinished arguments,
+line continuations, and command substitutions also keep the original pip invocation.
+
 When heuristic normalization selects Yarn, only a bare `npm install` is rewritten
 to `yarn install`. Install commands with package names, flags, or redirections
 remain unchanged: Yarn uses `add` for new dependencies and does not share all npm
@@ -386,6 +420,15 @@ error (`ENOENT` at the virtual read boundary) and never retries the live source.
 `getattr` size, partial reads, and full reads always agree on the transformed
 bytes. Only `SKILL.md` is adapted — other Markdown, shell, Python, and config
 files pass through untouched.
+
+Command availability for the directive stage is captured at mount startup. On
+Linux it checks executable files on `PATH` directly, without requiring `which`
+or executing the detected commands. Executable symlinks and relative/empty
+`PATH` entries follow normal lookup locations; directories, broken links and
+files that the effective user cannot execute do not count. If `PATH` is unset,
+the platform default search path is used. The existing fixed
+command allowlist is unchanged. Remount after changing `PATH` or installing a
+command; this does not add per-read environment probing.
 
 ### Disabling the Directive Stage
 

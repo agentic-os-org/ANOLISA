@@ -2,8 +2,8 @@
 
 [中文版](../../zh/adapters/qwenpaw-adapter.md)
 
-AW manages QwenPaw App tool invocations through the pinned QwenPaw
-`2.2.2.post1` / AgentScope `2.0.10` native middleware and Coordinator. Ordinary
+AW manages QwenPaw App tool invocations through native middleware and
+Coordinator interfaces, verified with QwenPaw `2.2.2.post1` / AgentScope `2.0.10`. Ordinary
 `aw run` admits each Agent request into the shared SDK task scope. Native
 permissions, scheduling and model configuration remain owned by QwenPaw.
 
@@ -22,7 +22,7 @@ a fresh UUID in `aw_invocation_id`; `tool_call.id` retains QwenPaw's original ID
 The service correlates the UUID, and the adapter retains only active native
 ownership records. Arguments are compared exactly at the native execution
 boundary, including integers above `2**53`, before the shared wire normalization.
-Admission uses the pinned Toolkit parser and tool schema, including native empty
+Admission uses the native Toolkit parser and tool schema, including native empty
 input and repair semantics. The Toolkit parser corroborates the effective mapping
 again immediately before the admitted dispatch; a later rewrite fences the owner.
 The dispatch guard is consumed before the tool body, allowing nested Toolkit
@@ -115,11 +115,18 @@ application's lease implementation and require its separate acceptance.
 
 ## Entrypoints and compatibility
 
-The launcher owns only `plugins/aw-native`, installs its private runtime assets,
-and removes that directory after the owned App exits. Existing plugin directories
-and native profiles remain under their owners. Use an initialized absolute
+Each launch owns a separate `plugins/aw-native-<uuid>` directory and manifest ID.
+Existing `aw-native` plugins and their settings remain untouched. The native App
+loads `config.json` and retains its own defaults, validation and update behavior;
+AW does not parse or rewrite that file. Cleanup removes only the owned directory.
+Attachment records retain the generated ID for native API installation and
+removal; existing fixed-name attachment records remain removable. Use an initialized absolute
 `QWENPAW_WORKING_DIR` and the App/API entrypoint. ACP, TUI and multiple workers
 remain outside this adapter's admission contract.
+
+Before downgrading AW, detach caller-owned App attachments with the version that
+created them. For an AW-owned launch, stop the App and let AW remove its temporary
+plugin before switching binaries.
 
 `--reloadable` retains the previous whole-request/tool busy tracking and policy
 update behavior. Its binding cannot open resident child scopes; attempting to
@@ -147,6 +154,18 @@ private environment/redaction, saturation recovery and 1,025 sequential calls.
 `native_resident_service.py --bin <directory>` exercises the same Coordinator
 through the real Scope CLI, service and Provider for denial and completed drain.
 The native inventory retains the earlier middleware, reload and App suites.
+`native_app_reload.py` also runs ordinary resident App turns against a local
+model, comparing native and AW behavior in the same profile. It checks user
+plugins, native configuration bytes after native initialization, policy switching,
+uncovered file-tool success/error, and dynamic MCP creation, environment updates,
+native denial and removal. Native initialization may normalize its own schema;
+the comparison records that behavior before installing AW.
+
+Middleware construction forwards native factory arguments unchanged. Before
+publishing a final response or error chunk to a Coordinator that stops pulling
+at that item, AW exhausts and closes the underlying tool generator. This keeps
+cleanup before after-Hooks, delivery and scope release across both consumption
+styles. Admission continues to verify actual seams rather than version strings.
 
 These deterministic tests use no model credentials. Full App deployment,
 application credential lifecycle, real security backend composition and production

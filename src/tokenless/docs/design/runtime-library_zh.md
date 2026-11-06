@@ -4,9 +4,9 @@
 
 ## 目标
 
-`anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含 PyO3
-Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk`
-出现在 `PATH` 中。
+`anolisa-tokenless` 是框架无关的 Tokenless SDK。BeforeModel、PostTool 和 Retrieve 通过
+PyO3 Runtime 在进程内运行；PreTool 在子进程中运行，详见下文。平台 Wheel 同时包含 PyO3 Runtime
+和匹配的 `tokenless` 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk` 出现在 `PATH` 中。
 
 公开的 `TokenlessSdk` 把宿主框架的四个生命周期映射为 Tokenless 行为：
 
@@ -27,12 +27,40 @@ Session 标识；PreTool 与普通 PostTool 还必须提供 Tool Use 标识。�
 OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约，不是 OpenAI 请求。
 
 `tokenless-runtime` 统一持有 SQLite Stash 和统计记录器。Schema 与响应压缩共享 Stash，
-候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
-提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
-携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
+候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。RTK 链接在 `tokenless`
+可执行文件中；Adapter 提供 `command_field` 时，`TokenlessSdk.pre_tool` 每次调用都启动
+`tokenless compress`，因为 RTK 假定一条命令对应一个进程：它在进程生命周期内缓存已信任的过滤规则和
+项目文件，并可能无时限地等待 `git rev-parse`。因此每次调用都能看到最新的 RTK 状态。SDK 给子进程
+5 秒时限，超时后杀掉其进程组（Windows 上用 `taskkill /T`），任何失败都记录警告并放行原命令。每个
+改写后的 wrapper 都以 `tokenless rtk` 形式调用 Wheel 内置的 `tokenless`，并携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
 Rust Core，而不是 Python 配置中。Shell 工具的 `PostToolRequest` 在 `command` 字段携带实际
 执行的命令行；由 Core 而非 Adapter 把只打印本地文件的结果报告为 `file_read`，打印出的
 HTML 页面因此保持原样，输出中的数据仍照常压缩。
+
+PreTool 使用与 `find` 相同的直接调用及内置 Wrapper 识别规则，保留已识别的原生
+`head`、`tail` 调用，支持嵌套和 Shell 换行续行。所有参数形式均保持原生执行，包括字节
+窗口和持续跟踪模式。一旦识别到此类调用，其所在的整条 Pipeline 或复合命令都跳过 RTK
+改写。这避免了 RTK `read --max-lines` 路径的结构截断；显式 RTK 调用保持既有行为。
+不会读取自定义 `hooks.transparent_prefixes`，因此这些前缀下的调用仍可能被改写。
+该规则独立于搜索路径共享开关，保留现有 PostTool 文件读取策略。
+
+同一原生命令识别覆盖 `grep`、`rg` 的所有模式；`git grep`、`xargs grep` 和自定义 Wrapper
+前缀不在此识别范围。PostTool 复用该解析器识别 `command_output` 来源的搜索，
+与原生 `Grep` 工具一样，只调用 `SearchResultsCompressor`。统一入口识别带路径和行号的
+匹配记录及纯路径列表，格式识别和收益判断都保留在压缩器内部。关闭搜索压缩或没有候选时
+原样返回，即使设置 `force_json` 也不尝试其他领域压缩器。Qoder 原生 Bash Adapter 只将
+`stdout` 交给 Core，即使它较短、为空或 `stderr` 更长；回填结果时保留其他所有字段。
+
+此保护覆盖包含已识别搜索的复合命令的完整输出。例如，`grep -q needle Cargo.toml && cargo build`
+也会保留完整构建日志，因为 Hook 不提供各子命令的输出边界。在能保证搜索匹配完整的混合输出
+分块处理实现之前，这会有意降低既有构建/测试日志及其他领域的压缩覆盖率。
+`rg -l TODO src | xargs cat` 等 Pipeline 也保留输出，尽管最终内容是文件正文而非路径列表。
+Tokenless 不增加截断回退，宿主自身的输出限制仍然有效。`max_input_bytes` 限制压缩工作量，
+超限时原样返回，不限制返回文本体积。
+
+搜索压缩器开启但没有候选时，使用公共仲裁的 `no_savings`；连接持久化 Store 时，Stash
+计数为零。关闭搜索压缩或命中生命周期门槛时仍为透传。API 和文件读取结果上的 `command`
+元数据不会开启 Shell 搜索保护；精确工具名 `Grep` 保留其原生搜索契约。
 
 SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
 声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
@@ -40,13 +68,13 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
 后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
-千问办公的 Hook Adapter 在两个生命周期请求之前，将两个工作区 Shell MCP 名称统一为
+千问办公的 Hook Adapter 在两个生命周期请求之前，将识别到的工作区 Shell MCP 名称统一为
 `Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
 确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置
 及结构化响应处理。插件私有二进制也由 Adapter 解析；私有 PATH 或工作区状态不代表
 模型可以调用恢复命令，因此这些路径声明 `recovery.kind = none`。
 
-非法输入、内置 RTK 缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
+非法输入、内置 `tokenless` 可执行文件缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
@@ -74,8 +102,9 @@ python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-polic
 ## 搜索路径共享
 
 PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `search_results` 的内容交给
-`SearchResultsCompressor`。这是按内容派发的 Core 能力，不依赖命令名或 Agent ID；
-带行号的搜索记录仍要求来源为 `api_response`。
+`SearchResultsCompressor`。原生 `Grep` 和识别出的 Shell `grep`、`rg` 直接调用此压缩器，
+不要求内容检测先判为搜索结果。其他工具保留按内容派发：带行号记录要求 `api_response`
+来源，纯路径列表也接受命令输出。
 成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
 行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；
 任意不支持的记录都会拒绝整份候选。字节数与估算 Token 均减少后，再经过现有 Runtime 仲裁。
@@ -89,8 +118,9 @@ PostTool 在搜索路径共享已开启且支持文本替换时，将识别为 `
 不带前缀的相对根目录仅接受字母、数字、`.`、`_`、`-`；以 `/`、`./`、`../` 开头的路径
 可包含空格、引号和反斜杠，通过 JSON 字符串编码。压缩器不读取文件，也不规范化路径。
 `file_content` 和 `file_read` 均跳过此路径列表策略；既有文件读取的 JSON、表格、日志处理不变。
-既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
-不会把路径中间或 CRLF 中间的字节截断片段视为记录。完整输入的路径列表候选只生成一次，随后复用到仲裁。
+对于搜索专用通路之外的工具，既有源码和表格检测优先于纯路径列表检测。路径探测的有界采样停在最后一个完整行尾，
+不会把路径中间或 CRLF 中间的字节截断片段视为记录。搜索专用通路之外，资格检查先解析完整路径列表，
+压缩器再解析并生成候选，随后进入公共仲裁。
 
 路径列表视图以 `[Path list; all received paths retained; full path = base + each paths entry]`
 开头，随后是含 `base`、`paths`、`line_ending`、`trailing_newline` 的紧凑 JSON。
@@ -182,10 +212,10 @@ Session；客户端不会推断或强制这两种模式。Python API 不清空�
 
 ## 打包与验证
 
-`make python-wheel` 会构建固定版本 RTK，把它暂存为
-`anolisa_tokenless/_bin/rtk`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
-可以通过 `PYTHON_RTK_BINARY` 指定为同一 Wheel 目标构建的 RTK 文件。
-`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 RTK 的条件下验证
+`make python-wheel` 会构建 `tokenless`，把它暂存为
+`anolisa_tokenless/_bin/tokenless`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
+可以通过 `PYTHON_TOKENLESS_BINARY` 指定为同一 Wheel 目标构建的 `tokenless` 文件。
+`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 `tokenless` 或 RTK 的条件下验证
 四个生命周期和 Stats 查询。
 
 `anolisa-tokenless-agentscope` 支持 AgentScope 1.0.11 至 1.0.x 和 2.0.x。1.x Adapter

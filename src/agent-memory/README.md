@@ -14,6 +14,10 @@ CMA-style persistent filesystem memory for AI agents, served over MCP. Provides 
 - **Safety** — prompt-injection detection and secret/PII redaction for injected content
 - **Cross-session tasks** — save/resume/close tasks across sessions with full context
 
+Keyword search accepts terms such as `config.toml`, `example.com`, and `v1.2.3`.
+Words such as `AND`, `NOT`, and `OR` are searched as text. Separate search terms
+with spaces; partial matches are returned when no result matches every term.
+
 ## Quick Start
 
 ### Install
@@ -54,6 +58,12 @@ hosts list it as a deprecated no-op and never receive it under either setting,
 so `AGENT_MEMORY_SAFE_INSTALL` changes nothing there and install-time safety
 follows the operator-owned `security.installPolicy`. The install log states
 which case applied.
+
+The companion `uninstall.sh` delegates plugin removal and configuration cleanup
+to OpenClaw. An already-unregistered plugin succeeds only when neither known
+plugin path remains under the state directory. A missing/failing CLI or residual
+path returns nonzero; the script does not edit configuration or delete plugin
+files itself. See the user guide for the exact success contract and RPM removal.
 
 ### Integration (MCP client)
 
@@ -111,6 +121,15 @@ capture consent before writing and marks the source as `auto-capture`. Explicit
 Upgrade the server and adapter together; an older server rejects automatic
 capture requests without falling back to a manual write.
 
+For single-line list entries, `memory_summary` concept and file rankings remain
+available after a `mem_export` / `mem_import` round trip, including literal commas.
+Import replaces ASCII control characters in frontmatter, including newlines, with spaces.
+
+Embedding providers selected in TOML also accept their `MEMORY_OPENAI_*` or
+`MEMORY_OLLAMA_*` field overrides without repeating the backend selector. See
+the [configuration guide](../../docs/user-guide/en/agent-memory/index.md)
+for credential precedence and model-change indexing limits.
+
 ## Architecture
 
 Single-process Tokio async runtime exposing 38 MCP tools over stdio JSON-RPC 2.0:
@@ -155,7 +174,7 @@ plugin output directory, target, timestamp and TOML build metadata inputs.
 Metadata binds `version`, `target_os`, `target_arch`,
 `binaries.agent-memory` (SHA256) and `plugin.sha256` to the supplied files.
 The packager does not build or execute binaries. It renders the raw installation
-contract from `.anolisa/component.raw.toml.in` and Cargo.toml; the RPM contract
+contract from `packaging/anolisa/raw/component.toml.in` and Cargo.toml; the RPM contract
 remains separate. Both installation modes leave the user service stopped.
 Run `python3 tests/test_raw_packaging.py` for packaging regressions.
 

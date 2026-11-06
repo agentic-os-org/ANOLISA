@@ -1,16 +1,17 @@
 #![forbid(unsafe_code)]
-//! Offline external Provider messages and native Hook capability checks.
+//! Offline external Provider messages and view contracts.
 //!
 //! This library neither runs commands nor authenticates an Adapter or Provider.
 //! A successful check yields candidate effects, never a Core receipt or proof of
 //! adoption. Trusted Hosts retain execution, budget and audit responsibilities.
 
-pub mod admission;
 mod parsing;
 mod protocol;
 pub mod view;
 
-pub use protocol::{Description, Outcome, Protocol, Reply, Request, ValidatedConfig};
+pub use protocol::{
+    Description, Outcome, Protocol, ProviderEvidence, Reply, Request, ValidatedConfig,
+};
 
 /// Experimental external protocol, separate from Core's canonical wire records.
 pub const VERSION: &str = "aw-provider/v1alpha1";

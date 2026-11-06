@@ -7,8 +7,7 @@ use super::{
     },
     read_file, Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -61,15 +60,9 @@ impl Adapter for Qoder {
         if version.is_empty() || version.len() > 128 {
             return Err("Qoder CLI version probe output must contain 1..128 bytes".into());
         }
-        let detected = semver::Version::parse(&version).map_err(|error| {
+        semver::Version::parse(&version).map_err(|error| {
             format!("could not parse Qoder CLI --version output; expected a bare SemVer such as 1.1.64, got {version:?}: {error}")
         })?;
-        let minimum = semver::Version::new(1, 1, 64);
-        if detected < minimum {
-            return Err(
-                format!("Qoder CLI {minimum} or newer is required (detected {version})").into(),
-            );
-        }
         Ok(Box::new(Prepared {
             input,
             settings,
@@ -97,7 +90,11 @@ impl Adapter for Qoder {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        capabilities(&self.native, &self.version)
+        let mut capabilities = capabilities(&self.native, &self.version);
+        if self.input.options.reloadable {
+            capabilities.events.remove("input.submit");
+        }
+        capabilities
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
@@ -321,6 +318,7 @@ pub(super) fn check_sources(
 
 pub(super) fn event_name(event: &str) -> Result<&'static str> {
     match event {
+        "input.submit" => Ok("UserPromptSubmit"),
         "tool.before" => Ok("PreToolUse"),
         "tool.after" => Ok("PostToolUse"),
         _ => Err("unsupported native event".into()),
@@ -344,9 +342,12 @@ pub(super) fn generate(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or("Qoder hooks must be an object")?;
-    for name in ["tool.before", "tool.after"] {
-        let selected =
-            adapter::native_steps(steps, name, adapter::observation_enabled(document, target));
+    for name in ["input.submit", "tool.before", "tool.after"] {
+        let selected = adapter::native_steps(
+            steps,
+            name,
+            name != "input.submit" && adapter::observation_enabled(document, target),
+        );
         if selected.is_empty() {
             continue;
         }
@@ -403,6 +404,15 @@ pub(super) fn normalize(binding: &NativeContext, name: &str, native: &Value) -> 
         || native["cwd"].as_str() != binding.cwd.to_str()
     {
         return Err("Qoder callback event or working directory does not match the binding".into());
+    }
+    if name == "input.submit" {
+        return crate::adapters::submission::normalize_turn(
+            binding,
+            native,
+            "qoder",
+            "prompt",
+            "request_set_id",
+        );
     }
     let identifier = |key: &str| -> Result<&str> {
         native[key]

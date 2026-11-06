@@ -8,6 +8,14 @@ fn texts_of(claims: &[Claim], class: ClaimClass) -> Vec<String> {
         .collect()
 }
 
+fn number_values(text: &str) -> Vec<f64> {
+    extract_claims(text)
+        .iter()
+        .filter(|c| c.class == ClaimClass::Number)
+        .filter_map(|c| c.value)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The over-flagging guard: trivial arithmetic must produce nothing to ground
 // ---------------------------------------------------------------------------
@@ -272,6 +280,1829 @@ fn thousands_separator_does_not_spawn_fragment_claims() {
         vec!["244,618"],
         "a grouped number is one fact, not three"
     );
+}
+
+#[test]
+fn compact_bracketed_comma_list_yields_individual_numbers() {
+    assert_eq!(
+        number_values("status codes [200,404,500]"),
+        vec![200.0, 404.0, 500.0]
+    );
+    assert_eq!(
+        number_values("measurements [200,404.5,1.2e3]"),
+        vec![200.0, 404.5, 1200.0]
+    );
+    assert_eq!(number_values("CI/CD[200,404]"), vec![200.0, 404.0]);
+}
+
+#[test]
+fn spaced_bracketed_comma_list_keeps_the_first_number() {
+    assert_eq!(
+        number_values("status codes [200, 404, 500]"),
+        vec![200.0, 404.0, 500.0]
+    );
+}
+
+#[test]
+fn compact_bracketed_comma_list_tolerates_sentence_punctuation() {
+    for text in [
+        "status codes [200,404,500].",
+        "status codes [200,404,500]!",
+        "status codes [200,404,500]?",
+        "状态码 [200,404,500]。",
+    ] {
+        assert_eq!(number_values(text), vec![200.0, 404.0, 500.0], "{text}");
+    }
+}
+
+#[test]
+fn bracketed_comma_list_allows_mixed_spacing() {
+    for text in ["status codes [200,404, 500]", "status codes [200, 404,500]"] {
+        assert_eq!(number_values(text), vec![200.0, 404.0, 500.0], "{text}");
+    }
+}
+
+#[test]
+fn bracketed_comma_list_survives_decoration_and_adjacent_prose() {
+    for text in [
+        "`[200,404,500]`",
+        "**[200,404,500]**",
+        "([200,404,500])",
+        "[200,404,500];",
+        "状态码[200,404,500]。",
+    ] {
+        assert_eq!(number_values(text), vec![200.0, 404.0, 500.0], "{text}");
+    }
+}
+
+#[test]
+fn bracketed_comma_normalization_preserves_path_claims() {
+    for path in ["/tmp/a[b,c].txt", "/tmp/a[200,404].txt"] {
+        assert_eq!(
+            texts_of(&extract_claims(path), ClaimClass::Path),
+            vec![path]
+        );
+    }
+}
+
+#[test]
+fn outer_numeric_list_preserves_a_nested_path() {
+    for (text, expected_numbers) in [
+        ("[100, /tmp/a[200,404].txt]", vec![100.0]),
+        ("[100,/tmp/a[200,404].txt,500]", vec![100.0, 500.0]),
+        ("x=[100,/tmp/a[200,404].txt,500]", vec![100.0, 500.0]),
+        ("x=`[100,/tmp/a[200,404].txt,500]`", vec![100.0, 500.0]),
+        ("x=([100,/tmp/a[200,404].txt,500])", vec![100.0, 500.0]),
+        ("x=**[100,/tmp/a[200,404].txt,500]**", vec![100.0, 500.0]),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a[200,404].txt"],
+            "{text}"
+        );
+        assert_eq!(number_values(text), expected_numbers, "{text}");
+    }
+}
+
+#[test]
+fn path_list_item_does_not_hide_later_numeric_items() {
+    for text in ["[/tmp/a.txt, 200,404]", "[/tmp/a.txt,200,404]"] {
+        assert_eq!(
+            texts_of(&extract_claims(text), ClaimClass::Path),
+            vec!["/tmp/a.txt"],
+            "{text}"
+        );
+        assert_eq!(number_values(text), vec![200.0, 404.0], "{text}");
+    }
+}
+
+#[test]
+fn path_first_mixed_lists_keep_following_items_separate() {
+    for path in ["/tmp/a.txt", "/tmp/a[200].txt", "/tmp/a[200,404].txt"] {
+        let text = format!("x=[{path},n=500]");
+        let claims = extract_claims(&text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{text}");
+        assert_eq!(number_values(&text), vec![500.0], "{text}");
+
+        let text = format!("x=[{path},v1.2.3]");
+        let claims = extract_claims(&text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{text}");
+        assert_eq!(texts_of(&claims, ClaimClass::Version), vec!["v1.2.3"]);
+
+        let text = format!("x=[{path},a/b/c]");
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![path.to_string(), "a/b/c".to_string()],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn mixed_lists_tolerate_quoted_and_empty_items() {
+    for path in ["/tmp/a.txt", "/tmp/a[200,404].txt"] {
+        for text in [
+            format!("x=[{path},\"500\"]"),
+            format!("x=[{path},,500]"),
+            format!("x=[\"{path}\",500]"),
+        ] {
+            let claims = extract_claims(&text);
+            assert!(
+                claims.iter().any(|claim| claim.text == path),
+                "{text}: {claims:?}"
+            );
+            assert_eq!(number_values(&text), vec![500.0], "{text}: {claims:?}");
+        }
+    }
+}
+
+#[test]
+fn mixed_lists_preserve_commas_inside_path_items() {
+    for (text, path, expected_numbers) in [
+        (
+            "x=[100,/tmp/a,b.txt,500]",
+            "/tmp/a,b.txt",
+            vec![100.0, 500.0],
+        ),
+        (
+            "x=[100,/tmp/a,b[200,404].txt,500]",
+            "/tmp/a,b[200,404].txt",
+            vec![100.0, 500.0],
+        ),
+        ("x=[/tmp/a,b.txt,500]", "/tmp/a,b.txt", vec![500.0]),
+        ("x=[/tmp/a,b.txt, 500]", "/tmp/a,b.txt", vec![500.0]),
+        (
+            "x=[100,/tmp/a，b.txt,500]",
+            "/tmp/a，b.txt",
+            vec![100.0, 500.0],
+        ),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![path],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), expected_numbers, "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn mixed_lists_preserve_multiple_path_commas_and_consecutive_paths() {
+    let text = "x=[100,/tmp/a,b,c.txt,500]";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a,b,c.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![100.0, 500.0], "{claims:?}");
+
+    let text = "x=[/tmp/a,b.txt,/tmp/c.txt,500]";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a,b.txt", "/tmp/c.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![500.0], "{claims:?}");
+}
+
+#[test]
+fn bracketed_url_commas_remain_url_content() {
+    let text = "[https://example.test/search?q=200,404]";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Url),
+        vec!["https://example.test/search?q=200,404"]
+    );
+    assert!(number_values(text).is_empty(), "{claims:?}");
+}
+
+#[test]
+fn compact_list_url_commas_do_not_become_numeric_claims() {
+    let text = "[100,https://example.test/search?q=200,404, 500]";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Url),
+        vec!["https://example.test/search?q=200,404"]
+    );
+    assert_eq!(number_values(text), vec![100.0, 500.0], "{claims:?}");
+
+    let followed_by_quoted = "[100,https://example.test,\"404\",500]";
+    assert_eq!(number_values(followed_by_quoted), vec![100.0, 404.0, 500.0]);
+}
+
+#[test]
+fn markdown_link_labels_keep_grouped_numbers_whole() {
+    for text in [
+        "[244,781 stars](https://example.test)",
+        r#"{"text":"[244,781 stars](https://example.test)"}"#,
+        "[244,781](https://example.test)",
+        r#"{"text":"[244,781](https://example.test)"}"#,
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn quoted_grouped_numbers_in_inline_arrays_stay_whole() {
+    assert_eq!(number_values(r#"result ["244,781"]"#), vec![244_781.0]);
+    assert_eq!(number_values(r#"result ["244，781"]"#), vec![244_781.0]);
+    for text in [
+        "result ['x,244,781,y']",
+        r#"{"text":"result ['x,244,781,y']"}"#,
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn compact_list_does_not_truncate_short_nested_paths() {
+    let unquoted = extract_claims("[100,/a[200,404].txt,500]");
+    assert_eq!(
+        texts_of(&unquoted, ClaimClass::Path),
+        vec!["/a[200,404].txt"]
+    );
+    assert_eq!(
+        number_values("[100,/a[200,404].txt,500]"),
+        vec![100.0, 500.0]
+    );
+
+    let quoted_text = r#"[200,"/a[200,404].txt",500]"#;
+    let quoted = extract_claims(quoted_text);
+    assert_eq!(
+        texts_of(&quoted, ClaimClass::Quoted),
+        vec!["/a[200,404].txt"]
+    );
+    assert!(
+        quoted
+            .iter()
+            .all(|claim| claim.text != "/a[200" && claim.text != ".txt"),
+        "{quoted:?}"
+    );
+}
+
+#[test]
+fn path_ownership_covers_every_bracketed_segment() {
+    let path = "/a[200,404]x[500,600].txt";
+    let claims = extract_claims(path);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+    assert!(number_values(path).is_empty(), "{claims:?}");
+
+    let list = r#"[100,"/a[200,404]x[500,600].txt",700]"#;
+    let claims = extract_claims(list);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Quoted),
+        vec!["/a[200,404]x[500,600].txt"]
+    );
+    assert_eq!(number_values(list), vec![100.0, 700.0], "{claims:?}");
+}
+
+#[test]
+fn attached_path_suffixes_after_numeric_brackets_stay_whole() {
+    for (text, path) in [
+        ("path=/tmp/a;[200,404].txt", "/tmp/a;[200,404].txt"),
+        ("path=/tmp/a;[200,404]/b", "/tmp/a;[200,404]/b"),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{text}");
+        assert!(number_values(text).is_empty(), "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn root_serialized_json_uses_typed_numeric_replay() {
+    let text = r#""{\"counts\":[200,404]}""#;
+    assert_eq!(number_values(text), vec![200.0, 404.0]);
+}
+
+#[test]
+fn embedded_serialized_json_uses_typed_numeric_replay() {
+    let text = r#"result "{\"counts\":[200,404]}""#;
+    assert_eq!(number_values(text), vec![200.0, 404.0]);
+}
+
+#[test]
+fn decorated_embedded_serialized_json_uses_typed_numeric_replay() {
+    for text in [r#""{\"a\":[200,404]}","#, r#"x="{\"a\":[200,404]}""#] {
+        assert_eq!(number_values(text), vec![200.0, 404.0], "{text}");
+    }
+}
+
+#[test]
+fn quoted_closing_brackets_do_not_close_the_outer_list() {
+    assert_eq!(number_values(r#"result ["]",200,404]"#), vec![200.0, 404.0]);
+}
+
+#[test]
+fn reference_markdown_labels_keep_grouped_numbers_whole() {
+    for text in [
+        "[244,781][ref]\n[ref]: https://example.test",
+        "[244,781][]\n[244,781]: https://example.test",
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn an_unmatched_leading_apostrophe_does_not_hide_list_structure() {
+    assert_eq!(number_values("'90s [200,404]"), vec![200.0, 404.0]);
+}
+
+#[test]
+fn shortcut_markdown_labels_keep_grouped_numbers_whole() {
+    let text = "[244,781]\n\n[244,781]: https://example.test";
+    assert_eq!(separate_bracketed_comma_lists(text), text);
+    assert_eq!(number_values(text), vec![244_781.0]);
+}
+
+#[test]
+fn shortcut_markdown_labels_normalize_label_whitespace() {
+    let text = "[244,\n781]\n\n[244, 781]: https://example.test";
+    assert_eq!(number_values(text), vec![244_781.0]);
+}
+
+#[test]
+fn shortcut_markdown_labels_normalize_label_case() {
+    for text in [
+        "[count=244,781]\n\n[COUNT=244,781]: https://example.test",
+        "[count=244,\n781]\n\n[COUNT=244, 781]: https://example.test",
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn shortcut_markdown_labels_use_unicode_case_folding() {
+    for text in [
+        "[ß=244,781]\n\n[SS=244,781]: https://example.test",
+        "[ς=244,781]\n\n[Σ=244,781]: https://example.test",
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn a_decade_apostrophe_does_not_quote_a_later_list() {
+    assert_eq!(number_values("'90s [200,404] 'x'"), vec![200.0, 404.0]);
+}
+
+#[test]
+fn compact_mixed_lists_keep_numbers_adjacent_to_versions() {
+    assert_eq!(number_values("[200,v1.2.3,500]"), vec![200.0, 500.0]);
+}
+
+#[test]
+fn quoted_brackets_respect_non_ascii_quote_pairs() {
+    for text in [
+        "result [“]”,200,404]",
+        "result [「]」,200,404]",
+        "result [‘]’,200,404]",
+    ] {
+        assert_eq!(number_values(text), vec![200.0, 404.0], "{text}");
+    }
+}
+
+#[test]
+fn key_prefixed_urls_do_not_degroup_query_commas() {
+    let text = "[100,url=https://example.test/?q=200,404, 500]";
+    assert_eq!(number_values(text), vec![100.0, 500.0]);
+}
+
+#[test]
+fn key_prefixed_short_paths_own_their_brackets() {
+    let text = "path=/a[200,404]";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec![text.trim_start_matches("path=")]
+    );
+    assert!(number_values(text).is_empty(), "{claims:?}");
+}
+
+#[test]
+fn attached_paths_do_not_swallow_following_fields() {
+    let claims = extract_claims("path=/tmp,count=500");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    assert_eq!(number_values("path=/tmp,count=500"), vec![500.0]);
+}
+
+#[test]
+fn attached_paths_keep_commas_before_following_fields() {
+    for separator in [',', ';', '|'] {
+        let text = format!("path=/tmp/a,b.txt{separator}count=500");
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a,b.txt"],
+            "{text}"
+        );
+        assert_eq!(number_values(&text), vec![500.0], "{text}");
+    }
+}
+
+#[test]
+fn quoted_attached_paths_preserve_field_like_content() {
+    for (text, path, expected_numbers) in [
+        (
+            "path=\"/tmp/a,count=500\";other=600",
+            "/tmp/a,count=500",
+            vec![600.0],
+        ),
+        ("path=\"/tmp/a;b\";count=500", "/tmp/a;b", vec![500.0]),
+        (
+            "{\"path\":\"/tmp/a,b.txt\",\"other\":600}",
+            "/tmp/a,b.txt",
+            vec![600.0],
+        ),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![path],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), expected_numbers, "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn attached_bracketed_paths_keep_their_commas_when_fields_follow() {
+    let text = "path=/a[200,404],count=500";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/a[200,404]"]);
+    assert_eq!(number_values(text), vec![500.0]);
+}
+
+#[test]
+fn embedded_urls_do_not_hide_following_serialized_fields() {
+    for text in [
+        r#""u":"https://x","n":500"#,
+        r#"\"u\":\"https://x\",\"n\":500"#,
+    ] {
+        assert_eq!(number_values(text), vec![500.0], "{text}");
+    }
+}
+
+#[test]
+fn attached_numeric_values_are_complete_list_items() {
+    assert_eq!(number_values("result [n=200,404]"), vec![200.0, 404.0]);
+}
+
+#[test]
+fn attached_values_do_not_hide_earlier_fields() {
+    for separator in [';', ',', '|'] {
+        let text = format!("200{separator}count=500");
+        assert_eq!(number_values(&text), vec![200.0, 500.0], "{text}");
+    }
+
+    let text = "path=/tmp;count=500";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    assert_eq!(number_values(text), vec![500.0]);
+}
+
+#[test]
+fn unkeyed_path_fields_do_not_split_on_pathname_equals() {
+    for separator in [';', '|'] {
+        for suffix in ["500", "c.txt"] {
+            let text = format!("path=/tmp/a{separator}/tmp/b={suffix}");
+            let claims = extract_claims(&text);
+            assert_eq!(
+                texts_of(&claims, ClaimClass::Path),
+                vec!["/tmp/a".to_string(), format!("/tmp/b={suffix}")],
+                "{text}"
+            );
+            assert!(number_values(&text).is_empty(), "{text}: {claims:?}");
+        }
+    }
+}
+
+#[test]
+fn attached_nested_paths_drop_only_the_key() {
+    for (text, expected) in [
+        ("path=/tmp/report.txt", "/tmp/report.txt"),
+        (
+            "path=/etc/agentsight/config.json",
+            "/etc/agentsight/config.json",
+        ),
+        ("path=scripts/run.sh", "scripts/run.sh"),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![expected],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn attached_relative_paths_keep_equals_around_slashes() {
+    for path in ["a=b/c=d.txt", "a=b/c=d/e", "a=b/c=d[200,404].txt"] {
+        let text = format!("path={path}");
+        let claims = extract_claims(&text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{text}");
+        assert!(number_values(&text).is_empty(), "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn commas_inside_standalone_paths_stay_path_content() {
+    for path in ["/tmp/2024,500.txt", "/tmp/a,b.txt"] {
+        let claims = extract_claims(path);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+        assert!(number_values(path).is_empty(), "{claims:?}");
+    }
+}
+
+#[test]
+fn escaped_numeric_strings_in_embedded_arrays_stay_visible() {
+    assert_eq!(number_values(r#"result [\"200\",404]"#), vec![200.0, 404.0]);
+    assert_eq!(
+        number_values(r#"result [\"244,781\",500]"#),
+        vec![244_781.0, 500.0]
+    );
+}
+
+#[test]
+fn many_attached_path_fields_complete_without_recursive_blowup() {
+    let text = format!("path=/tmp{},count=500", ",a=/tmp".repeat(64));
+    let claims = extract_claims(&text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    assert_eq!(number_values(&text), vec![500.0]);
+}
+
+#[test]
+fn comma_heavy_attached_values_complete_without_quadratic_scanning() {
+    let text = format!("path=/tmp{}=500", ",a".repeat(64_000));
+    assert_eq!(number_values(&text), vec![500.0]);
+}
+
+#[test]
+fn attached_dates_do_not_swallow_following_fields() {
+    for separator in [',', ';', '|'] {
+        let text = format!("date=2024-01-01{separator}count=500");
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Date),
+            vec!["2024-01-01"],
+            "{text}"
+        );
+        assert_eq!(number_values(&text), vec![500.0], "{text}");
+    }
+}
+
+#[test]
+fn attached_values_trim_sentence_decoration() {
+    for text in ["path=/tmp.", "path=/tmp,"] {
+        let claims = extract_claims(text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    }
+    let claims = extract_claims("date=2024-01-01.");
+    assert_eq!(texts_of(&claims, ClaimClass::Date), vec!["2024-01-01"]);
+}
+
+#[test]
+fn rejected_apostrophe_pairs_complete_without_quadratic_scanning() {
+    let text = "'a ".repeat(32_000);
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn attached_relative_paths_keep_leading_dots() {
+    for (text, expected) in [
+        ("path=./report.txt", "./report.txt"),
+        ("path=../report.txt", "../report.txt"),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![expected],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn attached_decorative_brackets_do_not_become_path_content() {
+    let claims = extract_claims("path=[/tmp]");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+}
+
+#[test]
+fn attached_field_boundaries_do_not_depend_on_claim_values() {
+    let text = "path=/tmp,count=42";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    assert!(number_values(text).is_empty(), "{claims:?}");
+
+    let text = "date=2024-01-01,url=https://x";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Date), vec!["2024-01-01"]);
+    assert_eq!(texts_of(&claims, ClaimClass::Url), vec!["https://x"]);
+}
+
+#[test]
+fn attached_dates_stop_at_structural_separators() {
+    let text = "date=2024-01-01|500";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Date), vec!["2024-01-01"]);
+    assert_eq!(number_values(text), vec![500.0]);
+}
+
+#[test]
+fn attached_dates_do_not_absorb_structured_suffixes() {
+    for text in [
+        "date=2024-01-01:count=500",
+        "date=2024-01-01。count=500",
+        "date=2024-01-01；count=500",
+        r"date=2024-01-01,\ncount=500",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Date),
+            vec!["2024-01-01"],
+            "{text}"
+        );
+        assert_eq!(number_values(text), vec![500.0], "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn attached_paths_do_not_absorb_structural_suffixes() {
+    for text in [
+        "path=/tmp；count=500",
+        "path=/tmp：count=500",
+        "path=/tmp。count=500",
+        r"path=/tmp,\ncount=500",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), vec![500.0], "{text}: {claims:?}");
+    }
+
+    for separator in [';', '|'] {
+        let text = format!("x=[100,/tmp/a,b.txt{separator}count=500]");
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a,b.txt"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            number_values(&text),
+            vec![100.0, 500.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn doubly_nested_attached_lists_keep_paths_and_sibling_items() {
+    for (text, expected_numbers) in [
+        ("x=[[/tmp/a.txt,500]]", vec![500.0]),
+        ("x=[[500,/tmp/a.txt]]", vec![500.0]),
+        (r#"x=[["/tmp/a.txt",500]]"#, vec![500.0]),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a.txt"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), expected_numbers, "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn list_paths_do_not_absorb_colon_delimited_suffixes() {
+    for text in ["x=[100,/tmp/a:count=500]", "x=[100,/tmp/a：count=500]"] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            number_values(text),
+            vec![100.0, 500.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn list_paths_do_not_absorb_cjk_or_serialized_suffixes() {
+    for text in [
+        "x=[100,/tmp/a；count=500]",
+        "x=[100,/tmp/a。count=500]",
+        r"x=[100,/tmp/a\ncount=500]",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            number_values(text),
+            vec![100.0, 500.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn unmatched_brackets_do_not_hide_attached_field_separators() {
+    let text = "path=/tmp/a[;count=500";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp/a"]);
+    assert_eq!(number_values(text), vec![500.0]);
+}
+
+#[test]
+fn decorative_attached_brackets_do_not_hide_path_before_following_field() {
+    let text = "path=[/tmp],count=500";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"]);
+    assert_eq!(number_values(text), vec![500.0]);
+}
+
+#[test]
+fn decorative_attached_brackets_preserve_nonnumeric_path_commas() {
+    let claims = extract_claims("path=[/tmp/a,b.txt]");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp/a,b.txt"]);
+}
+
+#[test]
+fn attached_path_decoration_survives_following_fields() {
+    for value in ["(/tmp)", "`/tmp`", "**/tmp**"] {
+        let text = format!("path={value},count=500");
+        let claims = extract_claims(&text);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp"], "{text}");
+        assert_eq!(number_values(&text), vec![500.0], "{text}");
+    }
+}
+
+#[test]
+fn standalone_paths_keep_attached_field_like_punctuation() {
+    for path in ["/tmp/a,b=c", "/tmp/a;b", "/tmp/a|b"] {
+        let claims = extract_claims(path);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+    }
+}
+
+#[test]
+fn standalone_attached_path_keeps_terminal_separator_decoration() {
+    let claims = extract_claims("/tmp/a=b;");
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a=b"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn standalone_path_keeps_semicolon_before_sentence_punctuation() {
+    let claims = extract_claims("/tmp/a;b.");
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a;b"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn even_backslash_runs_do_not_open_escaped_quote_spans() {
+    let text = ["[", "\\", "\\", "\"", "\"", ",200,404]", "\\", "\""].concat();
+    assert_eq!(number_values(&text), vec![200.0, 404.0]);
+}
+
+#[test]
+fn unmatched_brackets_complete_without_quadratic_scanning() {
+    let text = format!("x{}a", "[".repeat(32_000));
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn matched_non_path_brackets_complete_without_quadratic_scanning() {
+    let text = format!("x{}y", "[]".repeat(32_000));
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn matched_path_brackets_complete_without_quadratic_scanning() {
+    let text = format!("/tmp/a{}", "[]".repeat(32_000));
+    let claims = extract_claims(&text);
+    assert!(texts_of(&claims, ClaimClass::Path).contains(&"/tmp/a".to_string()));
+}
+
+#[test]
+fn nested_brackets_complete_without_quadratic_label_scanning() {
+    let text = format!("{}{}", "[".repeat(32_000), "]".repeat(32_000));
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn nested_path_brackets_complete_without_quadratic_scanning() {
+    let text = format!("/tmp/a{}{}", "x[".repeat(8_000), "]".repeat(8_000));
+    let claims = extract_claims(&text);
+    assert!(claims.iter().any(|claim| claim.class == ClaimClass::Path));
+}
+
+#[test]
+fn nested_path_brackets_use_linear_range_marking() {
+    let text = format!("p={}x{};a", "/[".repeat(64_000), "]".repeat(64_000));
+    let claims = extract_claims(&text);
+    assert!(claims.iter().any(|claim| claim.class == ClaimClass::Path));
+}
+
+#[test]
+fn nested_path_candidates_do_not_reclassify_every_normalized_suffix() {
+    let text = format!(
+        "{}{}{}",
+        "x[".repeat(32_000),
+        "/tmp/a=b",
+        "]".repeat(32_000)
+    );
+    drop(extract_claims(&text));
+}
+
+#[test]
+fn trailing_date_markers_do_not_rescan_every_path_candidate() {
+    let text = format!(
+        "{}{}{}{}",
+        "x[".repeat(64_000),
+        "CI/CD",
+        "年".repeat(64_000),
+        "]".repeat(64_000)
+    );
+    drop(extract_claims(&text));
+}
+
+#[test]
+fn decorated_numeric_tokens_do_not_rescan_every_digit_group() {
+    let text = format!("x=a;{}1{}", ".".repeat(32_000), ",1".repeat(32_000));
+    drop(extract_claims(&text));
+}
+
+#[test]
+fn nested_list_items_do_not_reclassify_every_suffix() {
+    let text = format!("x{}{}", ",[".repeat(32_000), "]".repeat(32_000));
+    drop(extract_claims(&text));
+}
+
+#[test]
+fn nested_numeric_list_items_do_not_classify_every_suffix() {
+    let text = format!("x={}200{}", "[200,".repeat(32_000), "]".repeat(32_000));
+    drop(extract_claims(&text));
+}
+
+#[test]
+fn nested_attached_brackets_do_not_reclassify_every_suffix() {
+    let text = format!("{}CI/CD{}", "key=[".repeat(32_000), "]".repeat(32_000));
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn nested_attached_numeric_ranges_do_not_materialize_every_suffix() {
+    let depth = 32_000;
+    let text = format!(
+        "x={}p=a/b{}",
+        "[200,200[".repeat(depth),
+        "]".repeat(2 * depth)
+    );
+    drop(extract_claims(&text));
+}
+
+#[test]
+fn nested_attached_path_candidates_do_not_reclassify_every_suffix() {
+    let depth = 32_000;
+    let text = format!("/{}c/d{}", "p=x[".repeat(depth), "]".repeat(depth));
+    drop(extract_claims(&text));
+}
+
+#[test]
+fn adjacent_attached_brackets_complete_without_quadratic_scanning() {
+    let text = format!("key=x{}", "[]".repeat(32_000));
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn rejected_path_items_do_not_reclassify_every_adjacent_bracket() {
+    let text = format!("CI/CD=x{}", "[]".repeat(5_000));
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn decorative_attached_brackets_do_not_reclassify_remaining_suffix() {
+    let text = "key=[]".repeat(2_500);
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn decorative_attached_brackets_stop_before_later_attached_fields() {
+    let text = format!("{}CI/CD", "key=[]".repeat(16_000));
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn unmatched_closing_brackets_complete_without_quadratic_scanning() {
+    let text = "][]".repeat(16_000);
+    assert!(extract_claims(&text).is_empty());
+}
+
+#[test]
+fn path_ownership_stops_at_attached_field_separators() {
+    let text = "path=/tmp/a[100,200];x=[300,400]";
+    let claims = extract_claims(text);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp/a[100,200]"]);
+    assert_eq!(number_values(text), vec![300.0, 400.0], "{claims:?}");
+}
+
+#[test]
+fn markdown_decorated_embedded_json_uses_typed_numeric_replay() {
+    for text in [
+        r#"`"[200,404]"`"#,
+        r#"**"{\"a\":[200,404]}"**"#,
+        r#"("{\"a\":[200,404]}")"#,
+    ] {
+        assert_eq!(number_values(text), vec![200.0, 404.0], "{text}");
+    }
+}
+
+#[test]
+fn attached_lists_do_not_glue_following_path_fields() {
+    for separator in [',', ';', '|'] {
+        let text = format!("x=[100,200]{separator}path=/tmp/a");
+        let claims = extract_claims(&text);
+        assert_eq!(number_values(&text), vec![100.0, 200.0], "{text}");
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a"],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn key_prefixed_url_query_fields_stay_url_content() {
+    for separator in [',', ';', '|'] {
+        let url = format!("https://example.test/?q=200{separator}page=500");
+        let text = format!("url={url}");
+        let claims = extract_claims(&text);
+        assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url], "{text}");
+        assert!(number_values(&text).is_empty(), "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn mixed_date_and_number_lists_keep_items_separate() {
+    for text in ["[2024-01-01,500]", "result [date=2024-01-01,n=500]"] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Date),
+            vec!["2024-01-01"],
+            "{text}"
+        );
+        assert_eq!(number_values(text), vec![500.0], "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn standalone_relative_paths_keep_field_like_punctuation() {
+    for path in [
+        "a,b/c=d.txt",
+        "a;b/c=d.txt",
+        "a|b/c=d.txt",
+        "a，b/c=d.txt",
+        "a,b/c/d",
+    ] {
+        let claims = extract_claims(path);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{path}");
+    }
+}
+
+#[test]
+fn standalone_relative_paths_do_not_drop_equals_prefixed_segments() {
+    for path in ["a=b/c=d.txt", "a=b/c=d/e"] {
+        let claims = extract_claims(path);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{path}");
+    }
+}
+
+#[test]
+fn standalone_bracketed_paths_keep_semicolons_and_pipes() {
+    for separator in [';', '|'] {
+        let path = format!("/tmp/a[100,200]{separator}x[300,400].txt");
+        let claims = extract_claims(&path);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![path.clone()],
+            "{path}"
+        );
+        assert!(number_values(&path).is_empty(), "{path}: {claims:?}");
+    }
+}
+
+#[test]
+fn decorated_key_prefixed_url_query_fields_stay_url_content() {
+    let url = "https://example.test/?q=200,page=500";
+    for value in [
+        format!("`{url}`"),
+        format!("'{url}'"),
+        format!("({url})"),
+        format!("**{url}**"),
+    ] {
+        let text = format!("url={value}");
+        let claims = extract_claims(&text);
+        assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url], "{text}");
+        assert!(number_values(&text).is_empty(), "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn markdown_decorated_embedded_json_tolerates_sentence_punctuation() {
+    for punctuation in ['.', '!', '?', '。', '，', '；'] {
+        let text = format!("`\"[200,404]\"`{punctuation}");
+        assert_eq!(number_values(&text), vec![200.0, 404.0], "{text}");
+    }
+}
+
+#[test]
+fn standalone_paths_keep_equals_before_numeric_brackets() {
+    let path = "/tmp/a=b[200,404].txt";
+    let claims = extract_claims(path);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+    assert!(number_values(path).is_empty(), "{claims:?}");
+}
+
+#[test]
+fn decorated_attached_urls_do_not_hide_following_fields() {
+    let url = "https://example.test/x";
+    for value in [
+        format!("({url})"),
+        format!("`{url}`"),
+        format!("'{url}'"),
+        format!("**{url}**"),
+    ] {
+        let text = format!("url={value},count=500");
+        let claims = extract_claims(&text);
+        assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url], "{text}");
+        assert_eq!(number_values(&text), vec![500.0], "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn undecorated_urls_keep_trailing_asterisks() {
+    let url = "https://example.test/x*";
+    let claims = extract_claims(url);
+    assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url]);
+}
+
+#[test]
+fn list_residue_before_a_path_is_not_path_content() {
+    for text in ["[100,200]/tmp/a", "x=[100,200]/tmp/a"] {
+        let claims = extract_claims(text);
+        assert_eq!(number_values(text), vec![100.0, 200.0], "{text}");
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a"],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn empty_list_decoration_does_not_glue_a_later_key_to_a_path() {
+    for text in [
+        "key=[]path=/tmp/a",
+        "key=`[]`path=/tmp/a",
+        "key=([])path=/tmp/a",
+        "key=\"[]\"path=/tmp/a",
+        "key=**[]**path=/tmp/a",
+        "key=[[]]path=/tmp/a.txt",
+        r"key=\[\]path=/tmp/a.txt",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![if text.contains(".txt") {
+                "/tmp/a.txt"
+            } else {
+                "/tmp/a"
+            }],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn empty_list_decoration_preserves_relative_path_equals() {
+    let claims = extract_claims("key=[]a=b/c=d.txt");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["a=b/c=d.txt"]);
+}
+
+#[test]
+fn list_residue_and_empty_decoration_preserve_attached_path_equals() {
+    for (text, expected_numbers) in [
+        ("key=[]path=/tmp/a=b/c=d.txt", vec![]),
+        ("x=[100,200]path=/tmp/a=b/c=d.txt", vec![100.0, 200.0]),
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a=b/c=d.txt"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), expected_numbers, "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn explicit_path_keys_drop_the_prefix_before_bare_relative_paths() {
+    let claims = extract_claims("path=a/b=c.txt");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["a/b=c.txt"]);
+}
+
+#[test]
+fn decorated_empty_list_residue_preserves_explicit_relative_paths() {
+    for text in [
+        "key=`[]`path=a/b=c.txt",
+        "key=([])path=a/b=c.txt",
+        "key=\"[]\"path=a/b=c.txt",
+        "key=【[]】path=a/b=c.txt",
+        "key=（[]）path=a/b=c.txt",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["a/b=c.txt"],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn serialized_json_strings_replay_typed_paths() {
+    for text in [
+        r#""{\"path\":\"/tmp/a.txt\"}""#,
+        r#"result "{\"path\":\"/tmp/a.txt\"}""#,
+        r#"result "{\"a\":\"/tmp/a.txt x\"}""#,
+        r#"「"{\"a\":\"/tmp/a.txt x\"}"」"#,
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a.txt"],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn serialized_json_strings_keep_same_word_suffix_claims() {
+    for (text, expected_paths, expected_numbers) in [
+        (
+            r#"result "{\"a\":\"/tmp/a.txt x\"}",count=500"#,
+            vec!["/tmp/a.txt"],
+            vec![500.0],
+        ),
+        (
+            r#"result "{\"a\":\"/tmp/a.txt x\"}",path=/tmp/c.txt"#,
+            vec!["/tmp/a.txt", "/tmp/c.txt"],
+            vec![],
+        ),
+        (
+            r#"result "{\"a\":\"/tmp/a.txt x\"}"path=/tmp/c.txt"#,
+            vec!["/tmp/a.txt", "/tmp/c.txt"],
+            vec![],
+        ),
+        (
+            r#""{\"a\":\"/tmp/a.txt x\"}","{\"b\":\"/tmp/b.txt y\"}""#,
+            vec!["/tmp/a.txt", "/tmp/b.txt"],
+            vec![],
+        ),
+        (
+            r#""{\"a\":\"/tmp/a.txt\"}","{\"b\":\"/tmp/b.txt\"}""#,
+            vec!["/tmp/a.txt", "/tmp/b.txt"],
+            vec![],
+        ),
+    ] {
+        let claims = extract_claims(text);
+        let mut paths = texts_of(&claims, ClaimClass::Path);
+        paths.sort_unstable();
+        assert_eq!(paths, expected_paths, "{text}: {claims:?}");
+        assert_eq!(number_values(text), expected_numbers, "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn serialized_json_suffix_preserves_raw_fields_and_unclosed_paths() {
+    let text = r#""{\"a\":[200,404]}",count=500,"/tmp/z.txt"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/z.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0, 500.0], "{claims:?}");
+}
+
+#[test]
+fn serialized_json_suffix_keeps_pipe_inside_path() {
+    let text = r#""[200,404]":/tmp/a|b"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a|b"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn bracketed_suffixes_after_paths_stay_individual_numbers() {
+    let claims = extract_claims("path=/tmp/a;[200,404]");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp/a"]);
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|claim| claim.class == ClaimClass::Number)
+            .filter_map(|claim| claim.value)
+            .collect::<Vec<_>>(),
+        vec![200.0, 404.0],
+        "{claims:?}"
+    );
+
+    let text = r#""[200,404]":/tmp/a.txt;[600,700]"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn dotted_path_segments_after_semicolons_stay_path_content() {
+    for text in ["path=/tmp/a;b.txt", r#""[200,404]":/tmp/a;b.txt"#] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a;b.txt"],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_fields_between_serialized_json_strings_preserve_both_payloads() {
+    for text in [
+        r#""{\"a\":[200,404]}",count=500,"{\"b\":[600,700]}""#,
+        r#"x="{\"a\":[200,404]}",count=500,y="{\"b\":[600,700]}""#,
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            number_values(text),
+            vec![200.0, 404.0, 500.0, 600.0, 700.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn serialized_json_replay_crosses_colon_boundaries() {
+    let text = r#"x="{\"a\":[200,404]}":y="{\"b\":[600,700]}""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn serialized_json_replay_crosses_serialized_newline_boundaries() {
+    let text = r#"x="{\"a\":[200,404]}"\ncount=500\ny="{\"b\":[600,700]}""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 500.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn field_segmented_multiword_json_preserves_pending() {
+    let text = r#"x="[\"a;b c\",200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn pending_json_replay_crosses_colon_before_a_later_payload() {
+    let text = r#"x="[1, 2]":y="[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn whole_word_json_replay_crosses_colon_boundaries() {
+    let text = r#""[200,404]":y="[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn whole_word_json_replay_crosses_serialized_newline_boundaries() {
+    let text = r#""[200,404]"\ny="[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn glued_raw_prefixes_expose_serialized_json() {
+    for text in [
+        r#"result:"[200,404]""#,
+        r#"result;"[200,404]""#,
+        r#"result,"[200,404]""#,
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            number_values(text),
+            vec![200.0, 404.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn numeric_prefix_before_embedded_json_is_preserved() {
+    let text = r#"500:"[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(number_values(text), vec![500.0, 200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn path_prefix_before_embedded_json_is_preserved() {
+    let text = r#"/tmp/a.txt:"[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn relative_path_prefix_before_embedded_json_is_preserved() {
+    for prefix in ["./a.txt", "../a.txt"] {
+        let text = format!(r#"{prefix}:"[200,404]""#);
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![prefix.to_string()],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            number_values(&text),
+            vec![200.0, 404.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn relative_path_after_embedded_json_is_preserved() {
+    for suffix in ["./a.txt", "../a.txt"] {
+        let text = format!(r#""[200,404]"\n{suffix}"#);
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![suffix.to_string()],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            number_values(&text),
+            vec![200.0, 404.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn pipe_before_embedded_json_is_not_path_content() {
+    let text = r#"/tmp/a.txt|"[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn pipe_between_json_payloads_is_not_path_content() {
+    let text = r#""[200,404]"|/tmp/a.txt|"[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn serialized_newline_before_a_raw_path_is_consumed() {
+    let text = r#""[200,404]"\n/tmp/a.txt"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn serialized_newline_between_json_payloads_preserves_a_raw_path() {
+    let text = r#""[200,404]"\n/tmp/a.txt\n"[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn serialized_newline_suffix_preserves_an_unclosed_path() {
+    let text = r#"x="{\"a\":[200,404]}"\ncount=500\n"/tmp/z.txt"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/z.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0, 500.0], "{claims:?}");
+}
+
+#[test]
+fn cjk_path_decoration_does_not_absorb_following_fields() {
+    let text = "【./a.txt】;n=600";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["./a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![600.0], "{claims:?}");
+}
+
+#[test]
+fn bracketed_relative_path_fallback_preserves_the_leading_dot() {
+    let text = "prefix;[./a.txt],n=600";
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["./a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![600.0], "{claims:?}");
+}
+
+#[test]
+fn root_json_string_preserves_identifier_claims() {
+    let claims = extract_claims(r#""Foo::bar""#);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Identifier),
+        vec!["Foo::bar"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn unclosed_prose_does_not_hide_nested_serialized_json_paths() {
+    let text = r#""unclosed result "{\"path0\":[\"/tmp/a,b.txt\",{\"b1\":\"/tmp/c.txt\"}]}""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a,b.txt", "/tmp/c.txt"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn unclosed_prose_does_not_hide_later_serialized_json() {
+    let text = r#""unclosed result "{\"a\":\"/tmp/a.txt x\"}" count=500 path=/tmp/c.txt"#;
+    let claims = extract_claims(text);
+    let mut paths = texts_of(&claims, ClaimClass::Path);
+    paths.sort_unstable();
+    assert_eq!(paths, vec!["/tmp/a.txt", "/tmp/c.txt"], "{claims:?}");
+    assert_eq!(number_values(text), vec![500.0], "{claims:?}");
+}
+
+#[test]
+fn serialized_json_string_can_close_after_whitespace() {
+    let text = r#""{\"a\":\"/tmp/a.txt x\"} ""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn unclosed_trailing_json_preserves_raw_numeric_claims() {
+    let text = r#""{\"a\":\"/tmp/a.txt x\"}","500"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![500.0], "{claims:?}");
+}
+
+#[test]
+fn wrapped_deep_containers_complete_on_a_small_stack() {
+    let text = r#""[[[[[[[[200]]]]]]]]""#;
+    std::thread::Builder::new()
+        .stack_size(32 * 1024)
+        .spawn(move || {
+            let claims = extract_claims(text);
+            assert_eq!(number_values(text), vec![200.0], "{claims:?}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn root_deep_containers_complete_on_a_small_stack() {
+    let text = format!("{}200,404{}", "[".repeat(64), "]".repeat(64));
+    std::thread::Builder::new()
+        .stack_size(32 * 1024)
+        .spawn(move || {
+            let claims = extract_claims(&text);
+            let numbers: Vec<_> = claims
+                .iter()
+                .filter(|claim| claim.class == ClaimClass::Number)
+                .filter_map(|claim| claim.value)
+                .collect();
+            assert_eq!(numbers, vec![200.0, 404.0], "{claims:?}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn serialized_containers_match_value_replay() {
+    for text in [
+        r#"{"404":[200,{"500":"119,120","path":"/tmp/a.txt"}],"active":true}"#,
+        r#"{"404":200,"404":600,"next":"[700,800]"}"#,
+        r#"[[200],{"path":"/tmp/a,b.txt","number":1.2e3},null]"#,
+    ] {
+        let value = serde_json::from_str(text).unwrap();
+        let expected = json_typed_claims(value);
+        let actual = json_typed_claims(serde_json::Value::String(text.to_string()));
+        assert_eq!(actual, expected, "{text}");
+    }
+}
+
+#[test]
+fn nested_serialized_strings_complete_on_a_small_stack() {
+    let mut text = "[200,404]".to_string();
+    for _ in 0..16 {
+        text = serde_json::to_string(&text).unwrap();
+    }
+    std::thread::Builder::new()
+        .stack_size(32 * 1024)
+        .spawn(move || {
+            let claims = extract_claims(&text);
+            let numbers: Vec<_> = claims
+                .iter()
+                .filter(|claim| claim.class == ClaimClass::Number)
+                .filter_map(|claim| claim.value)
+                .collect();
+            assert_eq!(numbers, vec![200.0, 404.0], "{claims:?}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn nested_empty_list_residue_chains_complete_without_quadratic_scanning() {
+    for prefix in [
+        "key=[[]]",
+        "key=`[]`",
+        "key=\"[]\"",
+        "key=\"[]\",",
+        "key=【[]】",
+        "key=（[]）",
+    ] {
+        let text = format!("{}path=/tmp/a=b/c=d.txt", prefix.repeat(8_000));
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a=b/c=d.txt"],
+            "{prefix}"
+        );
+    }
+}
+
+#[test]
+fn unkeyed_dates_do_not_absorb_structured_suffixes() {
+    for text in [
+        "path=/tmp/a|2024-01-01:count=500",
+        "path=/tmp/a;2024-01-01,500",
+        "path=/tmp/a;`2024-01-01,500`",
+        "path=/tmp/a;**2024-01-01,500**",
+        "path=/tmp/a;(2024-01-01,500)",
+        "path=/tmp/a;2024-01-01.,500",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Date),
+            vec!["2024-01-01"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), vec![500.0], "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn keyless_decorated_dates_keep_their_numeric_list_items() {
+    for text in [
+        "note;`2024-01-01,500`",
+        "note;**2024-01-01,500**",
+        "note;(2024-01-01,500)",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Date),
+            vec!["2024-01-01"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), vec![500.0], "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn paths_do_not_absorb_numeric_colon_suffixes() {
+    for text in [
+        "path=/tmp/report.txt:500",
+        "path=/tmp/a;/tmp/report.txt:500",
+        "path=/tmp/a;/tmp/report.txt:count=500",
+    ] {
+        let claims = extract_claims(text);
+        assert!(
+            texts_of(&claims, ClaimClass::Path).contains(&"/tmp/report.txt".to_string()),
+            "{text}: {claims:?}"
+        );
+        assert!(
+            texts_of(&claims, ClaimClass::Path)
+                .iter()
+                .all(|path| !path.starts_with("/tmp/report.txt:")),
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(text), vec![500.0], "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn paths_do_not_absorb_general_numeric_colon_suffixes() {
+    for (suffix, expected) in [
+        ("500.5", 500.5),
+        ("-500", -500.0),
+        ("+500", 500.0),
+        ("500,000", 500_000.0),
+        ("1.2e3", 1200.0),
+        ("500k", 500_000.0),
+        ("`500`", 500.0),
+        ("**500**", 500.0),
+        ("(500)", 500.0),
+    ] {
+        let text = format!("path=/tmp/report.txt:{suffix}");
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/report.txt"],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(number_values(&text), vec![expected], "{text}: {claims:?}");
+    }
+}
+
+#[test]
+fn non_path_list_cache_does_not_hide_later_path_brackets() {
+    let text = "[100,200]/tmp/a[300,400]";
+    let claims = extract_claims(text);
+    assert_eq!(number_values(text), vec![100.0, 200.0], "{claims:?}");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["/tmp/a[300,400]"]);
+}
+
+#[test]
+fn decorated_urls_do_not_hide_compact_list_items() {
+    for text in ["[100,(https://a),500]", "[100,**https://a**,500]"] {
+        let claims = extract_claims(text);
+        assert_eq!(number_values(text), vec![100.0, 500.0], "{text}");
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Url),
+            vec!["https://a"],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn first_url_determines_attached_url_end() {
+    let text = "u=(http://a),n=500,v=https://b";
+    let claims = extract_claims(text);
+    let urls = texts_of(&claims, ClaimClass::Url);
+    assert!(urls.contains(&"http://a".to_string()), "{claims:?}");
+    assert!(urls.contains(&"https://b".to_string()), "{claims:?}");
+    assert_eq!(number_values(text), vec![500.0], "{claims:?}");
+}
+
+#[test]
+fn balanced_url_parentheses_are_url_content() {
+    let url = "https://a/b(c)";
+    let claims = extract_claims(url);
+    assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url]);
+}
+
+#[test]
+fn standalone_paths_keep_terminal_brackets() {
+    let path = "/tmp/a[200]";
+    let claims = extract_claims(path);
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+}
+
+#[test]
+fn colon_after_prose_list_does_not_make_a_reference_definition() {
+    assert_eq!(
+        number_values("status codes [200,404]: observed"),
+        vec![200.0, 404.0]
+    );
+}
+
+#[test]
+fn brackets_prefer_list_structure_over_ambiguous_digit_grouping() {
+    for text in ["total 244,781", "star 数**：244,781"] {
+        assert_eq!(
+            number_values(text),
+            vec![244_781.0],
+            "unbracketed grouping must survive decoration: {text}"
+        );
+    }
+
+    // `[244,781]` can be either one grouped number or two list items. Brackets
+    // tip the balance toward list structure so compact lists cannot collapse
+    // into a fabricated larger claim.
+    assert_eq!(number_values("totals [244,781]"), vec![244.0, 781.0]);
 }
 
 #[test]

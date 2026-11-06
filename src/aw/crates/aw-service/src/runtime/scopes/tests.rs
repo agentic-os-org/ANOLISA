@@ -409,3 +409,155 @@ fn failed_acknowledgement_audit_cancels_committed_task() {
     );
     assert_eq!(fixture.call(Operation::Status).unwrap()["bindings"], 1);
 }
+
+#[test]
+fn bridge_failure_fences_dispatch_but_retains_cleanup_and_isolates_siblings() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    fixture.acknowledge(&task).unwrap();
+    fixture
+        .runtime
+        .enable_invocations(&task.instance_id)
+        .unwrap();
+    let parent = fixture.runtime.owners.lock().unwrap()[&task.instance_id]
+        .parent
+        .clone()
+        .unwrap();
+    let other: Binding = serde_json::from_value(
+        fixture
+            .call(Operation::OpenScope {
+                parent_id: parent.clone(),
+                pid: std::process::id(),
+                cwd: fixture.directory.path().to_str().unwrap().into(),
+                environment: BTreeMap::new(),
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    fixture.acknowledge(&other).unwrap();
+    let watch = fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .unwrap();
+    let revision = watch["policy_revision"].as_str().unwrap();
+    fixture
+        .runtime
+        .register_invocation(&task.instance_id, 1, "first", "tool", json!({}))
+        .unwrap();
+    fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), revision, true)
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), revision, false)
+        .is_err());
+    assert!(fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), revision, true)
+        .is_err());
+    assert!(fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .is_err());
+    assert!(fixture
+        .runtime
+        .register_invocation(&task.instance_id, 2, "second", "tool", json!({}))
+        .is_err());
+    fixture.runtime.maintain_scopes().unwrap();
+    fixture
+        .runtime
+        .check_scope_owner(&other.instance_id)
+        .unwrap();
+    let status = fixture.runtime.policy_status().unwrap();
+    let status = status
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["instance_id"] == task.instance_id)
+        .unwrap();
+    assert_eq!(
+        status["scope_validity"],
+        json!({"native_alive":true,"covered_bridge":"failed"})
+    );
+    // Failed coverage keeps the live owner and ledger until native drain is acknowledged.
+    fixture
+        .runtime
+        .finish_invocation(&task.instance_id, 1, "first", Instant::now() + TIMEOUT)
+        .unwrap();
+    fixture
+        .runtime
+        .release_instance(&parent, Instant::now() + TIMEOUT)
+        .unwrap();
+    assert!(fixture.runtime.instances.lock().unwrap().is_empty());
+}
+
+#[test]
+fn bridge_watch_rejects_wrong_worker_and_revision_without_reviving_old_scope() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    assert!(fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .is_err());
+    fixture.acknowledge(&task).unwrap();
+    assert!(fixture.runtime.watch_scope(&task.instance_id, 0).is_err());
+    fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .check_scope(&task.instance_id, std::process::id(), "stale", true)
+        .is_err());
+    fixture
+        .runtime
+        .release_instance(&task.instance_id, Instant::now() + TIMEOUT)
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .is_err());
+}
+
+#[test]
+fn expired_bridge_cannot_renew_or_reclaim_live_owner() {
+    let fixture = Fixture::new();
+    let task = fixture.task(std::process::id(), std::process::id());
+    fixture.acknowledge(&task).unwrap();
+    let watch = fixture
+        .runtime
+        .watch_scope(&task.instance_id, std::process::id())
+        .unwrap();
+    fixture
+        .runtime
+        .owners
+        .lock()
+        .unwrap()
+        .get_mut(&task.instance_id)
+        .unwrap()
+        .validity
+        .as_mut()
+        .unwrap()
+        .deadline = Instant::now();
+    let revision = watch["policy_revision"].as_str().unwrap();
+    assert!(
+        matches!(fixture.runtime.check_scope(&task.instance_id, std::process::id(), revision, true),
+        Err(Error::Rejected(code)) if code == "scope_bridge_expired")
+    );
+    fixture.runtime.maintain_scopes().unwrap();
+    assert!(fixture
+        .runtime
+        .instances
+        .lock()
+        .unwrap()
+        .contains_key(&task.instance_id));
+    assert!(fixture
+        .runtime
+        .check_scope_owner(&task.instance_id)
+        .is_err());
+    fixture
+        .runtime
+        .check_scope_cleanup(&task.instance_id)
+        .unwrap();
+}

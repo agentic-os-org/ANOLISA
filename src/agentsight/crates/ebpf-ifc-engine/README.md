@@ -89,18 +89,20 @@ loading eBPF programs directly.
 
 ## Building the eBPF programs
 
-The prebuilt CO-RE object ships in `prebuilt/process.bpf.o`. To rebuild:
+Full and inode-only CO-RE objects ship separately in `prebuilt/x86_64/` and
+`prebuilt/aarch64/`. Cargo selects the pair using `CARGO_CFG_TARGET_ARCH`, not
+host architecture, and copies it to the common filenames in `OUT_DIR`.
+Missing objects and unsupported architectures fail without rebuilding.
 
-```bash
-# Requires: clang, llvm, libelf-dev, zlib1g-dev
-cd bpf && make
-```
-
-Or via cargo:
+Manual rebuilds require clang/llvm, libbpf, bpftool, and the matching vmlinux
+header. Pass `ARCH=x86` or `ARCH=arm64` explicitly to Make; the development-only
+Cargo rebuild below supplies that override from the target architecture automatically:
 
 ```bash
 ACTPLANE_REBUILD_BPF=1 cargo build -p ebpf-ifc-engine
 ```
+
+Attested release builds prohibit rebuilding.
 
 ## Binary config format
 

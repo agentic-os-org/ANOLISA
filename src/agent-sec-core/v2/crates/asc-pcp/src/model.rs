@@ -52,6 +52,11 @@ pub enum Disposition {
     /// or its retry deadline is still in the future. The caller must preserve any
     /// future deadline; skipping does not establish successful delivery.
     Skipped,
+    /// Execution admission is busy; no attempt or failure budget was consumed.
+    DeferredAt {
+        /// Deadline in the shared Clock's millisecond domain.
+        at: u64,
+    },
     /// This call could not claim or complete the expected lifecycle, for example
     /// after a CAS conflict or a newer intent. Reload repository state on the next
     /// call; remote effects and recorded observations may already exist.

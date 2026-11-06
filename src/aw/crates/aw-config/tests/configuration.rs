@@ -685,3 +685,6 @@ fn daemon_limits_accept_concurrent_budgets_and_reject_invalid_values() {
     value["spec"]["daemon"]["limits"] = json!({"history_calls":1024});
     assert!(parse(&value).is_err());
 }
+
+#[path = "configuration/submission.rs"]
+mod submission;

@@ -100,6 +100,17 @@ impl OwnedChild {
         Ok(())
     }
 
+    pub(super) fn signal_leader(&self, signal: i32) -> io::Result<()> {
+        // SAFETY: exclusive reaping keeps the worker PID reserved until cleanup.
+        if unsafe { libc::kill(self.id() as i32, signal) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn observe_exit(&self) -> io::Result<bool> {
         // SAFETY: zero initializes siginfo_t; waitid fills this live allocation.
         // WNOWAIT observes termination without making the leader PID reusable.

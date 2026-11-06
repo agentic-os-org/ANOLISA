@@ -81,31 +81,48 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// Locate the rtk binary: `$RTK_BIN`, the vendored release build next to this
-/// crate, or `rtk` on `PATH`. Shared by the in-crate reports and the
-/// `l1_rtk_format_compat` integration tests so discovery never drifts between
-/// the two. Returns `None` when none is runnable.
+/// Locate the `tokenless` whose `rtk` subcommand runs RTK, the form PreTool
+/// rewrites commands to: `$TOKENLESS_BIN` when set, else the release build of
+/// the enclosing Tokenless workspace, then `tokenless` on `PATH`. Shared by the
+/// in-crate reports and the `l1_rtk_format_compat` integration tests so
+/// discovery never drifts between the two. Returns `None` when none is
+/// runnable.
 ///
-/// `l2-module/src/metrics.rs` carries a byte-identical copy — the two benchmark
-/// workspaces are independent, so changing the discovery order here means
-/// changing it there too.
-pub fn find_rtk_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("RTK_BIN") {
-        let pb = PathBuf::from(p);
-        if is_executable(&pb) {
-            return Some(pb);
-        }
+/// `l2-module/src/metrics.rs` carries a byte-identical copy of this function,
+/// [`rtk_command`] and `is_runnable` — the two benchmark workspaces are
+/// independent, so changing the discovery order here means changing it there
+/// too.
+pub fn find_tokenless_binary() -> Option<PathBuf> {
+    // An explicit choice is final: falling back would measure another build.
+    if let Some(program) = std::env::var_os("TOKENLESS_BIN").filter(|p| !p.is_empty()) {
+        let program = PathBuf::from(program);
+        return is_runnable(&program).then_some(program);
     }
-    let vendored =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/rtk/target/release/rtk");
-    if is_executable(&vendored) {
-        return Some(vendored);
+    [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/tokenless"),
+        PathBuf::from("tokenless"),
+    ]
+    .into_iter()
+    .find(|program| is_runnable(program))
+}
+
+/// Starts `<tokenless> rtk`; callers append RTK's own arguments.
+pub fn rtk_command(tokenless: &Path) -> Command {
+    let mut command = Command::new(tokenless);
+    command.arg("rtk");
+    command
+}
+
+/// A path must be executable; a bare name must answer `rtk --version` from
+/// `PATH`, which also rejects a `tokenless` older than `tokenless rtk`.
+fn is_runnable(program: &Path) -> bool {
+    if program.components().count() > 1 {
+        return is_executable(program);
     }
-    // Fall back to PATH: only accept it if `--version` actually runs.
-    if Command::new("rtk").arg("--version").output().is_ok() {
-        return Some(PathBuf::from("rtk"));
-    }
-    None
+    rtk_command(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// Outcome of running an rtk rewrite under a hard wall-clock timeout.
@@ -124,14 +141,14 @@ pub enum TimedRun {
     TimedOutKillFailed,
 }
 
-/// Runs `<bin> rewrite <cmd>` with a hard per-invocation timeout.
+/// Runs `<tokenless> rtk rewrite <cmd>` with a hard per-invocation timeout.
 ///
 /// Waits on a helper thread and SIGKILLs the child when the deadline
 /// elapses, so a hung rtk can never block the caller (report loop or
 /// criterion bench) indefinitely. Shared by [`rtk_report`] and
 /// `benches/l1_rtk_latency.rs` so both paths get identical hang protection.
-pub fn run_rewrite_with_timeout(bin: &Path, cmd: &str, timeout: Duration) -> TimedRun {
-    let child = match Command::new(bin)
+pub fn run_rewrite_with_timeout(tokenless: &Path, cmd: &str, timeout: Duration) -> TimedRun {
+    let child = match rtk_command(tokenless)
         .arg("rewrite")
         .arg(cmd)
         .stdout(Stdio::piped())
@@ -172,14 +189,15 @@ pub fn run_rewrite_with_timeout(bin: &Path, cmd: &str, timeout: Duration) -> Tim
 
 /// RTK command-rewrite compression report over [`rtk_command_samples`].
 ///
-/// Shells out to `rtk rewrite <cmd>` for each sample and counts tokens on the
-/// command text before and after the rewrite (same `estimate_tokens`
-/// heuristic as the in-process compressors). Exit-code protocol: 0 = rewrite
-/// available (allow), 1 = no equivalent, 2 = deny, 3 = rewrite available
-/// (ask). Codes 0 AND 3 both carry the rewritten command on stdout, so both
-/// count toward the savings figures; every code is also tallied per category.
-/// When the rtk binary is unavailable the report is `{"available": false}` —
-/// never an error — so the suite stays runnable on machines without rtk.
+/// Shells out to `tokenless rtk rewrite <cmd>` for each sample and counts
+/// tokens on the command text before and after the rewrite (same
+/// `estimate_tokens` heuristic as the in-process compressors). Exit-code
+/// protocol: 0 = rewrite available (allow), 1 = no equivalent, 2 = deny, 3 =
+/// rewrite available (ask). Codes 0 AND 3 both carry the rewritten command on
+/// stdout, so both count toward the savings figures; every code is also
+/// tallied per category. When tokenless is unavailable the report is
+/// `{"available": false}` — never an error — so the suite stays runnable on
+/// machines without tokenless.
 ///
 /// Note the methodology difference from the in-process compressors: rtk is a
 /// cross-process rewrite of shell COMMANDS (not payloads), so its rate is not
@@ -188,12 +206,12 @@ pub fn run_rewrite_with_timeout(bin: &Path, cmd: &str, timeout: Duration) -> Tim
 /// command TEXT may grow slightly; rtk's token savings materialize in the
 /// filtered runtime OUTPUT, which this in-suite metric does not execute.
 pub fn rtk_report() -> Value {
-    let Some(bin) = find_rtk_binary() else {
+    let Some(tokenless) = find_tokenless_binary() else {
         return json!({ "available": false });
     };
 
     // Best-effort version string for the report header.
-    let version = Command::new(&bin)
+    let version = rtk_command(&tokenless)
         .arg("--version")
         .output()
         .ok()
@@ -211,7 +229,7 @@ pub fn rtk_report() -> Value {
     let mut rewritten_total = 0usize;
 
     for (label, cmd) in rtk_command_samples() {
-        let out = match run_rewrite_with_timeout(&bin, cmd, Duration::from_secs(5)) {
+        let out = match run_rewrite_with_timeout(&tokenless, cmd, Duration::from_secs(5)) {
             TimedRun::Completed(output) => output,
             TimedRun::SpawnFailed => {
                 other += 1;
@@ -287,7 +305,7 @@ pub fn rtk_report() -> Value {
 
     json!({
         "available": true,
-        "binary": bin.display().to_string(),
+        "binary": tokenless.display().to_string(),
         "version": version,
         "samples": samples,
         "exit_codes": {

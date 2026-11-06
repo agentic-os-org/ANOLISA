@@ -4,7 +4,8 @@
 
 **面向 AI Agent 的 OS 级安全内核。** 为 Agent 负载提供纵深防御：提示词注入检测、
 代码扫描、PII 检测、Skill 完整性追踪、沙箱隔离，以及本地安全事件
-存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
+存储。安全扫描本地运行，无 Token 消耗；可选的 Intent 提案使用云模型，可能产生费用。
+适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
@@ -12,6 +13,13 @@
 **AgentSecCore (ANOLISA)** 已登记于 [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa)，当前状态为 **Aligned**。
 
 AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)。
+
+Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- command`，
+按明确的文件和网络权限在本地执行，无需 daemon。权限格式、运行要求与隔离边界见
+[Sandbox 指南](../../docs/user-guide/zh/agent-sec-core/sandbox.md)。应用可通过
+`asc-pep-runtime::PepRuntime` 接入策略授权，由 daemon `--authorization-config`
+选择 PAP 管理的 Cedar 策略。Policy 更新成功后，后续授权请求使用新版本。
+Cosh 可通过 `AGENT_SEC_COSH_SANDBOX_PERMISSIONS` 接入这条流程，并复用原生审批界面。
 
 ## 背景
 
@@ -35,7 +43,7 @@ AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制
 | **Skill Ledger** | 基于 Ed25519 签名的 Skill 完整性账本，仅追加版本链 | `agent-sec-cli skill-ledger` |
 | **Observability** | Agent 生命周期事件记录、会话复盘报告、交互式审查 TUI | `agent-sec-cli observability` |
 | **Security Events** | 本地 JSONL + SQLite 事件存储，支持查询与聚合 | `agent-sec-cli events` |
-| **Sandbox** | 系统调用级命令隔离（bubblewrap + seccomp），作为架构层使用 | `linux-sandbox` |
+| **Sandbox** | 按明确文件和网络权限隔离命令（bubblewrap + seccomp） | `agent-sec-cli sandbox run` |
 
 V2 源码构建会将 `agent-sec-daemon` 作为 host-level
 `agent-sec-core.service` systemd unit 安装。V2 迁移会通过 Rust 实现保留 hook 使用的
@@ -76,14 +84,48 @@ Rust V2 客户端在发送请求前校验连接对端的内核 peer UID 为 0。
 daemon 自己拥有的叶目录权限会先修复为 `0700`。
 两处都有数据库，或选址会绕过已有数据库时拒绝启动；显式 `AGENT_SEC_DATA_DIR` 仍为固定路径。
 详见 [Policy 存储](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#policy-数据库位置)。
-PolicyTemplate 是包含通用规则的可复用策略；AgentSight Adapter 当前仅执行文件删除 block 规则。
+PolicyTemplate 是包含通用规则的可复用策略；PEP Translator 对原生 JSON 支持文件删除 block 规则。
+现有 Policy create/update 命令也接受携带精确 schema 引用的 Cedar 源码封装，完成准入校验和源码保存；
+Cedar `forbid` 删除/普通写入限制已接入翻译与部署。原生 JSON 请求及保存快照保持原有格式。
 Scope 保存不可变策略快照，拥有自动 Binding 创建、下发和清理生命周期。
 可通过 daemon 的 `--policy-admin-uid <UID>` 授权非 root Policy CLI 调用者；默认仍只授权 root。
+
+**兼容性变更（Breaking change）**：移除 `scope create --cgroup-id`，此前不支持 cgroup
+assignment。请更新脚本，使用 `--pid`、`--process-name` 或 `--executable` 选择目标进程。
+
+V2 **Secret Gateway 预览能力**让真实 GitHub 凭据不进入 Agent 进程。
+V2 `agent-sec-core` RPM 自动启动基础 daemon，但网关默认关闭；root 显式安装 mitmproxy。
+raw 包包含相同网关资产，但不启动两个服务；网关启停仅由 daemon 管理，卸载时撤流失败则拒绝删除。
+`gateway key add github --secret-file /root/github.token` 只导入，不授权；相同 secret 幂等成功，
+不同值报错且不覆盖。更换必须先 remove 再 add、创建新 Scope 并更新 Agent 配置，旧 fake
+永久退役，不自动轮换。既有原生 Policy JSON 通过 `network/use_credential` 授权 HTTPS 请求；Scope 固定 Policy revision
+快照，并指定非 root owner 和进程 selector。先准备 Scope、启用网关，再以 owner 查询
+`gateway credentials --scope <scopeId>`，将 fake 与 CA 配入 Agent 后启动。
+discovery 自动接管匹配实例，不保证 first packet 保护。实例重启保持 Scope fake；删除 Scope
+只撤销其 fake，`gateway key remove github` 则全局退役凭据。只读 status 与凭据查询按 UID
+隔离：status 返回 `{enabled, ready, scopes}`，Scope 项为 `{scopeId, bindings}`，credentials
+返回 `{scopeId, environment}`。`ready` 要求已启用、cgroup v2 只读检查通过、代理 unit active、
+已加载 generation 匹配且 CA 可用。enable 在改变 enabled 前检查 cgroup v2；发布（含已启用
+状态恢复）、已启用时的 status 查询与凭据查询重新检查。默认关闭恢复跳过此预检；不降级为
+cgroup v1、不改挂载。nftables `socket cgroupv2` 仅在实际规则应用时检验，不做独立预检；
+实例 Binding `READY` 仍需另行等待。key list 只列 active IDs（`{"credentials":["github"]}`），add/remove 返回
+`{"credential":"github"}`，enable/disable 成功返回 `{}`。
+参阅 [Secret Gateway 设计](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md)。
 
 V2 原生 OTel 目前仅用于本地日志关联，不提供公开 OTLP exporter。
 现有 `--trace-context` JSON 传入 Agent 归属；`--otel-context`（version 1）传入上游
 W3C 链路。`RUST_LOG=info` 开启 stderr 有界关联诊断，参阅
 [上下文示例与日志限制](v2/README.md#native-opentelemetry-tracing)。
+
+`agent-sec-cli intent propose` 将可组合的读取、具体写操作、程序执行和全网络规则
+生成未批准的 Cedar 候选。命令只接收 `--task` 与 `--ttl`：不采集工作目录或附件路径，
+程序也不追加任何允许或禁止，模型写出的策略就是全部授权。在 daemon 环境启用
+`ASC_INTENT_ENABLED=true` 并配置 `DASHSCOPE_API_KEY`；任务正文发送给云模型，
+不读取也不发送文件正文。模型从 draft v1 直接写出原生 Cedar（不含逐字段 evidence），
+Rust 解析并校验，不改写其语义。纯禁止不补允许，无法表达的限制明确拒绝。
+CLI 与 daemon 须同步升级为 request v1/candidate v1，其它版本不兼容。
+候选不会批准、安装或执行策略。详见
+[Intent 命令参考](../../docs/user-guide/zh/agent-sec-core/policy-cli.md#intent从任务生成待审候选)。
 
 ## 安全防护架构
 
@@ -145,7 +187,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrapper 与 CI 辅助脚本
 ├── docs/design/               # 设计文档
 ├── tests/                     # 单元测试、集成测试、打包测试、端到端测试
-├── .anolisa/component.toml    # ANOLISA 组件契约
+├── packaging/anolisa/         # ANOLISA 组件契约
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM 打包 spec 模板
@@ -222,7 +264,7 @@ agent-sec-cli --version
 `sec-core` 是 ANOLISA 中的组件名，RPM 继续使用包名 `agent-sec-core`。
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 
@@ -364,13 +406,16 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 在 daemon 启动时加载 `/etc/agent-sec/pii-checker/rules.yaml`，也可通过
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` 指定其他文件；重启后更新。
-V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.0.0"`；
+V1 保留 `~/.config/agent-sec/pii-checker/rules.yaml`。V2 报告 coverage、规则标识及 `summary.scanner_version: "2.1.1"`；
 覆盖不完整时的 `pass` 不代表检测完整。本阶段保持 Hook 契约，不切换真实宿主，也不新增 PDP 执行控制。
 公共 CLI `--trace-context` 适配通过顶层 OTel 信封传播关联信息，不支持 `params.traceContext`。
 
 正式版 OpenClaw `>=2026.5.12` 在模型运行入口扫描，记录为 `source=model_input`；
 此输入 hook 只扫描本轮 `prompt`，不扫描 system prompt 或历史消息。
 较旧的受支持版本保留入站扫描。输入是否阻断取决于策略，工具输出 hook 仍只用于观测。
+
+`test` 等测试标记只有匹配完整词时才会降低置信度；`latest 13812345678` 保留手机号 finding，
+`test-only` 仍沿用原有的测试上下文处理。
 
 详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-sec-core/pii-checker.md)。
 

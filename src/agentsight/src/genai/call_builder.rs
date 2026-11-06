@@ -45,7 +45,9 @@ impl GenAIBuilder {
         let path_match = crate::parser::llm::is_llm_api_path(&http.path);
         let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
         let is_llm = path_match || body_match;
-        if !is_llm && !http.is_sse {
+        if http.path.split('?').next() == Some("/api/v1/qcs/config/stream")
+            || (!is_llm && !http.is_sse)
+        {
             return None;
         }
 
@@ -293,6 +295,25 @@ impl GenAIBuilder {
                     .and_then(|context| context.request.as_ref()?.get("metadata"))
                     .and_then(crate::analyzer::message::types::session_id_from_metadata)
             });
+        let metadata_session = metadata_session.or_else(|| {
+            if !crate::parser::llm::is_qoder_path(&http.path) {
+                return None;
+            }
+            let raw;
+            let request = match context.and_then(|context| context.request.as_ref()) {
+                Some(request) => request,
+                None => {
+                    raw = serde_json::from_str::<serde_json::Value>(http.request_body.as_deref()?)
+                        .ok()?;
+                    &raw
+                }
+            };
+            request
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|session| !session.trim().is_empty())
+                .map(str::to_owned)
+        });
         let parsed_response_id = parsed_message
             .as_ref()
             .and_then(|m| m.response_id())
@@ -302,19 +323,27 @@ impl GenAIBuilder {
             .and_then(|rid| response_mapper.get_session_by_response_id(rid))
             .or_else(|| response_mapper.get_session_by_pid(http.pid))
             .map(|s| s.to_string());
-        let session_id = metadata_session.or(mapper_session).or_else(|| {
-            self.id_resolver
-                .resolve_session_id(&agent_name, pid_i32, &first_user_raw, &response_id)
+        let session_id = metadata_session.or(mapper_session);
+        let (session_key, conversation_key) = self.id_resolver.message_keys(
+            &agent_name,
+            pid_i32,
+            &first_user_raw,
+            &last_user_raw,
+            user_message_count,
+            session_id.is_none(),
+        );
+        let session_id = session_id.or_else(|| {
+            session_key.as_ref().and_then(|key| {
+                self.id_resolver
+                    .resolve_session_id_with_key(key, &response_id)
+            })
         });
 
         // conversation_id: SHA256("conversation" + 该 conversation 内最早 response_id)
-        let conversation_id = self.id_resolver.resolve_conversation_id(
-            &agent_name,
-            pid_i32,
-            &last_user_raw,
-            &response_id,
-            user_message_count,
-        );
+        let conversation_id = conversation_key.as_ref().and_then(|key| {
+            self.id_resolver
+                .resolve_conversation_id_with_key(key, &response_id)
+        });
 
         // 若本次响应的 finish_reason 表明本轮对话已经结束（非 tool_calls/tool_use 等
         // 表示流程尚在继续的取值），显式驱逐 (agent_name, pid, last_user_raw) 对应的
@@ -349,12 +378,9 @@ impl GenAIBuilder {
                     })
                     .unwrap_or(false);
                 if !has_tool_call {
-                    self.id_resolver.finish_conversation(
-                        &agent_name,
-                        pid_i32,
-                        &last_user_raw,
-                        user_message_count,
-                    );
+                    if let Some(key) = &conversation_key {
+                        self.id_resolver.finish_conversation_with_key(key);
+                    }
                 }
             }
         }
@@ -504,6 +530,18 @@ impl GenAIBuilder {
                 } else if http.path.contains("/completions") {
                     meta.insert("operation_name".to_string(), "text_completion".to_string());
                 } else if http.path.contains("/api/v1/copilot/generate_copilot") {
+                    meta.insert("operation_name".to_string(), "chat".to_string());
+                } else if http.path.contains("/v1/responses")
+                    || crate::parser::llm::is_dashscope_native_path(&http.path)
+                {
+                    // The Responses API (codex CLI) and the DashScope/Bailian
+                    // native generation endpoints are chat-shaped inference —
+                    // a message list in, answer text out — like the copilot
+                    // gateway above. Both are in the shared LLM path set that
+                    // decides a row is created at all (parser::llm::
+                    // is_llm_api_path), so leaving them unlabeled here stores
+                    // NULL in genai_events.operation_name while the iLogtail
+                    // exporter substitutes "chat" for the same call.
                     meta.insert("operation_name".to_string(), "chat".to_string());
                 }
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
@@ -1679,6 +1717,51 @@ mod tests {
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert_eq!(call.metadata.get("operation_name").unwrap(), "chat");
         assert_eq!(call.provider, "sysom");
+    }
+
+    /// The Responses API is in the shared LLM path set (its calls create rows
+    /// and are audited), but the operation_name derivation never learned it,
+    /// so a codex CLI call's row kept `genai_events.operation_name` NULL while
+    /// the iLogtail exporter substituted "chat" for the same call.
+    #[test]
+    fn test_build_llm_call_responses_path_operation_name() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-5","instructions":"Be terse.","input":[{"type":"message","role":"user","content":"hi"}]}"#.to_string();
+        for path in [
+            "/v1/responses",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
+        ] {
+            let http = make_http(path, Some(body.clone()), None);
+            let call = build_call(&builder, &[AnalysisResult::Http(http)])
+                .unwrap_or_else(|| panic!("{path}: a Responses call must build"));
+            assert_eq!(
+                call.metadata.get("operation_name").unwrap(),
+                "chat",
+                "{path}: a chat-shaped Responses call must be labeled"
+            );
+        }
+    }
+
+    /// The DashScope/Bailian native generation endpoints are the other
+    /// admitted path set members the derivation skipped: a native call row
+    /// also kept `operation_name` NULL.
+    #[test]
+    fn test_build_llm_call_dashscope_native_operation_name() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"qwen3-max","input":{"messages":[{"role":"user","content":"hi"}]},"parameters":{"result_format":"message"}}"#.to_string();
+        for path in [
+            "/api/v1/services/aigc/text-generation/generation",
+            "/api/v1/services/aigc/multimodal-generation/generation",
+        ] {
+            let http = make_http(path, Some(body.clone()), None);
+            let call = build_call(&builder, &[AnalysisResult::Http(http)])
+                .unwrap_or_else(|| panic!("{path}: a native call must build"));
+            assert_eq!(
+                call.metadata.get("operation_name").unwrap(),
+                "chat",
+                "{path}: a chat-shaped native call must be labeled"
+            );
+        }
     }
 
     #[test]

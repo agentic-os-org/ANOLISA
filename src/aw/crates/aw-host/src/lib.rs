@@ -7,20 +7,21 @@ mod event;
 mod report;
 mod transport;
 
+pub use aw_core::admission::AdapterCapabilities;
 pub use event::Event;
 pub use report::{
     CallFailure, CallRecord, Failure, FailureAction, Invocation, Method, NativeOutput,
     PreparationFailure, ProcessOutput, StepOutput,
 };
 
-use aw_config::{Configuration, Validator};
-use aw_exec::{CommandSpec, Limits, PackageLeases};
-use aw_provider::{
-    admission::{self, AdapterCapabilities, AdmittedStep, ProviderEvidence},
-    Protocol, Reply, MAX_MESSAGE_BYTES, VERSION,
+use aw_config::Configuration;
+use aw_core::admission::{
+    AdmissionEngine, AdmissionError, AdmittedPolicy, AdmittedStep, PolicyCandidate,
+    ProviderEvidence,
 };
+use aw_exec::{CommandSpec, Limits, PackageLeases};
+use aw_provider::{Protocol, Reply, MAX_MESSAGE_BYTES, VERSION};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -61,7 +62,10 @@ pub enum Error {
     Configuration(#[from] aw_config::Error),
     /// Invalid admission evidence or configuration capability requirements.
     #[error(transparent)]
-    Admission(#[from] aw_provider::Error),
+    Admission(AdmissionError),
+    /// Bundled Provider protocol schema failed to compile.
+    #[error(transparent)]
+    Protocol(#[from] aw_provider::Error),
     /// Preparation or event creation exceeded its limit or was cancelled.
     #[error(transparent)]
     Execution(#[from] aw_exec::Error),
@@ -79,6 +83,15 @@ pub enum Error {
     Invalid(&'static str),
 }
 
+impl From<AdmissionError> for Error {
+    fn from(error: AdmissionError) -> Self {
+        match error {
+            AdmissionError::Configuration(error) => Self::Configuration(error),
+            error @ AdmissionError::Rejected(_) => Self::Admission(error),
+        }
+    }
+}
+
 struct Provider {
     native: bool,
     hook: bool,
@@ -88,6 +101,61 @@ struct Provider {
     limits: Limits,
 }
 
+/// Discovered Provider resources, protocol evidence, and managed file leases for one candidate.
+///
+/// External callers obtain [`PreparedProviders`] exclusively from [`Host::discover`]
+/// and cannot construct or deserialize it directly:
+///
+/// ```compile_fail
+/// let prepared: aw_host::PreparedProviders =
+///     serde_json::from_str("{}").unwrap();
+/// ```
+pub struct PreparedProviders {
+    revision: String,
+    target: String,
+    capabilities: AdapterCapabilities,
+    protocol: Protocol,
+    providers: BTreeMap<String, Provider>,
+    evidence: BTreeMap<String, ProviderEvidence>,
+    preparation: Vec<CallRecord>,
+    _package_leases: PackageLeases,
+}
+
+impl PreparedProviders {
+    /// Protocol-checked Provider evidence collected during discovery.
+    pub fn evidence(&self) -> &BTreeMap<String, ProviderEvidence> {
+        &self.evidence
+    }
+
+    /// Successful preparation exchanges recorded during discovery.
+    pub fn preparation(&self) -> &[CallRecord] {
+        &self.preparation
+    }
+
+    /// Exact-document revision bound to these discovered Provider resources.
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    /// Target Agent key bound to these discovered Provider resources.
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    /// Trusted Adapter capabilities bound to these discovered Provider resources.
+    pub fn capabilities(&self) -> &AdapterCapabilities {
+        &self.capabilities
+    }
+
+    /// Consume discovered Provider state into a preparation failure retaining completed calls.
+    pub fn into_failure(self, cause: Error) -> Error {
+        Error::Preparation(Box::new(PreparationFailure {
+            completed: self.preparation,
+            cause,
+        }))
+    }
+}
+
 /// Immutable configuration, process context and admitted steps for one Agent target.
 ///
 /// Construct a new Host when configuration, Adapter evidence or process context
@@ -95,18 +163,100 @@ struct Provider {
 /// unmanaged executables and imported code remain the caller's responsibility.
 /// The Host starts only Provider children, never an Agent, daemon or audit writer.
 pub struct Host {
-    configuration: Configuration,
-    revision: String,
-    target: String,
-    capabilities: AdapterCapabilities,
+    policy: AdmittedPolicy,
     protocol: Protocol,
     providers: BTreeMap<String, Provider>,
-    steps: Vec<AdmittedStep>,
     preparation: Vec<CallRecord>,
     _package_leases: PackageLeases,
 }
 
 impl Host {
+    /// Discover and validate structured Providers required by a preflighted candidate.
+    ///
+    /// Uses the candidate's already-validated configuration and step requirements
+    /// without re-parsing configuration bytes. Structured Providers run `describe`
+    /// and `validate_config` once; boolean hooks and native commands skip discovery.
+    ///
+    /// # Errors
+    /// Rejects invalid local context, package lease conflicts, and any failed,
+    /// cancelled, or expired exchange. Completed exchanges before a discovery failure
+    /// are retained in [`Error::Preparation`] while managed package leases are released.
+    pub fn discover(
+        candidate: &PolicyCandidate,
+        context: ProcessContext,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<PreparedProviders, Error> {
+        check(deadline, cancelled)?;
+        if !context.cwd.is_absolute() {
+            return Err(Error::Invalid("working directory must be absolute"));
+        }
+        let protocol = Protocol::new()?;
+        let mut providers = BTreeMap::new();
+        for step in candidate.requirements() {
+            if !providers.contains_key(&step.provider) {
+                let value =
+                    &candidate.configuration().as_value()["spec"]["providers"][&step.provider];
+                providers.insert(step.provider.clone(), provider(value, &context)?);
+            }
+        }
+        let package_leases =
+            PackageLeases::acquire(providers.values_mut().map(|provider| &mut provider.command))?;
+        check(deadline, cancelled)?;
+        let mut prepared = PreparedProviders {
+            revision: candidate.revision().to_owned(),
+            target: candidate.target().to_owned(),
+            capabilities: candidate.capabilities().clone(),
+            protocol,
+            providers,
+            evidence: BTreeMap::new(),
+            preparation: Vec::new(),
+            _package_leases: package_leases,
+        };
+        if let Err(cause) = prepared.discover_providers(deadline, cancelled) {
+            return Err(Error::Preparation(Box::new(PreparationFailure {
+                completed: prepared.preparation,
+                cause,
+            })));
+        }
+        Ok(prepared)
+    }
+
+    /// Construct an immutable Host from an admitted policy and its discovered Providers.
+    ///
+    /// Verifies that the admitted policy and discovered Provider resources share
+    /// the same configuration revision, target, Adapter capabilities, Provider
+    /// evidence, and required Provider commands.
+    ///
+    /// # Errors
+    /// Rejects mismatched revision, target, Adapter capabilities, Provider
+    /// evidence, or missing prepared Provider resources.
+    pub fn from_admitted(
+        policy: AdmittedPolicy,
+        prepared: PreparedProviders,
+    ) -> Result<Self, Error> {
+        if policy.revision() != prepared.revision
+            || policy.target() != prepared.target
+            || !same_capabilities(policy.capabilities(), &prepared.capabilities)
+            || !same_evidence(policy.providers(), &prepared.evidence)
+            || policy
+                .steps()
+                .iter()
+                .any(|step| !prepared.providers.contains_key(&step.provider))
+        {
+            return Err(Error::Invalid(
+                "admitted policy does not match prepared Providers",
+            ));
+        }
+        Ok(Self {
+            policy,
+            protocol: prepared.protocol,
+            providers: prepared.providers,
+            preparation: prepared.preparation,
+            _package_leases: prepared._package_leases,
+        })
+    }
+
     /// Validate desired configuration, execute discovery/private validation, then admit.
     ///
     /// All enabled requirements are preflighted before starting any command. Each
@@ -135,56 +285,122 @@ impl Host {
         if !context.cwd.is_absolute() {
             return Err(Error::Invalid("working directory must be absolute"));
         }
-        let configuration = Validator::new()?.parse(bytes)?;
-        let requirements = admission::preflight(&configuration, target, &capabilities)?;
-        let protocol = Protocol::new()?;
-        let revision = format!("{:x}", Sha256::digest(bytes));
-        check(deadline, cancelled)?;
-        let mut providers = BTreeMap::new();
-        for step in &requirements {
-            if !providers.contains_key(&step.provider) {
-                let value = &configuration.as_value()["spec"]["providers"][&step.provider];
-                providers.insert(step.provider.clone(), provider(value, &context)?);
-            }
-        }
-        let package_leases =
-            PackageLeases::acquire(providers.values_mut().map(|provider| &mut provider.command))?;
-        check(deadline, cancelled)?;
-        let mut host = Self {
-            configuration,
-            revision,
-            target: target.into(),
-            capabilities,
-            protocol,
-            providers,
-            steps: Vec::new(),
-            preparation: Vec::new(),
-            _package_leases: package_leases,
+        let engine = AdmissionEngine::new()?;
+        let candidate = engine.preflight(bytes, target, capabilities)?;
+        let prepared = Self::discover(&candidate, context, deadline, cancelled)?;
+        let policy = match engine.admit(candidate, prepared.evidence()) {
+            Ok(policy) => policy,
+            Err(error) => return Err(prepared.into_failure(error.into())),
         };
-        if let Err(cause) = host.prepare_providers(deadline, cancelled) {
-            return Err(Error::Preparation(Box::new(PreparationFailure {
-                completed: host.preparation,
-                cause,
-            })));
+        if let Err(error) = check(deadline, cancelled) {
+            return Err(prepared.into_failure(error.into()));
         }
-        Ok(host)
+        Self::from_admitted(policy, prepared)
     }
 
-    fn prepare_providers(
+    /// Admitted policy snapshot retained by this Host.
+    pub fn policy(&self) -> &AdmittedPolicy {
+        &self.policy
+    }
+
+    /// Validated immutable configuration retained by this Host snapshot.
+    pub fn configuration(&self) -> &Configuration {
+        self.policy.configuration()
+    }
+
+    /// Exact-document revision retained for every exchange and invocation binding.
+    pub fn revision(&self) -> &str {
+        self.policy.revision()
+    }
+
+    /// Configured target whose Adapter and event binding the Host requires.
+    pub fn target(&self) -> &str {
+        self.policy.target()
+    }
+
+    /// Trusted version/entrypoint evidence retained separately from Provider claims.
+    pub fn capabilities(&self) -> &AdapterCapabilities {
+        self.policy.capabilities()
+    }
+
+    /// Successful preparation exchanges, available for the embedding audit writer.
+    pub fn preparation(&self) -> &[CallRecord] {
+        &self.preparation
+    }
+
+    /// Admitted steps in configuration order within each event; no scheduling implied.
+    pub fn steps(&self) -> &[AdmittedStep] {
+        self.policy.steps()
+    }
+
+    pub(crate) fn record(
+        &self,
+        provider: &str,
+        method: Method,
+        event_id: Option<&str>,
+        step_id: Option<&str>,
+    ) -> Result<CallRecord, Error> {
+        Ok(CallRecord {
+            config_revision: self.revision().to_owned(),
+            binding_id: self.target().to_owned(),
+            provider: provider.into(),
+            request_id: identifier()?,
+            method,
+            event_id: event_id.map(str::to_owned),
+            step_id: step_id.map(str::to_owned),
+            elapsed: Duration::ZERO,
+            process: None,
+        })
+    }
+
+    fn transport<'a>(
+        &'a self,
+        provider: &'a Provider,
+        deadline: Instant,
+        cancelled: &'a AtomicBool,
+    ) -> Transport<'a> {
+        Transport {
+            protocol: &self.protocol,
+            command: &provider.command,
+            limits: provider.limits,
+            deadline: deadline.min(Instant::now() + provider.timeout),
+            cancelled,
+        }
+    }
+}
+
+impl PreparedProviders {
+    fn discover_providers(
         &mut self,
         deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<(), Error> {
-        let mut evidence = BTreeMap::new();
         for (name, provider) in &self.providers {
             if provider.native || provider.hook {
                 continue;
             }
             let mut replies = Vec::new();
             for method in [Method::Describe, Method::ValidateConfig] {
-                let record = self.record(name, method, None, None)?;
+                let record = CallRecord {
+                    config_revision: self.revision.clone(),
+                    binding_id: self.target.clone(),
+                    provider: name.clone(),
+                    request_id: identifier()?,
+                    method,
+                    event_id: None,
+                    step_id: None,
+                    elapsed: Duration::ZERO,
+                    process: None,
+                };
                 let request_id = record.request_id.clone();
-                let exchange = self.transport(provider, deadline, cancelled).exchange(record, |_| {
+                let transport = Transport {
+                    protocol: &self.protocol,
+                    command: &provider.command,
+                    limits: provider.limits,
+                    deadline: deadline.min(Instant::now() + provider.timeout),
+                    cancelled,
+                };
+                let exchange = transport.exchange(record, |_| {
                     let mut value = json!({"api_version": VERSION, "request_id": request_id, "method": method.as_str()});
                     if method == Method::ValidateConfig {
                         value["config"] = provider.config.clone();
@@ -210,7 +426,7 @@ impl Host {
             else {
                 return Err(Error::Invalid("unexpected preparation reply type"));
             };
-            evidence.insert(
+            self.evidence.insert(
                 name.clone(),
                 ProviderEvidence {
                     description,
@@ -218,80 +434,30 @@ impl Host {
                 },
             );
         }
-        self.steps = admission::admit(
-            &self.configuration,
-            &self.target,
-            &self.capabilities,
-            &evidence,
-        )?;
         check(deadline, cancelled)?;
         Ok(())
     }
+}
 
-    /// Validated immutable configuration retained by this Host snapshot.
-    pub fn configuration(&self) -> &Configuration {
-        &self.configuration
-    }
+fn same_capabilities(left: &AdapterCapabilities, right: &AdapterCapabilities) -> bool {
+    left.adapter == right.adapter
+        && left.version == right.version
+        && left.entrypoint == right.entrypoint
+        && left.events == right.events
+        && left.failure_actions == right.failure_actions
+}
 
-    /// Exact-document revision retained for every exchange and invocation binding.
-    pub fn revision(&self) -> &str {
-        &self.revision
-    }
-
-    /// Configured target whose Adapter and event binding the Host requires.
-    pub fn target(&self) -> &str {
-        &self.target
-    }
-
-    /// Trusted version/entrypoint evidence retained separately from Provider claims.
-    pub fn capabilities(&self) -> &AdapterCapabilities {
-        &self.capabilities
-    }
-
-    /// Successful preparation exchanges, available for the embedding audit writer.
-    pub fn preparation(&self) -> &[CallRecord] {
-        &self.preparation
-    }
-
-    /// Admitted steps in configuration order within each event; no scheduling implied.
-    pub fn steps(&self) -> &[AdmittedStep] {
-        &self.steps
-    }
-
-    pub(crate) fn record(
-        &self,
-        provider: &str,
-        method: Method,
-        event_id: Option<&str>,
-        step_id: Option<&str>,
-    ) -> Result<CallRecord, Error> {
-        Ok(CallRecord {
-            config_revision: self.revision.clone(),
-            binding_id: self.target.clone(),
-            provider: provider.into(),
-            request_id: identifier()?,
-            method,
-            event_id: event_id.map(str::to_owned),
-            step_id: step_id.map(str::to_owned),
-            elapsed: Duration::ZERO,
-            process: None,
+fn same_evidence(
+    left: &BTreeMap<String, ProviderEvidence>,
+    right: &BTreeMap<String, ProviderEvidence>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(name, left)| {
+            right.get(name).is_some_and(|right| {
+                left.description.as_value() == right.description.as_value()
+                    && left.configuration.as_value() == right.configuration.as_value()
+            })
         })
-    }
-
-    fn transport<'a>(
-        &'a self,
-        provider: &'a Provider,
-        deadline: Instant,
-        cancelled: &'a AtomicBool,
-    ) -> Transport<'a> {
-        Transport {
-            protocol: &self.protocol,
-            command: &provider.command,
-            limits: provider.limits,
-            deadline: deadline.min(Instant::now() + provider.timeout),
-            cancelled,
-        }
-    }
 }
 
 fn provider(value: &Value, context: &ProcessContext) -> Result<Provider, Error> {

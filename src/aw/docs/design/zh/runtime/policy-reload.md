@@ -3,9 +3,9 @@
 [English](../../en/runtime/policy-reload.md)
 
 AW 可以显式更新通过稳定桥接启动的空闲实例策略，原生宿主进程保持运行；忙碌实例拒绝更新。
-受限桥接路径通过 `aw run --reloadable` 显式启用，固定 Qoder 1.1.73 TUI 和
+受限桥接路径通过 `aw run --reloadable` 显式启用，已验证基线为 Qoder 1.1.73 TUI 和
 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled Worker
-1.1.78。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
+1.1.78。准入检查已安装版本所用的入口和原生空闲/更新协议。外部 TUI 和 App 接入通过 `aw agent connect --pid PID` 提供；SDK daemon
 外部接入和 steer 仍在规划中。
 `qoder-sdk` 的普通 `aw run` 为每个受管 Query 建立常驻子 scope。
 普通 QwenPaw App 启动为每个受管 Agent reply 建立任务 scope。
@@ -41,7 +41,7 @@ QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled 
 更新和任务派发串行化；更新成功后再恢复派发。活跃任务及清理期间返回 `busy`，
 不提供自动重试、等待任务排空或任务内切换。
 
-[空闲更新支持矩阵](../../../../../../docs/user-guide/zh/aw/configuration.md#更新预热实例)
+[空闲更新支持矩阵](../../../../../../docs/developer-guide/zh/aw/deployment/policy-updates.md)
 记录各启动模式的就绪接点、安全边界及选择入口。普通 Qoder SDK/QwenPaw 扩展公共服务事务，
 受限桥接及外部 attach 沿用已有合同；普通 Claude SDK、Pi、Qoder CLI、OpenClaw、Hermes、
 AgentScope SDK 保持固定策略。Qoder 预热应先调用受管 `startDaemon()` 再等待用户流量。
@@ -229,7 +229,7 @@ ERROR/INTERRUPTED 片段就停止拉取，因此这些输出须等正常耗尽�
 结束时应使用新实例。
 外部实例通过目标 App 的插件管理接口接入，确认 endpoint、工作目录和执行进程的关联。
 
-热安装复用固定版本的现有 AW 插件及 startup-ready 回调。2.2.2.post1 原生插件 API
+热安装复用现有 AW 插件及 startup-ready 回调。2.2.2.post1 原生插件 API
 在热安装时会执行 startup 回调；安装目录中的私有 `aw-attachment.json` 描述文件
 解决运行中 App 无法继承新增环境变量的问题。CLI 验证所选 App PID 拥有 loopback
 端口，并要求该 PID 返回带 nonce 的凭据；仅 API 成功不能证明回调成功。

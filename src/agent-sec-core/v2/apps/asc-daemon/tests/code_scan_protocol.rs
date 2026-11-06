@@ -257,7 +257,40 @@ async fn a_local_user_scans_dangerous_bash_and_receives_the_verdict() {
     // all is what proves the method's LocalUser access policy, since every PAP
     // method denies this same peer.
     let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
-    let response = support::request_json(
+    for (code, language) in [
+        ("rm -rf /tmp/test", "bash"),
+        (r#"rm -rf /tmp/test; python3 -c "print(1)""#, "python"),
+        (r#"python3 -c "print(1)" && rm -rf /tmp/test"#, "python"),
+        (r#"rm -rf /tmp/test; bash -c "echo hi""#, "bash"),
+    ] {
+        let response = support::request_json(
+            &daemon.socket_path,
+            &json!({
+                "method": "action.code_scan",
+                "params": {"code": code, "language": "bash"}
+            }),
+        )
+        .await;
+        let result = &response["result"];
+        assert_eq!(result["ok"], json!(true), "unexpected response {response}");
+        assert_eq!(result["verdict"], json!("warn"), "{code}: {response}");
+        assert_eq!(result["language"], json!(language));
+        assert!(
+            result["findings"]
+                .as_array()
+                .is_some_and(|findings| findings
+                    .iter()
+                    .any(|finding| finding["rule_id"] == "shell-recursive-delete")),
+            "expected recursive-delete finding: {response}"
+        );
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn python_keyword_command_arguments_reuse_bash_findings() {
+    let daemon = RunningDaemon::start(PrincipalRole::LocalUser).await;
+    let bash = support::request_json(
         &daemon.socket_path,
         &json!({
             "method": "action.code_scan",
@@ -265,16 +298,30 @@ async fn a_local_user_scans_dangerous_bash_and_receives_the_verdict() {
         }),
     )
     .await;
-    let result = &response["result"];
-    assert_eq!(result["ok"], json!(true), "unexpected response {response}");
-    assert_eq!(result["verdict"], json!("warn"));
-    assert_eq!(result["language"], json!("bash"));
-    assert!(
-        result["findings"]
-            .as_array()
-            .is_some_and(|findings| !findings.is_empty()),
-        "expected at least one finding: {response}"
-    );
+    for (code, language) in [
+        (
+            r#"subprocess.Popen(args="rm -rf /tmp/test", shell=True)"#,
+            "python",
+        ),
+        (
+            r#"python3 -c 'subprocess.Popen(args="rm -rf /tmp/test", shell=True)'"#,
+            "bash",
+        ),
+    ] {
+        let python = support::request_json(
+            &daemon.socket_path,
+            &json!({
+                "method": "action.code_scan",
+                "params": {"code": code, "language": language}
+            }),
+        )
+        .await;
+
+        assert_eq!(python["result"]["ok"], json!(true), "{python}");
+        assert_eq!(python["result"]["verdict"], bash["result"]["verdict"]);
+        assert_eq!(python["result"]["findings"], bash["result"]["findings"]);
+        assert_eq!(python["result"]["language"], json!("python"));
+    }
     daemon.stop().await;
 }
 

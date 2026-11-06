@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-11-06
+
+### Changed
+
+- RPM delivery splits into `skillfs-core` and `skillfs-skills`, selected by
+  `skillfs`. The CLI moves to `/usr/bin/skillfs` and the bundled skill to
+  `/usr/share/anolisa/skills/skillfs-mount/`
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222)).
+- ANOLISA owns component discovery contracts. Upgrade installed SkillFS RPM
+  roles together; hosts with ANOLISA and raw installs require ANOLISA 0.3.21
+  or later ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351)).
+- `make install` defaults to the shared ANOLISA skill namespace; use `AWPRJ=`
+  for an independent layout
+  ([#9462](https://github.com/agentic-os-org/ANOLISA/pull/9462)).
+
+### Fixed
+
+- Managed stop and orphan cleanup preserve unrelated processes after PID reuse;
+  malformed mount-table escapes no longer produce false target matches
+  ([#9242](https://github.com/agentic-os-org/ANOLISA/pull/9242)).
+- Renaming files, symlinks or special files onto virtual directory slots is
+  rejected, while supported directory moves remain available
+  ([#5375](https://github.com/agentic-os-org/ANOLISA/pull/5375)).
+- pip user installs retain their original commands, and command detection works
+  without `which` ([#9300](https://github.com/agentic-os-org/ANOLISA/pull/9300),
+  [#9276](https://github.com/agentic-os-org/ANOLISA/pull/9276)).
+- Skill parsing recognizes indented and tab-separated section headings;
+  enabled-only lists report empty results without empty source headings.
+- Session-log usage distinguishes skills with shared name prefixes and counts
+  paths next to shell operators
+  ([#8694](https://github.com/agentic-os-org/ANOLISA/pull/8694)).
+
+## [0.5.5] - Unreleased
+
+### Changed
+
+- Install the runtime and bundled skill through separate RPMs.
+- Place the bundled skill in the shared ANOLISA skills directory.
+
+## [0.5.4] - 2026-10-28
+
+### Fixed
+
+- Moving a skill into another skill directory removes its stale top-level
+  entries from `/skills` and `skill-discover`, keeping live discovery consistent
+  with a fresh scan ([#9124](https://github.com/agentic-os-org/ANOLISA/pull/9124)).
+- When Yarn is selected, npm install commands with packages, options or ambiguous
+  shell syntax retain their original form instead of becoming invalid commands
+  ([#9003](https://github.com/agentic-os-org/ANOLISA/pull/9003)).
+- Chat usage statistics treat `--logs-dir` as a literal path, including brackets,
+  and avoid counting logs from similarly named sibling directories
+  ([#9180](https://github.com/agentic-os-org/ANOLISA/pull/9180)).
+
 ## [0.5.3] - 2026-10-23
 
 ### Added

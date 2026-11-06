@@ -56,6 +56,12 @@ fn unescape_mount_field(field: &[u8]) -> Cow<'_, [u8]> {
     while i < field.len() {
         if field[i] == b'\\'
             && i + 3 < field.len()
+            // \ooo encodes a single byte: the leading digit must be <= 3
+            // (3*64 + 7*8 + 7 == 255), otherwise \400..\777 would wrap when
+            // narrowed to u8 and invent unrelated bytes. The kernel never
+            // emits those, so keep them verbatim like any other malformed
+            // escape (see the malformed-escape test below).
+            && field[i + 1] <= b'3'
             && field[i + 1..i + 4]
                 .iter()
                 .all(|b| (b'0'..=b'7').contains(b))
@@ -118,6 +124,33 @@ mod tests {
             unescape_mount_field(br"/non-octal\890").as_ref(),
             b"/non-octal\\890"
         );
+    }
+
+    #[test]
+    fn octal_escapes_above_377_stay_verbatim() {
+        // \400..\777 would wrap when narrowed to u8 and invent unrelated
+        // bytes (\400 -> NUL, \500 -> '@', \777 -> \xff colliding with \377);
+        // the kernel never emits them, so keep them verbatim.
+        assert_eq!(unescape_mount_field(br"/x\400y").as_ref(), br"/x\400y");
+        assert_eq!(unescape_mount_field(br"/x\500y").as_ref(), br"/x\500y");
+        assert_eq!(unescape_mount_field(br"/x\777y").as_ref(), br"/x\777y");
+        // \377 is still a real byte, and the guard must not disturb it or
+        // the values below it.
+        assert_eq!(unescape_mount_field(br"/x\377y").as_ref(), b"/x\xffy");
+        assert_eq!(unescape_mount_field(br"/x\300y").as_ref(), b"/x\xc0y");
+    }
+
+    #[test]
+    fn a_wrapping_escape_cannot_fabricate_a_mount_match() {
+        // Decoding \400 to a NUL byte would make a mounted malformed field
+        // match a target containing NUL, misleading stale-mount cleanup.
+        let mounts = b"/dev/vda1 /mnt/x\\400end ext4 rw 0 0\n";
+        assert!(!mounts_contain_target(mounts, b"/mnt/x\0end"));
+        // The real escaped path still matches.
+        assert!(mounts_contain_target(
+            b"/dev/vda1 /mnt/my\\040skills ext4 rw 0 0\n",
+            b"/mnt/my skills"
+        ));
     }
 
     #[test]

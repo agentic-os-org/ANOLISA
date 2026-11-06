@@ -1,7 +1,7 @@
 //! Bounded Provider fixtures and task-owned files for real Host exchanges.
 
+use aw_core::admission::AdapterCapabilities;
 use aw_host::{Host, ProcessContext};
-use aw_provider::admission::AdapterCapabilities;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,

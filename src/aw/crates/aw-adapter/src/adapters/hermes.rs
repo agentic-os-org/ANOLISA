@@ -16,13 +16,10 @@ use super::super::{
     },
     read_file, Exit, Result,
 };
-use aw_provider::admission::AdapterCapabilities as Capabilities;
-use aw_provider::admission::AdmittedStep;
+use aw_core::admission::{AdapterCapabilities as Capabilities, AdmittedStep};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
-
-const REVISION: &str = "952c941e741e922a9be8fc403c8944c6e96318bb";
 
 pub(crate) struct Hermes;
 
@@ -31,6 +28,7 @@ struct Prepared {
     profile: PathBuf,
     python: PathBuf,
     callback_timeout: f64,
+    revision: String,
 }
 
 impl Adapter for Hermes {
@@ -55,7 +53,7 @@ impl Adapter for Hermes {
                 profile.display()
             )
         })?;
-        let (selector, python, cache) =
+        let (selector, python, cache, revision) =
             checked_profile_command(&mut input.command, &profile, cancelled)?;
         let timeout =
             callback_timeout(&input.command, &python, &selector, cache.path(), cancelled)?;
@@ -70,6 +68,7 @@ impl Adapter for Hermes {
             profile,
             python,
             callback_timeout: timeout,
+            revision,
         }))
     }
 
@@ -81,6 +80,9 @@ impl Adapter for Hermes {
             return Err(
                 "Hermes callback event or working directory differs from its binding".into(),
             );
+        }
+        if event == "input.submit" {
+            return super::submission::normalize(binding, native, "hermes", "input_text");
         }
         let session = identifier(&native["session_id"], "session_id")?;
         let call = identifier(&native["extra"]["tool_call_id"], "extra.tool_call_id")?;
@@ -94,13 +96,19 @@ impl Adapter for Hermes {
         if !native["tool_input"].is_object() {
             return Err("Hermes callback requires a tool_input object".into());
         }
+        let mut input = native["tool_input"].clone();
+        let mut native = native.clone();
+        if tool == "skill_view" {
+            input["skill"] = input["name"].clone();
+            native["aw_skill"] = native["extra"]["aw_skill"].clone();
+        }
         Ok(json!({
             "name": event,
             "agent": {"adapter": "hermes", "binding_id": binding.target,
                       "instance_id": binding.instance_id},
             "session_id": session,
             "tool": {"name": tool, "native_name": tool, "call_id": call,
-                     "input": native["tool_input"], "result": native["extra"]["result"]},
+                     "input": input, "result": native["extra"]["result"]},
             "native": native,
         }))
     }
@@ -153,7 +161,8 @@ impl Adapter for Hermes {
             cwd: std::env::current_dir()?.canonicalize()?,
             environment: std::env::vars_os().collect(),
         };
-        let (selector, python, cache) = checked_profile_command(&mut command, &profile, cancelled)?;
+        let (selector, python, cache, _) =
+            checked_profile_command(&mut command, &profile, cancelled)?;
         let backup = install::install(
             &profile,
             cancelled,
@@ -274,10 +283,13 @@ fn installed_output(
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::HERMES.capabilities(REVISION, "chat")
+        super::super::adapter::catalog::HERMES.capabilities(&self.revision, "chat")
     }
 
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
+        if !self.native_steps(steps, "input.submit").is_empty() {
+            check_submission_args(&self.input.command.args)?;
+        }
         for event in ["tool.before", "tool.after"] {
             if !self.native_steps(steps, event).is_empty() {
                 let budget = self.budget(event)?;
@@ -294,15 +306,29 @@ impl PreparedLaunch for Prepared {
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
         let mut events = BTreeMap::new();
         let mut hooks = Vec::new();
-        for event in ["tool.before", "tool.after"] {
+        let mut submissions = Vec::new();
+        for event in ["input.submit", "tool.before", "tool.after"] {
             let selected = self.native_steps(context.steps, event);
             if selected.is_empty() {
                 continue;
             }
             let budget = self.budget(event)?;
             for step in &selected {
-                hooks.push(json!({"event":event, "step":step.step_id,
-                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.replaces_result}));
+                let mut hook = json!({"event":event, "step":step.step_id,
+                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.replaces_result});
+                if context.steps.iter().any(|admitted| {
+                    admitted.event == event
+                        && admitted.step_id == step.step_id
+                        && super::sdk_tools::checks_skill_tool(admitted, "hermes", "skill_view")
+                }) {
+                    hook["skill_check"] = json!(true);
+                }
+                let callbacks = if event == "input.submit" {
+                    &mut submissions
+                } else {
+                    &mut hooks
+                };
+                callbacks.push(hook);
             }
             events.insert(
                 event.into(),
@@ -327,11 +353,15 @@ impl PreparedLaunch for Prepared {
             "binding":context.binding_path.to_str().ok_or("Hermes binding path must be UTF-8")?,
             "profile":self.profile.to_str().ok_or("Hermes profile path must be UTF-8")?,
             "cwd":self.input.command.cwd.to_str().ok_or("Hermes working directory must be UTF-8")?,
-            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks});
+            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "submissions":submissions, "revision":self.revision});
         let path = context
             .files
             .write("hermes-launch.json", &serde_json::to_vec(&launch)?)?;
         let mut command = self.input.command.clone();
+        context.files.write(
+            "aw_skill.py",
+            include_bytes!("../../native/hermes/aw_skill.py"),
+        )?;
         let entrypoint = context.files.write(
             "hermes-entrypoint.py",
             include_bytes!("../../native/hermes/launch.py"),
@@ -369,7 +399,8 @@ impl Prepared {
         adapter::native_steps(
             steps,
             event,
-            adapter::observation_enabled(&self.input.document, &self.input.target),
+            event != "input.submit"
+                && adapter::observation_enabled(&self.input.document, &self.input.target),
         )
     }
 
@@ -399,10 +430,31 @@ fn identifier<'a>(value: &'a Value, label: &str) -> Result<&'a str> {
 
 fn event_name(event: &str) -> Result<&'static str> {
     match event {
+        "input.submit" => Ok("AWInputSubmit"),
         "tool.before" => Ok("pre_tool_call"),
         "tool.after" => Ok("post_tool_call"),
         _ => Err("unsupported Hermes hook event".into()),
     }
+}
+
+fn check_submission_args(args: &[OsString]) -> Result<()> {
+    let options: Vec<_> = args
+        .iter()
+        .filter_map(|arg| arg.to_str())
+        .map(|arg| arg.split('=').next().unwrap_or(arg))
+        .collect();
+    if !options
+        .iter()
+        .any(|arg| matches!(*arg, "--query" | "-q" | "--query-file"))
+        || !options.iter().any(|arg| matches!(*arg, "--quiet" | "-Q"))
+        || options.contains(&"--image")
+    {
+        return Err(
+            "Hermes input.submit requires --quiet with --query or --query-file and no --image"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn check_args(args: &[OsString]) -> Result<()> {

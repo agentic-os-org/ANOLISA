@@ -109,7 +109,10 @@ def main() -> None:
                 {
                     "version": 1,
                     "mode": "block",
-                    "tools": {"exec": {"language": "bash", "input_pointer": "/command"}},
+                    "tools": {
+                        name: {"language": "bash", "input_pointer": "/command"}
+                        for name in ["exec", "fixture_api"]
+                    },
                 },
             ),
             (
@@ -219,7 +222,8 @@ def main() -> None:
             retry = executed[0]
             assert "TOKENLESS_AGENT_ID=sdk " in retry["command"]
             assert retry in permissions and retry["command"] in scans
-            assert len(permissions) == 8 and len(scans) == 3, (permissions, scans)
+            assert len(permissions) == 8 and len(scans) == 7, (permissions, scans)
+            assert scans.count("git status") == 5, scans
             observed, native, late = records("observe"), records("native"), records("late")
             assert len(observed) == len(native) == len(late) == 7
             for before, user, after in zip(observed, native, late):

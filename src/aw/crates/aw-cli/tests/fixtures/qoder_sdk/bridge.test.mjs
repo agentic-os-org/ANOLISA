@@ -3,13 +3,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import * as bridge from "../../../../aw-adapter/native/qoder-sdk/bridge.mjs";
+import { Resident } from "../../../../aw-adapter/native/qoder-sdk/resident.mjs";
+import { resolveSkill } from "../../../../aw-adapter/native/qoder-sdk/skills.mjs";
 import "./resident.test.mjs";
 import "./resident-policy.test.mjs";
 import "./daemon.test.mjs";
 import "./private.test.mjs";
 import "./cleanup-fence.test.mjs";
+import "./native-options.test.mjs";
+import "./startup.test.mjs";
 const { createQuery } = bridge;
 
 function fixture(t, mode = "allow") {
@@ -25,6 +30,7 @@ function fixture(t, mode = "allow") {
   export function query({options}) {
     fs.writeFileSync(${JSON.stringify(path.join(root, "queried"))},'queried'); return {
     options, async initializationResult(){if(options.failInit) throw new Error('init failed');},
+    async request(){return {sources:{flag:options.settings},effective:options.settings};},
     async return(){fs.writeFileSync(${JSON.stringify(path.join(root, "closed"))},'closed');}
   };}`);
   const executable = path.join(root, "callback");
@@ -284,4 +290,177 @@ test("reloadable Queries reject background and isolated agent definitions before
   assert.deepEqual(q.options.agents, agents);
   await q.return();
   await daemon.stop();
+});
+
+
+test("cold Query selects the explicit SDK site and strips its bridge selector", async t => {
+  const f = fixture(t);
+  const cn = path.join(f.root, "cn.mjs");
+  fs.writeFileSync(cn, fs.readFileSync(f.config.sdk, "utf8").replaceAll(path.join(f.root, "queried"), path.join(f.root, "cn-queried")));
+  f.config.sdks = { global: f.config.sdk, cn };
+  f.config.default_site = "global";
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const q = await createQuery({ prompt: "cold", options: { ...f.options, awSite: "cn" } });
+  assert(fs.existsSync(path.join(f.root, "cn-queried")));
+  assert(!fs.existsSync(path.join(f.root, "queried")));
+  assert.equal(q.options.awSite, undefined);
+  await q.return();
+});
+
+test("Query inherits its daemon site and rejects a different explicit site before SDK dispatch", async t => {
+  const f = fixture(t);
+  const cn = path.join(f.root, "cn.mjs");
+  fs.writeFileSync(cn, fs.readFileSync(f.config.sdk, "utf8")
+    .replaceAll(path.join(f.root, "queried"), path.join(f.root, "cn-queried")));
+  f.config.sdks = { global: f.config.sdk, cn };
+  f.config.default_site = "global";
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const daemon = await bridge.startDaemon({ awSite: "cn" });
+  let prompts = 0;
+  const prompt = { async *[Symbol.asyncIterator]() { prompts++; yield "must not dispatch"; } };
+  try {
+    await assert.rejects(createQuery({ prompt, options: { ...f.options, daemon, awSite: "global" } }),
+      /site differs/);
+    assert.equal(prompts, 0);
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert(!fs.existsSync(path.join(f.root, "cn-queried")));
+    assert(!fs.existsSync(f.config.ready_path));
+    const q = await createQuery({ prompt: "inherited", options: { ...f.options, daemon } });
+    assert(fs.existsSync(path.join(f.root, "cn-queried")));
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert.equal(q.options.daemon, daemon);
+    assert.equal(q.options.awSite, undefined);
+    await q.return();
+  } finally { await daemon.stop(); }
+});
+
+test("nonresident native execution rejects before SDK, prompt or factory execution", async t => {
+  const f = fixture(t);
+  let prompts = 0, factories = 0;
+  const prompt = { async *[Symbol.asyncIterator]() { prompts++; yield "must not dispatch"; } };
+  await assert.rejects(createQuery({ prompt, options: { ...f.options,
+    awNativeExecutionFactory: async () => { factories++; throw new Error("must not acquire"); } } }),
+  /Native command execution requires an AW resident Query/);
+  assert.equal(prompts, 0);
+  assert.equal(factories, 0);
+  assert(!fs.existsSync(path.join(f.root, "queried")));
+  assert(!fs.existsSync(f.config.ready_path));
+});
+
+test("native command execution rejects absent approval and bypass modes before SDK creation", async t => {
+  const f = fixture(t);
+  fs.writeFileSync(f.file, JSON.stringify({ ...f.config, resident: true,
+    native_command_wrappers: [path.join(f.root, "wrapper")] }));
+  let prompts = 0, factories = 0;
+  const prompt = { async *[Symbol.asyncIterator]() { prompts++; yield "must not dispatch"; } };
+  for (const permissionMode of [undefined, "bypassPermissions", "yolo", "auto", "dontAsk", "plan"]) {
+    await assert.rejects(createQuery({ prompt, options: { ...f.options, permissionMode,
+      ...(permissionMode ? { canUseTool: async () => ({ behavior: "allow" }) } : {}),
+      awNativeExecutionFactory: async () => { factories++; throw new Error("must not acquire"); } } }),
+    permissionMode ? /requires default or acceptEdits/ : /requires an explicit canUseTool approver/);
+    assert.equal(prompts, 0);
+    assert.equal(factories, 0);
+    assert(!fs.existsSync(path.join(f.root, "queried")));
+    assert(!fs.existsSync(f.config.ready_path));
+  }
+});
+
+test("preloads reach only the admitted official daemon launch", async t => {
+  const f = fixture(t);
+  const worker = path.join(f.root, "_worker/qoder-worker-runtime.obf.mjs");
+  fs.mkdirSync(path.dirname(worker)); fs.writeFileSync(worker, "// worker");
+  const preload = path.join(f.root, "preload.mjs"); fs.writeFileSync(preload, "// import");
+  f.config.native_policy = { runtime_preloads: [{ path: preload,
+    sha256: createHash("sha256").update(fs.readFileSync(preload)).digest("hex") }] };
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const launch = { pathToQoderCLIExecutable: worker, executableArgs: ["--import", preload] };
+  await assert.rejects(createQuery({ prompt: "cold", options: { ...f.options, ...launch } }));
+  assert(!fs.existsSync(path.join(f.root, "queried")));
+  const daemon = await bridge.startDaemon(launch);
+  assert.deepEqual(daemon.options.executableArgs, launch.executableArgs);
+  await daemon.stop();
+});
+
+
+test("declarative profile owns the fixed native skill execution setting", async t => {
+  const f = fixture(t);
+  f.config.native_policy = { declarative_plugins: true };
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  await assert.rejects(createQuery({ prompt: "direct", options: f.options }), /managed daemon/);
+  assert(!fs.existsSync(path.join(f.root, "queried")));
+  const daemon = await bridge.startDaemon({});
+  const q = await createQuery({ prompt: "metadata", options: { ...f.options, daemon } });
+  assert.deepEqual(q.options.settings, { skills: { disableShellExecution: true } });
+  assert.equal(f.options.settings, undefined);
+  await q.return();
+  await assert.rejects(createQuery({ prompt: "override", options: { ...f.options,
+    daemon, settings: { skills: { disableShellExecution: false } } } }));
+  await daemon.stop();
+});
+
+test("a Skill source edit cannot downgrade a policy denial to report", async t => {
+  const f = fixture(t, "deny");
+  f.config.resident = true;
+  f.options.settingSources = ["user"];
+  const user = path.join(f.root, "native-config");
+  const directory = path.join(user, "skills/example");
+  fs.mkdirSync(directory, { recursive: true });
+  const manifest = path.join(directory, "SKILL.md");
+  fs.writeFileSync(manifest, "original instructions");
+  const sdk = f.config.sdk;
+  fs.writeFileSync(sdk, fs.readFileSync(sdk, "utf8").replace(
+    "async request(){return {sources:{flag:options.settings},effective:options.settings};}",
+    "async request(){return {effective:{},skills:[{name:'example'}]};}"));
+  fs.writeFileSync(f.config.executable, fs.readFileSync(f.config.executable, "utf8").replace(
+    "if(mode==='deny'){", `fs.writeFileSync(${JSON.stringify(manifest)},'changed');if(mode==='deny'){`));
+  // Isolate callback composition from the separately tested resident transport.
+  t.mock.method(Resident.prototype, "create", async function (_prompt, options, compose) {
+    const sdk = await import(pathToFileURL(this.config.sdk).href);
+    const query = sdk.query({ options: compose(this.config, options) });
+    this.config.skillState.query = query;
+    return query;
+  });
+  f.config.hooks[0].on_error = "report";
+  f.config.hooks[0].skill_check = true;
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const query = await createQuery({ prompt: "first", options: f.options });
+  try {
+    const input = { ...payload(), tool_name: "Skill", tool_input: { skill: "example" },
+      transcript_path: path.join(user, "projects/project/session.jsonl") };
+    const result = await query.options.hooks.PreToolUse.at(-1).hooks[0](input, "call", { signal: new AbortController().signal });
+    assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
+    assert.equal(result.hookSpecificOutput.permissionDecisionReason, "policy denied");
+    const checked = JSON.parse(fs.readFileSync(path.join(f.root, "input"), "utf8"));
+    assert.equal(checked.aw_skill.directory, directory);
+  } finally { await query.return(); }
+});
+
+test("native Read is retained while no Skill policy is selected", async t => {
+  const f = fixture(t);
+  f.config.resident = true;
+  f.config.hooks = [];
+  f.options.settingSources = ["user", "project"];
+  const user = path.join(f.root, "native-config");
+  fs.mkdirSync(path.join(user, "skills/example"), { recursive: true });
+  fs.writeFileSync(path.join(user, "skills/example/SKILL.md"), "signed user instructions");
+  t.mock.method(Resident.prototype, "create", async function (_prompt, options, compose) {
+    const sdk = await import(pathToFileURL(this.config.sdk).href);
+    const query = sdk.query({ options: compose(this.config, options) });
+    this.config.skillState.query = query;
+    query.request = async () => ({ effective: {}, skills: [{ name: "example" }] });
+    return query;
+  });
+  fs.writeFileSync(f.file, JSON.stringify(f.config));
+  const query = await createQuery({ prompt: "first", options: f.options });
+  const input = { ...payload(), tool_name: "Skill", tool_input: { skill: "example" },
+    transcript_path: path.join(user, "projects/project/session.jsonl") };
+  try {
+    await (await resolveSkill(input, f.options, query))();
+    const result = await query.options.hooks.PreToolUse.at(-1).hooks[0](
+      { ...payload(), tool_name: "Read", tool_input: { file_path: "nested/readme.txt" } },
+      "call", { signal: new AbortController().signal });
+    assert.deepEqual(result, {});
+    await resolveSkill(input, f.options, query);
+    assert.deepEqual(input.aw_skill, { error_code: "skill_resolution_error" });
+  } finally { await query.return(); }
 });

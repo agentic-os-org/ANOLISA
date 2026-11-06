@@ -1,4 +1,4 @@
-//! Private SDK CLI transport preserves task ownership and never converts failures to allow.
+//! Private SDK CLI transport preserves task ownership and classified report recovery.
 
 use super::*;
 use aw_service::Binding;
@@ -170,8 +170,11 @@ fn sdk_scope_cli_corroborates_child_workers_and_rejects_unrelated_launchers() {
                     .contains("bridge_process_mismatch"));
                 assert!(fixture.calls("invoke").is_empty());
             } else {
-                for action in ["open", "acknowledge", "invoke", "close"] {
+                for action in ["open", "acknowledge", "watch", "check", "invoke", "close"] {
                     assert_eq!(result[action], 0, "{action}: {result}");
+                }
+                for action in ["invalid", "renew", "blocked"] {
+                    assert_eq!(result[action], 1, "{action}: {result}");
                 }
                 let calls = fixture.calls("invoke");
                 assert_eq!(calls.len(), 1);
@@ -237,11 +240,27 @@ fn sdk_scope_cli_isolates_context_and_rejects_failures_and_forwarded_handles() {
                 after,
             );
             if scenario == "malformed" {
-                assert_eq!(
-                    response.status.code(),
-                    Some(1),
-                    "resident callbacks must surface report-mode failures"
-                );
+                // Audited after-report faults recover for Pi and Claude;
+                // before-tool faults stay fail-closed for every adapter.
+                if after && matches!(adapter, "pi" | "claude-sdk") {
+                    assert!(
+                        response.status.success(),
+                        "{}: {}",
+                        adapter,
+                        String::from_utf8_lossy(&response.stderr)
+                    );
+                } else {
+                    assert_eq!(
+                        response.status.code(),
+                        Some(1),
+                        "resident callbacks must surface {} failures",
+                        if after {
+                            "report-mode after-tool"
+                        } else {
+                            "before-tool"
+                        }
+                    );
+                }
             } else if scenario == "block" {
                 if adapter == "pi" {
                     assert_eq!(

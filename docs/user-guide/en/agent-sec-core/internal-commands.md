@@ -95,7 +95,7 @@ anything.
 
 | | `linux-sandbox` | `agent-sec-cli log-sandbox` |
 |---|---|---|
-| Form | Standalone binary at `/usr/local/bin/linux-sandbox` | Hidden `agent-sec-cli` subcommand |
+| Form | Standalone binary at `/usr/bin/linux-sandbox` | Hidden `agent-sec-cli` subcommand |
 | Role | Actually runs a command under filesystem and network isolation | Records that a decision was made |
 | Effect on the command | Wraps and executes it | None — it never executes, blocks, or rewrites anything |
 | How `sandbox-guard` uses it | Rewrites the tool call to run through it | Spawns it detached, fire-and-forget |

@@ -11,6 +11,8 @@ pub(super) struct TestProbes {
     events: RefCell<VecDeque<Event>>,
     /// Pids handed to `attach_process` by the production handlers.
     attached_pids: RefCell<Vec<i32>>,
+    cpu_budget: RefCell<Option<Arc<crate::utils::cpu_budget::CpuBudget>>>,
+    failed_registration_pid: Option<u32>,
 }
 
 impl Deref for TestProbes {
@@ -31,6 +33,24 @@ impl DerefMut for TestProbes {
 }
 
 impl TestProbes {
+    pub(super) fn poll_pending_ssl(&mut self) {
+        if let Some(live) = self.live.as_mut() {
+            live.poll_pending_ssl();
+        }
+    }
+
+    pub(super) fn set_cpu_budget(&self, budget: Option<Arc<crate::utils::cpu_budget::CpuBudget>>) {
+        if let Some(live) = self.live.as_ref() {
+            live.set_cpu_budget(budget.clone());
+        }
+        *self.cpu_budget.borrow_mut() = budget;
+    }
+
+    pub(super) fn detach_ssl_probes(&mut self, pid: u32) {
+        if let Some(live) = self.live.as_mut() {
+            live.detach_ssl_probes(pid);
+        }
+    }
     pub(super) fn new_with_cgroup_filter(
         pids: &[u32],
         uid: Option<u32>,
@@ -46,6 +66,8 @@ impl TestProbes {
             )?),
             events: RefCell::new(VecDeque::new()),
             attached_pids: RefCell::new(Vec::new()),
+            cpu_budget: RefCell::new(None),
+            failed_registration_pid: None,
         })
     }
 
@@ -59,9 +81,26 @@ impl TestProbes {
         Ok(())
     }
 
-    /// Record pid registration without touching kernel maps.
-    pub(super) fn add_traced_pid(&mut self, _pid: u32) -> Result<()> {
+    /// Record a best-effort attach for an unclassified process.
+    ///
+    /// Shadows the live method for the same reason as `attach_process`; the
+    /// live one differs only in whether a filter-map slot is claimed, which
+    /// replay has no map to observe.
+    pub(super) fn attach_unclassified_process(&mut self, pid: i32) -> Result<()> {
+        self.attached_pids.borrow_mut().push(pid);
         Ok(())
+    }
+
+    /// Record pid registration without touching kernel maps.
+    pub(super) fn add_traced_pid(&mut self, pid: u32) -> Result<()> {
+        if self.failed_registration_pid == Some(pid) {
+            anyhow::bail!("injected registration failure for pid {pid}");
+        }
+        Ok(())
+    }
+
+    pub(super) fn fail_registration_for(&mut self, pid: u32) {
+        self.failed_registration_pid = Some(pid);
     }
 
     pub(super) fn attached_pids(&self) -> Vec<i32> {
@@ -138,17 +177,19 @@ impl RuntimeFixture {
             )
             .unwrap(),
         );
-        let budget = (percent != 0)
-            .then(|| Arc::new(crate::utils::cpu_budget::CpuBudget::new(percent).unwrap()));
+        let probes = TestProbes {
+            live: None,
+            events: RefCell::new(VecDeque::new()),
+            attached_pids: RefCell::new(Vec::new()),
+            cpu_budget: RefCell::new(None),
+            failed_registration_pid: None,
+        };
+        let budget = maintenance::configure_cpu_budget(&probes, percent).unwrap();
         let storage = AgentSight::create_storage(&config.storage.primary_path(), &config).unwrap();
         Self {
             directory,
             sight: Some(AgentSight {
-                probes: TestProbes {
-                    live: None,
-                    events: RefCell::new(VecDeque::new()),
-                    attached_pids: RefCell::new(Vec::new()),
-                },
+                probes,
                 core: PipelineCore::new(&config, Analyzer::new()),
                 genai_builder: GenAIBuilder::new(),
                 genai_exporters: vec![Box::new(Arc::clone(&store))],
@@ -211,6 +252,38 @@ impl Drop for RuntimeFixture {
         drop(self.sight.take());
         std::fs::remove_dir_all(&self.directory).unwrap();
     }
+}
+
+#[test]
+fn cpu_budget_is_shared_by_probe_scans_and_capture() {
+    for percent in [1, 25, 100] {
+        let fixture = RuntimeFixture::new(percent);
+        let probe_budget = fixture.probes.cpu_budget.borrow();
+        assert!(Arc::ptr_eq(
+            probe_budget.as_ref().unwrap(),
+            fixture.completions.budget.as_ref().unwrap(),
+        ));
+    }
+}
+
+#[test]
+fn cpu_budget_zero_disables_probe_and_capture_pacing() {
+    let fixture = RuntimeFixture::new(0);
+    assert!(fixture.probes.cpu_budget.borrow().is_none());
+    assert!(fixture.completions.budget.is_none());
+}
+
+#[test]
+fn cpu_budget_invalid_target_preserves_installed_probe_budget() {
+    let fixture = RuntimeFixture::new(25);
+    let error = maintenance::configure_cpu_budget(&fixture.probes, 101)
+        .err()
+        .expect("invalid CPU target must fail");
+    assert!(error.to_string().contains("between 1 and 100"));
+    assert!(Arc::ptr_eq(
+        fixture.probes.cpu_budget.borrow().as_ref().unwrap(),
+        fixture.completions.budget.as_ref().unwrap(),
+    ));
 }
 
 #[test]
@@ -360,6 +433,42 @@ fn clean_process_exit_completes_captured_error_headers_once() {
     assert_eq!(fixture.aggregator().http().active_connections(), 0);
     fixture.handle_agent_crash_detection(pid, "fixture", 0);
     assert_eq!(fixture.rows().len(), 1);
+}
+
+#[test]
+fn process_exit_delivers_drained_response_without_deferring_its_session() {
+    let pid = std::process::id();
+    let response = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/event-stream\r\n",
+        "\r\n",
+        "data: {\"id\":\"exit-drained\",\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"reply\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20}}\n",
+        "\n"
+    )
+    .as_bytes();
+    let mut fixture = pending_runtime(pid, response);
+    let log_path = fixture.directory.join("logtail/events.jsonl");
+    let logtail = Arc::new(LogtailExporter::new_with_path_dynamic(
+        log_path.to_str().unwrap(),
+        None,
+        true,
+        false,
+        true,
+    ));
+    std::fs::File::create(&log_path).unwrap();
+    fixture.genai_exporters.push(Box::new(logtail));
+
+    fixture.handle_procmon_event(&crate::probes::procmon::Event::Exit {
+        pid,
+        tid: pid,
+        uid: 0,
+        timestamp_ns: 10,
+        comm: "fixture".into(),
+        exit_code: 0,
+    });
+
+    assert_eq!(fixture.pending_genai.len(), 0);
+    assert_eq!(fixture.rows(), ["exit-drained"]);
 }
 
 #[test]

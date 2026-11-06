@@ -17,7 +17,10 @@ impl Fixture {
         let root = tempfile::tempdir_in(parent).unwrap();
         fs::write(
             root.path().join("node"),
-            "#!/bin/sh\n: > probed\nprintf '%s\\n' \"$PWD/sdk.mjs\"\n",
+            r#"#!/bin/sh
+: > probed
+printf '{"global":{"entry":"%s/sdk.mjs","version":"1.0.57","worker_version":"1.1.79"}}\n' "$PWD"
+"#,
         )
         .unwrap();
         fs::set_permissions(root.path().join("node"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -54,6 +57,7 @@ impl Fixture {
         let mut prepared = QoderSdk
             .prepare(self.input(evidence, reloadable), &AtomicBool::new(false))
             .unwrap();
+        assert_eq!(prepared.capabilities().version, "1.0.57");
         let launch = self.root.path().join("launch");
         fs::create_dir(&launch).unwrap();
         let files = crate::test_support::Artifacts(launch);
@@ -67,7 +71,11 @@ impl Fixture {
             .unwrap();
         assert!(self.root.path().join("probed").is_file());
         assert!(!plan.readiness.unwrap().path.exists());
-        serde_json::from_slice(&fs::read(files.0.join("qoder-sdk.json")).unwrap()).unwrap()
+        let config: Value =
+            serde_json::from_slice(&fs::read(files.0.join("qoder-sdk.json")).unwrap()).unwrap();
+        assert_eq!(config["sdk_metadata"]["global"]["version"], "1.0.57");
+        assert_eq!(config["sdk_metadata"]["global"]["worker_version"], "1.1.79");
+        config
     }
 }
 
@@ -125,6 +133,59 @@ fn only_resident_queries_admit_post_withholding() {
                 Some(vec!["withhold_result".into()])
             }
         );
-        assert!(!capabilities.events["tool.after"].contains(&"replace_result".into()));
+        assert_eq!(
+            capabilities.events["tool.after"].contains(&"replace_result".into()),
+            !reloadable
+        );
+    }
+}
+
+#[test]
+fn command_consumer_grants_are_checked_before_the_sdk_probe() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    let path = fixture.root.path().join("consumer.sh");
+    fs::write(&path, "#!/bin/sh\n").unwrap();
+    let digest = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
+    let mut input = fixture.input(None, false);
+    input.document["spec"]["agents"]["sdk"]["qoder_sdk"] = json!({
+        "command_wrappers":[{"path":path,"sha256":digest}]
+    });
+    QoderSdk.prepare(input, &AtomicBool::new(false)).unwrap();
+    fs::remove_file(fixture.root.path().join("probed")).unwrap();
+    fs::write(&path, "changed").unwrap();
+    let mut input = fixture.input(None, false);
+    input.document["spec"]["agents"]["sdk"]["qoder_sdk"] = json!({
+        "command_wrappers":[{"path":path,"sha256":digest}]
+    });
+    assert!(QoderSdk.prepare(input, &AtomicBool::new(false)).is_err());
+    assert!(!fixture.root.path().join("probed").exists());
+}
+
+#[test]
+fn declared_sdk_sites_must_all_be_resolved_by_the_probe() {
+    let fixture = Fixture::new();
+    let mut input = fixture.input(None, false);
+    input.document["spec"]["agents"]["sdk"]["qoder_sdk"] = json!({"sites":["global","cn"]});
+    assert!(QoderSdk.prepare(input, &AtomicBool::new(false)).is_err());
+    assert!(fixture.root.path().join("probed").exists());
+}
+
+#[test]
+fn reloadable_execution_grants_fail_before_the_sdk_probe() {
+    for grant in [
+        json!({"declarative_plugins":true}),
+        json!({"command_wrappers":[{"path":"/absent/wrapper","sha256":"0".repeat(64)}]}),
+    ] {
+        let fixture = Fixture::new();
+        let mut input = fixture.input(None, true);
+        input.document["spec"]["agents"]["sdk"]["qoder_sdk"] = grant;
+        let error = QoderSdk
+            .prepare(input, &AtomicBool::new(false))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("ordinary resident mode"));
+        assert!(!fixture.root.path().join("probed").exists());
+        assert!(!fixture.root.path().join("launch").exists());
     }
 }

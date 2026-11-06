@@ -9,6 +9,54 @@
 
 ## [未发布]
 
+## [0.5.6] - 2026-11-06
+
+### 变更
+
+- RPM 拆分为 `skillfs-core` 和 `skillfs-skills`，由 `skillfs` 入口包统一安装。
+  CLI 迁至 `/usr/bin/skillfs`，内置 Skill 迁至
+  `/usr/share/anolisa/skills/skillfs-mount/`
+  ([#9222](https://github.com/agentic-os-org/ANOLISA/pull/9222))。
+- 组件发现契约改由 ANOLISA 持有。升级时一起更新已安装的 SkillFS RPM 子包；
+  已安装 ANOLISA 的机器及 raw 安装要求 ANOLISA 0.3.21 或更高版本
+  ([#9351](https://github.com/agentic-os-org/ANOLISA/pull/9351))。
+- `make install` 默认使用 ANOLISA 共享技能目录，独立布局使用 `AWPRJ=`
+  ([#9462](https://github.com/agentic-os-org/ANOLISA/pull/9462))。
+
+### 修复
+
+- managed stop 和孤儿清理在 PID 复用后保留无关进程；异常挂载表转义不再造成
+  目标路径误匹配 ([#9242](https://github.com/agentic-os-org/ANOLISA/pull/9242))。
+- 拒绝将文件、符号链接和特殊文件重命名到虚拟目录槽位，保留已支持的目录移动
+  ([#5375](https://github.com/agentic-os-org/ANOLISA/pull/5375))。
+- pip 用户安装命令保留原样，缺少 `which` 时仍可检测可用命令
+  ([#9300](https://github.com/agentic-os-org/ANOLISA/pull/9300)、
+  [#9276](https://github.com/agentic-os-org/ANOLISA/pull/9276))。
+- Skill 解析识别缩进和制表符分隔的章节标题；仅列出已启用技能且结果为空时，
+  输出空结果提示并省略空来源标题。
+- 会话日志用量区分名称前缀相同的 Skill，并识别紧邻 shell 操作符的路径
+  ([#8694](https://github.com/agentic-os-org/ANOLISA/pull/8694))。
+
+## [0.5.5] - 未发布
+
+### 变更
+
+- 可通过独立 RPM 安装运行时和随附 Skill。
+- 随附 Skill 迁至 ANOLISA 的共享 skills 目录。
+
+## [0.5.4] - 2026-10-28
+
+### 修复
+
+- Skill 移入另一个 Skill 目录后，及时移除 `/skills` 和 `skill-discover` 中残留的
+  顶层条目，使实时发现结果与重新扫描一致
+  ([#9124](https://github.com/agentic-os-org/ANOLISA/pull/9124))。
+- 选择 Yarn 时，带包名、选项或不明确 shell 语法的 npm install 命令保留原样，
+  避免转换为无效命令 ([#9003](https://github.com/agentic-os-org/ANOLISA/pull/9003))。
+- chat 使用统计将 `--logs-dir` 按字面路径处理，支持方括号等字符，
+  避免误统计相似名称的同级目录
+  ([#9180](https://github.com/agentic-os-org/ANOLISA/pull/9180))。
+
 ## [0.5.3] - 2026-10-23
 
 ### 新增

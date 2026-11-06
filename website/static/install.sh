@@ -340,6 +340,102 @@ sha256_verify() {
   log "checksum verified"
 }
 
+component_contracts() {
+  printf '%s\n' cosh-ng sec-core agentsight tokenless skillfs ws-ckpt agent-memory
+}
+
+validate_component_contracts() (
+  source_root="$1"
+  for directory in "${source_root%/*}" "$source_root" "$source_root/components"; do
+    if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+      echo "error: invalid CLI integration data directory: $directory" >&2
+      return 1
+    fi
+  done
+  for component in $(component_contracts); do
+    directory="$source_root/components/$component"
+    path="$directory/component.toml"
+    if [ ! -d "$directory" ] || [ -L "$directory" ] ||
+      [ ! -f "$path" ] || [ -L "$path" ]; then
+      echo "error: CLI archive integration contract missing or unsafe: $path" >&2
+      return 1
+    fi
+  done
+)
+
+preflight_component_contract_owners() (
+  command -v rpm >/dev/null 2>&1 || return 0
+  for datadir in "$@"; do
+    for component in $(component_contracts); do
+      path="$datadir/components/$component/component.toml"
+      owners="$(rpm -qf --queryformat '%{NAME}\n' -- "$path" 2>/dev/null)" || continue
+      if ! printf '%s\n' "$owners" | while IFS= read -r owner; do
+        case "$owner" in
+          cosh-ng|tokenless|agentsight|skillfs|ws-ckpt|agent-memory|agent-sec-cli)
+            echo "error: registry contract $path is still owned by component RPM $owner; upgrade that package with the native package manager before installing ANOLISA data" >&2
+            exit 1
+            ;;
+        esac
+      done; then
+        return 1
+      fi
+    done
+  done
+)
+
+# Only the destination and its ancestors are inspected; unrelated installed
+# resources are neither traversed nor assigned new permissions.
+check_contract_path() (
+  path="$1"
+  require_root="$2"
+  while :; do
+    if [ -L "$path" ]; then
+      echo "error: integration data path must not be a symlink: $path" >&2
+      return 1
+    fi
+    if [ "$require_root" = 1 ] && [ -e "$path" ]; then
+      attributes="$(stat -c '%u %a' "$path" 2>/dev/null)" ||
+        attributes="$(stat -f '%u %Lp' "$path" 2>/dev/null)" || {
+          echo "error: cannot verify integration data ownership: $path" >&2
+          return 1
+        }
+      owner="${attributes%% *}"
+      mode="${attributes#* }"
+      case "$mode" in
+        ''|*[!0-7]*) return 1 ;;
+      esac
+      if [ "$owner" != 0 ] || [ "$((0$mode & 0022))" -ne 0 ]; then
+        echo "error: system integration data must be root-owned and not group/world writable: $path" >&2
+        return 1
+      fi
+    fi
+    [ "$path" != / ] || break
+    path="${path%/*}"
+    [ -n "$path" ] || path=/
+  done
+)
+
+install_component_contracts() (
+  source_root="$1"
+  datadir="$2"
+  require_root="$3"
+  validate_component_contracts "$source_root" || return 1
+  preflight_component_contract_owners "$datadir" /usr/share/anolisa || return 1
+  for component in $(component_contracts); do
+    path="$datadir/components/$component/component.toml"
+    check_contract_path "$path" "$require_root" || return 1
+    if [ -e "$path" ] && [ ! -f "$path" ]; then
+      echo "error: integration contract destination is not a file: $path" >&2
+      return 1
+    fi
+  done
+  for component in $(component_contracts); do
+    install -d -m 0755 "$datadir/components/$component"
+    install -m 0644 "$source_root/components/$component/component.toml" \
+      "$datadir/components/$component/component.toml"
+  done
+)
+
 run_system_anolisa() {
   [ -n "$VERIFIED_ARCHIVE" ] || err "verified CLI archive is unavailable"
   if [ "${#VERIFIED_ARCHIVE_SHA256}" -ne 64 ]; then
@@ -352,7 +448,9 @@ run_system_anolisa() {
   esac
 
   local runner
-  runner='
+  runner="$(declare -f component_contracts validate_component_contracts \
+    preflight_component_contract_owners check_contract_path install_component_contracts)"
+  runner="$runner"'
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -383,12 +481,32 @@ if [ "$actual_sha" != "$expected_sha" ]; then
 fi
 
 tar -xzf "$archive" -C "$workdir"
-if [ ! -f "$workdir/anolisa" ]; then
+binary="$workdir/anolisa"
+if [ -f "$workdir/bin/anolisa" ]; then
+  if [ -L "$workdir/bin" ]; then
+    echo "error: privileged CLI archive bin directory must not be a symlink" >&2
+    exit 1
+  fi
+  binary="$workdir/bin/anolisa"
+fi
+if [ ! -f "$binary" ] || [ -L "$binary" ]; then
   echo "error: privileged CLI archive does not contain anolisa" >&2
   exit 1
 fi
-chmod 0755 "$workdir/anolisa"
-"$workdir/anolisa" --install-mode system "$@"
+chmod 0755 "$binary"
+if [ -e "$workdir/share/anolisa" ] || [ -L "$workdir/share/anolisa" ]; then
+  # State can retain contract provenance after this temporary CLI is removed.
+  # Never persist a reference to the temporary or caller-writable data tree.
+  case "$(uname -s)" in
+    Linux) stable_datadir=/usr/share/anolisa ;;
+    Darwin) stable_datadir=/usr/local/share/anolisa ;;
+    *) echo "error: unsupported system integration data platform" >&2; exit 1 ;;
+  esac
+  install_component_contracts "$workdir/share/anolisa" "$stable_datadir" 1
+  ANOLISA_DATA_DIR="$stable_datadir" "$binary" --install-mode system "$@"
+else
+  "$binary" --install-mode system "$@"
+fi
 '
 
   if [ "$COMPONENT_USE_SUDO" -eq 1 ]; then
@@ -545,12 +663,22 @@ main() {
   VERIFIED_ARCHIVE="${TMPDIR_INSTALL}/${artifact}"
   VERIFIED_ARCHIVE_SHA256="$expected_sha"
 
-  log "extracting binary"
+  log "extracting CLI"
   tar -xzf "${TMPDIR_INSTALL}/${artifact}" -C "$TMPDIR_INSTALL"
+
+  local binary datadir
+  binary="${TMPDIR_INSTALL}/anolisa"
+  if [ -f "${TMPDIR_INSTALL}/bin/anolisa" ]; then
+    [ ! -L "${TMPDIR_INSTALL}/bin" ] ||
+      err "CLI archive bin directory must not be a symlink"
+    binary="${TMPDIR_INSTALL}/bin/anolisa"
+  fi
+  [ -f "$binary" ] && [ ! -L "$binary" ] ||
+    err "CLI archive does not contain anolisa"
 
   mkdir -p "$INSTALL_DIR"
   STAGED_BINARY="$(mktemp "${INSTALL_DIR}/.anolisa.XXXXXX")"
-  install -m 0755 "${TMPDIR_INSTALL}/anolisa" "$STAGED_BINARY"
+  install -m 0755 "$binary" "$STAGED_BINARY"
 
   local installed_version
   if ! installed_version="$("$STAGED_BINARY" --version 2>&1)"; then
@@ -559,6 +687,12 @@ main() {
   if [ -n "$RESOLVED_VERSION" ] &&
     [ "$installed_version" != "anolisa ${RESOLVED_VERSION}" ]; then
     err "downloaded binary version does not match release manifest"
+  fi
+
+  if [ -e "${TMPDIR_INSTALL}/share/anolisa" ] ||
+    [ -L "${TMPDIR_INSTALL}/share/anolisa" ]; then
+    datadir="$(cd "$INSTALL_DIR/.." && pwd -P)/share/anolisa"
+    install_component_contracts "${TMPDIR_INSTALL}/share/anolisa" "$datadir" 0
   fi
 
   mv -f "$STAGED_BINARY" "${INSTALL_DIR}/anolisa"

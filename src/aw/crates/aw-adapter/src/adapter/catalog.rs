@@ -1,7 +1,7 @@
 //! Registered native dialects and the runtime capabilities admitted by their launchers.
 
 use super::Adapter;
-use aw_provider::admission::AdapterCapabilities as Capabilities;
+use aw_core::admission::AdapterCapabilities as Capabilities;
 
 pub(crate) struct Profile {
     pub name: &'static str,
@@ -38,15 +38,20 @@ impl Profile {
 pub(crate) const QODER: Profile = Profile {
     name: "qoder",
     adapter: &super::super::qoder::Qoder,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const QODER_SDK: Profile = Profile {
     name: "qoder-sdk",
     adapter: &super::super::adapters::qoder_sdk::QoderSdk,
     events: &[
+        ("input.submit", &["observe", "block"]),
         ("tool.before", &["observe", "block"]),
-        ("tool.after", &["observe"]),
+        ("tool.after", &["observe", "replace_result"]),
     ],
 };
 
@@ -59,31 +64,51 @@ pub(crate) const OPENCLAW: Profile = Profile {
 pub(crate) const HERMES: Profile = Profile {
     name: "hermes",
     adapter: &super::super::adapters::hermes::Hermes,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const QWENPAW: Profile = Profile {
     name: "qwenpaw",
     adapter: &super::super::adapters::qwenpaw::QwenPaw,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const PI: Profile = Profile {
     name: "pi",
     adapter: &super::super::adapters::pi::Pi,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const CLAUDE_SDK: Profile = Profile {
     name: "claude-sdk",
     adapter: &super::super::adapters::claude_sdk::ClaudeSdk,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const AGENTSCOPE: Profile = Profile {
     name: "agentscope",
     adapter: &super::super::adapters::agentscope::AgentScope,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const PROFILES: &[Profile] = &[

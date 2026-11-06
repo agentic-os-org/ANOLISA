@@ -13,9 +13,10 @@ Agent 启动、原生 Hook 安装、效果采用和审计持久化仍由接入�
 | 层 | 职责 |
 | --- | --- |
 | `aw-config` | 解析期望配置并校验静态引用 |
-| `aw-provider` | 检查协议消息、离线预检与能力准入 |
+| `aw-core::admission` | 执行离线预检、能力准入，并生成不可变的 `PolicyCandidate` 与 `AdmittedPolicy` 快照 |
+| `aw-provider` | 检查协议消息、Provider 证据与视图契约 |
 | `aw-exec` | 按字面参数执行命令，提供有界字节传输与所属进程清理 |
-| `aw-host` | 保留执行上下文，准备 Provider 并调用已准入的事件步骤 |
+| `aw-host` | 保留执行上下文，发现 Provider 并调用已准入的事件步骤 |
 | 接入 Adapter | 提供可信能力、归一化事件、调度步骤并应用原生效果 |
 
 Host 复用这些库，离线准入仍不执行命令，原始传输层仍不解释 Provider JSON。
@@ -26,7 +27,21 @@ Core 的最终执行约束。
 
 ## 准备固定上下文
 
-调用 `Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`。
+准备流程将无副作用的 Core 准入与 Provider 进程发现分离：
+
+1. `AdmissionEngine::preflight(bytes, target, capabilities)` 解析并校验配置文档，
+   计算原始字节的 SHA-256 修订摘要，返回包含静态步骤需求的 `PolicyCandidate`。
+2. `Host::discover(&candidate, context, deadline, cancelled)` 获取受管安装文件读锁，
+   直接复用候选快照中的配置对被引用的结构化 Provider 执行 `describe` 与
+   `validate_config`，返回 `PreparedProviders`。
+3. `AdmissionEngine::admit(candidate, prepared.evidence())` 核对发现阶段的
+   Provider 证据并生成不可变的 `AdmittedPolicy`。
+4. `Host::from_admitted(policy, prepared)` 核对配置版本、目标、Adapter 能力、发现
+   阶段的 Provider 证据及已准备的 Provider 命令一致后构建 `Host`。
+
+独立调用方也可直接调用
+`Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`，内部
+委托上述四个步骤。
 `bytes` 是完整配置文档；每次调用保留的 SHA-256 修订摘要由这些原始字节确定。
 `target` 选择配置中的 Agent。调用方提供实际版本及入口对应的
 `AdapterCapabilities`，Provider 声明不能提供或扩展这份可信证据。
@@ -53,6 +68,7 @@ Agent 已采用策略。准入范围仍为：
 
 | 事件 | 候选效果 | 失败动作 |
 | --- | --- | --- |
+| `input.submit` | `observe`、`block` | `report`，或 Adapter 支持的 `block` |
 | `tool.before` | `observe`、`block` | `report`，或在 Adapter 支持时使用 `block` |
 | `tool.after` | `observe`, `replace_result` | `report`，或 Adapter 显式提供失败动作能力时使用 `withhold_result` |
 
@@ -129,6 +145,9 @@ deadline、取消、一次调用声明和失败处置沿用 Host 规则。显式
 `StepOutput::Skipped`；不启动 Provider 或 Hook 调用进程，也不产生候选效果。
 启用的结构化 Provider 仍须完成准备阶段的发现和配置校验。跳过步骤保留单次占用、
 关联记录及正常完成路径，使后续步骤和终态清理继续执行。
+所有协议都在选择或执行前校验规范化事件，原生 Hook 同样适用。工具身份缺失时，
+已占用的调用按配置错误动作失败；格式错误的数据不会启动 Hook 进程。
+
 服务在完成元数据审计中记录 `kind: skipped`。非法、过期或已取消事件仍按配置的
 `on_error` 返回失败。
 

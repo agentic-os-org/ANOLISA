@@ -268,6 +268,15 @@ const documentationSources = [
   ...(await walkFiles(path.join(repoRoot, 'docs/user-guide/en'), (file) => file.endsWith('.md'))).map((file) => toPosix(path.relative(repoRoot, file))),
   ...(await walkFiles(path.join(repoRoot, 'docs/developer-guide/en'), (file) => file.endsWith('.md'))).map((file) => toPosix(path.relative(repoRoot, file))),
 ];
+const contributorRoot = path.join(repoRoot, 'contribute/en');
+if (await exists(contributorRoot)) {
+  documentationSources.push(...(await walkFiles(contributorRoot, (file) => file.endsWith('.md')))
+    .map((file) => toPosix(path.relative(repoRoot, file))));
+}
+for (const source of ['CONTRIBUTING.md',
+  ...componentRows.map((component) => `${component.source_path}/CONTRIBUTING.md`)]) {
+  if (await exists(path.join(repoRoot, source))) documentationSources.push(source);
+}
 
 const sourceCommit = process.env.GITHUB_SHA || git('rev-parse', 'HEAD');
 const index = {
@@ -439,7 +448,7 @@ await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n
 
 await writeGenerated(
   'static/llms.txt',
-  `# ANOLISA\n\n> ${index.project.description}\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
+  `# ANOLISA\n\n> ${index.project.description}\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/user-guide/getting-started/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Contribute: ${siteHref('docs/contribute/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
 );
 
 const fullDocumentation = [];

@@ -1,5 +1,103 @@
 # Changelog
 
+## 1.2.0
+
+**Breaking Changes**
+
+- Defaulted source installations to the shared `anolisa` namespace across the
+  component installers; existing independent layouts are left in place and must be
+  migrated with the original path overrides followed by `make uninstall AWPRJ=`, or
+  kept on the previous layout by continuing to pass `AWPRJ=`. (#9462)
+
+**Cedar Policy Engine**
+
+- Added a Cedar policy frontend that validates source against the application schema
+  and stores the original source through the policy create and update paths. (#9298)
+- Deployed supported Cedar file-protection policies through the existing Scope, Binding
+  and reconciliation lifecycle, rejecting translations that exceed the supported subset. (#9442)
+- Added `agent-sec-cli policy default`, printing a restrictive baseline policy for
+  Scopes without a bound policy. (#9522)
+- Added `agent-sec-cli intent propose` to generate reviewable Cedar candidates from a
+  task description through the optional `intent.propose` daemon method. (#9450)
+- Added a self-contained `policy-authoring` skill with intent disambiguation, rule
+  formalization, worked examples and a self-check checklist. (#9463)
+
+**Sandbox Authorization**
+
+- Added `agent-sec-cli sandbox run` to execute a command under an explicit OS
+  permission set without a policy service. (#9311)
+- Routed Cosh sandbox hooks through Cedar authorization, native approval and receipts,
+  and showed only the resource operations that require confirmation. (#9379)
+- Split OS permission, invocation and lifecycle contracts into dedicated sandbox
+  contract crates shared by the standalone sandbox and policy paths. (#9456)
+
+**Credential Protection**
+
+- Added an opt-in secret gateway that replaces Scope-specific fake credentials with
+  real values for authorized GitHub REST and HTTPS Git traffic. (#9265)
+
+**Scanner & Policy Engine**
+
+- Retained outer Bash findings when an inline interpreter payload is scanned, merging
+  findings per rule and de-duplicating identical evidence. (#9418)
+- Hardened prompt-scan and code-scan verdict parsing against echoed verdict lines and
+  verdict words embedded in larger words. (#9446)
+- Sped up PII boundary matching for near-limit scans while preserving exact spans and
+  redacted output. (#9453)
+
+**Codex & OpenClaw Hook Integrations**
+
+- Blocked native OpenClaw plugin disable and uninstall of `agent-sec` through the Code
+  Scanner hook, including in observe mode. (#9491)
+
+**Build & Packaging**
+
+- Preserved service enablement and activity state when rolling back split RPMs to the
+  legacy package layout. (#9472)
+
+**Raw Packaging**
+
+- Preserved distribution-owned discovery contracts during ANOLISA raw install, repair,
+  update, rollback and uninstall; new archives now require ANOLISA 0.3.21 or later. (#9351)
+
+**Testing & CI**
+
+- Measured the full V2 workspace in the incremental coverage gate instead of a fixed
+  package allowlist. (#9502)
+- Stabilized daemon startup and UDS admission tests across the SecCore E2E, Rust and
+  packaging CI targets. (#9323)
+
+## [1.1.2] - Unreleased
+
+### Changed
+
+- Install the security runtime, framework integrations and skills through separate RPMs.
+
+## 1.1.1
+
+**Breaking Changes**
+
+- Removed the unsupported `--cgroup-id` flag from `scope create`; cgroup assignment
+  was never accepted by PAP or the AgentSight Adapter, and the flag now fails locally
+  with exit code 2. Select target processes with `--pid`, `--process-name`, or
+  `--executable` instead. (#9134)
+
+**Code Scanning**
+
+- Evaluated command strings passed to Python process APIs (`os.system`, `os.popen`,
+  `subprocess`) against the existing Shell rules, with native rule IDs, severity, and
+  evidence retained; dynamically built commands and argv arrays remain uninferred.
+  (#9128)
+
+**Skill Ledger Runtime**
+
+- Added `skillsec` as the primary `agent-sec-cli` command group name, retaining
+  `skill-ledger` as a compatible alias with identical arguments, output, and exit
+  codes. (#8907)
+- Escaped the YAML-sensitive characters that JSON quoting leaves literal in a pending
+  Skill placeholder, so accepted Skill names containing control characters or Unicode
+  separators survive publication and frontmatter parsing unchanged. (#8948)
+
 ## 1.1.0
 
 **Breaking Changes**

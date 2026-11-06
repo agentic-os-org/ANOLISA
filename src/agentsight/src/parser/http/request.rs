@@ -27,6 +27,34 @@ pub struct ParsedRequest {
 }
 
 impl ParsedRequest {
+    /// Builds a request from captured event bytes and parsed routing metadata.
+    ///
+    /// `body_offset` and `body_len` locate the body inside `source_event.buf`.
+    /// The reassembled body starts empty and the fingerprint cache is cold;
+    /// assign a reassembled body through [`Self::set_reassembled_body`] so
+    /// `body_len` stays in step.
+    pub fn new(
+        method: String,
+        path: String,
+        version: u8,
+        headers: HashMap<String, String>,
+        body_offset: usize,
+        body_len: usize,
+        source_event: Rc<SslEvent>,
+    ) -> Self {
+        Self {
+            method,
+            path,
+            version,
+            headers,
+            body_offset,
+            body_len,
+            source_event,
+            reassembled_body: None,
+            cached_fingerprint: Cell::new(None),
+        }
+    }
+
     /// 获取 body 数据（零拷贝，或返回重组后的 body）
     pub fn body(&self) -> &[u8] {
         if let Some(ref buf) = self.reassembled_body {

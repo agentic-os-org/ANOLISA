@@ -115,6 +115,7 @@ fn scope(policy_count: usize) -> PreparedScope {
         scope_id: input.scope.scope_id,
         selector: input.scope.selector,
         policy_snapshots: policies,
+        owner_uid: None,
         status: ScopeStatus::Active,
     }
 }

@@ -1,3 +1,4 @@
+mod activation;
 mod active_submission;
 mod capture;
 mod completion;
@@ -12,6 +13,9 @@ mod provider_management;
 mod required;
 mod retry;
 pub(crate) mod runtime;
+pub(crate) mod trial;
+mod trial_state;
+mod trial_terminal;
 mod validation;
 
 #[cfg(test)]

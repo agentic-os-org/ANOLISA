@@ -161,6 +161,23 @@ impl AnalyzeChatmlCommand {
                                         serde_json::Value::String(text) => text.clone(),
                                         other => other.to_string(),
                                     };
+                                    // SysOM's non-streaming POP response wraps
+                                    // the provider payload in
+                                    // `{"data": "<json string>"}`, the envelope
+                                    // the SysOM parser and the client both
+                                    // unwrap. Read the inner payload, or the
+                                    // wrapper is offered as the frame and
+                                    // nothing in it matches.
+                                    let payload =
+                                        serde_json::from_str::<serde_json::Value>(&payload)
+                                            .ok()
+                                            .and_then(|value| {
+                                                value
+                                                    .get("data")
+                                                    .and_then(|inner| inner.as_str())
+                                                    .map(str::to_string)
+                                            })
+                                            .unwrap_or(payload);
                                     Self::extract_response_from_sse(&[serde_json::json!({
                                         "data": payload
                                     })])
@@ -878,9 +895,18 @@ impl AnalyzeChatmlCommand {
                             // streamed arguments fragments by index. A message
                             // snapshot carries the complete call, so it
                             // replaces the slot instead of appending to it.
-                            if let Some(calls) =
-                                payload.get("tool_calls").and_then(|t| t.as_array())
-                            {
+                            //
+                            // SysOM's Copilot stream spells the same list
+                            // `tool_use` (the same {index, id, type, function}
+                            // items), and the shared token extractor counts
+                            // both spellings. Reading only `tool_calls` broke
+                            // a SysOM call down as zero tool-call tokens.
+                            let calls: Vec<&serde_json::Value> = ["tool_calls", "tool_use"]
+                                .into_iter()
+                                .filter_map(|field| payload.get(field).and_then(|t| t.as_array()))
+                                .flatten()
+                                .collect();
+                            if !calls.is_empty() {
                                 for (call_pos, call) in calls.iter().enumerate() {
                                     let function = call.get("function");
                                     let name = function
@@ -1244,6 +1270,35 @@ mod tests {
         assert_eq!(rendered, "<|im_start|>user\nhello<|im_end|>\n");
     }
 
+    /// Exact equality with the canonical shape proves this uses conversation
+    /// text rather than the serialized-Gemini fallback, which also counts > 0.
+    #[test]
+    fn gemini_text_matches_canonical_token_count() {
+        let tokenizer = fixture_tokenizer();
+        let request = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "first question"}]},
+                {"role": "model", "parts": [{"text": "answer"}]},
+                {"role": "user", "parts": [{"text": "second question"}]}
+            ]
+        });
+        let canonical = json!({
+            "messages": [
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "second question"}
+            ]
+        });
+
+        let count = crate::analyzer::count_request_tokens(&request, &tokenizer, &tokenizer)
+            .expect("Gemini request is counted");
+        let expected = crate::analyzer::count_request_tokens(&canonical, &tokenizer, &tokenizer)
+            .expect("canonical request is counted");
+        assert_eq!(count.total_tokens, expected.total_tokens);
+        assert_eq!(count.by_role, expected.by_role);
+        assert!(!count.by_role.contains_key("model"));
+    }
+
     #[test]
     fn tool_definition_tokens_are_counted_without_tool_messages() {
         // The first request of a tool-using agent carries `tools` but no
@@ -1458,6 +1513,31 @@ mod tests {
         let mut event = ChromeTraceEvent::instant("200 OK", "http.response", 1, 1, ts);
         event.args = Some(json!({ "body": body }));
         event
+    }
+
+    /// SysOM's non-streaming POP response wraps the provider payload in
+    /// `{"data": "<json string>"}`; the SysOM parser unwraps it and so does
+    /// the client, but the breakdown offered the envelope itself as the
+    /// frame. Nothing matched, so an answer the parser read broke down as an
+    /// empty response.
+    #[test]
+    fn a_sysom_data_envelope_body_is_counted() {
+        let tokenizer = fixture_tokenizer();
+        let inner = json!({
+            "choices": [{
+                "message": {"content": "hello there", "tool_use": null}
+            }]
+        })
+        .to_string();
+        let events = vec![response_event(json!({ "data": inner }), 1)];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a SysOM envelope body must still break down");
+        assert!(
+            breakdowns[0].total_tokens > 0,
+            "the answer must be counted, got {:?}",
+            breakdowns[0]
+        );
     }
 
     /// The trace writer stores a non-streaming response under `body`, but the
@@ -1886,6 +1966,29 @@ mod tests {
         assert_eq!(
             resp.tool_calls,
             vec![r#"get_weather: {"city":"Beijing"}"#.to_string()]
+        );
+    }
+
+    /// SysOM's Copilot stream carries its calls on
+    /// `choices[].message.tool_use` — `{index, id, type, function}` — not on
+    /// `tool_calls`. The snapshot arm read only `tool_calls`, so a SysOM
+    /// capture that made a call broke down with zero tool-call tokens while
+    /// the aggregator and the shared token extractor both counted the call.
+    #[test]
+    fn sse_sysom_tool_use_snapshot_is_extracted() {
+        let events = vec![
+            sse(
+                r#"{"choices":[{"message":{"content":"","tool_use":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"message":{"content":"","tool_use":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/tmp/a.md\"}"}}]}}]}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()],
+            "a SysOM tool_use snapshot must be read like tool_calls"
         );
     }
 

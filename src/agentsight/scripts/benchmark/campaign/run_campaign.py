@@ -40,6 +40,16 @@ BENCHMARK_ALLOW_RULE = {
     "rule": ["*python*", "*mock_llm_server.py*"],
     "agent_name": "BenchmarkHarness",
 }
+
+
+def _signal_group(process: subprocess.Popen[bytes], number: int) -> None:
+    """Signal the child's whole session, not just its leader."""
+    try:
+        os.killpg(process.pid, number)
+    except ProcessLookupError:
+        pass
+
+
 FORMAL_STAGES = (
     ("baseline", "capacity"),
     ("optimized", "capacity"),
@@ -446,15 +456,15 @@ class TracerProcess:
         """Request graceful shutdown, escalating only for this owned child."""
         process = self.process
         if process is not None and process.poll() is None:
-            process.send_signal(signal.SIGINT)
+            _signal_group(process, signal.SIGINT)
             try:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                process.terminate()
+                _signal_group(process, signal.SIGTERM)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    _signal_group(process, signal.SIGKILL)
                     process.wait(timeout=5)
         if self.log is not None and not self.log.closed:
             self.log.close()
@@ -582,15 +592,15 @@ class BenchmarkServer:
         """Stop only the server child owned by this runner."""
         process = self.process
         if process is not None and process.poll() is None:
-            process.send_signal(signal.SIGINT)
+            _signal_group(process, signal.SIGINT)
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.terminate()
+                _signal_group(process, signal.SIGTERM)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    _signal_group(process, signal.SIGKILL)
                     process.wait(timeout=5)
         if self.log is not None and not self.log.closed:
             self.log.close()

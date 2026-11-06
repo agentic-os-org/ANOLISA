@@ -272,3 +272,101 @@ fn batch_accuracy_rejects_local_mode_before_spawning() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("accuracy requires LLM"));
     assert!(output.stdout.is_empty());
 }
+
+fn batch_statistics(events: &[Value], dim: &str) -> Value {
+    let input = Input::new(
+        &events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/batch-analyze.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--file")
+        .arg(&input.0)
+        .args([
+            "--min-steps",
+            "0",
+            "--dim",
+            dim,
+            "--stats-only",
+            "--binary",
+            env!("CARGO_BIN_EXE_analyze"),
+        ])
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .unwrap();
+    decode(output)[dim].clone()
+}
+
+fn check_orphan_statistics(dim: &str) {
+    let tool = json!({"type":"assistant","timestamp":"2026-01-01T00:00:01Z",
+        "message":{"content":[{"type":"tool_use","id":"known","name":"Bash","input":{}}]}});
+    let answer = json!({"type":"assistant","timestamp":"2026-01-01T00:00:15Z",
+        "message":{"content":"Done."}});
+    let orphan = json!({"type":"user","timestamp":"2026-01-01T00:00:08Z",
+        "message":{"content":[{"type":"tool_result","tool_use_id":"missing",
+            "content":"permission denied","is_error":true}]}});
+    let control = vec![tool.clone(), answer.clone()];
+    let expected = batch_statistics(&control, dim);
+    if dim == "perf" {
+        assert_eq!(expected["tool_secs"], 14.0);
+        assert_eq!(expected["model_secs"], 0.0);
+    } else {
+        assert_eq!(expected["calls"].as_array().unwrap().len(), 2);
+    }
+    // Prefix, middle, and terminal evidence must not move conversation boundaries.
+    for (position, timestamp) in [(1, "08"), (0, "00"), (2, "20")] {
+        let mut events = control.clone();
+        let mut evidence = orphan.clone();
+        evidence["timestamp"] = json!(format!("2026-01-01T00:00:{timestamp}Z"));
+        events.insert(position, evidence);
+        assert_eq!(
+            batch_statistics(&events, dim),
+            expected,
+            "{dim}: orphan at {position}"
+        );
+    }
+    // A genuine mixed human reply remains a boundary, with or without the evidence.
+    let user = json!({"type":"user","timestamp":"2026-01-01T00:00:08Z",
+        "message":{"content":[{"type":"text","text":"try again"}]}});
+    let mut mixed = orphan.clone();
+    mixed["message"]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(user["message"]["content"][0].clone());
+    let mixed_stats = batch_statistics(&[tool.clone(), mixed, answer.clone()], dim);
+    let human_stats = batch_statistics(&[tool, user, answer], dim);
+    if dim == "perf" {
+        assert_eq!(mixed_stats, human_stats);
+    } else {
+        assert_eq!(mixed_stats["calls"], human_stats["calls"]);
+        assert_eq!(mixed_stats["headroom"], human_stats["headroom"]);
+    }
+    // A partial transcript containing only results still parses as an empty conversation.
+    assert_eq!(batch_statistics(&[orphan], dim), {
+        let mut empty: Value = serde_json::from_str(&fixture(true)).unwrap();
+        empty["agent"]["model_name"] = Value::Null;
+        let input = Input::new(&empty.to_string());
+        decode(
+            input
+                .command()
+                .args(["--dim", dim, "--stats-only"])
+                .output()
+                .unwrap(),
+        )[dim]
+            .clone()
+    });
+}
+
+#[test]
+fn batch_orphan_results_do_not_change_perf_windows() {
+    check_orphan_statistics("perf");
+}
+
+#[test]
+fn batch_orphan_results_do_not_invent_cost_calls() {
+    check_orphan_statistics("cost");
+}

@@ -39,7 +39,11 @@ pub fn states_dir() -> Option<PathBuf> {
     if let Ok(override_dir) = std::env::var("COSH_STATES_DIR") {
         return Some(PathBuf::from(override_dir));
     }
-    dirs::home_dir().map(|h| h.join(COPILOT_CONFIG_DIR).join(STATES_DIR))
+    std::env::var_os("COSH_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(COPILOT_CONFIG_DIR)))
+        .map(|home| home.join(STATES_DIR))
 }
 
 /// Load the disabled set from a state file.

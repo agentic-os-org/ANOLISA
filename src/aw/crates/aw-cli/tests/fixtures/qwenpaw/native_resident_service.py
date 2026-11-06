@@ -171,6 +171,42 @@ class NativeResidentServiceTests(ResidentPolicyTests, unittest.IsolatedAsyncioTe
         self.assertEqual((await self.rpc("status"))["instances"], [])
         await coordinator.shutdown()
 
+    async def test_idle_seam_loss_blocks_next_dispatch_and_preserves_sibling(self):
+        config = {**self.middleware.root_config, "adapter": "qwenpaw"}
+        failed, sibling = native.SCOPE.Scope(config), native.SCOPE.Scope(config)
+        installed = True
+        def probe():
+            if not installed:
+                raise RuntimeError("native seam removed")
+        failed.probe = probe
+        try:
+            await failed.open(str(self.root), {})
+            await sibling.open(str(self.root), {})
+            await failed.register(1, "first", "tool", {})
+            await failed.finish(1, "first")
+            installed = False
+            deadline = asyncio.get_running_loop().time() + 4
+            while not failed.failed:
+                self.assertLess(asyncio.get_running_loop().time(), deadline)
+                await asyncio.sleep(0.05)
+            # Join the original failure report before reading service status.
+            await asyncio.wait_for(asyncio.shield(failed.monitor), 7)
+            status = await self.rpc("status")
+            task = next(row for row in status["instances"]
+                        if row["instance_id"] == failed.handle["binding"]["instance_id"])
+            self.assertEqual(task["scope_validity"], {"native_alive": True, "covered_bridge": "failed"})
+            with self.assertRaises(RuntimeError):
+                await failed.register(2, "blocked", "tool", {})
+            await sibling.register(1, "independent", "tool", {})
+            await sibling.finish(1, "independent")
+        finally:
+            await failed.close()
+            await sibling.close()
+        self.assertTrue(failed.monitor.done())
+        self.assertTrue(sibling.monitor.done())
+        await self.rpc("release_instance", instance_id=self.parent)
+        self.assertEqual((await self.rpc("status"))["instances"], [])
+
     async def test_unmatched_steps_preserve_before_and_after_host_order(self):
         await self.run_native(False)
         self.assertEqual(list((self.root / "skipped").iterdir()), [])

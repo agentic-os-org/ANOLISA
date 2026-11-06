@@ -680,15 +680,106 @@ fn rewrite_invocation_tokens_if(
 /// beginning of a line; other prose and shell arguments stay untouched.
 fn rewrite_pip_install_invocations(line: &str) -> String {
     rewrite_after_doc_label(line, |commands| {
-        rewrite_invocation_tokens(
+        rewrite_invocation_tokens_if(
             commands,
             "pip",
             &[
                 ("pip3 install", "uv pip install"),
                 ("pip install", "uv pip install"),
             ],
+            |prefix, _, tail| pip_install_can_use_uv(prefix, tail),
         )
     })
+}
+
+// Track backtick runs rather than line position: lists and prose can contain
+// several independent inline spans, including spans delimited by double ticks.
+fn inline_code_delimiter(prefix: &str) -> Option<usize> {
+    let mut delimiter = None;
+    let mut chars = prefix.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && delimiter.is_none() {
+            chars.next();
+        } else if ch == '`' {
+            let mut length = 1;
+            while chars.peek() == Some(&'`') {
+                chars.next();
+                length += 1;
+            }
+            if delimiter == Some(length) {
+                delimiter = None;
+            } else if delimiter.is_none() {
+                delimiter = Some(length);
+            }
+        }
+    }
+    delimiter
+}
+
+// uv has no user-site installation mode. Inspect only this invocation's
+// arguments, preserving quoting and command boundaries in the output. An
+// unfinished token can continue on the next line, so leave it to pip as well.
+fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut chars = tail.chars().peekable();
+    let inline_delimiter = inline_code_delimiter(prefix);
+    while let Some(ch) = chars.next() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+        } else if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            } else if delimiter == '"' && (ch == '`' || (ch == '$' && chars.peek() == Some(&'('))) {
+                return false;
+            } else {
+                word.push(ch);
+            }
+        } else {
+            match ch {
+                '\'' | '"' => quote = Some(ch),
+                ';' | '|' | ')' => return word != "--user",
+                '&' if chars.peek() != Some(&'>') => return word != "--user",
+                '#' if word.is_empty() => return true,
+                '`' => {
+                    let mut length = 1;
+                    while chars.peek() == Some(&'`') {
+                        chars.next();
+                        length += 1;
+                    }
+                    // Stop at this span, not at a later span or trailing prose.
+                    return word != "--user" && inline_delimiter == Some(length);
+                }
+                // Bare parentheses delimit prose; substitutions can supply
+                // unknown arguments and must retain the original installer.
+                '$' if chars.peek() == Some(&'(') => return false,
+                '(' => return word != "--user",
+                '<' | '>' => {
+                    if word == "--user" || chars.peek() == Some(&'(') {
+                        return false;
+                    }
+                    word.clear();
+                    // The ampersand in >& / <& duplicates a descriptor; it
+                    // does not end this invocation like a background operator.
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                    }
+                }
+                ch if ch.is_whitespace() || ch == '&' => {
+                    if word == "--user" {
+                        return false;
+                    }
+                    word.clear();
+                }
+                _ => word.push(ch),
+            }
+        }
+    }
+    !escaped && quote.is_none() && word != "--user"
 }
 
 /// Normalize `python -m venv` / `python3 -m venv` without changing prose or
@@ -1085,6 +1176,176 @@ Run: pip install requests
             "echo Run: pip install requests\n",
         );
         assert_eq!(compile(unchanged, &env), unchanged);
+    }
+
+    #[test]
+    fn test_heuristic_pip_redirects_spans_and_prose() {
+        let env = env_darwin_uv();
+        let pipeline = crate::transform::TransformPipeline::directive_only(env.clone());
+        for (input, expected) in [
+            (
+                "pip install requests 2>&1 --user",
+                "pip install requests 2>&1 --user",
+            ),
+            (
+                "pip3 install requests >&2 --user",
+                "pip3 install requests >&2 --user",
+            ),
+            (
+                "pip install --user requests 2>&1",
+                "pip install --user requests 2>&1",
+            ),
+            (
+                "pip install requests 0<&3 --user",
+                "pip install requests 0<&3 --user",
+            ),
+            (
+                "pip install requests 2>&- --user",
+                "pip install requests 2>&- --user",
+            ),
+            (
+                "pip install a 2>&1 --user && pip3 install b",
+                "pip install a 2>&1 --user && uv pip install b",
+            ),
+            (
+                "pip install a >&2; pip3 install b --user",
+                "uv pip install a >&2; pip3 install b --user",
+            ),
+            (
+                "pip install a 2>&1 & pip3 install b --user",
+                "uv pip install a 2>&1 & pip3 install b --user",
+            ),
+            (
+                "pip install a 0<&3 | pip3 install b --user",
+                "uv pip install a 0<&3 | pip3 install b --user",
+            ),
+            ("- `pip install requests`", "- `uv pip install requests`"),
+            ("1. `pip install requests`", "1. `uv pip install requests`"),
+            (
+                "Use `pip install requests` now",
+                "Use `uv pip install requests` now",
+            ),
+            (
+                "Install `pip install a` or `pip3 install b --user`.",
+                "Install `uv pip install a` or `pip3 install b --user`.",
+            ),
+            (
+                "Use `pip install a --user` then `pip3 install b`.",
+                "Use `pip install a --user` then `uv pip install b`.",
+            ),
+            (
+                "Use ``pip install a`` then ``pip install b --user``.",
+                "Use ``uv pip install a`` then ``pip install b --user``.",
+            ),
+            (
+                "Use `pip install a` with --user elsewhere",
+                "Use `uv pip install a` with --user elsewhere",
+            ),
+            (
+                "pip install requests (optional)",
+                "uv pip install requests (optional)",
+            ),
+            (
+                "Run: pip install pandas (required for step 2)",
+                "Run: uv pip install pandas (required for step 2)",
+            ),
+            (
+                "pip install requests --user (optional)",
+                "pip install requests --user (optional)",
+            ),
+            (
+                "pip install $(printf -- --user) requests",
+                "pip install $(printf -- --user) requests",
+            ),
+            (
+                "pip install \"$(printf -- --user)\" requests",
+                "pip install \"$(printf -- --user)\" requests",
+            ),
+            (
+                "pip install `printf -- --user` requests",
+                "pip install `printf -- --user` requests",
+            ),
+            (
+                "pip install \"`printf -- --user`\" requests",
+                "pip install \"`printf -- --user`\" requests",
+            ),
+            (
+                "pip install <(printf requests)",
+                "pip install <(printf requests)",
+            ),
+            ("pip install '$(literal)'", "uv pip install '$(literal)'"),
+            (
+                "pip install package\\(extra\\)",
+                "uv pip install package\\(extra\\)",
+            ),
+        ] {
+            assert_eq!(compile(input, &env), expected, "{input}");
+            assert_eq!(pipeline.run(input), expected, "read-time pipeline: {input}");
+            assert_eq!(compile(expected, &env), expected, "idempotence: {input}");
+            assert_eq!(
+                compile(input, &env_linux_no_uv()),
+                input,
+                "without uv: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_heuristic_pip_preserves_user_installs() {
+        let env = env_darwin_uv();
+        let content = concat!(
+            "pip install --user requests\n",
+            "pip3 install requests --user\n",
+            "sudo -u alice pip install --user requests\n",
+            "env FOO=1 timeout 30 pip3 install requests --user\n",
+            "Run: pip install --user requests\r\n",
+            "`pip install --user requests`\n",
+            "pip install '--user' requests\n",
+            "pip install \"--user\" requests\n",
+            "pip install --u\\ser requests\n",
+            "pip install --user>install.log requests\n",
+            "pip install --user&>install.log requests\n",
+            "pip install requests &>install.log --user\n",
+            "python -m pip install --user requests\n",
+            "python3 -m pip install requests --user\n",
+            "pip install \\\n  --user requests\n",
+            "pip install \"\n--user\" requests\n",
+            "pip install $(printf -- --user) requests\n",
+            "pip3 install requests --user",
+        );
+        assert_eq!(compile(content, &env), content);
+        assert_eq!(compile(content, &env_linux_no_uv()), content);
+    }
+
+    #[test]
+    fn test_heuristic_pip_user_install_command_boundaries() {
+        let env = env_darwin_uv();
+        let input = concat!(
+            "pip install --user a && pip3 install b\n",
+            "pip install a; pip3 install --user b\n",
+            "pip install a | tee --user output\n",
+            "pip install a && echo --user\n",
+            "pip install a # use --user outside a virtualenv\n",
+            "pip install '--user-guide'\n",
+            "pip install 'package;--user'\n",
+            "`pip install requests`\n",
+            "pip install --upgrade requests\n",
+        );
+        let expected = concat!(
+            "pip install --user a && uv pip install b\n",
+            "uv pip install a; pip3 install --user b\n",
+            "uv pip install a | tee --user output\n",
+            "uv pip install a && echo --user\n",
+            "uv pip install a # use --user outside a virtualenv\n",
+            "uv pip install '--user-guide'\n",
+            "uv pip install 'package;--user'\n",
+            "`uv pip install requests`\n",
+            "uv pip install --upgrade requests\n",
+        );
+        let result = compile(input, &env);
+        assert_eq!(result, expected);
+        assert_eq!(compile(&result, &env), result);
+        assert_eq!(compile(input, &env_linux_no_uv()), input);
     }
 
     #[test]

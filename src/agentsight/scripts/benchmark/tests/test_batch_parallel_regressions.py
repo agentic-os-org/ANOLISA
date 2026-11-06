@@ -15,6 +15,66 @@ from unittest.mock import patch
 from test_batch_analyze import batch_analyze
 
 
+class BatchLimitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.sessions = self.root / "sessions"
+        self.sessions.mkdir()
+        for index in range(3):
+            (self.sessions / f"s{index}.jsonl").write_text(
+                json.dumps({"type": "user", "message": {"content": "fixture " * 200}}) + "\n",
+                encoding="utf-8",
+            )
+        self.output = self.root / "exports"
+        self.modes = (
+            ["--export-atif", str(self.output)],
+            ["--dim", "perf", "--binary", str(self.root / "absent-analyzer"), "--jobs", "1"],
+            ["--dim", "perf", "--binary", str(self.root / "absent-analyzer"), "--jobs", "3"],
+        )
+
+    def cli(self, limit: str, mode: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                batch_analyze.__file__,
+                "--dir",
+                str(self.sessions),
+                "--min-steps",
+                "1",
+                "--limit",
+                limit,
+                *mode,
+            ],
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+
+    def test_negative_limits_fail_before_discovery_or_dispatch(self) -> None:
+        for mode in self.modes:
+            for limit in ("-1", "-10"):
+                with self.subTest(mode=mode, limit=limit):
+                    result = self.cli(limit, mode)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("--limit must be non-negative", result.stderr)
+                    self.assertNotIn("Scanning directories", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertFalse(self.output.exists())
+
+    def test_zero_limit_preserves_no_work_behavior(self) -> None:
+        for mode in self.modes:
+            with self.subTest(mode=mode):
+                result = self.cli("0", mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertRegex(result.stderr, r"Done: 0 (analyzed|exported), 0 skipped, 0 failed")
+                self.assertFalse(self.output.exists())
+
+
 @unittest.skipUnless(os.name == "posix", "local executable fixtures use POSIX file locks")
 class BatchParallelTests(unittest.TestCase):
     def setUp(self) -> None:

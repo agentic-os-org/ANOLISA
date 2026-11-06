@@ -42,7 +42,7 @@ V2 保留原有顶层结果字段，在 `summary` 中增加证据元数据：
 | `coverage.reasons` | 输入截断、规则无效、匹配受限或扫描失败的安全错误码 |
 | `input_sha256` | 检测器收到文本的 SHA-256，不代表未收到的原始内容 |
 | `scanned_input_sha256`、`scanned_bytes` | 实际扫描前缀的摘要及字节数 |
-| `scanner_version` | 检测语义版本；V2 当前为 `2.0.1` |
+| `scanner_version` | 检测语义版本；V2 当前为 `2.1.1` |
 | `ruleset_id` | scanner 版本及不可变内置/自定义规则配置的标识 |
 
 `bytes_scanned` 保留 V1 前缀计数，可能包含被 `scanned_bytes` 排除的不完整 UTF-8 尾部。
@@ -73,7 +73,7 @@ coverage `unavailable`，CLI 退出 `1`。单次正则调用受引擎回溯上�
 ## 检测语义版本
 
 `summary.scanner_version` 标识检测行为，独立于 AgentSecCore 包版本和 RPC schema。
-V2 的成功/失败扫描报告及审计结果均记录 `2.0.1`；内置 finding 的 engine 为 `regex_v2`，
+V2 的成功/失败扫描报告及审计结果均记录 `2.1.1`；内置 finding 的 engine 为 `regex_v2`，
 自定义 finding 为 `fancy_regex`。`ruleset_id` 包含此版本、内置模式及自定义配置，
 即使 YAML 内容不变，引擎行为变化仍可追溯。CI 的 commit SHA 标识被测构建，不是检测语义版本。
 
@@ -87,6 +87,8 @@ V2 的成功/失败扫描报告及审计结果均记录 `2.0.1`；内置 finding
 - 银行卡检测排除能通过 Luhn 的全零占位符；命中不代表号码已经发行。2.0.1 增加下述结构校验。
 - 自定义模式使用下述原生方言。与 Python 的行为不同，本身不会使有效 V2 规则变成 invalid，
   也不会因此将 coverage 标记为 partial。
+
+2.1.1 修正置信度评分中的测试标记词边界，详见[内置检测](#内置检测)。
 
 保留的 V1 语料验证不变行为，独立的正反例和资源限制用例定义 V2 变化。这些检查覆盖支持的格式，
 不代表对任意数据零误报漏报。短密钥、无标签密钥、11 类之外的格式和上下文歧义，
@@ -173,8 +175,11 @@ agent-sec-cli scan-pii --input ./agent-output.txt --format text
 | 敏感字段 | `generic_secret_field` | `deny` |
 
 信用卡号、中国身份证号和 JWT candidate 在生成 finding 前会经过格式校验。周边安全关键词可能提高
-置信度，`example`、`dummy`、`test`、`sample` 等测试标记可能降低置信度。低于默认 `0.5` 阈值的
-finding 会被忽略，除非使用 `--include-low-confidence`。
+置信度。`example`、`dummy`、`test`、`sample` 只有匹配完整词时才会降低置信度，不区分 ASCII
+大小写；字母、数字和下划线属于词内字符，连字符可分隔词。例如，`latest 13812345678` 保留
+手机号 finding，`test-only 13812345678` 仍按测试上下文产生低置信度 finding。`.invalid` 标记
+保留子串匹配，邮箱和私钥 finding 仍不受这项上下文降分影响。低于默认 `0.5` 阈值的 finding
+会被忽略，除非使用 `--include-low-confidence`。
 
 邮箱检测支持句末 ASCII 句号及连续句号组成的省略号；连续句号后必须是输入结束、空白或支持的
 句末标点、闭合分隔符。例如，`alice@company.co.uk.` 的 finding 仅包含 `alice@company.co.uk`，

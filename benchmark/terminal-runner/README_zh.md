@@ -157,6 +157,10 @@ harbor run \
 5. 将结果反馈给 OpenClaw 进入下一轮迭代
 6. 当 OpenClaw 输出 `TASK_COMPLETE` 或达到 `OPENCLAW_MAX_ITERATIONS` 时停止
 
+OpenClaw 直接子进程退出后，runner 会继续收集输出，直到 stdout 和 stderr 均到达 EOF，并始终检查原有超时和 stdout 大小守卫。因此，后代进程保持管道打开时，等待仍受限制；限制允许范围内的尾部输出会被保留。总超时守卫为 `max(OPENCLAW_TIMEOUT, 600)` 秒；无输出守卫仅在从未收到 stdout 时生效。
+
+守卫触发时，runner 停止收集输出、关闭自身的管道读端，并在直接子进程仍运行时终止它；它不会终止整个后代进程组。守卫会记录到 runner 日志中；直接子进程若已经退出，即使剩余输出被截断，也保留其原有退出码。
+
 ### 每次试验隔离
 
 每次试验获得独立的 `~/.openclaw-<profile>` 目录（profile 名称源自 harbor session id），并发试验互不冲突。
@@ -169,6 +173,7 @@ Skill 提示按优先级从高到低加载：
 2. **`dataset/<task>/solution/solve.sh`** — 自动解析为分步提示。**默认禁用**，设置 `SKILL_FROM_SOLUTION=1` 启用。
 
 数据集目录通过 `DATASET_DIR` 环境变量解析（默认 `dataset`，相对于 `harbor run` 的工作目录）。
+设置 `SKILL_FROM_SOLUTION=1` 时，自动解析会移除未加引号的行尾 shell 注释，并保留引号内或转义命令文本中的 `#`。
 
 ---
 

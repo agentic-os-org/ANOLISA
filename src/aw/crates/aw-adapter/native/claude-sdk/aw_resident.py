@@ -45,6 +45,7 @@ class ResidentBridge(Bridge):
     def __init__(self) -> None:
         super().__init__()
         self.scope = Scope(self.config)
+        self.scope.on_failure = self.scope_failed
         self.failure: str | None = None
         self.mcp_names: set[str] = set()
         self.mcp_servers: set[str] = set()
@@ -52,6 +53,11 @@ class ResidentBridge(Bridge):
         self.stop = None
         self.stopped = False
         self.stop_future: asyncio.Task[None] | None = None
+
+    def scope_failed(self, error: BaseException) -> None:
+        self.failure = "AW managed task stopped after bridge validity failure"
+        if self.stop is not None:
+            self.request_stop()
 
     async def _transport(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
         return await self.scope.invoke(hook, payload)
@@ -132,7 +138,7 @@ class ManagedClient(ClaudeSDKClient):
         self._aw_environment = {**os.environ, **options.env}
         self._aw_state = "new"
         self._aw_task_started = False
-        self._aw_relay = ModelRelay(self._aw_bridge, self._aw_environment)
+        self._aw_relay: ModelRelay | None = None
         self._aw_query_finished = False
         self._aw_receiving = False
         self._aw_input_task = None
@@ -205,6 +211,8 @@ class ManagedClient(ClaudeSDKClient):
 
     async def connect(self, prompt: str | AsyncIterable[dict[str, Any]] | None = None) -> None:
         self._aw_check()
+        checked_input = any(hook["event"] == "input.submit"
+                            for hook in self._aw_bridge.config["hooks"])
         async with self._aw_lock:
             if self._aw_state != "new":
                 raise RuntimeError("AW task clients cannot reconnect; create a new client")
@@ -219,26 +227,38 @@ class ManagedClient(ClaudeSDKClient):
                 _active.add(self)
                 self._aw_connect_task = asyncio.current_task()
                 try:
-                    endpoint = await self._aw_relay.start()
                     self.options = replace(
                         self.options,
                         env={
                             **self.options.env,
-                            "ANTHROPIC_BASE_URL": endpoint,
                             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                         },
                     )
                     await super().connect(None)
+                    async with asyncio.timeout(5):
+                        transport = self._custom_transport
+                        environment = await transport.model_environment(self._query)
+                        self._aw_relay = ModelRelay(
+                            self._aw_bridge, {**self._aw_environment, **environment}
+                        )
+                        endpoint = await self._aw_relay.start()
+                        await transport.route_model(self._query, endpoint)
+                    self.options = replace(
+                        self.options, env={**self.options.env, "ANTHROPIC_BASE_URL": endpoint}
+                    )
                 finally:
                     self._aw_connect_task = None
                 self._aw_check()
                 self._aw_task_started = False
                 self._aw_state = "connected"
-                if prompt is not None:
+                if prompt is not None and not checked_input:
                     await self.query(prompt)
             except BaseException:
                 await self._aw_cleanup()
                 raise
+        # A denied initial input leaves this initialized client available.
+        if prompt is not None and checked_input:
+            await self.query(prompt)
 
     async def _connect_inner(
         self,
@@ -270,7 +290,27 @@ class ManagedClient(ClaudeSDKClient):
         self._aw_input_task = asyncio.current_task()
         begun = False
         try:
-            if not isinstance(prompt, str):
+            hooks = [hook for hook in self._aw_bridge.config["hooks"]
+                     if hook["event"] == "input.submit"]
+            if hooks:
+                from aw_submission import check, prepare, SubmissionDenied
+
+                prompt, payload = await prepare(
+                    prompt, session_id, self._aw_cwd, hooks[0]["budget_ms"],
+                )
+                try:
+                    await check(self._aw_bridge, payload)
+                except SubmissionDenied:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._aw_bridge.failure_reply("input.submit", {})
+                    raise
+                self._aw_bridge.scope.check()
+                if self._aw_bridge.failure:
+                    raise CallbackFailure(self._aw_bridge.failure)
+            elif not isinstance(prompt, str):
                 from aw_transport import single_input
 
                 message = await single_input(prompt)
@@ -313,7 +353,8 @@ class ManagedClient(ClaudeSDKClient):
 
     async def receive_messages(self) -> AsyncIterator[Any]:
         self._aw_check()
-        if self._aw_state != "connected" or not self._aw_task_started or self._aw_receiving:
+        if (self._aw_state != "connected" or not self._aw_task_started or self._aw_receiving
+                or self._aw_input_task is not None):
             raise RuntimeError("AW requires one response consumer for the active task")
         self._aw_receiving = True
         try:
@@ -368,7 +409,8 @@ class ManagedClient(ClaudeSDKClient):
                             await super().disconnect()
                     finally:
                         try:
-                            await self._aw_relay.close()
+                            if self._aw_relay is not None:
+                                await self._aw_relay.close()
                         finally:
                             await self._aw_bridge.invocations.drain()
                 finally:

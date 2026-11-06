@@ -14,14 +14,14 @@
 #   3. openclaw-plugin/openclaw.plugin.json  ("version" field)
 #   4. cosh-extension/cosh-extension.json    ("version" field)
 #   5. hermes-plugin/src/plugin.yaml          (version field)
-#   6. .anolisa/component.toml                (component.version)
+#   6. packaging/anolisa/component.toml                (component.version)
 #   7. codex-plugin/hooks-plugin/.codex-plugin/plugin.json ("version" field)
 #   8. qoder-plugin/.qoder-plugin/plugin.json ("version" field)
 #   9. qwen-code-extension/qwen-extension.json ("version" field)
-#  10. v2/Cargo.lock and openclaw-plugin/package-lock.json
+#  10. v2/Cargo.lock, linux-sandbox/Cargo.lock and openclaw-plugin/package-lock.json
 #
 # Manual update required (not automated):
-#   - agent-sec-core.spec.v2.in (%changelog entry)
+#   - packaging/rpm/agent-sec-core.spec.v2.in (%changelog entry)
 #   - CHANGELOG.md (new version header with actual notes)
 #
 # =============================================================================
@@ -145,10 +145,10 @@ bump_file "$PROJECT_ROOT/hermes-plugin/src/plugin.yaml" \
     "version: $NEW_VERSION" \
     "hermes-plugin/src/plugin.yaml"
 
-bump_file "$PROJECT_ROOT/.anolisa/component.toml" \
+bump_file "$PROJECT_ROOT/packaging/anolisa/component.toml" \
     "^version = \"$OLD_VERSION\"" \
     "version = \"$NEW_VERSION\"" \
-    ".anolisa/component.toml"
+    "packaging/anolisa/component.toml"
 
 bump_file "$PROJECT_ROOT/codex-plugin/hooks-plugin/.codex-plugin/plugin.json" \
     "\"version\": \"$OLD_VERSION\"" \
@@ -167,22 +167,24 @@ bump_file "$PROJECT_ROOT/qwen-code-extension/qwen-extension.json" \
 
 log "Updating lock files..."
 
-V2_CARGO_LOCK="$PROJECT_ROOT/v2/Cargo.lock"
-if [[ -f "$V2_CARGO_LOCK" ]]; then
-    lock_tmp="$(mktemp "$V2_CARGO_LOCK.XXXXXX")"
-    awk -v version="$NEW_VERSION" '
-        /^\[\[package\]\]$/ { is_workspace_package = 0 }
-        /^name = "asc-/ { is_workspace_package = 1 }
-        is_workspace_package && /^version = "/ {
-            sub(/"[^"]+"$/, "\"" version "\"")
-        }
-        { print }
-    ' "$V2_CARGO_LOCK" > "$lock_tmp"
-    mv "$lock_tmp" "$V2_CARGO_LOCK"
-    ok "v2/Cargo.lock"
-else
-    warn "v2/Cargo.lock not found, skipping"
-fi
+for lock_rel in "v2/Cargo.lock" "linux-sandbox/Cargo.lock"; do
+    cargo_lock="$PROJECT_ROOT/$lock_rel"
+    if [[ -f "$cargo_lock" ]]; then
+        lock_tmp="$(mktemp "$cargo_lock.XXXXXX")"
+        awk -v version="$NEW_VERSION" '
+            /^\[\[package\]\]$/ { is_workspace_package = 0 }
+            /^name = "asc-/ { is_workspace_package = 1 }
+            is_workspace_package && /^version = "/ {
+                sub(/"[^"]+"$/, "\"" version "\"")
+            }
+            { print }
+        ' "$cargo_lock" > "$lock_tmp"
+        mv "$lock_tmp" "$cargo_lock"
+        ok "$lock_rel"
+    else
+        warn "$lock_rel not found, skipping"
+    fi
+done
 
 if command -v npm &>/dev/null; then
     (cd "$PROJECT_ROOT/openclaw-plugin" && npm install --package-lock-only --ignore-scripts 2>/dev/null)
@@ -197,7 +199,7 @@ log " Version bump complete: $OLD_VERSION → $NEW_VERSION"
 log "=========================================="
 echo ""
 warn "Manual updates still needed:"
-echo "  - agent-sec-core.spec.v2.in (%changelog entry)"
+echo "  - packaging/rpm/agent-sec-core.spec.v2.in (%changelog entry)"
 echo "  - CHANGELOG.md             (add actual change notes)"
 echo ""
 warn "Review CHANGELOG.md and spec.v2.in %changelog entries before committing."

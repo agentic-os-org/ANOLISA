@@ -97,8 +97,15 @@ fn v1_scanner_and_analyze_fixtures_preserve_findings_and_coverage() {
     let fixtures: Value = serde_json::from_str(include_str!("fixtures/scanners.json")).unwrap();
     let mut differences = Vec::new();
     for case in fixtures["cases"].as_array().unwrap() {
+        let mut case = case.clone();
+        // Keep V1 evidence frozen while asserting V2's complete outer Bash scan.
+        if case["name"] == "persistence-6" {
+            let evidence = json!(["systemctl enable", "bash -c 'systemctl enable"]);
+            case["code"][0]["metadata"]["evidence"] = evidence.clone();
+            case["analyze"]["scanners"][0]["findings"][0]["metadata"]["evidence"] = evidence;
+        }
         let (_temporary, root) = skill();
-        materialize(&root, case);
+        materialize(&root, &case);
         let results = ScannerRegistry::default()
             .scan(&root, None, deadline())
             .unwrap();

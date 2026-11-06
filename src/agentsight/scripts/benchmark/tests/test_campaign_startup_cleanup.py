@@ -16,7 +16,12 @@ from test_campaign_runner import run_campaign
 def test_startup_failure_reaps_owned_child(
     tmp_path: Path, kind: str, failure: BaseException
 ) -> None:
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    # The runner signals the process group, so this child has to lead
+    # its own group; otherwise every escalation is a no-op.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
     if kind == "tracer":
         owned = run_campaign.TracerProcess(
             {"binary": "unused", "config": "unused", "log_file": str(tmp_path / "trace.log")}, 3

@@ -6,26 +6,28 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # -- Binary fallback paths ----------------------------------------------------
 #
-# Tokenless has three supported installers whose layouts differ:
+# Tokenless has three supported installers whose binary directories differ:
 #
-# - Makefile:     ~/.local/{bin,libexec} or /usr/{bin,libexec}
-# - Anolisa CLI:  ~/.local/{bin,lib/anolisa/libexec} or /usr/local/{bin,libexec}
-# - RPM:          /usr/{bin,libexec}
+# - Makefile:     ~/.local/bin or /usr/bin
+# - Anolisa CLI:  ~/.local/bin or /usr/local/bin
+# - RPM:          /usr/bin
 #
-# Keep the legacy lib/share paths until installations made by older releases
-# have aged out.
+# Callers keep passing the legacy lib/share paths as explicit fallbacks until
+# installations made by older releases have aged out.
 #
 # KEEP IN SYNC with tool_ready_hook.sh::resolve_binary,
 # env_check.rs::binary_fallback_paths, OpenClaw's fallback constants, and the
 # Codex standalone scripts. Makefile and the Anolisa component manifest define
-# the supported layouts; the canonical order is user, /usr/local, /usr, legacy.
+# the supported layouts; the canonical order is user, /usr/local, then /usr.
 
 _USER_HOME = os.path.expanduser("~")
 if not _USER_HOME or not os.path.isabs(_USER_HOME):
@@ -39,11 +41,6 @@ def _user_path(*parts: str) -> str:
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
 _TOKENLESS_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "tokenless")
 _TOKENLESS_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "tokenless")
-_RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "rtk")
-_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
-
-_TOKENLESS_HELPER_BINARIES = frozenset({"rtk"})
 
 
 def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
@@ -55,52 +52,8 @@ def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
     paths = []
     if user_home:
         paths.append(os.path.join(user_home, ".local", "bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        if user_home:
-            paths.extend(
-                [
-                    # Anolisa CLI user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "lib",
-                        "anolisa",
-                        "libexec",
-                        "tokenless",
-                        name,
-                    ),
-                    # Makefile user mode.
-                    os.path.join(
-                        user_home,
-                        ".local",
-                        "libexec",
-                        "anolisa",
-                        "tokenless",
-                        name,
-                    ),
-                ]
-            )
     paths.append(os.path.join("/usr/local/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        # Anolisa CLI system mode.
-        paths.append(os.path.join("/usr/local/libexec/anolisa/tokenless", name))
     paths.append(os.path.join("/usr/bin", name))
-    if name in _TOKENLESS_HELPER_BINARIES:
-        paths.extend(
-            [
-                # Makefile system mode and RPM.
-                os.path.join("/usr/libexec/anolisa/tokenless", name),
-                # Debian and pre-layout-migration compatibility.
-                os.path.join("/usr/lib/anolisa/tokenless", name),
-            ]
-        )
-        if user_home:
-            paths.extend(
-                [
-                    os.path.join(user_home, ".local", "share", "anolisa", "tokenless", name),
-                    os.path.join(user_home, ".local", "lib", "anolisa", "tokenless", name),
-                ]
-            )
     return tuple(paths)
 
 
@@ -212,7 +165,43 @@ _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
 
 def tokenless_retrieve_command_available() -> bool:
     """Return whether a Marker command can invoke bare ``tokenless``."""
-    return not _QWENWORK_PRIVATE_RUNTIME and shutil.which("tokenless") is not None
+    return _QWENWORK_RECOVERY is not None or (
+        not _QWENWORK_PRIVATE_RUNTIME and shutil.which("tokenless") is not None
+    )
+
+
+def _bare_retrieve_hash(command: str) -> str | None:
+    if not _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command):
+        return None
+    return re.search(r"[0-9a-fA-F]{24}", shlex.split(command)[2]).group().lower()
+
+
+def _qwenwork_retrieve_command(key: str) -> str | None:
+    if _QWENWORK_RECOVERY is None:
+        return None
+    runtime = _QWENWORK_RECOVERY
+    arguments = ["/usr/bin/env"]
+    for name in (
+        "TOKENLESS_AGENT_ID",
+        "TOKENLESS_SESSION_ID",
+        "TOKENLESS_TOOL_USE_ID",
+        "TOKENLESS_DATA_DIR",
+        "TOKENLESS_STASH_DB",
+        "DSH_TOKENLESS_STASH_DB",
+    ):
+        arguments.append(f"{name}={runtime[name]}")
+    arguments.extend((runtime["binary"], "retrieve", key))
+    return " ".join(shlex.quote(argument) for argument in arguments)
+
+
+def rewrite_qwenwork_retrieve(tool_name: str, arguments: dict) -> dict | None:
+    """Anchor a standalone recovery command to the same private runtime as its Hook."""
+    command = arguments.get("command")
+    if tool_name not in SHELL_TOOLS or not isinstance(command, str):
+        return None
+    key = _bare_retrieve_hash(command)
+    rewritten = _qwenwork_retrieve_command(key) if key is not None else None
+    return {**arguments, "command": rewritten} if rewritten is not None else None
 
 
 def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
@@ -222,7 +211,19 @@ def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
     command = arguments.get("command")
     if not isinstance(command, str):
         return False
-    return _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command) is not None
+    if _bare_retrieve_hash(command) is not None:
+        return True
+    if _QWENWORK_RECOVERY is None:
+        return False
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+    if not arguments or not re.fullmatch(r"[0-9a-f]{24}", arguments[-1]):
+        return False
+    # Only our exact command is recovery; pipelines and user-supplied wrappers
+    # must not inherit the exemption from response compression.
+    return command == _qwenwork_retrieve_command(arguments[-1])
 
 
 # Layer 3: API tools (zero-truncation).
@@ -375,12 +376,12 @@ def classify_env_error(tool_response) -> tuple[str | None, str | None]:
     return None, None
 
 
-# -- Context file for rewrite session tracking --
+# -- Hook state directory --
 
-_CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
-_CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
-_OPTIMIZATION_STATE_DIR = os.path.join(_CONTEXT_DIR, "hook-state")
+_OPTIMIZATION_STATE_DIR = os.path.join(os.path.expanduser("~"), ".tokenless", "hook-state")
 _OPTIMIZATION_STATE_TTL_SECONDS = 24 * 60 * 60
+# This bound is shared by all sessions using the same state directory. Under
+# pressure an in-flight marker can be evicted, losing PostTool deduplication.
 _OPTIMIZATION_STATE_MAX_FILES = 1024
 
 # -- Binary resolution (cached) -----------------------------------------------
@@ -391,14 +392,152 @@ _QWENWORK_WORKSPACE_SHELLS = frozenset(
     {
         "mcp__workspace__bash",
         "mcp__qw-builtin__mcp_workspace_bash",
+        "mcp__qw-builtin__mcp__workspace__bash",
     }
 )
 _QWENWORK_PRIVATE_RUNTIME = False
+_QWENWORK_RECOVERY: dict[str, str] | None = None
+
+
+def _prepare_qwenwork_recovery(plugin_root: str, payload: dict) -> dict[str, str] | None:
+    if sys.platform != "darwin" or not os.path.isabs(plugin_root):
+        return None
+    root = Path(plugin_root)
+    binary = root / "bin/tokenless"
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return None
+    required = (root / "hooks/run-hook.sh", root / "hooks/shared/rewrite_hook.py")
+    if not all(path.is_file() and os.access(path, os.R_OK) for path in required):
+        return None
+    session_id = payload.get("session_id")
+    call_id = resolve_tool_call_id("qwenwork", payload)
+    if not isinstance(session_id, str) or not session_id or not call_id:
+        return None
+    try:
+        data_dir = resolve_data_directory()
+        hooks = json.loads((root / "hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
+        covered = set()
+        for group in hooks:
+            if any(
+                hook.get("type") == "command"
+                and "rewrite_hook.py" in shlex.split(hook.get("command", ""))
+                for hook in group.get("hooks", [])
+            ):
+                covered.update(
+                    tool
+                    for tool in {"Bash", *_QWENWORK_WORKSPACE_SHELLS}
+                    if re.fullmatch(group.get("matcher", ".*"), tool)
+                )
+        if covered != {"Bash", *_QWENWORK_WORKSPACE_SHELLS}:
+            return None
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, re.error):
+        return None
+    return {
+        "binary": str(binary),
+        "TOKENLESS_AGENT_ID": "qwenwork",
+        "TOKENLESS_SESSION_ID": session_id,
+        "TOKENLESS_TOOL_USE_ID": call_id,
+        "TOKENLESS_DATA_DIR": data_dir,
+        # Empty values also override any different defaults in the model shell.
+        "TOKENLESS_STASH_DB": os.environ.get("TOKENLESS_STASH_DB", ""),
+        "DSH_TOKENLESS_STASH_DB": os.environ.get("DSH_TOKENLESS_STASH_DB", ""),
+    }
+
+
+def _windows_profile_directory() -> str:
+    """Resolve the process token's profile, as tokenless-stats/home.rs does."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    profiles = ctypes.WinDLL("userenv", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    security.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    profiles.GetUserProfileDirectoryW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    profiles.GetUserProfileDirectoryW.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise OSError("cannot query the current process token")
+    try:
+        size = wintypes.DWORD()
+        profiles.GetUserProfileDirectoryW(token, None, ctypes.byref(size))
+        if not size.value:
+            raise OSError("no profile directory for the current process token")
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not profiles.GetUserProfileDirectoryW(token, buffer, ctypes.byref(size)):
+            raise OSError("cannot resolve the current process profile directory")
+        return buffer.value
+    finally:
+        kernel.CloseHandle(token)
+
+
+def resolve_data_directory() -> str:
+    """Resolve QwenWork state without writes or environment-based home fallbacks.
+
+    Keep the default and validation aligned with tokenless-stats/home.rs and
+    path_policy.rs, which the CLI and patched RTK also share.
+    """
+    configured = os.environ.get("TOKENLESS_DATA_DIR")
+    if configured:
+        path = Path(configured)
+    else:
+        try:
+            if os.name == "nt":
+                home = _windows_profile_directory()
+            else:
+                import pwd
+
+                home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError) as error:
+            raise ValueError("no trusted home directory; set TOKENLESS_DATA_DIR") from error
+        anchor = Path(home)
+        if not home or not anchor.is_absolute() or anchor == anchor.parent:
+            raise ValueError("no trusted home directory; set TOKENLESS_DATA_DIR")
+        path = anchor / ".tokenless"
+
+    if not path.is_absolute():
+        raise ValueError("TOKENLESS_DATA_DIR must be an absolute path")
+    if ".." in path.parts:
+        raise ValueError("TOKENLESS_DATA_DIR must not contain parent traversal")
+    # Resolve existing prefixes strictly: dangling links, loops and inaccessible
+    # ancestors must not silently select a different directory from the CLI.
+    ancestor = path
+    missing = []
+    while True:
+        try:
+            ancestor.lstat()
+            break
+        except FileNotFoundError:
+            # Missing drives and UNC shares have no existing ancestor to find.
+            if ancestor == ancestor.parent:
+                raise
+            missing.append(ancestor.name)
+            ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        raise ValueError("TOKENLESS_DATA_DIR must resolve to a directory")
+    normalized = ancestor.resolve(strict=True).joinpath(*reversed(missing))
+    if normalized == normalized.parent:
+        raise ValueError("TOKENLESS_DATA_DIR must not be the filesystem root")
+    return str(normalized)
 
 
 def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
     """Map QwenWork workspace shell events to the shared Bash contract."""
-    global _CONTEXT_DIR, _CONTEXT_FILE, _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME
+    global _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME, _QWENWORK_RECOVERY
+    _QWENWORK_RECOVERY = None
     if agent_id != "qwenwork":
         return input_data
 
@@ -410,6 +549,8 @@ def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
         # The hook's private PATH is not the model's shell PATH.
         _QWENWORK_PRIVATE_RUNTIME = True
 
+    _QWENWORK_RECOVERY = _prepare_qwenwork_recovery(plugin_root, input_data)
+
     tool_name = input_data.get("tool_name")
     if not isinstance(tool_name, str) or tool_name not in _QWENWORK_WORKSPACE_SHELLS:
         return input_data
@@ -418,14 +559,15 @@ def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
         warn("workspace shell hook has no valid cwd. Passing through unchanged.")
         skip()
-    # RTK receives this path in its rewritten command; future conversations
-    # must not depend on grants to a previous conversation's state directory.
-    data_dir = os.path.join(cwd, ".tokenless")
-    os.environ["TOKENLESS_DATA_DIR"] = data_dir
-    _CONTEXT_DIR = data_dir
-    _CONTEXT_FILE = os.path.join(data_dir, ".rewrite-context")
+    # Let Tokenless resolve its default database directory and carry it into
+    # RTK commands. Hook state must not default to the workspace either.
+    try:
+        data_dir = resolve_data_directory()
+    except (OSError, ValueError, RuntimeError) as error:
+        warn(f"{error}. Passing through unchanged.")
+        skip()
     _OPTIMIZATION_STATE_DIR = os.path.join(data_dir, "hook-state")
-    # Bare retrieval commands do not carry the hook's workspace data setting.
+    # Bare retrieval commands do not inherit the hook's runtime environment.
     _QWENWORK_PRIVATE_RUNTIME = True
 
     normalized = {**input_data, "tool_name": "Bash"}
@@ -557,11 +699,6 @@ def secure_write_text(path: str, content: str) -> None:
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(content)
-
-
-def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
-    """Write context file for rtk rewrite session tracking."""
-    secure_write_text(_CONTEXT_FILE, f"{agent_id}\n{session_id}\n{tool_use_id}\n")
 
 
 def _optimization_state_path(agent_id: str, session_id: str, tool_use_id: str) -> str:

@@ -1,0 +1,379 @@
+%define anolis_release 1
+%global debug_package %{nil}
+
+Name:           agentsight
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        eBPF-based AI Agent Observability Tool
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+
+# Build dependencies (required for OpenSSL compilation during cargo build)
+BuildRequires:  perl-IPC-Cmd
+BuildRequires:  perl-core
+BuildRequires:  python3
+# %%systemd_* scriptlet macros expand at rpmbuild time (see %%post/%%preun/%%postun)
+BuildRequires:  systemd-rpm-macros
+
+Requires:       %{name}-core = %{version}-%{release}
+Provides:       anolisa-component(agentsight)
+
+%description
+Compatibility package selecting matching agentsight-core through an
+exact-version dependency, without a runtime payload of its own. The DSH plugin
+is optional.
+
+%package core
+Summary:        AgentSight tracing, dashboard and enforcement runtime
+Requires:       elfutils-libelf
+# An older monolithic package still owns these files; upgrade it to the
+# compatibility package in the same transaction before transferring ownership.
+Conflicts:      agentsight < %{version}
+Conflicts:      anolisa < 0.3.21
+Requires(post):   rpm
+Requires(post):   (%{_bindir}/systemctl if systemd)
+Requires(preun):  (%{_bindir}/systemctl if systemd)
+Requires(postun): (%{_bindir}/systemctl if systemd)
+
+%description core
+AgentSight eBPF tracing, embedded dashboard, enforcer, system configuration and
+service units. Installing this package does not explicitly start the services.
+
+%package plugins
+Summary:        AgentSight DSH plugin resources
+Requires:       %{name}-core = %{version}-%{release}
+Requires:       nodejs >= 22
+BuildArch:      noarch
+
+%description plugins
+Optional DSH plugin runtime and descriptor. Register it with the target DSH
+installation separately; package installation does not change user profiles.
+
+%prep
+%setup -q
+
+%build
+# Binary is built by packaging/rpm/rpm-build.sh prior to rpmbuild and included in the source tarball.
+
+%install
+rm -rf $RPM_BUILD_ROOT
+install -d -m 0755 %{buildroot}%{_bindir} %{buildroot}%{_unitdir} \
+    %{buildroot}%{_docdir}/agentsight %{buildroot}%{_sysconfdir}/agentsight
+
+install -p -m 0755 agentsight agentsight-enforcer \
+    %{buildroot}%{_bindir}/
+python3 packaging/systemd/render.py --bindir "%{_bindir}" \
+    --binary "%{_bindir}/agentsight" \
+    --launcher "%{buildroot}%{_bindir}/agentsight-start" \
+    --unitdir "%{buildroot}%{_unitdir}"
+install -p -m 0644 agentsight.json %{buildroot}%{_sysconfdir}/agentsight/config.json
+install -p -m 0644 README.md README_zh.md LICENSE %{buildroot}%{_docdir}/agentsight/
+install -d -m 0755 %{buildroot}%{_datadir}/agentsight/adapters/dsh
+cp -Rp dsh-plugin/lib %{buildroot}%{_datadir}/agentsight/adapters/dsh/
+install -p -m 0644 dsh-plugin/package.json dsh-plugin/cordis.patch.yml \
+    %{buildroot}%{_datadir}/agentsight/adapters/dsh/
+
+%post core
+# A transfer from the monolithic package is an upgrade, even though core is
+# newly installed. Preserve the existing unit enablement during that transfer.
+if ! rpm -q agentsight >/dev/null 2>&1; then
+    %systemd_post agentsight-enforcer.service
+    %systemd_post agentsight.service
+fi
+# Fresh install: surface opt-in features that are disabled by default.
+if [ "$1" -eq 1 ]; then
+    echo "AgentSight: dead-loop detection/auto-kill is disabled by default."
+    echo "  To enable: set \"deadloop\": {\"enabled\": true} in /etc/agentsight/config.json,"
+    echo "  then run: systemctl reload agentsight.service"
+fi
+
+%preun core
+%systemd_preun agentsight.service
+%systemd_preun agentsight-enforcer.service
+
+%postun core
+%systemd_postun agentsight.service
+%systemd_postun agentsight-enforcer.service
+
+%files
+
+%files core
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) %{_bindir}/agentsight
+%attr(0755,root,root) %{_bindir}/agentsight-enforcer
+%attr(0755,root,root) %{_bindir}/agentsight-start
+%config(noreplace) %{_sysconfdir}/agentsight/config.json
+%{_unitdir}/agentsight.service
+%{_unitdir}/agentsight-enforcer.service
+%doc %{_docdir}/agentsight/README.md
+%doc %{_docdir}/agentsight/README_zh.md
+%license %{_docdir}/agentsight/LICENSE
+
+%files plugins
+%defattr(0644,root,root,0755)
+%{_datadir}/agentsight/adapters/dsh/
+
+%changelog
+* Fri Nov 06 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.16.0-1
+- Add secret-file read protection for selected agent process trees
+- Observe Qoder CLI gateway calls; configuration schema 6 adds Qoder defaults
+- Add a Cline session parser and sortable token savings sessions
+- Share one tokenizer cache slot across model aliases
+- Fix Codex, Gemini, Anthropic, SysOM, DeepSeek and Responses parsing and usage gaps
+- Isolate concurrent storage writes and bound LLM HTTP request attempts
+- Harden batch exports, RSS evidence, recovery replay and benchmark campaigns
+- Keep enforcer objects within the eBPF verifier stack limit
+- Migrate configuration to schema 6 with a timestamped backup
+
+* Mon Nov 02 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.15.3-1
+- Preserve final token usage in cost analysis and scope final answers to the latest turn
+- Preserve ATIF developer instructions and recorded tool completion times
+- Decode stacked HTTP content codings and keep missing throughput measurements unknown
+- Preserve Hermes fallback call identity and clear empty Hermes histories
+- Cover legacy guards in write-access preflight and close file-guard content-loss entries
+- Validate resource capture quality before accepting benchmark results
+- Keep ANOLISA discovery contract ownership in the distribution
+
+* Sat Oct 31 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.15.2-1
+- Enforce structured file-protection policies for deletion, rename, exchange and ordinary writes
+- Advertise structured file protection as a capability
+- Choose the runtime and DSH integration separately using the core and plugins RPMs
+- Install programs to the system binary directory; make install no longer activates services
+
+* Sat Oct 31 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.15.1-1
+- Unify file installation with make install, install-core and install-plugins targets
+- Enforce structured file protection for delete, rename, exchange and ordinary writes
+- Accept structured policies through ActPlane and report structured capabilities
+- Split the RPM into agentsight-core and agentsight-plugins
+- Move the enforcer control protocol to v5; upgrade client and enforcer together
+- See CHANGELOG.md for the remaining changes
+
+* Tue Oct 27 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.15.0-1
+- Discover Gemini CLI JSONL chats in the trajectory collector and local viewer
+- Add analyze --stats-only for offline perf and cost statistics
+- Expose the PipelineCore Rust library API and re-export HttpContext
+- Window Tokenless savings by request time and count unlabelled modes as applied
+- Fix non-streaming answers, Gemini calls and Python TLS detection
+- See CHANGELOG.md for the remaining changes
+
+* Fri Oct 23 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.14.3-1
+- Add read-only Hermes `state.db` trajectory collection and Claude SDK session discovery
+- Add Gemini CLI chat-file conversion to ATIF, including legacy JSON files and replay of conversation corrections
+- Add type, state and agent filters to interruption queries where applicable, agent-scoped summary totals, and JSON output for interruption resolution
+- Add batch ATIF export without analysis and configurable parallel batch analysis
+- Add `token --db`, `summary --tokenless-db`, and per-agent metrics in JSON for offline queries and scripts
+- Include 19 more changes; see CHANGELOG.md
+
+* Wed Oct 21 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.14.2-1
+- Record fixes for no-response-body calls at agent exit and recap-only session inspection that already shipped in 0.14.1
+
+* Fri Oct 16 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.14.1-1
+- Accept `--db` in the query commands
+- Content-probe unknown executables for static BoringSSL, with negative caching of misses
+- Support explicit prebuilt targets and build prebuilt agentsight artifacts in CI
+- Map OpenAI, Claude, Qwen3, InternLM, Baichuan, phi-3-small and yi-9b-chat model names to real, loadable tokenizers
+- Parse Gemini streaming responses, honor final Anthropic usage, fold whole-message chat SSE snapshots, and parse CR-ended SSE lines
+- Include 12 more changes; see CHANGELOG.md
+
+* Mon Oct 12 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.14.0-1
+- Unify SQLite storage under one configurable total cap (default 2200 MB)
+- Preserve and correctly count streamed content, reasoning, tool calls, response IDs, finish reasons, and token usage across Anthropic, Gemini, Codex, and Responses providers
+- Make agent discovery, trajectory filtering, reuse labels, semantic search, dashboard metrics, savings, and interruption aggregates more accurate and robust
+- Harden enforcement, credential discovery, IMDSv2 access, BPF polling, process restart, OOM detection, and audit/event validation paths
+- Make SQLite maintenance, storage budgeting, UTF-8 handling, SSE/HPACK parsing, and time handling resilient to malformed or edge-case input
+- Support legacy kernel enforcement, wrapped inode guard labels, legacy function-call tool requests, and additional process/file reference formats
+
+* Thu Oct 08 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.13.1-1
+- Add JSON output and graceful CLI errors
+- Resolve namespace PIDs to host PIDs with an init-namespace self-check
+- Honor the RUST_LOG regex in the main logger
+- Add inode guard support for file-delete-guard on 5.10/6.6 kernels
+- Drop the trace_id alias in the traces list
+- Include 11 more changes; see CHANGELOG.md
+
+* Mon Sep 21 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.13.0-1
+- Add preferences APIs that surface working habits inferred from recent conversations
+- Add GET /api/trajectories/steps to find ATIF steps by derived category
+- Label trajectories for reuse triage with a review page and labelled-history search
+- Add an inode guard for file-delete-guard on 5.10/6.6 kernels
+- Initialize logging in the macOS trace path so collection failures surface
+- Include 6 more changes; see CHANGELOG.md
+
+* Thu Sep 10 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.12.1-1
+- Align kernel event timestamps by calibrating BPF monotonic clocks against realtime instead of container uptime
+- Capture rustls plaintext for cosh-ng and attach the cosh plaintext tap by name
+- Stop counting cached tokens twice in token totals
+- Stream the static SSL pattern scan
+- Shorten the SSL uprobe re-attach TTL to 30s
+- Include 6 more changes; see CHANGELOG.md
+
+* Tue Sep 08 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.12.0-1
+- Add `--no-ebpf` trajectory-only trace mode for environments where eBPF is unavailable
+- Support the DashScope/Bailian native protocol
+- Add Kubernetes DaemonSet packaging
+- Monitor agent resource usage
+- Ground causal attribution in deterministic, re-checkable evidence
+- Include 14 more changes; see CHANGELOG.md
+
+* Fri Aug 28 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.11.2-1
+- Show historical agent activity
+- Re-attach stale SSL uprobes after kernel-side consumer deregistration so capture self-heals without a restart
+- Restart agentsight after an OOM kill
+- Bound probe event channel by bytes to cap memory under event bursts
+- Align CLI and dashboard with docs and de-duplicate the guide sidebar
+- Include 3 more changes; see CHANGELOG.md
+
+* Tue Aug 25 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.11.1-1
+- Keep null-session interruptions in breakdowns so per-session and per-conversation counts always sum to the total
+- Add Bun SSL_do_handshake prologue pattern so Claude Code (Bun builds >= 2.1.113) LLM traffic is captured
+
+* Mon Aug 24 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.11.0-1
+- Version bump for RPM packaging; no functional changes since 0.10.3
+
+* Sat Aug 22 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.10.3-1
+- Add semantic search to the sessions list
+- Add dsh plugin for DeepSeek Harness
+- Group agents by type in discovery
+- Add filtered_count to agent-health
+- Add /api/docs route inventory
+- Include 14 more changes; see CHANGELOG.md
+
+* Tue Aug 18 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.10.2-1
+- Enforce size limits on sqlite stores
+- Make dashboard UI bilingual (en/zh)
+- Add raw packaging for immutable release artifacts
+- Add LLM latency metrics API
+- Match latency agents case-insensitively
+- Address latency metrics CI follow-ups
+
+* Thu Aug 13 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.10.1-1
+- Bootstrap dashboard i18n with preferred browser locale matching
+- Add agentscope framework to agent discovery rules
+- Streamline component onboarding docs and clarify service startup
+- Treat pause_turn as a normal SSE finish
+- Keep tool_call name across SSE continuation deltas
+- Include 4 more changes; see CHANGELOG.md
+
+* Tue Aug 11 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.10.0-1
+- Add case containment lifecycle with policy handoff, no-gap replacement, dedicated API, and dashboard views
+- Add system audit protocol, event storage, dashboard, and extract audit service into a dedicated crate
+- Add ActPlane risk enforcement with enforcer service, hardened file controls, secure lifecycle, and risk enforcement dashboard
+- Convert Codex rollout JSONL to ATIF and cover Codex routing and tool calls with tests
+- Report process metadata on raw HTTPS events and carry it in the generic envelope
+- Include 5 more changes; see CHANGELOG.md
+
+* Tue Aug 04 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.9.1-1
+- Rework optimization dashboard views and add detour-based cost waste analysis
+- Move agent health and interruptions to a dedicated dashboard page
+- Extract cache tokens for OpenAI and DashScope responses, and extract real user query from cosh-ng adapter prompt template
+- Capture Claude Code launched via absolute path or node wrapper
+- Skip `agent_crash` detection on clean exit and flush deferred GenAI events on agent exit
+- Include 4 more changes; see CHANGELOG.md
+
+* Tue Jul 28 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.9.0-1
+- Release AgentSight 0.9.0
+- Add optimization dashboard, trajectory collection, and ATIF v1.7 support
+- Fix Anthropic parsing, trajectory collection, dashboard, and trace output issues
+
+* Fri Jul 17 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.8.1-1
+- Replace `lock().unwrap()` with poison-safe `unwrap_or_else` for mutex recovery
+- Correct SSL library attribution from aws-lc/BoringSSL to OpenSSL 3.x
+- Add Claude process name to BoringSSL classification
+- Preserve user config on schema migration instead of overwriting
+- Don't auto-overwrite invalid JSON configs; record process pid not thread tid in ns pid helper
+- Downgrade high-frequency event logs from debug to trace to reduce noise
+
+* Mon Jul 13 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.8.0-1
+- Add dashboard token-based authentication with file-only auth config
+- Add LAN/public IP address display and Chinese output in dashboard CLI
+- Add ECS security group guide and metadata integration to dashboard
+- Add conversation grader API and dashboard controls
+- Add `COSH_SESSION_ID` export for per-run session correlation
+- Include 10 more changes; see CHANGELOG.md
+
+* Fri Jul 03 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.7.1-1
+- Improve severity labels and agent sidebar UX
+- Show all verdicts in the summary command
+- Sync component.toml version with package version
+
+* Mon Jun 29 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.7.0-1
+- Add Codex CLI adaptation with three-tier SSL probe attach and cross-chunk SSE continuation buffer
+- Add security observability dashboard and server proxy for agent threat visibility
+- Add memory optimization with bounded event buffers, feature flags and configurable runtime limits
+- Add `container_id` to `AgentsightLLMData` for container-level attribution
+- Derive `session_id` from process environment variables and request metadata instead of message content
+- Include 33 more changes; see CHANGELOG.md
+
+* Mon Jun 15 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.6.1-1
+- Add real-time agent_crash detection in trace mode
+- Add OOM crash detection
+- Add cgroup-level event filtering with v1/v2 compatibility
+- Support QwenCode skill discovery via per-user home scanning
+- Support SLS Logtail activation reversible via dynamic path
+- Include 8 more changes; see CHANGELOG.md
+
+* Mon Jun 15 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.6.0-1
+- Add deadloop detection and auto-kill mechanism for runaway agent processes
+- Add retry storm detection and `/metrics` interruption counters
+- Add BPF-layer HTTP protocol filter and wildcard capture (`*`) for unknown IP/port targets
+- Add client-side hybrid encryption for sensitive message fields
+- Add `traceEnabled` configuration toggle with SLS upload layer enforcement
+- Include 14 more changes; see CHANGELOG.md
+
+* Wed May 27 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.5.1-1
+- Join token savings to tool calls by tool_use_id instead of session_id
+- Group token savings back to sessions through turn indices
+- Show compounded savings in the conversation list to match the Token Savings page
+
+* Fri May 22 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.5.0-1
+- Add Claude Code support including SSL probe attach for BoringSSL, Anthropic SSE thinking/tool_use content blocks, and `message.id`-based session correlation
+- Add tcpsniff probe for plain HTTP traffic capture with configurable IP/port filtering
+- Add User-Agent based agent detection with `comm` fallback for simplified agent matching
+- Add UDP DNS probe for agent discovery (replacing TLS SNI probe) with QNAME parsing moved to userspace
+- Add TLS SNI probe module and refactor discovery to config-driven rules
+- Include 11 more changes; see CHANGELOG.md
+
+* Mon May 11 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.4.0-1
+- Add HTTP/1.1 request body reassembly for fragmented SSL writes
+- Add skill metrics analysis with cosh filesystem-based discovery
+- Add SLS upload and Logtail file exporter for GenAI events
+- Add hermes agent matcher for LLM process discovery
+- Detect uv Python static OpenSSL in SSL sniffer
+- Remove AK/SK-based SLS direct upload, keep Logtail file export
+
+* Wed Apr 29 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.3.1-1
+- Simplify agent_crash detection and fix multi-process deduplication
+- Use SqliteConfig for the audit CLI database path
+- Hide Cosh from the agent health UI and remove keepalive support
+
+* Sun Apr 26 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.3.0-1
+- Add interruption detection system with drain mechanism and dashboard integration
+- Add token savings page and API endpoint for optimization visualization
+- Add compounded token savings and request count tracking
+- Add C FFI API with cbindgen header generation
+- Add filewatch and filewrite eBPF probes for file access monitoring
+- Include 12 more changes; see CHANGELOG.md
+
+* Wed Apr 15 2026 shenglongzhu <samchu.zsl@alibaba-inc.com> - 0.2.2-1
+- Support starting backend-server for dashboard with AgentSight service
+- Fix dashboard frontend dynamic width for multiple display-size
+
+* Tue Apr 14 2026 shenglongzhu <samchu.zsl@alibaba-inc.com> - 0.2.1-1
+- Add `/usr/lib/copilot-shell` path to CoshMatcher for agent discovery
+- Add 200MB size limit for `genai_events.db` to prevent unbounded growth
+- Remove `/api/stats` endpoint returning incorrect data
+- Extract audit from HttpRecord and filter non-LLM calls
+- Always show comparison data when `--compare` flag is used in token queries
+- Include 3 more changes; see CHANGELOG.md
+
+* Sat Apr 11 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.2.0-1
+- Add systemd service file (agentsight.service)
+- Add systemd post/preun/postun hooks for service management
+- Update installation path to /usr/local/bin
+- Support dashboard (token and session analysis)
+- Support HTTP/2 protocol
+
+* Mon Mar 30 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.1.0-1
+- Initial AgentSight RPM package

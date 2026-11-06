@@ -265,6 +265,8 @@ fn file_errors_duplicate_keys_and_oversized_inputs_are_local_failures() {
         br#"{"specVersion":"0.1","specVersion":"0.1","rules":[]}"#,
         br#"{"specVersion":"0.1","rules":[{"effect":"block","category":"file","action":"write","target":{"type":"file","path":"/one","path":"/two"}}]}"#,
         br#"{"specVersion":"0.1","rules":[],"extra":true}"#,
+        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"first","text":"second"}}"#,
+        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1,"revision":2},"text":"first"}}"#,
     ] {
         std::fs::write(&path, bytes).unwrap();
         assert!(matches!(
@@ -277,6 +279,46 @@ fn file_errors_duplicate_keys_and_oversized_inputs_are_local_failures() {
         Cli::parse_from(args).unwrap().request(),
         Err(InputError::TooLarge)
     ));
+}
+
+#[test]
+fn policy_file_errors_retain_original_line_and_column() {
+    let directory = common::Directory::new();
+    let path = directory.0.join("template.json");
+    for (source, message, line, column) in [
+        ("{}", "missing field `specVersion`", 1, 2),
+        ("\n  {\n}\n", "missing field `specVersion`", 3, 1),
+        (
+            "\n{\n\"language\":\"cedar\"\n}\n",
+            "missing field `content`",
+            4,
+            1,
+        ),
+    ] {
+        std::fs::write(&path, source).unwrap();
+        for command in ["create", "update"] {
+            let mut args = vec![
+                "agent-sec-cli",
+                "policy",
+                command,
+                "--name",
+                "test",
+                "--file",
+                path.to_str().unwrap(),
+            ];
+            if command == "update" {
+                args.extend(["--policy-id", "policy-one"]);
+            }
+            let Err(InputError::Json(error)) = Cli::parse_from(args).unwrap().request() else {
+                panic!("invalid policy file must fail JSON decoding");
+            };
+            assert_eq!((error.line(), error.column()), (line, column));
+            assert_eq!(
+                error.to_string(),
+                format!("{message} at line {line} column {column}")
+            );
+        }
+    }
 }
 
 #[test]
@@ -580,6 +622,66 @@ fn skill_sec_uses_global_trace_context_without_business_fields() {
 }
 
 #[test]
+fn scope_create_excludes_unsupported_cgroup_selector() {
+    for flag in ["-h", "--help"] {
+        let output = common::run(&["scope".into(), "create".into(), flag.into()]);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let help = String::from_utf8(output.stdout).unwrap();
+        for selector in ["--pid", "--process-name", "--executable"] {
+            assert!(help.contains(selector), "{help}");
+        }
+        assert!(!help.contains("--cgroup-id"), "{help}");
+    }
+
+    for selector in [vec!["--cgroup-id", "1"], vec!["--cgroup-id=1"]] {
+        let mut args = vec![
+            "agent-sec-cli",
+            "scope",
+            "create",
+            "--policy-id",
+            "policy-one",
+            "--policy-revision",
+            "2",
+        ];
+        args.extend(selector);
+        let error = Cli::parse_from(args.clone()).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        let output = common::run(&args[1..].iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--cgroup-id"));
+    }
+}
+
+#[test]
+fn scope_owner_uid_maps_to_rpc_and_rejects_root_or_pid_credential_selection() {
+    let base = [
+        "agent-sec-cli",
+        "scope",
+        "create",
+        "--policy-id",
+        "credential-policy",
+        "--policy-revision",
+        "1",
+    ];
+    for (flag, value) in [("--process-name", "agent"), ("--executable", "/bin/agent")] {
+        let args = base.into_iter().chain([flag, value, "--owner-uid", "1000"]);
+        let request = Cli::parse_from(args).unwrap().request().unwrap();
+        assert_eq!(request.params["ownerUid"], 1000);
+        assert_eq!(request.method, "policy.scopes.create");
+    }
+    for extra in [
+        vec!["--process-name", "agent", "--owner-uid", "0"],
+        vec!["--process-name", "agent", "--owner-uid", "-1"],
+        vec!["--process-name", "agent", "--owner-uid", "4294967296"],
+        vec!["--pid", "42", "--owner-uid", "1000"],
+    ] {
+        assert!(Cli::parse_from(base.into_iter().chain(extra)).is_err());
+    }
+}
+
+#[test]
 fn scope_create_encodes_name_and_path_assignments() {
     for (flag, matcher) in [
         ("--process-name", json!({"processName":"scope-agent"})),
@@ -620,6 +722,212 @@ fn scope_create_encodes_name_and_path_assignments() {
             "--executable",
             "/bin/agent"
         ])
+        .is_err()
+    );
+}
+
+#[test]
+fn gateway_transport_and_invalid_secret_paths_fail_without_reading_credentials() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let directory = common::Directory::new();
+    let socket = directory.0.join("absent.sock");
+    for arguments in [
+        vec![OsString::from("status")],
+        vec![
+            "key".into(),
+            "add".into(),
+            "github".into(),
+            "--secret-file".into(),
+            OsString::from_vec(b"/unread-secret-\xff".to_vec()),
+        ],
+    ] {
+        let mut args = vec![
+            OsString::from("--socket"),
+            socket.as_os_str().into(),
+            "gateway".into(),
+        ];
+        args.extend(arguments);
+        let cli =
+            Cli::parse_from(std::iter::once(OsString::from("agent-sec-cli")).chain(args.clone()))
+                .unwrap();
+        assert!(matches!(cli.request(), Err(InputError::Gateway(_))));
+        let output = common::run(&args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.starts_with("agent-sec-cli: "), "{error}");
+        let expected = if args.last().unwrap() == "status" {
+            "connection unavailable"
+        } else {
+            "--secret-file must be UTF-8"
+        };
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("unread-secret"), "{error}");
+    }
+    assert!(!socket.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_cli_preserves_minimal_results_and_conflicts() {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    if !cfg!(target_os = "linux")
+        || (rustix::process::geteuid().as_raw() != 0
+            && std::env::var_os("AGENT_SEC_TEST_SKIP_SERVER_UID_CHECK").as_deref()
+                != Some(std::ffi::OsStr::new("1")))
+    {
+        return;
+    }
+    let directory = common::Directory::new();
+    let socket = directory.0.join("gateway.sock");
+    let relative_secret = std::path::absolute("gateway token").unwrap();
+    let cases: &[(&[&str], &str, Value, Value)] = &[
+        (&["enable"], "gateway.enable", json!({}), json!({})),
+        (&["disable"], "gateway.disable", json!({}), json!({})),
+        (
+            &["status"],
+            "gateway.status",
+            json!({}),
+            json!({"enabled":true,"ready":true,"scopes":[{"scopeId":"scope-1","bindings":["binding-1"]}]}),
+        ),
+        (
+            &["key", "list"],
+            "gateway.key.list",
+            json!({}),
+            json!({"credentials":["github"]}),
+        ),
+        (
+            &["key", "add", "github", "--secret-file", "/root/a b"],
+            "gateway.key.add",
+            json!({"credential":"github","secretFile":"/root/a b"}),
+            json!({"credential":"github"}),
+        ),
+        (
+            &["key", "add", "github", "--secret-file", "gateway token"],
+            "gateway.key.add",
+            json!({"credential":"github","secretFile":relative_secret}),
+            json!({"credential":"github"}),
+        ),
+        (
+            &["key", "remove", "github"],
+            "gateway.key.remove",
+            json!({"credential":"github"}),
+            json!({"credential":"github"}),
+        ),
+        (
+            &["credentials", "--scope", "scope-1"],
+            "gateway.credentials",
+            json!({"scopeId":"scope-1"}),
+            json!({"scopeId":"scope-1","environment":{"GITHUB_TOKEN":"fake","GIT_SSL_CAINFO":"/run/agent-sec-gateway/ca-bundle.pem"}}),
+        ),
+        (
+            &["key", "add", "github", "--secret-file", "/root/new"],
+            "gateway.key.add",
+            json!({"credential":"github","secretFile":"/root/new"}),
+            Value::Null,
+        ),
+    ];
+    for (arguments, method, params, result) in cases {
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let mut args: Vec<OsString> = vec![
+            "--socket".into(),
+            socket.as_os_str().into(),
+            "gateway".into(),
+        ];
+        args.extend(arguments.iter().map(OsString::from));
+        let cli = tokio::task::spawn_blocking(move || common::run(&args));
+        let response = if result.is_null() {
+            DaemonResponse::error(
+                RequestId::new("gateway-test").unwrap(),
+                "conflict",
+                "credential already holds a different value",
+            )
+        } else {
+            DaemonResponse::success(RequestId::new("gateway-test").unwrap(), result.clone())
+        };
+        let response = serde_json::to_value(response).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = tokio::io::BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], *method);
+            assert_eq!(request["params"], *params);
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            stream.get_mut().write_all(&bytes).await.unwrap();
+        })
+        .await
+        .unwrap();
+        let output = cli.await.unwrap();
+        assert_gateway_output(&output, result, &response);
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+    }
+}
+
+fn assert_gateway_output(output: &std::process::Output, result: &Value, response: &Value) {
+    if result.is_null() {
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stderr).unwrap(),
+            *response
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            *result
+        );
+    }
+}
+
+#[test]
+fn policy_commands_accept_tagged_cedar_source_files() {
+    let directory = common::Directory::new();
+    let file = directory.0.join("cedar-policy.json");
+    let source = json!({"language":"cedar", "content":{
+        "schema":{"schemaId":"seccore.system", "revision":1},
+        "text":"permit(principal, action, resource);"
+    }});
+    std::fs::write(&file, serde_json::to_vec(&source).unwrap()).unwrap();
+    for operation in ["create", "update"] {
+        let mut args = vec![
+            "agent-sec-cli",
+            "policy",
+            operation,
+            "--name",
+            "sandbox",
+            "--file",
+            file.to_str().unwrap(),
+        ];
+        if operation == "update" {
+            args.extend(["--policy-id", "sandbox-baseline"]);
+        }
+        let request = Cli::parse_from(args).unwrap().request().unwrap();
+        assert_eq!(request.params["template"], source);
+        assert_eq!(request.method, format!("policy.templates.{operation}"));
+    }
+    let mut with_trailing_data = serde_json::to_vec(&source).unwrap();
+    with_trailing_data.extend_from_slice(b" {}");
+    std::fs::write(&file, with_trailing_data).unwrap();
+    assert!(
+        Cli::parse_from([
+            "agent-sec-cli",
+            "policy",
+            "create",
+            "--name",
+            "sandbox",
+            "--file",
+            file.to_str().unwrap()
+        ])
+        .unwrap()
+        .request()
         .is_err()
     );
 }

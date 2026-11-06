@@ -265,6 +265,9 @@ pub struct SkillsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub custom_paths: Vec<String>,
+    /// Additional package roots, below user and extension skills in priority.
+    #[serde(default)]
+    pub system_paths: Vec<String>,
 }
 
 /// Configuration for locally managed MCP client connections.
@@ -568,6 +571,7 @@ struct PartialHooksConfig {
 struct PartialSkillsConfig {
     enabled: Option<bool>,
     custom_paths: Option<Vec<String>>,
+    system_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -744,6 +748,10 @@ fn apply_project_layer(
         );
         layer.hooks = None;
     }
+    // Package roots belong to system/user configuration, not repository content.
+    if let Some(ref mut skills) = layer.skills {
+        skills.system_paths = None;
+    }
     apply_common_layers(config, &layer, false);
 }
 
@@ -842,6 +850,9 @@ fn apply_skills_layer(config: &mut SkillsConfig, layer: &PartialSkillsConfig) {
     }
     if let Some(ref value) = layer.custom_paths {
         config.custom_paths = value.clone();
+    }
+    if let Some(ref value) = layer.system_paths {
+        config.system_paths = value.clone();
     }
 }
 
@@ -1022,13 +1033,12 @@ impl CoreConfig {
     }
 
     pub fn resolve_provider(&self) -> ResolvedProvider {
-        let provider_name = self
-            .ai
-            .active_provider
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+        let provider_name = self.ai.active_provider.as_deref().unwrap_or("default");
+        self.resolve_named_provider(provider_name)
+    }
 
-        let provider_cfg = self.ai.providers.get(&provider_name);
+    pub(crate) fn resolve_named_provider(&self, provider_name: &str) -> ResolvedProvider {
+        let provider_cfg = self.ai.providers.get(provider_name);
 
         // SysOM's API host, kept deliberately separate from `base_url`.
         //
@@ -1131,8 +1141,10 @@ impl ResolvedProvider {
             return false;
         }
         if self.provider_type == "aliyun" {
-            return self.auth_source.as_deref() != Some("ecs_ram_role")
-                && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
+            return !matches!(
+                self.auth_source.as_deref(),
+                Some("ecs_ram_role" | "ecs_identity")
+            ) && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
         }
         self.api_key.is_empty()
     }
@@ -1994,6 +2006,30 @@ active_model = "project-model"
     }
 
     #[test]
+    fn skill_package_paths_merge_without_project_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("system.toml");
+        let user = tmp.path().join("user.toml");
+        let project = tmp.path().join("project.toml");
+        std::fs::write(&system, "[skills]\nsystem_paths = [\"/opt/skills\"]\n").unwrap();
+        std::fs::write(&user, "[skills]\nenabled = true\n").unwrap();
+        std::fs::write(
+            &project,
+            "[skills]\nsystem_paths = [\"/project/packages\"]\ncustom_paths = [\"/project/skills\"]\n",
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(Some(&system), Some(&user), Some(&project), false);
+        assert_eq!(config.skills.system_paths, vec!["/opt/skills"]);
+        assert_eq!(config.skills.custom_paths, vec!["/project/skills"]);
+        assert!(config.skills.enabled);
+
+        std::fs::write(&user, "[skills]\nsystem_paths = []\n").unwrap();
+        let config = CoreConfig::load_from_paths(Some(&system), Some(&user), Some(&project), false);
+        assert!(config.skills.system_paths.is_empty());
+    }
+
+    #[test]
     fn bare_config_preserves_user_provider_but_ignores_project_and_runtime_extensions() {
         let tmp = tempfile::TempDir::new().unwrap();
         let user_path = tmp.path().join("user-config.toml");
@@ -2014,6 +2050,7 @@ enabled = true
 [skills]
 enabled = true
 custom_paths = ["/user/skills"]
+system_paths = ["/opt/skills"]
 "#,
         )
         .unwrap();
@@ -2036,6 +2073,7 @@ active_model = "project-model"
         assert_eq!(config.hooks.enabled_override, Some(false));
         assert!(!config.skills.enabled);
         assert!(config.skills.custom_paths.is_empty());
+        assert!(config.skills.system_paths.is_empty());
         assert!(!config.session.auto_persist);
         assert!(project_path.exists());
     }

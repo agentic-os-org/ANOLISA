@@ -5,7 +5,8 @@
 **OS-level security kernel for AI Agents.** Provides defense in depth for Agent
 workloads: prompt injection detection, code scanning, PII detection, skill
 integrity tracking, sandbox isolation, and a local security event store.
-Everything runs locally with no Token cost. Applicable to
+Security scanning runs locally with no Token cost; optional Intent proposals
+use a cloud model and may incur charges. Applicable to
 Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
 listed below.
 
@@ -14,6 +15,15 @@ listed below.
 **AgentSecCore (ANOLISA)** is listed in the [AARM Builder Registry](https://aarm.dev/builders/agentseccore-anolisa) with **Aligned** status.
 
 AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-sec-core/owasp-agentic-top10.md).
+
+Rust V2 supports `agent-sec-cli sandbox run --permissions permissions.json -- command`
+for local execution with explicit filesystem and network permissions, without a
+daemon. See the [sandbox guide](../../docs/user-guide/en/agent-sec-core/sandbox.md)
+for the permission format, runtime requirements and isolation boundaries.
+Applications can add policy authorization through `asc-pep-runtime::PepRuntime`,
+using PAP-managed Cedar policies selected by daemon `--authorization-config`.
+Successful Policy updates apply to subsequent authorization requests.
+Cosh can opt into this flow with `AGENT_SEC_COSH_SANDBOX_PERMISSIONS`, using its native approval UI.
 
 ## Background
 
@@ -37,7 +47,7 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 | **Skill Ledger** | Ed25519-signed skill integrity ledger with an append-only version chain | `agent-sec-cli skill-ledger` |
 | **Observability** | Agent lifecycle event recording, session debrief, and an interactive review TUI | `agent-sec-cli observability` |
 | **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
-| **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
+| **Sandbox** | Command isolation with explicit filesystem and network permissions (bubblewrap + seccomp) | `agent-sec-cli sandbox run` |
 
 The V2 source build installs `agent-sec-daemon` as the host-level
 `agent-sec-core.service` systemd unit. The V2 migration retains the hook-facing
@@ -86,15 +96,60 @@ The default Policy database can fall back to `/var/lib/agent-sec/policy` when it
 Conflicting or bypassed existing databases
 refuse startup; explicit `AGENT_SEC_DATA_DIR` remains a fixed path. See
 [Policy storage](../../docs/user-guide/en/agent-sec-core/policy-cli.md#policy-database-location).
-PolicyTemplates are reusable policies with general rules; the AgentSight Adapter
-currently executes only file-deletion block rules. Scopes save immutable Policy snapshots and
-own automatic Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
+PolicyTemplates are reusable policies with general rules; the PEP Translator
+supports native JSON file-deletion block rules. Policy create/update also accepts Cedar
+source envelopes with an exact schema reference. Cedar admission and source persistence are
+available; Cedar `forbid` deletion/ordinary-write restrictions can be translated and deployed. Native JSON requests and saved
+snapshots retain their format. Scopes save immutable Policy snapshots and own automatic
+Binding creation, reconciliation and cleanup. To authorize non-root Policy CLI callers, configure
 the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
+
+**Breaking change:** `scope create --cgroup-id` has been removed because cgroup
+assignments were not supported. Update scripts to select the intended processes
+with `--pid`, `--process-name`, or `--executable`.
+
+The V2 **Secret Gateway preview** keeps real GitHub credentials out of Agent processes.
+The V2 `agent-sec-core` RPM starts the base daemon automatically but leaves the gateway off; root installs
+mitmproxy explicitly. Raw packages include the same gateway assets but start neither service; the daemon
+alone controls the gateway lifecycle, and uninstall refuses to proceed if routing withdrawal fails.
+`gateway key add github --secret-file /root/github.token` imports without granting access: the same
+secret is idempotent, and a different value is rejected without overwrite.
+Replacement requires remove then add, a new Scope and updated Agent configuration; old fakes are
+permanently retired, with no automatic rotation. Existing native Policy JSON authorizes `network/use_credential` HTTPS
+requests, and a Scope pins that Policy revision with a non-root owner and process selector.
+Prepare the Scope, enable the gateway, query `gateway credentials --scope <scopeId>` as its owner,
+and configure the Agent's fake and CA before starting it. Discovery automatically attaches matching
+instances; it does not guarantee first-packet protection. Instance restarts retain the Scope fake;
+Scope deletion revokes only its fakes, while `gateway key remove github` retires the credential globally.
+Read-only status and credential queries are UID-scoped: status returns `{enabled, ready, scopes}`
+with `{scopeId, bindings}` entries, and credentials returns `{scopeId, environment}`. `ready` requires
+an enabled gateway, a passing read-only cgroup v2 check, active proxy unit, matching loaded generation
+and available CA. Enable checks cgroup v2 before changing enabled state; publication (including enabled
+recovery), enabled status queries and credential queries recheck it. Default-off recovery skips this
+preflight. No cgroup v1 fallback or mount changes occur; nftables `socket cgroupv2` is checked only by
+actual rule application, not an independent preflight. Wait separately for instance Binding `READY`.
+Key list returns active IDs only (`{"credentials":["github"]}`); add/remove return `{"credential":"github"}` and
+successful enable/disable return `{}`. See the
+[Secret Gateway design (Chinese)](docs/design/V2_SECRET_GATEWAY_DESIGN_zh.md).
 
 V2 uses native OTel for local log correlation only; it exposes no OTLP exporter.
 Pass Agent attribution through the existing `--trace-context` JSON option, or an
 upstream W3C parent through `--otel-context` (version 1). `RUST_LOG=info` enables
 bounded correlation records on stderr. See [context examples and logging limits](v2/README.md#native-opentelemetry-tracing).
+
+`agent-sec-cli intent propose` generates an unapproved Cedar candidate from
+composable read, write-operation, execution and whole-network rules.
+The command takes only `--task` and `--ttl`: no path metadata is collected,
+and the program adds no permits or forbids of its own, so the model's
+policy is the whole authorization.
+Enable `ASC_INTENT_ENABLED=true` and configure `DASHSCOPE_API_KEY` in the daemon
+environment. Task text goes to the cloud; file contents are not read or sent.
+The model writes native Cedar from draft v1 without per-field evidence; Rust
+parses and validates it without rewriting its meaning. Pure prohibitions add no
+permissions; unsupported constraints are rejected.
+Upgrade CLI and daemon together for request v1/candidate v1; other versions are
+incompatible. Candidates do not approve, install or enforce policies. See the
+[Intent reference](../../docs/user-guide/en/agent-sec-core/policy-cli.md#intent-propose-a-candidate-from-a-task).
 
 ## Security Architecture
 
@@ -156,7 +211,7 @@ agent-sec-core/
 ├── scripts/                   # CLI/daemon wrappers and CI helpers
 ├── docs/design/               # Design documents
 ├── tests/                     # Unit, integration, packaging, and e2e tests
-├── .anolisa/component.toml    # ANOLISA component contract
+├── packaging/anolisa/         # ANOLISA component contract
 ├── LICENSE
 ├── Makefile
 ├── agent-sec-core.spec.in     # RPM packaging spec template
@@ -238,7 +293,7 @@ agent-sec-cli --version
 `agent-sec-core`:
 
 ```bash
-sudo yum install anolisa agent-sec-core
+sudo yum install anolisa agent-sec-core agent-sec-plugins agent-sec-skills
 sudo anolisa --install-mode system adopt sec-core
 ```
 
@@ -388,7 +443,7 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 loads custom business rules from `/etc/agent-sec/pii-checker/rules.yaml` at daemon startup;
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` selects an alternative. Restart to update.
-V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.0.0"`;
+V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.1.1"`;
 a `pass` result with partial coverage does not establish complete detection. This phase preserves
 Hook contracts without switching live hosts or adding PDP enforcement.
 The shared CLI `--trace-context` adapter propagates attribution through the top-level OTel
@@ -398,6 +453,9 @@ OpenClaw records model-entry scans as `source=model_input` on stable `>=2026.5.1
 this input hook scans only the current `prompt`, excluding system prompts and history.
 Older supported hosts retain inbound scanning. Input blocking depends on policy,
 and tool-output hooks remain observation-only.
+
+Fixture words such as `test` lower confidence only when matched as whole words.
+`latest 13812345678` retains its phone finding; `test-only` keeps its existing fixture treatment.
 
 Details: [PII Checker User Guide](../../docs/user-guide/en/agent-sec-core/pii-checker.md).
 

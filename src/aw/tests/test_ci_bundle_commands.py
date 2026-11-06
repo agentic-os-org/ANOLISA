@@ -50,14 +50,14 @@ class InstalledComparisonTests(GateFixture):
 
 
 class BundleCommandTests(GateFixture):
-    def prepare(self, missing_launcher: str = "") -> tuple[str, dict[str, str], Path]:
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+    def prepare(self, missing_provider: str = "") -> tuple[str, dict[str, str], Path]:
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         step = workflow.split(
             "      - name: Verify installed packages and service lifecycle\n", 1
         )[1].split("      - uses: actions/upload-artifact@v4\n", 1)[0]
         script = textwrap.dedent(step.split("        run: |\n", 1)[1])
-        preview = self.root / "preview output"
-        packages = preview / "packages"
+        output = self.root / "package output"
+        packages = output / "packages"
         packages.mkdir(parents=True)
         capture = self.root / "aw-commands.jsonl"
         launcher = f"#!{sys.executable}\n" + textwrap.dedent('''\
@@ -73,46 +73,56 @@ class BundleCommandTests(GateFixture):
             def option(name):
                 return args[args.index(name) + 1]
             if args[0] == "install":
-                bundle = Path(option("--bundle"))
-                prefix = Path(option("--prefix"))
+                bundle, prefix = Path(option("--bundle")), Path(option("--prefix"))
                 assert bundle.is_absolute() and prefix.is_absolute()
-                assert bundle / "aw" == Path(sys.argv[0])
-                parts = ["core", "sec-core", "tokenless"] if bundle.name.startswith("aw-all-in-one-") else [bundle.name.removeprefix("aw-provider-").removeprefix("aw-").removesuffix("-fixture")]
-                records = prefix / ".aw-packages"
+                assert not (bundle / "manifest.json").exists()
+                description = json.loads((bundle / "package.json").read_text())
+                assert description["provider"]["protocol"] == "aw-provider/v1alpha1"
+                records = prefix / "fixture-records"
                 records.mkdir(parents=True, exist_ok=True)
-                for part in parts:
-                    (records / (part + ".json")).write_text(part)
-                if "core" in parts:
-                    (prefix / "bin").mkdir(exist_ok=True)
-                    shutil.copy2(sys.argv[0], prefix / "bin/aw")
-                if "tokenless" in parts:
-                    payload = prefix / "libexec/aw/providers/tokenless"
-                    payload.mkdir(parents=True, exist_ok=True)
-                    for name in ("tokenless", "rtk"):
-                        (payload / name).write_text("fixture")
+                (records / (description["package_id"] + ".json")).write_text(json.dumps(description))
+                shutil.copytree(bundle / "payload", prefix, dirs_exist_ok=True)
             elif args[:2] == ["config", "init"]:
-                config = Path(option("--config"))
-                config.write_text("fixture")
-                Path(option("--state-dir")).mkdir()
+                Path(option("--config")).write_text("fixture")
             elif args[:2] == ["config", "validate"]:
                 assert Path(option("--config")).is_file()
             elif args[:2] == ["list", "--installed"]:
-                prefix = Path(option("--prefix"))
-                packages = [{"package_id":path.stem,"version":"1.0.0","os":"linux","arch":"x86_64","files":{},"source":{"source_commit":"a" * 40},"dependencies":[]} for path in sorted((prefix / ".aw-packages").iterdir())]
-                print(json.dumps({"format":1,"status":"succeeded","result":{"inventory":{"source":"database","installations":[{"packages":packages}]}}}))
+                records = Path(option("--prefix")) / "fixture-records"
+                packages = [{**json.loads(path.read_text()),"source":{"source_commit":"a" * 40}}
+                            for path in sorted(records.iterdir())]
+                print(json.dumps({"format":1,"status":"succeeded","result":{"inventory":{
+                    "source":"database","installations":[{"installation_id":"fixture","packages":packages}]}}}))
             elif args[0] == "uninstall":
                 assert "--yes" in args
-                shutil.rmtree(option("--prefix"))
+                prefix = Path(option("--prefix"))
+                shutil.rmtree(prefix / "libexec")
+                shutil.rmtree(prefix / "fixture-records")
             else:
                 raise AssertionError(args)
             ''')
-        for name in ("aw-core", "aw-provider-sec-core", "aw-provider-tokenless", "aw-all-in-one"):
-            bundle = self.root / "source bundles" / f"{name}-fixture"
+        sources = self.root / "source bundles"
+        for name in ("aw-core", "aw-provider-sec-core", "aw-provider-tokenless"):
+            bundle = sources / f"{name}-fixture"
             bundle.mkdir(parents=True)
-            (bundle / "manifest.json").write_text("{}")
-            if name != missing_launcher:
-                (bundle / "aw").write_text(launcher)
-                (bundle / "aw").chmod(0o755)
+            if name == "aw-core":
+                (bundle / "bin").mkdir()
+                (bundle / "bin/aw").write_text(launcher)
+                (bundle / "bin/aw").chmod(0o755)
+                (bundle / "Makefile").write_text(
+                    'install:\n\tmkdir -p "$(PREFIX)/bin"\n\tcp bin/aw "$(PREFIX)/bin/aw"\n'
+                )
+            selected = (name.removeprefix("aw-provider-"),) if name.startswith("aw-provider-") else ()
+            for provider in selected:
+                identifier = "aw-provider-" + provider
+                package = bundle
+                payload = package / "payload/libexec/aw/providers" / provider / identifier
+                payload.parent.mkdir(parents=True)
+                payload.write_text("Provider fixture")
+                if name != missing_provider:
+                    (package / "package.json").write_text(json.dumps({
+                        "package_id":identifier,"version":"1.0.0","os":"linux","arch":"x86_64",
+                        "files":{},"dependencies":[],"provider":{"protocol":"aw-provider/v1alpha1"}
+                    }))
             with tarfile.open(packages / f"{name}-fixture.tar.gz", "w:gz") as archive:
                 archive.add(bundle, arcname=bundle.name)
         (packages / "SHA256SUMS").write_text("checksums exercised by Linux acceptance")
@@ -137,7 +147,7 @@ class BundleCommandTests(GateFixture):
         environment = {
             **os.environ,
             "PATH": str(binary) + os.pathsep + os.environ["PATH"],
-            "AW_PREVIEW_DIR": str(preview),
+            "AW_PACKAGE_DIR": str(output),
             "AW_PACKAGE_COMMANDS": str(capture),
             "GITHUB_WORKSPACE": str(self.root / "container workspace"),
         }
@@ -146,7 +156,7 @@ class BundleCommandTests(GateFixture):
         shutil.copy2(AW / "scripts/compare_installed.py", helper)
         return script, environment, capture
 
-    def test_package_acceptance_uses_each_bundles_aw_and_confirms_every_removal(self) -> None:
+    def test_core_uses_make_and_aw_only_installs_provider_directories(self) -> None:
         script, environment, capture = self.prepare()
         subprocess.run(
             ["/bin/bash", "-eu", "-c", script], env=environment, cwd=self.root,
@@ -154,20 +164,17 @@ class BundleCommandTests(GateFixture):
         )
         calls = [json.loads(line) for line in capture.read_text().splitlines()]
         installs = [call for call in calls if call["args"][0] == "install"]
-        self.assertEqual(len(installs), 6)
-        self.assertEqual(
-            {Path(call["program"]).parent.name for call in installs},
-            {"aw-core-fixture", "aw-provider-sec-core-fixture", "aw-provider-tokenless-fixture", "aw-all-in-one-fixture"},
-        )
+        self.assertEqual(len(installs), 4)
+        self.assertTrue(all("aw-provider-" in call["args"][2] for call in installs))
         removals = [call for call in calls if call["args"][0] == "uninstall"]
-        self.assertEqual(len(removals), 4)
+        self.assertEqual(len(removals), 2)
         self.assertTrue(all("--yes" in call["args"] for call in removals))
         self.assertEqual(sum(call["args"][:2] == ["config", "init"] for call in calls), 2)
         self.assertEqual(sum(call["args"][:2] == ["config", "validate"] for call in calls), 2)
-        self.assertEqual(sum(call["args"][:2] == ["list", "--installed"] for call in calls), 3)
+        self.assertEqual(sum(call["args"][:2] == ["list", "--installed"] for call in calls), 2)
         self.assertTrue(all(Path(call["program"]).name == "aw" for call in calls))
 
-    def test_missing_provider_bundle_launcher_fails_before_installation(self) -> None:
+    def test_missing_provider_description_fails_before_installation(self) -> None:
         script, environment, capture = self.prepare("aw-provider-tokenless")
         result = subprocess.run(
             ["/bin/bash", "-eu", "-c", script], env=environment, cwd=self.root,
@@ -178,7 +185,7 @@ class BundleCommandTests(GateFixture):
 
     def test_ambiguous_bundle_versions_fail_before_installation(self) -> None:
         script, environment, capture = self.prepare()
-        packages = Path(environment["AW_PREVIEW_DIR"]) / "packages"
+        packages = Path(environment["AW_PACKAGE_DIR"]) / "packages"
         with tarfile.open(packages / "aw-core-other.tar.gz", "w:gz") as archive:
             archive.add(self.root / "source bundles/aw-core-fixture", arcname="aw-core-other")
         result = subprocess.run(

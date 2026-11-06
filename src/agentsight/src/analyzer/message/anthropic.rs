@@ -586,6 +586,33 @@ mod tests {
         assert_eq!(response.usage.output_tokens, 0);
     }
 
+    /// A compatible gateway may spell "no counters reported" as an explicit
+    /// `"usage": null` instead of `{}` or an absent key. The response is
+    /// otherwise complete, so failing the whole deserialization dropped the
+    /// answer text and id along with the counters.
+    #[test]
+    fn test_parse_response_with_null_usage_keeps_the_answer() {
+        let json = serde_json::json!({
+            "id": "msg_null_usage",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "the answer"}],
+            "model": "claude-3-opus-20240229",
+            "stop_reason": "end_turn",
+            "usage": null
+        });
+
+        let response = AnthropicParser::parse_response(&json)
+            .expect("a null usage must not fail the whole response");
+        assert_eq!(response.id, "msg_null_usage");
+        assert_eq!(response.usage.input_tokens, 0);
+        assert_eq!(response.usage.output_tokens, 0);
+        assert!(matches!(
+            &response.content[0],
+            AnthropicContentBlock::Text { text, .. } if text == "the answer"
+        ));
+    }
+
     /// A response that omits `usage` entirely (as likely as `"usage": {}`
     /// when the body is incomplete) must still parse and keep the response
     /// id rather than failing deserialization (issue #7553 review).

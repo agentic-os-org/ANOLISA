@@ -16,6 +16,13 @@ pub(super) fn event_may_render_structured_surface(event: &GovernedEvent) -> bool
     classification::event_may_render_structured_surface(event)
 }
 
+pub(crate) fn record_trial_cancellation(active_run: &mut ActiveAgentRun, event: AgentEvent) {
+    let governed =
+        govern_agent_events_with_language(&[event], &Policy::default(), active_run.language).events;
+    remember_agent_activity(active_run, &governed);
+    active_run.governed_events.extend(governed);
+}
+
 pub(crate) fn render_active_agent_event<W: Write>(
     active_run: &mut ActiveAgentRun,
     event: AgentEvent,

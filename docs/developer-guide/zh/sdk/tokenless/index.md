@@ -16,7 +16,7 @@ AgentScope 层依赖完全相同版本的通用 SDK，并把 Tokenless 操作交
 
 ## 第一层：通用 SDK
 
-`anolisa-tokenless` Wheel 让 Python 应用可以在进程内运行 Tokenless。把 Tokenless 接入
+`anolisa-tokenless` Wheel 让 Python 应用无需系统 CLI 即可运行 Tokenless。把 Tokenless 接入
 Agent 生命周期时使用 `TokenlessSdk`。不需要接入生命周期、只想执行某一项具体操作时
 使用 `TokenlessRuntime`，例如单独压缩一个响应或恢复一条 Stash 内容。只查询统计时
 使用 `TokenlessStats`。
@@ -37,20 +37,20 @@ Tokenless GitHub Release 会附带官方 SDK Wheel。Wheel 需要 CPython 3.11 �
 
 Intel Mac 和 Windows x64 Wheel 从 v0.9.0 开始提供。
 
-下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.9.0 安装到虚拟环境：
+下文的生命周期 API 示例要求 Tokenless 0.8.0。在 Linux x86_64 上把 v0.9.3 安装到虚拟环境：
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless-0.9.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.3/anolisa_tokenless-0.9.3-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 Linux 产物面向兼容 `manylinux_2_17` 的 glibc 发行版，不支持 Alpine Linux 等 musl 发行版。
 Release 同时提供 `SHA256SUMS-python-wheels.txt`，可用于校验下载内容。
 
-Wheel 包含原生 Tokenless Runtime 和匹配的 RTK 可执行文件，不需要 `tokenless` CLI、系统
-RTK 或独立 TOON 可执行文件。
+Wheel 包含原生 Tokenless Runtime，以及运行改写后命令的匹配 `tokenless` 可执行文件，
+不需要系统 `tokenless` CLI、RTK 二进制或独立 TOON 可执行文件。
 
 ### 从源码构建
 
@@ -70,7 +70,7 @@ python3 -m venv /tmp/tokenless-sdk
 make python-wheel MATURIN=maturin
 ```
 
-Pip 会以展开形式安装 Wheel，从而为命令改写提供 Wheel 内置 RTK 所需的稳定可执行路径。
+Pip 会以展开形式安装 Wheel，从而为改写后的命令提供 Wheel 内置 `tokenless` 的稳定可执行路径。
 
 ### 选择 API
 
@@ -230,9 +230,15 @@ call = await sdk.pre_tool(
 ```
 
 Core 只处理显式指定的 `command_field`。如果 RTK 产生改写，Response 的 Action 为
-`replace_arguments`，参数包含 Wheel 内置 RTK 路径，并返回 `output_optimization=rtk`。
+`replace_arguments`，参数通过 Wheel 内置的 `tokenless` 路径以 `tokenless rtk` 形式执行，并返回
+`output_optimization=rtk`。
 应执行返回参数，并把该优化状态传给 PostTool。关闭 RTK 是 Adapter 的选择：
 `TokenlessConfig.rtk_enabled` 为 false 时不要调用 `pre_tool()`。
+
+每次调用 `pre_tool()` 都会启动 Wheel 内置的 `tokenless compress` 子进程，因为 RTK 假定一条命令
+对应一个进程：新信任的过滤规则从下一次调用起生效，不需要重启宿主。子进程有 5 秒时限。超时或失败时，SDK
+会杀掉它及其启动的进程，在 `anolisa_tokenless.sdk` logger 上记录一次警告，并以 `passthrough` 返回原参数，
+工具调用照常执行。只有 CLI 无法读取或解码的请求才会抛出 `ValueError`。
 
 #### 工具调用后
 
@@ -289,7 +295,7 @@ config = TokenlessConfig(
 名称必须由 1–64 个 ASCII 字母、数字、下划线或连字符组成。这也收紧了已有
 `retrieve_tool_name` 配置的校验：含点号、冒号或空格的名称必须在升级前重命名。
 `rtk_enabled` 控制 SDK 是否为 PreTool
-解析 Wheel 内置 RTK。压缩阈值、内容检测、TOON 选择、诊断、授权和 Stash 策略都属于 Core
+解析 Wheel 内置的 `tokenless` 可执行文件。压缩阈值、内容检测、TOON 选择、诊断、授权和 Stash 策略都属于 Core
 行为，不是 Python 配置。
 
 ### Runtime 直接调用示例

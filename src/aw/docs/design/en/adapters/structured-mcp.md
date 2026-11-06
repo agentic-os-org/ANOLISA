@@ -53,6 +53,25 @@ the remote server owns cancellation and cleanup of its own operation.
 
 ## Qoder SDK 1.0.56 / Worker 1.1.78
 
+Ordinary resident Queries use unmodified SDK/Worker files. Public PreToolUse
+checks capture the observed input; native Hook and permission rewrites afterward
+are outside the final-input guarantee. Policy Post records retain that checked
+snapshot. Identity, cancellation and callback retirement remain enforced.
+
+For native in-process SDK servers, the resident delegates model policy callbacks
+to the SDK handler boundary. The SDK performs input-schema parsing first. AW then
+captures the selected handler and parsed arguments, registers a Query-owned child
+invocation, and performs Pre checks. Handler completion releases the SDK waiter
+so native output-schema validation and exception conversion can form the final
+response. AW applies Post to that response before dispatch returns. The tracked
+handler/response barrier retains ownership through cancellation and finalizers;
+strict Post closes native transport before delivery. An AW runtime wrapper on
+`executeToolHandler` checks the registration actually selected by native dispatch
+and pins its callback through Pre admission. Replacing that registration during
+pending dispatch rejects the call before handler execution; subsequent requests
+can use the new registration. Native schema errors before handler entry retain
+their error envelope and Post checks. A closed Query leaves the server reusable.
+
 Use the existing `createSdkMcpServer()` export from AW's managed Qoder bridge.
 The factory accepts `parentIdentity: "query"` (default) or `"required"`.
 `required` rejects before native server creation because the pinned Worker does

@@ -11,16 +11,22 @@ import socket
 import sys
 import tempfile
 import unittest
-import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sec_core"))
 from agents import configure_qwenpaw
 from runtime import Processes, await_condition, checked, save
+from native_app_config import ready as native_ready, stage_user_configuration, turn, dynamic_mcp
 
 
 class AppReloadTests(unittest.TestCase):
     def test_policy_updates_after_successful_and_error_native_tools(self):
-        evidence = Path(os.environ["AW_TEST_OUTPUT"]) / "app-reload"
+        self.check_policy_updates(reloadable=True)
+
+    def test_resident_policy_updates_preserve_native_configuration(self):
+        self.check_policy_updates(reloadable=False)
+
+    def check_policy_updates(self, *, reloadable):
+        evidence = Path(os.environ["AW_TEST_OUTPUT"]) / ("app-reload" if reloadable else "app-resident")
         evidence.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="aw-app-reload-") as directory:
             root = Path(directory)
@@ -36,6 +42,23 @@ class AppReloadTests(unittest.TestCase):
             config = root / "current.json"
             try:
                 argv, ports = configure_qwenpaw(root, self.qwenpaw, environment, processes)
+                user_files = stage_user_configuration(root) if not reloadable else {}
+                readable = root / "work/readable.txt"
+                readable.write_text("native read success")
+                native_config = None
+                baseline = None
+                if not reloadable:
+                    native = processes.start("native-baseline", argv, ports[:1])
+                    await_condition(lambda: native_ready(ports[0]), 45, "native App readiness")
+                    baseline = turn(self, root, evidence, ports[0], "baseline", "read_file", {"file_path": str(readable)})
+                    self.assertEqual(baseline["state"], "success")
+                    dynamic_mcp(self, root, evidence, ports[0], self.qwenpaw.parent / "python", "baseline", processes)
+                    processes.stop(native)
+                    baseline_order = (root / "work/native-order.log").read_text().splitlines()
+                    native_config = (root / "home/config.json").read_bytes()
+                    # Native first startup may normalize its own schema. Compare AW
+                    # against that native result, retaining plugin extension fields.
+                    self.assertEqual(json.loads(native_config)["plugins"]["native-observer"]["future"], [1, 2])
                 document = {
                     "apiVersion": "aw/v1alpha1", "kind": "AWConfiguration",
                     "metadata": {"name": "app-reload"}, "spec": {
@@ -50,7 +73,7 @@ class AppReloadTests(unittest.TestCase):
                 daemon = processes.start("daemon", [aw, "serve", "--config", config, "--state-dir", root / "state"])
                 await_condition(lambda: (root / "state/aw.sock").exists() or processes.exited(daemon), 5, "AW startup")
                 self.assertFalse(processes.exited(daemon))
-                child = processes.start("app", [aw, "run", "--config", config, "--agent", "native", "--reloadable"], ports[:1])
+                child = processes.start("app", [aw, "run", "--config", config, "--agent", "native", *(["--reloadable"] if reloadable else [])], ports[:1])
 
                 def status():
                     return json.loads(checked([aw, "status", "--config", config], env=environment).stdout)["result"]
@@ -69,44 +92,23 @@ class AppReloadTests(unittest.TestCase):
                     "timeout_ms": 500, "max_output_bytes": 4096, "config": {},
                 }
                 blocked["spec"]["events"]["tool.before"] = {"enabled": True, "steps": [
-                    {"id": "deny", "provider": "deny", "native": {}, "on_error": "block"},
+                    {"id": "deny", "provider": "deny", "native": {}, "on_error": "block", "match": {"tools": ["native:qwenpaw:execute_shell_command"]}},
                 ]}
-                readable = root / "work/readable.txt"
-                readable.write_text("native read success")
                 cases = (
                     (blocked, "execute_shell_command", "denied", None),
                     (document, "execute_shell_command", "success", None),
-                    (document, "read_file", "success", readable),
-                    (document, "read_file", "error", root / "work/absent.txt"),
+                    (blocked, "read_file", "success", readable),
+                    (blocked, "read_file", "error", root / "work/absent.txt"),
                     (blocked, "execute_shell_command", "denied", None),
                 )
                 for index, (policy, tool, expected_state, path) in enumerate(cases):
-                    tool_request = root / "tool-call.json"
-                    if path is None:
-                        tool_request.unlink(missing_ok=True)
-                    else:
-                        save(tool_request, {"name": tool, "arguments": {"file_path": str(path)}})
                     candidate = root / "next.json"
                     save(candidate, policy)
                     changed = json.loads(checked([aw, "update", "--config", config, "--agent", "native", "--policy", candidate], env=environment).stdout)
-                    payload = {"session_id": f"reload-{index}", "user_id": "aw-test", "input": [
-                        {"role": "user", "content": [{"type": "text", "text": f"Use {tool} once then stop."}]},
-                    ]}
-                    request = urllib.request.Request(
-                        f"http://127.0.0.1:{ports[0]}/api/console/chat",
-                        data=json.dumps(payload).encode(),
-                        headers={"Content-Type": "application/json", "X-Agent-Id": "default"},
-                    )
-                    with urllib.request.urlopen(request, timeout=45) as response:
-                        events = response.read(2 * 1024 * 1024)
-                    (evidence / f"turn-{index}.log").write_bytes(events)
-                    frames = [json.loads(line[6:]) for line in events.splitlines() if line.startswith(b"data: {")]
-                    completed = [frame for frame in frames if frame.get("object") == "response" and frame.get("status") == "completed"]
-                    self.assertEqual(len(completed), 1)
-                    outputs = [message for message in completed[0]["output"] if message["type"] == "plugin_call_output"]
-                    self.assertEqual(len(outputs), 1)
-                    result = outputs[0]["content"][0]["data"]
-                    self.assertEqual(result["name"], tool)
+                    arguments = {"command": (root / "tool-command.txt").read_text(), "timeout": 5} if path is None else {"file_path": str(path)}
+                    result = turn(self, root, evidence, ports[0], str(index), tool, arguments)
+                    if baseline is not None and path == readable:
+                        self.assertEqual(result["output"], baseline["output"])
                     self.assertEqual(result["state"], expected_state)
                     self.assertEqual(marker.exists(), index == 1)
 
@@ -121,13 +123,22 @@ class AppReloadTests(unittest.TestCase):
                     self.assertEqual(state["policy_revision"], changed["policy_revision"])
                     snapshots.append(state)
                     marker.unlink(missing_ok=True)
+                if not reloadable:
+                    dynamic_mcp(self, root, evidence, ports[0], self.qwenpaw.parent / "python", "managed", processes)
                 processes.stop(child)
                 self.assertEqual(status()["bindings"], 0)
+                if native_config is not None:
+                    self.assertEqual((root / "home/config.json").read_bytes(), native_config)
+                    for path, original in user_files.items():
+                        self.assertEqual(path.read_bytes(), original)
+                    order = (root / "work/native-order.log").read_text().splitlines()
+                    self.assertEqual(order.count("before:read_file"), 3)
+                    self.assertEqual(order.count("after:read_file"), baseline_order.count("after:read_file") + 2)
                 save(evidence / "result.json", {"passed": True, "same_process": True, "turns": snapshots})
             finally:
                 processes.close()
                 self.assertFalse((root / "state/aw.sock").exists())
-                self.assertFalse((root / "home/plugins/aw-native").exists())
+                self.assertFalse(list((root / "home/plugins").glob("aw-native-*")))
                 for port in ports:
                     with socket.socket() as connection:
                         connection.settimeout(0.2)

@@ -1,8 +1,12 @@
-//! AW Provider projection over the public agent-sec-cli scan-code command.
+//! AW Provider projection over public agent-sec-cli scans and Skill checks.
 
 mod config;
 pub mod health;
+pub mod pii;
+mod prompt;
 mod scan;
+mod skill;
+mod tool_pii;
 mod trace_context;
 
 use std::io::{Read, Write};
@@ -75,8 +79,13 @@ fn dispatch(
         return Ok(serde_json::Map::from_iter([(
             "operations".to_owned(),
             json!([
+                {"name":"check_skill", "events":["tool.before"], "effects":["observe","block"]},
                 {"name":"scan_code", "events":["tool.before"], "effects":["observe","block"]},
-                {"name":"observe_tool", "events":["tool.after"], "effects":["observe"]}
+                {"name":"observe_tool", "events":["tool.after"], "effects":["observe"]},
+                {"name":"scan_prompt", "events":["input.submit"], "effects":["observe","block"]},
+                {"name":"scan_user_input", "events":["input.submit"], "effects":["observe","block"]},
+                {"name":"scan_tool_input", "events":["tool.before"], "effects":["observe","block"]},
+                {"name":"scan_tool_output", "events":["tool.after"], "effects":["observe","replace_result"]}
             ]),
         )]));
     }
@@ -86,8 +95,81 @@ fn dispatch(
     }
     let remaining = remaining_budget(value, timeout, started)?;
     let event = &value["event"];
+    if matches!(
+        value["operation"].as_str(),
+        Some("scan_tool_input" | "scan_tool_output")
+    ) {
+        let fields = tool_pii::invoke(value, &config, cli, socket, remaining)?;
+        remaining_budget(value, timeout, started)?;
+        return Ok(fields);
+    }
     let (effect, reason) = match (value["operation"].as_str(), event["name"].as_str()) {
+        (Some("scan_prompt"), Some("input.submit")) => {
+            let mode = config.prompt.as_ref().ok_or("prompt_not_configured")?.mode;
+            if mode == Mode::Block && !admitted(value, "block") {
+                return Err("block_not_admitted");
+            }
+            let text = event["input"]["text"]
+                .as_str()
+                .ok_or("invalid_user_input")?;
+            let verdict = prompt::call(
+                cli,
+                socket,
+                text,
+                &trace_context::from_event(event),
+                remaining,
+            )?;
+            match (mode, verdict) {
+                (Mode::Block, scan::Verdict::Risk) => ("block", "prompt_risk"),
+                (_, scan::Verdict::Risk) => ("observe", "prompt_risk"),
+                (_, scan::Verdict::Pass) => ("observe", "prompt_pass"),
+            }
+        }
+        (Some("scan_user_input"), Some("input.submit")) => {
+            let mode = config.pii.as_ref().ok_or("pii_not_configured")?.input_mode;
+            if mode == Mode::Block && !admitted(value, "block") {
+                return Err("block_not_admitted");
+            }
+            let text = event["input"]["text"]
+                .as_str()
+                .ok_or("invalid_user_input")?;
+            let verdict = pii::call(
+                cli,
+                socket,
+                text,
+                pii::Source::UserInput,
+                &trace_context::from_event(event),
+                remaining,
+            )
+            .map_err(|error| error.code())?;
+            match (mode, verdict) {
+                (Mode::Block, pii::Verdict::Risk) => ("block", "pii_risk"),
+                (_, pii::Verdict::Risk) => ("observe", "pii_risk"),
+                (_, pii::Verdict::Pass) => ("observe", "pii_pass"),
+            }
+        }
         (Some("observe_tool"), Some("tool.after")) => ("observe", "tool_observed"),
+        (Some("check_skill"), Some("tool.before")) => {
+            if config.mode == Mode::Block && !admitted(value, "block") {
+                return Err("block_not_admitted");
+            }
+            if !config.skill {
+                return Err("skill_check_disabled");
+            }
+            if event["tool"]["native_name"] != "Skill"
+                && !(event["agent"]["adapter"] == "hermes"
+                    && event["tool"]["native_name"] == "skill_view")
+            {
+                return Err("skill_tool_unmapped");
+            }
+            let reason = skill::call(cli, socket, event, remaining)?;
+            let effect = if config.mode == Mode::Block && reason != "skill_pass" {
+                "block"
+            } else {
+                "observe"
+            };
+            (effect, reason)
+        }
         (Some("scan_code"), Some("tool.before")) => {
             // Admission of block is required for this configured mode, even if
             // this particular input later turns out to be harmless.

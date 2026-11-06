@@ -7,7 +7,8 @@
 # Any field left unset falls back to its built-in default; a missing
 # /etc/ws-ckpt/config.toml is equivalent to all defaults.
 #
-# Apply edits without restart: `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
+# Apply scheduling edits with `systemctl reload ws-ckpt` (or `ws-ckpt reload`).
+# Backend type, btrfs_mount and image size settings require a daemon restart.
 # Most fields can also be updated via `ws-ckpt config --<flag>`, which writes
 # /etc/ws-ckpt/config.toml without comments — this sample stays as the
 # canonical reference for available options.
@@ -17,7 +18,8 @@
 # auto_cleanup_keep = 20              # integer = count mode (keep N unpinned); 
                                       # string = age mode (delete older than duration, e.g. auto_cleanup_keep = "30d"; units s/m/h/d/w).
 # auto_cleanup_interval_secs = 86400  # Auto-cleanup interval (seconds, default 24h)
-# health_check_interval_secs = 300    # Health check interval (seconds)
+# health_check_interval_secs = 300    # Periodic health diagnostics interval (seconds)
+                                      # 0 disables diagnostics; advisory cache still refreshes every 300 seconds.
 
 # ── Backend selection ──
 # Section headers below are always active so that uncommenting a single
@@ -30,10 +32,17 @@
 # NOTE: The following fields only take effect during daemon bootstrap.
 # To apply changes you MUST run `systemctl restart ws-ckpt` to restart the daemon.
 [backend.btrfs-loop]
-# img_size = 30                               # Absolute cap: image size (GB)
+# img_size = 30                               # Absolute cap: image size (GiB, minimum 5)
 # img_max_percent = 40                        # Percentage cap: % of host partition total capacity
 #                                             # Actual target = min(img_size GB, total * img_max_percent%)
 
 # ── BtrfsBase backend ──
 [backend.btrfs-base]
-# btrfs_mount = "/data"               # (reserved) Target btrfs partition
+# btrfs_mount = "/data"               # Absolute, existing, read-write btrfs mount point
+# Data lives below <btrfs_mount>/ws-ckpt-data; do not specify that child here.
+# Selection: explicit btrfs_mount > persisted data_root's mount > fresh detection.
+# A persisted mount must remain mounted at the same path; no automatic relocation.
+# Changing this pin intentionally selects a different root. Previous snapshots
+# become invisible and startup can prune unpinned indexes in /var/lib/ws-ckpt.
+# Switching back does not recover pruned records. Back up state and data first.
+# `ws-ckpt daemon --mount-path` configures only the BtrfsLoop mount point.

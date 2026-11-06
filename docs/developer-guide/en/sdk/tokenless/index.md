@@ -17,7 +17,7 @@ both layers. Detailed AgentScope usage lives in the
 
 ## Layer 1: Framework-neutral SDK
 
-The `anolisa-tokenless` wheel lets Python applications run Tokenless in process. Use
+The `anolisa-tokenless` wheel lets Python applications run Tokenless without a system CLI. Use
 `TokenlessSdk` when integrating Tokenless into an Agent lifecycle. Use `TokenlessRuntime` when you
 do not need lifecycle integration and only want to invoke a specific operation, such as compressing
 one response or retrieving one Stash entry. Use `TokenlessStats` only for statistics queries.
@@ -38,22 +38,23 @@ CPython 3.11 or later. Select the native `anolisa-tokenless` wheel for the targe
 
 Intel Mac and Windows x64 wheels are available starting with v0.9.0.
 
-The lifecycle API examples below require Tokenless 0.8.0. Install v0.9.0 on Linux x86_64
+The lifecycle API examples below require Tokenless 0.8.0. Install v0.9.3 on Linux x86_64
 into a virtual environment:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless-0.9.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.3/anolisa_tokenless-0.9.3-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ```
 
 The Linux assets target glibc-based distributions compatible with `manylinux_2_17`; they do not
 support Alpine Linux or other musl-based distributions. The Release also includes
 `SHA256SUMS-python-wheels.txt` for download verification.
 
-The wheel contains the native Tokenless runtime and the matching RTK executable. It does not need
-the `tokenless` CLI, a system RTK binary, or a separate TOON executable.
+The wheel contains the native Tokenless runtime and a matching `tokenless` executable that runs
+rewritten commands. It does not need a system `tokenless` CLI, an RTK binary, or a separate TOON
+executable.
 
 ### Build from source
 
@@ -73,8 +74,8 @@ python3 -m venv /tmp/tokenless-sdk
 make python-wheel MATURIN=maturin
 ```
 
-Pip installs the wheel in unpacked form, which gives the packaged RTK executable the stable path
-required by command rewriting.
+Pip installs the wheel in unpacked form, which gives the packaged `tokenless` executable the stable
+path that rewritten commands call.
 
 ### Choose an API
 
@@ -238,9 +239,17 @@ call = await sdk.pre_tool(
 ```
 
 Core considers only the explicitly named `command_field`. If RTK has a rewrite, the response uses
-`replace_arguments`, contains the packaged RTK path, and reports `output_optimization=rtk`. Execute
+`replace_arguments`, runs through the packaged `tokenless` path as `tokenless rtk`, and reports
+`output_optimization=rtk`. Execute
 the returned arguments and carry that optimization value into PostTool. A disabled RTK is an
 adapter choice: do not call `pre_tool()` when `TokenlessConfig.rtk_enabled` is false.
+
+Each `pre_tool()` call starts the packaged `tokenless compress` as a child process, because RTK
+assumes one process per command: a newly trusted filter applies from the next call, without
+restarting the host. The child has 5 seconds to finish. If it times out or fails, the SDK kills it
+with any process it started, logs one warning on the `anolisa_tokenless.sdk` logger, and returns the
+original arguments with `passthrough`, so the tool call still runs. Only a request the CLI cannot
+read or decode raises `ValueError`.
 
 #### After a tool call
 
@@ -298,7 +307,7 @@ integration-owned tool name for framework layers such as AgentScope; they declar
 Core through the recovery capability. Names must contain 1–64 ASCII letters, digits, underscores,
 or hyphens. This also tightens validation of existing `retrieve_tool_name` configurations: names
 containing dots, colons, or spaces must be renamed before upgrading.
-`rtk_enabled` controls whether the SDK resolves packaged RTK for PreTool. Compression thresholds,
+`rtk_enabled` controls whether the SDK resolves its packaged `tokenless` executable for PreTool. Compression thresholds,
 content detection, TOON selection, diagnostics, authorization, and Stash policy are Core behavior
 and are not Python configuration.
 

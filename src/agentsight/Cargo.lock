@@ -216,7 +216,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentsight"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -292,6 +292,7 @@ dependencies = [
  "thiserror 1.0.69",
  "typed-arena",
  "uname",
+ "unicode-casefold",
  "ureq 2.12.1",
  "url",
  "uuid",
@@ -357,6 +358,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "reqwest 0.13.4",
  "rig-core",
  "serde",
  "serde_json",
@@ -5378,6 +5380,12 @@ name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+
+[[package]]
+name = "unicode-casefold"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f66b1c8f8caa2ab31dc6d3f35386f16efdab89668f93411e565ac368908e8f"
 
 [[package]]
 name = "unicode-ident"

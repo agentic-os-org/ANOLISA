@@ -25,7 +25,15 @@ pub(super) fn callback(args: &Arguments) -> Exit {
         Ok(exit) => exit,
         Err(error) => {
             eprintln!("aw hook failed: {error}");
-            if args.flags.contains_key("--close-event")
+            if (args
+                .flags
+                .get("--adapter")
+                .is_some_and(|v| matches!(v.as_str(), "claude-sdk" | "hermes"))
+                && args
+                    .flags
+                    .get("--event")
+                    .is_some_and(|v| v == "input.submit"))
+                || args.flags.contains_key("--close-event")
                 || args
                     .flags
                     .get("--on-error")
@@ -36,7 +44,7 @@ pub(super) fn callback(args: &Arguments) -> Exit {
             let blocked = args
                 .flags
                 .get("--event")
-                .is_some_and(|v| v == "tool.before")
+                .is_some_and(|v| matches!(v.as_str(), "input.submit" | "tool.before"))
                 && args.flags.get("--on-error").is_some_and(|v| v == "block");
             match emit(adapter.reply(blocked)) {
                 Ok(exit) => exit,
@@ -109,7 +117,7 @@ fn budget_deadline(started: Instant, budget_ms: u64, close: bool) -> Result<Inst
     Ok(deadline)
 }
 
-// Resident SDK callers keep transport/Provider errors visible and stop the task.
+// Resident SDK callers retain errors unless response adoption permits report recovery.
 // The legacy hook command retains its configured native failure reply above.
 pub(super) fn invoke_bound(
     args: &Arguments,
@@ -154,21 +162,28 @@ pub(super) fn invoke_bound(
         return Err("stale hook binding".into());
     }
     if close {
-        client.call(
+        let session_id = normalized["session_id"]
+            .as_str()
+            .ok_or("missing session")?
+            .into();
+        let operation = if event == "input.submit" {
+            Operation::CloseInputEvent {
+                instance_id: binding.binding.instance_id,
+                session_id,
+                turn_id: normalized["turn_id"].as_str().ok_or("missing turn")?.into(),
+            }
+        } else {
             Operation::CloseHookEvent {
                 instance_id: binding.binding.instance_id,
                 event: event.into(),
-                session_id: normalized["session_id"]
-                    .as_str()
-                    .ok_or("missing session")?
-                    .into(),
+                session_id,
                 call_id: normalized["tool"]["call_id"]
                     .as_str()
                     .ok_or("missing call")?
                     .into(),
-            },
-            deadline,
-        )?;
+            }
+        };
+        client.call(operation, deadline)?;
         return Ok(Exit::Code(0));
     }
     if step == adapter::OBSERVE_STEP {
@@ -214,7 +229,7 @@ pub(super) fn invoke_bound(
             .map_err(Into::into)
         });
     // SDK loops stop on vetoes or fail-closed errors; unvisited steps cannot complete the event.
-    if event == "tool.before"
+    if matches!(event, "input.submit" | "tool.before")
         && handle.steps.last().map(String::as_str) != Some(step)
         && aw_adapter::callback::stops_before(&binding.adapter, result.as_ref().ok(), on_error)
     {

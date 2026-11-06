@@ -40,6 +40,19 @@ impl ValidatedConfig {
     }
 }
 
+/// Protocol-checked evidence supplied by the caller for one configured Provider.
+///
+/// The caller owns discovery and must associate both responses with the same
+/// configured Provider. These values do not establish process identity or prove
+/// that an Agent has installed a hook.
+#[derive(Clone)]
+pub struct ProviderEvidence {
+    /// The operations, events and effects declared by the Provider.
+    pub description: Description,
+    /// The exact private configuration accepted by that Provider.
+    pub configuration: ValidatedConfig,
+}
+
 /// Candidate effects from one invocation, never a receipt or adoption record.
 pub struct Outcome(Value);
 
@@ -49,9 +62,9 @@ impl Outcome {
         &self.0
     }
 
-    /// Whether the Provider requested blocking this tool attempt.
+    /// Whether the Provider requested blocking this submission or tool attempt.
     ///
-    /// False adds no restriction; it does not authorize the native tool.
+    /// False adds no restriction; it does not authorize the native submission or tool.
     pub fn requests_block(&self) -> bool {
         self.0["effects"]
             .as_array()
@@ -136,7 +149,10 @@ impl Protocol {
             return Err(Error::Invalid("request schema mismatch"));
         }
         if value["method"] == "invoke" {
-            let before = value["event"]["name"] == "tool.before";
+            let before = matches!(
+                value["event"]["name"].as_str(),
+                Some("input.submit" | "tool.before")
+            );
             for effect in array(&value["allowed_effects"])? {
                 if effect != "observe"
                     && !(before && effect == "block")

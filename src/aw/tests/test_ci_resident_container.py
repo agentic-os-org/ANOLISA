@@ -102,7 +102,7 @@ class ResidentContainerTests(GateFixture):
         stage(AW, binaries, context, "a" * 40, self.manifest)
         self.assertEqual(
             {p.name for p in (context / "payload").iterdir()},
-            {"aw", "aw-provider-tokenless", "tokenless", "rtk", "SHA256SUMS", "source-sha.txt"},
+            {"aw", "aw-provider-tokenless", "tokenless", "SHA256SUMS", "source-sha.txt"},
         )
         verify_bundle(context / "payload", "a" * 40, BINARIES)
         for path in context.rglob("*"):
@@ -119,7 +119,7 @@ class ResidentContainerTests(GateFixture):
         with patch("resident_contract.verify_case") as check:
             result = verify(self.root, self.manifest, "a" * 40)
             self.assertEqual(check.call_count, len(result["suites"]))
-            self.assertEqual(len(result["suites"]), 24)
+            self.assertEqual(len(result["suites"]), 26)
         for shard, (directory, report, cleanup) in reports.items():
             for field, value in (("passed", False), ("candidate_sha", "b" * 40),
                                  ("shard", "unknown"), ("suites", report["suites"][:-1])):
@@ -148,6 +148,7 @@ class ResidentContainerTests(GateFixture):
         self.assertCountEqual(actual, expected)
         self.assertIn(("claude-sdk", "resident-drain-timeout"), actual)
         self.assertIn(("claude-sdk", "resident-model-boundaries"), actual)
+        self.assertIn(("claude-sdk", "resident-model-settings"), actual)
         self.assertIn(("claude-sdk", "resident-native-denial"), actual)
         for agent in ("claude-sdk", "pi"):
             self.assertIn((agent, "resident-long"), actual)
@@ -248,7 +249,7 @@ class ResidentContainerTests(GateFixture):
                 signal.signal(sig, handler)
 
     def test_unmerged_profile_requires_manual_fork_exact_sha_and_no_secret(self):
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         block = workflow.split(
             "      - name: Require a trusted candidate before executing repository code\n",
             1,

@@ -146,6 +146,22 @@ New implementation files do not belong at the `cosh-shell/src/` root. Keep
 owner boundaries visible and run `crates/cosh-shell/scripts/check-layout.sh`
 after structural changes.
 
+## Live session refresh
+
+Before the next provider request, Core may adopt a background compaction only
+for the same session, a newer durable generation and compaction revision, and
+a matching redacted-transcript digest. The live transcript remains authoritative;
+rejected evidence leaves its request projection unchanged.
+
+Successful live auth activation rebuilds the provider, model, and extra parameters.
+Shell serializes activation with first-run admission: a short registry process owns
+an exclusive reservation until completion, while a live registry request transfers
+that reservation to the service. A caller timeout does not release the service's
+reservation. A canceled run may queue one successor, but cannot bypass an activation
+reservation. Activation failures retain the auth panel and observed model for retry;
+only success clears the old provider observation. This does not add a provider
+fallback policy or guarantee activation while the runtime is busy.
+
 ## Compatibility and safety contracts
 
 - `CoshResponse<T>` is the stable automation envelope.

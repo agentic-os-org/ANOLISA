@@ -44,7 +44,12 @@ class BatchCallIdentityTests(unittest.TestCase):
         document = self.convert(
             [assistant("a"), assistant("b"), user([result("missing", "orphan")])]
         )
+        self.assertEqual(len(document["steps"]), 2)
         self.assertTrue(all("observation" not in step for step in document["steps"]))
+        self.assertEqual(
+            document["extra"]["unmatched_tool_results"][0]["results"],
+            [{"source_call_id": "missing", "content": "orphan"}],
+        )
 
     def test_split_steps_receive_their_own_echoes(self) -> None:
         document = self.convert(
@@ -85,7 +90,12 @@ class BatchCallIdentityTests(unittest.TestCase):
         document = self.convert(
             [assistant("call_a-1"), assistant("call_a_1"), user([result("calla1", "ambiguous")])]
         )
+        self.assertEqual(len(document["steps"]), 2)
         self.assertTrue(all("observation" not in step for step in document["steps"]))
+        self.assertEqual(
+            document["extra"]["unmatched_tool_results"][0]["results"],
+            [{"source_call_id": "calla1", "content": "ambiguous"}],
+        )
 
     def test_reused_exact_id_still_selects_latest_issuer(self) -> None:
         document = self.convert([assistant("a"), assistant("a"), user([result("a", "latest")])])

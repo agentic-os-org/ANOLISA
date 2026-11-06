@@ -545,14 +545,16 @@ fn command_policy(command: &Commands) -> CommandPolicy {
 fn telemetry_command_scope(args: &telemetry::TelemetryArgs) -> CommandScope {
     match &args.command {
         telemetry::TelemetryCommands::Status { .. } => CommandScope::ReadOnly,
-        // enable / disable / link / unlink / upload / init mutate system state
-        // and need root; an explicit system-mode dry-run may preview without root.
+        // enable / disable / link / unlink / upload / init / prepare mutate system
+        // state and need root; an explicit system-mode dry-run may preview without
+        // root.
         telemetry::TelemetryCommands::Enable
         | telemetry::TelemetryCommands::Disable
         | telemetry::TelemetryCommands::Link
         | telemetry::TelemetryCommands::Unlink
         | telemetry::TelemetryCommands::Upload { .. }
-        | telemetry::TelemetryCommands::Init => CommandScope::ModeScopedMutation {
+        | telemetry::TelemetryCommands::Init
+        | telemetry::TelemetryCommands::Prepare { .. } => CommandScope::ModeScopedMutation {
             dry_run: DryRunPolicy::UnprivilegedPreview,
         },
     }
@@ -875,6 +877,8 @@ mod tests {
             telemetry::TelemetryCommands::Upload { loop_flag: false },
             telemetry::TelemetryCommands::Upload { loop_flag: true },
             telemetry::TelemetryCommands::Init,
+            telemetry::TelemetryCommands::Prepare { no_service: false },
+            telemetry::TelemetryCommands::Prepare { no_service: true },
         ];
 
         for command in commands {

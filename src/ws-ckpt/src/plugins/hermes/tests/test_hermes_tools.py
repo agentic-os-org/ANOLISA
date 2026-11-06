@@ -352,6 +352,22 @@ class TestHandlers:
         assert "--preview" in mock_cmd.call_args[0][0]
         mock_cwd.assert_not_called()
 
+    @pytest.mark.parametrize("preview", ["true", "TRUE", "1", "yes", "on"])
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "Rollback preview"))
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_string_preview_is_still_a_preview(self, _ws, mock_cmd, preview):
+        result = json.loads(handle_ws_ckpt_rollback({"target": "snap1", "preview": preview}))
+        assert result["success"] is True
+        assert "--preview" in mock_cmd.call_args[0][0]
+
+    @pytest.mark.parametrize("preview", ["maybe", 2, {}])
+    def test_rollback_ambiguous_preview_is_rejected(self, preview):
+        with patch("hermes.tools._run_ws_ckpt_cmd") as mock_cmd:
+            result = json.loads(handle_ws_ckpt_rollback({"target": "snap1", "preview": preview}))
+        assert result["success"] is False
+        assert "boolean" in result["error"]
+        mock_cmd.assert_not_called()
+
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "snap1 created"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))

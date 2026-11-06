@@ -2,10 +2,17 @@
 
 #![forbid(unsafe_code)]
 
+mod authorization;
+pub use authorization::{
+    AuthorizationError, AuthorizationEvaluator, AuthorizationReceiptSink, AuthorizationService,
+};
 mod observability;
 pub use observability::{ObservabilityService, ObservabilitySink, ObservabilityWriteError};
 mod action;
+mod gateway;
+pub use gateway::{GatewayAdministration, GatewayFailure, GatewayFailureKind, GatewayKeyRequest};
 mod identity;
+pub mod intent;
 pub use action::ActionService;
 mod pap;
 pub mod scope_discovery;

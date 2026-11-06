@@ -8,7 +8,7 @@ import {
   ApiRequestError,
 } from '../utils/apiClient';
 import type { OptimizeHistoryEntry } from '../utils/apiClient';
-import { copyText } from '../components/CopyButton';
+import { copyText } from '../utils/clipboard';
 import { formatDurationSecs as formatSecs } from '../utils/formatDuration';
 import type {
   AccIssue,

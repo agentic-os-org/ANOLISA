@@ -21,7 +21,7 @@ use package::{Configure, Edit, Install, Show};
     about = "Run native Agents and manage local AW software and configuration",
     disable_help_subcommand = true,
     arg_required_else_help = true,
-    after_help = "Install accepts local unpacked bundles with manifest.json or package.json.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
+    after_help = "Install accepts local unpacked Provider bundles with package.json.\nCompatibility: aw install --config FILE --agent TARGET connects native Hooks;\naw serve/status/stop and aw validate remain available.\nOptions are command-local; --json is not a global output mode."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -44,7 +44,7 @@ enum Command {
     },
     /// Launch a configured Agent; preserve its output, exit code and signals
     Run(Run),
-    /// Install a local software bundle, or retain legacy native Hook connection
+    /// Install a local Provider extension, or connect native Hooks
     Install(Install),
     /// Remove selected packages or an entire installation, preserving unknown files
     Uninstall(package::Uninstall),
@@ -70,6 +70,8 @@ enum Command {
     Update(Update),
     /// Query service and optional Provider views; may execute view commands
     Inspect(Inspect),
+    /// Register, confirm, query or release an application-owned instance using stdin JSON
+    Instance(Instance),
     /// Send one operation from stdin JSON to an existing service
     Request(Request),
     /// Serve the command Provider stdin/stdout protocol
@@ -115,8 +117,14 @@ enum Service {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Config {
-    /// Create a configuration from installed Preview packages
-    Init(Configure),
+    /// Show redacted native source declarations; does not load or activate them
+    NativeSources(package::NativeSources),
+    /// Record a native source reference without opening the native source
+    AddNativeSource(package::AddNativeSource),
+    /// Remove a reference while retaining the original native source
+    RemoveNativeSource(package::RemoveNativeSource),
+    /// Create an offline configuration with optional Provider templates
+    Init(Box<Configure>),
     /// Print configuration JSON, including private Provider values
     Show(Show),
     /// Check configuration; optionally compare a policy update's scope
@@ -347,4 +355,17 @@ pub(crate) fn run(arguments: Vec<String>) -> crate::cli::Result<crate::cli::Exit
             }
         }
     }
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct Instance {
+    /// Unix socket of an already running same-user daemon
+    #[arg(long)]
+    socket: String,
+    /// Discover protocol and generation; does not read stdin or create an instance
+    #[arg(long)]
+    connect: bool,
+    /// Total input, connection and request budget
+    #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..=60000))]
+    timeout_ms: u64,
 }

@@ -2,8 +2,8 @@
 
 use super::{Fixture, Process, TIMEOUT};
 use aw_package::database::{
-    DatabasePaths, Installation, InstalledDatabase, Inventory, Manager, Registration as Registered,
-    RegistrationPointer, Scope,
+    DatabasePaths, Installation, InstalledDatabase, InstalledPackage, Inventory, Manager,
+    Registration as Registered, RegistrationPointer, Scope,
 };
 use serde_json::{json, Value};
 use std::{
@@ -47,7 +47,8 @@ impl Registration {
         let executable = core_bundle.join("payload/bin/aw");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::copy(env!("CARGO_BIN_EXE_aw"), &executable).unwrap();
-        package(&core_bundle, "aw-core", &["bin/aw"]);
+        // Provider fixtures carry launcher copies to exercise file leases, not core delivery.
+        package(&core_bundle, "fixture.launcher-provider", &["bin/aw"]);
         let core_record = seed(&paths, &core_bundle, &core, "registration-core");
 
         let bundle = fixture.root.join("bundle-agent");
@@ -78,7 +79,7 @@ time.sleep(30)
         .unwrap();
         package(
             &bundle,
-            "example.agent",
+            "fixture.agent-provider",
             &["bin/hermes", "bin/python-fixture"],
         );
         let agent_record = seed(&paths, &bundle, &agent, "registration-agent");
@@ -192,7 +193,11 @@ fn seed(
     prefix: &Path,
     installation_id: &str,
 ) -> Installation {
-    let packages = aw_package::open_bundle::inspect(bundle).unwrap().packages;
+    let descriptor = bundle.join("package.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
+    record.as_object_mut().unwrap().remove("schema_version");
+    record["source"] = json!({"bundle_sha256": aw_package::digest(&descriptor).unwrap()});
+    let packages: Vec<InstalledPackage> = vec![serde_json::from_value(record).unwrap()];
     for package in &packages {
         for (name, payload) in &package.files {
             let destination = prefix.join(name);
@@ -201,19 +206,19 @@ fn seed(
             fs::set_permissions(destination, fs::Permissions::from_mode(payload.mode)).unwrap();
         }
     }
-    fs::create_dir_all(prefix.join(".aw-packages")).unwrap();
+    fs::create_dir_all(prefix.join(".local-packages")).unwrap();
     for directory in [
         prefix.to_owned(),
         prefix.join("bin"),
-        prefix.join(".aw-packages"),
+        prefix.join(".local-packages"),
     ] {
         fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let lock = prefix.join(".aw-install.lock");
+    let lock = prefix.join(".local-install.lock");
     fs::write(&lock, []).unwrap();
     fs::set_permissions(lock, fs::Permissions::from_mode(0o644)).unwrap();
     let pointer = RegistrationPointer::new(paths, installation_id.into()).unwrap();
-    let marker = prefix.join(".aw-packages/aw-core.json");
+    let marker = prefix.join(".local-packages/installation.json");
     // Exact removal-plan encoding keeps the retained locator unchanged during uninstall.
     fs::write(&marker, serde_json::to_vec_pretty(&pointer).unwrap()).unwrap();
     fs::set_permissions(marker, fs::Permissions::from_mode(0o644)).unwrap();
@@ -242,7 +247,8 @@ fn package(bundle: &Path, id: &str, names: &[&str]) {
         bundle.join("package.json"),
         serde_json::to_vec(&json!({
             "schema_version":1,"package_id":id,"version":"1.2.3","os":"linux",
-            "arch":std::env::consts::ARCH,"files":files,"dependencies":[]
+            "arch":std::env::consts::ARCH,"files":files,"dependencies":[],
+            "provider":{"protocol":"aw-provider/v1alpha1"}
         }))
         .unwrap(),
     )
@@ -253,7 +259,7 @@ fn exclusive(prefix: &Path) -> File {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(prefix.join(".aw-install.lock"))
+        .open(prefix.join(".local-install.lock"))
         .unwrap();
     // SAFETY: the returned owned descriptor retains this nonblocking lock for the test.
     assert_eq!(

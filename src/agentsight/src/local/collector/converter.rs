@@ -4,14 +4,15 @@
 //! to ATIF v1.7 documents for trajectory display. These agents share a common
 //! JSONL format with event types: `runtime-config`, `user`, `assistant`.
 //! Codex rollouts use a different envelope schema and are delegated to the
-//! collector crate's Codex converter.
+//! collector crate's Codex converter. Cline whole-document tasks and their
+//! sibling UI streams use the corresponding path-aware Cline converter.
 //!
 //! Content blocks within messages:
 //! - `assistant` content: `thinking`, `text`, `tool_use`
 //! - `user` content: `text` (human input), `tool_result` (tool output)
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Observation,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Metrics, Observation,
     ObservationResult, Step, StepSource, ToolCall,
 };
 use serde_json::Value;
@@ -27,10 +28,19 @@ pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
-    convert_jsonl_content_to_atif(&content)
+    if let Some(result) = agentsight_trajectory_collector::cline::convert_task_file(path, &content)
+    {
+        return result;
+    }
+    let claude = path.components().any(|part| part.as_os_str() == ".claude");
+    convert_content_with_source(&content, claude)
 }
 
 pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajectory> {
+    convert_content_with_source(content, false)
+}
+
+fn convert_content_with_source(content: &str, claude_path: bool) -> anyhow::Result<AtifTrajectory> {
     // Codex rollouts use a different envelope schema
     // (`{"timestamp","type","payload"}` records). The collector crate already
     // ships a converter for them, so delegate instead of emitting an empty
@@ -85,17 +95,21 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     let mut message_model = None;
     let mut steps: Vec<Step> = Vec::new();
     let mut step_id: usize = 0;
+    let mut events = content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok());
+    // Runtime configuration is a header record. Reuse that parsed event in
+    // the conversion loop instead of scanning headerless files twice.
+    let first_event = events.next();
+    let claude_snapshots = first_event
+        .as_ref()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("runtime-config"))
+        .and_then(|event| event.get("entrypoint").and_then(Value::as_str))
+        .map(|entrypoint| entrypoint == "claude-code")
+        .unwrap_or(claude_path);
+    let mut usage_owners: HashMap<String, usize> = HashMap::new();
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let event: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
+    for event in first_event.into_iter().chain(events) {
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         if matches!(event_type, "user" | "assistant") {
@@ -234,7 +248,8 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                     .map(String::from)
                     .or_else(|| model_name.clone());
 
-                let content_arr = event.pointer("/message/content").and_then(|c| c.as_array());
+                let content = event.pointer("/message/content");
+                let content_arr = content.and_then(Value::as_array);
 
                 let mut message_text = String::new();
                 let mut reasoning = String::new();
@@ -285,6 +300,43 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                             _ => {}
                         }
                     }
+                } else if let Some(text) = content.and_then(Value::as_str) {
+                    message_text.push_str(text);
+                }
+
+                let usage = event.pointer("/message/usage");
+                let counter = |key: &str| {
+                    usage
+                        .and_then(|value| value.get(key))
+                        .and_then(Value::as_u64)
+                };
+                let prompt = counter("input_tokens").map(|value| {
+                    value
+                        .saturating_add(counter("cache_read_input_tokens").unwrap_or(0))
+                        .saturating_add(counter("cache_creation_input_tokens").unwrap_or(0))
+                });
+                let completion = counter("output_tokens");
+                let metrics = (prompt.is_some() || completion.is_some()).then(|| Metrics {
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    cached_tokens: counter("cache_read_input_tokens"),
+                    cost_usd: None,
+                    logprobs: None,
+                    completion_token_ids: None,
+                    prompt_token_ids: None,
+                    extra: None,
+                });
+                // Split assistant blocks repeat cumulative usage for one API
+                // message. Only a valid later snapshot supersedes its owner.
+                if claude_snapshots
+                    && metrics.is_some()
+                    && let Some(id) = event
+                        .pointer("/message/id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                    && let Some(previous) = usage_owners.insert(id.to_string(), steps.len())
+                {
+                    steps[previous].metrics = None;
                 }
 
                 step_id += 1;
@@ -306,7 +358,7 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
                         Some(tool_calls)
                     },
                     observation: None,
-                    metrics: None,
+                    metrics,
                     extra: None,
                     llm_call_count: None,
                     is_copied_context: None,
@@ -345,10 +397,18 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         extra: None,
     };
 
+    let sum = |select: fn(&Metrics) -> Option<u64>| {
+        steps
+            .iter()
+            .filter_map(|step| step.metrics.as_ref().and_then(select))
+            .fold(None, |sum: Option<u64>, value| {
+                Some(sum.unwrap_or(0).saturating_add(value))
+            })
+    };
     let final_metrics = FinalMetrics {
-        total_prompt_tokens: None,
-        total_completion_tokens: None,
-        total_cached_tokens: None,
+        total_prompt_tokens: sum(|metrics| metrics.prompt_tokens),
+        total_completion_tokens: sum(|metrics| metrics.completion_tokens),
+        total_cached_tokens: sum(|metrics| metrics.cached_tokens),
         total_cost_usd: None,
         total_steps: Some(total_steps),
         extra: None,
@@ -439,6 +499,14 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
         let Some(step) = owner.map(|index| &mut steps[index]) else {
             continue;
         };
+        let source_call_id = agentsight_atif::resolve_call_id(
+            id,
+            step.tool_calls
+                .iter()
+                .flatten()
+                .map(|call| call.tool_call_id.as_str()),
+        )
+        .map(str::to_string);
         let observation = step.observation.get_or_insert_with(|| Observation {
             results: Vec::new(),
         });
@@ -756,12 +824,12 @@ mod tests {
     }
 
     #[test]
-    fn test_assistant_no_content_blocks() {
+    fn test_assistant_string_content() {
         let content =
             r#"{"type":"assistant","message":{"model":"m","content":"plain text reply"}}"#;
         let traj = convert_jsonl_content_to_atif(content).unwrap();
         assert_eq!(traj.steps.len(), 1);
-        assert_eq!(traj.steps[0].message, "");
+        assert_eq!(traj.steps[0].message, "plain text reply");
         assert!(traj.steps[0].tool_calls.is_none());
         assert!(traj.steps[0].reasoning_content.is_none());
     }

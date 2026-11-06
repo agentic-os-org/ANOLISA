@@ -94,8 +94,9 @@ sudo systemctl status agentsight-enforcer.service
 sudo systemctl start agentsight-enforcer.service
 ```
 
-源码构建要用 `make build-all`，只跑 `make build` 不会产出 enforcer 二进制。采集与分析不受影响，只是风险
-拦截页面会消失。
+源码构建使用 `make build-all`，然后按[源码构建](deployment.md#源码构建)中的命令直接运行工作进程。
+可选的 enforcer 守护进程需要单独启动，编译本身不会启动它。enforcer 停止时采集与分析仍可用，
+风险拦截则依赖它。
 
 ## 数据增长太快
 

@@ -29,7 +29,10 @@ use crate::session::{
 use crate::sls;
 use crate::tool::SessionWorkspace;
 
-mod auth;
+pub(crate) mod auth;
+#[cfg(test)]
+mod live_state_tests;
+mod trial;
 
 use auth::request_auth;
 
@@ -157,7 +160,9 @@ pub async fn run(
 
     // --- Auth check: if no API key, request auth from Shell ---
     let mut buffered_lines: Vec<String> = Vec::new();
-    let provider = if crate::needs_auth(&config) {
+    let provider = if auth::defer_auth(args) && crate::needs_auth(&config) {
+        auth::unconfigured_provider()
+    } else if crate::needs_auth(&config) {
         match request_auth(&mut config, &mut lines, &mut writer, &mut buffered_lines).await {
             Some(p) => p,
             None => {
@@ -322,7 +327,15 @@ pub async fn run(
         }
     }
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = if let Some(line) = protocol.pending_input.pop_front() {
+            line
+        } else {
+            match lines.next_line().await {
+                Ok(Some(line)) => line,
+                _ => break,
+            }
+        };
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
@@ -375,6 +388,8 @@ enum InputLineResult {
 struct ProtocolState {
     profile: crate::cli::ExecutionProfile,
     initialized: bool,
+    pending_input: std::collections::VecDeque<String>,
+    trial_preference_notice_shown: bool,
 }
 
 impl ProtocolState {
@@ -382,6 +397,8 @@ impl ProtocolState {
         Self {
             profile,
             initialized: false,
+            pending_input: std::collections::VecDeque::new(),
+            trial_preference_notice_shown: false,
         }
     }
 }
@@ -662,6 +679,7 @@ where
                     );
                     return InputLineResult::Continue;
                 }
+                engine.config.ai.active_model = Some(model.clone());
                 engine.model = model.clone();
                 engine.emit(
                     writer,
@@ -713,8 +731,20 @@ where
             message,
             session_id,
             shell_context,
+            ecs_trial_context,
             ..
         } => {
+            if auth::defer_auth(args) && !protocol.initialized {
+                engine.emit(
+                    writer,
+                    &OutputMessage::result_error_with_code(
+                        &engine.session_id,
+                        "initialize is required before user input",
+                        Some("InitializeRequired"),
+                    ),
+                );
+                return InputLineResult::Continue;
+            }
             if protocol.profile.is_brokered() && !protocol.initialized {
                 engine.emit(
                     writer,
@@ -743,6 +773,72 @@ where
                 engine.shell_context = Some(ctx);
             }
 
+            let trial_capable =
+                auth::defer_auth(args) && engine.client_capabilities.can_handle_ecs_trial_v1;
+            let previous_model = engine.model.clone();
+            let selection = match trial::prepare(engine, trial_capable, ecs_trial_context).await {
+                Ok(selection) => selection,
+                Err(code) => {
+                    let preference_error = code.starts_with("trial_preferences_");
+                    if preference_error && !protocol.trial_preference_notice_shown {
+                        engine.emit(
+                            writer,
+                            &OutputMessage::system_status(&format!(
+                                "trial_preferences_unavailable:{code}"
+                            )),
+                        );
+                        protocol.trial_preference_notice_shown = true;
+                    }
+                    let message = if preference_error {
+                        "automatic access preferences are unavailable; automatic model access is disabled; use /auth"
+                    } else {
+                        "no model configured; use /auth to configure or re-enable a model"
+                    };
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            message,
+                            Some(code),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                }
+            };
+
+            if selection == trial::Prepared::Trial && engine.model != previous_model {
+                engine.emit(
+                    writer,
+                    &OutputMessage::system_status(&format!("model_switched:{}", engine.model)),
+                );
+            }
+
+            if selection == trial::Prepared::Existing
+                && auth::defer_auth(args)
+                && crate::needs_auth(&engine.config)
+            {
+                let mut buffered = Vec::new();
+                let provider = request_auth(&mut engine.config, lines, writer, &mut buffered).await;
+                protocol.pending_input.extend(buffered);
+                let Some(provider) = provider else {
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            "authentication cancelled; configure a model with /auth",
+                            Some("AuthenticationCancelled"),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                };
+                engine.provider = provider;
+                let resolved = engine.config.resolve_provider();
+                engine.model = resolved.model;
+                engine.extra_params = resolved.extra_params;
+            }
+
+            session.refresh_background_compaction(engine);
+
             // Reset per-turn metrics before each user message
             engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
@@ -754,6 +850,9 @@ where
             let turn_result = engine
                 .handle_user_message_with_raw_input(&message.content, raw_user_input, lines, writer)
                 .await;
+            if let Some(access) = engine.trial_access.as_ref() {
+                protocol.pending_input.extend(access.drain_input());
+            }
             let persist_result = session.persist(engine);
             match combine_turn_and_persist(turn_result, persist_result) {
                 Ok(()) => {
@@ -783,7 +882,16 @@ where
                     session.recommend_auto_compaction(engine, writer);
                 }
                 Err(failure) => {
-                    let err_msg = failure.output_message(&engine.session_id);
+                    let mut err_msg = failure.output_message(&engine.session_id);
+                    if let Some(failure) = engine
+                        .trial_access
+                        .as_ref()
+                        .and_then(|access| access.failure())
+                    {
+                        if let OutputMessage::Result { error_code, .. } = &mut err_msg {
+                            *error_code = Some(failure.code);
+                        }
+                    }
                     // Emit the error result before awaiting telemetry so a stalled
                     // metadata probe does not delay the visible turn result.
                     engine.emit(writer, &err_msg);
@@ -801,7 +909,7 @@ where
         InputMessage::ControlResponse { .. } => {}
         // Receipts only matter to an interactive `wait_for_approval` loop;
         // the headless path never waits on one.
-        InputMessage::ApprovalReceipt { .. } => {}
+        InputMessage::ApprovalReceipt { .. } | InputMessage::EcsTrialControl { .. } => {}
         InputMessage::RegistryRequest {
             request_id,
             domain,
@@ -823,17 +931,56 @@ where
                 );
                 return InputLineResult::Continue;
             };
-            let response = crate::registry::handle_registry_request(
+            let mut restored_config = if domain == "auth"
+                && matches!(action.as_str(), "state" | "activate" | "activate_trial")
+            {
+                trial::restored_model_config(engine)
+            } else {
+                None
+            };
+            let mut response = crate::registry::handle_registry_request(
                 &request_id,
                 &domain,
                 &action,
                 &params,
-                &mut engine.config,
+                restored_config.as_mut().unwrap_or(&mut engine.config),
                 manager,
                 None,
                 Some(extensions.live),
             )
             .await;
+            if domain == "auth"
+                && matches!(action.as_str(), "activate" | "activate_trial" | "configure")
+                && matches!(
+                    &response,
+                    OutputMessage::RegistryResponse { success: true, .. }
+                )
+            {
+                if let Some(config) = restored_config {
+                    engine.config = config;
+                }
+                let resolved = engine.config.resolve_provider();
+                engine.provider = crate::create_provider(&engine.config);
+                engine.model = resolved.model;
+                engine.extra_params = resolved.extra_params;
+                if session.record.was_loaded {
+                    session.refresh_background_compaction(engine);
+                    if let Err(error) = session.persist(engine) {
+                        tracing::warn!(error = ?error, "provider selection session save failed");
+                        response = OutputMessage::RegistryResponse {
+                            request_id,
+                            success: false,
+                            data: Some(serde_json::json!({
+                                "provider_updated": true,
+                                "error_code": error.code(),
+                            })),
+                            error: Some(format!(
+                                "Provider updated, but the session model could not be saved: {error}. The current session uses the selected provider; a later question will retry session saving."
+                            )),
+                        };
+                    }
+                }
+            }
             engine.emit(writer, &response);
             engine.drain_retired_extension_snapshots().await;
         }
@@ -988,6 +1135,43 @@ impl SessionRuntime {
         }
     }
 
+    fn refresh_background_compaction(&mut self, engine: &mut CoshCore) {
+        if !self.auto_persist
+            || !self.record.was_loaded
+            || self.record.session_id.as_str() != engine.session_id
+        {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let saved = match store.load(&self.record.session_id) {
+            Ok(saved) => saved,
+            Err(error) => {
+                tracing::warn!(error = ?error, "background compaction refresh failed");
+                return;
+            }
+        };
+        if saved.generation <= self.record.generation
+            || saved.compaction_revision <= engine.compaction.revision()
+        {
+            return;
+        }
+        // Compare the durable redaction without changing live provider context.
+        let mut persisted_messages = engine.messages.clone();
+        crate::redaction::redact_messages(&mut persisted_messages);
+        if crate::compaction::source_digest(&persisted_messages)
+            != crate::compaction::source_digest(&saved.messages)
+        {
+            tracing::warn!("background compaction transcript differs from live session");
+            return;
+        }
+        engine
+            .compaction
+            .load_state(saved.compaction.clone(), saved.compaction_revision);
+        self.record = saved;
+    }
+
     fn persist(&mut self, engine: &CoshCore) -> Result<(), SessionError> {
         if !self.auto_persist || self.store.is_none() {
             return Ok(());
@@ -1051,6 +1235,17 @@ impl SessionRuntime {
     /// revision) so the shell can suppress retrigger loops per revision.
     fn recommend_auto_compaction<W: io::Write>(&self, engine: &mut CoshCore, writer: &mut W) {
         let policy = &engine.config.session.compaction;
+        if engine.trial_access.is_some()
+            || crate::auth::trial_policy::decide(
+                &engine.config,
+                &crate::auth::trial_policy::ProviderIntent::from_env(),
+                true,
+                true,
+                true,
+            ) == crate::auth::trial_policy::TrialDecision::EcsIdentity
+        {
+            return;
+        }
         if !policy.enabled || !policy.auto || !self.resumable() {
             return;
         }

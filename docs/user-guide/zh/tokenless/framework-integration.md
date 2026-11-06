@@ -48,7 +48,7 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 | 需要 Record Reduction 或字符串、数组、深度截断的 JSON | 仅在 Marker 命令恢复可用时应用；否则以 `recoverability_unavailable` 拒绝候选 |
 | 来自命令输出的构建/测试/包管理日志 | 终端输出清理与常规进度缩减；每段省略都带有就地取回标记 |
 | 宿主支持文本替换时的 CSV/TSV 表格 | 仅在字符数和估算 Token 数同时减少时做保留全部单元格的整表压紧，否则透传；不写 Stash，无需恢复能力 |
-| 路径共享开启且宿主支持文本替换时，带行号的 API 搜索记录，或非文件来源命令/API 结果中的纯路径列表 | 无损共享连续路径或目录前缀；保留全部已收到记录，无需 Stash 或恢复调用 |
+| 路径共享开启且宿主支持文本替换时，带行号的 API 搜索记录、已识别的原生 Shell 搜索，或非文件来源命令/API 结果中的纯路径列表 | 无损共享连续路径或目录前缀；保留全部已收到记录，无需 Stash 或恢复调用 |
 | 显式开启 `TOKENLESS_DIFF_COMPRESSION_ENABLED`（默认关闭）且宿主支持文本替换时，来自命令输出的 Git Diff | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的完整 HTML 文档；默认开启，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭 | 主内容转写为 Markdown，视图头部写明移除计数；完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | 长纯文本、Stack Trace、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
@@ -93,7 +93,7 @@ Windows 支持范围为 x64 上的千问办公 1.3.2 本地会话，需要安装
 Python 3.10+。不支持 Windows ARM64 和安全工作区／VM 会话，其他 Windows Agent
 尚未验证。
 
-Windows 安装包尚未发布，目前需按
+使用 `npm install -g anolisa-tokenless` 安装已发布的软件包。源码构建请按
 [Windows 构建说明](../../../developer-guide/zh/tokenless/windows.md#在-windows-上构建和测试)构建并安装本地 npm 包。
 
 安装 npm 包后，退出千问办公，在 PowerShell 中执行：
@@ -124,8 +124,9 @@ $adapter = Join-Path (npm root -g) 'anolisa-tokenless/adapters/tokenless/qwenwor
 JSON 转 TOON 输出及 Read 透传。适配器也接受 QwenWorkCN 1.3.2 中观察到的
 macOS 工作区 Shell 契约。Linux VM 执行仍不受支持，Hook 在非 macOS 环境直接透传。
 
-PreToolUse 匹配 `Bash`、`mcp__workspace__bash` 和
-`mcp__qw-builtin__mcp_workspace_bash`，使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
+PreToolUse 匹配 `Bash`、`mcp__workspace__bash`、
+`mcp__qw-builtin__mcp_workspace_bash` 和 `mcp__qw-builtin__mcp__workspace__bash`，
+使用 RTK 改写受支持的命令。PostToolUse **不设置工具 matcher**：
 符合条件的完整 Bash 及非 Bash 结果进入公共策略。`mcp_list`、`mcp_get`、`mcp_call`
 仅包含遥测信息的回调保持透传，避免用遥测替换真实内容；完整的 `mcp_call` 响应仍可正常压缩。
 被接受的结果通过 `updatedToolOutput` 替换原文；对象和数组保留类型，文本槽可以使用 TOON。
@@ -134,7 +135,30 @@ PreToolUse 匹配 `Bash`、`mcp__workspace__bash` 和
 
 工作区 Shell 的结果恰好包含一个普通 MCP 文本块时，内容进入文本槽，支持 JSON 转 TOON。
 多个块、混合媒体或带注解的块数组保持透传，其他 MCP 工具保留已有结构化结果处理。
-工作区 Shell 的统计及 Pre/Post 去重状态保存在 `<cwd>/.tokenless`；原生 Bash 保留原有数据位置。
+千问办公工作区 Shell Hook 的 Tokenless 数据库和 Pre/Post 去重状态使用默认的
+`~/.tokenless`，或 `TOKENLESS_DATA_DIR` 指定的绝对路径。
+默认家目录与 CLI/RTK 一致，按操作系统用户身份解析，不读取 `$HOME`。
+Adapter 保留该环境变量，
+不再自动选择工作区内的数据目录。已有的 `<cwd>/.tokenless` 数据库不会自动迁移；
+查询历史记录时，需要显式指定原目录。
+
+`TOKENLESS_DATA_DIR` 未设置或为空时使用默认目录；路径无效时（相对路径、文件系统
+根目录、父目录遍历、非目录目标或无法解析的链接），工作区 Shell Hook 原样放行，
+不创建数据目录。系统家目录不可用且未设置覆盖路径时，也按此处理。
+
+如果 Shell 沙箱无法写入所选目录，RTK 的 Tokenless 统计和执行回执可能缺失，
+但命令仍可执行。缺少回执时会保守跳过后续压缩。
+PostTool 压缩统计由 Hook 进程写入，是否成功取决于该进程的权限。
+因此，即使 Agent 完成任务，统计也可能不完整；失败的 RTK 记录不会排队补写。
+
+RTK 原生数据库有独立的路径配置，不受 `TOKENLESS_DATA_DIR` 控制。
+它的写入同样受 Shell 沙箱约束，Adapter 保留这一行为。
+
+安装和检测输出会显示当前进程的数据目录、配置来源及上述沙箱限制。
+这不是沙箱可写性检测，也不证明桌面进程继承了终端环境变量。
+提示不会加入 Hook 结果或模型上下文。需要完整的 RTK 记录时，应选择 Shell 已获准写入的目录。
+Adapter 不修改沙箱权限，也不跨沙箱转存记录。
+
 独立安装在插件内提供 `bin/` 时，适配器使用这些二进制。模型 Shell 不会继承 Hook 的环境，
 因此工作区 Shell 或插件私有二进制不声明裸 `tokenless retrieve` 恢复能力，PostTool 只应用无损压缩。
 
@@ -154,8 +178,7 @@ anolisa adapter status tokenless
 CLI 将自包含插件复制到 `~/.qwenworkcn/plugins-custom/tokenless` 并记录文件归属。
 完成后重启千问办公、开启新会话，并在应用内检查插件激活状态。
 `status` 验证应用存在及受管理文件完整性，加载和激活状态保持 `unknown`。
-旁加载不修改 settings、权限、数据库或禁用／阻止列表。兼容性基线为 1.2.5 原生 Bash 和 1.3.2 工作区 Shell；
-其他版本会显示兼容性未验证的警告。
+旁加载不修改 settings、权限、数据库或禁用／阻止列表。
 
 `TOKENLESS_QWENWORK_APP` 指定非默认应用 Bundle；`TOKENLESS_QWENWORK_HOME` 指定数据目录。
 默认在 `/Applications` 和 `~/Applications` 查找应用，数据目录为 `~/.qwenworkcn`。
@@ -376,7 +399,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 脚本会调用框架自身的 Plugin/Extension 机制；按照脚本输出完成重启。安装脚本缺失、失败或框架版本不兼容时，优先改用 anolisa 管理的安装方式。
 
-在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会带 `--dangerously-force-unsafe-install` 调用 `plugins install`，因为 Plugin 通过 Node.js 子进程 API 启动 `tokenless` 和 `rtk` 二进制；将该参数列为 deprecated no-op 的宿主不再收到该参数，安全扫描由 `security.installPolicy` 决定。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略。如果策略不允许该覆盖参数，就不要安装此 Plugin。
+在安装器仍执行安全扫描的宿主上，OpenClaw 安装脚本会带 `--dangerously-force-unsafe-install` 调用 `plugins install`，因为 Plugin 通过 Node.js 子进程 API 启动 `tokenless` 二进制；将该参数列为 deprecated no-op 的宿主不再收到该参数，安全扫描由 `security.installPolicy` 决定。运行前应审查已安装的 Adapter 源码和 OpenClaw 安全策略。如果策略不允许该覆盖参数，就不要安装此 Plugin。
 
 ### npm + Cosh-NG
 

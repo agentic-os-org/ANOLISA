@@ -3,8 +3,12 @@
 //! PAP administration requires a Policy administrator. Action capabilities,
 //! observability ingestion, and read-only queries accept any authenticated
 //! local peer; the query family is additionally row-scoped to the caller's
-//! owner by the handler. The closed inventory rejects unregistered methods
-//! before authorization rather than defaulting into a family.
+//! owner by the handler. Secret-gateway administration retains Policy
+//! administrator metadata and additionally requires authenticated UID 0 in the
+//! gateway handler. Status and credentials accept local peers; the runtime
+//! scopes non-root queries to domains owned by the peer's UID. The closed
+//! inventory rejects unregistered methods before authorization rather than
+//! defaulting into a family.
 
 /// Create one Policy identity from an authored template.
 pub const POLICY_TEMPLATES_CREATE: &str = "policy.templates.create";
@@ -31,11 +35,38 @@ pub const POLICY_BINDINGS_GET: &str = "policy.bindings.get";
 /// List current Bindings and lifecycle statuses.
 pub const POLICY_BINDINGS_LIST: &str = "policy.bindings.list";
 
+/// Authorize an OS execution request without launching the target.
+pub const AUTHORIZATION_EVALUATE: &str = "authorization.evaluate";
+/// Record the result of applying a previously issued decision.
+pub const AUTHORIZATION_REPORT: &str = "authorization.report";
+/// Accept or consume a host handoff without reevaluating its policy.
+pub const AUTHORIZATION_CLAIM: &str = "authorization.claim";
+/// Complete runtime authorization inventory.
+pub const AUTHORIZATION_METHODS: [&str; 3] = [
+    AUTHORIZATION_EVALUATE,
+    AUTHORIZATION_REPORT,
+    AUTHORIZATION_CLAIM,
+];
+
+/// One authorization operation resolved before parameter decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizationMethod {
+    /// Evaluate one execution request.
+    Evaluate,
+    /// Persist an execution receipt.
+    Report,
+    /// Transfer an accepted invocation between host processes.
+    Claim,
+}
+
 /// Append one observability record using `OTel` attribution.
 pub const OBS_RECORD: &str = "obs.record";
 
 /// Check daemon responsiveness and process uptime.
 pub const DAEMON_HEALTH: &str = "daemon.health";
+
+/// Propose an initial task candidate without granting approval.
+pub const INTENT_PROPOSE: &str = "intent.propose";
 
 /// Scan one Bash or Python snippet for pre-execution security issues.
 pub const ACTION_CODE_SCAN: &str = "action.code_scan";
@@ -47,6 +78,32 @@ pub const ACTION_PROMPT_SCAN: &str = "action.prompt_scan";
 pub const ACTION_PROMPT_SCAN_WARMUP: &str = "action.prompt_scan.warmup";
 /// Manage Skill scanning, integrity, history and activation.
 pub const ACTION_SKILL_SEC: &str = "action.skill_sec";
+
+/// Start the credential gateway for prepared Scopes.
+pub const GATEWAY_ENABLE: &str = "gateway.enable";
+/// Withdraw routing and stop the credential gateway.
+pub const GATEWAY_DISABLE: &str = "gateway.disable";
+/// Report gateway execution state without credential values.
+pub const GATEWAY_STATUS: &str = "gateway.status";
+/// Import a credential without replacing an active value or granting access.
+pub const GATEWAY_KEY_ADD: &str = "gateway.key.add";
+/// Globally retire a credential and revoke its grants.
+pub const GATEWAY_KEY_REMOVE: &str = "gateway.key.remove";
+/// List protected credentials without values.
+pub const GATEWAY_KEY_LIST: &str = "gateway.key.list";
+/// Return an authorized Scope's fake credentials.
+pub const GATEWAY_CREDENTIALS: &str = "gateway.credentials";
+
+/// Complete secret-gateway method inventory for this protocol version.
+pub const GATEWAY_METHODS: [&str; 7] = [
+    GATEWAY_ENABLE,
+    GATEWAY_DISABLE,
+    GATEWAY_STATUS,
+    GATEWAY_KEY_ADD,
+    GATEWAY_KEY_REMOVE,
+    GATEWAY_KEY_LIST,
+    GATEWAY_CREDENTIALS,
+];
 
 /// Return the dashboard summary of the caller's own security events.
 pub const SEC_SUMMARY: &str = "sec.summary";
@@ -193,9 +250,32 @@ pub enum QueryMethod {
     EventsCountBy,
 }
 
+/// One secret-gateway operation resolved from its exact wire method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayMethod {
+    /// Start serving.
+    Enable,
+    /// Stop serving.
+    Disable,
+    /// Value-free report.
+    Status,
+    /// Protect a credential.
+    KeyAdd,
+    /// Withdraw a credential.
+    KeyRemove,
+    /// List credentials.
+    KeyList,
+    /// Query an authorized Scope's fake credentials.
+    Credentials,
+}
+
 /// Closed daemon method identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodId {
+    /// Local-peer proposals over submitted materials, without authorization or publication.
+    IntentPropose,
+    /// Runtime authorization and owner-bound execution reporting.
+    Authorization(AuthorizationMethod),
     /// Process health for any authenticated local peer.
     Health,
     /// Read-only owner-authorized observability query.
@@ -208,6 +288,8 @@ pub enum MethodId {
     ObservabilityRecord,
     /// Read-only owner-scoped query method.
     Query(QueryMethod),
+    /// Secret-gateway method.
+    Gateway(GatewayMethod),
 }
 
 /// Server-owned access policy for a method.
@@ -235,15 +317,26 @@ impl MethodId {
     /// Returns authorization metadata for this exact method.
     pub const fn metadata(self) -> Metadata {
         match self {
-            Self::Pap(_) => Metadata {
+            Self::Pap(_)
+            | Self::Gateway(
+                GatewayMethod::Enable
+                | GatewayMethod::Disable
+                | GatewayMethod::KeyAdd
+                | GatewayMethod::KeyRemove
+                | GatewayMethod::KeyList,
+            ) => Metadata {
                 access: AccessPolicy::PolicyAdministrator,
             },
             // Action capabilities, observability ingestion, and read-only
             // queries share one access policy: any kernel-authenticated local
             // peer. The query family adds row-level owner scoping inside its
             // handler, derived from the transport-authenticated principal
-            // rather than from the request.
+            // rather than from the request. Gateway query ownership is enforced
+            // by the runtime using the authenticated peer UID.
             Self::Health
+            | Self::IntentPropose
+            | Self::Gateway(GatewayMethod::Status | GatewayMethod::Credentials)
+            | Self::Authorization(_)
             | Self::Action(_)
             | Self::ObservabilityRecord
             | Self::Query(_)
@@ -258,6 +351,10 @@ impl MethodId {
 pub fn resolve(method: &str) -> Option<MethodId> {
     match method {
         DAEMON_HEALTH => Some(MethodId::Health),
+        INTENT_PROPOSE => Some(MethodId::IntentPropose),
+        AUTHORIZATION_EVALUATE => Some(MethodId::Authorization(AuthorizationMethod::Evaluate)),
+        AUTHORIZATION_REPORT => Some(MethodId::Authorization(AuthorizationMethod::Report)),
+        AUTHORIZATION_CLAIM => Some(MethodId::Authorization(AuthorizationMethod::Claim)),
         POLICY_TEMPLATES_CREATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Create))),
         POLICY_TEMPLATES_UPDATE => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Update))),
         POLICY_TEMPLATES_GET => Some(MethodId::Pap(PapMethod::Policy(PolicyMethod::Get))),
@@ -283,6 +380,13 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         ACTION_PROMPT_SCAN => Some(MethodId::Action(ActionMethod::PromptScan)),
         ACTION_PROMPT_SCAN_WARMUP => Some(MethodId::Action(ActionMethod::PromptScanWarmup)),
         ACTION_SKILL_SEC => Some(MethodId::Action(ActionMethod::SkillSec)),
+        GATEWAY_ENABLE => Some(MethodId::Gateway(GatewayMethod::Enable)),
+        GATEWAY_DISABLE => Some(MethodId::Gateway(GatewayMethod::Disable)),
+        GATEWAY_STATUS => Some(MethodId::Gateway(GatewayMethod::Status)),
+        GATEWAY_KEY_ADD => Some(MethodId::Gateway(GatewayMethod::KeyAdd)),
+        GATEWAY_KEY_REMOVE => Some(MethodId::Gateway(GatewayMethod::KeyRemove)),
+        GATEWAY_KEY_LIST => Some(MethodId::Gateway(GatewayMethod::KeyList)),
+        GATEWAY_CREDENTIALS => Some(MethodId::Gateway(GatewayMethod::Credentials)),
         SEC_SUMMARY => Some(MethodId::Query(QueryMethod::Summary)),
         SEC_EVENTS_LIST => Some(MethodId::Query(QueryMethod::EventsList)),
         SEC_EVENTS_GET => Some(MethodId::Query(QueryMethod::EventsGet)),
@@ -294,4 +398,19 @@ pub fn resolve(method: &str) -> Option<MethodId> {
 /// Returns metadata for an exact registered method.
 pub fn metadata(method: &str) -> Option<Metadata> {
     resolve(method).map(MethodId::metadata)
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_authorization_is_an_explicit_local_peer_inventory() {
+        for method in AUTHORIZATION_METHODS {
+            let resolved = resolve(method).expect("registered");
+            assert!(matches!(resolved, MethodId::Authorization(_)));
+            assert_eq!(resolved.metadata().access, AccessPolicy::LocalUser);
+        }
+        assert!(resolve("authorization.execute").is_none());
+    }
 }

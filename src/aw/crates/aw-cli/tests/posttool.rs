@@ -10,6 +10,7 @@ mod native;
 
 use serde_json::{json, Value};
 use std::fs;
+use std::time::Instant;
 use support::{Fixture, Service};
 
 #[path = "posttool/openclaw_scope.rs"]
@@ -68,11 +69,26 @@ fn optional_projection_does_not_remove_large_results_from_the_journal() {
 
 #[test]
 fn qoder_waiting_after_steps_cannot_renew_an_exhausted_budget() {
+    exhausted_budget(0);
+}
+
+#[test]
+fn qoder_exhausted_budget_cleans_up_delayed_observer_startup() {
+    for delay_ms in [400, 2500] {
+        exhausted_budget(delay_ms);
+    }
+}
+
+fn exhausted_budget(startup_delay_ms: u64) {
     let fixture = Fixture::new();
     let mut document = fixture.document();
-    document["spec"]["execution"]["default_event_budget_ms"] = json!(300);
+    // Startup is part of the event budget, including time before the observer
+    // can write a marker. The daemon's kernel child list is the cleanup oracle.
+    document["spec"]["execution"]["default_event_budget_ms"] = json!(2000);
+    let observer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/launcher/budget_observer.py");
     document["spec"]["providers"] = json!({
-        "observer":{"protocol":"native-hook/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,"-c","import os,pathlib,sys,time; sys.stdin.read(); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(2)",fixture.root.join("sleeper.pid")]},"timeout_ms":2000,"max_output_bytes":4096},
+        "observer":{"protocol":"native-hook/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,observer,fixture.root,startup_delay_ms.to_string()]},"timeout_ms":5000,"max_output_bytes":4096},
         "compression":{"protocol":"aw-provider/v1alpha1","config":{},"transport":{"type":"stdio","location":"agent","argv":[fixture.python,fixture.action(),"--root",fixture.root,"--protocol","provider","--behavior","replace"]},"timeout_ms":2000,"max_output_bytes":4096}
     });
     document["spec"]["events"] = json!({"tool.after":{"enabled":true,"steps":[
@@ -83,13 +99,20 @@ fn qoder_waiting_after_steps_cannot_renew_an_exhausted_budget() {
     let mut command = fixture.launch(&[], None);
     command.env("FAKE_QODER_RESULT_TEXT", "original");
     let report = fixture.successful(command);
-    for hook in report["events"][1]["hooks"].as_array().unwrap() {
+    // Readiness is diagnostic: the executor may stop the observer before it
+    // initializes, or reap it after a scheduler delay. Both must leave no child.
+    eprintln!(
+        "observer startup delay: {startup_delay_ms} ms; initialized: {}",
+        fixture.root.join("observer-ready").exists()
+    );
+    let hooks = report["events"][1]["hooks"].as_array().unwrap();
+    assert_eq!(hooks.len(), 2);
+    for hook in hooks {
         assert_eq!(hook["status"], 0);
         assert!(!hook["stderr"].as_str().unwrap().is_empty());
         assert_eq!(hook["stdout"], "7b7d");
     }
-    let pid = fs::read_to_string(fixture.root.join("sleeper.pid")).unwrap();
-    assert!(!std::path::Path::new("/proc").join(pid).exists());
+    assert_service_children_reaped(&service);
     for entry in fs::read_dir(&fixture.root)
         .unwrap()
         .map(Result::unwrap)
@@ -99,6 +122,33 @@ fn qoder_waiting_after_steps_cannot_renew_an_exhausted_budget() {
         assert_ne!(request["method"], "invoke");
     }
     service.released(&fixture);
+}
+
+fn assert_service_children_reaped(service: &Service) {
+    let pid = service.status()["pid"].as_u64().unwrap();
+    let tasks = std::path::PathBuf::from(format!("/proc/{pid}/task"));
+    let leader = tasks.join(pid.to_string());
+    // A worker may exit after returning the callback response. Its children
+    // transfer to another daemon thread; read the stable leader last.
+    let mut children_files: Vec<_> = fs::read_dir(&tasks)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path != &leader)
+        .map(|path| path.join("children"))
+        .collect();
+    children_files.push(leader.join("children"));
+    for path in children_files {
+        match fs::read_to_string(&path) {
+            Ok(children) => assert!(
+                children.trim().is_empty(),
+                "daemon still owns unreaped children ({path:?}): {children}"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                assert!(path != leader.join("children"));
+            }
+            Err(error) => panic!("cannot inspect daemon children ({path:?}): {error}"),
+        }
+    }
 }
 
 #[test]
@@ -195,7 +245,7 @@ fn qoder_callback_delivers_one_replacement_and_keeps_audit_metadata_only() {
 #[test]
 fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
     use aw_service::{Binding, Capabilities, Operation};
-    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Instant};
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
     for agent in native::agents() {
         let adapter = agent.as_str();
         let fixture = Fixture::new();
@@ -219,30 +269,6 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
             {"id":"compress","provider":"tokenless","operation":"record","effects":["replace_result"],"on_error":"report"}]}});
         let service = Service::start(&fixture, &document);
         let deadline = || Instant::now() + support::TIMEOUT;
-        // An observation-only adapter must reject compression during admission.
-        if adapter == "qoder-sdk" {
-            let rejected = service.client.call(
-                Operation::Bind {
-                    target: "agent".into(),
-                    capabilities: Capabilities {
-                        failure_actions: Default::default(),
-                        adapter: adapter.into(),
-                        version: "1.0.56".into(),
-                        entrypoint: "sdk-worker".into(),
-                        events: BTreeMap::from([("tool.after".into(), vec!["observe".into()])]),
-                    },
-                    cwd: fixture.root.to_str().unwrap().into(),
-                    environment: BTreeMap::new(),
-                },
-                deadline(),
-            );
-            assert!(
-                rejected.is_err(),
-                "unsupported replacement must fail admission"
-            );
-            service.released(&fixture);
-            continue;
-        }
         let binding: Binding = serde_json::from_value(
             service
                 .client

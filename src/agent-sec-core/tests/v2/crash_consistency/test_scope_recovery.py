@@ -52,7 +52,7 @@ def test_process_exit_during_crash_cleans_binding_without_repinning_scope(recove
     recovery.restart()
     gate.release.set()
     until(
-        lambda: recovery.daemon.request("binding", "list"),
+        lambda remaining: recovery.daemon.request("binding", "list", timeout=remaining),
         lambda value: value["total"] == 0,
     )
     restored = recovery.daemon.request("scope", "get", "--scope-id", scope["scopeId"])

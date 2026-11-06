@@ -640,10 +640,17 @@ fn resolve_manifest_contract(
     if files.is_empty() {
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
-            reason: format!(
-                "component '{}' declares no [install.files] — nothing to install",
-                resolution.component
-            ),
+            reason: if manifest.install.files.is_empty() {
+                format!(
+                    "component '{}' declares no [install.files] — nothing to install",
+                    resolution.component
+                )
+            } else {
+                format!(
+                    "component '{}' only declares the ANOLISA-owned discovery contract; no component files remain to install",
+                    resolution.component
+                )
+            },
         });
     }
     // Adapter resources are laid alongside the component's own files, from
@@ -899,6 +906,10 @@ fn resolve_manifest_files(
             render,
         });
     }
+    // Published archives predate the transfer of discovery ownership to ANOLISA.
+    files.retain(|file| {
+        !anolisa_core::manifest::is_distribution_discovery_contract(layout, component, &file.dest)
+    });
     Ok(files)
 }
 
@@ -940,9 +951,10 @@ fn resolve_render_spec(
     let mode = RenderMode::parse(render).ok_or_else(|| CliError::InvalidArgument {
         command: COMMAND.to_string(),
         reason: format!(
-            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}'); run 'anolisa update self' and retry",
+            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}', '{}'); run 'anolisa update self' and retry",
             spec.display(),
             anolisa_core::manifest::RENDER_ANOLISA_PATHS_V1,
+            anolisa_core::manifest::RENDER_ANOLISA_JSON_COMMAND_V1,
         ),
     })?;
     if spec.kind == FileKind::Symlink || spec.source.as_deref().is_some_and(|s| s.ends_with('/')) {
@@ -1116,8 +1128,9 @@ pub(crate) struct InstallHooks {
 /// reject the whole component: the default is a warning naming the phase
 /// (see [`unrunnable_hook_phase_warnings`]), and only a `strict = true`
 /// declaration — the author stating the hook must run — refuses the
-/// install or update before any IO ([`strict_unrunnable_hook_phase_reason`]),
-/// exactly like an unresolvable script path.
+/// install or update before file placement
+/// ([`strict_unrunnable_hook_phase_reason`]). The check reads the embedded
+/// manifest after the artifact has been downloaded into the cache.
 const RUNNABLE_HOOK_PHASES: [HookPhase; 5] = [
     HookPhase::PreInstall,
     HookPhase::PostInstall,
@@ -1179,7 +1192,8 @@ pub(crate) fn unrunnable_hook_phase_warnings(
 ///
 /// Unlike the uninstall side (which degrades a missing/invalid snapshot to
 /// "no hooks"), install resolves strictly: an unresolvable script path is a
-/// contract authoring bug and aborts before any IO so it surfaces early.
+/// contract authoring bug and aborts before install file placement. The
+/// artifact has already been downloaded and its embedded manifest parsed.
 /// A hook phase no command runs follows the `strict` contract: a strict
 /// declaration refuses with [`CliError::InvalidArgument`] (an authored-input
 /// defect, not a machine failure), a non-strict one proceeds — the caller
@@ -1227,7 +1241,7 @@ mod tests {
 
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         for contract in [
-            "../../../../src/ws-ckpt/.anolisa/component.toml",
+            "../../../../src/ws-ckpt/packaging/anolisa/raw/component.toml",
             "../../manifests/components/ws-ckpt/component.toml",
         ] {
             let manifest = ComponentManifest::from_file(&manifest_dir.join(contract))
@@ -1261,7 +1275,7 @@ mod tests {
             for framework in ["openclaw", "hermes"] {
                 let plugin = layout
                     .datadir
-                    .join(format!("runtime/ws-ckpt/plugins/{framework}/fixture.txt"));
+                    .join(format!("plugins/ws-ckpt/{framework}/fixture.txt"));
                 assert_eq!(std::fs::read(plugin).unwrap(), b"fixture");
             }
         }

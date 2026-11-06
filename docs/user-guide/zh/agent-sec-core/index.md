@@ -5,7 +5,12 @@
 AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测和沙箱隔离。
 
 Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
-下文正式版本安装和 Agent 集成说明对应 V1；源码构建安装 V2 Rust CLI 和 daemon。
+下文 RPM 选包说明对应 V2 Rust CLI 和 daemon。Agent 接入资源保留既有宿主接口；
+后端命令与服务契约请参阅 V2 指南。
+
+使用 `agent-sec-cli sandbox run` 按明确的文件和网络权限执行命令。
+[Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求，以及应用如何接入策略授权、
+本地审批和执行回执。
 
 ## 概述
 
@@ -15,7 +20,7 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 | Code Scanner | bash/python 静态分析检测危险操作（判定：pass/warn/deny/error） |
 | Skill Ledger | Ed25519 签名完整性追踪，6 状态生命周期（pass/none/drifted/warn/deny/tampered） |
 | PII Checker | 检测文本中的个人信息和凭据（邮箱/手机/身份证/JWT/AccessKey 等） |
-| Sandbox | 基于 seccomp + namespace 的 cosh 命令执行隔离 |
+| Sandbox | 按明确文件和网络权限隔离命令（bubblewrap + seccomp） |
 | Observability | 交互式事件审阅 TUI，4 级下钻 |
 | Security Events | 本地安全事件存储，支持查询与聚合统计 |
 
@@ -44,24 +49,41 @@ sudo anolisa status sec-core
 agent-sec-cli --version
 ```
 
-`sec-core` 是 ANOLISA 中的组件名。RPM 继续使用原有包名
-`agent-sec-core`。
+`sec-core` 是 ANOLISA 中的组件名。V2 RPM 分别交付后端、宿主接入和 skills：
 
 ```bash
-sudo yum install anolisa agent-sec-core
+# Backend, sandbox, configuration and system service only.
+sudo yum install agent-sec-core
+
+# Complete direct integrations and security skills.
+sudo yum install agent-sec-core agent-sec-plugins agent-sec-skills
+
+# Optional: use ANOLISA to manage the installed framework integrations.
+sudo yum install anolisa
 sudo anolisa --install-mode system adopt sec-core
 ```
 
 从 YUM 安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把 RPM
 写入 system 状态，adapter 管理器随后才能读取已安装组件的契约。
 
-从源码构建时，使用仓库级统一入口。
+`agent-sec-core` 不再依赖安装全部框架插件和 skills。`agent-sec-plugins` 包含已有的
+六种宿主接入，安装后再以实际框架用户注册需要的接入。现有 ANOLISA raw 归档仍是整包交付。
+
+仓库级便利脚本继续可用。
 
 ```bash
 ./scripts/build-all.sh --component sec-core
 ```
 
-安装文件前，源码构建入口会检查 Node.js 20 或更高版本、Python 3、bubblewrap、
+在组件目录中构建 V2 并安装到系统：
+
+```bash
+cd src/agent-sec-core
+make build
+sudo make install
+```
+
+安装文件前，仓库脚本会检查 Node.js 20 或更高版本、Python 3、bubblewrap、
 GnuPG 和 `jq`。它会通过 `sudo` 安装 Rust CLI、sandbox 与 host-level daemon，默认模式下的
 集成资源仍安装到用户目录。Python hook 使用宿主的 `python3`；Qoder 插件安装器当前
 要求 Python >= 3.11, < 3.12。user mode 会一次性列出缺少的系统 runtime package 和安装命令，

@@ -12,6 +12,10 @@ export function query({ options }) {
   let sequence = 0;
   const callbacks = new Map();
   const q = {
+    async request(request) {
+      if (request.type !== "get_settings") throw new Error("Unexpected fixture request");
+      return { effective: options.settings ?? {} };
+    },
     transport: { write() {} },
     async initializationResult() {
       if (process.env.QODER_INIT_FAIL) throw new Error("fixture initialization failed");
@@ -19,6 +23,9 @@ export function query({ options }) {
     },
     recordInboundSessionMessage() {},
     async handleControlRequest(frame) {
+      return this.processControlRequest(frame, signal);
+    },
+    async processControlRequest(frame, signal) {
       const { input, callback_id } = frame.request;
       return await callbacks.get(callback_id)(input, input.tool_use_id, { signal });
     },
@@ -28,6 +35,11 @@ export function query({ options }) {
     async streamInput() {},
     async next() { return { done: true }; },
     async fixture() {
+      if (process.env.QODER_SUBMIT) {
+        const denied = await emit("UserPromptSubmit");
+        if (denied) return { denied: true, submit_denied: true };
+        writeFileSync("model-request", "yes");
+      }
       this.recordInboundSessionMessage({ type: "assistant", session_id: native.session_id,
         message: { content: [{ type: "tool_use", id: native.tool_use_id,
           name: native.tool_name, input: native.tool_input }] } });
@@ -45,12 +57,15 @@ export function query({ options }) {
   async function emit(name, fields = {}) {
     for (const group of options.hooks[name] ?? [])
       for (const callback of group.hooks) {
-        const input = { ...native, hook_event_name: name, ...fields };
+        const input = name === "UserPromptSubmit" ?
+          { session_id: native.session_id, cwd: native.cwd, hook_event_name: name,
+            prompt: "fresh user input", scenario: native.scenario } :
+          { ...native, hook_event_name: name, ...fields };
         const callback_id = `callback-${++sequence}`;
         callbacks.set(callback_id, callback);
         const result = await q.handleControlRequest({ request_id: `dispatch-${sequence}`,
           request: { subtype: "hook_callback", callback_id, input, tool_use_id: input.tool_use_id } });
-        if (result.hookSpecificOutput?.permissionDecision === "deny") return true;
+        if (result.hookSpecificOutput?.permissionDecision === "deny" || result.decision === "block") return true;
       }
     return false;
   }

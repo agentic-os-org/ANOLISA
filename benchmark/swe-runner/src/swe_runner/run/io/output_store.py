@@ -110,7 +110,11 @@ class RunOutputStore:
                 instance_id = data.get("instance_id") if isinstance(data, dict) else None
                 if isinstance(instance_id, str) and instance_id:
                     ids.add(instance_id)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                # UnicodeDecodeError keeps the read strict: a results/*.json
+                # file that is not valid UTF-8 is skipped (and left byte-for-
+                # byte unchanged) like any other unreadable file, instead of
+                # aborting the whole batch resume.
                 logger.warning("OUTPUT_LOAD_ATTEMPTED_IDS_SKIP file=%s", result_file)
 
         logger.info("OUTPUT_LOAD_ATTEMPTED_IDS instance=global count=%s results_dir=%s", len(ids), self.results_dir)

@@ -608,26 +608,35 @@ impl GenAIBuilder {
         let agent_name_str = agent_name.as_deref().unwrap_or("");
         let pid_i32 = conn_id.pid as i32;
 
-        let session_id = metadata_session
+        let session_id = metadata_session.or_else(|| {
+            // Mapper first (same order as call_builder.rs): a FileWrite
+            // from this pid already revealed the real session UUID, which
+            // groups the crash-drain record with the normal calls of the
+            // same session instead of an isolated crash bucket (#2059).
+            //
+            // Known limitation: pid_map has no lifecycle bound, so a
+            // recycled pid whose new process has not yet written a session
+            // file can surface the previous process's mapping here. This
+            // mis-groups only orphan calls that would otherwise get a
+            // synthetic crash hash, and needs pid reuse + zero FileWrite +
+            // drain to coincide — accepted instead of lifecycle tracking.
+            response_mapper
+                .get_session_by_pid(conn_id.pid)
+                .map(str::to_string)
+        });
+        let (session_key, conversation_key) = self.id_resolver.message_keys(
+            agent_name_str,
+            pid_i32,
+            &first_user_text,
+            &last_user_text,
+            user_message_count,
+            session_id.is_none(),
+        );
+        let session_id = session_id
             .or_else(|| {
-                // Mapper first (same order as call_builder.rs): a FileWrite
-                // from this pid already revealed the real session UUID, which
-                // groups the crash-drain record with the normal calls of the
-                // same session instead of an isolated crash bucket (#2059).
-                //
-                // Known limitation: pid_map has no lifecycle bound, so a
-                // recycled pid whose new process has not yet written a session
-                // file can surface the previous process's mapping here. This
-                // mis-groups only orphan calls that would otherwise get a
-                // synthetic crash hash, and needs pid reuse + zero FileWrite +
-                // drain to coincide — accepted instead of lifecycle tracking.
-                response_mapper
-                    .get_session_by_pid(conn_id.pid)
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                self.id_resolver
-                    .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+                session_key
+                    .as_ref()
+                    .and_then(|key| self.id_resolver.peek_session_id_with_key(key))
             })
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
@@ -638,9 +647,9 @@ impl GenAIBuilder {
                     0,
                 ))
             });
-        let conversation_id = self
-            .id_resolver
-            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text, user_message_count)
+        let conversation_id = conversation_key
+            .as_ref()
+            .and_then(|key| self.id_resolver.peek_conversation_id_with_key(key))
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
                     "conversation",
@@ -657,12 +666,9 @@ impl GenAIBuilder {
         // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
         // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
         // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
-        self.id_resolver.finish_conversation(
-            agent_name_str,
-            pid_i32,
-            &last_user_text,
-            user_message_count,
-        );
+        if let Some(key) = &conversation_key {
+            self.id_resolver.finish_conversation_with_key(key);
+        }
 
         Some(PendingCallInfo {
             call_id,
@@ -1759,6 +1765,59 @@ mod tests {
         assert!(pending.user_query.as_deref() == Some("hello"));
     }
 
+    #[test]
+    fn test_build_pending_from_request_gemini_uses_user_text_for_crash_ids() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "first question"}]},
+                {"role": "model", "parts": [{"text": "answer"}]},
+                {"role": "user", "parts": [{"text": "second question"}]}
+            ]
+        }"#;
+        let req = make_request("/v1beta/models/gemini-2.5-pro:generateContent", body);
+        let mapper = ResponseSessionMapper::new();
+        let cache = std::collections::HashMap::from([(1_u32, "gemini-agent".to_string())]);
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
+            .expect("Gemini request creates a pending row");
+
+        assert_eq!(pending.user_query.as_deref(), Some("second question"));
+        let expected_session = crate::genai::id_resolver::crash_fallback_id(
+            "session",
+            "gemini-agent",
+            1,
+            "first question",
+            0,
+        );
+        let expected_conversation = crate::genai::id_resolver::crash_fallback_id(
+            "conversation",
+            "gemini-agent",
+            1,
+            "second question",
+            2,
+        );
+        assert_eq!(
+            pending.session_id.as_deref(),
+            Some(expected_session.as_str())
+        );
+        assert_eq!(
+            pending.conversation_id.as_deref(),
+            Some(expected_conversation.as_str())
+        );
+
+        let input: serde_json::Value = serde_json::from_str(
+            pending
+                .input_messages
+                .as_deref()
+                .expect("messages are recorded"),
+        )
+        .expect("input messages are valid JSON");
+        assert_eq!(input[0]["content"], "first question");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["content"], "second question");
+    }
+
     /// A SysOM POP request keeps its LLM parameters inside `llmParamString`.
     /// The pending builder read the wrapper only, so a drained SysOM call
     /// lost its model, streaming flag, messages and user query — every
@@ -1913,9 +1972,10 @@ mod tests {
         // 同固定文本的下一轮对话重新锚定。
         let builder = GenAIBuilder::new();
         let pid = 1i32;
-        let text = "hello";
-        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
-        let req = make_request("/v1/chat/completions", body);
+        let text = "雪|\"\n\0".repeat(128 * 1024);
+        let body = serde_json::json!({"model":"gpt-4","messages":[{"role":"user","content":text}]})
+            .to_string();
+        let req = make_request("/v1/chat/completions", &body);
         let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
 
@@ -1931,18 +1991,20 @@ mod tests {
         // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
         let turn1 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-1", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-1", 1)
             .unwrap();
 
         // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
-        builder
+        let pending = builder
             .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .expect("LLM path should create pending");
+        assert_eq!(pending.conversation_id.as_deref(), Some(turn1.as_str()));
+        assert_eq!(pending.user_query.as_deref(), Some(text.as_str()));
 
         // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
         let turn2 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-2", 1)
+            .resolve_conversation_id(&agent_name, pid, &text, "resp-2", 1)
             .unwrap();
         assert_ne!(
             turn1, turn2,

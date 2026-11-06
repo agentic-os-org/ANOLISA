@@ -16,5 +16,7 @@ const ruleReasonZh: Record<string, string> = {
 export function translateRuleReason(reason: string, locale: string): string {
   if (!reason || !locale.startsWith('zh')) return reason;
   const key = reason.trim().toLowerCase();
-  return ruleReasonZh[key] ?? reason;
+  return Object.prototype.hasOwnProperty.call(ruleReasonZh, key)
+    ? ruleReasonZh[key]
+    : reason;
 }

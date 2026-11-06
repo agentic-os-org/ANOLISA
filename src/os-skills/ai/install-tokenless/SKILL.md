@@ -12,7 +12,7 @@ Tokenless is the token optimization component of ANOLISA. It compresses tool sch
 
 ## System Requirements
 
-- **OS**: Linux or macOS. Windows is not supported by any method below; use WSL2 there.
+- **OS**: Linux or macOS. This Skill's Bash workflow requires WSL2 on Windows; native Windows x64 npm installation is documented in the Tokenless user guide.
 - **Architecture**: x86_64 or arm64
 - **Network**: Internet access required
 - **Shell**: Bash
@@ -22,8 +22,8 @@ Per-method prerequisites:
 | Method | Requires | Installs |
 |--------|----------|----------|
 | A — anolisa CLI | `curl` | full component suite including adapters |
-| B — npm | Node.js 16.7+ with `npm`, glibc Linux or macOS | `tokenless`, `rtk`, adapter resources |
-| C — curl | `curl`, `tar`, plus Node.js 16.7+ **or** a Rust toolchain (`cargo`) depending on the path taken | npm path: as Method B. Source-build path (Linux only): the `tokenless` CLI only |
+| B — npm | Node.js 16.7+ with `npm`, glibc Linux or macOS | `tokenless` (0.9.2 and earlier: also `rtk`), adapter resources |
+| C — curl | `curl`, `tar`, plus Node.js 16.7+ **or** a Rust toolchain (`cargo`; after 0.9.2 also `git` and `patch`), depending on the path taken | npm path: as Method B. Source-build path (Linux only): the `tokenless` CLI only |
 | D — Skill | whichever of A/B/C the agent runs | as that method |
 
 The package postinstall enables the `claude-code` adapter by running that adapter's own `install.sh`, which registers the plugin with the Claude CLI when one is reachable; with no Claude CLI it skips registration and says so. That registration lives in Claude's own configuration, outside both the npm prefix and the adapter directory, so deregister it with the adapter's `uninstall.sh` (or `scripts/uninstall.sh`) rather than by deleting the package.
@@ -76,16 +76,21 @@ Requires Node.js 16.7+ — the release `fs.cpSync` arrived in, which the package
 npm install -g anolisa-tokenless
 ```
 
-This automatically installs the `tokenless` and `rtk` binaries plus the framework adapter resources. (`toon` is no longer a standalone binary — TOON encoding is a `tokenless` subcommand.)
+This automatically installs the `tokenless` binary plus the framework adapter resources. How RTK, the command rewriter, is installed depends on the release that npm resolves; check it with `tokenless --version`:
+
+- **0.9.2 and earlier:** a separate `rtk` binary is installed next to `tokenless`, which has no `rtk` subcommand.
+- **Releases after 0.9.2:** RTK is linked into `tokenless` and runs as `tokenless rtk`; no `rtk` binary is installed.
+
+(`toon` is no longer a standalone binary — TOON encoding is a `tokenless` subcommand.)
 
 The adapter resources land in `~/.local/share/anolisa/adapters/tokenless`, which is shared with the anolisa CLI. Ownership there has to be **proven**, not assumed: the postinstall only refreshes a tree carrying the marker (`.tokenless-owner`) that this package or the standalone curl installer wrote. Anything else is kept unchanged and reported — a managed anolisa component install, a tree left by a release from before the marker existed, or a directory somebody copied by hand — because nothing about its content says who put it there, and every framework registration pointing into it would dangle otherwise. The copy this package ships stays available inside the package under `adapters/tokenless`; pass `ANOLISA_TOKENLESS_FORCE_ADAPTERS=1` to take the directory over anyway.
 
-The npm package declares `os: linux, darwin`, so this method is unavailable on Windows and on musl Linux.
-Intel macOS (x86_64) has no published platform package yet either: `@anolisa/tokenless-darwin-x64` is a
-release build target, not a registry artifact, so Intel macOS has **no supported install route in this release**.
-Method A does not cover the platform and Method C only reaches its npm path there. Do not pass
+The npm package declares `os: win32, linux, darwin`; prebuilt Linux packages require glibc.
+Intel macOS (x86_64) uses the published `@anolisa/tokenless-darwin-x64` package.
+Method A does not cover Intel macOS; use Method B or Method C's npm path there. Do not pass
 `TOKENLESS_FORCE_BUILD=1` on macOS — the installer refuses the source build on that platform and exits with an
-error instead of running `cargo`. Use Linux or Apple Silicon macOS until that package is published.
+error instead of running `cargo`. Native Windows x64 can use npm directly, but the remaining Bash
+commands in this Skill require WSL2.
 
 **Method C: Standalone curl Install**
 
@@ -104,13 +109,18 @@ curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/
 # Custom install directory
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_INSTALL_DIR=/usr/local/bin bash
 
-# Force the source build even when npm is available (needs cargo; Linux only)
+# Force the source build even when npm is available (needs cargo, and after 0.9.2 git and patch; Linux only)
 curl -fsSL https://raw.githubusercontent.com/alibaba/anolisa/main/src/tokenless/scripts/install.sh | TOKENLESS_FORCE_BUILD=1 bash
 ```
 
 A pinned version is a hard pin: the source build downloads only the matching `tokenless/v<VERSION>` tag, and fails if that tag does not exist. It never falls back to the `main` branch.
 
-The source-build path installs the `tokenless` CLI only — no `rtk` and no adapter resources. Treat it as a CLI-only install (see Step 3). It runs on Linux only.
+The source-build path installs the `tokenless` CLI only, with no adapter resources. Treat it as a CLI-only install (see Step 3). It runs on Linux only. Without `TOKENLESS_VERSION` it builds the version npm reports as latest.
+
+Whether RTK is part of that build depends on the tag:
+
+- **Releases after 0.9.2** link RTK into `tokenless`. Before building, the installer fetches the pinned RTK source with `git` and `patch` and stops if either is missing.
+- **0.9.2 and earlier**, such as the 0.7.4 example above, build without RTK and need neither tool.
 
 The installer records every path it created in `~/.local/share/tokenless/install-receipt`, which the uninstall step below relies on.
 
@@ -145,7 +155,7 @@ ls ~/.local/share/anolisa/adapters/tokenless/          # confirm the directory e
 bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 ```
 
-**Installed via Method C's source-build path** — CLI-only. No `rtk` and no adapter resources were installed, so no adapter can be enabled. Use the `tokenless` subcommands directly, or reinstall through Method A or B for agent integration.
+**Installed via Method C's source-build path** — CLI-only. No adapter resources were installed, so no adapter can be enabled. Use the `tokenless` subcommands directly, or reinstall through Method A or B for agent integration.
 
 > **Note:** The script paths below are examples for npm-installed adapters. Not all frameworks ship a standalone install script, and directory names may differ. Always check `ls ~/.local/share/anolisa/adapters/tokenless/` first. For anolisa CLI installs, `anolisa adapter enable tokenless <framework>` is the recommended path.
 
@@ -249,7 +259,7 @@ that newer install and is kept, including its framework registrations and its np
 package.
 
 Re-running the installer with a different method retires the previous receipt, so
-switching npm → source does not orphan the `rtk` launcher, the npm global package
+switching npm → source does not orphan a launcher link, the npm global package
 or the adapter tree — but only once the replacement is verified. The previous
 install is moved aside first and put back if the new one fails, so a missing tag,
 a build error or an unwritable directory leaves the working install and its
@@ -266,7 +276,7 @@ because a stale receipt would let a later uninstall delete the new one. Where th
 directory overlap (`--prefix ~/.local` with `~/.local/bin`), that package is
 retired by hand instead of through `npm uninstall`, which would otherwise take the
 freshly installed CLI with it. A failed npm attempt is rolled back the same way,
-so the source-build fallback never inherits an unowned package, `rtk` link or
+so the source-build fallback never inherits an unowned package, launcher link or
 adapter tree.
 
 **Direct npm installation (Method B), not through the curl script:** no receipt
@@ -301,5 +311,6 @@ whenever the postinstall reported that it kept a managed adapter tree, because
 that directory was never this npm install's to delete.
 
 If the receipt is missing (for example after a manual cleanup), the uninstaller
-exits with an error rather than guessing; remove `<install-dir>/tokenless` and
-`<install-dir>/rtk` yourself, using the directory you actually installed into.
+exits with an error rather than guessing; remove `<install-dir>/tokenless` (and
+`<install-dir>/rtk`, left by releases that shipped it separately) yourself, using
+the directory you actually installed into.

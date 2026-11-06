@@ -4,6 +4,7 @@ pub mod capabilities;
 mod commands;
 mod context;
 pub mod output;
+pub mod sandbox;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;
@@ -15,8 +16,8 @@ use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
 use clap::Parser;
 use commands::Command;
 pub use commands::{
-    CapabilitiesCommand, EventsCommand, EventsRunError, EventsTransport, PiiOutputFormat,
-    PromptScanPlan, ScanPromptInputError,
+    CapabilitiesCommand, DefaultPolicy, EventsCommand, EventsRunError, EventsTransport,
+    IntentFailure, PiiOutputFormat, PromptScanPlan, ScanPromptInputError,
 };
 
 /// Parsed invocation for one CLI command.
@@ -32,8 +33,12 @@ pub struct Cli {
 /// How a parsed invocation reaches its result.
 #[derive(Debug)]
 pub enum Plan<'a> {
+    /// Run a direct sandbox or the internal host authorization handoff.
+    Sandbox(&'a sandbox::SandboxCommand),
     /// Rendered from the process environment without any daemon involvement.
     Local(&'a CapabilitiesCommand),
+    /// Rendered from the embedded default policy without any daemon involvement.
+    PolicyDefault(&'a DefaultPolicy),
     /// Generate the observability record schema without a daemon endpoint.
     ObservabilitySchema,
     /// Sent to the daemon listening on `socket`.
@@ -102,7 +107,10 @@ impl Cli {
             let mut tokens = argv.iter().skip(1);
             let mut count = 0;
             while let Some(argument) = tokens.next() {
-                if argument == "--text" || argument == "--code" {
+                if argument == "--" {
+                    break;
+                }
+                if argument == "--text" || argument == "--code" || argument == "--task" {
                     tokens.next();
                 } else if argument.as_bytes().split(|byte| *byte == b'=').next()
                     == Some(option.as_bytes())
@@ -121,7 +129,15 @@ impl Cli {
             // A local command must stay usable on hosts that never deploy a
             // daemon, so an absent or malformed endpoint is not an error here.
             Some(_) => None,
-            None if arguments.command.is_observability_schema() => None,
+            None if arguments.command.is_observability_schema()
+                || arguments.command.policy_default().is_some()
+                || arguments
+                    .command
+                    .sandbox()
+                    .is_some_and(|command| !command.requires_daemon()) =>
+            {
+                None
+            }
             None => Some(resolve_socket(arguments.socket, socket_env)?),
         };
         Ok(Self {
@@ -133,7 +149,10 @@ impl Cli {
                 } else if arguments.command.is_llm_code_scan() {
                     u32::try_from(asc_model_client::MAX_CODE_SCAN_BUDGET.as_millis())
                         .unwrap_or(u32::MAX)
-                } else if arguments.command.is_skill_sec() {
+                } else if arguments.command.is_intent() {
+                    45_000
+                } else if arguments.command.is_skill_sec() || arguments.command.gateway().is_some()
+                {
                     60_000
                 } else {
                     5_000
@@ -153,8 +172,14 @@ impl Cli {
 
     /// Reports whether this invocation runs locally or against the daemon.
     pub fn plan(&self) -> Plan<'_> {
+        if let Some(command) = self.command.sandbox() {
+            return Plan::Sandbox(command);
+        }
         if self.command.is_observability_schema() {
             return Plan::ObservabilitySchema;
+        }
+        if let Some(command) = self.command.policy_default() {
+            return Plan::PolicyDefault(command);
         }
         match (self.command.local(), self.socket.as_deref()) {
             (Some(command), _) => Plan::Local(command),
@@ -180,6 +205,14 @@ impl Cli {
     /// the 5 s interactive default.
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(u64::from(self.timeout_ms))
+    }
+
+    /// Executes intent collection, daemon calls and candidate rendering, when selected.
+    ///
+    /// # Errors
+    /// Returns redacted input, transport, candidate validation or output failures.
+    pub fn run_intent(&self, socket: &Path) -> Option<Result<u8, IntentFailure>> {
+        self.command.run_intent(socket, self.timeout())
     }
 
     /// Executes paged observability queries or an interactive review, when selected.
@@ -246,6 +279,21 @@ impl Cli {
     /// Whether this invocation uses the prompt-scan projection.
     pub const fn is_scan_prompt(&self) -> bool {
         self.command.is_scan_prompt()
+    }
+
+    /// Runs a secret-gateway command, or returns `None` for another command.
+    ///
+    /// # Errors
+    /// Returns daemon transport or output failures.
+    pub fn run_gateway(
+        &self,
+        socket: &Path,
+        stdout: &mut impl std::io::Write,
+        stderr: &mut impl std::io::Write,
+    ) -> Option<std::io::Result<u8>> {
+        self.command
+            .gateway()
+            .map(|command| command.run(socket, self.timeout(), stdout, stderr))
     }
 
     /// The events query command, or `None` for another command.
@@ -336,6 +384,13 @@ pub enum InputError {
     /// transport loop, not the single-request path.
     #[error("events requests are resolved through the events transport loop")]
     EventsBatch,
+    /// Invalid secret-gateway input.
+    #[error("gateway: {0}")]
+    Gateway(String),
+    /// The intent command collects inputs and handles interaction through
+    /// [`Cli::run_intent`], not the single-request path.
+    #[error("intent proposals are resolved through run_intent")]
+    IntentProposal,
     /// A scan-prompt input failure; that command owns its variants and
     /// wording, mirroring V1's scan-specific messages.
     #[error(transparent)]
@@ -362,7 +417,9 @@ impl InputError {
             | Self::Json(_)
             | Self::LocalCommand
             | Self::PromptScanBatch
-            | Self::EventsBatch => false,
+            | Self::EventsBatch
+            | Self::Gateway(_)
+            | Self::IntentProposal => false,
         }
     }
 }
@@ -370,6 +427,68 @@ impl InputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_never_resolves_a_daemon_and_preserves_target_options() {
+        let cli = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "--socket",
+                "/unused",
+                "sandbox",
+                "run",
+                "--permissions",
+                "permissions.json",
+                "--",
+                "python3",
+                "a b.py",
+                "--socket",
+                "one",
+                "--socket",
+                "two",
+                "--timeout-ms",
+                "invalid",
+            ],
+            Some(OsStr::new("relative")),
+        )
+        .unwrap();
+        assert!(cli.socket().is_none());
+        assert!(matches!(cli.request(), Err(InputError::LocalCommand)));
+        let Plan::Sandbox(sandbox::SandboxCommand::Run(command)) = cli.plan() else {
+            panic!("local sandbox plan");
+        };
+        assert_eq!(
+            command.command,
+            [
+                "python3",
+                "a b.py",
+                "--socket",
+                "one",
+                "--socket",
+                "two",
+                "--timeout-ms",
+                "invalid",
+            ]
+        );
+    }
+
+    #[test]
+    fn sandbox_requires_permissions_and_an_explicit_command_boundary() {
+        for args in [
+            vec!["agent-sec-cli", "sandbox", "run", "--", "true"],
+            vec!["agent-sec-cli", "sandbox", "run", "--permissions", "p.json"],
+            vec![
+                "agent-sec-cli",
+                "sandbox",
+                "run",
+                "--permissions",
+                "p.json",
+                "true",
+            ],
+        ] {
+            assert!(Cli::parse_from_with_socket_env(args, None).is_err());
+        }
+    }
 
     #[test]
     fn scanner_hyphen_values_are_data_but_duplicate_global_options_fail() {
@@ -410,6 +529,58 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn intent_task_is_data_and_timeout_is_command_specific() {
+        for literal in ["--socket", "--timeout-ms", "--socket=/literal"] {
+            let cli = Cli::parse_from_with_socket_env(
+                [
+                    "agent-sec-cli",
+                    "--socket",
+                    "/run/test.sock",
+                    "intent",
+                    "propose",
+                    "--task",
+                    literal,
+                ],
+                None,
+            )
+            .unwrap();
+            assert_eq!(cli.timeout(), Duration::from_secs(45));
+            assert!(matches!(cli.request(), Err(InputError::IntentProposal)));
+        }
+        for ttl in ["0", "1801"] {
+            assert!(
+                Cli::parse_from_with_socket_env(
+                    [
+                        "agent-sec-cli",
+                        "intent",
+                        "propose",
+                        "--task",
+                        "read",
+                        "--ttl",
+                        ttl
+                    ],
+                    None
+                )
+                .is_err()
+            );
+        }
+        let cli = Cli::parse_from_with_socket_env(
+            [
+                "agent-sec-cli",
+                "intent",
+                "propose",
+                "--task",
+                "read",
+                "--timeout-ms",
+                "1",
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(cli.timeout(), Duration::from_millis(1));
     }
 
     #[test]

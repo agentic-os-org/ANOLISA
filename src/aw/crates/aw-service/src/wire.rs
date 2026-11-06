@@ -1,11 +1,16 @@
 //! Versioned local control messages; native identities are data, not authentication.
 
-use aw_provider::admission::AdapterCapabilities;
+use aw_core::admission::AdapterCapabilities;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, ffi::OsString};
 
 mod environment;
+mod registration;
+pub use registration::{
+    RegistrationCommand, RegistrationHandle, RegistrationKey, RegistrationOwner,
+    RegistrationRequest, REGISTRATION_VERSION,
+};
 
 /// Experimental local protocol, separate from the Provider stdio protocol.
 pub const VERSION: &str = "aw-service/v1alpha7";
@@ -157,6 +162,11 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    /// Coordinate an application-owned instance through an authenticated peer.
+    Registration {
+        /// Versioned independent lifecycle action.
+        command: RegistrationCommand,
+    },
     /// Discover identity and current bounded resource counts.
     Status,
     /// Read at most 20 completed step metadata entries from this service start.
@@ -203,9 +213,33 @@ pub enum Operation {
         instance_id: String,
     },
 
+    /// Start continuous validity checking on an acknowledged task scope.
+    WatchScope {
+        /// Task identity, already bound to the outer service generation.
+        instance_id: String,
+        /// Native worker PID; must match the original scope owner.
+        pid: u32,
+    },
+    /// Validate the installed bridge against its immutable task policy.
+    CheckScope {
+        /// Previously watched task scope.
+        instance_id: String,
+        /// Original native worker PID.
+        pid: u32,
+        /// Revision returned by WatchScope; a mismatch permanently fences the scope.
+        policy_revision: String,
+        /// Whether the native owner still observes every required installed seam.
+        valid: bool,
+    },
+
     /// Enable producer-sequenced reclamation on a fresh owned binding.
     EnableInvocations {
         /// Owned binding whose adapter supplies stable producer identities.
+        instance_id: String,
+    },
+    /// Enable sequenced input turns before the binding's first submission.
+    EnableSubmissions {
+        /// Owned binding whose input producer supplies monotonic turn IDs.
         instance_id: String,
     },
     /// Reserve one invocation before forwarding it to native dispatch.
@@ -310,9 +344,9 @@ pub enum Operation {
         /// Normalized Provider event, including the matching instance ID.
         event: Value,
     },
-    /// Lease one native callback shared by all step processes for the same tool call.
+    /// Lease one native submission or tool callback shared by all its step processes.
     ///
-    /// Nonempty session/tool call IDs identify the event within this instance.
+    /// Nonempty session plus turn/tool-call IDs identify the event within this instance.
     /// Repeated opens require identical input and reuse the first deadline. Hermes
     /// completion observers and final replacement normalize only their seam name
     /// and observer-only middleware trace; the first native bytes are retained.
@@ -320,6 +354,7 @@ pub enum Operation {
     /// its pinned completion view supplies native metadata without renewing claims.
     /// Sequenced bindings require a producer registration and reclaim both phases
     /// after FinishInvocation drains them. Unknown or retired identities fail closed.
+    /// Sequenced inputs reclaim details after CloseInputEvent, retaining a high-water mark.
     /// Legacy bindings retain at most 1024 claims until unbind; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.
@@ -343,6 +378,15 @@ pub enum Operation {
         session_id: String,
         /// Invocation-scoped normalized tool call identifier.
         call_id: String,
+    },
+    /// Cancel a submitted turn without creating a tool invocation identity.
+    CloseInputEvent {
+        /// Owning binding instance.
+        instance_id: String,
+        /// Session used by the normalized submission.
+        session_id: String,
+        /// Adapter-issued turn identity.
+        turn_id: String,
     },
     /// Execute one step; concurrent RPCs preserve caller scheduling.
     InvokeStep {

@@ -7,6 +7,7 @@ use crate::tools::{is_shell_tool_name, known_provider_tool, KnownProviderTool};
 use crate::types::{AgentEvent, QuestionSelectionMode};
 
 mod auth;
+pub(crate) mod ecs_trial;
 mod serialization;
 
 use auth::parse_auth_provider;
@@ -154,6 +155,7 @@ pub struct ControlProtocolCapabilities {
     /// an ordinary response, and losing the receipt only means the core keeps
     /// its last-resort approval guard armed (the designed degradation).
     pub can_handle_approval_receipt: bool,
+    pub can_handle_ecs_trial_v1: bool,
 }
 
 /// Shared writer-thread check for the #1940 receipt gate: a poisoned or
@@ -651,6 +653,7 @@ pub(crate) fn parse_initialize_response_value(
             "can_handle_shell_evidence_tool",
         ),
         can_handle_approval_receipt: bool_capability(capabilities, "can_handle_approval_receipt"),
+        can_handle_ecs_trial_v1: bool_capability(capabilities, "can_handle_ecs_trial_v1"),
     }))
 }
 
@@ -675,8 +678,14 @@ pub struct ApprovalResponse {
 /// disarm its residual timeout) and never resolves anything.
 #[derive(Debug, Clone)]
 pub(crate) enum ApprovalChannelMessage {
+    EcsTrialControl {
+        progress: crate::types::EcsTrialProgress,
+        action: crate::types::EcsTrialAction,
+    },
     Response(ApprovalResponse),
-    Receipt { request_id: String },
+    Receipt {
+        request_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]

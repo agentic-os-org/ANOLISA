@@ -2,32 +2,8 @@
 
 [中文版](../../../zh/integrations/agentsight/agentsight-readonly.md)
 
-The subsequent [evidence/context layer](../../runtime/evidence-context.md) composes this
-connector with admitted native identity; the diagnostic command remains
-unassociated and independent.
-
-## Scope and sequence
-
-This implements [#7621](https://github.com/agentic-os-org/ANOLISA/issues/7621),
-the first slice of AW as the base with AgentSight supplying additional evidence.
-`aw-service::agentsight::Client` reads a selected source trajectory.
-The connector is a library; it adds no standalone query command. The normal
-entrypoint is `aw run`, integrated by #7622 / #7655 as specified in the
-[lifecycle design](agentsight-integration.md). Hook dispatch, Provider effects,
-local Journal persistence and AgentSight lifecycle keep their existing owners.
-
-| Stage | Issue | Dependency |
-| --- | --- | --- |
-| Read-only source connector | [#7621](https://github.com/agentic-os-org/ANOLISA/issues/7621) | Existing AgentSight GET APIs |
-| Run lifecycle, trusted identity, evidence and bounded context | [#7622](https://github.com/agentic-os-org/ANOLISA/issues/7622) | #7621; coordinate scope admission with #4372 |
-| Capability coverage and explicit degradation modes | [#7623](https://github.com/agentic-os-org/ANOLISA/issues/7623) | #7621, #7622 |
-| Public incremental AW audit export | [#7624](https://github.com/agentic-os-org/ANOLISA/issues/7624) | #7622, #7623 |
-| Idempotent AgentSight audit consumption | [#7625](https://github.com/agentic-os-org/ANOLISA/issues/7625) | #7623, #7624 |
-
-Semantic evaluation, Jev-like models, scoring and action routing belong to phase
-two. All-in-one profiles/lifecycle follow separately after the capability and
-audit contracts. This slice does not introduce `aw.evidence/v1`, `aw.audit/v1`,
-`off`/`auto`/`required` policy admission, or new YAML/service RPC fields.
+`aw-service::agentsight::Client` reads source trajectories through bounded GET requests. Callers provide source configuration and session identity; the connector returns compatibility, results and gaps.
+See the [evidence contract](../../runtime/evidence-context.md) for runtime correlation and snapshots, and the [integration roadmap](agentsight-integration.md) for future capability and audit extensions.
 
 ## Query boundary
 

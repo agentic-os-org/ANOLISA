@@ -20,6 +20,9 @@ use crate::model::{Page, PolicyRevisionState};
 pub trait PapRepository: Send + Sync {
     /// Creates or replaces the current Policy record.
     ///
+    /// Validate the complete snapshot before writing. Cedar language admission
+    /// is performed by PAP; snapshot validation checks its source envelope only.
+    ///
     /// Implementations must atomically accept a changed record only when its
     /// revision is exactly the next never-reused revision for the Policy identity.
     /// An exact replay of the current record is idempotent; every other stale,
@@ -28,7 +31,7 @@ pub trait PapRepository: Send + Sync {
     /// record remains.
     ///
     /// # Errors
-    /// Returns conflict or persistence failures.
+    /// Returns validation, conflict or persistence failures.
     fn put_policy(&self, policy: &PreparedPolicy) -> Result<PreparedPolicy, PapError>;
 
     /// Gets Policy allocation state and its optional current record.
@@ -45,6 +48,13 @@ pub trait PapRepository: Send + Sync {
     /// # Errors
     /// Returns not-found or persistence failures.
     fn get_policy(&self, id: &ResourceId, revision: Revision) -> Result<PreparedPolicy, PapError>;
+
+    /// Reads 1..32 selected current policies in one consistent storage snapshot.
+    /// Returns records in requested order; no missing policy may be omitted.
+    ///
+    /// # Errors
+    /// Rejects invalid selection sizes, missing policies, or persistence failures.
+    fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError>;
 
     /// Lists current Policy records ordered by Policy identity ascending.
     ///
@@ -108,6 +118,16 @@ pub trait PapRepository: Send + Sync {
         &self,
         id: &ResourceId,
     ) -> Result<Vec<asc_policy_repository::BindingIntentReceipt>, PapError>;
+
+    /// Reports whether discovery has stopped and no Binding responsibility remains.
+    /// # Errors
+    /// Returns storage failures; never assumes completion from an empty in-memory set.
+    fn scope_execution_ready_to_release(&self, id: &ResourceId) -> Result<bool, PapError>;
+
+    /// Confirms successful execution release and finalizes an otherwise empty deletion.
+    /// # Errors
+    /// Rejects unfinished discovery/Binding cleanup or storage failures.
+    fn finish_scope_execution(&self, id: &ResourceId) -> Result<(), PapError>;
 
     /// Admits missing instances and retires absent ones atomically with Scope lifecycle.
     /// Returns only changed Binding intents; terminal failures are not implicitly retried.

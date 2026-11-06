@@ -222,7 +222,7 @@ impl SkillLedgerCommand {
         {
             // Certification is committed. Local cleanup cannot change its exit status.
             let result = (|| -> Result<(), InputError> {
-                let path = absolute(path)?;
+                let path = expanded_path(path)?;
                 let metadata = fs::symlink_metadata(&path)?;
                 if !metadata.is_file() || read_findings(&path)? != request.params["findings"] {
                     return Err(InputError::SkillSec(
@@ -311,7 +311,7 @@ fn check_policy(policy: Option<&str>) -> Result<(), InputError> {
 fn read_findings(path: &Path) -> Result<Value, InputError> {
     let file = fs::File::from(
         rustix::fs::open(
-            absolute(path)?,
+            expanded_path(path)?,
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
         )
@@ -332,7 +332,7 @@ fn read_findings(path: &Path) -> Result<Value, InputError> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn absolute(path: &Path) -> Result<PathBuf, InputError> {
+fn expanded_path(path: &Path) -> Result<PathBuf, InputError> {
     let text = path
         .to_str()
         .ok_or_else(|| InputError::SkillSec("Skill paths must be UTF-8".into()))?;
@@ -343,11 +343,16 @@ fn absolute(path: &Path) -> Result<PathBuf, InputError> {
     } else {
         path.to_path_buf()
     };
-    let full = if path.is_absolute() {
+    // Filesystem inputs must resolve symlinks before traversing subsequent `..` components.
+    Ok(if path.is_absolute() {
         path
     } else {
         std::env::current_dir()?.join(path)
-    };
+    })
+}
+
+fn absolute(path: &Path) -> Result<PathBuf, InputError> {
+    let full = expanded_path(path)?;
     let mut normalized = PathBuf::new();
     for component in full.components() {
         match component {
@@ -372,6 +377,45 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn findings_preserve_filesystem_errors_and_bounded_regular_file_reads() {
+        let directory = std::env::temp_dir().join(format!("asc-findings-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let findings = directory.join("findings.json");
+        fs::write(&findings, "[]").unwrap();
+        let invalid = directory.join("invalid.json");
+        fs::write(&invalid, "not JSON").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let fifo = directory.join("fifo");
+            rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                &fifo,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            )
+            .unwrap();
+            assert!(super::read_findings(&fifo).is_err());
+        }
+        for path in [
+            directory.clone(),
+            directory.join("missing/../findings.json"),
+            directory.join("findings.json/../findings.json"),
+            directory.join("findings.json/"),
+            directory.join("findings.json/."),
+            invalid,
+        ] {
+            assert!(super::read_findings(&path).is_err(), "{}", path.display());
+        }
+        let mut bytes = vec![b' '; 2 * 1024 * 1024];
+        bytes[..2].copy_from_slice(b"[]");
+        fs::write(&findings, &bytes).unwrap();
+        assert_eq!(super::read_findings(&findings).unwrap(), json!([]));
+        bytes.push(b' ');
+        fs::write(&findings, &bytes).unwrap();
+        assert!(super::read_findings(&findings).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn aggregate_commands_leave_discovery_to_daemon_and_keep_explicit_init_roots() {

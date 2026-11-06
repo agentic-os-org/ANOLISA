@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Pipeline integration tests: feed synthetic SslEvents through the full
 //! parser → aggregator → analyzer → genai builder → SQLite chain.
 //!
@@ -208,6 +210,75 @@ fn native_event_clock_reaches_semantic_output() {
     assert!(calls[0].end_timestamp_ns >= calls[0].start_timestamp_ns);
 }
 
+#[test]
+fn process_wait_status_reaches_audit_output() {
+    use agentsight::analyzer::AuditExtra;
+    use agentsight::probes::proctrace::{ProcEventHeader, VariableEvent};
+
+    for (index, (raw_exit_status, expected_code, expected_signal)) in [
+        (0, Some(0), None),
+        (0x700, Some(7), None),
+        (0x0f, None, Some(15)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pid = 6_000 + index as u32;
+        let header = ProcEventHeader {
+            source: 0,
+            timestamp_ns: 100,
+            pid,
+            tid: pid,
+            ppid: 1,
+            ptid: 1,
+            uid: 0,
+            event_type: 0,
+            data_len: 0,
+            comm: [0; 16],
+            cgroup_id: 0,
+        };
+        let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
+        assert!(
+            core.process_event(Event::Proc(VariableEvent::Exec {
+                header,
+                filename: "/bin/fixture".into(),
+                args: "fixture".into(),
+            }))
+            .is_empty()
+        );
+
+        let aggregated = core.process_event(Event::Proc(VariableEvent::Exit {
+            header: ProcEventHeader {
+                timestamp_ns: 450,
+                tid: pid + 1,
+                ..header
+            },
+            raw_exit_status,
+        }));
+        assert_eq!(aggregated.len(), 1);
+        let analysis = core.analyze_for_owned_delivery(
+            aggregated
+                .into_iter()
+                .next()
+                .expect("one completed process"),
+            false,
+        );
+        assert_eq!(analysis.len(), 1);
+        let AnalysisResult::Audit(record) = &analysis[0] else {
+            panic!("process completion must produce an audit record");
+        };
+        let AuditExtra::ProcessAction {
+            exit_code, signal, ..
+        } = &record.extra
+        else {
+            panic!("expected process action");
+        };
+        assert_eq!(*exit_code, expected_code);
+        assert_eq!(*signal, expected_signal);
+        assert_eq!(record.duration_ns, 350);
+    }
+}
+
 /// Run a sequence of SslEvents through the full pipeline, return any GenAI events produced.
 fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISemanticEvent> {
     let mut core = PipelineCore::new(&agentsight::AgentsightConfig::default(), Analyzer::new());
@@ -318,6 +389,44 @@ fn test_openai_sse_pipeline() {
 }
 
 #[test]
+fn openai_usage_split_across_tls_records_is_reassembled() {
+    let analysis = run_analysis(vec![
+        (
+            5002,
+            0xC000,
+            1,
+            common::make_openai_request_bytes("gpt-4o", "Say hello", true),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            common::make_openai_sse_response_headers(),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            br#"{"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_to"#.to_vec(),
+            "python3",
+        ),
+        (
+            5002,
+            0xC000,
+            0,
+            b"kens\":3,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n".to_vec(),
+            "python3",
+        ),
+    ]);
+
+    let record = expect_token_record(&analysis);
+    assert_eq!(record.input_tokens, 3);
+    assert_eq!(record.output_tokens, 2);
+}
+
+#[test]
 fn test_openai_non_streaming_pipeline() {
     let pid = 5001u32;
     let ssl_ptr = 0xB000u64;
@@ -361,6 +470,90 @@ fn test_openai_non_streaming_pipeline() {
         .expect("non-streaming call must carry token usage");
     assert_eq!(usage.input_tokens, 8, "input tokens from JSON usage");
     assert_eq!(usage.output_tokens, 4, "output tokens from JSON usage");
+}
+
+fn make_responses_json_response_bytes() -> Vec<u8> {
+    let body = serde_json::json!({
+        "id": "resp_abc123",
+        "object": "response",
+        "model": "gpt-4o",
+        "output": [],
+        "usage": {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "total_tokens": 28,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0}
+        }
+    });
+    let body = body.to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .into_bytes()
+}
+
+#[test]
+fn responses_retrieval_usage_does_not_create_token_or_audit_records() {
+    let results = run_analysis(vec![
+        (
+            5003,
+            0xB100,
+            1,
+            b"GET /v1/responses/resp_abc123 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n".to_vec(),
+            "python3",
+        ),
+        (
+            5003,
+            0xB100,
+            0,
+            make_responses_json_response_bytes(),
+            "python3",
+        ),
+    ]);
+
+    assert!(
+        results
+            .iter()
+            .all(|result| !matches!(result, AnalysisResult::Token(_) | AnalysisResult::Audit(_))),
+        "retrieving a stored response must not count its usage as a new call: {results:?}"
+    );
+    assert!(results.iter().any(|result| matches!(
+        result,
+        AnalysisResult::Http(record) if record.path == "/v1/responses/resp_abc123"
+    )));
+}
+
+#[test]
+fn responses_create_usage_still_creates_token_and_audit_records() {
+    let request_body = serde_json::json!({"model": "gpt-4o", "input": "hello"}).to_string();
+    let request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        request_body.len(),
+        request_body
+    )
+    .into_bytes();
+    let results = run_analysis(vec![
+        (5004, 0xB200, 1, request, "python3"),
+        (
+            5004,
+            0xB200,
+            0,
+            make_responses_json_response_bytes(),
+            "python3",
+        ),
+    ]);
+
+    let token = expect_token_record(&results);
+    assert_eq!(token.input_tokens, 20);
+    assert_eq!(token.output_tokens, 8);
+    assert!(
+        results
+            .iter()
+            .any(|result| matches!(result, AnalysisResult::Audit(_)))
+    );
 }
 
 #[test]

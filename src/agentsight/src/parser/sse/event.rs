@@ -115,7 +115,10 @@ impl ParsedSseEvent {
         if let Some(body) = &self.parsed_body {
             read(Some(&body.value))
         } else {
-            read(serde_json::from_slice(self.data()).ok().as_ref())
+            let value = serde_json::from_slice(self.data())
+                .ok()
+                .map(|value| crate::parser::llm::unwrap_qoder_envelope(&value).unwrap_or(value));
+            read(value.as_ref())
         }
     }
 
@@ -124,7 +127,9 @@ impl ParsedSseEvent {
         if let Some(body) = self.parsed_body.take() {
             Some(Rc::try_unwrap(body).map_or_else(|shared| shared.value.clone(), |body| body.value))
         } else {
-            serde_json::from_slice(self.data()).ok()
+            serde_json::from_slice(self.data())
+                .ok()
+                .map(|value| crate::parser::llm::unwrap_qoder_envelope(&value).unwrap_or(value))
         }
     }
 

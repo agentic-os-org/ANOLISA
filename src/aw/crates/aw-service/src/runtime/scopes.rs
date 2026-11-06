@@ -16,19 +16,33 @@ use std::{
 mod policy;
 #[cfg(test)]
 mod tests;
+mod validity;
 
 pub(super) struct Owner {
     pub(super) parent: Option<String>,
-    process: Process,
-    cancelled: Arc<AtomicBool>,
-    acknowledge_by: Option<Instant>,
+    pub(super) process: Process,
+    pub(super) independent: bool,
+    pub(super) cancelled: Arc<AtomicBool>,
+    pub(super) acknowledge_by: Option<Instant>,
     policy_confirmed: bool,
+    validity: Option<validity::Validity>,
 }
 
 impl Runtime {
     pub(super) fn check_scope_owner(&self, id: &str) -> Result<()> {
+        self.scope_owner(id, true)
+    }
+
+    pub(super) fn check_scope_cleanup(&self, id: &str) -> Result<()> {
+        self.scope_owner(id, false)
+    }
+
+    fn scope_owner(&self, id: &str, execution: bool) -> Result<()> {
         let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
         if let Some(owner) = owners.get(id) {
+            if execution && owner.independent && owner.parent.is_none() {
+                return Err(rejected("registration_requires_scope"));
+            }
             if owner.acknowledge_by.is_some() {
                 return Err(rejected("scope_unacknowledged"));
             }
@@ -36,6 +50,11 @@ impl Runtime {
                 return Err(rejected("scope_closing"));
             }
             owner.process.check()?;
+            if execution {
+                if let Some(validity) = &owner.validity {
+                    validity.check()?;
+                }
+            }
             if let Some(parent) = &owner.parent {
                 let root = owners
                     .get(parent)
@@ -128,8 +147,10 @@ impl Runtime {
             id.into(),
             Owner {
                 parent: None,
+                independent: false,
                 acknowledge_by: None,
                 policy_confirmed: true,
+                validity: None,
                 process,
                 cancelled: Arc::new(AtomicBool::new(false)),
             },
@@ -175,6 +196,10 @@ impl Runtime {
             if let Some(reload) = &instance.reload {
                 reload.admit_scope(pid)?;
             }
+            if owner.acknowledge_by.is_some() {
+                return Err(rejected("registration_not_ready"));
+            }
+            let independent = owner.independent;
             let policy_confirmed = instance.reload.is_none();
             if instances.len() >= self.limits.bindings {
                 return Err(self.overload("binding_limit"));
@@ -189,8 +214,10 @@ impl Runtime {
                 id.clone(),
                 Owner {
                     parent: Some(parent.into()),
+                    independent,
                     acknowledge_by: Some(deadline + Duration::from_secs(5)),
                     policy_confirmed,
+                    validity: None,
                     process,
                     cancelled: Arc::clone(&cancellation),
                 },
@@ -340,6 +367,7 @@ impl Runtime {
     }
 
     pub(super) fn maintain_scopes(&self) -> Result<()> {
+        self.maintain_validity()?;
         let expired = {
             let owners = self.owners.lock().map_err(|_| rejected("state_poisoned"))?;
             owners
@@ -379,5 +407,23 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+}
+
+impl Owner {
+    pub(super) fn independent(
+        process: Process,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            parent: None,
+            process,
+            cancelled,
+            independent: true,
+            acknowledge_by: Some(deadline),
+            policy_confirmed: true,
+            validity: None,
+        }
     }
 }

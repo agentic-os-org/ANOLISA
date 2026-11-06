@@ -50,12 +50,12 @@ fn get_global_manager() -> MutexGuard<'static, MultiModelTokenizer> {
 }
 
 pub fn get_global_tokenizer(model_id: &str) -> Result<Arc<LlmTokenizer>> {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     GLOBAL_TOKENIZER_LOOKUPS.with(|count| count.set(count.get() + 1));
     get_global_manager().get_for_model(model_id)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 thread_local! {
     /// Global tokenizer lookups performed on this thread. Thread-local so a
     /// test asserting that a disabled feature performs no lookup cannot race
@@ -64,7 +64,7 @@ thread_local! {
 }
 
 /// Number of global tokenizer lookups performed on the calling thread.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn global_tokenizer_lookup_count() -> usize {
     GLOBAL_TOKENIZER_LOOKUPS.with(std::cell::Cell::get)
 }
@@ -187,10 +187,10 @@ impl MultiModelTokenizer {
 
     /// Get a tokenizer for a model name, auto-register from HuggingFace if not found
     ///
-    /// This method will:
-    /// 1. Map the model name to HuggingFace model ID using predefined mappings
-    /// 2. Check the cache with the original model name
-    /// 3. Download tokenizer from HuggingFace Hub if not cached
+    /// Explicit registrations under the requested name take precedence. API
+    /// aliases otherwise share the mapped HuggingFace entry, so they do not
+    /// consume additional model slots in the bounded cache. The mapped ID is
+    /// registered on a cache miss; an alias is not separately registered.
     pub fn get_for_model(&mut self, model_name: &str) -> Result<Arc<LlmTokenizer>> {
         // Try direct lookup first (with original model name)
         if let Some(tokenizer) = self.get(model_name) {
@@ -200,30 +200,14 @@ impl MultiModelTokenizer {
         // Map model name to HuggingFace model ID
         let hf_model_id = map_to_hf_model_id(model_name);
 
-        // Try lookup with HF model ID (in case same HF ID was registered under different name)
-        if hf_model_id != model_name {
-            if let Some(tokenizer) = self.get(hf_model_id) {
-                // Cache under original model name too
-                let entry = self.tokenizers.get(hf_model_id).cloned();
-                if let Some(entry) = entry {
-                    self.tokenizers.put(model_name.to_string(), entry);
-                }
-                return Ok(tokenizer);
-            }
+        // Cache aliases by the tokenizer they share, not by each API name.
+        if let Some(tokenizer) = self.get(hf_model_id) {
+            return Ok(tokenizer);
         }
 
-        // Register from HuggingFace Hub using mapped ID
         self.register_from_hf(hf_model_id)?;
 
-        // If we used a different HF ID, also cache under original model name
-        if hf_model_id != model_name {
-            if let Some(entry) = self.tokenizers.get(hf_model_id).cloned() {
-                self.tokenizers.put(model_name.to_string(), entry);
-            }
-        }
-
-        // Return the tokenizer
-        self.get(model_name).ok_or_else(|| {
+        self.get(hf_model_id).ok_or_else(|| {
             anyhow!("Failed to get tokenizer after registration for model '{model_name}'")
         })
     }
@@ -480,5 +464,87 @@ mod tests {
             "enabled tokenizer feature must resolve the registered model"
         );
         assert_eq!(global_tokenizer_lookup_count(), before + 1);
+    }
+    #[test]
+    fn cached_alias_keeps_the_other_model_within_capacity() {
+        const SHARED: &str = "Xenova/gpt-4o";
+        const OTHER: &str = "Xenova/gpt-4";
+        let mut manager = MultiModelTokenizer::with_capacity(2);
+        let (shared, _shared_dir) = fixture_tokenizer();
+        let (other, _other_dir) = fixture_tokenizer();
+        manager.register(SHARED, shared);
+        manager.register(OTHER, other);
+        let expected_shared = manager.get(SHARED).expect("registered shared fixture");
+        let expected_other = manager.get(OTHER).expect("registered other fixture");
+
+        // This name resolves to the already registered SHARED key, so no
+        // downloader is needed on either the original or repaired source.
+        assert_eq!(map_to_hf_model_id("gpt-4o"), SHARED);
+        assert!(manager.has(SHARED), "fixture must make this a cache hit");
+        assert!(
+            manager.hf_api.is_none(),
+            "no Hub client before cached lookup"
+        );
+        let alias = manager.get_for_model("gpt-4o").expect("cached alias");
+        assert!(
+            manager.hf_api.is_none(),
+            "cached lookup must not build a Hub client"
+        );
+        assert!(Arc::ptr_eq(&alias, &expected_shared));
+        assert_eq!(manager.len(), 2);
+        let retained_other = manager
+            .get(OTHER)
+            .expect("an alias must not evict the second cached model");
+        assert!(Arc::ptr_eq(&retained_other, &expected_other));
+    }
+
+    #[test]
+    fn mapped_aliases_reuse_one_cached_model_slot() {
+        const SHARED: &str = "Xenova/gpt-4o";
+        let mut manager = MultiModelTokenizer::with_capacity(1);
+        let (tokenizer, _dir) = fixture_tokenizer();
+        manager.register(SHARED, tokenizer);
+        let expected = manager.get(SHARED).expect("registered shared fixture");
+        for name in ["gpt-4o", "gpt-4o-mini", "openai/gpt-4o"] {
+            assert_eq!(map_to_hf_model_id(name), SHARED);
+            // Stop at this assertion if a broken implementation loses the
+            // canonical entry; never exercise an uncached Hub lookup.
+            assert!(manager.has(SHARED), "cached canonical fixture must remain");
+            assert!(
+                manager.hf_api.is_none(),
+                "no Hub client before cached lookup"
+            );
+            let actual = manager.get_for_model(name).expect("cached model alias");
+            assert!(
+                manager.hf_api.is_none(),
+                "cached lookup must not build a Hub client"
+            );
+            assert!(Arc::ptr_eq(&actual, &expected));
+            assert_eq!(manager.len(), 1, "aliases share the same model slot");
+        }
+    }
+
+    #[test]
+    fn explicitly_registered_model_name_keeps_lookup_priority() {
+        let mut manager = MultiModelTokenizer::with_capacity(2);
+        let (mapped, _mapped_dir) = fixture_tokenizer();
+        let (explicit, _explicit_dir) = fixture_tokenizer();
+        manager.register("Xenova/gpt-4o", mapped);
+        manager.register("gpt-4o", explicit);
+        let expected = manager.get("gpt-4o").expect("explicit registration");
+
+        assert!(
+            manager.hf_api.is_none(),
+            "no Hub client before cached lookup"
+        );
+        let actual = manager
+            .get_for_model("gpt-4o")
+            .expect("explicit model name");
+        assert!(
+            manager.hf_api.is_none(),
+            "explicit registration must not build a Hub client"
+        );
+        assert!(Arc::ptr_eq(&actual, &expected));
+        assert_eq!(manager.len(), 2);
     }
 }

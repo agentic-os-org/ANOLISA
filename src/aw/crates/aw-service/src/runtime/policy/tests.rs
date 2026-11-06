@@ -63,6 +63,7 @@ impl Fixture {
         let (version, entrypoint) = match adapter {
             "qoder-sdk" => ("1.0.56", "sdk-worker"),
             "qwenpaw" => ("2.2.2.post1", "app"),
+            "agentscope" => ("2.0.6", "factory"),
             _ => unreachable!(),
         };
         let root = serde_json::from_value(
@@ -182,7 +183,7 @@ fn rejects(result: Result<Value>, expected: &str) {
 
 #[test]
 fn resident_claim_covers_preparation_unacknowledged_scope_and_final_cleanup() {
-    for adapter in ["qoder-sdk", "qwenpaw"] {
+    for adapter in ["qoder-sdk", "qwenpaw", "agentscope"] {
         let f = Fixture::new(adapter);
         let original = f.revision();
         let mut candidate = f.document.clone();
@@ -289,7 +290,7 @@ fn resident_claim_covers_preparation_unacknowledged_scope_and_final_cleanup() {
 
 #[test]
 fn resident_failed_preparation_and_revision_conflict_retain_active_policy() {
-    let f = Fixture::new("qwenpaw");
+    let f = Fixture::with_provider("qwenpaw", true);
     let original = f.revision();
     let mut candidate = f.document.clone();
     candidate["spec"]["execution"]["default_event_budget_ms"] = json!(3456);
@@ -301,6 +302,30 @@ fn resident_failed_preparation_and_revision_conflict_retain_active_policy() {
     candidate["spec"]["agents"]["target"]["argv"] = json!(["/different"]);
     rejects(f.update(&original, &candidate), "configuration_rejected");
     assert_eq!(f.revision(), original);
+
+    let mut undeclared = f.document.clone();
+    undeclared["spec"]["events"]["tool.before"]["steps"][0]["operation"] = json!("undeclared");
+    let result = f.update(&original, &undeclared);
+    let update_key = match &result {
+        Err(Error::Attempt { code, audit_key }) if code == "preparation_failed" => {
+            audit_key.clone()
+        }
+        other => panic!("expected audited preparation failure: {other:?}"),
+    };
+    assert_eq!(f.revision(), original);
+    let update_audit = f.runtime.audit.read(&update_key).unwrap();
+    let prep_key = update_audit["records"].as_array().unwrap().last().unwrap()["record"]
+        ["preparation_audit"]
+        .as_str()
+        .unwrap();
+    let prep_audit = f.runtime.audit.read(prep_key).unwrap();
+    let prep_record = &prep_audit["records"].as_array().unwrap().last().unwrap()["record"];
+    assert_eq!(prep_record["status"], "error");
+    let completed = prep_record["calls"]["completed"].as_array().unwrap();
+    assert_eq!(completed.len(), 2);
+    assert_eq!(completed[0]["method"], "describe");
+    assert_eq!(completed[1]["method"], "validate_config");
+    assert!(prep_record["calls"]["failed"].is_null());
     assert!(f.runtime.audit.healthy());
 }
 

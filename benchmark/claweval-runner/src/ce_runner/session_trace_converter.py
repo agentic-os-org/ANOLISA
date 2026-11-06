@@ -206,7 +206,7 @@ def convert_session_to_trace(
 
     # Read session events
     session_events = []
-    with open(session_path) as f:
+    with open(session_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -235,9 +235,14 @@ def convert_session_to_trace(
 
     body_events = []      # messages + tool_dispatches — will be sorted by timestamp
 
+    task_tools = {tool.get("name") for tool in task.get("tools", [])}
+    endpoint_urls = {}
+    for endpoint in task.get("tool_endpoints", []):
+        endpoint_urls.setdefault(endpoint.get("tool_name"), endpoint.get("url", ""))
+
     # --- mcporter extraction helper ---
     def _try_extract_mcporter_dispatch(
-        tool_call_id: str, tc_info: dict, task: dict, trace_id: str,
+        tool_call_id: str, tc_info: dict, trace_id: str,
     ) -> dict | None:
         """If an exec call uses mcporter, return a virtual tool_dispatch for the actual tool."""
         cmd = tc_info.get("input", {}).get("command", "")
@@ -250,7 +255,6 @@ def convert_session_to_trace(
         # Check if first arg looks like an MCP server name (contains '-' or 'mock')
         # In mcporter, the pattern is: mcporter call --config <cfg> <server> <tool> <args>
         # or: mcporter call --config <cfg> <tool> <args> (when server name is omitted)
-        task_tools = {t.get("name") for t in task.get("tools", [])}
         if first_arg in task_tools:
             tool_name = first_arg
         elif "." in first_arg and first_arg.startswith("claw-eval-"):
@@ -271,11 +275,7 @@ def convert_session_to_trace(
             return None
 
         # Build virtual tool_dispatch
-        endpoint_url = ""
-        for ep in task.get("tool_endpoints", []):
-            if ep.get("tool_name") == tool_name:
-                endpoint_url = ep.get("url", "")
-                break
+        endpoint_url = endpoint_urls.get(tool_name, "")
 
         # Extract input params from remaining command args
         input_params = {}
@@ -297,8 +297,12 @@ def convert_session_to_trace(
 
         result_body = tc_info.get("result", "")
         is_error = tc_info.get("is_error", False)
-        # If mcporter returned an error, mark as error
-        if "Error:" in result_body or "unknown" in result_body.lower():
+        # mcporter prints failures as "Error: ..." lines (including its
+        # "Error: unknown tool ..." form), so that marker alone identifies an
+        # error. Matching the bare word "unknown" instead would flip a
+        # successful call whose body merely contains it (for example
+        # "from": "unknown@example.com") to HTTP 500.
+        if "Error:" in result_body:
             is_error = True
 
         return {
@@ -322,14 +326,7 @@ def convert_session_to_trace(
         else:
             tool_name = raw_name
 
-        endpoint_url = ""
-        for tool_def in task.get("tools", []):
-            if tool_def.get("name") == tool_name:
-                for ep in task.get("tool_endpoints", []):
-                    if ep.get("tool_name") == tool_name:
-                        endpoint_url = ep.get("url", "")
-                        break
-                break
+        endpoint_url = endpoint_urls.get(tool_name, "") if tool_name in task_tools else ""
 
         return {
             "type": "tool_dispatch",
@@ -504,7 +501,7 @@ def convert_session_to_trace(
                 # tool_dispatch for the actual tool name so graders can detect it
                 if tc_info.get("name") == "exec":
                     virtual = _try_extract_mcporter_dispatch(
-                        tool_call_id, tc_info, task, trace_id,
+                        tool_call_id, tc_info, trace_id,
                     )
                     if virtual:
                         body_events.append(virtual)
@@ -625,7 +622,7 @@ def convert_session_to_trace(
     # Write output
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         for event in output_events:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 

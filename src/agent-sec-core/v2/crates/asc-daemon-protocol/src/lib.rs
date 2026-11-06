@@ -8,7 +8,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod authorization;
+pub use authorization::{
+    AuthorizationRequest, ClaimResponse, Decision, DecisionClaim, ExecutionReceipt, ReceiptAck,
+};
+
 mod action;
+pub mod intent;
 mod observability;
 pub use observability::ObservabilityRecordParams;
 mod common;
@@ -19,6 +25,7 @@ pub use trace::{
     TraceCarrierV1, request_fits_budget,
 };
 mod envelope;
+mod gateway;
 pub mod method;
 mod pap;
 mod response;
@@ -26,6 +33,7 @@ mod response;
 pub use action::{CodeScanParams, PiiScanParams, PromptScanParams, PromptScanWarmupParams};
 pub use common::{ListParams, ListResult, ResourceParams, RevisionParams};
 pub use envelope::{DaemonRequest, V1Request};
+pub use gateway::{GatewayKeyAddParams, GatewayKeyRemoveParams, GatewayScopeParams};
 pub use pap::{CreatePolicyParams, CreateScopeParams, UpdatePolicyParams};
 pub use query::SecQueryParams;
 pub use response::{

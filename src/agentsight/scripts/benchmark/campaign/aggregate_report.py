@@ -150,7 +150,10 @@ def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]
                 # Keep the record in the inventory and final audit, but do not
                 # invent a load level for unusable evidence in comparisons.
                 continue
-            grouped[(qps, run["version"])].append(run)
+            version = run.get("version")
+            if not isinstance(version, str):
+                continue
+            grouped[(qps, version)].append(run)
     rows = []
     for (qps, version), runs in sorted(grouped.items()):
         row: dict[str, Any] = {
@@ -158,7 +161,8 @@ def matrix_rows(items: list[tuple[Path, dict[str, Any]]]) -> list[dict[str, Any]
             "version": version,
             "repetitions": len(runs),
             "pass_count": sum(
-                run.get("evaluation", {}).get("verdict") == "PASS" for run in runs
+                (run.get("evaluation") or {}).get("verdict") == "PASS"
+                for run in runs
             ),
         }
         fields = {
@@ -340,9 +344,14 @@ def write_soak(results: Path, items: list[tuple[Path, dict[str, Any]]]) -> None:
     ]
     runs = scenario_runs(items, "soak")
     for _, run in runs:
-        summary = run["summary"]
+        summary = run.get("summary")
+        summary = summary if isinstance(summary, dict) else {}
+        evaluation = run.get("evaluation")
+        verdict = evaluation.get("verdict", "—") if isinstance(evaluation, dict) else "—"
+        version = display(run.get("version"))
+        duration = display(run.get("duration_seconds"), "s")
         lines.append(
-            f"| {run['version']} | {run['duration_seconds']}s | "
+            f"| {version} | {duration} | "
             f"{display(nested(summary, 'resources', 'rss_mb', 'first'))}/"
             f"{display(nested(summary, 'resources', 'rss_mb', 'last'))}/"
             f"{display(nested(summary, 'resources', 'rss_mb', 'avg'))}/"
@@ -368,7 +377,7 @@ def write_soak(results: Path, items: list[tuple[Path, dict[str, Any]]]) -> None:
             f"{display(nested(summary, 'resources', 'connection_cache_bytes', 'max'))} | "
             f"{ratio_display(nested(summary, 'drop_rate'))}/"
             f"{ratio_display(nested(summary, 'trace_completeness'))} | "
-            f"{run['evaluation']['verdict']} |"
+            f"{verdict} |"
         )
     if not runs:
         lines.append("| — | — | — | — | — | — | — | — | — | NOT EXECUTED |")
@@ -386,7 +395,14 @@ def write_recovery(
         defaultdict(dict)
     )
     for path, run in scenario_runs(items, "recovery"):
-        grouped[(run["version"], run["repetition"])][run["label"]] = (path, run)
+        version = run.get("version")
+        repetition = run.get("repetition")
+        label = run.get("label")
+        if not isinstance(version, str) or not isinstance(label, str):
+            continue
+        if not isinstance(repetition, int) or isinstance(repetition, bool):
+            continue
+        grouped[(version, repetition)][label] = (path, run)
     lines = [
         "# AgentSight 过载恢复报告",
         "",
@@ -671,6 +687,11 @@ def headline_lines(
     trace = metrics["trace_completeness"]
     drop = metrics["drop_rate"]
     soak = metrics["soak_rss_slope_mb_per_hour"]
+    soak_direction = soak["delta_pct"]
+    # A negative baseline reverses a relative percentage's sign, but higher
+    # RSS growth remains a regression. Keep the documented percentage intact.
+    if soak["baseline"] is not None and soak["baseline"] < 0 and soak_direction is not None:
+        soak_direction = -soak_direction
     qps_label = f"相同 {highest} QPS" if highest is not None else "最高共同 QPS"
     rss_absolute = (
         rss["optimized"] - rss["baseline"]
@@ -721,7 +742,7 @@ def headline_lines(
         (
             f"| 4 小时 RSS 增长斜率 | {display(soak['baseline'], ' MB/h')} | "
             f"{display(soak['optimized'], ' MB/h')} | {signed(soak['delta_pct'])} | "
-            f"{conclusion(soak['delta_pct'], '长期内存增长', lower_is_better=True)} |"
+            f"{conclusion(soak_direction, '长期内存增长', lower_is_better=True)} |"
         ),
     ]
 
@@ -820,11 +841,17 @@ def write_final(
         )
     regression_checks = regression.get("checks", [])
     regression_checks = regression_checks if isinstance(regression_checks, list) else []
-    regression_passed = sum(
-        check["exit_code"] == 0
+    # An entry that cannot be read as a check (not an object, or a missing or
+    # non-integer exit_code) is not evidence either way, so it must leave both
+    # the numerator and the denominator alone. Counting it only in the
+    # denominator rendered "4/5" for four usable passing checks plus one
+    # unreadable record.
+    usable_checks = [
+        check
         for check in regression_checks
         if campaign_evidence.usable_regression_check(check)
-    )
+    ]
+    regression_passed = sum(check["exit_code"] == 0 for check in usable_checks)
     lines = [
         (
             "# AgentSight A/A 全量校准报告"
@@ -916,7 +943,7 @@ def write_final(
         "| 项目 | 结果 |",
         "| --- | --- |",
         f"| 完整门禁 | {'是' if regression.get('full') else '否'} |",
-        f"| 通过命令 | {regression_passed}/{len(regression_checks)} |",
+        f"| 通过命令 | {regression_passed}/{len(usable_checks)} |",
         "| 详细日志 | `regression-report.md` 和 `regression.json` |",
         "",
         "## 7. 可追溯产物",

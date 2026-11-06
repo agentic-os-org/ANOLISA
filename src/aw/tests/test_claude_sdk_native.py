@@ -116,7 +116,12 @@ def document(
                     "--cli",
                     str(
                         tokenless
-                        if mode not in {"bash-compress-failure", "bash-compress-tool-failure"}
+                        if mode
+                        not in {
+                            "bash-compress-failure",
+                            "bash-compress-tool-failure",
+                            "http-mcp-compress-failure",
+                        }
                         else Path("/bin/false")
                     ),
                     "--data-dir",
@@ -213,9 +218,7 @@ def run_case(
         (case / "stderr.log").write_text(stderr)
         if mode in {
             "unready",
-            "settings",
             "cli-path",
-            "plugins",
             "extra-args",
             "permission-hook-rewrite",
             "permission-prompt",
@@ -254,6 +257,22 @@ def run_case(
             )
         )
         report = json.loads((case / "report.json").read_text())
+        if mode.startswith("bash-native-rewrite-"):
+            denied = mode.endswith("-deny")
+            policies = [json.loads(line) for line in (case / "policy-events.jsonl").read_text().splitlines()]
+            before = [event for event in policies if event["name"] == "tool.before"]
+            after = [event for event in policies if event["name"] == "tool.after"]
+            assert len(before) == 1 and len(after) == (0 if denied else 1), policies
+            assert "rewritten-effect" not in before[0]["tool"]["input"]["command"], policies
+            assert not report["effect"] and report["rewritten_effect"] == (not denied), report
+            if after:
+                assert after[0]["tool"]["input"]["command"] == "printf rewritten > rewritten-effect", policies
+                assert before[0]["tool"]["call_id"] == after[0]["tool"]["call_id"], policies
+            # Public-Hook coverage ends at its callback input; native rewrites
+            # need a separate final execution boundary before claiming coverage.
+            return {"mode": mode, "output": str(case), "events": len(policies),
+                    "session_id": before[0]["session_id"], "final_argument_check": False,
+                    "native_rewrite_executed": not denied, "aw_denied": denied}
         allowed = mode in {
             "allow",
             "failure",
@@ -262,6 +281,13 @@ def run_case(
             "before-report-failure",
             "after-report-failure",
             "strict-mcp-config",
+            "settings",
+            "settings-disabled-hooks",
+            "plugins",
+            "http-mcp",
+            "http-mcp-compress",
+            "http-mcp-compress-failure",
+            "http-mcp-error-compress",
             "many-denials",
             "bash-compress",
             "bash-compress-observer-failure",
@@ -274,6 +300,14 @@ def run_case(
             "native-hook-invalid-chain",
         }
         assert report["effect"] == allowed, report
+        if mode.startswith("settings"):
+            assert (case / "native-settings-hook").exists() == (
+                mode != "settings-disabled-hooks"
+            ), report
+        if mode == "http-mcp":
+            assert json.loads(report["tool_results"][-1]["content"]) == {
+                "tenant": "fixture-tenant"
+            }, report
         events = report["events"]
         before = [event for event in events if event["hook_event_name"] == "PreToolUse"]
         after = [
@@ -311,6 +345,11 @@ def run_case(
         else:
             assert not after, report
         if mode in {"bash-failure", "bash-compress-tool-failure"}:
+            assert after[0]["hook_event_name"] == "PostToolUseFailure", report
+        if mode == "http-mcp-error-compress":
+            # The bundled CLI reports HTTP MCP isError results through
+            # PostToolUseFailure, not PostToolUse; failure results carry no
+            # projection and reach the model unchanged.
             assert after[0]["hook_event_name"] == "PostToolUseFailure", report
         if mode == "permission-rewrite":
             assert (case / "permission-called").exists(), report
@@ -360,8 +399,11 @@ def run_case(
             "after-report-failure",
             "bash-compress-observer-failure",
             "bash-compress-failure",
+            "http-mcp-compress-failure",
         }:
-            assert "aw hook failed:" in stderr, stderr
+            diagnostic = ("aw hook failed:" if mode == "before-report-failure"
+                          else "recorded as report in the instance audit")
+            assert diagnostic in stderr, stderr
             assert any(
                 record.get("status") == "error" and record.get("failure_action") == "report"
                 for record in completed
@@ -386,7 +428,42 @@ def run_case(
                 json.loads(line) for line in (case / "policy-events.jsonl").read_text().splitlines()
             ]
             assert all("result_projection" not in event["tool"] for event in policies)
-            if mode.startswith("bash-compress") and mode != "bash-compress-tool-failure":
+            if mode.startswith("http-mcp-compress"):
+                original = report["original"]
+                # The policy observer sees the native projection: the
+                # plain-text content blocks of the HTTP MCP result.
+                observed = [
+                    event["tool"]["result"]
+                    for event in policies
+                    if event["name"] == "tool.after"
+                ]
+                assert observed == [[{"type": "text", "text": original}]], observed
+                result = report["tool_results"][-1]["content"]
+                if mode == "http-mcp-compress-failure":
+                    assert result == [{"type": "text", "text": original}], report
+                    assert any(
+                        record.get("status") == "error" and record.get("failure_action") == "report"
+                        for record in completed
+                    ), completed
+                else:
+                    assert isinstance(result, str) and len(result) < len(original), result
+                    assert json.loads(result) == json.loads(original), result
+            elif mode == "http-mcp-error-compress":
+                original = report["original"]
+                # The failure event exposes only the native error envelope;
+                # no text projection reaches the observer or the compressor.
+                observed = [
+                    event["tool"]["result"]
+                    for event in policies
+                    if event["name"] == "tool.after"
+                ]
+                assert observed == [
+                    {"is_error": True, "error": original, "is_interrupt": False}
+                ], observed
+                result = report["tool_results"][-1]
+                assert result["is_error"] is True, report
+                assert result["content"] == original, report
+            elif mode.startswith("bash-compress") and mode != "bash-compress-tool-failure":
                 original = report["original"]
                 observed = [
                     event["tool"]["result"]["stdout"]
@@ -466,7 +543,7 @@ def main() -> None:
     parser.add_argument(
         "--tokenless",
         type=Path,
-        help="Also verify Bash optimization using a built Protocol v2 CLI and RTK on PATH",
+        help="Also verify Bash optimization using a built Protocol v2 CLI with its linked RTK",
     )
     parser.add_argument("--tokenless-provider", type=Path, help="Tokenless Provider executable")
     args = parser.parse_args()
@@ -509,9 +586,18 @@ def main() -> None:
             "strict-mcp-config",
             "unready",
             "settings",
+            "settings-disabled-hooks",
+            "settings-native-deny",
             "cli-path",
             "plugins",
+            "http-mcp",
             "extra-args",
+            "bash-native-rewrite-inline",
+            "bash-native-rewrite-inline-deny",
+            "bash-native-rewrite-project",
+            "bash-native-rewrite-project-deny",
+            "bash-native-rewrite-plugin",
+            "bash-native-rewrite-plugin-deny",
         ]
     ]
     if args.tokenless is not None:
@@ -524,6 +610,9 @@ def main() -> None:
             "bash-pretool",
             "bash-pretool-deny",
             "mcp-error-compress",
+            "http-mcp-compress",
+            "http-mcp-compress-failure",
+            "http-mcp-error-compress",
         ):
             results.append(
                 run_case(

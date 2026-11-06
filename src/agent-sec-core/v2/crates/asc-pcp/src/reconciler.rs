@@ -3,7 +3,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use asc_foundation_types::ResourceId;
-use asc_policy_types::binding::BindingStatus;
+use asc_policy_types::binding::{BindingStatus, PreparedBinding};
 use asc_policy_types::target::TranslationOutcome;
 
 use crate::{
@@ -13,6 +13,8 @@ use crate::{
     TargetDeploymentClientFactory, TargetRef,
 };
 
+type RouteSelector = dyn Fn(&PreparedBinding) -> String + Send + Sync;
+
 /// Pure orchestration over repository, Adapter and Client ports. The caller
 /// serializes attempts for each Binding, including across core instances.
 pub struct BindingReconciler {
@@ -20,6 +22,7 @@ pub struct BindingReconciler {
     adapter: Arc<dyn TargetBindingAdapter>,
     client_factories: BTreeMap<String, Arc<dyn TargetDeploymentClientFactory>>,
     apply_route: String,
+    route_selector: Option<Arc<RouteSelector>>,
     clock: Arc<dyn Clock>,
     retry: RetryPolicy,
 }
@@ -47,9 +50,20 @@ impl BindingReconciler {
             adapter,
             client_factories,
             apply_route,
+            route_selector: None,
             clock,
             retry,
         })
+    }
+
+    /// Selects a fixed execution route from each immutable Binding snapshot.
+    #[must_use]
+    pub fn with_route_selector(
+        mut self,
+        selector: impl Fn(&PreparedBinding) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.route_selector = Some(Arc::new(selector));
+        self
     }
 
     /// Shares the exact clock used to compute retry deadlines with the scheduler.
@@ -300,16 +314,20 @@ impl BindingReconciler {
             }
             Err(fault) => return Err(retryable(&fault.code)),
         };
+        let route = self.route_selector.as_ref().map_or_else(
+            || self.apply_route.clone(),
+            |select| select(&record.binding.spec),
+        );
         let client = self
             .client_factories
-            .get(&self.apply_route)
+            .get(&route)
             .ok_or_else(|| retryable("RECONCILE_TARGET_UNAVAILABLE"))?
             .open()
             .map_err(|error| Failure::new(error.kind, &error.code))?;
         let prepared = client
             .prepare_apply(&plan)
             .map_err(|error| Failure::new(error.kind, &error.code))?;
-        if prepared.target.route != self.apply_route
+        if prepared.target.route != route
             || prepared.target.id.is_empty()
             || prepared.format.is_empty()
         {

@@ -132,7 +132,11 @@ pub(super) fn update_input_mode_and_wake(
         action,
         super::input_events::latest_capture_submission_generation(&parser.events),
     );
-    if matches!(action, RawObserverAction::InvalidateApprovalCapture(_)) {
+    if matches!(
+        action,
+        RawObserverAction::InvalidateApprovalCapture(_)
+            | RawObserverAction::InvalidateTrialCapture(_)
+    ) {
         match wake.write(&[1]) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -254,6 +258,9 @@ pub(super) fn resolve_pty_emit<W: Write>(
                     ghost_route,
                 });
             }
+            // This restore follows new output; an earlier ghost's replay arm
+            // must not swallow the prompt needed below that output.
+            prompt_replay.disarm_replay();
             if parser.display_position() > *display_start {
                 write_pending_display(
                     parser,

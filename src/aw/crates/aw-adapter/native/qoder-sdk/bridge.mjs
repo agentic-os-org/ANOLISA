@@ -3,13 +3,22 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { resolveSkill, bindSkillQuery, noteSkillRead } from "./skills.mjs";
 import { invoke } from "./callback.mjs";
+import { randomUUID } from "node:crypto";
 import { Reload } from "./reload.mjs";
 import { Resident, bounded, validateHooks } from "./resident.mjs";
 import { managedDaemon, daemonOwner, credentialOptions } from "./daemon.mjs";
 import { managedMcpServer } from "./mcp.mjs";
 import { Scope } from "./scope.mjs";
+import { prewarm } from "./startup.mjs";
+import { nativeConfiguration } from "./native-configuration.mjs";
+import { pluginsAdmitted, runtimeOptions, sdkEntry, verifyNativeSettings } from "./native-options.mjs";
 export { PRIVATE_EXECUTION_VERSION, executionEnvironment, hookEnvironment } from "./private.mjs";
+export { NATIVE_COMMAND_WRAPPER_VERSION } from "./command-wrapper.mjs";
+
+/** Initialize an admitted one-shot Query without submitting a prompt. */
+export function startup(input) { return prewarm(createQuery, input); }
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse",
   permissionDecision: "deny", permissionDecisionReason: reason } });
@@ -23,26 +32,27 @@ function configuration() {
   return config;
 }
 
-function runtime(options) {
-  if (options.pathToQoderCLIExecutable != null || options.executable !== undefined ||
-      options.executableArgs !== undefined || options.spawnQoderCLIProcess !== undefined)
-    throw new Error("AW Qoder SDK rejects runtime executable overrides");
+function runtime(config, options, operation) {
+  runtimeOptions(config, options, operation);
   if (process.env.QODERCLI_PATH)
-    throw new Error("QODERCLI_PATH overrides the pinned Qoder SDK runtime");
+    throw new Error("QODERCLI_PATH overrides the bundled Qoder SDK runtime");
   for (const environment of [process.env, options.env ?? {}])
     if (/^(1|true|yes|on)$/i.test((environment.QODER_HEADLESS_FAST_HOOKS ?? "").trim()))
       throw new Error("QODER_HEADLESS_FAST_HOOKS disables native hooks");
 }
 
-/** Start the pinned daemon after admission; the caller still owns stop(). */
+/** Start the SDK daemon after admission; the caller still owns stop(). */
 export async function startDaemon(options) {
   const config = configuration();
+  const { awSite = config.default_site ?? "global", ...nativeOptions } = options;
+  const entry = sdkEntry(config, awSite);
   const environment = { ...process.env, ...(options.env ?? {}) };
+  options = nativeOptions;
   options = { ...options, env: { ...environment },
     ...(options.auth ? { auth: credentialOptions(options.auth) } : {}) };
-  runtime(options);
-  const sdk = await import(pathToFileURL(config.sdk).href);
-  const daemon = await managedDaemon(sdk, options, config, bounded, environment);
+  runtime(config, { ...options, awSite }, "daemon");
+  const sdk = await import(pathToFileURL(entry).href);
+  const daemon = await managedDaemon(sdk, options, { ...config, sdk: entry, sdk_site: awSite }, bounded, environment);
   if (config.resident_policy_reload) {
     try {
       await new Scope(config, "qoder-sdk").ready();
@@ -60,18 +70,21 @@ export async function startDaemon(options) {
 export async function createSdkMcpServer(options) {
   const config = configuration();
   if (!config.resident) throw new Error("Managed MCP requires an AW resident Query");
-  const sdk = await import(pathToFileURL(config.sdk).href);
-  return managedMcpServer(sdk, options);
+  const { awSite, ...nativeOptions } = options;
+  const sdk = await import(pathToFileURL(sdkEntry(config, awSite)).href);
+  return managedMcpServer(sdk, nativeOptions);
 }
 
 function compose(config, options) {
-  if (!Array.isArray(options.settingSources) || options.settingSources.length ||
-      options.settings != null || options.plugins?.length ||
+  const native = nativeConfiguration(config);
+  config.skillState ??= {};
+  if (options.transport != null || (!native && (!Array.isArray(options.settingSources) || options.settingSources.length ||
+      options.settings != null || !pluginsAdmitted(options.plugins) ||
       Object.keys(options.extraArgs ?? {}).length ||
-      options.transport != null || options.permissionPromptToolName != null ||
-      options.hooks?.PermissionRequest?.length)
+      options.permissionPromptToolName != null ||
+      options.hooks?.PermissionRequest?.length)))
     throw new Error("AW Qoder SDK requires settingSources=[] and no settings, plugins, runtime or permission-hook overrides");
-  runtime(options);
+  runtime(config, options);
   daemonOwner(options.daemon, config);
   if (!config.resident && resolve(options.cwd ?? process.cwd()) !== config.cwd)
     throw new Error("Qoder Query cwd differs from the AW binding");
@@ -79,25 +92,33 @@ function compose(config, options) {
     [event, groups.map((group) => ({ ...group, hooks: group.hooks.map((callback) =>
       async (payload, id, context) => {
         const result = await callback(copy(payload), id, context);
-        if (event === "PreToolUse" && result?.hookSpecificOutput?.updatedInput !== undefined)
+        if (!native && event === "PreToolUse" && result?.hookSpecificOutput?.updatedInput !== undefined)
           return deny("Tool argument rewriting is unsupported with AW");
         return result;
       }) }))]));
   for (const [event, nativeEvents] of [
+    ["input.submit", ["UserPromptSubmit"]],
     ["tool.before", ["PreToolUse"]], ["tool.after", ["PostToolUse", "PostToolUseFailure"]],
   ]) {
     const routes = config.hooks.filter((hook) => hook.event === event);
-    if (!routes.length) continue;
+    if (!routes.length && !(native && event === "tool.before")) continue;
     const callback = async (input, id, { signal }) => {
       const payload = copy(input);
-      if (id !== undefined && id !== payload.tool_use_id)
+      noteSkillRead(payload, config.skillState.query);
+      if (event === "input.submit") payload.aw_turn_id = randomUUID();
+      const verifySkill = routes.some(hook => hook.skill_check === true) ?
+        await resolveSkill(payload, { ...options, env: config.skillEnvironment ?? options.env }, config.skillState.query, signal) : undefined;
+      if (event !== "input.submit" && id !== undefined && id !== payload.tool_use_id)
         return event === "tool.before" ? deny("AW tool identity mismatch") : {};
       for (const hook of routes) {
         try {
           const result = await invoke(config, hook, payload, signal);
-          if (result.hookSpecificOutput) return result;
+          if (result.hookSpecificOutput || result.decision === "block") return result;
+          await verifySkill?.();
         } catch (error) {
           process.stderr.write(`AW ${event}/${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`);
+          if (event === "input.submit" && (hook.on_error === "block" || signal?.aborted))
+            return { decision: "block", reason: "AW input check failed; submission blocked" };
           if (event === "tool.before" && hook.on_error === "block")
             return deny("AW hook failed; configured failure action blocked the tool");
           if (config.resident && event === "tool.after" && hook.on_error === "block")
@@ -112,11 +133,15 @@ function compose(config, options) {
   }
   const canUseTool = options.canUseTool && (async (name, input, context) => {
     const result = await options.canUseTool(name, copy(input), context);
-    if (result?.updatedInput !== undefined && !isDeepStrictEqual(result.updatedInput, input))
+    if (!native && result?.updatedInput !== undefined && !isDeepStrictEqual(result.updatedInput, input))
       return { behavior: "deny", message: "Tool argument rewriting is unsupported with AW" };
     return result;
   });
-  return { ...options, hooks, ...(canUseTool ? { canUseTool } : {}) };
+  // The pinned Worker expands skill arguments before shell interpolation. Its
+  // native switch must disable that secondary executor even for inert assets.
+  const settings = !native && config.native_policy?.declarative_plugins ?
+    { settings: { skills: { disableShellExecution: true } } } : {};
+  return { ...options, ...settings, hooks, ...(canUseTool ? { canUseTool } : {}) };
 }
 
 function ready(config) {
@@ -132,25 +157,41 @@ function ready(config) {
 }
 
 /** Return the native Query after its initialization handshake accepts AW callbacks. */
-export async function createQuery({ prompt, options }) {
-  const config = configuration();
+export async function createQuery({ prompt, options }, initialization = {}) {
+  let config = configuration();
+  if (!nativeConfiguration(config) && config.native_policy?.declarative_plugins && !options.daemon)
+    throw new Error("AW declarative profile requires a managed daemon");
   if (config.resident) {
     const resident = new Resident(config);
-    return await resident.create(prompt, options, compose, ready);
+    return await resident.create(prompt, options, compose, ready, initialization);
   }
   if (options.awExecutionFactory !== undefined)
     throw new Error("Private execution requires an AW resident Query");
+  if (options.awNativeExecutionFactory !== undefined)
+    throw new Error("Native command execution requires an AW resident Query");
+  const { awSite, ...nativeOptions } = options;
+  const owner = daemonOwner(options.daemon, config);
+  const site = awSite ?? owner?.site ?? config.default_site ?? "global";
+  const entry = sdkEntry(config, site);
+  if (owner && owner.sdk !== entry) throw new Error("AW Query site differs from its managed daemon");
+  config = { ...config, sdk: entry, active_site: site };
+  options = nativeOptions;
   const reload = config.reloadable ? new Reload(config) : undefined;
+  config.skillEnvironment = owner?.environment ?? { ...process.env, ...(options.env ?? {}) };
   const composed = compose(config, options);
   const sdk = await import(pathToFileURL(config.sdk).href);
   const query = sdk.query({ prompt: reload ? reload.input(prompt) : prompt,
     options: reload ? reload.decorate(composed) : composed });
+  config.skillState.query = bindSkillQuery(query, config.hooks.some(hook => hook.skill_check === true));
   try {
-    const initialization = await query.initializationResult();
-    const managed = reload ? await reload.attach(query, initialization) : query;
+    const result = await (initialization.initializeTimeoutMs === undefined ? query.initializationResult() :
+      bounded(query.initializationResult(), initialization.initializeTimeoutMs));
+    await verifyNativeSettings(config, query, bounded);
+    const managed = reload ? await reload.attach(query, result) : query;
     ready(config);
     return managed;
   } catch (error) {
+    initialization.discard?.();
     if (reload?.admitted) await reload.close();
     else {
       if (reload) { reload.closing = true; reload.initialized.resolve(); }

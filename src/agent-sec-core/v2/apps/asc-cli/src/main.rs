@@ -106,6 +106,10 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+        Err(RunError::Intent(error)) => {
+            eprintln!("agent-sec-cli: {error}");
+            ExitCode::from(error.exit_code())
+        }
         Err(error) => {
             eprintln!("agent-sec-cli: {error}");
             ExitCode::FAILURE
@@ -115,6 +119,9 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<u8, RunError> {
     let socket = match cli.plan() {
+        Plan::Sandbox(command) => {
+            return Ok(command.run(cli.socket(), cli.timeout())?);
+        }
         // The capability view describes the environment this process inherited,
         // so it must resolve it here rather than through a daemon.
         Plan::Local(command) => {
@@ -126,18 +133,14 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
                 )
                 .map_err(RunError::Output);
         }
-        Plan::ObservabilitySchema => {
-            use std::io::Write;
-            let schema = asc_observability::observability_record_json_schema();
-            let text = serde_json::to_string_pretty(&schema)
-                .map_err(|error| RunError::Output(io::Error::other(error)))?;
-            writeln!(io::stdout().lock(), "{text}").map_err(RunError::Output)?;
-            return Ok(0);
-        }
+        // The baseline is embedded in this binary, so printing it needs neither
+        // a daemon nor any host state.
+        Plan::PolicyDefault(command) => return render_policy_default(command),
+        Plan::ObservabilitySchema => return render_observability_schema(),
         Plan::Daemon { socket } => socket,
     };
-    if let Some(result) = cli.run_observability_query(socket) {
-        return result.map_err(RunError::Output);
+    if let Some(result) = run_owned_transport(cli, socket) {
+        return result;
     }
     // Scan-prompt resolves its own request batch (one per input line or
     // conversation payload) and prints diagnostics around them, so it owns
@@ -199,14 +202,13 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
     let request = cli.request().map_err(RunError::Input)?;
     let response =
         asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
-    if let Some(format) = cli.pii_format() {
+    let result = if let Some(format) = cli.pii_format() {
         render_pii_scan(
             &response,
             format,
             &mut io::stdout().lock(),
             &mut io::stderr(),
         )
-        .map_err(RunError::Output)
     } else if cli.is_skill_sec() {
         render_skill_sec(
             &response,
@@ -214,21 +216,53 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             &mut io::stderr(),
             |output| cli.after_success(&request, output),
         )
-        .map_err(RunError::Output)
     } else if cli.is_observability_record() {
         asc_cli::output::render_observability_record(&response, &mut io::stderr())
-            .map_err(RunError::Output)
     } else if cli.is_scan_code() {
         render_scan_code(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
     } else {
         render_policy(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
+    };
+    result.map_err(RunError::Output)
+}
+
+/// Commands that page, review or exec around their own daemon calls.
+fn run_owned_transport(cli: &Cli, socket: &std::path::Path) -> Option<Result<u8, RunError>> {
+    if let Some(result) = cli.run_intent(socket) {
+        return Some(result.map_err(RunError::Intent));
     }
+    let result = cli
+        .run_observability_query(socket)
+        .or_else(|| cli.run_gateway(socket, &mut io::stdout().lock(), &mut io::stderr()))?;
+    Some(result.map_err(RunError::Output))
+}
+
+/// Prints the default policy embedded in this binary, which needs neither a
+/// daemon nor any host state.
+fn render_policy_default(command: &asc_cli::DefaultPolicy) -> Result<u8, RunError> {
+    command
+        .render(&mut io::stdout().lock())
+        .map_err(RunError::Output)?;
+    Ok(0)
+}
+
+/// Prints the observability record schema from this binary.
+fn render_observability_schema() -> Result<u8, RunError> {
+    use std::io::Write;
+
+    let schema = asc_observability::observability_record_json_schema();
+    let text = serde_json::to_string_pretty(&schema)
+        .map_err(|error| RunError::Output(io::Error::other(error)))?;
+    writeln!(io::stdout().lock(), "{text}").map_err(RunError::Output)?;
+    Ok(0)
 }
 
 #[derive(Debug, thiserror::Error)]
 enum RunError {
+    #[error(transparent)]
+    Sandbox(#[from] asc_cli::sandbox::SandboxError),
+    #[error(transparent)]
+    Intent(#[from] asc_cli::IntentFailure),
     #[error(transparent)]
     Input(#[from] InputError),
     #[error(transparent)]

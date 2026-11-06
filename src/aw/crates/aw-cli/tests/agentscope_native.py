@@ -135,7 +135,7 @@ def main() -> None:
                     record_path.write_text(json.dumps(launch_record))
                     child = subprocess.Popen(
                         command,
-                        env=env,
+                        env={**env, "AW_TEST_WORKER": str(number)},
                         cwd=root,
                         stdout=stdout,
                         stderr=stderr,
@@ -178,8 +178,11 @@ def main() -> None:
             ]
             assert len(native_callbacks) == 320, len(native_callbacks)
             instances = {item["event"]["agent"]["instance_id"] for item in callbacks}
-            assert len(instances) == 2
+            assert len(instances) == 292, len(instances)
             for instance in instances:
+                selected = [row for row in callbacks if row["event"]["agent"]["instance_id"] == instance]
+                assert len({(row["worker"], row["event"]["session_id"]) for row in selected}) == 1
+            for worker in ["0", "1"]:
                 for session in ["session-one", "session-two"]:
                     for mode, outcome in [
                         ("success", "success"),
@@ -190,7 +193,7 @@ def main() -> None:
                         selected = [
                             item
                             for item in callbacks
-                            if item["event"]["agent"]["instance_id"] == instance
+                            if item["worker"] == worker
                             and item["event"]["session_id"] == session
                             and item["event"]["native"]["tool_call"]["id"] == "call-" + mode
                             and item["event"]["tool"]["input"]["mode"] == mode
@@ -211,7 +214,7 @@ def main() -> None:
                     for item in callbacks:
                         event = item["event"]
                         if (
-                            event["agent"]["instance_id"] == instance
+                            item["worker"] == worker
                             and event["session_id"] == session
                         ):
                             by_call.setdefault(event["tool"]["call_id"], []).append(item)
@@ -266,7 +269,7 @@ def main() -> None:
             assert status["bindings"] == 0 and status["events"] == 0, status
             assert not list(state.glob("launch-*"))
             journals = list(state.rglob("*.jsonl"))
-            assert len(journals) == 610, "missing durable event journals"
+            assert len(journals) == 1492, ("missing durable event journals", len(journals))
             verified = []
             for journal in journals:
                 audit = subprocess.run(

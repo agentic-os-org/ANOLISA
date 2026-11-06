@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 use std::{fs, path::Path, process::Command};
 use support::{Fixture, Service};
 
+#[path = "pi/submission.rs"]
+mod submission;
+
 #[path = "pi/tool_scope.rs"]
 mod tool_scope;
 
@@ -176,7 +179,7 @@ fn unavailable_before_policy_adopts_failure_block() {
     service.released(&fixture);
 }
 #[test]
-fn actual_package_version_is_checked_without_importing_business_factory() {
+fn invalid_package_metadata_is_rejected_without_importing_business_factory() {
     let fixture = Fixture::new();
     let document = setup(&fixture);
     fixture.save(&document);
@@ -184,7 +187,7 @@ fn actual_package_version_is_checked_without_importing_business_factory() {
         .root
         .join("node_modules/@earendil-works/pi-coding-agent/package.json");
     let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
-    metadata["version"] = json!("0.84.3");
+    metadata["version"] = json!("invalid version");
     fs::write(package, metadata.to_string()).unwrap();
     assert!(!fixture.run(launch(&fixture)).status.success());
     assert!(!fixture.root.join("state").exists());
@@ -335,8 +338,61 @@ fn execution_drain_fences_registration_and_transport_failures() {
     let output = fixture.run(command);
     let report = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success() && report.contains("# pass 5") && report.contains("# fail 0"),
+        output.status.success() && report.contains("# pass 9") && report.contains("# fail 0"),
         "{report}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn independently_versioned_pi_packages_keep_policy_and_cleanup() {
+    for (sdk, core) in [
+        ("0.84.3", "0.84.4"),
+        ("0.84.1", "0.84.1"),
+        ("1.0.0-preview.1", "1.0.0-preview.2"),
+    ] {
+        let fixture = Fixture::new();
+        let mut document = setup(&fixture);
+        for (name, version) in [("pi-coding-agent", sdk), ("pi-agent-core", core)] {
+            let package = fixture
+                .root
+                .join(format!("node_modules/@earendil-works/{name}/package.json"));
+            let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
+            metadata["version"] = json!(version);
+            fs::write(package, metadata.to_string()).unwrap();
+        }
+        policy(&fixture, &mut document, "error");
+        let service = Service::start(&fixture, &document);
+        assert_eq!(fixture.successful(launch(&fixture))["denied"], true);
+        assert!(!fixture.root.join("side-effect").exists());
+        service.released(&fixture);
+    }
+}
+
+#[test]
+fn strict_output_rejects_unverified_versions_before_application_import() {
+    for name in ["pi-coding-agent", "pi-agent-core"] {
+        let fixture = Fixture::new();
+        let mut document = setup(&fixture);
+        policy(&fixture, &mut document, "normal");
+        document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+        let package = fixture
+            .root
+            .join(format!("node_modules/@earendil-works/{name}/package.json"));
+        let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
+        metadata["version"] = json!("0.84.3");
+        fs::write(package, metadata.to_string()).unwrap();
+        fs::write(
+            fixture.root.join("app.mjs"),
+            "throw new Error('business module imported');",
+        )
+        .unwrap();
+        let service = Service::start(&fixture, &document);
+        let output = fixture.run(launch(&fixture));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(stderr.contains("AW strict Pi output requires"), "{stderr}");
+        assert!(!stderr.contains("business module imported"), "{stderr}");
+        service.released(&fixture);
+    }
 }

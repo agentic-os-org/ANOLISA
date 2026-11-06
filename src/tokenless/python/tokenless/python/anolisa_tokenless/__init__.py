@@ -1,4 +1,4 @@
-"""In-process Python SDK for complete Tokenless lifecycle optimization."""
+"""Python SDK for complete Tokenless lifecycle optimization."""
 
 from anolisa_tokenless._native import (
     CompressionResult,

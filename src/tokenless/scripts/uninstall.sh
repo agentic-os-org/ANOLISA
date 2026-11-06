@@ -41,7 +41,7 @@ RECEIPT="${TOKENLESS_RECEIPT:-${DEFAULT_DATA_DIR}/tokenless/install-receipt}"
 RUNTIME_DATA_DIR="${TOKENLESS_DATA_DIR:-${HOME}/.tokenless}"
 MARKER="# Added by tokenless installer"
 # Identity anchor inside the npm-owned adapter tree, stamped with the release
-# version by npm/scripts/package-npm.js.
+# version by packaging/npm/package-npm.js.
 ADAPTERS_IDENTITY_FILE="manifest.json"
 # Ownership marker written by scripts/install.sh into the artefacts that can
 # carry one. It lives where a foreign reinstall removes it, which is what makes

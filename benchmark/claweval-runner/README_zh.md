@@ -71,6 +71,9 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 以下所有命令均假设使用 `uv run`（项目 venv 自动解析）。
 
+Runner 当前使用 MCP SDK 1.x 的 FastMCP 接口。迁移服务端接口前，依赖范围
+排除 SDK 2.x，因此全新安装及 lock 更新会保持在支持的 1.x 版本线。
+
 > **除非已 export model/judge 环境变量，否则必须传 `--config`。** `run`/`batch` **不会**自动加载 `claw-eval/config.yaml`；请传 `--config claw-eval/config.yaml`（由 `scripts/configure_model.py` 写入），或 export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` 与 `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`。
 
 ```bash
@@ -115,12 +118,21 @@ ce-runner 支持三种任务前缀,对应不同执行模式:
 
 ## 输出
 
+批量输入只能选择同一任务 YAML 一次，各 YAML 必须声明唯一、非空的字符串 `task_id`。
+重复选择（包括目录别名）、冲突的 ID，以及不可读取或无效的任务 YAML，都会在
+gateway 或 worker 配置前报错。重复执行同一任务请使用 `--trials`。
+
 ```
-claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
+claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>-<unique-suffix>/
 ├── <task_id>_xxxx.jsonl   # 转换后的 trace
 ├── batch_results.json     # 每次试验结果
 └── batch_summary.json     # 聚合汇总
 ```
+
+评分时先在目标文件旁完整写入 UTF-8 trace，再替换原文件。序列化、写入或
+替换失败时保留原 trace 并返回错误，便于重试评分，同时保留既有权限和符号
+链接目标。这保证本地文件系统上读者看到完整的旧文件或新文件，不保证断电
+持久性，也不协调多个评分进程同时写入。
 
 ## 架构:MCP 工具注入与防作弊隔离
 
@@ -147,6 +159,8 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
       "canvas", "nodes", "cron", "sessions_list", "sessions_history",
       "sessions_send", "sessions_spawn", "sessions_yield", "subagents",
       "web_fetch", "session_status", "memory_get", "memory_search",
+      "anolisa_memory_search", "anolisa_memory_get", "memory_observe",
+      "memory_get_context",
       "other-mcp-server__*"
     ],
     "exec": { "security": "full", "ask": "off" }
@@ -157,7 +171,7 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | 策略 | 作用 |
 |--------|------|
 | `tools.allow` | 显式白名单:`exec`(启用工具执行)+ `serverKey__toolName` 格式(双下划线)的任务 MCP 工具。只有列出的工具对模型可用。 |
-| `tools.deny` | 屏蔽所有内置 gateway 工具(宿主 exec/read/write/browser 等)以及其他 MCP 服务器的工具。防止访问宿主文件系统和跨任务泄漏。 |
+| `tools.deny` | 屏蔽所有内置 gateway 工具(宿主 exec/read/write/browser 等)、agent-memory 插件的持久记忆工具以及其他 MCP 服务器的工具。防止访问宿主文件系统,并阻止**模型**调用任何宿主记忆工具。它管不到插件自己的宿主侧 hook —— 见[宿主记忆隔离](#宿主记忆隔离)。 |
 | `tools.exec` | 设置 MCP 工具执行的安全策略(工具调用成功所必需)。 |
 
 ### 每个任务两个 MCP 服务器
@@ -173,12 +187,37 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 
 在批量模式下,每个任务的 deny 列表还会包含其他任务的 MCP 服务器名(`claw-eval-mock-<other_task>__*`),防止一个 agent 调用另一个任务的 mock 服务。
 
+### 宿主记忆隔离
+
+在已安装并启用 agent-memory OpenClaw 插件的宿主机上,插件把工具直接注册到 gateway 上,而不经过 MCP 服务器,因此上面的 `claw-eval-*__*` 通配永远匹配不到它们 —— 宿主 `memory-core` 插件的 `memory_get` / `memory_search` 也正是因此按裸名屏蔽。它的记忆库跨任务、跨运行、跨 gateway 重启持久存在:一个 agent 可以读到之前任务写下的内容,也可以给后续任务留下答案。所以每个任务都会屏蔽该插件的全部 4 个工具:
+
+| 被屏蔽的工具 | 来源 |
+|--------|-------------|
+| `anolisa_memory_search`、`anolisa_memory_get` | agent-memory ≥ 0.2.8(命名空间化后的名称) |
+| `memory_observe`、`memory_get_context` | agent-memory(所有版本) |
+| `memory_get`、`memory_search` | agent-memory ≤ 0.2.7 以及 OpenClaw 自带的 `memory-core` |
+
+最后一行也是两种拼写都要保留的原因:`memory_get` / `memory_search` 在 0.2.8 之前就是插件自己的读/检索工具名,同时也是宿主 `memory-core` 的内置工具名,屏蔽它们即可同时覆盖旧版插件和宿主后端。
+
+#### 屏蔽列表覆盖不到的部分
+
+`tools.deny` 约束的是**模型**被允许调用的工具。插件还注册了两个宿主侧 hook,它们不经过这道门禁 —— 而是直接通过 stdio 与 agent-memory 的 MCP 子进程通信:
+
+| Hook | 在评测任务中做的事 |
+|------|--------------------|
+| `before_prompt_build`(自动召回) | 用任务 prompt 检索记忆库,并把命中结果作为 `prependContext` 返回,于是 agent 不调用任何工具就读到了之前任务写入的内容 |
+| `agent_end`(自动捕获) | 当最后一条 assistant 消息命中触发词时,通过 `memory_observe` 写入记忆库,于是 agent 不调用任何工具就给下一个任务留下了状态 |
+
+这两个 hook 都没有配置开关:`openclaw.plugin.json` 的 `configSchema` 只暴露 `binaryPath`、`userId`、`profile`、`maxReadBytes`、`maxWriteBytes`、`sessionId` 和 `sessionDir`,因此本 runner 无法按任务关闭它们。**所以屏蔽列表保证的是模型无法调用宿主的记忆工具,它本身并不保证记忆隔离。** 分数不得依赖宿主记忆的评测,必须跑在没有加载 agent-memory 插件的宿主机上。这是宿主属性而非任务属性 —— 可以在 gateway 日志里确认:插件加载时会写一次 `agent-memory: plugin registered (...)`,每轮注入时会写 `agent-memory: auto-recall injected N memory result(s) for prompt`。runner 的预检会执行 `openclaw plugins doctor`,但它报告的是插件**加载失败**,并不是本插件的存在性检查。
+
 ### 实现
 
 核心逻辑:`src/ce_runner/tool_injector.py`
 - `_build_allowlist()` —— 根据 task.yaml 工具 + sandbox 工具构造 `alsoAllow`
-- `_build_deny_list()` —— 根据内置工具 + 其他 MCP 服务器构造 `deny`
+- `_build_deny_list()` —— 根据其他 MCP 服务器构造 *额外* 的 `deny` 条目
 - `_DENY_BUILTIN_TOOLS` —— 需屏蔽的 gateway 内置工具静态列表
+- `_DENY_MEMORY_PLUGIN_TOOLS` —— 需屏蔽的 agent-memory 插件工具静态列表
+- `_DENY_HOST_TOOLS` —— 内置工具 + 记忆插件工具,即 `build_agent_tools()` 的 deny 基线
 
 ## 脚本
 
@@ -193,12 +232,28 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/debug_task.py` | 单任务交互式调试,输出详细信息 |
 | `scripts/analyze.py` | 分析批量 trace 产物 |
 | `scripts/summarize_results.py` | 汇总多次运行的批量结果 |
+| `scripts/compare_session_trace_tokens.py` | 对比 session/trace 的 Token 总数，流式读取大型 JSONL 日志而不缓冲整个文件 |
 | `scripts/generate_trial_reports.py` | 生成每次试验的详细报告 |
 | `scripts/prompt_task.py` | 显示指定任务的 system prompt |
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+固定端口的逐 trial 沙箱会在启动就绪检查失败或中断时尝试停止并强制移除容器，
+无需等待调用方取得句柄。关闭时，即使停止操作失败，也会尝试移除。
+清理警告会指出未释放的资源，原始启动错误仍保持可见。
+
 ## 故障排查
+
+`list_tasks.py` 支持自定义 `--tasks-dir` 与 `--format json|names`；默认分组显示保持不变。
+JSON 包含任务元数据与 `directory_name`。names 模式输出可供 `--tasks-file` 使用的精确
+目录名，即使 YAML 中的 `task_id` 与目录名不同也能正确选择。空筛选结果输出 `[]` JSON
+或空的名称流。两种机器格式均输出 UTF-8，即使控制台的默认编码无法表示任务名称。
+
+```bash
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --prefix T --format json
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --difficulty hard --format names > selected-tasks.txt
+uv run ce-runner batch --tasks-dir ./custom-tasks --tasks-file selected-tasks.txt --config claw-eval/config.yaml
+```
 
 | 问题 | 修复 |
 |---|---|

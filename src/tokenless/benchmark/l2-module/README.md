@@ -25,7 +25,7 @@ in the same round.
 | Side | Basis |
 |---|---|
 | tokenless (json/code) | **in-process**: `Instant` around the `JsonCompressor` call |
-| tokenless (command/grep/diff) | **wrapped-minus-raw wall clock**: rtk-wrapped run minus raw run (includes rtk process startup) |
+| tokenless (command/grep/diff) | **wrapped-minus-raw wall clock**: `tokenless rtk` run minus raw run (includes its process startup) |
 | headroom | **worker-internal**: `perf_counter` around `router.compress` inside the worker (pipe/JSON framing excluded) |
 
 ## Running (three steps, all remote)
@@ -67,7 +67,7 @@ Extra arguments to `remote_run.sh` are forwarded to `l2_compare`:
 | `HEADROOM_SRC` | remote_sync | local headroom checkout, default `~/git_repo/headroom` |
 | `DASHSCOPE_API_KEY` | l2_compare | enables the semantic probe; unset ⇒ all S = None |
 | `HEADROOM_PYTHON` | l2_compare | python that can `import headroom`, default `python3` |
-| `RTK_BIN` | l2_compare | rtk binary; default discovery: vendored release build, then `PATH` |
+| `TOKENLESS_BIN` | l2_compare | tokenless run as `tokenless rtk`; default discovery: Tokenless release build, then `PATH` |
 
 ## Degradation matrix
 
@@ -77,7 +77,7 @@ degradation in the report:
 | Missing | Effect |
 |---|---|
 | headroom worker (spawn/import failure) | headroom side skipped everywhere; one-sided report |
-| rtk binary | tokenless side of command/grep/diff skipped; raw commands still feed headroom |
+| `tokenless` | tokenless side of command/grep/diff skipped; raw commands still feed headroom |
 | `DASHSCOPE_API_KEY` or `--no-probe` | all semantic scores reported as `None` |
 | `/models` discovery failure | silent fallback to `qwen-max` |
 

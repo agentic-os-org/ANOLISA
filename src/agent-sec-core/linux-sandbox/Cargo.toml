@@ -16,7 +16,11 @@ path = "src/lib.rs"
 uninlined_format_args = "deny"
 redundant_closure_for_method_calls = "deny"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
+asc-sandbox-types = { path = "../v2/crates/asc-sandbox-types" }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 libc = "0.2.182"

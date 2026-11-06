@@ -1,7 +1,7 @@
 //! Exercise a local Provider through a synthetic Adapter boundary, without an Agent.
 
+use aw_core::admission::AdapterCapabilities;
 use aw_host::{FailureAction, Host, ProcessContext};
-use aw_provider::admission::AdapterCapabilities;
 use serde_json::json;
 use std::{
     collections::BTreeMap,

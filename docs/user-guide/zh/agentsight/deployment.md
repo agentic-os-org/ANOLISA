@@ -30,7 +30,7 @@ sudo systemctl enable --now agentsight.service
 
 | Unit | 职责 |
 |---|---|
-| `agentsight.service` | 运行 `/usr/local/bin/agentsight-start`，由它守护 `agentsight trace` 和 `agentsight serve --host 0.0.0.0` |
+| `agentsight.service` | 运行 `/usr/bin/agentsight-start`，由它守护 `agentsight trace` 和 `agentsight serve --host 0.0.0.0` |
 | `agentsight-enforcer.service` | 可选的 ActPlane 拦截守护进程；由主 unit 顺带拉起，风险拦截页面依赖它 |
 
 安装包 unit 自带的保障：
@@ -52,6 +52,49 @@ sudo systemctl reload agentsight.service     # 改完 config.json 之后
 
 由于该 unit 把 Dashboard 绑定在 `0.0.0.0`，把主机暴露到不可信网络前，请先在防火墙或云安全组限制
 TCP 7396。
+
+### 启用系统层文件防误删
+
+安装包的 enforcer unit 默认设置 `ACTPLANE_PINNED_PROFILE=credential-exfiltration`，
+保留凭证到网络的阻断能力，但不预留文件防误删所需的 write-rule hook。
+因此即使 BPF-LSM 已开启，`ready=true` 也不等于 `capabilities.file_delete_guard=true`。
+防误删不可用时，enforcer 启动日志会明确提示当前请求的 profile 与启用条件；
+SecCore 仍会以 `AGENTSIGHT_FILE_DELETE_GUARD_UNAVAILABLE` 拒绝 Apply，不会静默放行。
+
+启用前确认 `/sys/kernel/security/lsm` 包含 `bpf`，且 enforcer 运行在宿主初始 PID 命名空间。
+`agent-file-guard` 提供文件防护 hook，但切换后不再提供 `credential-exfiltration` 的凭证到网络阻断。
+不能把这两种 profile 当作可同时启用的开关。请先安排维护窗口并保留原绑定配置：
+切换 profile 会重建不兼容的 pinned 引擎，重启也会清理运行时绑定，期间保护有空窗。
+
+```bash
+sudo systemctl edit agentsight-enforcer.service
+```
+
+在 drop-in 中保存：
+
+```ini
+[Service]
+Environment=ACTPLANE_PINNED_PROFILE=agent-file-guard
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart agentsight-enforcer.service
+sudo journalctl -u agentsight-enforcer.service -n 50 --no-pager
+
+# 本机 loopback GET 健康检查无需令牌，不会 Apply 策略
+curl --fail --silent --show-error \
+  http://127.0.0.1:7396/api/enforcement/health
+```
+
+此免令牌示例仅适用于 loopback GET。远程请求和策略写操作仍需现有的
+[Dashboard 认证](data-and-storage.md)凭据。
+
+确认 `ready=true` 且 `capabilities.file_delete_guard=true` 后，再由 SecCore 重新 Apply 防误删绑定。
+若仍为 false，检查 BPF-LSM、PID 命名空间和引擎加载日志，不要绕过能力门控。
+`/run/agentsight/enforcer.sock` 使用内部版本化协议，不是供 `curl --unix-socket` 调用的 HTTP socket。
+回滚时把同一 drop-in 的 profile 改回 `credential-exfiltration`，重启 enforcer，并重新 Apply 原有绑定。
+仅重启 enforcer 无需停止 AgentSight 的采集或 Dashboard 服务。
 
 ## 前台运行（排查用）
 
@@ -82,8 +125,18 @@ sudo ./target/release/agentsight trace &
 sudo ./target/release/agentsight serve --host 0.0.0.0
 ```
 
-只跑 `make build` 会跳过 enforcer，之后每次启动 `serve` 都会打印
-`AgentSight enforcement unavailable`。
+采集与分析可以直接在源码目录中运行。风险拦截还需要单独运行 enforcer 守护进程，
+构建完成并不代表它已经启动。
+
+### 将源码构建安装为服务
+
+如果需要安装已构建的运行时并改用 systemd 管理：
+
+```bash
+sudo make install-core
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentsight.service
+```
 
 ## 容器与 Sidecar
 

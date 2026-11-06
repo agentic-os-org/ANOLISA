@@ -249,6 +249,14 @@ extends `@commitlint/config-conventional`:
 | `header-max-length` | error | Subject longer than 120 characters fails (repository convention is 50). |
 | `scope-enum` | warning | Scope outside the table in §4 warns. |
 | `body-max-line-length` | warning | Body lines longer than 100 characters warn. |
+| `footer-max-line-length` | warning | Footer lines longer than 100 characters warn. |
+
+Commitlint can treat a body line containing an issue reference such as `#9224`
+and all following lines as the footer. Both line-length rules use the same
+warning level so an issue reference does not make a later, intact command
+line fail CI. Long trailer lines also produce warnings. Prefer putting issue
+references in the PR description or a `Refs: #9224` trailer to keep the body
+and footer distinct.
 
 The looser CI thresholds do not replace the repository's 50-character subject
 limit and 72-column body prose convention.

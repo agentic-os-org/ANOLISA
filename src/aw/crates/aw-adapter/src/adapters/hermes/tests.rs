@@ -343,6 +343,21 @@ fn native_ids_and_error_results_are_not_fabricated_or_decoded() {
 }
 
 #[test]
+fn skill_metadata_preserves_native_arguments_and_adopts_shared_provider_contract() {
+    let native = json!({"hook_event_name":"pre_tool_call", "cwd":"/work", "session_id":"session",
+        "tool_name":"skill_view", "tool_input":{"name":"local", "file_path":null},
+        "extra":{"tool_call_id":"call", "api_request_id":"request",
+            "aw_skill":{"name":"local", "directory":"/skills/local", "source":"hermes-local"}}});
+    let event = Hermes
+        .normalize(&binding(), "tool.before", &native)
+        .unwrap();
+    assert_eq!(event["tool"]["input"]["skill"], "local");
+    assert_eq!(event["tool"]["input"]["name"], "local");
+    assert_eq!(event["native"]["tool_input"], native["tool_input"]);
+    assert_eq!(event["native"]["aw_skill"], native["extra"]["aw_skill"]);
+}
+
+#[test]
 fn native_cli_rejects_profile_switches_and_unverified_entrypoints() {
     let argv = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     assert!(check_args(&argv(&["chat", "--oneshot", "--query", "hello"])).is_ok());
@@ -631,5 +646,41 @@ fn binding() -> NativeContext {
         target: "hermes".into(),
         instance_id: "instance".into(),
         cwd: "/work".into(),
+    }
+}
+
+#[test]
+fn submission_requires_native_text_identity_and_quiet_query() {
+    let native = json!({"hook_event_name":"AWInputSubmit", "cwd":binding().cwd,
+        "session_id":"session", "aw_turn_id":"turn", "input_text":"hello"});
+    let event = Hermes
+        .normalize(&binding(), "input.submit", &native)
+        .unwrap();
+    assert_eq!(event["input"]["text"], "hello");
+    assert_eq!(event["turn_id"], "turn");
+    assert!(event.get("tool").is_none());
+    for field in ["session_id", "aw_turn_id", "input_text"] {
+        let mut missing = native.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(Hermes
+            .normalize(&binding(), "input.submit", &missing)
+            .is_err());
+    }
+    for args in [
+        vec!["chat", "--quiet", "--query", "hello"],
+        vec!["chat", "-Q", "--query-file=/tmp/prompt"],
+    ] {
+        assert!(
+            check_submission_args(&args.iter().map(OsString::from).collect::<Vec<_>>()).is_ok()
+        );
+    }
+    for args in [
+        vec!["chat"],
+        vec!["chat", "--query", "hello"],
+        vec!["chat", "--quiet", "--query", "hello", "--image=a.png"],
+    ] {
+        assert!(
+            check_submission_args(&args.iter().map(OsString::from).collect::<Vec<_>>()).is_err()
+        );
     }
 }

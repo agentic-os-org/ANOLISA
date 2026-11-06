@@ -1,12 +1,16 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
+import { OPTIMIZATION_STRATEGIES } from '../utils/optimizationStrategies';
 import { downloadSavingsCsv } from '../utils/savingsCsv';
+import { nextSavingsSort, sortSavingsSessions } from '../utils/savingsSort';
+import type { SavingsSort, SavingsSortKey } from '../utils/savingsSort';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
+import { CopyButton } from '../components/CopyButton';
 import { SessionIdHelp } from '../components/SessionIdHelp';
 import { compoundedSavingsRate } from '../utils/savings';
 import { useI18n, useLocaleTag } from '../i18n';
@@ -47,52 +51,6 @@ function shortId(id: string, len = 16): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
 }
 
-/** Copy button with a brief "Copied" feedback */
-const CopyButton: React.FC<{ text: string }> = ({ text }) => {
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handleCopy = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const done = () => {
-      setCopied(true);
-      if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => setCopied(false), 1500);
-    };
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-    } else {
-      fallbackCopy(text, done);
-    }
-  };
-  return (
-    <button
-      onClick={handleCopy}
-      className={`flex-shrink-0 px-1.5 py-0.5 rounded text-xs transition-colors ${
-        copied
-          ? 'bg-green-100 text-green-600'
-          : 'bg-gray-100 hover:bg-gray-200 text-gray-500 hover:text-gray-700'
-      }`}
-      title={t('common.copyFullId')}
-    >
-      {copied ? t('common.copied') : t('common.copy')}
-    </button>
-  );
-};
-
-function fallbackCopy(text: string, done: () => void) {
-  const el = document.createElement('textarea');
-  el.value = text;
-  el.style.position = 'fixed';
-  el.style.opacity = '0';
-  document.body.appendChild(el);
-  el.focus();
-  el.select();
-  try { document.execCommand('copy'); } catch {}
-  document.body.removeChild(el);
-  done();
-}
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type OptimizationCategory = 'tool_output' | 'mcp_response';
@@ -102,15 +60,6 @@ type OptimizationCategory = 'tool_output' | 'mcp_response';
 const CATEGORY_CONFIG: Record<OptimizationCategory, { labelKey: MessageKey; color: string; bg: string }> = {
   tool_output: { labelKey: 'ts.toolOutput', color: 'text-orange-700', bg: 'bg-orange-100' },
   mcp_response: { labelKey: 'ts.mcpOutput', color: 'text-violet-700', bg: 'bg-violet-100' },
-};
-
-// ─── Strategy config ─────────────────────────────────────────────────────────
-
-const STRATEGY_CONFIG: Record<string, { labelKey: MessageKey; color: string; bg: string; pie: string; tooltipKey: MessageKey }> = {
-  'compress-schema':   { labelKey: 'ts.schemaCompression', color: 'text-blue-700',   bg: 'bg-blue-100',   pie: '#3b82f6', tooltipKey: 'ts.schemaCompressionTip' },
-  'compress-response': { labelKey: 'ts.responseCompression', color: 'text-violet-700', bg: 'bg-violet-100', pie: '#8b5cf6', tooltipKey: 'ts.responseCompressionTip' },
-  'rewrite-command':   { labelKey: 'ts.commandRewrite', color: 'text-orange-700', bg: 'bg-orange-100', pie: '#f59e0b', tooltipKey: 'ts.commandRewriteTip' },
-  'compress-toon':     { labelKey: 'ts.toonEncoding', color: 'text-teal-700',  bg: 'bg-teal-100',  pie: '#14b8a6', tooltipKey: 'ts.toonEncodingTip' },
 };
 
 // ─── Pie chart data ───────────────────────────────────────────────────────────
@@ -319,7 +268,7 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
   const locale = useLocaleTag();
   const [expanded, setExpanded] = useState(false);
   const cfg = CATEGORY_CONFIG[item.category];
-  const stratConfig = STRATEGY_CONFIG[item.strategy];
+  const stratConfig = OPTIMIZATION_STRATEGIES[item.strategy];
   const stratStyle = stratConfig ?? { color: 'text-gray-700', bg: 'bg-gray-100', pie: '#9ca3af' };
   const stratLabel = stratConfig ? t(stratConfig.labelKey) : (item.strategy_label || item.strategy);
   const stratTooltip = stratConfig ? t(stratConfig.tooltipKey) : '';
@@ -422,7 +371,7 @@ const SessionRow: React.FC<{
             >
               {shortId(session.session_id, 20)}
             </span>
-            <CopyButton text={session.session_id} />
+            <CopyButton text={session.session_id} showIcon={false} />
           </div>
         </td>
         <td className="px-4 lg:px-6 py-4 text-sm text-gray-700">
@@ -525,6 +474,8 @@ export const TokenSavingsPage: React.FC = () => {
   // it survives detail expansion, is served from the loaded snapshot only and
   // never triggers requests of its own.
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
+  const [sort, setSort] = useState<SavingsSort | null>(null);
+  const sortedSessions = useMemo(() => sortSavingsSessions(sessions, sort), [sessions, sort]);
   const [summary, setSummary] = useState<SavingsSummary | null>(null);
   const [statsAvailable, setStatsAvailable] = useState(true);
   const [tips, setTips] = useState<OptimizationTip[]>([]);
@@ -534,6 +485,24 @@ export const TokenSavingsPage: React.FC = () => {
 
   // Ref for scrolling to the target session row
   const targetRowRef = useRef<HTMLTableRowElement>(null);
+
+  const sortButton = (key: SavingsSortKey, label: MessageKey) => {
+    const direction = sort?.key === key ? sort.direction : null;
+    const action = t(direction === 'descending' ? 'ts.sortAscending'
+      : direction === 'ascending' ? 'ts.sortOriginal' : 'ts.sortDescending');
+    return (
+      <button
+        type="button"
+        onClick={() => setSort(current => nextSavingsSort(current, key))}
+        title={key === 'compounded_saved' ? `${action}. ${t('ts.savedComparedTooltip')}` : action}
+        aria-label={`${t(label)}: ${action}`}
+        className="inline-flex items-center gap-1 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+      >
+        {t(label)}
+        <span aria-hidden="true">{direction === 'descending' ? '↓' : direction === 'ascending' ? '↑' : '↕'}</span>
+      </button>
+    );
+  };
 
   // Load agent names on mount
   useEffect(() => {
@@ -614,7 +583,7 @@ export const TokenSavingsPage: React.FC = () => {
   }, [selectedSessionIds, allSessionsSelected]);
 
   // Subset export source: keeps displayed row order, snapshot only.
-  const selectedSessions = sessions.filter((sess) => selectedSessionIds.has(sess.session_id));
+  const selectedSessions = sortedSessions.filter((sess) => selectedSessionIds.has(sess.session_id));
 
   const totalInput = summary?.total_input_tokens ?? 0;
   const totalOutput = summary?.total_output_tokens ?? 0;
@@ -754,9 +723,9 @@ export const TokenSavingsPage: React.FC = () => {
                 const pieData = breakdown
                   .filter(b => b.compounded_saved > 0)
                   .map(b => ({
-                    name: (STRATEGY_CONFIG[b.strategy] ? t(STRATEGY_CONFIG[b.strategy].labelKey) : b.label),
+                    name: (OPTIMIZATION_STRATEGIES[b.strategy] ? t(OPTIMIZATION_STRATEGIES[b.strategy].labelKey) : b.label),
                     value: b.compounded_saved,
-                    color: (STRATEGY_CONFIG[b.strategy]?.pie ?? '#9ca3af'),
+                    color: (OPTIMIZATION_STRATEGIES[b.strategy]?.pie ?? '#9ca3af'),
                   }));
                 return (
                   <>
@@ -914,7 +883,7 @@ export const TokenSavingsPage: React.FC = () => {
         <div className="flex justify-end gap-2 px-4 py-3 border-b border-gray-200">
           <button
             type="button"
-            onClick={() => downloadSavingsCsv(sessions)}
+            onClick={() => downloadSavingsCsv(sortedSessions)}
             disabled={loading || !!error || sessions.length === 0}
             className="px-3 py-1.5 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -952,22 +921,22 @@ export const TokenSavingsPage: React.FC = () => {
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
                   {t('common.agent')}
                 </th>
-                <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  {t('ts.inputTokens')}
+                <th aria-sort={sort?.key === 'total_input_tokens' ? sort.direction : 'none'} className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                  {sortButton('total_input_tokens', 'ts.inputTokens')}
                 </th>
-                <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  {t('ts.outputTokens')}
+                <th aria-sort={sort?.key === 'total_output_tokens' ? sort.direction : 'none'} className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                  {sortButton('total_output_tokens', 'ts.outputTokens')}
                 </th>
-                <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  <span className="inline-flex items-center gap-1" title={t('ts.savedComparedTooltip')}>{t('ts.savedCol')}</span>
+                <th aria-sort={sort?.key === 'compounded_saved' ? sort.direction : 'none'} className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                  <span title={t('ts.savedComparedTooltip')}>{sortButton('compounded_saved', 'ts.savedCol')}</span>
                 </th>
-                <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  {t('ts.savingsRateCol')}
+                <th aria-sort={sort?.key === 'compounded_savings_rate' ? sort.direction : 'none'} className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                  {sortButton('compounded_savings_rate', 'ts.savingsRateCol')}
                 </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {sessions.map((sess) => (
+              {sortedSessions.map((sess) => (
                 <SessionRow
                   key={sess.session_id}
                   session={sess}

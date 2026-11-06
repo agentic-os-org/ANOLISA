@@ -1,4 +1,7 @@
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::fs::OpenOptions;
+use std::io;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
@@ -516,50 +519,65 @@ impl StorageBackend for BtrfsLoopBackend {
         let mounted = is_mounted(&mount_path_str).await?;
         let needs_mount = if mounted {
             // Check if our img is already the one mounted here (inode-based).
-            let our_loop = find_loop_device_for(&img_path_str).await.ok();
+            // A lost association (missing /dev node) must not invalidate the
+            // healthy ones — reuse the mount when any active loop matches.
+            let our_loops = associated_loops(&img_path_str).await.ok();
             let mounted_source = run_command("findmnt", &["-no", "SOURCE", &mount_path_str])
                 .await
                 .ok()
                 .map(|s| last_nonempty_line(&s).to_string());
-            match (&our_loop, &mounted_source) {
-                (Some(ours), Some(src)) if ours == src => {
-                    info!("Already mounted at {:?} (loop {})", self.mount_path, ours);
+            if let Some(lost) = our_loops
+                .as_ref()
+                .map(|l| &l.lost)
+                .filter(|l| !l.is_empty())
+            {
+                warn!(
+                    "Image {} has lost loop associations {:?} (missing device nodes)",
+                    img_path_str, lost
+                );
+            }
+            match (&our_loops, &mounted_source) {
+                (Some(ours), Some(src)) if ours.active.contains(src) => {
+                    info!("Already mounted at {:?} (loop {})", self.mount_path, src);
                     false
                 }
                 _ => {
                     info!(
-                        "{} mounted by {:?} but our img loop is {:?}; overmounting",
-                        mount_path_str, mounted_source, our_loop
+                        "{} mounted by {:?} but our img loops are {:?}; overmounting",
+                        mount_path_str, mounted_source, our_loops
                     );
                     true
                 }
             }
         } else {
-            // Detach orphan loop from a prior failed mount attempt before re-attaching.
-            if let Ok(orphan) = find_loop_device_for(&img_path_str).await {
-                warn!(
-                    "Found orphan loop {} for img (attached but not mounted); detaching",
-                    orphan
-                );
-                let _ = run_command_checked("losetup", &["-d", &orphan]).await;
-            }
             true
         };
         if needs_mount {
-            let loop_device = attach_loop(&img_path_str).await?;
-            if let Err(e) = run_command_checked("mount", &[&loop_device, &mount_path_str]).await {
-                // Mount failed after the loop device was attached; detach it so
-                // repeated failures don't leak/exhaust loop devices.
-                if let Err(detach_err) = run_command_checked("losetup", &["-d", &loop_device]).await
-                {
-                    warn!(
-                        "Failed to detach loop device {} after mount failure: {:#}",
-                        loop_device, detach_err
-                    );
+            let image = image_identity(&img_path_str).await?;
+            detach_idle_image_loops(&img_path_str, image).await?;
+            for attempt in 0..2 {
+                let loop_device = attach_loop(&img_path_str).await?;
+                match run_command_checked("mount", &[&loop_device, &mount_path_str]).await {
+                    Ok(()) => {
+                        info!("Mounted {} at {}", loop_device, mount_path_str);
+                        break;
+                    }
+                    Err(e) => {
+                        if let Err(cleanup_err) =
+                            detach_idle_image_loops(&img_path_str, image).await
+                        {
+                            return Err(e).context(format!(
+                                "Failed to mount btrfs image; loop cleanup incomplete: {cleanup_err:#}"
+                            ));
+                        }
+                        if attempt == 0 {
+                            warn!("Mount of {} failed: {e:#}; retrying once with a new loop association", loop_device);
+                            continue;
+                        }
+                        return Err(e).context("Failed to mount btrfs image");
+                    }
                 }
-                return Err(e).context("Failed to mount btrfs image");
             }
-            info!("Mounted {} at {}", loop_device, mount_path_str);
         }
 
         // Zombie sweep (#3053): a previous run may have deleted subvolumes the
@@ -844,6 +862,223 @@ fn last_nonempty_line(s: &str) -> &str {
         .find(|l| !l.trim().is_empty())
         .map(|l| l.trim())
         .unwrap_or("")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ImageIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+async fn image_identity(img: &str) -> anyhow::Result<ImageIdentity> {
+    let meta = tokio::fs::metadata(img).await?;
+    Ok(ImageIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+/// Loop associations to one backing image. util-linux 2.40+ prints
+/// "<dev> (lost)" when the association survives in the kernel but the
+/// /dev node is gone; such loops cannot be opened or detached by path,
+/// so they are reported separately instead of failing the whole lookup.
+#[derive(Debug, Default)]
+struct ImageLoopAssociations {
+    active: Vec<String>,
+    lost: Vec<String>,
+}
+
+async fn associated_loops(img: &str) -> anyhow::Result<ImageLoopAssociations> {
+    let out = run_command(
+        "losetup",
+        &["--list", "--noheadings", "--output", "NAME", "-j", img],
+    )
+    .await?;
+    let mut associations = ImageLoopAssociations::default();
+    for line in out.lines().filter(|line| !line.trim().is_empty()) {
+        let trimmed = line.trim();
+        let (dev, lost) = match trimmed.strip_suffix(" (lost)") {
+            Some(dev) => (dev, true),
+            None => (trimmed, false),
+        };
+        let digits = dev
+            .strip_prefix("/dev/loop")
+            .with_context(|| format!("Invalid loop device: {dev}"))?;
+        if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            bail!("Invalid loop device: {dev}");
+        }
+        if lost {
+            associations.lost.push(dev.to_string());
+        } else {
+            associations.active.push(dev.to_string());
+        }
+    }
+    Ok(associations)
+}
+
+// Linux include/uapi/linux/loop.h. The unused fields are required by the ioctl ABI.
+#[repr(C)]
+#[allow(dead_code)]
+struct LoopInfo64 {
+    lo_device: u64,
+    lo_inode: u64,
+    lo_rdevice: u64,
+    lo_offset: u64,
+    lo_sizelimit: u64,
+    lo_number: u32,
+    lo_encrypt_type: u32,
+    lo_encrypt_key_size: u32,
+    lo_flags: u32,
+    lo_file_name: [u8; 64],
+    lo_crypt_name: [u8; 64],
+    lo_encrypt_key: [u8; 32],
+    lo_init: [u64; 2],
+}
+
+impl Default for LoopInfo64 {
+    fn default() -> Self {
+        // SAFETY: every field is an integer or integer array, so zero is a valid value.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+fn loop_ioctl(fd: RawFd, request: libc::c_ulong, info: *mut LoopInfo64) -> io::Result<()> {
+    // SAFETY: `info` is either a valid loop_info64 pointer or null for LOOP_CLR_FD.
+    let rc = unsafe { libc::ioctl(fd, request, info) };
+    if rc < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+async fn detach_idle_image_loops(img: &str, expected: ImageIdentity) -> anyhow::Result<()> {
+    let associations = associated_loops(img).await?;
+    for dev in &associations.active {
+        if !detach_owned_unused_loop(img, dev, expected).await? {
+            bail!("Loop {dev} is in use or its ownership is uncertain; refusing to reattach image");
+        }
+        info!("Detached idle loop {dev} for btrfs image");
+    }
+    let remaining = associated_loops(img).await?;
+    if !remaining.active.is_empty() {
+        bail!(
+            "Loop associations changed during cleanup ({:?}); refusing to reattach image",
+            remaining.active
+        );
+    }
+    if !remaining.lost.is_empty() {
+        // Reattaching would create a second binding alongside a holder we
+        // cannot inspect or detach; keep the site for manual recovery.
+        bail!(
+            "Lost loop associations {:?} for the image cannot be detached (missing device nodes); \
+             refusing to reattach image — resolve them manually (e.g. detach by loop number or reboot) first",
+            remaining.lost
+        );
+    }
+    Ok(())
+}
+
+/// Release only an idle association to this exact image. O_EXCL guards against
+/// mounts in other namespaces. A deferred AUTOCLEAR after CLR_FD means some
+/// other opener still holds the device; the flag is undone to stay in charge
+/// and the detach is retried briefly, which tolerates short-lived openers
+/// (e.g. udev probing after the failed mount, issue #9437). A long-term holder
+/// keeps the association and the caller refuses to reattach.
+async fn detach_owned_unused_loop(
+    img: &str,
+    dev: &str,
+    expected: ImageIdentity,
+) -> anyhow::Result<bool> {
+    if image_identity(img).await? != expected {
+        return Ok(false);
+    }
+    let associated = associated_loops(img).await?;
+    if !associated.active.iter().any(|candidate| candidate == dev) {
+        return Ok(false);
+    }
+    let number: u32 = dev
+        .strip_prefix("/dev/loop")
+        .and_then(|s| s.parse().ok())
+        .context("Invalid loop device name")?;
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_EXCL | libc::O_NOFOLLOW)
+        .open(dev)
+    {
+        Ok(file) => file,
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("Cannot exclusively open {dev}")),
+    };
+    if !file.metadata()?.file_type().is_block_device() {
+        return Ok(false);
+    }
+    let fd = file.as_raw_fd();
+    let mut before = LoopInfo64::default();
+    loop_ioctl(fd, 0x4c05, &mut before).context("Cannot inspect loop binding")?;
+    const AUTOCLEAR: u32 = 4;
+    if before.lo_number != number
+        || before.lo_device != expected.dev
+        || before.lo_inode != expected.ino
+        || before.lo_offset != 0
+        || before.lo_sizelimit != 0
+        || before.lo_flags & AUTOCLEAR != 0
+    {
+        return Ok(false);
+    }
+    // CLR_FD only defers the detach (AUTOCLEAR) while another opener exists;
+    // short-lived openers such as udev probes close within milliseconds, so a
+    // brief bounded retry (at most three CLR_FD attempts in total) detaches
+    // cleanly instead of failing the whole mount retry (#9437). The flag is
+    // undone before every wait so a genuine holder cannot pull the association
+    // out from under us, and a persistent holder still ends in the
+    // conservative refuse-and-keep path below.
+    const DETACH_RETRIES: usize = 2;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+    // The association must still target this exact image before every CLR_FD:
+    // a concurrent plain-fd holder can retarget it via LOOP_CHANGE_FD or shift
+    // its geometry via LOOP_SET_STATUS64 while we wait, and detaching then
+    // would release another image's association (PR #9471 review).
+    let identity_matches = |info: &LoopInfo64| {
+        info.lo_number == number
+            && info.lo_device == expected.dev
+            && info.lo_inode == expected.ino
+            && info.lo_offset == 0
+            && info.lo_sizelimit == 0
+    };
+    loop_ioctl(fd, 0x4c01, std::ptr::null_mut()).context("Cannot clear loop binding")?;
+    let mut after = LoopInfo64::default();
+    for retry in 0..=DETACH_RETRIES {
+        match loop_ioctl(fd, 0x4c05, &mut after) {
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => return Ok(true),
+            Ok(()) if identity_matches(&after) && after.lo_flags & AUTOCLEAR != 0 => {
+                after.lo_flags &= !AUTOCLEAR;
+                loop_ioctl(fd, 0x4c04, &mut after)
+                    .context("Cannot restore busy loop's autoclear flag")?;
+                let mut restored = LoopInfo64::default();
+                loop_ioctl(fd, 0x4c05, &mut restored)
+                    .context("Cannot verify busy loop was retained")?;
+                if !identity_matches(&restored) || restored.lo_flags & AUTOCLEAR != 0 {
+                    bail!("Busy loop {dev} was not restored");
+                }
+                if retry == DETACH_RETRIES {
+                    return Ok(false);
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+                match loop_ioctl(fd, 0x4c05, &mut after) {
+                    Err(e) if e.raw_os_error() == Some(libc::ENXIO) => return Ok(true),
+                    Ok(()) if identity_matches(&after) => {}
+                    Ok(()) => bail!("Loop {dev} changed identity during cleanup"),
+                    Err(e) => return Err(e).context("Cannot verify loop cleanup"),
+                }
+                loop_ioctl(fd, 0x4c01, std::ptr::null_mut())
+                    .context("Cannot clear loop binding")?;
+            }
+            Ok(()) => bail!("Loop {dev} changed identity during cleanup"),
+            Err(e) => return Err(e).context("Cannot verify loop cleanup"),
+        }
+    }
+    unreachable!("detach retry loop always returns")
 }
 
 /// Live-mount migration legacy → target: idle-check, umount, rename, remount.

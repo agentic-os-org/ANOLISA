@@ -30,6 +30,10 @@ sudo agentsight serve --host 0.0.0.0 --port 7396
 已保存的 Tokenless 记录列表即使从 loopback 访问也需要 Dashboard 凭据。这项变更约束
 元数据访问；现有页面、登录流程及统计计算保持不变。
 
+`GET /api/preferences?llm=true` 会使用服务端保存的 LLM 凭据，因此即使从 loopback 访问也需要
+Dashboard 凭据。规则模式偏好查询、`/api/preferences/export` 和 `/api/preferences/turns`
+的现有访问行为不变。
+
 ![Dashboard 登录页](../../../images/agentsight/zh/dashboard-login.png)
 
 令牌在首次启动 `serve` 时生成（64 位十六进制），保存在数据库旁边的
@@ -136,6 +140,11 @@ Session 资源消耗。
 源查询失败时显示错误，不返回旧的汇总值。即使从 loopback 访问也需要现有 AgentSight 登录。
 已保存的元数据与显式请求的完整内容仍可通过[记录 API](integrations.md#通过-api-记录统计数据)查询。
 
+点击输入 Token、输出 Token、节省或节省率的列标题，按数值从高到低排序；再点击一次
+改为从低到高，第三次恢复查询顺序。节省和节省率使用表格显示的含复利数值。
+相同数值保持查询顺序，排序选择也应用于下一次查询结果。箭头表示当前方向，
+列标题支持键盘操作。
+
 **导出 CSV** 将上次成功查询后显示的会话按显示顺序下载为 `token-savings.csv`，
 包含 Session ID、Agent 名称、请求次数和 Token 指标；比例使用小数（如 `0.4` 表示 40%）。
 导出不包含工具内容，采用带 BOM 的 UTF-8 编码以兼容电子表格。
@@ -168,6 +177,13 @@ Skill 数量分布，以及按周的热度排行。统计单位是一次 LLM 调
 系统审计把审计事件聚合成可评审的案例，装了 enforcer 时还能执行处置。
 
 ![系统审计页面](../../../images/agentsight/zh/dashboard-system-audit.png)
+
+## 密钥文件禁读模板
+
+装了 enforcer 后，在风险拦截页的「策略模板」中选择「禁止读取密钥文件」，填写 Agent ID、根 PID
+和普通文件绝对路径，然后下发。该策略固定使用拦截模式，不需要配置可信网络端点；读取拒绝记录
+显示为 `read`。后端不支持 `file_read_protection` 或未就绪时，下发按钮不可用。
+原有凭证外发模板仍保留。文件身份、已有映射及密钥轮换的边界见[禁读说明](integrations.md#禁止读取密钥文件)。
 
 ## 轨迹查看
 

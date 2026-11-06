@@ -48,8 +48,9 @@ pub(super) fn reply(request: &Value, result: &Value) -> Result<Value, &'static s
 
 // Like the Tokenless Hermes integration, infer ownership from executed input,
 // not from a blocked call ID (the retry has a new ID). Restrict recognition to
-// the attributed standalone wrapper; compound output remains eligible for PostTool.
-pub(super) fn optimization(event: &Value, data: &Path) -> &'static str {
+// the attributed standalone wrapper that `cli` emits; compound output remains
+// eligible for PostTool.
+pub(super) fn optimization(event: &Value, data: &Path, cli: &Path) -> &'static str {
     if !supported(&event["tool"]) {
         return "none";
     }
@@ -76,7 +77,7 @@ pub(super) fn optimization(event: &Value, data: &Path) -> &'static str {
                 )
             && words[3].starts_with("TOKENLESS_TOOL_USE_ID=")
             && data_directory_matches(&words[4], data)
-            && rtk_command(&words[5..])
+            && rtk_command(&words[5..], cli)
         {
             return "rtk";
         }
@@ -102,7 +103,7 @@ pub(super) fn optimization(event: &Value, data: &Path) -> &'static str {
     "none"
 }
 
-fn rtk_command(words: &[String]) -> bool {
+fn rtk_command(words: &[String], cli: &Path) -> bool {
     // Tokenless may insert its receipt pair before the executable. Accept only
     // that emitted shape so extra environment assignments cannot change ownership.
     let command = match words {
@@ -118,9 +119,20 @@ fn rtk_command(words: &[String]) -> bool {
         }
         _ => words,
     };
-    matches!(command, [program, _, ..]
-        if Path::new(program).is_absolute()
-            && Path::new(program).file_name().is_some_and(|name| name == "rtk"))
+    matches!(command, [program, subcommand, _, ..]
+        if subcommand == "rtk" && launches_cli(Path::new(program), cli))
+}
+
+// Tokenless links RTK and launches it through its own executable, named by the
+// path the operating system resolved for it: on Linux the file behind every
+// link, whatever its name. `--cli` may be that file, a link to it, or a script
+// that starts the CLI; a script's target is unknown here, so an executable
+// named `tokenless` also counts.
+fn launches_cli(program: &Path, cli: &Path) -> bool {
+    program.is_absolute()
+        && (program == cli
+            || program.file_name().is_some_and(|name| name == "tokenless")
+            || cli.canonicalize().is_ok_and(|target| program == target))
 }
 
 fn environment_assignment(word: &str) -> bool {
@@ -192,15 +204,20 @@ fn data_directory_matches(assignment: &str, data: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// The `--cli` that the wrappers in these tests name; it need not exist.
+    fn cli() -> &'static Path {
+        Path::new("/opt/tokenless")
+    }
+
     #[test]
     fn receipt_wrappers_keep_attribution_and_literal_command_guards() {
         let receipt =
             "TOKENLESS_RTK_RUN_ID=0123456789abcdef0123456789abcdef TOKENLESS_RTK_ORDINAL=0";
-        let prefix = format!("env TOKENLESS_AGENT_ID=pi TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR=/state {receipt} /opt/rtk git status");
+        let prefix = format!("env TOKENLESS_AGENT_ID=pi TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR=/state {receipt} /opt/tokenless rtk git status");
         let mut event = json!({"agent":{"binding_id":"pi"},"session_id":"session","tool":{"name":"bash","call_id":"new-call","input":{"command":prefix}}});
         for command in [prefix.clone(), format!("sudo {prefix}")] {
             event["tool"]["input"]["command"] = json!(command);
-            assert_eq!(optimization(&event, Path::new("/state")), "rtk");
+            assert_eq!(optimization(&event, Path::new("/state"), cli()), "rtk");
         }
         for command in [
             prefix.replace("AGENT_ID=pi", "AGENT_ID=other"),
@@ -210,15 +227,20 @@ mod tests {
             prefix.replace("TOKENLESS_RTK_ORDINAL=0", "TOKENLESS_RTK_ORDINAL=-1"),
             prefix.replace("TOKENLESS_RTK_ORDINAL=0 ", ""),
             prefix.replace(receipt, "TOKENLESS_RTK_ORDINAL=0"),
-            prefix.replace(" /opt/rtk", " TOKENLESS_AGENT_ID=other /opt/rtk"),
-            prefix.replace("/opt/rtk", "/opt/rtk-lookalike"),
-            prefix.replace("/opt/rtk", "rtk"),
+            prefix.replace(
+                " /opt/tokenless",
+                " TOKENLESS_AGENT_ID=other /opt/tokenless",
+            ),
+            prefix.replace("/opt/tokenless", "/opt/tokenless-lookalike"),
+            prefix.replace("/opt/tokenless", "tokenless"),
+            prefix.replace("/opt/tokenless rtk", "/opt/rtk"),
+            prefix.replace(" rtk git", " compress git"),
             format!("{prefix} && echo other"),
             format!("echo {prefix}"),
         ] {
             event["tool"]["input"]["command"] = json!(command);
             assert_eq!(
-                optimization(&event, Path::new("/state")),
+                optimization(&event, Path::new("/state"), cli()),
                 "none",
                 "{command}"
             );
@@ -227,9 +249,12 @@ mod tests {
 
     #[test]
     fn optimization_uses_executed_attribution_without_granting_authority() {
-        let prefix = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID='session one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/rtk git status";
+        let prefix = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID='session one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/tokenless rtk git status";
         let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session one","tool":{"name":"terminal","call_id":"new-call","input":{"command":prefix}}});
-        assert_eq!(optimization(&event, Path::new("/state space")), "rtk");
+        assert_eq!(
+            optimization(&event, Path::new("/state space"), cli()),
+            "rtk"
+        );
         for command in [
             "rtk git status".to_owned(),
             format!("echo {prefix}"),
@@ -237,13 +262,15 @@ mod tests {
             prefix.replace("AGENT_ID=hermes-target", "AGENT_ID=other-target"),
             prefix.replace("'session one'", "other"),
             prefix.replace("'/state space'", "/other"),
-            prefix.replace("/opt/rtk", "rtk"),
-            prefix.replace("/opt/rtk", "/opt/rtk-lookalike"),
+            prefix.replace("/opt/tokenless", "tokenless"),
+            prefix.replace("/opt/tokenless", "/opt/tokenless-lookalike"),
+            prefix.replace("/opt/tokenless rtk", "/opt/rtk"),
+            prefix.replace(" rtk git status", " rtk"),
             "'unclosed".into(),
         ] {
             event["tool"]["input"]["command"] = json!(command);
             assert_eq!(
-                optimization(&event, Path::new("/state space")),
+                optimization(&event, Path::new("/state space"), cli()),
                 "none",
                 "{command}"
             );
@@ -252,7 +279,7 @@ mod tests {
 
     #[test]
     fn quoted_shell_literals_preserve_ownership_but_shell_operations_do_not() {
-        let prefix = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID='session|one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/rtk rg";
+        let prefix = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID='session|one' TOKENLESS_TOOL_USE_ID=old-call TOKENLESS_DATA_DIR='/state space' /opt/tokenless rtk rg";
         let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session|one","tool":{"name":"terminal","input":{"command":""}}});
         for (argument, expected) in [
             ("'foo|bar' src", "rtk"),
@@ -277,7 +304,7 @@ mod tests {
         ] {
             event["tool"]["input"]["command"] = json!(format!("{prefix} {argument}"));
             assert_eq!(
-                optimization(&event, Path::new("/state space")),
+                optimization(&event, Path::new("/state space"), cli()),
                 expected,
                 "{argument}"
             );
@@ -296,20 +323,56 @@ mod tests {
         for suffix in ["", "not-created/nested"] {
             let data = link.join(suffix);
             let canonical = real.canonicalize().unwrap().join(suffix);
-            let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session","tool":{"name":"terminal","input":{"command":format!("env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR={} /opt/rtk git status", shlex::try_quote(canonical.to_str().unwrap()).unwrap())}}});
-            assert_eq!(optimization(&event, &data), "rtk");
+            let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session","tool":{"name":"terminal","input":{"command":format!("env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR={} /opt/tokenless rtk git status", shlex::try_quote(canonical.to_str().unwrap()).unwrap())}}});
+            assert_eq!(optimization(&event, &data, cli()), "rtk");
             event["tool"]["input"]["command"] = json!(event["tool"]["input"]["command"]
                 .as_str()
                 .unwrap()
                 .replace("TOKENLESS_DATA_DIR=", "TOKENLESS_DATA_DIR=/other"));
-            assert_eq!(optimization(&event, &data), "none");
+            assert_eq!(optimization(&event, &data, cli()), "none");
         }
         assert!(!real.join("not-created").exists());
     }
 
     #[test]
+    fn ownership_follows_the_configured_cli_or_a_cli_named_tokenless() {
+        let build = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tokenless-validation");
+        std::fs::create_dir_all(&build).unwrap();
+        let root = tempfile::tempdir_in(build.canonicalize().unwrap()).unwrap();
+        let versioned = root.path().join("versions/tokenless-v0.9.2");
+        let link = root.path().join("bin/tokenless-current");
+        let script = root.path().join("bin/run-tokenless");
+        let other = root.path().join("bin/tokenless-other");
+        for path in [&versioned, &script, &other] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        std::os::unix::fs::symlink(&versioned, &link).unwrap();
+        let wrapper = |program: &Path| json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session","tool":{"name":"terminal","input":{"command":format!("env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR=/state {} rtk git status", shlex::try_quote(program.to_str().unwrap()).unwrap())}}});
+        let target = versioned.canonicalize().unwrap();
+        let named = std::path::PathBuf::from("/opt/tokenless");
+        for (cli, program, expected) in [
+            (&versioned, &target, "rtk"),
+            (&link, &target, "rtk"),
+            (&link, &link, "rtk"),
+            (&script, &named, "rtk"),
+            (&link, &other, "none"),
+            (&versioned, &link, "none"),
+            (&script, &target, "none"),
+        ] {
+            assert_eq!(
+                optimization(&wrapper(program), Path::new("/state"), cli),
+                expected,
+                "{} -> {}",
+                cli.display(),
+                program.display()
+            );
+        }
+    }
+
+    #[test]
     fn transparent_execution_prefixes_preserve_ownership() {
-        let wrapper = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR=/state /opt/rtk git status";
+        let wrapper = "env TOKENLESS_AGENT_ID=hermes-target TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=old TOKENLESS_DATA_DIR=/state /opt/tokenless rtk git status";
         let mut event = json!({"agent":{"adapter":"hermes","binding_id":"hermes-target"},"session_id":"session","tool":{"name":"terminal","input":{"command":""}}});
         for (prefix, expected) in [
             ("sudo ", "rtk"),
@@ -329,12 +392,12 @@ mod tests {
         ] {
             event["tool"]["input"]["command"] = json!(format!("{prefix}{wrapper}"));
             assert_eq!(
-                optimization(&event, Path::new("/state")),
+                optimization(&event, Path::new("/state"), cli()),
                 expected,
                 "{prefix}"
             );
         }
         event["tool"]["input"]["command"] = json!(format!("sudo {wrapper} && echo other"));
-        assert_eq!(optimization(&event, Path::new("/state")), "none");
+        assert_eq!(optimization(&event, Path::new("/state"), cli()), "none");
     }
 }

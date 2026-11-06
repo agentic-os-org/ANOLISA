@@ -77,6 +77,10 @@ The server converts this request into the existing versioned `ApplyPolicy`
 protocol. The raw `POST /api/enforcement/bindings` endpoint remains available
 for trusted integration clients but is not called by the Dashboard.
 
+The read-denial template posts the same body to
+`POST /api/enforcement/file-read-bindings`. The separate route makes a server
+without read protection answer 404 instead of applying an open-only policy.
+
 ## Server-Side Policy Construction
 
 The server performs the following steps before calling the coordinator:

@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::binding::{BindingStatus, BindingView};
 use asc_policy_types::error::ValidationError;
 use asc_policy_types::policy::{PreparedPolicy, validate_policy_name};
@@ -20,13 +20,16 @@ const MAX_PAGE_SIZE: u32 = 1_000;
 enum WriteTarget<'a> {
     Create,
     Update(&'a ResourceId),
+    UpdateFile(&'a ResourceId),
 }
 
 /// Policy Administration Point for templates, assignments and owned Binding intent.
 pub struct PapService<R> {
     scope_mutations: Arc<Mutex<()>>,
+    credential_scope_mutations: Arc<Mutex<()>>,
     repository: Arc<R>,
     discovery: Option<Arc<dyn crate::ScopeDiscovery>>,
+    execution: Option<Arc<dyn crate::ScopeExecution>>,
     enqueuer: Option<Arc<dyn crate::BindingReconcileEnqueuer>>,
 }
 
@@ -34,9 +37,11 @@ impl<R> Clone for PapService<R> {
     fn clone(&self) -> Self {
         Self {
             scope_mutations: self.scope_mutations.clone(),
+            credential_scope_mutations: self.credential_scope_mutations.clone(),
             repository: Arc::clone(&self.repository),
             enqueuer: self.enqueuer.clone(),
             discovery: self.discovery.clone(),
+            execution: self.execution.clone(),
         }
     }
 }
@@ -49,9 +54,11 @@ where
     pub fn new(repository: Arc<R>) -> Self {
         Self {
             scope_mutations: Arc::new(Mutex::new(())),
+            credential_scope_mutations: Arc::new(Mutex::new(())),
             repository,
             enqueuer: None,
             discovery: None,
+            execution: None,
         }
     }
 
@@ -70,6 +77,27 @@ where
         self.discovery = Some(discovery);
         self
     }
+    /// Connects credential Scope lifecycle to the execution owner.
+    #[must_use]
+    pub fn with_scope_execution(mut self, execution: Arc<dyn crate::ScopeExecution>) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
+    fn scope_mutation_lock(
+        &self,
+        scope: &PreparedScope,
+    ) -> Result<std::sync::MutexGuard<'_, ()>, PapError> {
+        // Pinned policies never change; mixed scopes share the credential domain.
+        // Hold only one domain so gateway waits cannot block unrelated file work.
+        let mutations = if scope.uses_credentials() {
+            &self.credential_scope_mutations
+        } else {
+            &self.scope_mutations
+        };
+        mutations.lock().map_err(|_| PapError::Persistence)
+    }
+
     fn check_ready(&self) -> Result<(), PapError> {
         self.enqueuer.as_ref().map_or(Ok(()), |e| e.check_ready())
     }
@@ -134,7 +162,7 @@ where
     pub fn create_policy(
         &self,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PapError> {
         self.write_policy(WriteTarget::Create, policy_name, template)
     }
@@ -151,26 +179,52 @@ where
         &self,
         policy_id: &ResourceId,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PapError> {
         self.write_policy(WriteTarget::Update(policy_id), policy_name, template)
+    }
+
+    /// Updates a file Policy without allowing a concurrent credential revision to be downgraded.
+    /// # Errors
+    /// Requires credential authority when either old or new content uses credentials.
+    #[tracing::instrument(skip_all, name = "pap.update_policy")]
+    pub fn update_file_policy(
+        &self,
+        policy_id: &ResourceId,
+        policy_name: &str,
+        template: &PolicySource,
+    ) -> Result<PreparedPolicy, PapError> {
+        self.write_policy(WriteTarget::UpdateFile(policy_id), policy_name, template)
     }
 
     fn write_policy(
         &self,
         target: WriteTarget<'_>,
         policy_name: &str,
-        template: &PolicyTemplate,
+        template: &PolicySource,
     ) -> Result<PreparedPolicy, PapError> {
         validate_policy_name(policy_name)
             .map_err(|message| PapError::InvalidPolicyName(message.to_owned()))?;
+        if let PolicySource::Cedar(cedar) = template {
+            asc_policy_cedar::validate(cedar)
+                .map_err(|error| PapError::InvalidCedar(error.diagnostic()))?;
+        }
         let (update_existing, mut selected_id) = match target {
             WriteTarget::Create => (false, generated_resource_id()?),
-            WriteTarget::Update(id) => (true, id.clone()),
+            WriteTarget::Update(id) | WriteTarget::UpdateFile(id) => (true, id.clone()),
         };
 
         for _ in 0..MAX_WRITE_ATTEMPTS {
             let state = self.repository.get_policy_revision_state(&selected_id)?;
+            if matches!(target, WriteTarget::UpdateFile(_))
+                && (template.uses_credentials()
+                    || state
+                        .as_ref()
+                        .and_then(|s| s.current.as_ref())
+                        .is_some_and(|p| p.template.uses_credentials()))
+            {
+                return Err(PapError::CredentialAuthorityRequired);
+            }
             if update_existing && state.is_none() {
                 return Err(PapError::NotFound);
             }
@@ -193,7 +247,6 @@ where
                 revision,
                 template: template.clone(),
             };
-            candidate.validate().map_err(PapError::InvalidPolicy)?;
             match self.repository.put_policy(&candidate) {
                 Err(PapError::Conflict) => {
                     if !update_existing {
@@ -219,6 +272,14 @@ where
         self.repository.get_policy(id, revision)
     }
 
+    /// Reads selected current policies together, in requested order.
+    ///
+    /// # Errors
+    /// Rejects empty or oversized selections, missing policies, and storage failures.
+    pub fn current_policies(&self, ids: &[ResourceId]) -> Result<Vec<PreparedPolicy>, PapError> {
+        self.repository.current_policies(ids)
+    }
+
     /// Lists current Policy records.
     ///
     /// # Errors
@@ -242,19 +303,16 @@ where
         self.repository.delete_policy_revision(id, revision)
     }
 
-    /// Creates an immutable assignment from exact current policy revisions.
+    /// Creates an immutable assignment with optional credential process owner attribution.
     /// # Errors
-    /// Rejects stale references, invalid selectors, and unavailable discovery.
+    /// Rejects invalid snapshots, owner constraints or unavailable execution before persistence.
     #[tracing::instrument(skip_all, name = "pap.create_scope", fields(scope_id = tracing::field::Empty))]
     pub fn create_scope_assignment(
         &self,
         selector: &ScopeSelector,
         policies: &[PolicyReference],
+        owner_uid: Option<u32>,
     ) -> Result<PreparedScope, PapError> {
-        let _guard = self
-            .scope_mutations
-            .lock()
-            .map_err(|_| PapError::Persistence)?;
         selector.validate().map_err(PapError::InvalidScope)?;
         // The current AgentSight adapter has no cgroup instance contract.
         if matches!(selector, ScopeSelector::CgroupId { .. }) {
@@ -263,8 +321,6 @@ where
                 "cgroup assignments are not supported",
             )));
         }
-        let discovery = self.discovery.as_ref().ok_or(PapError::Unavailable)?;
-        self.check_ready()?;
         let snapshots = policies
             .iter()
             .map(|p| {
@@ -283,9 +339,28 @@ where
             scope_id: generated_resource_id()?,
             selector: selector.clone(),
             policy_snapshots: snapshots,
+            owner_uid,
             status: asc_policy_types::scope::ScopeStatus::Active,
         };
         candidate.validate().map_err(PapError::InvalidScope)?;
+        let _guard = self.scope_mutation_lock(&candidate)?;
+        let discovery = self.discovery.as_ref().ok_or(PapError::Unavailable)?;
+        let credential = candidate.uses_credentials();
+        // File admission retains its own readiness contract; credential-only scopes
+        // must not depend on a disabled file enforcement backend.
+        if candidate
+            .policy_snapshots
+            .iter()
+            .any(|p| !p.template.uses_credentials())
+        {
+            self.check_ready()?;
+        }
+        if credential {
+            self.execution
+                .as_ref()
+                .ok_or(PapError::Unavailable)?
+                .validate(&candidate)?;
+        }
         let scope = match self.repository.put_scope(&candidate) {
             // A commit can succeed before its acknowledgement is lost. Only the
             // exact server-generated assignment proves admission in that case.
@@ -296,10 +371,17 @@ where
             result => result?,
         };
         tracing::Span::current().record("scope_id", tracing::field::display(&scope.scope_id));
-        let started = self
-            .repository
-            .scope_discovery_seed(&scope.scope_id)
-            .and_then(|seed| discovery.start(&seed));
+        let started = (|| {
+            if credential {
+                self.execution
+                    .as_ref()
+                    .ok_or(PapError::Unavailable)?
+                    .prepare(&scope)?;
+            }
+            self.repository
+                .scope_discovery_seed(&scope.scope_id)
+                .and_then(|seed| discovery.start(&seed))
+        })();
         tracing::debug!(
             target: "asc_observability::diagnostic", component = "policy_pap",
             scope_id = %scope.scope_id, discovery_result = ?started,
@@ -309,8 +391,10 @@ where
             let cleanup = self
                 .repository
                 .begin_scope_delete(&scope.scope_id)
-                .and_then(|_| self.repository.finish_scope_discovery(&scope.scope_id))
-                .and_then(|bindings| self.notify_all(bindings));
+                .and_then(|saved| match saved {
+                    Some(saved) => self.complete_scope_deletion(&saved, credential),
+                    None => Ok(()),
+                });
             if let Err(cleanup_error) = cleanup {
                 tracing::error!(
                     target: "asc_process_diagnostic",
@@ -346,27 +430,30 @@ where
     /// Returns not-found, discovery or storage failures, retaining admitted intent.
     #[tracing::instrument(skip_all, name = "pap.delete_scope", fields(scope_id = %id))]
     pub fn delete_scope(&self, id: &ResourceId) -> Result<ScopeDeletion, PapError> {
-        let _guard = self
-            .scope_mutations
-            .lock()
-            .map_err(|_| PapError::Persistence)?;
-        if self.repository.begin_scope_delete(id)?.is_none() {
+        let scope = match self.repository.get_scope(id) {
+            Ok(scope) => scope,
+            Err(PapError::NotFound) => {
+                return Ok(ScopeDeletion {
+                    scope_id: id.clone(),
+                    completed: true,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let _guard = self.scope_mutation_lock(&scope)?;
+        let Some(scope) = self.repository.begin_scope_delete(id)? else {
             return Ok(ScopeDeletion {
                 scope_id: id.clone(),
                 completed: true,
             });
-        }
+        };
         tracing::debug!(
             target: "asc_observability::diagnostic", component = "policy_pap",
             scope_id = %id, "scope deletion intent committed"
         );
         // Close child admission before joining discovery. A stop failure retains
         // deletion intent; retry delete/retry_scope after discovery is available.
-        self.discovery
-            .as_ref()
-            .ok_or(PapError::Unavailable)?
-            .stop(id)?;
-        self.notify_all(self.repository.finish_scope_discovery(id)?)?;
+        self.complete_scope_deletion(&scope, true)?;
         tracing::debug!(
             target: "asc_observability::diagnostic", component = "policy_pap",
             scope_id = %id, "scope discovery stopped; binding cleanup notified"
@@ -386,17 +473,14 @@ where
     /// # Errors
     /// Returns not-found, discovery, scheduling or storage failures.
     pub fn retry_scope(&self, id: &ResourceId) -> Result<PreparedScope, PapError> {
-        let _guard = self
-            .scope_mutations
-            .lock()
-            .map_err(|_| PapError::Persistence)?;
+        let scope = self.repository.get_scope(id)?;
+        let _guard = self.scope_mutation_lock(&scope)?;
+        // The first read selects a stable domain, not authority to restore Active.
         let scope = self.repository.get_scope(id)?;
         if scope.status == asc_policy_types::scope::ScopeStatus::Deleting {
-            self.discovery
-                .as_ref()
-                .ok_or(PapError::Unavailable)?
-                .stop(id)?;
-            self.notify_all(self.repository.finish_scope_discovery(id)?)?;
+            self.complete_scope_deletion(&scope, true)?;
+        } else if scope.uses_credentials() {
+            self.restore_active_scope(&scope)?;
         }
         match self.repository.retry_scope(id) {
             Ok(bindings) => self.notify_all(bindings)?,
@@ -405,6 +489,123 @@ where
             Err(error) => return Err(error),
         }
         Ok(scope)
+    }
+
+    fn restore_active_scope(&self, scope: &PreparedScope) -> Result<(), PapError> {
+        if scope.uses_credentials() {
+            let execution = self.execution.as_ref().ok_or(PapError::Unavailable)?;
+            execution.validate(scope)?;
+            execution.prepare(scope)?;
+        }
+        self.discovery
+            .as_ref()
+            .ok_or(PapError::Unavailable)?
+            .start(&self.repository.scope_discovery_seed(&scope.scope_id)?)
+    }
+
+    fn release_scope_execution(&self, id: &ResourceId) -> Result<(), PapError> {
+        self.execution
+            .as_ref()
+            .ok_or(PapError::Unavailable)?
+            .release(id)?;
+        self.repository.finish_scope_execution(id)
+    }
+
+    fn complete_scope_deletion(
+        &self,
+        scope: &PreparedScope,
+        stop_discovery: bool,
+    ) -> Result<(), PapError> {
+        // Durable release readiness proves discovery was finished after revocation.
+        // Do not republish revocation on every sweep while retrying execution release.
+        if scope.uses_credentials() {
+            let execution = self.execution.as_ref().ok_or(PapError::Unavailable)?;
+            match self
+                .repository
+                .scope_execution_ready_to_release(&scope.scope_id)
+            {
+                Ok(true) => return self.release_scope_execution(&scope.scope_id),
+                Ok(false) => execution.revoke(scope)?,
+                Err(error) => {
+                    // Committed deletion must withdraw authority even when storage cannot confirm cleanup.
+                    execution.revoke(scope)?;
+                    return Err(error);
+                }
+            }
+        }
+        if stop_discovery {
+            self.discovery
+                .as_ref()
+                .ok_or(PapError::Unavailable)?
+                .stop(&scope.scope_id)?;
+        }
+        self.notify_all(self.repository.finish_scope_discovery(&scope.scope_id)?)?;
+        if scope.uses_credentials()
+            && self
+                .repository
+                .scope_execution_ready_to_release(&scope.scope_id)?
+        {
+            self.release_scope_execution(&scope.scope_id)?;
+        }
+        Ok(())
+    }
+
+    /// Sweeps durable deletion responsibilities after Binding cleanup, including zero-instance scopes.
+    /// Wire to the existing reconciliation compensation worker; no extra scanner is required.
+    /// # Errors
+    /// Attempts every saved deletion and returns a failure if any responsibility remains blocked.
+    pub fn sweep_deleting_scopes(&self) -> Result<(), PapError> {
+        self.recover_scope_work(false)
+    }
+
+    /// Restores active execution before discovery and resumes durable deletions on restart.
+    /// Call after execution, discovery and reconciliation have been wired.
+    /// # Errors
+    /// Reports file/storage failures; credential failures remain logged, pending and retryable.
+    pub fn recover_scopes(&self) -> Result<(), PapError> {
+        self.recover_scope_work(true)
+    }
+
+    fn recover_scope_work(&self, restore_active: bool) -> Result<(), PapError> {
+        let mut after = None;
+        let mut failure = None;
+        loop {
+            let scopes = self.repository.scan_scopes(after.as_ref(), 128)?;
+            if scopes.is_empty() {
+                break;
+            }
+            for scope in scopes {
+                after = Some(scope.scope_id.clone());
+                let result = (|| {
+                    let _guard = self.scope_mutation_lock(&scope)?;
+                    // A scan snapshot may predate deletion by another service clone.
+                    let scope = match self.repository.get_scope(&scope.scope_id) {
+                        Ok(scope) => scope,
+                        Err(PapError::NotFound) => return Ok(()),
+                        Err(error) => return Err(error),
+                    };
+                    if scope.status == asc_policy_types::scope::ScopeStatus::Deleting {
+                        self.complete_scope_deletion(&scope, true)
+                    } else if restore_active {
+                        self.restore_active_scope(&scope)
+                    } else {
+                        Ok(())
+                    }
+                })();
+                if let Err(error) = result {
+                    tracing::error!(
+                        target: "asc_process_diagnostic", scope_id = %scope.scope_id,
+                        status = ?scope.status, %error,
+                        "scope recovery failed; intent retained; inspect and explicitly retry Scope work"
+                    );
+                    // An optional gateway failure must not block existing file-policy admission.
+                    if !restore_active || !scope.uses_credentials() {
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     fn notify_all(

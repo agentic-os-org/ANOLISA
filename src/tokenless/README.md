@@ -12,7 +12,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
 The bundled RTK 0.49.0 preserves native `grep -l` / `-m` semantics, rewrites pipelines
-conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `rtk recall`; retained output is scoped to the host OS user,
+conservatively, and leaves `sudo` commands unchanged. RTK recovery hints use `tokenless rtk recall`; retained output is scoped to the host OS user,
 not isolated by Tokenless tenant or session.
 See [bundled RTK commands](../../docs/user-guide/en/tokenless/cli-reference.md#bundled-rtk-commands)
 for flag migration, pipeline behavior, and output recovery.
@@ -41,13 +41,13 @@ retrieval, and attribution.
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
 | Content-aware response compression | workload-dependent | Routes successful JSON through `JsonCompressor`; complete candidates retain all fields and empty values; those saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, unittest/Django, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
-| Search path sharing | workload-dependent | Enabled by default: API search records share consecutive paths; pure path lists from commands or APIs share a directory prefix, retaining every received path and byte. File reads skip the path-list strategy. Disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False` |
+| Search path sharing | workload-dependent | Enabled by default: API search records and recognized native shell searches share consecutive paths; pure path lists from commands or APIs share a directory prefix, retaining every received path and byte. File reads skip the path-list strategy. Disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False` |
 | Git Diff context cropping | workload-dependent | Opt in with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; preserves all changed lines, reduces context per hunk, and provides original recovery. Disabled by default; stable whole-Agent token savings have not been established |
 | HTML page rendering | workload-dependent | Enabled by default: renders complete HTML documents from commands or APIs as Markdown, removes only enumerated non-content elements (scripts, styles, navigation, banners, footers, asides, form controls, media embeds) with counts in the view header, and provides original recovery; disable with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; file reads pass through |
 | CSV/TSV table compression | workload-dependent | Preserves every cell and row/column order while compacting quoting and record separators; returns the original when there is no benefit. No row sampling or Stash writes. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.6% on reference response | Encodes JSON to TOON format for LLMs; since TOON spec v4.4 this also covers nested record arrays and objects keyed by ID, which previously encoded larger than compact JSON |
-| Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported); recognized build/test commands and direct or built-in-wrapper `find` invocations keep the entire command native, even when search path sharing is disabled; custom RTK wrapper prefixes are outside this protection |
+| Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported); recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native, even when search path sharing is disabled; custom RTK wrapper prefixes are outside this protection |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | RTK ✅, lossless live PostTool ✅, Schema/Retrieve unavailable in the host |
 | copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅; Cosh-NG supports response compression and Marker-command recovery, while legacy copilot-shell remains lossless-only; Common BeforeModel passes schemas through without authorized Retrieve |
@@ -157,7 +157,7 @@ Token-Less/
 Install the published component with the ANOLISA CLI:
 
 The install script places `anolisa` in `~/.local/bin`, and a user-mode
-Tokenless installation places `tokenless` and `rtk` in that same
+Tokenless installation places `tokenless` in that same
 directory. Export it once if the current shell has not picked it up yet.
 
 ```bash
@@ -182,8 +182,8 @@ system path. `adopt` then records the directly installed RPM in system state so
 adapter commands can use its component contract.
 
 Two further public routes install the CLI on their own, without an anolisa
-component record. The npm route ships the prebuilt `tokenless` and `rtk`
-binaries plus the bundled Agent adapters and needs Node.js 16.7+, the release
+component record. The npm route ships the prebuilt `tokenless` binary plus
+the bundled Agent adapters and needs Node.js 16.7+, the release
 `fs.cpSync` arrived in and the one the package postinstall requires. The curl route
 is a standalone installer that prefers npm and builds from source instead. The
 method is chosen before npm runs (npm missing, musl Linux, or
@@ -203,7 +203,7 @@ apply to them; enable a framework with its bundled script under
 instead. The curl installer records what it created in
 `~/.local/share/tokenless/install-receipt`, which `scripts/uninstall.sh`
 consumes to remove exactly those paths; its source-build path is CLI-only
-(no `rtk`, no adapters). Agent frameworks can run the same steps through the
+(no adapters) and needs Git and `patch` to fetch the pinned RTK source. Agent frameworks can run the same steps through the
 `install-tokenless` OS Skill. The full method matrix lives in
 `docs/user-guide/en/tokenless/index.md`.
 
@@ -221,14 +221,11 @@ resources, framework registrations and npm package are left alone. A replacement
 that fails halfway (a missing tag, a build error) puts the previous install back
 instead of leaving the machine without a CLI.
 
-Published packages cover Linux x86_64/aarch64 and macOS Apple Silicon. Intel
-macOS still has no published package: the `@anolisa/tokenless-darwin-x64`
-optional-dependency entry describes a release build target, not a registry
-artifact, so the npm route cannot deliver a binary there. The standalone
-installer does not fall back to a source build on macOS either — it exits with
-an error instead of running `cargo` — so Intel macOS currently has no supported
-install route. Use Linux or Apple Silicon macOS until that package is
-published.
+Published npm packages cover Linux x86_64/aarch64, macOS Apple Silicon and
+Intel Mac, and Windows x64. The `@anolisa/tokenless-darwin-x64` and
+`@anolisa/tokenless-win32-x64` packages are available from 0.9.0. The standalone
+installer uses npm on macOS and refuses a source-build fallback there: it
+exits with an error instead of running `cargo`. On Windows, use npm directly.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
 without changing an Agent product's user configuration. Run these commands
@@ -260,12 +257,13 @@ cd Token-Less
 make setup
 ```
 
-The source setup installs `tokenless` to `~/.local/bin`, places the `rtk`
-helper alongside it, and deploys all adapters for development.
+The source setup installs `tokenless` to `~/.local/bin` and deploys all
+adapters for development. RTK is linked into `tokenless`; rewritten commands run
+through `tokenless rtk`.
 
 ### Build the Python SDK
 
-Framework authors can build the in-process Python API from source:
+Framework authors can build the Python API from source:
 
 ```bash
 make python-wheel
@@ -282,8 +280,9 @@ plain workspace-default Cargo commands exclude the Python extension.
 
 The `anolisa_tokenless` module supports CPython 3.11 and later on the platform
 where its native wheel was built. It exposes the four Tokenless lifecycle
-methods and bundles the matching RTK executable; TOON is linked into the native
-runtime. It does not require the Tokenless CLI or system helper binaries. The
+methods and bundles the matching `tokenless` executable, which runs rewritten
+commands; TOON is linked into the native runtime. It does not require the
+Tokenless CLI or system helper binaries. The
 package is built and tested in this repository but is not yet published to
 PyPI. See the [Python SDK guide](../../docs/developer-guide/en/sdk/tokenless/index.md) for
 runnable lifecycle and Stats examples, the
@@ -568,9 +567,9 @@ bypass does not read this file:
       { "binary": "jq", "package": "jq", "manager": "apt" }
     ],
     "recommended": [
-      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+      { "binary": "uv", "package": "uv", "manager": "pip", "pip_name": "uv",
         "fallback": [
-          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
+          { "method": "cargo", "binary": "uv", "package": "uv" }
         ]
       }
     ]
@@ -700,9 +699,9 @@ make qoder-install
 
 ## QwenWork Plugin (Windows x64 Local Mode)
 
-Windows x64 supports native `tokenless.exe` and `rtk.exe`, npm launchers, and
-QwenWorkCN PowerShell hooks. Windows ARM64 is unsupported. The Windows package
-is not yet published; build and package it using the
+Windows x64 supports native `tokenless.exe`, npm launchers, and QwenWorkCN
+PowerShell hooks. Windows ARM64 is unsupported. Install the published package
+with `npm install -g anolisa-tokenless`. For source builds, follow the
 [Windows build instructions](../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Git Bash and WSL are not required.
 
@@ -720,7 +719,15 @@ Shell sessions. PreToolUse rewrites both shell tool names; PostToolUse observes
 `mcp_list`, `mcp_get`, or `mcp_call` pass through without replacing their real
 output; full MCP responses remain compressible. File-content protection and RTK
 deduplication remain unchanged. Statistics use `qwenwork`, independently of Qoder CLI, Qwen Code,
-and QwenPaw.
+and QwenPaw. QwenWork workspace Shell hooks use the system user's default
+`~/.tokenless` directory or a valid absolute `TOKENLESS_DATA_DIR` for databases
+and Pre/Post state; `$HOME` does not redirect the default. Invalid paths pass
+through without creating state. Existing workspace databases are not migrated.
+Shell sandbox restrictions can prevent RTK statistics and execution receipts
+from being saved while commands and host Hook compression still work.
+Installation/detection reports this limitation and the current process's data
+directory without testing sandbox access. RTK's native database retains
+its own path configuration.
 
 After `anolisa install tokenless`, quit QwenWorkCN and explicitly sideload the plugin:
 
@@ -733,8 +740,8 @@ anolisa adapter status tokenless
 Restart QwenWorkCN and open a new session; check activation in the application.
 The CLI verifies managed files, while loading and activation remain `unknown`.
 It does not change settings or enable a disabled plugin. Linux VM sessions remain
-unsupported. Workspace Shell state uses the conversation working directory, and
-its single MCP text block is handled as shell output. Uninstall previous
+unsupported. Workspace Shell state follows the Tokenless data directory, and its
+single MCP text block is handled as shell output. Uninstall previous
 script-managed installations with their original script before enabling through
 the CLI; CLI-managed copies use `anolisa adapter disable tokenless qwenwork`.
 Installation, removal, and compatibility baselines are covered in
@@ -1013,8 +1020,9 @@ lifecycle policy, and do not expect retrieval across nodes.
 
 Both AgentScope adapters enable schema compression, RTK command rewriting,
 response compression, TOON, retrieval, environment-error guidance, and
-per-call attribution. The native wheel contains RTK and links TOON directly;
-it does not search for system executables. Host objects and streaming chunks
+per-call attribution. The native wheel links TOON directly and runs rewritten
+commands through its bundled `tokenless` executable; it does not search for
+system executables. Host objects and streaming chunks
 remain unchanged; only copied call arguments and final model-visible text are
 transformed. Tool Ready remains hard-disabled.
 
@@ -1042,13 +1050,14 @@ and makes no cloud requests.
 
 | Target | Description |
 |---|---|
-| `make build` | Build `tokenless` + `rtk` (release mode) |
-| `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
+| `make build` | Build `tokenless` and OpenClaw/DSH plugins (release mode) |
+| `make build-tokenless` | Build `tokenless` (via justfile) |
 | `make python-wheel` | Build the native `anolisa-tokenless` wheel |
 | `make agentscope-wheel` | Build the pure-Python AgentScope integration wheel |
 | `make test-python-runtime` | Install and test the wheel in an isolated environment |
 | `make test-agentscope-integration` | Test both wheels with supported AgentScope versions |
-| `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
+| `make install` | Copy all prebuilt files using `PREFIX`, `AWPRJ` and optional `DESTDIR`; no build or activation |
+| `make install-legacy` | Retain the auto-building legacy user/system installation profile |
 | `make test` | Run all tests (Rust + hooks) |
 | `make test-hooks` | Run hook integration tests against the installed `tokenless` binary, whose version must match this checkout (`TOKENLESS_ALLOW_VERSION_SKEW=1` overrides) |
 | `make lint` | Run clippy checks |
@@ -1073,18 +1082,18 @@ and makes no cloud requests.
 | `make opencode-uninstall` | Remove OpenCode local plugin |
 | `make qwenpaw-install` | Install QwenPaw plugin via the qwenpaw CLI |
 | `make qwenpaw-uninstall` | Remove QwenPaw plugin |
-| `make setup` | Full setup: build + install + all adapters |
+| `make setup` | Build, install, and register all adapters |
 
 Override install paths:
 
 ```bash
-make install BIN_DIR=/usr/local/bin
+make install PREFIX=/usr/local
 ```
 
 ## Raw Packaging
 
-Raw packaging accepts already-built `tokenless` and `rtk`
-executables in one directory and applies the stable component payload layout:
+Raw packaging accepts an already-built `tokenless` executable
+in one directory and applies the stable component payload layout:
 
 ```bash
 make package-raw \
@@ -1116,7 +1125,7 @@ and `darwin-arm64` binary directories under `target/npm-prebuilt`. The packer
 validates and assembles them:
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 ```
 
 See [npm/README.md](npm/README.md#packaging-for-npm) for the fixed directory
@@ -1147,7 +1156,7 @@ layout and single-target interface.
 
 ## Prerequisites
 
-- **Rust** toolchain >= 1.89 — required by rtk (edition 2024). Install via [rustup](https://rustup.rs)
+- **Rust** toolchain >= 1.91 — the workspace MSRV, which RTK also requires. Install via [rustup](https://rustup.rs)
 - **just** — build runner for rtk setup (clone + patch orchestration)
 - **Git** — for rtk source download via justfile
 - **CPython 3.11+ development environment and uv** — only for the Python wheel

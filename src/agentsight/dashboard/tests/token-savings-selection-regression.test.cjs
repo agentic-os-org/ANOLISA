@@ -152,6 +152,8 @@ function loadPageModule(relativePath, moduleStubs, hooks) {
   const requireStub = (name) => {
     if (name === 'react') return reactStub;
     if (moduleStubs[name]) return moduleStubs[name];
+    if (name === './savings') return savingsModule;
+    if (name === '../utils/savingsSort') return loadPageModule('src/utils/savingsSort.ts', moduleStubs, hooks);
     throw new Error(`unexpected require from ${relativePath}: ${name}`);
   };
   const fn = new Function('require', 'module', 'exports', code);
@@ -215,9 +217,18 @@ function makeHarness() {
     },
     '../utils/apiClient': { ...stubs },
     '../utils/savings': savingsModule,
+    '../utils/optimizationStrategies': (() => {
+      const module = { exports: {} };
+      const code = transpile('src/utils/optimizationStrategies.ts');
+      new Function('require', 'module', 'exports', code)((name) => {
+        throw new Error(`optimization strategies must not require anything at runtime: ${name}`);
+      }, module, module.exports);
+      return module.exports;
+    })(),
     '../utils/savingsCsv': { downloadSavingsCsv: (rows) => downloads.push(rows) },
     '../components/DateTimePicker': componentStub('DateTimePicker'),
     '../components/SessionIdHelp': componentStub('SessionIdHelp'),
+    '../components/CopyButton': componentStub('CopyButton'),
     '../i18n': {
       useI18n: () => ({ t: (key) => key }),
       useLocaleTag: () => 'en',

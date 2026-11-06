@@ -11,7 +11,7 @@ PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类
 | R1 | **字符串截断** | Unicode 字符数 > 4096 | 在 Unicode 字符边界截断，追加截断标记 | 4096 字符 |
 | R2 | **Record Reduction** | 数组至少有 33 项，且每项都是 JSON Object | 保留首尾、错误、结构异常和数值异常记录；普通记录去重后稳定等距采样；完整数组写入 Stash | 32 条普通预算；关键记录可突破预算 |
 | R3 | **普通数组截断** | 非 Record Array 的元素数超过配置预算 | 保留前 32 个 + 末尾 8 个（`array_tail_preserve`），head 与 tail 之间插入截断标记；head+tail 覆盖全部元素时不截断 | 32 + 8 个 |
-| R7 | **深度截断** | 嵌套深度 > 8 | 替换为 `<{type} truncated at depth {N}>` | 8 层 |
+| R7 | **深度截断** | 嵌套深度 > 8 | 对象 / 数组 / 字符串替换为 `<{type} truncated at depth {N}>`；`null` / bool / number 无法再嵌套，按 R8 原样保留，不占 Stash、不计入截断数 | 8 层 |
 | R8 | **原始类型保留** | null / bool / number | 直接保留，不做处理 | — |
 
 **保留约定**：所有字段名均按普通业务字段处理，包括 `debug`、`trace`、`traces`、`stack`、`stacktrace`、`logs`、`logging`。`null`、`""`、`[]`、`{}` 在对象和数组中均保留；数组空项保留原来的位置与顺序。只有下述显式 Record Reduction 和截断规则会省略内容，Compact JSON 与通过校验的 TOON 仅改变表示。规则编号沿用原编号，R4–R6 删除规则已移除。
@@ -156,7 +156,9 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 `command` 字段；Core（`post_tool/file_read.rs`）把只打印本地文件的命令（`cat`、`head`、`tail`、
 `nl`、`less`、`more`、`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）
 改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样，
-且跳过新增的纯路径列表策略。`Grep` 工具输出只允许进入无损的 Search Results 路径共享。
+且跳过新增的纯路径列表策略。`Grep` 工具及通过 `command` 识别出的原生 `grep`、`rg` 输出
+只允许进入无损的 Search Results 路径共享。格式识别由统一搜索压缩入口负责；关闭搜索压缩、
+格式不支持或无收益时原样返回，即使设置 `force_json` 也不会转入其他压缩器。
 纯路径列表按内容识别，允许非文件来源的命令或 API 结果，不依赖 `find` 或特定工具名。
 通过入口后按下表静态派发，每个领域各调用一次：
 
@@ -165,7 +167,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 | `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无 | `JsonCompressor`：Record Reduction、截断、Compact JSON 与可选 TOON | 启用 |
 | `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：Terminal Cleanup、方言分类、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：保留全部单元格的 CSV/TSV 压紧，无收益时原样返回，不写 Stash | 启用 |
-| `search_results` | 宿主支持文本替换；带行号记录要求 `api_response`，纯路径列表允许 `api_response` 或 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
+| `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
 | `diff` | 来源为 `command_output` 或 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | Runtime `post_tool/diff.rs`：按代价裁剪未修改上下文，元信息与改动行原样保留 | 关闭，`TOKENLESS_DIFF_COMPRESSION_ENABLED=true` 开启 |
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |
 
@@ -178,11 +180,15 @@ Diff 与 HTML 领域要求至少节省 16 个 Token 才采用结果，其他领�
 全部路径、顺序、重复项均保留。空行、混合输出、NUL 分隔或歧义格式透传；完整视图的字节数
 和估算 Token 均减少才采用。检测器只采样完整行，压缩器仍验证全部输入。
 
-PreTool 让包含已识别原生 `find` 调用的整条命令跳过 RTK，包括复合命令及 RTK 内置透明前缀：
+PreTool 让包含已识别原生 `find`、`grep`、`rg` 调用的整条命令跳过 RTK，包括复合命令及 RTK 内置透明前缀：
 `env`、`command`、`exec`、`noglob`、`nocorrect`、`builtin`、`timeout`、`time`、`nice`、`nohup`
 和 `uv run`；支持嵌套及反斜杠换行续行，进程 Wrapper 的未知参数会停止识别。
-不读取自定义 `hooks.transparent_prefixes`，这些前缀中的 `find` 仍可能被 RTK 改写。
-关闭搜索路径共享只停止后置压缩，仍保留原生 `find` 的完整输出；混合或不支持的输出因此可能不压缩。
+不读取自定义 `hooks.transparent_prefixes`，这些前缀中的调用仍可能被 RTK 改写。
+关闭搜索路径共享只停止后置压缩，仍保留原生搜索和 `find` 的完整输出；混合或不支持的输出因此可能不压缩。
+同一 PreTool 保护也覆盖原生 `head`、`tail` 的所有参数：只要识别到其中一个调用，
+整条命令（含 Pipeline、复合命令）就跳过改写。RTK 的 `read --max-lines` 使用结构截断，
+可能遗漏 `head` 请求行范围内的函数体；`tail` 按相同原生执行策略保留。显式 `rtk` 调用不受此规则保护。
+该规则只控制 PreTool，适用的 PostTool 压缩和文件读取策略不变。
 其余 ContentType（如 `stack_trace`、`plain_text`）透传。
 Claude Code 2.1.121 及以上版本、Qoder CLI、OpenCode 和 Cosh-NG 能替换实时结果；同时裸
 `tokenless` 可从 Shell `PATH` 解析时，其 PostTool 请求才声明恢复可用。缩减或截断结果中的
@@ -226,7 +232,21 @@ Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON
 
 Qoder 通过原生插件目录 `hooks/hooks.json` 加载 hook，并在运行时展开 `${QODER_PLUGIN_ROOT}`。插件内的 `hooks/run-hook.sh` 再从 ANOLISA adapter 目录定位共享的 `compress_response_hook.py`，无需改写 `~/.qoder/settings.json` 或将机器相关绝对路径写入插件缓存。
 
-Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。结构化响应沿用 Claude Code 的 schema 保留逻辑；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。原生 Bash 只把字符串 `stdout` 交给 Core，包括较短或为空的值；压缩后回填到原对象，`stderr` 和其他字段保持不变。其他结果形态沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+
+这也意味着原生 Bash 对象中的独立 `stderr` 字段不再压缩或生成检索标记；Hook 返回 `{}`
+表示不替换工具结果，不表示给模型返回空文本。Qoder 1.1.78 的真实 Bash 探针中，进程的
+stdout/stderr 合并进入 `tool_response.stdout`，`tool_response.stderr` 为空：
+
+| 实际命令 | 原生结果 | 下一次模型请求中的工具文本 |
+| --- | --- | --- |
+| `printf 'RAW_STDERR\n' >&2` | `stdout="RAW_STDERR"`，`stderr=""` | `RAW_STDERR` |
+| `printf 'RAW_STDERR_FAILURE\n' >&2; exit 7` | `stdout="RAW_STDERR_FAILURE"`，`stderr=""`，`exitCode=7` | `Exit code 7` 加原始错误文本 |
+| GCC 编译引用未定义符号的 C 文件 | `stdout` 含完整编译诊断，`stderr=""`，`exitCode=1` | `Exit code 1` 加完整编译诊断 |
+
+这些探针使用真实 Qoder CLI 和本地模型端点捕获后续请求，没有付费模型调用。两个失败命令
+均未调用 `PostToolUse`。成功命令中，只修改对象的 `stderr` 不改变模型文本；修改 `stdout`
+则会替换模型文本。以上是该版本的观测结果，不把手工构造的分离 stderr 信封当作原生载荷。
 
 ### 路径 5：Claude Code 插件（`PostToolUse` hook）
 
@@ -444,6 +464,7 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 所有集成路径均采用 fail-open 策略：
 
 - **OpenClaw 插件**：Protocol v2 进程失败、非法响应或不能安全重建 Slot 时，Hook 不返回值 → 宿主交付的结果透传（不恢复宿主此前的截断）
+- **进程内 Python 适配器**（AgentScope 1.x/2.x、QwenPaw）：工具完成后，Core 错误、无效 SDK 响应或不兼容 Wheel 导致 PostTool 压缩失败时，保留完整宿主响应，包括流式 Chunk、非文本 Block、Metadata 和结果状态；不交付部分压缩结果。取消操作等 `BaseException` 信号继续传播。AgentScope 的双语说明见 [English](../../../docs/developer-guide/en/sdk/tokenless/agentscope.md#completed-tool-results-on-compression-failure) / [中文](../../../docs/developer-guide/zh/sdk/tokenless/agentscope.md#压缩失败时保留已完成的工具结果)。
 - **copilot-shell hook**：任何失败点（依赖缺失、压缩失败、输出为空）均 `exit 0` 且不输出 stdout → 原始结果透传
 - **CLI**：错误输出到 stderr，调用方可检查退出码决定是否回退
 

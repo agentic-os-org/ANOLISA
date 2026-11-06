@@ -106,8 +106,10 @@ sudo systemctl status agentsight-enforcer.service
 sudo systemctl start agentsight-enforcer.service
 ```
 
-Source builds need `make build-all`; plain `make build` skips the enforcer binary. Capture and
-analysis are unaffected — only the Risk Enforcement page disappears.
+For source builds, use `make build-all` and run the workers directly as described in
+[Source build](deployment.md#source-build). The optional enforcer daemon needs to be started
+separately; compiling it does not start it. Capture and analysis remain available when it is
+stopped; Risk Enforcement requires it.
 
 ## Data grows too fast
 

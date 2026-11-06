@@ -282,6 +282,7 @@ fn admission_create_reports_saved_identity_and_policy_scope_remain_available() {
                 policy_id: policy.policy_id.clone(),
                 policy_revision: policy.revision,
             }],
+            None,
         )
         .unwrap();
     asc_pap::ScopeBindingSink::sync_instances(

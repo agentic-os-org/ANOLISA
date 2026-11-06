@@ -22,14 +22,14 @@ AgentScope layer. Product adapters such as Claude Code and OpenCode are document
 
 The AgentScope integration wheel requires the exact same version of the native Runtime wheel.
 Install both assets from the same Tokenless GitHub Release in one command. For example, install
-[v0.9.0](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.9.0) on Linux x86_64:
+[v0.9.3](https://github.com/agentic-os-org/ANOLISA/releases/tag/tokenless/v0.9.3) on Linux x86_64:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless-0.9.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
-  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.0/anolisa_tokenless_agentscope-0.9.0-py3-none-any.whl"
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.3/anolisa_tokenless-0.9.3-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" \
+  "https://github.com/agentic-os-org/ANOLISA/releases/download/tokenless/v0.9.3/anolisa_tokenless_agentscope-0.9.3-py3-none-any.whl"
 ```
 
 For other supported systems, replace the native Runtime URL with the matching asset
@@ -160,6 +160,21 @@ Both AgentScope version paths enable schema compression, RTK command rewriting, 
 compression, TOON, retrieval, environment-error guidance, and per-call attribution. The platform
 wheel contains RTK and links TOON directly, so it does not search for system helper binaries. Tool
 Ready remains hard-disabled.
+
+### Completed tool results on compression failure
+
+The AgentScope 1.x and 2.x adapters retain the complete received tool response
+when PostTool compression fails, including Core errors, invalid SDK responses,
+and incompatible wheel request signatures. Intermediate streamed chunks,
+non-text blocks, metadata, and the final result state remain unchanged; a later
+block failure also discards earlier replacement text and recovery hints.
+Failures are logged with the tool-use identifier and a per-instance count.
+
+This boundary covers SDK request construction and execution after a host tool
+has completed. Cancellation and other `BaseException` signals still propagate,
+and AgentScope 1.x still requires `install()` before use. Earlier successful
+compression calls can leave unreferenced Stash entries, but no partial recovery
+markers are exposed to the model.
 
 ## Validate the integration
 

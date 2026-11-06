@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use agentsight_atif::{
     resolve_call_id, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult,
-    Step, StepSource, ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
+    Step, StepSource, ToolCall, ATIF_SCHEMA_VERSION,
 };
 
 /// Event types to skip entirely.
@@ -228,9 +228,15 @@ pub fn convert_qoder_events(
                 }
 
                 // Process content blocks
-                let content_blocks = match msg.get("content").and_then(|v| v.as_array()) {
-                    Some(arr) => arr,
-                    None => continue,
+                let content_blocks = match msg.get("content") {
+                    Some(serde_json::Value::Array(arr)) => arr,
+                    Some(serde_json::Value::String(text)) => {
+                        if !text.is_empty() {
+                            message_parts.push(text.clone());
+                        }
+                        continue;
+                    }
+                    _ => continue,
                 };
                 for block in content_blocks {
                     let bt = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -473,13 +479,7 @@ fn observation_from_tool_results(tool_results: &[ExtractedToolResult]) -> Option
     let results = tool_results
         .iter()
         .map(|tr| {
-            let extra = if tr.is_error {
-                let mut m = HashMap::new();
-                m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-                Some(m)
-            } else {
-                None
-            };
+            let extra = tr.is_error.map(agentsight_atif::is_error_extra);
             ObservationResult {
                 source_call_id: Some(tr.tool_use_id.clone()),
                 content: Some(serde_json::Value::String(tr.content.clone())),
@@ -496,7 +496,9 @@ fn observation_from_tool_results(tool_results: &[ExtractedToolResult]) -> Option
 struct ExtractedToolResult {
     tool_use_id: String,
     content: String,
-    is_error: bool,
+    /// The outcome the block declared, if it declared one. `None` is *unknown*,
+    /// not success: it preserves the text fallback for flag-less traces.
+    is_error: Option<bool>,
 }
 
 /// Extract `tool_result` blocks from a user-message `content` array.
@@ -538,13 +540,23 @@ fn extract_tool_results(content: &serde_json::Value) -> Vec<ExtractedToolResult>
                     .collect();
                 text_parts.join("\n")
             }
+            // An explicit null is "the producer recorded no output", not the
+            // four-character string "null": stringifying it here hands every
+            // consumer of the observation a result the tool never produced.
+            serde_json::Value::Null => String::new(),
             other => other.to_string(),
         };
 
-        let is_error = obj
-            .get("is_error")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // The block itself carries `is_error` for the Claude/Qoder envelope, but
+        // an MCP result is often a JSON-encoded object under `content` — the
+        // shape the eBPF-side converter and the grader both look through. Read
+        // it the same way so the same bytes get the same outcome.
+        let is_error = agentsight_atif::declared_tool_failure(block).or_else(|| {
+            serde_json::from_str::<serde_json::Value>(content_str.trim())
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .and_then(|envelope| agentsight_atif::declared_tool_failure(&envelope))
+        });
 
         results.push(ExtractedToolResult {
             tool_use_id,
@@ -628,15 +640,9 @@ fn merge_tool_results_into_agent_steps(
             }
         }
 
-        let extra = if tr.is_error {
-            let mut m = HashMap::new();
-            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-            Some(m)
-        } else {
-            None
-        };
+        let extra = tr.is_error.map(agentsight_atif::is_error_extra);
         let result = ObservationResult {
-            source_call_id: Some(tr.tool_use_id.clone()),
+            source_call_id: owner,
             content: Some(serde_json::Value::String(tr.content.clone())),
             subagent_trajectory_ref: None,
             extra,
@@ -714,6 +720,37 @@ mod tests {
         let obs = traj.steps[0].observation.as_ref().unwrap();
         let extra = obs.results[0].extra.as_ref().unwrap();
         assert_eq!(extra["is_error"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn test_convert_records_a_declared_success() {
+        // `is_error: false` on a successful result whose output mentions a
+        // missing path. Only the `true` polarity used to be carried, so this
+        // result reached the grounding classifier flag-less and its free text
+        // was read as a failure.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t9\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t9\",\"content\":\"grep: /root: No such file or directory\",\"is_error\":false}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results[0].is_error(), Some(false));
+    }
+
+    #[test]
+    fn test_convert_records_an_encoded_envelope_outcome() {
+        // An MCP result serialised as a JSON string under `content`: the
+        // declared `isError: false` lives inside the envelope, not on the
+        // block, and used to be dropped.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t9\",\"name\":\"mcp__fs\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t9\",\"content\":\"{\\\"content\\\":\\\"cat: /root/x: No such file or directory\\\",\\\"isError\\\":false}\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results[0].is_error(), Some(false));
     }
 
     #[test]
@@ -958,5 +995,29 @@ mod tests {
         let traj = convert_qoder_events(&[], "qoder").unwrap();
         assert!(traj.steps.is_empty());
         assert!(traj.final_metrics.is_none());
+    }
+
+    #[test]
+    fn test_convert_null_tool_result_is_empty_not_the_text_null() {
+        // An explicit null content is "the tool produced no output", not the
+        // four-character string "null". Stringifying it fabricated a result
+        // the tool never produced, which the analyzers then scanned as real
+        // output.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t8\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t8\",\"content\":null}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        let obs = traj.steps[0]
+            .observation
+            .as_ref()
+            .expect("the null result still attaches to its call");
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("t8"));
+        assert_eq!(
+            obs.results[0].content.as_ref(),
+            Some(&serde_json::Value::String(String::new())),
+            "a null tool result records no text"
+        );
     }
 }

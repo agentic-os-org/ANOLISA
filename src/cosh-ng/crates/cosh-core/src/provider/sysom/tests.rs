@@ -220,7 +220,7 @@ fn build_request_preserves_user_provided_secrets() {
             access_key_secret: "test-secret".to_string(),
             security_token: None,
         }),
-        refresh_from_ecs_metadata: false,
+        source: CredentialSource::Static,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
     };
@@ -244,7 +244,7 @@ fn test_provider() -> SysomProvider {
             access_key_secret: "test-secret".to_string(),
             security_token: None,
         }),
-        refresh_from_ecs_metadata: false,
+        source: CredentialSource::Static,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         instance_id: OnceCell::new(),
     }
@@ -425,7 +425,8 @@ fn ecs_metadata_classifies_http_errors_before_parsing_body() {
                         status,
                         classify_credentials(status, body.as_bytes(), ecs_metadata_now())
                     ),
-                    (401 | 403, Err(ProbeError::AccessDenied)) | (500, Err(ProbeError::Http))
+                    (401 | 403, Err(ProbeError::AccessDenied))
+                        | (500, Err(ProbeError::ServiceUnavailable))
                 ),
                 "HTTP {status} must retain its error classification"
             );
@@ -707,8 +708,8 @@ async fn ecs_metadata_http_probe_preserves_classification() {
         ),
         (401, Err(ProbeError::AccessDenied)),
         (403, Err(ProbeError::AccessDenied)),
-        (500, Err(ProbeError::Http)),
-        (429, Err(ProbeError::Http)),
+        (500, Err(ProbeError::ServiceUnavailable)),
+        (429, Err(ProbeError::ServiceUnavailable)),
     ] {
         assert_eq!(
             ecs_metadata_fixture(

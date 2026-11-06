@@ -71,6 +71,10 @@ export MODEL_API_KEY=sk-xxx MODEL_BASE_URL=https://api.example.com/v1 MODEL_ID=g
 
 All commands below assume `uv run` (project venv is auto-resolved).
 
+The runner currently uses the MCP SDK 1.x FastMCP interfaces. Its dependency
+range excludes SDK 2.x until those server interfaces are migrated; fresh installs
+and lock updates therefore stay on the supported 1.x line.
+
 > **`--config` is required unless the model/judge env vars are exported.** `run`/`batch` do **not** auto-load `claw-eval/config.yaml`; pass `--config claw-eval/config.yaml` (written by `scripts/configure_model.py`), or export `MODEL_API_KEY`/`MODEL_BASE_URL`/`MODEL_ID` and `JUDGE_API_KEY`/`JUDGE_BASE_URL`/`JUDGE_MODEL_ID`.
 
 ```bash
@@ -115,12 +119,23 @@ ce-runner supports three task prefixes with different execution modes:
 
 ## Output
 
+Batch inputs must select each task YAML only once and declare unique, nonempty string
+`task_id` values. Duplicate selections (including directory aliases), conflicting IDs,
+and unreadable or invalid task YAMLs produce an error before gateway or worker setup.
+Use `--trials` to execute a task repeatedly.
+
 ```
-claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>/
+claw-eval/traces/openclaw_<YY-MM-DD-HH-MM>-<unique-suffix>/
 ├── <task_id>_xxxx.jsonl   # Converted trace
 ├── batch_results.json     # Per-trial results
 └── batch_summary.json     # Aggregate summary
 ```
+
+Grading stages the complete UTF-8 trace beside the destination before replacing
+it. Serialization, write or replacement failures leave the previous trace intact
+and report an error so grading can be retried. Existing permissions and symlink
+targets are preserved. This provides atomic visibility on local filesystems;
+it does not guarantee power-loss durability or coordinate concurrent graders.
 
 ## Architecture: MCP Tool Injection & Anti-Cheat Isolation
 
@@ -147,6 +162,8 @@ Each task agent is configured with three tool policies working together:
       "canvas", "nodes", "cron", "sessions_list", "sessions_history",
       "sessions_send", "sessions_spawn", "sessions_yield", "subagents",
       "web_fetch", "session_status", "memory_get", "memory_search",
+      "anolisa_memory_search", "anolisa_memory_get", "memory_observe",
+      "memory_get_context",
       "other-mcp-server__*"
     ],
     "exec": { "security": "full", "ask": "off" }
@@ -157,7 +174,7 @@ Each task agent is configured with three tool policies working together:
 | Policy | Role |
 |--------|------|
 | `tools.allow` | Explicit allowlist: `exec` (enables tool execution) + task MCP tools in `serverKey__toolName` format (double underscore). Only listed tools are available to the model. |
-| `tools.deny` | Blocks all built-in gateway tools (host exec/read/write/browser/etc.) and other MCP servers' tools. Prevents host filesystem access and cross-task leakage. |
+| `tools.deny` | Blocks all built-in gateway tools (host exec/read/write/browser/etc.), the agent-memory plugin's persistent-memory tools, and other MCP servers' tools. Prevents host filesystem access and stops the *model* from invoking any host memory tool. It does not reach the plugin's own host-side hooks — see [Host Memory Isolation](#host-memory-isolation). |
 | `tools.exec` | Sets MCP tool execution security policy (required for tool calls to succeed). |
 
 ### Two MCP Servers Per Task
@@ -173,12 +190,37 @@ Both are registered via `openclaw mcp set` (persisted, stdio transport). The san
 
 In batch mode, each task's deny list also includes other tasks' MCP server names (`claw-eval-mock-<other_task>__*`), preventing one agent from calling another task's mock services.
 
+### Host Memory Isolation
+
+Where the agent-memory OpenClaw plugin is installed and enabled, it registers its tools directly on the gateway instead of through an MCP server, so the `claw-eval-*__*` wildcards above never match them — the same reason the host `memory-core` plugin's `memory_get` / `memory_search` are denied by plain name. Its store persists across tasks, runs, and gateway restarts, which would let one agent read what an earlier task recorded and leave answers behind for the next one. Every task therefore denies all four plugin tools:
+
+| Denied | Provided by |
+|--------|-------------|
+| `anolisa_memory_search`, `anolisa_memory_get` | agent-memory ≥ 0.2.8 (namespaced names) |
+| `memory_observe`, `memory_get_context` | agent-memory (all versions) |
+| `memory_get`, `memory_search` | agent-memory ≤ 0.2.7 and OpenClaw's own `memory-core` |
+
+The last row is why both spellings stay in the list: `memory_get` / `memory_search` were the plugin's own read/search names before 0.2.8 and are also the host `memory-core` built-ins, so denying them covers the old plugin and the host backend at once.
+
+#### What the deny list does not cover
+
+`tools.deny` gates the tools the *model* is allowed to call. The plugin also installs two host-side hooks that never pass through that gate — they talk to the agent-memory MCP child directly over stdio:
+
+| Hook | What it does during a benchmark task |
+|------|--------------------------------------|
+| `before_prompt_build` (auto-recall) | Searches the store for the task prompt and returns the hits as `prependContext`, so the agent reads what earlier tasks recorded without calling a tool |
+| `agent_end` (auto-capture) | Writes the last assistant message to the store through `memory_observe` when it matches a trigger phrase, so the agent leaves state behind for the next task without calling a tool |
+
+Neither hook has a configuration knob: `openclaw.plugin.json`'s `configSchema` exposes only `binaryPath`, `userId`, `profile`, `maxReadBytes`, `maxWriteBytes`, `sessionId` and `sessionDir`, so this runner cannot switch them off per task. **The deny list therefore guarantees that the model cannot invoke the host's memory tools; on its own it does not guarantee memory isolation.** A benchmark whose scores must not depend on host memory has to run on a host where the agent-memory plugin is not loaded. That is a host property, not a task property — confirm it in the gateway log, where the plugin writes `agent-memory: plugin registered (...)` once when it loads and `agent-memory: auto-recall injected N memory result(s) for prompt` on every turn it injects. The runner's pre-flight runs `openclaw plugins doctor`, but that reports plugin *load failures*; it is not a presence check for this plugin.
+
 ### Implementation
 
 Core logic: `src/ce_runner/tool_injector.py`
 - `_build_allowlist()` — constructs `alsoAllow` from task.yaml tools + sandbox tools
-- `_build_deny_list()` — constructs `deny` from built-in tools + other MCP servers
+- `_build_deny_list()` — constructs the *extra* `deny` entries from other MCP servers
 - `_DENY_BUILTIN_TOOLS` — static list of gateway built-in tools to block
+- `_DENY_MEMORY_PLUGIN_TOOLS` — static list of agent-memory plugin tools to block
+- `_DENY_HOST_TOOLS` — built-ins + memory plugin tools; the deny baseline `build_agent_tools()` starts from
 
 ## Scripts
 
@@ -193,12 +235,31 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/debug_task.py` | Single-task interactive debug with verbose output |
 | `scripts/analyze.py` | Analyze batch trace artifacts |
 | `scripts/summarize_results.py` | Summarize batch results across runs |
+| `scripts/compare_session_trace_tokens.py` | Compare session/trace token totals, streaming large JSONL logs without buffering whole files |
 | `scripts/generate_trial_reports.py` | Generate per-trial detailed reports |
 | `scripts/prompt_task.py` | Display the system prompt for a given task |
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+Fixed-port per-trial sandboxes attempt stop and force removal when startup
+readiness fails or is interrupted, before any handle reaches the caller.
+Shutdown also attempts removal after a failed stop. Cleanup warnings expose
+unreleased resources, and the original startup failure remains visible.
+
 ## Troubleshooting
+
+`list_tasks.py` supports a custom `--tasks-dir` and `--format json|names`; its default
+grouped display stays unchanged. JSON includes task metadata and `directory_name`.
+Names mode emits exact directory names for `--tasks-file`, including when a YAML's
+`task_id` differs from its directory. Empty selections produce `[]` JSON or an empty
+names stream. Both machine formats write UTF-8, including when the console's default
+encoding cannot represent task names.
+
+```bash
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --prefix T --format json
+python scripts/list_tasks.py --tasks-dir ./custom-tasks --difficulty hard --format names > selected-tasks.txt
+uv run ce-runner batch --tasks-dir ./custom-tasks --tasks-file selected-tasks.txt --config claw-eval/config.yaml
+```
 
 | Issue | Fix |
 |---|---|

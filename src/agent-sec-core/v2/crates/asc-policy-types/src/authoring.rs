@@ -2,12 +2,44 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cedar::CedarPolicySource;
 use crate::error::{Validate, ValidationError};
 
 mod condition;
+mod http;
 pub use condition::{
     Comparison, Condition, HistoryCondition, HistoryEvent, HistoryLogic, Scalar, Value,
 };
+pub use http::{HttpMethod, HttpScheme, ResponseRewrite};
+
+/// Authored content, independent of Policy identity and Scope/Binding assignment.
+///
+/// A frontend must derive the representation from the source rather than trust a
+/// caller-supplied AST.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "language", content = "content", deny_unknown_fields)]
+pub enum PolicySource {
+    /// Existing JSON authoring format, including its own `specVersion`.
+    #[serde(rename = "seccore")]
+    SecCore(PolicyTemplate),
+    /// Cedar text and the exact application schema used for validation.
+    #[serde(rename = "cedar")]
+    Cedar(CedarPolicySource),
+}
+
+impl PolicySource {
+    /// Whether this source contains native managed-credential rules.
+    #[must_use]
+    pub fn uses_credentials(&self) -> bool {
+        match self {
+            Self::SecCore(template) => template.uses_credentials(),
+            Self::Cedar(_) => false,
+        }
+    }
+}
+
+/// PAP and snapshot encoding: retain native JSON while accepting both source formats.
+pub mod source_serde;
 
 /// Reusable policy content; identity and revision belong to `PreparedPolicy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +95,7 @@ pub enum Effect {
 pub enum Category {
     /// Filesystem operations.
     File,
-    /// Network operations; target serialization is not yet defined.
+    /// Network operations with managed credentials.
     Network,
     /// Agent semantic events; target serialization is not yet defined.
     Agenthook,
@@ -79,6 +111,8 @@ pub enum Action {
     Write,
     /// Execute a program.
     Exec,
+    /// Inject a managed credential into an allowed HTTPS request.
+    UseCredential,
 }
 
 /// Typed operation targets; undefined resource formats are not accepted as JSON.
@@ -90,6 +124,74 @@ pub enum Resource {
         /// Target path pattern.
         path: String,
     },
+    /// An HTTPS request eligible for managed credential injection.
+    #[serde(rename_all = "camelCase")]
+    HttpRequest {
+        /// Store identifier, never a credential value.
+        credential_id: String,
+        /// Required transport security.
+        scheme: HttpScheme,
+        /// Exact lowercase DNS host.
+        host: String,
+        /// Bounded absolute path pattern.
+        path: String,
+        /// Permitted request methods.
+        methods: Vec<HttpMethod>,
+        /// Handling of the upstream response.
+        response_rewrite: ResponseRewrite,
+    },
+}
+
+impl PolicyTemplate {
+    /// Classifies credential intent even when category, action and target disagree.
+    #[must_use]
+    pub fn uses_credentials(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            credential_operation(rule.category, rule.action, &rule.target)
+                || rule.previous.as_ref().is_some_and(history_uses_credentials)
+        })
+    }
+}
+
+fn credential_operation(category: Category, action: Action, target: &Resource) -> bool {
+    category == Category::Network
+        || action == Action::UseCredential
+        || matches!(target, Resource::HttpRequest { .. })
+}
+
+fn history_uses_credentials(history: &HistoryCondition) -> bool {
+    match history {
+        HistoryCondition::Event(event) => {
+            credential_operation(event.category, event.action, &event.target)
+        }
+        HistoryCondition::Logic(HistoryLogic::And(children) | HistoryLogic::Or(children)) => {
+            children.iter().any(history_uses_credentials)
+        }
+        HistoryCondition::Logic(HistoryLogic::Not(child)) => history_uses_credentials(child),
+    }
+}
+
+impl Validate for PolicySource {
+    /// Checks the source envelope; Cedar parsing and schema checks require the frontend.
+    ///
+    /// # Errors
+    /// Returns an existing native-AST error, or rejects blank/NUL-bearing Cedar text.
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::SecCore(template) => template.validate().map_err(|error| {
+                ValidationError::new(format!("content.{}", error.path), error.message)
+            }),
+            Self::Cedar(source) => {
+                if source.text.trim().is_empty() || source.text.contains('\0') {
+                    return Err(ValidationError::new(
+                        "content.text",
+                        "must contain non-whitespace Cedar text without NUL",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Validate for PolicyTemplate {
@@ -102,9 +204,40 @@ impl Validate for PolicyTemplate {
         }
         validate_text(self.description.as_deref(), "description")?;
         let mut nodes = 0;
+        let credentials = self.uses_credentials();
         for (i, rule) in self.rules.iter().enumerate() {
             let prefix = format!("rules[{i}]");
-            validate_operation(rule.category, &rule.target, &prefix)?;
+            if credentials {
+                if rule.category != Category::Network || rule.action != Action::UseCredential {
+                    return Err(ValidationError::new(
+                        &prefix,
+                        "credential policies require only network/use_credential rules",
+                    ));
+                }
+                if rule.effect != Effect::Allow {
+                    return Err(ValidationError::new(
+                        format!("{prefix}.effect"),
+                        "credential rules support only allow",
+                    ));
+                }
+                if rule.condition.is_some() || rule.previous.is_some() {
+                    return Err(ValidationError::new(
+                        &prefix,
+                        "credential rules do not support where or previous",
+                    ));
+                }
+                http::validate(&rule.target, &prefix)?;
+                if rule.because.as_deref().is_some_and(|text| {
+                    text.is_empty() || text.len() > 256 || text.chars().any(char::is_control)
+                }) {
+                    return Err(ValidationError::new(
+                        format!("{prefix}.because"),
+                        "must be 1..=256 bytes without control characters",
+                    ));
+                }
+            } else {
+                validate_operation(rule.category, &rule.target, &prefix)?;
+            }
             validate_text(rule.because.as_deref(), &format!("{prefix}.because"))?;
             if let Some(condition) = &rule.condition {
                 condition::validate(
@@ -133,13 +266,12 @@ fn validate_operation(
     target: &Resource,
     prefix: &str,
 ) -> Result<(), ValidationError> {
-    if category != Category::File {
+    let (Category::File, Resource::File { path }) = (category, target) else {
         return Err(ValidationError::new(
             format!("{prefix}.target"),
             "resource type must match category; only file targets are defined",
         ));
-    }
-    let Resource::File { path } = target;
+    };
     validate_file_pattern(path)
         .map_err(|message| ValidationError::new(format!("{prefix}.target.path"), message))
 }

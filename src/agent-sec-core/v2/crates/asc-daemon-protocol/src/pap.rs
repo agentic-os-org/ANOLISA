@@ -1,6 +1,6 @@
 use asc_foundation_types::ResourceId;
 use asc_policy_types::Validate;
-use asc_policy_types::authoring::PolicyTemplate;
+use asc_policy_types::authoring::{PolicySource, source_serde};
 use asc_policy_types::scope::{PolicyReference, ScopeSelector};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -11,7 +11,8 @@ pub struct CreatePolicyParams {
     /// Human-readable Policy name.
     pub policy_name: String,
     /// Complete authored Policy intent.
-    pub template: PolicyTemplate,
+    #[serde(with = "source_serde")]
+    pub template: PolicySource,
 }
 
 /// Update one existing Policy identity.
@@ -23,7 +24,8 @@ pub struct UpdatePolicyParams {
     /// Human-readable Policy name.
     pub policy_name: String,
     /// Complete authored Policy intent.
-    pub template: PolicyTemplate,
+    #[serde(with = "source_serde")]
+    pub template: PolicySource,
 }
 
 /// Create one Scope with a server-generated identity.
@@ -39,6 +41,9 @@ pub struct CreateScopeParams {
     /// Exact policies assigned to every Scope; admission requires 1–32 distinct IDs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policy_templates: Vec<PolicyReference>,
+    /// Process owner attribution, not caller authority; required for credential scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_uid: Option<u32>,
 }
 
 fn deserialize_authored_selector<'de, D>(deserializer: D) -> Result<ScopeSelector, D::Error>

@@ -185,6 +185,8 @@ function makeMdxSafe(markdown) {
         return line;
       }
       if (inFence) return line;
+      // Preserve explicit fragment targets used by published section links.
+      if (/^ {0,3}<a id="[\p{L}\p{M}\p{N}_-]+"><\/a>[ \t]*$/u.test(line)) return line;
       return line
         .replace(/\\`/g, '&#96;')
         .split(/(`+[^`]*`+)/g)
@@ -220,6 +222,9 @@ function sidebarLabel(document, title, locale) {
   const item = navigation.groups.flatMap((group) => group.items)
     .concat(navigation.reports ?? [])
     .find((entry) => `user-guide/${itemPath(entry)}` === document.target);
+  if (document.target === 'user-guide/aw/index.md') {
+    return locale === 'zh' ? '快速入门' : 'Quickstart';
+  }
   if (item) return item.label[locale];
   const coshNgLabels = {
     en: {
@@ -297,11 +302,12 @@ const categoryPositions = {
 const documentPositions = {
   'user-guide/aw/installation.md': 2,
   'user-guide/aw/configuration.md': 3,
-  'user-guide/aw/tokenless.md': 4,
-  'user-guide/aw/security.md': 5,
-  'user-guide/aw/observability.md': 6,
-  'user-guide/aw/operations.md': 7,
-  'user-guide/aw/packages.md': 8,
+  'user-guide/aw/cli-reference.md': 4,
+  'user-guide/aw/tokenless.md': 5,
+  'user-guide/aw/security.md': 6,
+  'user-guide/aw/observability.md': 7,
+  'user-guide/aw/operations.md': 8,
+  'user-guide/aw/capabilities.md': 9,
   'developer-guide/aw/integration.md': 2,
   'developer-guide/aw/native-agents.md': 3,
   'developer-guide/aw/agentsight.md': 5,
@@ -311,6 +317,7 @@ const documentPositions = {
   'developer-guide/aw/providers/sec-core.md': 4,
   'developer-guide/aw/providers/tokenless.md': 5,
   'contribute/aw/building.md': 2,
+  'contribute/aw/testing.md': 3,
   'contribute/cosh-ng/getting-started.md': 2,
   'contribute/cosh-ng/adding-commands.md': 3,
   'contribute/cosh-ng/adding-distros.md': 4,

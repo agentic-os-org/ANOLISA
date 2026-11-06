@@ -5,25 +5,14 @@
 AW 为 Agent 和 SDK 应用提供统一 Hook 编排、受管 MCP 接入和策略热更新。
 通过一份配置组合工具执行前的安全检查、执行后的输出压缩和自定义规则。
 支持的常驻入口可在任务排空后更新策略，保留宿主进程。
-Agent 继续管理自己的模型、界面和权限。当前提供 Linux Preview。
-
-## 通用能力
-
-| 能力 | 用户能做什么 |
-| --- | --- |
-| Hook 编排 | 按目标和工具选择规则，组合 sec-core、Tokenless 与自定义 Hook，统一步骤顺序、执行期限和审计。 |
-| 受管 MCP | 在支持的实际工具调用处执行同一套策略，检查调用身份及获准参数。 |
-| 策略更新 | 向支持的空闲实例显式应用新策略，让后续任务使用新版本。 |
-
-Adapter 接通原生事件并采纳支持的效果，Provider 实现具体策略。
-core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
-工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
+Agent 继续管理自己的模型、界面和权限。AW 运行于 Linux。
 
 <a id="安装与使用"></a>
+<a id="安装与首次运行"></a>
 
-## 安装与首次运行
+## 快速入门
 
-从[安装指南](../../docs/user-guide/zh/aw/installation.md)获取 Preview 包并安装。
+按[安装指南](../../docs/user-guide/zh/aw/installation.md)安装 AW core 和可选 Provider 扩展。
 当前使用独立安装包；`anolisa install aw` 和 RPM 安装入口尚未提供。
 先安装并登录所选 Agent，再用 `aw config init` 生成配置。
 
@@ -36,7 +25,7 @@ install -d -m 700 "$AW_HOME" "$AW_HOME/workspace"
 aw config init --prefix "$AW_PREFIX" \
   --config "$AW_HOME/aw.yaml" --state-dir "$AW_HOME/state" \
   --qoder "$(command -v qodercli)"
-aw validate --config "$AW_HOME/aw.yaml"
+aw config validate --config "$AW_HOME/aw.yaml"
 cd "$AW_HOME/workspace"
 aw run --config "$AW_HOME/aw.yaml" --agent qoder
 ```
@@ -45,9 +34,51 @@ aw run --config "$AW_HOME/aw.yaml" --agent qoder
 退出 Agent 后，本地服务仍可复用。使用结束后查询并停止它。
 
 ```bash
-aw status --config "$AW_HOME/aw.yaml"
-aw stop --config "$AW_HOME/aw.yaml"
+aw service status --config "$AW_HOME/aw.yaml"
+aw service stop --config "$AW_HOME/aw.yaml"
 ```
+
+## 通用能力
+
+| 能力 | 用户能做什么 |
+| --- | --- |
+| Hook 编排 | 按目标和工具选择规则，组合 sec-core、Tokenless 与自定义 Hook，统一步骤顺序、执行期限和审计。 |
+| 受管 MCP | 在支持的实际工具调用处执行同一套策略，检查调用身份及获准参数。 |
+| 策略更新 | 向支持的空闲实例显式应用新策略，让后续任务使用新版本。 |
+
+Adapter 接通原生事件并采纳支持的效果，Provider 实现具体策略。
+sec-core Provider 可在 Qoder SDK 和 QwenPaw 加载本地 Skill 指令前校验对象，见[安全配置](../../docs/user-guide/zh/aw/security.md#加载前校验-skill)。
+
+core 可独立使用；安全检查与压缩需安装对应 Provider 并通过配置启用。
+工具结果替换限于获准的位置，Agent 的原生权限检查始终保留。
+
+显式 Adapter 可通过 `aw instance` 向已有同用户 daemon 独立登记、确认 Ready、查询和释放业务自管实例。首期支持 Qoder SDK / QwenPaw 普通路由，使用固定配置；语言包和原生工厂迁移另行交付。见[独立实例接入](../../docs/developer-guide/zh/aw/deployment/independent-instances.md)。
+
+## Hook 支持矩阵
+
+✓ 已声明且有契约测试覆盖，× 尚不支持。矩阵从[回归清单](tests/regression-matrix.json)生成。结果替换的原生限制与 MCP、更新范围见[完整能力表](../../docs/user-guide/zh/aw/capabilities.md)。
+
+<!-- aw-regression-matrix:start -->
+| Agent | `tool.before` / `observe` | `tool.before` / `block` | `tool.after` / `observe` | `tool.after` / `replace_result` | `input.submit` / `observe` | `input.submit` / `block` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `agentscope` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `claude-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `hermes` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+<!-- aw-regression-matrix:end -->
+
+Qoder CLI 也可通过 `input.submit` 检查原生 `UserPromptSubmit` 文本，见 [Qoder 输入检查](../../docs/developer-guide/zh/aw/agents/qoder.md#检查用户提交)。
+
+Pi `runWorker` 工厂支持模型派发前的字面量用户文本检查，接入方式见 [Pi 输入检查指南](../../docs/developer-guide/zh/aw/agents/pi.md#检查用户输入)。
+
+普通 resident Qoder SDK 和 QwenPaw 可通过 `input.submit` 在模型请求前检查用户文本。
+sec-core Provider 支持 fast 提示词注入扫描，风险与故障分别按策略处理，见
+[用户提交检查](../../docs/user-guide/zh/aw/security.md#检查用户提交)。
+
 
 <a id="hook-支持"></a>
 <a id="adapter-能力覆盖"></a>
@@ -56,18 +87,25 @@ aw stop --config "$AW_HOME/aw.yaml"
 
 当前接入 Qoder CLI、Qoder SDK、OpenClaw、Hermes、QwenPaw、Pi SDK、
 Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需要显式接入受管工厂。
+运行准入检查所需原生接口，[已验证基线](../../docs/developer-guide/zh/aw/native-agents.md)记录实际测试的框架版本。
+[Qoder SDK 接入](../../docs/developer-guide/zh/aw/agents/qoder-sdk.md)还支持预热、原样 SDK/Worker 下的原生配置、Pilot runtime launcher 授权、固定摘要的 Bash 消费者及声明式角色资产。
 [能力支持矩阵](../../docs/user-guide/zh/aw/capabilities.md)按 Adapter 和启动模式说明
-结果处理、MCP 与策略更新的差异，并链接支持版本与接线步骤。
+结果处理、MCP 与策略更新的差异，并链接已验证基线与接线步骤。
+
+
+常驻任务在空闲期间和覆盖内派发前重新核验服务与 owner 有效性。状态分别报告 worker
+存活和 AW 桥接故障；恢复操作见[运维指南](../../docs/user-guide/zh/aw/operations.md)。
 
 ## 文档导航
 
 | 任务 | 文档 |
 | --- | --- |
-| 安装并完成首次运行 | [AW 用户手册](../../docs/user-guide/zh/aw/index.md) |
+| 安装并完成首次运行 | [快速入门](../../docs/user-guide/zh/aw/index.md) |
+| 查询完整子命令与参数 | [CLI 命令参考](../../docs/user-guide/zh/aw/cli-reference.md) |
 | 选择 Agent、配置规则和更新策略 | [配置与启动](../../docs/user-guide/zh/aw/configuration.md) |
 | 启用输出压缩或安全检查 | [Tokenless](../../docs/user-guide/zh/aw/tokenless.md)、[sec-core](../../docs/user-guide/zh/aw/security.md) |
 | 查看运行记录 | [AgentSight](../../docs/user-guide/zh/aw/observability.md) |
-| 查询状态、管理安装包与排错 | [运行维护](../../docs/user-guide/zh/aw/operations.md) |
+| 查询状态、升级卸载与排错 | [运行维护](../../docs/user-guide/zh/aw/operations.md) |
 | 编写 Provider、接入 SDK 或理解架构 | [开发指南](../../docs/developer-guide/zh/aw/index.md) |
 
 <a id="代码架构"></a>
@@ -75,3 +113,6 @@ Claude SDK 和 AgentScope SDK。CLI 使用原生 Hook 或插件，SDK 应用需�
 
 [架构总览](docs/design/zh/architecture.md)说明框架与 Provider 的职责和调用流程。
 源码构建、测试与 CI 入口见[贡献指南](CONTRIBUTING_zh.md)。
+
+`aw config add-native-source` 记录原生来源引用，保留原文件。通用 loader API 保留原生
+配置，分别报告加载、准入与激活状态；用法见[配置说明](../../docs/user-guide/zh/aw/configuration.md#记录原生配置来源)。

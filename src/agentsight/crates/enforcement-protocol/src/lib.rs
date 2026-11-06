@@ -170,7 +170,10 @@ impl ApplyPolicy {
                     return Err(ApplyPolicyValidationError::EmptyTargets);
                 }
                 for (target_index, target) in policy.targets.iter().enumerate() {
-                    if !target.protections.delete && !target.protections.ordinary_write {
+                    if !target.protections.delete
+                        && !target.protections.ordinary_write
+                        && !target.protections.read
+                    {
                         return Err(ApplyPolicyValidationError::EmptyProtections { target_index });
                     }
                 }
@@ -262,6 +265,9 @@ pub struct EnforcementCapabilities {
     /// Whether ordinary write operations can be denied for protected content.
     #[serde(default)]
     pub ordinary_write_protection: bool,
+    /// Whether reads and mappings of an exact regular file can be denied.
+    #[serde(default)]
+    pub file_read_protection: bool,
     /// Whether targets are resolved against mount topology fixed at apply time.
     #[serde(default)]
     pub static_mount_topology: bool,
@@ -289,6 +295,7 @@ impl EnforcementCapabilities {
             file_entry_delete_protection: false,
             directory_tree_delete_protection: false,
             ordinary_write_protection: false,
+            file_read_protection: false,
             static_mount_topology: false,
             dynamic_mount_topology: false,
             complete_content_protection: false,
@@ -310,6 +317,7 @@ impl EnforcementCapabilities {
             file_entry_delete_protection: false,
             directory_tree_delete_protection: false,
             ordinary_write_protection: false,
+            file_read_protection: false,
             static_mount_topology: false,
             dynamic_mount_topology: false,
             complete_content_protection: false,
@@ -331,6 +339,7 @@ impl EnforcementCapabilities {
             file_entry_delete_protection: false,
             directory_tree_delete_protection: false,
             ordinary_write_protection: false,
+            file_read_protection: false,
             static_mount_topology: false,
             dynamic_mount_topology: false,
             complete_content_protection: false,
@@ -663,6 +672,7 @@ mod tests {
                     protections: FileProtections {
                         delete: true,
                         ordinary_write: true,
+                        read: false,
                     },
                     exclusions: vec![FileProtectionExclusion {
                         path: "/workspace/config.json.lock".into(),
@@ -675,6 +685,7 @@ mod tests {
                     protections: FileProtections {
                         delete: true,
                         ordinary_write: false,
+                        read: false,
                     },
                     exclusions: vec![FileProtectionExclusion {
                         path: "/workspace/state/cache".into(),
@@ -779,6 +790,7 @@ mod tests {
             .protections = FileProtections {
             delete: false,
             ordinary_write: false,
+            read: false,
         };
         assert_eq!(
             empty_protections.validate_payload(),

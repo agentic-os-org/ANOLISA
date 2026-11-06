@@ -207,7 +207,7 @@ pub fn path_on_overlayfs(path: &Path) -> bool {
     // mounted volume, and matching the unresolved path would false-positive.
     // Fall back to the raw path when the directory does not exist yet.
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+    let Ok(mounts) = std::fs::read("/proc/self/mounts") else {
         return false;
     };
     path_on_overlayfs_in(&resolved, &mounts)
@@ -231,33 +231,58 @@ pub fn warn_if_data_dir_not_persistent(dir: &Path) {
     }
 }
 
-/// Evaluate a mount table (the text of `/proc/self/mounts`) for
+/// Evaluate a mount table (the bytes of `/proc/self/mounts`) for
 /// [`path_on_overlayfs`]; kept separate so tests do not depend on the host.
-fn path_on_overlayfs_in(path: &Path, mounts: &str) -> bool {
-    let target = path.to_string_lossy();
+fn path_on_overlayfs_in(path: &Path, mounts: impl AsRef<[u8]>) -> bool {
+    let target = path.as_os_str().as_encoded_bytes();
     let mut best_len = 0usize;
     let mut overlay = false;
-    for line in mounts.lines() {
+    for line in mounts.as_ref().split(|&byte| byte == b'\n') {
         // Format: <src> <mountpoint> <fstype> <options> <dump> <pass>
-        let mut fields = line.split_whitespace();
+        let mut fields = line
+            .split(u8::is_ascii_whitespace)
+            .filter(|field| !field.is_empty());
         let (Some(_src), Some(mount_point), Some(fstype)) =
             (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
-        // The kernel octal-escapes spaces (and other specials) as \040.
-        let mount_point = mount_point.replace("\\040", " ");
+        let mount_point = decode_mount_point(mount_point);
         let is_prefix = target == mount_point
-            || target.starts_with(&format!("{mount_point}/"))
-            || mount_point == "/";
+            || target
+                .strip_prefix(mount_point.as_slice())
+                .is_some_and(|suffix| suffix.starts_with(b"/"))
+            || mount_point == b"/";
         // Longest prefix wins; on ties the later entry wins, because stacked
         // mounts list the effective (most recently stacked) mount last.
         if is_prefix && mount_point.len() >= best_len {
             best_len = mount_point.len();
-            overlay = fstype == "overlay";
+            overlay = fstype == b"overlay";
         }
     }
     best_len > 0 && overlay
+}
+
+/// Decode the four escapes emitted by the kernel, once, without assuming UTF-8.
+fn decode_mount_point(mut encoded: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(encoded.len());
+    while let Some(&byte) = encoded.first() {
+        let escaped = match encoded.get(..4) {
+            Some(b"\\040") => Some(b' '),
+            Some(b"\\011") => Some(b'\t'),
+            Some(b"\\012") => Some(b'\n'),
+            Some(b"\\134") => Some(b'\\'),
+            _ => None,
+        };
+        if let Some(byte) = escaped {
+            decoded.push(byte);
+            encoded = &encoded[4..];
+        } else {
+            decoded.push(byte);
+            encoded = &encoded[1..];
+        }
+    }
+    decoded
 }
 
 #[cfg(test)]
@@ -265,6 +290,45 @@ mod tests {
     use super::*;
 
     // ── path_on_overlayfs ───────────────────────────────────────────────────
+
+    #[test]
+    fn overlayfs_detects_all_escaped_mount_characters() {
+        for (encoded, decoded) in [
+            ("\\040", " "),
+            ("\\011", "\t"),
+            ("\\012", "\n"),
+            ("\\134", "\\"),
+        ] {
+            let mounts =
+                format!("/dev/root / ext4 rw 0 0\noverlay /mnt/a{encoded}b overlay rw 0 0\n");
+            let path = format!("/mnt/a{decoded}b/database");
+            assert!(path_on_overlayfs_in(Path::new(&path), &mounts), "{encoded}");
+        }
+    }
+
+    #[test]
+    fn overlayfs_does_not_decode_backslash_escapes_twice() {
+        let mounts = "overlay /mnt/a\\134040b overlay rw 0 0\n";
+        assert!(path_on_overlayfs_in(Path::new("/mnt/a\\040b/db"), mounts));
+        assert!(!path_on_overlayfs_in(Path::new("/mnt/a b/db"), mounts));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlayfs_matches_non_utf8_mounts_without_lossy_aliases() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mounts =
+            b"disk / ext4 rw 0 0\noverlay /mnt/\xff overlay rw 0 0\noverlay /data overlay rw 0 0\n";
+        assert!(path_on_overlayfs_in(
+            Path::new(OsStr::from_bytes(b"/mnt/\xff/db")),
+            mounts
+        ));
+        assert!(!path_on_overlayfs_in(Path::new("/mnt/\u{fffd}/db"), mounts));
+        assert!(path_on_overlayfs_in(Path::new("/data/db"), mounts));
+        assert!(!path_on_overlayfs_in(Path::new("/database"), mounts));
+    }
 
     #[test]
     fn overlayfs_detects_overlay_root() {

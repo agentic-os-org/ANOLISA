@@ -7,7 +7,7 @@
 The `aw` executable owns daemon discovery, instance binding, foreground process
 lifetime and cleanup. Each native adapter owns version and entrypoint admission,
 registration files, event normalization and the host's response dialect. These
-interfaces are private CLI code. The service adds an optional native-command
+interfaces belong to `aw-adapter`. The service adds an optional native-command
 environment snapshot to `invoke_step`; existing requests may omit it.
 
 Native dialects, callback interpretation and Python/JavaScript assets live in
@@ -69,7 +69,7 @@ registration path and does not require a plugin startup receipt.
 
 ## Delivery boundary
 
-Qoder requires a semantic CLI version >=1.1.64 and records the probed value; its
+Qoder records the installed semantic CLI version; its
 command-Hook configuration and callback contracts remain enforced.
 OpenClaw, Hermes and QwenPaw supply separate native implementations and acceptance
 evidence. The daemon still retains at most 1024 correlated events per instance;

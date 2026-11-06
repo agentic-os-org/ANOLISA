@@ -336,6 +336,7 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
   const trajectoryTree = realModule('src/utils/trajectoryTree.ts');
   const text = realModule('src/utils/text.ts');
   const trajectoryTextFilter = realModule('src/utils/trajectoryTextFilter.ts');
+  const optimizationStrategies = realModule('src/utils/optimizationStrategies.ts');
   const spHolder = { params: new URLSearchParams(searchParamsInit) };
   const moduleStubs = {
     'react-router-dom': {
@@ -349,8 +350,10 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
     '../utils/roundModel': roundModel,
     '../utils/savings': savingsModule,
     '../utils/text': text,
+    '../utils/download': realModule('src/utils/download.ts'),
     '../utils/trajectoryTree': trajectoryTree,
     '../utils/trajectoryTextFilter': trajectoryTextFilter,
+    '../utils/optimizationStrategies': optimizationStrategies,
     '../components/SubagentGraph': { SubagentGraph: () => null },
     '../components/CausalAttributionPanel': { CausalAttributionPanel: () => null },
   };

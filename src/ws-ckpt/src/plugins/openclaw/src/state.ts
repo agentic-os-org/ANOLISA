@@ -90,12 +90,26 @@ export function cwdInsideWorkspaceReason(cwd: string, workspace: string): string
 export function cwdInsideWorkspace(workspace: string): { inside: boolean; cwd: string } {
   let cwd: string;
   try {
-    cwd = path.resolve(process.cwd());
+    cwd = resolveExistingPath(process.cwd());
   } catch {
     return { inside: false, cwd: "" };
   }
-  const ws = path.resolve(workspace);
-  return { inside: cwd === ws || cwd.startsWith(ws + path.sep), cwd };
+  const ws = resolveExistingPath(workspace);
+  const relative = path.relative(ws, cwd);
+  const inside = relative === "" || (
+    relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+  );
+  return { inside, cwd };
+}
+
+function resolveExistingPath(value: string): string {
+  const absolute = path.resolve(value);
+  try {
+    return fs.realpathSync(absolute);
+  } catch {
+    // A workspace may not exist yet, before its first init command.
+    return absolute;
+  }
 }
 
 /** Resolve parent aliases without following the mutable workspace symlink. */

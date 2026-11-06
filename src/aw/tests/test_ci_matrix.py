@@ -126,7 +126,7 @@ class MatrixTests(GateFixture):
             workspace({name}, self.root / name) for name in sorted(providers)
         ]
         (self.root / "tests").mkdir()
-        for mode in ("valid", "missing-provider", "duplicate-target", "unknown-opt-in"):
+        for mode in ("valid", "missing-provider", "missing-framework", "duplicate-target", "unknown-opt-in"):
             matrix = copy.deepcopy(self.matrix)
             if mode == "unknown-opt-in":
                 matrix["opt_in_targets"]["unknown/test/acceptance"] = "fixture"
@@ -135,7 +135,7 @@ class MatrixTests(GateFixture):
             def collected(root: Path, data: dict, run: object, opt_in: frozenset) -> dict:
                 owned = set(data["workspace_members"])
                 self.assertTrue(all(target.split("/", 1)[0] in owned for target in opt_in))
-                if mode == "missing-provider" and owned == {"aw-provider-tokenless"}:
+                if (mode == "missing-provider" and owned == {"aw-provider-tokenless"}) or (mode == "missing-framework" and "aw-cli" in owned):
                     return {}
                 result = {
                     target: tests for target, tests in self.runnable.items()
@@ -201,6 +201,7 @@ class MatrixTests(GateFixture):
                 (f"{START}\nstale\n{END}\n", "update the grid"),
                 ("no generated table", "missing unique matrix markers"),
                 (original + original, "missing unique matrix markers"),
+                (f"<details>\n{original}</details>\n", "keep the Hook grid expanded"),
             ):
                 with self.subTest(document=name, content=text), self.assertRaisesRegex(
                     ValueError, error
@@ -209,13 +210,11 @@ class MatrixTests(GateFixture):
                     validate(self.matrix, self.runnable, self.root)
             path.write_text(original)
 
-    def test_regeneration_updates_guides_without_changing_surrounding_text_or_readmes(self) -> None:
+    def test_regeneration_updates_all_grids_without_changing_surrounding_text(self) -> None:
         (self.root / "tests").mkdir()
         (self.root / "tests/regression-matrix.json").write_text(json.dumps(self.matrix))
         for name in CAPABILITY_DOCS:
             (self.root / name).write_text(f"intro\n{START}\nstale\n{END}\nfooter\n")
-        for name in ("README.md", "README_zh.md"):
-            (self.root / name).write_text("summary only\n")
         with patch("check_matrix.__file__", str(self.root / "scripts/check_matrix.py")), patch(
             "sys.argv", ["check_matrix.py", "--write-docs"]
         ):
@@ -226,8 +225,6 @@ class MatrixTests(GateFixture):
                 (self.root / name).read_text(),
                 f"intro\n{START}\n{table(self.matrix)}\n{END}\nfooter\n",
             )
-        for name in ("README.md", "README_zh.md"):
-            self.assertEqual((self.root / name).read_text(), "summary only\n")
 
 
 class ScriptLayoutTests(GateFixture):

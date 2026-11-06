@@ -15,6 +15,9 @@ JSONL 接口。
 记录最终 PATH，并仅传给 Provider 子进程。设置 `COSH_SHELL_BOOTSTRAP_PATH=0`
 可关闭该启动 PATH 交接。
 
+`COSH_HOME` 可统一指定用户扩展和状态根目录，详见
+[Extension 指南](../../docs/user-guide/zh/cosh-ng/core/extensions.md)。
+
 ## 为什么使用 cosh-ng
 
 | 传统终端 | cosh-ng |
@@ -120,6 +123,8 @@ Enhanced 不会向子进程保留已导出的 Bash `PROMPT_COMMAND` 值。
 $ hello
 bash: hello: command not found
 ```
+
+ECS 默认免配置接入的候选实现可在首次模型请求时引导开通并自动继续，无需先执行 `/auth`；现有 Provider 配置优先。需要服务端支持 ECS 实例身份交换，详见[模型与认证](../../docs/user-guide/zh/cosh-ng/core/providers.md#ecs-免配置接入)。
 
 用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望每次 Agent
 调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置

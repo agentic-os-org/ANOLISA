@@ -1,8 +1,9 @@
 use super::*;
-use aw_provider::admission::StepExecution;
+use aw_core::admission::StepExecution;
 
 fn prepared(profile: &Profile, mode: &str) -> Prepared {
     Prepared {
+        revision: "a".repeat(40),
         input: LaunchInput {
             document: json!({"spec":{"agents":{"hermes":{"evidence":{"mode":mode}}},
                 "execution":{"default_event_budget_ms":1001},"events":{}}}),

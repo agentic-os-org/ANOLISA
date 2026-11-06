@@ -249,6 +249,26 @@ pub(super) fn run_turn(
             }
             continue;
         }
+        if let Some(progress) = control_protocol::ecs_trial::parse_progress(&line) {
+            if !process.control_capabilities.can_handle_ecs_trial_v1 {
+                transport_error = Some("unnegotiated ECS trial state".into());
+                break;
+            }
+            match progress {
+                Ok(progress) => send_agent_event(
+                    &command.event_tx,
+                    AgentEvent::EcsTrialState {
+                        run_id: command.run_id.clone(),
+                        progress,
+                    },
+                ),
+                Err(error) => {
+                    transport_error = Some(error);
+                    break;
+                }
+            }
+            continue;
+        }
         if control::handle_control_request(
             &line,
             command,

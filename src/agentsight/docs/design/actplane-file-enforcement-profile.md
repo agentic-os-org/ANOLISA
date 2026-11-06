@@ -42,6 +42,96 @@ current product scope. Network blocking, process execution blocking, taint
 propagation, and temporal policy enforcement remain follow-up profiles and
 must not be presented as enabled by this profile.
 
+## Content-Loss Mediation Coverage
+
+Delete protection alone does not preserve file content, so the file-guard
+backend mediates the content-loss entries that the validated kernel permits:
+
+- `truncate(2)` is mediated by `enforce_path_truncate` without `bpf_d_path`:
+  the inode-only variant matches the registered canonical path of the target,
+  and structured policies classify the parent/dentry pair from the hook
+  arguments. `ftruncate(2)` and `O_TRUNC` opens are mediated by
+  `enforce_file_truncate`, which the kernel also invokes for truncating opens.
+- Exact-file ordinary-write protection installs an `INODE_GUARD_WRITE` inode
+  guard at activation, checked by the mediation hooks before their deep
+  chains at constant stack cost: the inode-only profile denies writable
+  opens at `enforce_file_open`, the advanced profile denies new writable
+  mappings at `enforce_mmap_file` (its `enforce_file_open` resolves paths
+  instead of checking the guard), and both deny `write(2)` and truncates at
+  the permission and truncate hooks.
+- Denying writable opens of guarded inodes closes new-mapping entries that
+  need a fresh open. A descriptor already held at apply time needs no new
+  open, so the apply-time preflight also rejects writable file descriptors
+  of protected paths (via `/proc/<pid>/fd` and `fdinfo` access modes) in
+  addition to shared mappings. Profiles with the advanced tracepoint budget
+  additionally attach `enforce_mmap_file` and `enforce_file_mprotect`.
+- Mappings and descriptors that already exist when a binding is applied
+  cannot be revoked by any LSM hook. Apply therefore scans `/proc/<pid>/maps`
+  and `/proc/<pid>/fd` over the whole target process tree and rejects the
+  binding with `preexisting_writable_map` or `preexisting_writable_fd` when
+  write access to a content-protected path is present, instead of claiming
+  coverage it cannot enforce. For structured policies the scan covers only
+  targets that request ordinary-write protection, because structured delete
+  protection leaves writes genuinely unmediated. Legacy guards are always
+  covered: their `block unlink` clauses lower to write-op rules, so even a
+  delete-only legacy binding mediates writes and implicitly promises content
+  coverage.
+- Path stability: the inode entry also guards every ancestor directory of a
+  guarded file against rename and removal inside the bound domain, so path
+  relation changes cannot detach a protected entry from its authored path.
+
+Known boundaries: stores through a shared writable mapping created after
+binding are not mediated for directory-tree targets in either profile,
+because mapping stores never reach the write or truncate hooks and neither
+profile denies writable opens of tree members; exact-file targets close this
+entry at the writable-open denial in the inode-only profile and at the
+mapping hook in the advanced profile, and pre-existing mappings and writable
+descriptors are rejected at apply time. Unknown path
+classifications remain fail-open for phase-one ordinary writes. The apply-time
+scan renders paths and resolves exact identities in the enforcer's mount
+namespace while topology resolution uses the target's view, so tree-scope
+prefix matching can silently fail open for targets inside a different mount
+namespace, and an exact path that resolves to different files in the two
+namespaces can mismatch silently as well; tree paths whose authored form
+contains symlink components mismatch for the same reason, because the
+topology follows symlinks while the scan matches the canonical paths rendered
+by `/proc` lexically (exact scope stays identity-based and unaffected); with
+the advanced kernel object and a legacy DSL policy the scan has no protected
+identities to match and is a no-op. The scan is a snapshot: access created
+between the scan and domain activation (inherited or freshly opened
+descriptors, new mappings) is not observable and is only covered once the
+hooks are attached. Unlinked files still render in `/proc` with a
+" (deleted)" suffix that satisfies tree prefix matching, so held write
+access to a removed tree file rejects the apply; this fail-closed behavior is
+kept because `linkat(AT_EMPTY_PATH)` can re-attach such an inode.
+
+## Exact-file read protection
+
+The structured contract adds optional `protections.read`, defaulting to false,
+for `exact_file` targets only. The HTTP-owned template selects it through the
+dedicated `POST /api/enforcement/file-read-bindings` route, so an older server
+answers 404 instead of ignoring an unknown field and applying an open-only
+policy; directory-tree read targets are rejected instead of claiming
+unsupported coverage. Protocol v5 and the policy schema version
+remain unchanged: omitted false fields preserve old payloads, while old
+backends reject the unknown true field.
+
+Activation installs `INODE_GUARD_READ` on the held device/inode identity.
+The file-open, permission, mmap and mprotect hooks check this guard before
+deep policy evaluation, reporting event operation 9 as `read`. The
+`agent-file-guard` pinned marker advances to v6 and reserves mapping hooks;
+health advertises `file_read_protection` only when every required link exists.
+The read guard applies to aliases and previously opened read-only descriptors
+without affecting unbound processes or implying delete/write protection.
+
+Preflight uses identities resolved in the target topology to reject all
+existing file mappings, including private and PROT_NONE mappings. This scan
+cannot revoke previously read memory or provide atomic isolation against
+concurrent process-tree/file-access changes. External file replacement or
+secret rotation requires re-apply; dynamic topology and io_uring/AIO remain
+outside coverage. Validation used synthetic files on ALinux 6.6 with an
+isolated enforcer, HTTP server, UDS and pin root.
+
 ## Build Contract
 
 `make build-enforcer` invokes `scripts/build-enforcer.sh`. The script:

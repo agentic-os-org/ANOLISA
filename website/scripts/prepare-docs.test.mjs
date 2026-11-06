@@ -5,10 +5,58 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {fileURLToPath} from 'node:url';
+import {evaluate} from '@mdx-js/mdx';
+import * as jsxRuntime from 'react/jsx-runtime';
+import {renderToStaticMarkup} from 'react-dom/server';
 import {exists, walkFiles} from './lib.mjs';
 import {loadDocumentRedirects, redirectDestination, writeDocumentRedirects} from './document-routes.mjs';
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
+
+const awLegacyAnchors = {
+  en: {
+    index: ['run-a-session', 'choose-capabilities', 'start-here'],
+    installation: ['create-configuration', 'launch-and-verify'],
+  },
+  zh: {
+    index: ['一次运行', '选择需要的能力', '从这里开始'],
+    installation: ['创建配置', '启动并验证'],
+  },
+};
+
+function awAnchorFixture(title, anchors) {
+  const example = `<a id="${anchors[0]}"></a>`;
+  return `# ${title}\n\n${anchors.map((id) => `<a id="${id}"></a>`).join('\n')}\n\n`
+    + `Inline example: \`${example}\`\n\n\`\`\`html\n${example}\n\`\`\`\n\n`
+    + '<a id="nonempty">Visible text</a>\n\n'
+    + '<a id="extra-attribute" title="example"></a>\n\n'
+    + '<a id="expression-{name}"></a>\n\n'
+    + '<a id="self-closing" />\n\n'
+    + '<a id=\'single-quoted\'></a>\n\n'
+    + 'Inline HTML: <a id="inline-html"></a>\n\n'
+    + '    <a id="indented-code"></a>\n\n'
+    + '<div id="raw-element">Other raw HTML</div>\n';
+}
+
+async function assertRenderedAnchors(markdown, anchors) {
+  const {default: Document} = await evaluate(
+    markdown.replace(/^---\n[\s\S]*?\n---\n/, ''), jsxRuntime,
+  );
+  const html = renderToStaticMarkup(jsxRuntime.jsx(Document, {}));
+  assert.deepEqual([...html.matchAll(/<a id="([^"]+)"/g)].map((match) => match[1]), anchors,
+    'Only standalone empty compatibility anchors must render as real fragment targets');
+  const example = `<a id="${anchors[0]}"></a>`;
+  assert.ok(markdown.includes(`\`${example}\``), 'Inline anchor examples must remain code');
+  assert.ok(markdown.includes(`\`\`\`html\n${example}\n\`\`\``), 'Fenced anchor examples must remain code');
+  assert.ok(html.includes(`&lt;a id=&quot;${anchors[0]}&quot;&gt;&lt;/a&gt;`),
+    'Code examples must display literal anchor syntax rather than create extra targets');
+  for (const id of ['nonempty', 'extra-attribute', 'expression-{name}', 'self-closing',
+    'single-quoted', 'inline-html', 'indented-code', 'raw-element']) {
+    assert.ok(!html.includes(`id="${id}"`), `${id} must not become a raw HTML element`);
+  }
+  assert.ok(html.includes('&lt;a id=&quot;nonempty&quot;&gt;Visible text&lt;/a&gt;'));
+  assert.ok(html.includes('&lt;div id=&quot;raw-element&quot;&gt;Other raw HTML&lt;/div&gt;'));
+}
 
 test('publishes current guides and changelogs without Copilot Shell entry points', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'prepare-docs-test-'));
@@ -28,8 +76,10 @@ test('publishes current guides and changelogs without Copilot Shell entry points
     files[`docs/user-guide/${locale}/cosh-ng/index.md`] = `# cosh-ng\n\n## ${locale === 'zh' ? '快速上手' : 'Quick start'}\n`;
     files[`docs/user-guide/${locale}/cosh-ng/configuration.md`] = '# Configuration\n';
     files[`docs/user-guide/${locale}/tokenless/index.md`] = '# Tokenless\n';
-    files[`docs/user-guide/${locale}/aw/index.md`] = '# AW\n';
-    files[`docs/user-guide/${locale}/aw/installation.md`] = '# Install AW\n';
+    files[`docs/user-guide/${locale}/aw/index.md`] = awAnchorFixture('AW', awLegacyAnchors[locale].index);
+    files[`docs/user-guide/${locale}/aw/installation.md`] = awAnchorFixture('Install AW', awLegacyAnchors[locale].installation);
+    files[`docs/user-guide/${locale}/aw/cli-reference.md`] = '# AW CLI\n';
+    files[`docs/user-guide/${locale}/aw/capabilities.md`] = '# AW Capabilities\n';
     files[`docs/developer-guide/${locale}/index.md`] = '# Developer Guide\n';
     files[`docs/developer-guide/${locale}/aw/index.md`] = '# AW Integration\n';
     files[`docs/developer-guide/${locale}/aw/providers/index.md`] = '# Providers\n';
@@ -180,6 +230,16 @@ groups:
     assert.ok(quickstart.includes('[cosh-ng](/docs/user-guide/cosh-ng)'));
     const aw = await readFile(path.join(output, 'user-guide/aw/installation.md'), 'utf8');
     assert.match(aw, /slug: "\/user-guide\/aw\/installation"/);
+    assert.match(aw, /sidebar_position: 2\n/);
+    await assertRenderedAnchors(aw, awLegacyAnchors[locale].installation);
+    const awEntry = await readFile(path.join(output, 'user-guide/aw/index.md'), 'utf8');
+    assert.ok(awEntry.includes(`sidebar_label: ${JSON.stringify(locale === 'zh' ? '快速入门' : 'Quickstart')}`));
+    assert.match(awEntry, /sidebar_position: 1\n/);
+    await assertRenderedAnchors(awEntry, awLegacyAnchors[locale].index);
+    const awReference = await readFile(path.join(output, 'user-guide/aw/cli-reference.md'), 'utf8');
+    assert.match(awReference, /sidebar_position: 4\n/);
+    const awCapabilities = await readFile(path.join(output, 'user-guide/aw/capabilities.md'), 'utf8');
+    assert.match(awCapabilities, /sidebar_position: 9\n/);
     const contribute = await readFile(path.join(output, 'contribute/index.md'), 'utf8');
     assert.ok(contribute.includes('[AW](/docs/contribute/aw)'));
     assert.ok(contribute.includes('[CI](https://github.com/agentic-os-org/ANOLISA/blob/main/.github/workflows/ci.yaml)'));
@@ -245,7 +305,9 @@ test('migrated developer, SDK, and design routes redirect directly with locale a
     'developer-guide/aw/building': 'contribute/aw/building',
     'developer-guide/cosh-ng/testing': 'contribute/cosh-ng/testing',
     'developer-guide/ws-ckpt/packaging': 'contribute/ws-ckpt/packaging',
-    'developer-guide/aw/packages': 'user-guide/aw/packages',
+    'developer-guide/aw/packages': 'developer-guide/aw/reference/packages',
+    'user-guide/aw/packages': 'developer-guide/aw/reference/packages',
+    'user-guide/user-entrypoint/aw/packages': 'developer-guide/aw/reference/packages',
     'developer-guide/aw/tokenless': 'developer-guide/aw/providers/tokenless',
     'developer-guide/aw/sec-core': 'developer-guide/aw/providers/sec-core',
     'user-guide/tokenless/sdk': 'developer-guide/sdk/tokenless',

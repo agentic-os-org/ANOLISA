@@ -703,7 +703,23 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     """Handle ws-ckpt-rollback tool call."""
     target = (args.get("target") or "").strip()
     num_ancestors = args.get("num_ancestors")
-    preview = args.get("preview") is True
+    preview_arg = args.get("preview", False)
+    if preview_arg is None:
+        preview_arg = False
+    if isinstance(preview_arg, str):
+        # Tool callers serialize booleans too; an unrecognised spelling must
+        # not fall through to False, because False performs the rollback the
+        # caller asked only to preview.
+        normalized = preview_arg.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            preview_arg = True
+        elif normalized in ("false", "0", "no", "off", ""):
+            preview_arg = False
+        else:
+            return _err("'preview' must be a boolean")
+    if not isinstance(preview_arg, bool):
+        return _err("'preview' must be a boolean")
+    preview = preview_arg
 
     if target and num_ancestors is not None:
         return _err("'target' and 'num_ancestors' are mutually exclusive")

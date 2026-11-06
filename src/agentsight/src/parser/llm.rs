@@ -12,6 +12,22 @@
 
 use serde_json::Value;
 
+/// Recognize the Qoder chat endpoint without matching query-string lookalikes.
+pub(crate) fn is_qoder_path(path: &str) -> bool {
+    path.split('?')
+        .next()
+        .unwrap_or(path)
+        .ends_with("/algo/api/v2/service/pro/sse/agent_chat_generation")
+}
+
+/// Read the gateway's inner chunk only when an envelope marker is present.
+pub(crate) fn unwrap_qoder_envelope(value: &Value) -> Option<Value> {
+    if value.get("statusCode").is_none() && value.get("statusCodeValue").is_none() {
+        return None;
+    }
+    serde_json::from_str(value.get("body")?.as_str()?).ok()
+}
+
 /// Path suffixes of the DashScope/Bailian **native** protocol.
 ///
 /// Full form: `POST https://{WorkspaceId}.{region}.maas.aliyuncs.com
@@ -27,6 +43,14 @@ const DASHSCOPE_NATIVE_PATHS: [&str; 2] = [
 /// Whether the path belongs to the DashScope/Bailian native protocol.
 pub fn is_dashscope_native_path(path: &str) -> bool {
     DASHSCOPE_NATIVE_PATHS.iter().any(|p| path.contains(p))
+}
+
+/// Whether the path is a Responses API per-id operation rather than inference.
+///
+/// Retrieval returns the stored response object, including its original usage;
+/// consumers must not count that usage as a second call.
+pub fn is_responses_sub_endpoint(path: &str) -> bool {
+    path.contains("/v1/responses/")
 }
 
 /// Check if the path indicates an LLM API call.
@@ -45,20 +69,13 @@ pub fn is_llm_api_path(path: &str) -> bool {
         || (path.contains("/v1/messages")
             && !path.contains("/v1/messages/count_tokens")
             && !path.contains("/v1/messages/batches"))
-        // The Responses API's per-id sub-endpoints (GET retrieve,
-        // POST cancel, DELETE) share the /v1/responses prefix but are
-        // not inference calls: the retrieval response IS the stored
-        // response object, so admitting a poll re-records the create
-        // call's output and re-counts its usage tokens. Must stay in
-        // lockstep with OpenAIParser::matches_path so a retrieval
-        // neither creates a row (this gate) nor gets deep-parsed
-        // (that gate).
-        || (path.contains("/v1/responses") && !path.contains("/v1/responses/"))
+        || (path.contains("/v1/responses") && !is_responses_sub_endpoint(path))
         || path.contains("/chat/completions")
         || path.contains("/completions")
         || path.contains("/api/v1/copilot/generate_copilot")
         || is_gemini_generation_path(path)
         || is_dashscope_native_path(path)
+        || is_qoder_path(path)
 }
 
 /// Gemini's inference endpoints: `:generateContent` and
@@ -118,7 +135,12 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
                     .join("\n")
             })
             .filter(|s| !s.is_empty());
-        return Some((arr.clone(), system_text));
+        return Some((
+            arr.iter()
+                .filter_map(gemini_content_to_text_message)
+                .collect(),
+            system_text,
+        ));
     }
     if let Some(input) = body.get("input") {
         if let Some(arr) = input.as_array() {
@@ -196,6 +218,28 @@ pub fn extract_messages_view(body: &Value) -> Option<(Vec<Value>, Option<String>
         }
     }
     None
+}
+
+/// Convert Gemini text parts to the canonical message shape used by every
+/// downstream text reader. An empty content string keeps textless turns
+/// renderable by strict chat templates.
+fn gemini_content_to_text_message(content: &Value) -> Option<Value> {
+    let parts = content.get("parts").and_then(|p| p.as_array())?;
+    let text = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let role = match content.get("role").and_then(|r| r.as_str()) {
+        Some("model") => "assistant",
+        Some(role) => role,
+        None => "user",
+    };
+    Some(serde_json::json!({
+        "role": role,
+        "content": text,
+    }))
 }
 
 /// Normalize the tool definitions from a parsed request body.
@@ -634,13 +678,19 @@ mod tests {
     fn test_extract_messages_view_gemini_contents() {
         let body = serde_json::json!({
             "contents": [
-                {"role": "user", "parts": [{"text": "Hello"}]},
-                {"role": "model", "parts": [{"text": "Hi there"}]}
+                {"role": "user", "parts": [{"text": "Hello"}, {"text": "again"}]},
+                {"role": "model", "parts": [{"text": "Hi there"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "list_dir", "args": {}}}]}
             ],
             "systemInstruction": {"parts": [{"text": "Be concise"}]}
         });
         let (msgs, instructions) = extract_messages_view(&body).unwrap();
-        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "Hello\nagain");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "Hi there");
+        assert_eq!(msgs[2]["content"], "");
         assert_eq!(instructions.as_deref(), Some("Be concise"));
     }
 

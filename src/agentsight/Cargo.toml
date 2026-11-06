@@ -38,6 +38,7 @@ log = "0.4.22"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 memchr = "2"
+reqwest = "0.13"
 rig-core = "0.40.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -47,11 +48,12 @@ tempfile = "3"
 thiserror = "1.0.63"
 tokio = "1"
 tracing = "0.1"
+unicode-casefold = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [package]
 name = "agentsight"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 
 [features]
@@ -97,6 +99,7 @@ minijinja = "2"
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 ureq = "2.10"
 thiserror = { workspace = true }
+unicode-casefold = { workspace = true }
 uuid = { workspace = true }
 lru = "0.12.3"
 once_cell = "1.19.0"

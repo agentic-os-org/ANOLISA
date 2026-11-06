@@ -84,7 +84,14 @@ impl PostToolPipeline {
         // Grep without line prefixes can return CSV matches classified as
         // Tabular. Shape detection does not remove the need to retain every
         // match; other domain compressors may drop rows or rewrite source text.
-        let search_only = request.tool_name == "Grep";
+        // Compound commands have no per-command output boundaries. Protect the
+        // complete result when any segment searches, even a quiet condition.
+        let protect_search_output = request.tool_name == "Grep"
+            || (request.content_origin == ContentOrigin::CommandOutput
+                && request
+                    .command
+                    .as_deref()
+                    .is_some_and(crate::entry::is_search_command));
         // Data printed by a shell file read (`cat build.log`) compresses like
         // command output; a page printed that way is source the agent may edit,
         // so only HTML keeps it verbatim. Read tool results were excluded above.
@@ -93,38 +100,30 @@ impl PostToolPipeline {
             ContentOrigin::CommandOutput | ContentOrigin::FileRead
         );
         let diff_candidate = config.diff_compression_enabled
-            && !search_only
+            && !protect_search_output
             && content_type == ContentType::Diff
             && shell_output
             && request.capabilities.replace_with_text;
         let html_candidate = config.html_extraction_enabled
-            && !search_only
+            && !protect_search_output
             && content_type == ContentType::Html
             && request.content_origin != ContentOrigin::FileRead
             && request.capabilities.replace_with_text;
-        let json_candidate = !search_only
+        let json_candidate = !protect_search_output
             && (config.force_json
                 || content_type == ContentType::Json
                 || is_wrapped_structured_json(&request.content));
         let build_log_candidate =
-            !search_only && content_type == ContentType::BuildLog && shell_output;
-        let tabular_candidate = !search_only
+            !protect_search_output && content_type == ContentType::BuildLog && shell_output;
+        let tabular_candidate = !protect_search_output
             && content_type == ContentType::Tabular
             && request.capabilities.replace_with_text;
-        let path_list_candidate = (config.search_path_sharing_enabled
-            && content_type == ContentType::SearchResults
-            && matches!(
-                request.content_origin,
-                ContentOrigin::CommandOutput | ContentOrigin::ApiResponse
-            )
-            && request.capabilities.replace_with_text)
-            .then(|| SearchResultsCompressor.compress_paths(&request.content))
-            .flatten();
         let search_candidate = config.search_path_sharing_enabled
-            && (request.content_origin == ContentOrigin::ApiResponse
-                || (request.content_origin == ContentOrigin::CommandOutput
-                    && path_list_candidate.is_some()))
-            && content_type == ContentType::SearchResults
+            && (protect_search_output
+                || (content_type == ContentType::SearchResults
+                    && (request.content_origin == ContentOrigin::ApiResponse
+                        || (request.content_origin == ContentOrigin::CommandOutput
+                            && SearchResultsCompressor.is_path_list(&request.content)))))
             && request.capabilities.replace_with_text;
         if !diff_candidate
             && !html_candidate
@@ -285,8 +284,7 @@ impl PostToolPipeline {
                 unrecoverable_truncations: None,
             }
         } else if search_candidate {
-            let output =
-                path_list_candidate.or_else(|| SearchResultsCompressor.compress(&request.content));
+            let output = SearchResultsCompressor.compress(&request.content);
             DomainCandidate {
                 operations: if output.is_some() {
                     vec![AppliedOperation::SearchPathSharing]
@@ -555,7 +553,14 @@ mod tests {
                     let run = PostToolPipeline::run(&req, &config, Some(&store));
                     assert_eq!(run.response.content_type, Some(content_type));
                     assert_eq!(run.response.output, input);
-                    assert_eq!(run.response.disposition, Disposition::Passthrough);
+                    assert_eq!(
+                        run.response.disposition,
+                        if enabled {
+                            Disposition::NoSavings
+                        } else {
+                            Disposition::Passthrough
+                        }
+                    );
                     assert!(run.operations.is_empty());
                     assert!(run.response.applied_operations.is_empty());
                     assert!(run.response.stash_keys.is_empty());
@@ -573,6 +578,65 @@ mod tests {
     }
 
     #[test]
+    fn shell_search_uses_only_the_search_compressor_for_every_format() {
+        for command in [
+            "grep -n match file",
+            "cd /testbed && env LANG=C timeout 30 rg match src | sort",
+        ] {
+            for input in [
+                search_input(),
+                path_list_input(),
+                tabular_input(','),
+                record_array(100),
+                build_log(),
+                "41\n".into(),
+                String::new(),
+                "1:single-file match\n".repeat(30),
+            ] {
+                let mut req = request(&input);
+                req.tool_name = "Bash".into();
+                req.command = Some(command.into());
+                req.content_origin = ContentOrigin::CommandOutput;
+                for enabled in [false, true] {
+                    for force_json in [false, true] {
+                        let mut config = build_log_config();
+                        config.search_path_sharing_enabled = enabled;
+                        config.force_json = force_json;
+                        let concrete = Arc::new(CountingStore::default());
+                        let store: Arc<dyn StashStore> = concrete.clone();
+                        let run = PostToolPipeline::run(&req, &config, Some(&store));
+                        let candidate = enabled
+                            .then(|| SearchResultsCompressor.compress(&input))
+                            .flatten();
+                        assert_eq!(
+                            run.response.output,
+                            candidate.clone().unwrap_or_else(|| input.clone()),
+                            "{command}"
+                        );
+                        assert_eq!(
+                            run.response.disposition,
+                            if candidate.is_some() {
+                                Disposition::Applied
+                            } else if enabled {
+                                Disposition::NoSavings
+                            } else {
+                                Disposition::Passthrough
+                            }
+                        );
+                        assert!(
+                            run.response
+                                .applied_operations
+                                .iter()
+                                .all(|op| *op == AppliedOperation::SearchPathSharing)
+                        );
+                        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn native_grep_path_sharing_takes_precedence_over_force_json() {
         let mut req = request(&search_input());
         req.tool_name = "Grep".into();
@@ -584,6 +648,54 @@ mod tests {
             [AppliedOperation::SearchPathSharing]
         );
         assert_eq!(run.response.recoverability, Recoverability::Lossless);
+    }
+
+    #[test]
+    fn compound_search_preserves_output_without_segment_boundaries() {
+        for (command, input) in [
+            (
+                "grep -n foo src/a.py && cargo build",
+                format!("1:foo\n{}", build_log()),
+            ),
+            (
+                "grep -c '' *.log; cargo test",
+                format!("build.log:41\n{}", build_log()),
+            ),
+            ("rg -l TODO src | xargs cat", record_array(100)),
+            (
+                "cargo build 2>&1 | grep -E 'error|warning'",
+                "warning: diagnostic from the build\n".repeat(40),
+            ),
+            ("grep -q needle Cargo.toml && cargo build 2>&1", build_log()),
+            ("rg --quiet needle Cargo.toml; cargo test", build_log()),
+        ] {
+            let mut req = request(&input);
+            req.command = Some(command.into());
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(run.response.output, input, "{command}");
+            assert_eq!(run.response.disposition, Disposition::NoSavings);
+            assert!(run.response.applied_operations.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn command_search_protection_requires_command_output() {
+        let input = record_array(100);
+        for origin in [ContentOrigin::ApiResponse, ContentOrigin::FileRead] {
+            let mut req = request(&input);
+            req.tool_name = "Custom".into();
+            req.content_origin = origin;
+            let store: Arc<dyn StashStore> = Arc::new(CountingStore::default());
+            let expected = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(expected.response.disposition, Disposition::Applied);
+            req.command = Some("grep match file".into());
+            let actual = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+            assert_eq!(actual.response.output, expected.response.output);
+            assert_eq!(actual.response.disposition, expected.response.disposition);
+        }
     }
 
     #[test]
@@ -632,12 +744,28 @@ mod tests {
             "x.rs:1:a\nx.rs:2:b\nx.rs:3:c".to_owned(),
             format!("{}--\n", search_input()),
         ] {
-            let mut req = request(&input);
-            req.content_origin = ContentOrigin::ApiResponse;
-            let run = PostToolPipeline::run(&req, &build_log_config(), None);
-            assert_eq!(run.response.output, input);
-            assert_eq!(run.response.disposition, Disposition::NoSavings);
-            assert!(run.response.applied_operations.is_empty());
+            for (tool, origin, command) in [
+                ("Custom", ContentOrigin::ApiResponse, None),
+                ("Grep", ContentOrigin::ApiResponse, None),
+                (
+                    "Bash",
+                    ContentOrigin::CommandOutput,
+                    Some("grep -n match file"),
+                ),
+            ] {
+                let mut req = request(&input);
+                req.tool_name = tool.into();
+                req.content_origin = origin;
+                req.command = command.map(str::to_owned);
+                let store: Arc<dyn StashStore> = Arc::new(CountingStore::default());
+                let run = PostToolPipeline::run(&req, &build_log_config(), Some(&store));
+                assert_eq!(run.response.output, input);
+                assert_eq!(run.response.disposition, Disposition::NoSavings);
+                assert!(run.response.applied_operations.is_empty());
+                assert_eq!(run.stash_writes, Some(0));
+                assert_eq!(run.stash_errors, Some(0));
+                assert_eq!(run.stash_size, Some(0));
+            }
         }
     }
 

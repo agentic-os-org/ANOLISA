@@ -35,6 +35,7 @@ pub(super) fn submit_delete_confirmation(
     adapter: &AdapterInstance,
     auth: &mut RuntimeAuthState,
     provider_idx: usize,
+    auto_use_allowed: bool,
 ) -> Result<DeleteConfirmationOutcome, String> {
     if auth.selected_provider != DELETE_OPTION_INDEX {
         auth.phase = AuthPhase::ProviderAction { provider_idx };
@@ -52,6 +53,10 @@ pub(super) fn submit_delete_confirmation(
         return Err("auth registry requires cosh-core backend".to_string());
     };
     let core_state = load_core_auth_state(cosh_core)?;
+    if let Some(trial) = core_state.ecs_trial.as_ref() {
+        let auto_use = core_state.trial_auto_use.unwrap_or(true) && auto_use_allowed;
+        auth.sysom.refresh_trial(trial, auto_use);
+    }
     auth.existing_providers = core_state.existing_providers;
     // Re-derive the SysOM slot from the reloaded list: deleting the promoted RAM-role
     // provider must bring the shortcut back rather than relabel its replacement.
@@ -59,6 +64,7 @@ pub(super) fn submit_delete_confirmation(
     auth.phase = AuthPhase::ManagingProviders;
     auth.selected_provider = 0;
     let needs_reselection = existing.is_active
+        && !auth.sysom.trial_active()
         && !auth
             .existing_providers
             .iter()

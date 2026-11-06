@@ -2,6 +2,8 @@
 import { realpathSync } from "node:fs";
 import { configuration, installSessionBridge, publishReady } from "./bridge.mjs";
 import { Scope } from "./scope.mjs";
+import { randomUUID } from "node:crypto";
+import { inputBoundary } from "./submission.mjs";
 
 async function bounded(promise, milliseconds) {
   let timer;
@@ -28,12 +30,16 @@ export async function runWorker(app, sdk, core, args) {
     if (record.closing) return await record.closing;
     // Fence callbacks and model transport before abort can yield to the SDK.
     record.scope.failed = true;
+    record.inputAbort?.abort();
     record.closing = (async () => {
       try {
         try {
-          await bounded(session.abort(), 12000);
-          record.bridge.dispose();
-          session.dispose();
+          await bounded((async () => {
+            await record.abort();
+            await record.pending?.catch(() => {});
+            record.bridge.dispose();
+            await record.dispose();
+          })(), 12000);
         } finally {
           await record.scope.close();
         }
@@ -63,33 +69,77 @@ export async function runWorker(app, sdk, core, args) {
       const nativeStream = session.agent.streamFunction;
       if (typeof nativeStream !== "function") throw new Error("Pi requires its public model stream function");
       const bridge = installSessionBridge(session, scope);
+      scope.onFailure = () => session.agent.abort();
       const stream = bridge.model(nativeStream);
       // The SDK may schedule a final turn after abort; gate before any model transport.
       Object.defineProperty(session.agent, "streamFunction", {
         configurable: false, enumerable: true,
-        value: (...arguments_) => { scope.checkExecution(); return stream(...arguments_); }, writable: false,
+        value: (...arguments_) => {
+          scope.checkExecution();
+          if (boundary) arguments_[1] = boundary.model(arguments_[1], arguments_[2]);
+          return stream(...arguments_);
+        }, writable: false,
       });
-      const abort = session.abort.bind(session);
-      Object.defineProperty(session, "abort", { value: (...arguments_) => {
-        // Public abort has the same final-turn hazard as managed close.
+      const checked = configuration().hooks.some(hook => hook.event === "input.submit");
+      const boundary = checked ? inputBoundary(session) : null;
+      const record = { scope, bridge, closing: null, pending: null, inputAbort: null,
+        abort: session.abort.bind(session), dispose: session.dispose.bind(session) };
+      if (checked) {
+        const agentAbort = session.agent.abort.bind(session.agent);
+        Object.defineProperty(session.agent, "abort", { value: () => {
+          scope.failed = true;
+          record.inputAbort?.abort();
+          return agentAbort();
+        }, configurable: false, writable: false });
+      }
+      Object.defineProperty(session, "abort", { value: () => {
         scope.failed = true;
-        return abort(...arguments_);
+        record.inputAbort?.abort();
+        // Cancellation closes the task, including an input event whose reply was lost.
+        return checked ? closeSession(session) : record.abort();
       }, configurable: false, writable: false });
+      if (checked) {
+        Object.defineProperty(session, "dispose", { value: () => closeSession(session),
+          configurable: false, writable: false });
+      }
       const prompt = session.prompt.bind(session);
-      let prompting = false;
-      Object.defineProperty(session, "prompt", { value: async (...arguments_) => {
-        scope.check();
-        if (prompting) throw new Error("One AW Pi session permits one active prompt");
-        scope.begin();
-        prompting = true;
-        try { const value = await prompt(...arguments_); scope.checkExecution(); return value; }
-        finally {
-          try { await bridge.drain(); }
-          catch (error) { scope.failed = true; session.agent.abort(); throw error; }
-          finally { prompting = false; }
-        }
+      Object.defineProperty(session, "prompt", { value: (...arguments_) => {
+        const execute = async () => {
+          scope.check();
+          if (record.pending) throw new Error("One AW Pi session permits one active prompt");
+          boundary?.validate(...arguments_);
+          scope.begin();
+          record.inputAbort = new AbortController();
+          try {
+            if (checked) {
+              try {
+                await bridge.submit(arguments_[0], randomUUID(), record.inputAbort.signal);
+                scope.checkExecution();
+                boundary.validate(...arguments_);
+              } catch (error) {
+                arguments_[1]?.preflightResult?.(false);
+                throw error;
+              }
+            }
+            scope.checkExecution();
+            const value = boundary
+              ? await boundary.run(arguments_[0], () => prompt(...arguments_))
+              : await prompt(...arguments_);
+            scope.checkExecution();
+            return value;
+          } finally {
+            try { await bridge.drain(); }
+            catch (error) { scope.failed = true; session.agent.abort(); throw error; }
+            finally { record.inputAbort = null; }
+          }
+        };
+        // Keep rejected concurrent calls from clearing the owner's pending promise.
+        if (record.pending) return Promise.reject(new Error("One AW Pi session permits one active prompt"));
+        const pending = execute();
+        record.pending = pending;
+        return pending.finally(() => { if (record.pending === pending) record.pending = null; });
       }, configurable: false, writable: false });
-      active.set(session, { scope, bridge, closing: null });
+      active.set(session, record);
       return { ...result, close: () => closeSession(session) };
     } catch (error) {
       scope.failed = true;

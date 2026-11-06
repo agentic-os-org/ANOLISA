@@ -87,7 +87,7 @@ class NativeTests(GateFixture):
                 )
 
     def test_native_secret_gate_rejects_unmerged_candidates_and_workflow_refs(self) -> None:
-        workflow = (AW.parents[1] / ".github/workflows/aw-preview.yml").read_text()
+        workflow = (AW.parents[1] / ".github/workflows/aw-integration.yml").read_text()
         step = workflow.split(
             "      - name: Require a trusted candidate before executing repository code\n", 1
         )[1].split("      - name: Validate native coverage", 1)[0]
@@ -293,6 +293,11 @@ class NativeTests(GateFixture):
         for names in ([], ["allow", "allow"]):
             case["results"][0]["cases"]["names"] = names
             with self.assertRaises(ValueError):
+                validate_case(case)
+        for result in (None, {"file": ["report.json"]}):
+            case = copy.deepcopy(self.manifest["agents"]["pi"]["cases"][0])
+            case["results"] = [result]
+            with self.subTest(result=result), self.assertRaisesRegex(ValueError, "file"):
                 validate_case(case)
 
     def test_custom_suites_reject_missing_empty_or_malformed_results(self) -> None:
@@ -509,7 +514,6 @@ class NativeTests(GateFixture):
             "aw-provider-tokenless",
             "aw-provider-sec-core",
             "tokenless",
-            "rtk",
             "policy",
             "agent-sec-cli",
             "agent-sec-daemon",

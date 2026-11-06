@@ -132,6 +132,7 @@ export class McpStdioClient {
   private pending: Map<number, PendingCall> = new Map();
   private buffer = "";
   private initialized = false;
+  private disposed = false;
   private respawnAttempts = 0;
   private giveUp = false;
   private startingPromise: Promise<void> | null = null;
@@ -148,6 +149,9 @@ export class McpStdioClient {
 
   /** Lazy-start: spawn + initialize on first use. */
   private async ensureStarted(): Promise<void> {
+    if (this.disposed) {
+      throw new Error("agent-memory client is disposed");
+    }
     if (this.giveUp) {
       throw new Error(
         `agent-memory process repeatedly crashed; gave up after ${MAX_RESPAWN_ATTEMPTS} respawn attempts`,
@@ -519,7 +523,15 @@ export class McpStdioClient {
 
   private deliberateStop = false;
 
-  /** Gracefully shut down the child process. */
+  /** Permanently retire this plugin instance and shut down its worker. */
+  async dispose(): Promise<void> {
+    // In-flight hooks can continue after shutdown rejects or completes an RPC.
+    // Retire before awaiting exit so their next query cannot restart this client.
+    this.disposed = true;
+    await this.stop();
+  }
+
+  /** Gracefully shut down the worker, allowing a later startup retry. */
   async stop(): Promise<void> {
     const child = this.proc;
     if (!child) {

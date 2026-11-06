@@ -92,6 +92,7 @@ impl RuntimeDispatcher {
         let batch = snapshot.batch_since(state.control.event_cursor());
         render_inline_guidance_from_batch(snapshot, &batch, adapter, shell_label, state, output)?;
         crate::auth::ecs_poll::poll(adapter, state, output)?;
+        crate::auth::trial::poll(adapter, state, output)?;
         Ok(vec![RuntimeAction::AdvanceEventCursor(batch.to)])
     }
 
@@ -165,6 +166,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         output,
         adapter.name(),
     )?;
+    crate::auth::trial::consume(action_events, state, output)?;
     // Task forms reuse Question/TextQuestion captures. Route them first and
     // reserve their answer events so QuestionConsumer never emits a false
     // "No pending question" notice for Task-owned input.

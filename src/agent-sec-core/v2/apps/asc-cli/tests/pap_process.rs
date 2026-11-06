@@ -277,6 +277,110 @@ async fn real_cli_processes_execute_the_complete_frozen_pap_crud_scenario() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cedar_cli_create_update_query_and_rejection_use_the_existing_pap_entrypoints() {
+    async fn call(
+        socket: &Path,
+        directory: &Path,
+        method: &str,
+        params: Value,
+    ) -> std::process::Output {
+        let args = common::args_for(&json!({"method":method,"params":params}), directory, socket);
+        tokio::task::spawn_blocking(move || common::run(&args))
+            .await
+            .unwrap()
+    }
+
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let (shutdown, task, _) = start(&socket, PrincipalRole::PolicyAdministrator).await;
+    let mut source = json!({
+        "language":"cedar", "content":{
+            "schema":{"schemaId":"seccore.system","revision":1},
+            "text":"// Original text.\nforbid(principal, action == SecCore::Action::\"file.write\", resource);"
+        }
+    });
+    let output = call(
+        &socket,
+        &directory.0,
+        "policy.templates.create",
+        json!({"policyName":"cedar","template":source}),
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let created: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(created["template"], source);
+    assert_eq!(created["revision"], 1);
+    source["content"]["text"] =
+        json!("forbid(principal, action == SecCore::Action::\"file.read\", resource);");
+    let output = call(
+        &socket,
+        &directory.0,
+        "policy.templates.update",
+        json!({"policyId":created["policyId"],"policyName":"cedar","template":source}),
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let updated: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(updated["template"], source);
+    assert_eq!(updated["revision"], 2);
+
+    for (method, mut params) in [
+        (
+            "policy.templates.create",
+            json!({"policyName":"invalid","template":source}),
+        ),
+        (
+            "policy.templates.update",
+            json!({"policyId":created["policyId"],"policyName":"invalid","template":source}),
+        ),
+    ] {
+        params["template"]["content"]["text"] = json!("not a Cedar policy");
+        let output = call(&socket, &directory.0, method, params).await;
+        assert_eq!(output.status.code(), Some(1));
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_argument");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("syntax") && message.contains("bytes"),
+            "{message}"
+        );
+    }
+    let output = call(
+        &socket,
+        &directory.0,
+        "policy.templates.get",
+        json!({"id":created["policyId"],"revision":2}),
+    )
+    .await;
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        updated
+    );
+    let output = call(
+        &socket,
+        &directory.0,
+        "policy.templates.list",
+        json!({"limit":100,"offset":0}),
+    )
+    .await;
+    assert!(output.status.success());
+    let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(listed["items"], json!([updated]));
+    assert_eq!(listed["total"], 1);
+    shutdown.request();
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_cli_processes_code_scan_through_the_daemon() {
     let directory = common::Directory::new();
     let socket = directory.0.join("daemon.sock");

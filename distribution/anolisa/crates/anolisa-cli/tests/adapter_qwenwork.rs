@@ -65,7 +65,7 @@ impl Fixture {
         );
         f.write_source(".tokenless-qwenwork-owned.json", "{}");
         std::fs::create_dir_all(&f.bin).unwrap();
-        for name in ["bash", "tokenless", "rtk"] {
+        for name in ["bash", "tokenless"] {
             f.program(name, "#!/bin/sh\nexit 0\n");
         }
         f.program("python3", "#!/bin/sh\nprintf '3.9\\n'\nexit 0\n");
@@ -74,7 +74,7 @@ impl Fixture {
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(
             manifest,
-            include_str!("../../../../../src/tokenless/.anolisa/component.toml.in")
+            include_str!("../../../../../src/tokenless/packaging/anolisa/component.toml.in")
                 .replace("@VERSION@", "0.1.0"),
         )
         .unwrap();
@@ -245,6 +245,7 @@ fn lifecycle_dry_run_upgrade_and_source_free_disable() {
     );
     let enabled = f.ok(&[], &["enable", "tokenless", "qwenwork"]);
     assert!(enabled.to_string().contains("Restart QwenWorkCN"));
+    assert!(!enabled.to_string().contains("RTK not found"), "{enabled}");
     assert!(f.target().join("hooks/shared/hook_utils.py").exists());
     assert!(!f.target().join("scripts").exists());
     assert!(!f.target().join(".tokenless-qwenwork-owned.json").exists());

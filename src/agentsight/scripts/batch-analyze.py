@@ -164,15 +164,29 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
         entries.close()
 
 
-def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
-    """Keep only output steps and the call/usage state needed to correlate them."""
+def _nonempty_str(value: object) -> str:
+    """Return the value when it is a nonempty string, else empty."""
+    return value if isinstance(value, str) and value else ""
 
-    # Extract session_id
-    session_id = filepath.stem
-    agent_name = "unknown"
+
+def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
+
+    # Identity precedence mirrors the local converter: explicit runtime-config
+    # metadata wins even when it arrives late, message-level sessionId/version
+    # (Claude) come next, and the filename/path only backfills when the
+    # transcript carries no metadata at all.
+    session_id = ""
+    agent_name = ""
+    agent_version = ""
+    message_session_id = ""
+    message_version = ""
     model_name = None
+    # Only known Qoder sources use partial accounting. Unidentified exports
+    # retain the existing snapshot convention for backward compatibility.
+    partial_usage = ".qoder" in filepath.parts or ".qoderwork" in filepath.parts
 
     steps = []
+    unmatched_tool_results = []
     tool_call_steps = {}
     tool_call_aliases = {}
     usage_records = []
@@ -181,10 +195,28 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
     for entry in entries:
         entry_type = entry.get("type", "")
 
-        # Detect agent name from runtime-config
+        # Detect agent identity from runtime-config
         if entry_type == "runtime-config":
-            model_name = entry.get("model")
+            if model_name is None:
+                model_name = entry.get("model")
+            if not session_id:
+                session_id = _nonempty_str(entry.get("sessionId"))
+            if not agent_version:
+                agent_version = _nonempty_str(entry.get("version"))
+            entrypoint = entry.get("entrypoint")
+            if not agent_name:
+                agent_name = _nonempty_str(entrypoint)
+            if entrypoint in ("qoder", "qoderwork", "claude-code"):
+                partial_usage = entrypoint != "claude-code"
             continue
+
+        # Message-level identity (Claude transcripts tag user/assistant
+        # records with the real session and CLI version).
+        if entry_type in ("user", "assistant"):
+            if not message_session_id:
+                message_session_id = _nonempty_str(entry.get("sessionId"))
+            if not message_version:
+                message_version = _nonempty_str(entry.get("version"))
 
         # Detect mode/config entries (skip)
         if entry_type in ("mode", "permission-mode", "file-history-snapshot", "summary"):
@@ -208,6 +240,7 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             unmatched_results = []
             for result in tool_results:
                 call_id = result.get("source_call_id")
+                owner_id = call_id
                 owner = tool_call_steps.get(call_id) if isinstance(call_id, str) else None
                 if owner is None and isinstance(call_id, str):
                     case_key, (kind, normalized) = _call_id_keys(call_id)
@@ -217,14 +250,18 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
                     )
                     # An exact ID wins; an ambiguous echo must not steal a sibling's result.
                     if len(matches) == 1:
-                        owner = tool_call_steps[next(iter(matches))]
+                        owner_id = next(iter(matches))
+                        owner = tool_call_steps[owner_id]
                 if owner is not None:
                     owner.setdefault("observation", {"results": []})["results"].append(result)
+                    if isinstance(timestamp, str) and timestamp:
+                        for call in owner.get("tool_calls", []):
+                            if call.get("tool_call_id") == owner_id:
+                                call.setdefault("extra", {})["result_timestamp"] = timestamp
                 else:
                     unmatched_results.append(result)
 
-            # A mixed reply still contains a genuine user turn. Pure orphan
-            # results have no issuing step and must not become human input.
+            # Preserve the existing user step for a mixed reply.
             text = extract_text(content, include_tool_results=False)
             if text.strip():
                 step_id += 1
@@ -237,6 +274,12 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
                 if unmatched_results:
                     step["observation"] = {"results": unmatched_results}
                 steps.append(step)
+            elif unmatched_results:
+                # Without a real turn to attach to, retain evidence in metadata.
+                # A synthetic step would change replay costs and timing windows.
+                unmatched_tool_results.append(
+                    {"timestamp": timestamp, "results": unmatched_results}
+                )
 
         elif role == "assistant" or entry_type == "assistant":
             text = extract_text(content)
@@ -246,7 +289,10 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             # Thinking is part of the turn even when the record carries no
             # text or tool call: Claude Code can stream it in its own record,
             # and dropping the step also dropped the reasoning_content.
-            if not text.strip() and not tool_calls and not thinking:
+            # A measured empty response must survive as well: its usage can
+            # advance independently of visible content.
+            metrics = usage_to_metrics(msg.get("usage"))
+            if not text.strip() and not tool_calls and not thinking and not metrics:
                 continue
 
             step_id += 1
@@ -272,11 +318,9 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             # message into several assistant records that repeat (or
             # cumulatively advance) the same usage, so counting each record
             # doubles the cost input.
-            usage = msg.get("usage")
-            metrics = usage_to_metrics(usage)
             if metrics:
                 message_id = msg.get("id")
-                if not isinstance(message_id, str) or not message_id:
+                if partial_usage or not isinstance(message_id, str) or not message_id:
                     message_id = None
                 usage_records.append((step, message_id, metrics))
 
@@ -294,26 +338,36 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             continue
         step["metrics"] = metrics
 
-    if not steps:
+    if not steps and not unmatched_tool_results:
         return None
 
-    # Detect agent name from path
-    path_str = str(filepath)
-    if ".claude" in path_str:
-        agent_name = "claude-code"
-    elif ".qoder" in path_str:
-        agent_name = "qoder"
+    # Explicit runtime metadata retains precedence even when it arrives late.
+    if not session_id:
+        session_id = message_session_id
+    if not agent_version:
+        agent_version = message_version
 
-    return {
+    # Detect agent name from path when the transcript names none.
+    path_str = str(filepath)
+    if not agent_name:
+        if ".claude" in path_str:
+            agent_name = "claude-code"
+        elif ".qoder" in path_str:
+            agent_name = "qoder"
+
+    trajectory = {
         "schema_version": "ATIF-v1.7",
-        "session_id": session_id,
+        "session_id": session_id or filepath.stem,
         "agent": {
-            "name": agent_name,
-            "version": "",
+            "name": agent_name or "unknown",
+            "version": agent_version,
             "model_name": model_name,
         },
         "steps": steps,
     }
+    if unmatched_tool_results:
+        trajectory["extra"] = {"unmatched_tool_results": unmatched_tool_results}
+    return trajectory
 
 
 # ─── File discovery ───────────────────────────────────────────────────────────
@@ -533,7 +587,7 @@ def main():
         "--limit",
         type=int,
         default=10,
-        help="Max number of files to analyze (default: 10)",
+        help="Max number of files to analyze (non-negative; default: 10)",
     )
     parser.add_argument(
         "--min-steps",
@@ -552,6 +606,8 @@ def main():
         help="Compute local perf/cost statistics without LLM requests or credentials",
     )
     args = parser.parse_args()
+    if args.limit < 0:
+        parser.error("--limit must be non-negative")
     if args.stats_only and args.dim == "accuracy":
         parser.error("--stats-only supports perf and cost; accuracy requires LLM analysis")
 

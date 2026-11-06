@@ -826,6 +826,7 @@ pub struct FakeInstaller {
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
     package_appears_under_lock_path: Option<PathBuf>,
+    core_appears_under_lock: Option<(String, PathBuf)>,
     /// Lock path after which rpm tooling (and the external RPM) exists: every
     /// query fails with `CommandMissing` until the install lock is held, then
     /// behaves as if the package was installed while tooling was appearing.
@@ -858,6 +859,7 @@ impl FakeInstaller {
             lock_probe: None,
             lock_was_held: Cell::new(false),
             package_appears_under_lock_path: None,
+            core_appears_under_lock: None,
             tooling_appears_under_lock_path: None,
             rpmdb_appears_under_lock: None,
             block_state_save: None,
@@ -891,6 +893,10 @@ impl FakeInstaller {
     }
     pub fn package_appears_under_lock(mut self, path: PathBuf) -> Self {
         self.package_appears_under_lock_path = Some(path);
+        self
+    }
+    pub fn core_appears_under_lock(mut self, package: &str, path: PathBuf) -> Self {
+        self.core_appears_under_lock = Some((package.to_string(), path));
         self
     }
     /// Simulate a host without rpm tooling at planning time that gains both
@@ -1001,6 +1007,12 @@ impl PackageQuery for FakeInstaller {
     fn what_provides_installed(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
         if let Some(err) = self.tooling_still_missing() {
             return Err(err);
+        }
+        if let Some((core, path)) = &self.core_appears_under_lock
+            && capability == format!("anolisa-component-core({})", self.package)
+            && matches!(InstallLock::acquire(path), Err(LockError::Held { .. }))
+        {
+            return Ok(vec![core.clone()]);
         }
         if capability == self.component_capability() && self.installed.borrow().is_some() {
             Ok(vec![self.package.clone()])

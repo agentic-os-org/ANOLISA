@@ -34,10 +34,18 @@ pub(crate) fn receipt(snapshot: &BindingStateSnapshot) -> BindingIntentReceipt {
 struct Assignment {
     selector: ScopeSelector,
     policy_snapshots: Vec<PreparedPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_uid: Option<u32>,
+    // Stored in the existing assignment envelope so old file rows and schema stay readable.
+    // Missing values derive responsibility from pinned policies, never from live policy state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution_pending: Option<bool>,
 }
 pub(crate) struct ScopeRow {
     pub scope: PreparedScope,
     pub pin: Option<ProcessIdentity>,
+    pub execution_pending: bool,
+    pub discovery_stopped: bool,
 }
 
 pub(crate) fn read_scope(
@@ -58,9 +66,18 @@ pub(crate) fn read_scope(
             scope_id: key.clone(),
             selector: assignment.selector,
             policy_snapshots: assignment.policy_snapshots,
+            owner_uid: assignment.owner_uid,
             status,
         };
         scope.validate().map_err(|_| StoreError::Corrupt)?;
+        let execution_pending = assignment
+            .execution_pending
+            .unwrap_or_else(|| scope.uses_credentials());
+        if (execution_pending && !scope.uses_credentials())
+            || (!execution_pending && scope.uses_credentials() && status == ScopeStatus::Active)
+        {
+            return Err(StoreError::Corrupt.into());
+        }
         let pin: Option<ProcessIdentity> = pin.map(|p| decode(&p)).transpose()?;
         if let Some(pin) = &pin {
             asc_policy_types::binding::BindingScope {
@@ -77,7 +94,12 @@ pub(crate) fn read_scope(
         if stopped && status != ScopeStatus::Deleting {
             return Err(StoreError::Corrupt.into());
         }
-        Ok(ScopeRow { scope, pin })
+        Ok(ScopeRow {
+            scope,
+            pin,
+            execution_pending,
+            discovery_stopped: stopped,
+        })
     })
     .transpose()
 }
@@ -89,6 +111,8 @@ pub(crate) fn insert_scope(
     let assignment = Assignment {
         selector: scope.selector.clone(),
         policy_snapshots: scope.policy_snapshots.clone(),
+        owner_uid: scope.owner_uid,
+        execution_pending: scope.uses_credentials().then_some(true),
     };
     tx.execute(
         "INSERT INTO scopes(scope_id,assignment_json,phase) VALUES (?1,?2,'ACTIVE')",
@@ -97,10 +121,39 @@ pub(crate) fn insert_scope(
     Ok(())
 }
 
+pub(crate) fn confirm_scope_execution(
+    tx: &Transaction<'_>,
+    key: &ResourceId,
+) -> Result<(), RepositoryError> {
+    let Some(scope) = read_scope(tx, key)? else {
+        return Ok(());
+    };
+    if scope.scope.status != ScopeStatus::Deleting
+        || !scope.discovery_stopped
+        || !binding_ids(tx, key)?.is_empty()
+    {
+        return Err(PapError::Conflict.into());
+    }
+    let assignment = Assignment {
+        selector: scope.scope.selector,
+        policy_snapshots: scope.scope.policy_snapshots,
+        owner_uid: scope.scope.owner_uid,
+        execution_pending: Some(false),
+    };
+    tx.execute(
+        "UPDATE scopes SET assignment_json=?2 WHERE scope_id=?1",
+        params![key.as_str(), encode(&assignment)?],
+    )?;
+    finalize_scope(tx, key)
+}
+
 pub(crate) fn finalize_scope(
     tx: &Transaction<'_>,
     key: &ResourceId,
 ) -> Result<(), RepositoryError> {
+    if read_scope(tx, key)?.is_some_and(|scope| scope.execution_pending) {
+        return Ok(());
+    }
     tx.execute(
         "DELETE FROM scopes WHERE scope_id=?1 AND phase='DELETING'
          AND discovery_stopped=1 AND NOT EXISTS (SELECT 1 FROM bindings WHERE scope_id=?1)",

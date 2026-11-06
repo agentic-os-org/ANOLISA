@@ -14,6 +14,8 @@ use std::{
 pub(super) struct State {
     pub(super) ledger: Option<Ledger>,
     pub(super) legacy_used: bool,
+    pub(super) submissions: Option<super::submissions::Ledger>,
+    pub(super) legacy_submissions: bool,
 }
 
 #[derive(Default)]
@@ -135,7 +137,6 @@ impl Ledger {
 
 impl Runtime {
     fn invocation_ledger(&self, id: &str) -> Result<Arc<Mutex<State>>> {
-        self.check_scope_owner(id)?;
         let instances = self
             .instances
             .lock()
@@ -149,6 +150,7 @@ impl Runtime {
     }
 
     pub(super) fn enable_invocations(&self, id: &str) -> Result<Value> {
+        self.check_scope_owner(id)?;
         let state = self.invocation_ledger(id)?;
         let mut state = state.lock().map_err(|_| rejected("state_poisoned"))?;
         if state.ledger.is_some() {
@@ -180,6 +182,7 @@ impl Runtime {
         {
             return Err(rejected("invocation_input_invalid"));
         }
+        self.check_scope_owner(id)?;
         let ledger = self.invocation_ledger(id)?;
         let mut ledger = ledger.lock().map_err(|_| rejected("state_poisoned"))?;
         let ledger = ledger
@@ -211,6 +214,7 @@ impl Runtime {
         call: &str,
         deadline: Instant,
     ) -> Result<Value> {
+        self.check_scope_cleanup(id)?;
         let ledger = self.invocation_ledger(id)?;
         let (hooks, opening) = {
             let instances = self

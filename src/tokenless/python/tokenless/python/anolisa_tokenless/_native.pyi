@@ -67,15 +67,6 @@ class TokenlessRuntime:
         session_id: str | None = None,
         tool_use_id: str | None = None,
     ) -> str: ...
-    def _pre_tool_json(
-        self,
-        request_json: str,
-        rtk_path: str | os.PathLike[str],
-        *,
-        agent_id: str = "python",
-        session_id: str | None = None,
-        tool_use_id: str | None = None,
-    ) -> str: ...
     def _post_tool_json(
         self,
         request_json: str,

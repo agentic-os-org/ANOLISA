@@ -176,7 +176,7 @@ impl<T, R> AgentSightClient<T, R> {
             || body.root_pid <= 0
             || body.process_start_time == 0
             || body.policy_mode != "enforce"
-            || body.policy_dsl.is_empty()
+            || !body.valid_policy()
             || body.session_id.is_some()
             // New requests leave unknown Agent attribution empty. Existing
             // prepared requests retain their original attribution and bytes.
@@ -391,7 +391,7 @@ impl<T: AgentSightTransport, R: ProcessIdentityResolver> AgentSightClient<T, R> 
         body: &ApplyBindingRequest,
     ) -> Result<(), AgentSightClientError> {
         self.check_process(payload, body)?;
-        self.require_file_delete_capability()
+        self.require_capabilities(body)
     }
 
     fn send_prepared(

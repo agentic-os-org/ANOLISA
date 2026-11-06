@@ -41,6 +41,10 @@ pub(crate) use main_prompt_gate::MainPromptGate;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawInputEvent {
+    TrialControl {
+        id: String,
+        action: String,
+    },
     ShellInputActivity {
         empty: bool,
     },

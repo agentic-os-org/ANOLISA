@@ -18,7 +18,7 @@ class TestHermesScripts(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.home = self.root / "hermes home"
-        self.plugin = self.root / "payload/share/anolisa/runtime/ws-ckpt/plugins/hermes"
+        self.plugin = self.root / "payload/share/anolisa/plugins/ws-ckpt/hermes"
         self.plugin.mkdir(parents=True)
         for name in ("plugin.yaml", "__init__.py"):
             (self.plugin / name).touch()

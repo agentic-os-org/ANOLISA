@@ -77,7 +77,7 @@ pub(crate) trait SslProbe {
 
 impl SslProbe for Probes {
     fn attach_ssl(&mut self, pid: i32) {
-        let _ = self.attach_process(pid);
+        let _ = self.attach_unclassified_process(pid);
     }
 }
 
@@ -463,7 +463,7 @@ impl AgentSight {
             // ensure_default_agents_config handles both cases:
             // - File missing: creates it with the embedded default.
             // - File exists: checks schema_version; if outdated, backs up and
-            //   overwrites with the current default.
+            //   shallow-merges user top-level sections over the current defaults.
             let load_result = match crate::config::ensure_default_agents_config(&path) {
                 Ok(()) => config.load_from_file(&path),
                 Err(e) => Err(e),
@@ -571,6 +571,8 @@ impl AgentSight {
             &config.runtime_limits,
         )
         .context("Failed to create probes")?;
+        let cpu_budget =
+            maintenance::configure_cpu_budget(&probes, config.runtime_limits.cpu_budget_percent)?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -850,12 +852,6 @@ impl AgentSight {
         };
 
         let mut maintenance_jobs = Vec::new();
-        let cpu_budget = (config.runtime_limits.cpu_budget_percent != 0)
-            .then(|| {
-                crate::utils::cpu_budget::CpuBudget::new(config.runtime_limits.cpu_budget_percent)
-            })
-            .transpose()?
-            .map(Arc::new);
         // Global capacity budget shared by every maintenance job: each job
         // re-evaluates its effective size limit right before running.
         let storage_budget = Arc::new(crate::storage_budget::StorageBudget::new(
@@ -1143,8 +1139,10 @@ impl AgentSight {
     /// Attach SSL probes best-effort when the process has no recognized agent
     /// name yet.
     ///
-    /// `Probes::attach_process` already logs the degrade path and registers the
-    /// pid for global uprobe coverage, so a failure is not fatal here.  The
+    /// Reaching here for every exec on the host is the point -- the first TLS
+    /// connection can precede the scan that classifies the process -- so the
+    /// probe side only claims a `traced_processes` slot once the uprobe
+    /// actually attached (see `Probes::attach_unclassified_process`). The
     /// decision lives in this helper so it stays unit-testable without live
     /// eBPF probes: the surrounding scan loops still need a real `Probes`.
     fn attach_if_agent_name_unknown<P: SslProbe>(
@@ -1213,7 +1211,12 @@ impl AgentSight {
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
         if let Err(e) = probes.add_traced_pid(pid) {
-            log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
+            // Unregistered pids are dropped by the BPF `is_pid_traced()` gate,
+            // so this is the whole agent going uncaptured, not one lost event.
+            log::error!(
+                "agent {agent_name} (pid {pid}) could not be registered in the traced_processes \
+                 filter: {e}; its LLM traffic will not be captured"
+            );
         }
         // Register descendant PIDs so child processes spawned by wrapper-style
         // agents are admitted by the BPF `traced_processes` filter even when
@@ -1493,10 +1496,11 @@ impl AgentSight {
                 if let Ok(mut targets) = self.resource_targets.write() {
                     targets.remove(pid);
                 }
+                // Unknown-process scans also retain inode references until exit.
+                self.probes.detach_ssl_probes(*pid);
                 // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
-                    self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
                 } else {
                     self.flush_deferred_genai_for_pid(*pid);

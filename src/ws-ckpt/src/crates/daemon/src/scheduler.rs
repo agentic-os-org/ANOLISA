@@ -10,14 +10,18 @@ use crate::state::DaemonState;
 use ws_ckpt_common::backend::StorageBackend;
 use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const HEALTH_ADVISORY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Start background scheduler tasks: periodic auto-cleanup and health checks.
 ///
 /// Config hot-reload is **push-based**: the dispatcher calls
 /// `state.config_notify.notify_waiters()` after updating `state.config`, and
 /// every periodic loop uses `tokio::select!` to react. This replaces the old
 /// polling design — loops never wake up "just to check", and a disabled task
-/// (`auto_cleanup = false` or `*_interval_secs == 0`) blocks on the notify
-/// at zero CPU cost until a reload re-enables it.
+/// (`auto_cleanup = false` or `auto_cleanup_interval_secs == 0`) blocks on
+/// the notify at zero CPU cost until a reload re-enables it. Health advisory
+/// sampling continues when periodic health diagnostics are disabled.
 pub fn start_scheduler(state: Arc<DaemonState>) {
     // Periodic auto-cleanup: reacts to `ReloadConfig` via `config_notify`.
     let state_clone = state.clone();
@@ -70,27 +74,126 @@ async fn auto_cleanup_loop(state: Arc<DaemonState>) {
     }
 }
 
-/// Health-check loop. Same push-based pattern as `auto_cleanup_loop`, keyed
-/// off `health_check_interval_secs`. See that function's comment for why
-/// `enable()` is called before the config read.
+/// Sleeps until the interval ends; an unrepresentable deadline waits for reload.
+async fn sleep_health_interval(duration: Duration) {
+    match tokio::time::Instant::now().checked_add(duration) {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Refreshes advisories independently of optional periodic health diagnostics.
 async fn health_check_loop(state: Arc<DaemonState>) {
+    tokio::join!(
+        health_advisory_loop(&state),
+        health_diagnostics_loop(&state)
+    );
+}
+
+async fn health_advisory_loop(state: &DaemonState) {
+    let mut delay = Duration::ZERO;
+    let mut retrying = false;
+    loop {
+        let wait = sleep_health_interval(delay);
+        tokio::pin!(wait);
+        if retrying {
+            // Changes during backoff coalesce into the next attempt. They must not
+            // turn a failing probe into a busy loop or extend the retry deadline.
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = wait.as_mut() => break,
+                    _ = state.advisory_notify.notified() => {}
+                }
+            }
+        } else {
+            tokio::select! {
+                biased;
+                _ = state.advisory_notify.notified() => {}
+                _ = wait.as_mut() => {}
+            }
+        }
+
+        // A stored permit covers changes before registration. Do not cancel an
+        // in-progress refresh: coalesce changes into one subsequent refresh.
+        let notified = state.advisory_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let result = state.refresh_health_advisory().await;
+        let changed = tokio::select! {
+            biased;
+            _ = notified.as_mut() => true,
+            _ = std::future::ready(()) => false,
+        };
+        match result {
+            Ok(()) => {
+                retrying = false;
+                delay = if changed {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(crate::state::effective_health_advisory_interval_secs(
+                        state.config_snapshot().health_check_interval_secs,
+                    ))
+                };
+            }
+            Err(e) => {
+                warn!("Health advisory refresh failed: {:#}", e);
+                retrying = true;
+                delay = HEALTH_ADVISORY_RETRY_INTERVAL.min(Duration::from_secs(
+                    crate::state::effective_health_advisory_interval_secs(
+                        state.config_snapshot().health_check_interval_secs,
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+async fn health_diagnostics_loop(state: &DaemonState) {
     loop {
         let notified = state.config_notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-
         let interval = state.config_snapshot().health_check_interval_secs;
         if interval == 0 {
             notified.await;
             continue;
         }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(interval)) => {
-                health_check(&state).await;
-            }
+            biased;
             _ = notified.as_mut() => {}
+            _ = sleep_health_interval(Duration::from_secs(interval)) => {
+                if tokio::time::timeout(
+                    HEALTH_CHECK_TIMEOUT,
+                    crate::health_probe::scope(health_check(state)),
+                )
+                    .await
+                    .is_err()
+                {
+                    warn!("Health check diagnostics timed out after {} seconds", HEALTH_CHECK_TIMEOUT.as_secs());
+                }
+            }
         }
     }
+}
+
+/// Cutoff for `Age` retention: `now - secs`, or `None` when unrepresentable.
+///
+/// `parse_duration_secs` admits anything up to `i64::MAX` seconds, but chrono
+/// represents at most ~9.2e15 s (`TimeDelta`'s millisecond bound), and the
+/// subtraction fails once the result leaves the `NaiveDateTime` range (~262k
+/// years of headroom, i.e. ~8.3e12 s). Values above `i64::MAX` cannot pass the
+/// parse guard, but the `Age` fields are public and an `as i64` cast would wrap
+/// negative, forging a future cutoff that expires every snapshot — so they are
+/// rejected here too. The caller treats `None` as "nothing expires".
+fn age_cutoff(
+    now: chrono::DateTime<chrono::Utc>,
+    secs: u64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    i64::try_from(secs)
+        .ok()
+        .and_then(chrono::TimeDelta::try_seconds)
+        .and_then(|delta| now.checked_sub_signed(delta))
 }
 
 /// Auto-cleanup: purge non-pinned snapshots per `CleanupRetention` (pinned always kept).
@@ -140,14 +243,16 @@ async fn auto_cleanup(state: &DaemonState) {
                             .collect()
                     }
                 }
-                CleanupRetention::Age { secs, .. } => {
-                    let cutoff = now - chrono::Duration::seconds(*secs as i64);
-                    unpinned
+                CleanupRetention::Age { secs, .. } => match age_cutoff(now, *secs) {
+                    Some(cutoff) => unpinned
                         .iter()
                         .filter(|(_, ts)| *ts < cutoff)
                         .map(|(id, _)| id.clone())
-                        .collect()
-                }
+                        .collect(),
+                    // Retention beyond chrono's representable range: the cutoff
+                    // would sit in the unreachable past, so nothing expires yet.
+                    None => Vec::new(),
+                },
             };
 
             (to_remove, state.index_dir(&ws_id))
@@ -183,7 +288,17 @@ async fn health_check(state: &DaemonState) {
         debug!("Health check skipped: no workspace registered");
         return;
     }
-    for line in assess_usage_health(state.backend.as_ref()).await {
+    let lines = match state.health_advisory_snapshot() {
+        Some(sample) => {
+            assess_usage_health_with_usage(
+                state.backend.as_ref(),
+                Ok((sample.fs_total_bytes, sample.fs_used_bytes)),
+            )
+            .await
+        }
+        None => assess_usage_health(state.backend.as_ref()).await,
+    };
+    for line in lines {
         match line {
             UsageHealthLine::Info(msg) => info!("{}", msg),
             UsageHealthLine::Warn(msg) => warn!("{}", msg),
@@ -208,7 +323,14 @@ enum UsageHealthLine {
 /// silently die (permissions, missing btrfs binary, fs errors) exactly in
 /// the degraded regime where it matters most (#3053 review P2).
 async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLine> {
-    let (total, used) = match backend.get_usage().await {
+    assess_usage_health_with_usage(backend, backend.get_usage().await).await
+}
+
+async fn assess_usage_health_with_usage(
+    backend: &dyn StorageBackend,
+    usage: anyhow::Result<(u64, u64)>,
+) -> Vec<UsageHealthLine> {
+    let (total, used) = match usage {
         Ok(pair) => pair,
         Err(e) => {
             // `{:#}` prints the full anyhow cause chain (e.g. outer
@@ -276,8 +398,12 @@ async fn assess_usage_health(backend: &dyn StorageBackend) -> Vec<UsageHealthLin
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
     // ── Per-workspace effective policy invariants ──
     // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
+    use super::age_cutoff;
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
 
     fn cfg(global_on: bool, keep: CleanupRetention) -> DaemonConfig {
@@ -323,17 +449,90 @@ mod tests {
         assert_eq!(eff.auto_cleanup_keep, CleanupRetention::Count(5));
     }
 
+    // ── Age cutoff checked math ──
+    //
+    // `parse_duration_secs` admits anything up to i64::MAX seconds, but the
+    // raw `now - chrono::Duration::seconds(secs)` this module used to run
+    // panics beyond chrono's representable range, killing the spawned
+    // auto-cleanup task for the daemon's lifetime.
+
+    #[test]
+    fn age_cutoff_normal_retention_subtracts_from_now() {
+        let now = chrono::Utc::now();
+        let cutoff = age_cutoff(now, 30 * 86400).expect("30d is representable");
+        // Exact delta, not just `cutoff < now`: a wrong subtraction magnitude
+        // (e.g. 1 s instead of 30 d) must fail this test.
+        assert_eq!(now - cutoff, chrono::TimeDelta::days(30));
+    }
+
+    #[test]
+    fn age_cutoff_huge_retention_does_not_panic() {
+        let now = chrono::Utc::now();
+        // 1e16 s passes parse_duration_secs (1e16 < i64::MAX) but overflows
+        // chrono's TimeDelta seconds bound (~9.2e15 s).
+        let raw = "10000000000000000s";
+        let secs = match CleanupRetention::age(raw).expect("parse accepts 1e16 s") {
+            CleanupRetention::Age { secs, .. } => secs,
+            other => panic!("expected Age, got {other:?}"),
+        };
+        assert_eq!(age_cutoff(now, secs), None);
+    }
+
+    #[test]
+    fn age_cutoff_out_of_datetime_range_does_not_panic() {
+        let now = chrono::Utc::now();
+        // 8.5e15 s fits TimeDelta (max ~9.2e15) but `now - delta` leaves the
+        // representable date range (~262k years, i.e. ~8.3e12 s of headroom).
+        assert_eq!(age_cutoff(now, 8_500_000_000_000_000), None);
+    }
+
+    #[test]
+    fn age_cutoff_rejects_values_above_i64_max() {
+        // Unreachable via parse_duration_secs, but the `Age` fields are public.
+        // An `as i64` cast would wrap negative and forge a future cutoff that
+        // expires every snapshot; the checked conversion must yield None.
+        let now = chrono::Utc::now();
+        assert_eq!(age_cutoff(now, i64::MAX as u64 + 1), None);
+        assert_eq!(age_cutoff(now, u64::MAX), None);
+    }
+
     // ── Filesystem-usage health probe (#3053 review P1-a / P2) ──
     //
     // Stub-backend coverage of every assess_usage_health branch: healthy,
     // high-usage with/without zombies, FAILED dead-list query (must stay
     // visible, never collapse into "no zombies"), and failed usage probe.
 
+    struct ActiveUsageProbe<'a>(&'a std::sync::atomic::AtomicUsize);
+
+    impl Drop for ActiveUsageProbe<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    struct UsageGate {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
     struct UsageProbeBackend {
         usage: Result<(u64, u64), String>,
         zombies: Result<Vec<u64>, String>,
         data_root: std::path::PathBuf,
         snapshots_root: std::path::PathBuf,
+        active_usage_probes: std::sync::atomic::AtomicUsize,
+        max_active_usage_probes: std::sync::atomic::AtomicUsize,
+        usage_probe_calls: std::sync::atomic::AtomicUsize,
+        usage_stalls_remaining: std::sync::atomic::AtomicUsize,
+        usage_failures_remaining: std::sync::atomic::AtomicUsize,
+        usage_delay_millis: std::sync::atomic::AtomicU64,
+        usage_lock: tokio::sync::Mutex<()>,
+        shared_probe_lock: tokio::sync::Mutex<()>,
+        share_probe_slot: std::sync::atomic::AtomicBool,
+        usage_gate: std::sync::Mutex<Option<Arc<UsageGate>>>,
+        deleted_probe_calls: std::sync::atomic::AtomicUsize,
+        stall_deleted_probe: std::sync::atomic::AtomicBool,
+        require_health_scope: bool,
     }
 
     impl UsageProbeBackend {
@@ -343,6 +542,19 @@ mod tests {
                 zombies,
                 data_root: std::env::temp_dir(),
                 snapshots_root: std::env::temp_dir(),
+                active_usage_probes: std::sync::atomic::AtomicUsize::new(0),
+                max_active_usage_probes: std::sync::atomic::AtomicUsize::new(0),
+                usage_probe_calls: std::sync::atomic::AtomicUsize::new(0),
+                usage_stalls_remaining: std::sync::atomic::AtomicUsize::new(0),
+                usage_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+                usage_delay_millis: std::sync::atomic::AtomicU64::new(10),
+                usage_lock: tokio::sync::Mutex::new(()),
+                shared_probe_lock: tokio::sync::Mutex::new(()),
+                share_probe_slot: std::sync::atomic::AtomicBool::new(false),
+                usage_gate: std::sync::Mutex::new(None),
+                deleted_probe_calls: std::sync::atomic::AtomicUsize::new(0),
+                stall_deleted_probe: std::sync::atomic::AtomicBool::new(false),
+                require_health_scope: false,
             }
         }
     }
@@ -359,11 +571,68 @@ mod tests {
             &self.snapshots_root
         }
         async fn get_usage(&self) -> anyhow::Result<(u64, u64)> {
+            use std::sync::atomic::Ordering;
+
+            if self.require_health_scope {
+                crate::health_probe::assert_scoped();
+            }
+            let _shared_guard = if self.share_probe_slot.load(Ordering::SeqCst) {
+                Some(self.shared_probe_lock.lock().await)
+            } else {
+                None
+            };
+            let _usage_guard = self.usage_lock.lock().await;
+            self.usage_probe_calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active_usage_probes.fetch_add(1, Ordering::SeqCst) + 1;
+            let _active_probe = ActiveUsageProbe(&self.active_usage_probes);
+            self.max_active_usage_probes
+                .fetch_max(active, Ordering::SeqCst);
+            let gate = self.usage_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.started.notify_one();
+                gate.release.notified().await;
+            }
+            if self
+                .usage_stalls_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                self.usage_delay_millis.load(Ordering::SeqCst),
+            ))
+            .await;
+            if self
+                .usage_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(anyhow::anyhow!("injected transient usage failure"));
+            }
             self.usage
                 .clone()
                 .map_err(|e| anyhow::anyhow!("injected usage failure: {}", e))
         }
         async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+            use std::sync::atomic::Ordering;
+
+            if self.require_health_scope {
+                crate::health_probe::assert_scoped();
+            }
+            let _shared_guard = if self.share_probe_slot.load(Ordering::SeqCst) {
+                Some(self.shared_probe_lock.lock().await)
+            } else {
+                None
+            };
+            self.deleted_probe_calls.fetch_add(1, Ordering::SeqCst);
+            if self.stall_deleted_probe.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
             self.zombies
                 .clone()
                 .map_err(|e| anyhow::anyhow!("injected query failure: {}", e))
@@ -431,6 +700,673 @@ mod tests {
         ) -> anyhow::Result<ws_ckpt_common::backend::EnvironmentStatus> {
             unimplemented!()
         }
+    }
+
+    fn health_scheduler_fixture(
+        usage: (u64, u64),
+    ) -> (
+        tempfile::TempDir,
+        Arc<UsageProbeBackend>,
+        Arc<crate::state::DaemonState>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = UsageProbeBackend::new(Ok(usage), Ok(vec![]));
+        backend.require_health_scope = true;
+        backend.data_root = temp.path().join("data");
+        backend.snapshots_root = temp.path().join("snapshots");
+        let backend = Arc::new(backend);
+        let state = Arc::new(crate::state::DaemonState::new(
+            DaemonConfig {
+                health_check_interval_secs: 1,
+                ..DaemonConfig::default()
+            },
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let workspace_path = temp.path().join("workspace");
+        state
+            .register_workspace(
+                "ws-health-loop".into(),
+                workspace_path.clone(),
+                ws_ckpt_common::SnapshotIndex::new(workspace_path),
+            )
+            .unwrap();
+        (temp, backend, state)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_refreshes_after_same_interval_notification() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        state.config.write().unwrap().health_check_interval_secs = 300;
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.health_advisory_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        state.advisory_notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("workspace notification must refresh even when the interval is unchanged");
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_refreshes_again_after_notification_during_sampling() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        state.config.write().unwrap().health_check_interval_secs = 300;
+        let gate = Arc::new(UsageGate {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *backend.usage_gate.lock().unwrap() = Some(gate.clone());
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        tokio::time::timeout(Duration::from_secs(1), gate.started.notified())
+            .await
+            .expect("the first sample must enter the backend");
+        state.advisory_notify.notify_one();
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a notification during sampling must trigger a follow-up");
+        assert!(
+            state.health_advisory_snapshot().is_some(),
+            "the first sample must finish before retrying"
+        );
+        assert_eq!(backend.max_active_usage_probes.load(Ordering::SeqCst), 1);
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn workspace_changes_during_sampling_reach_the_cached_count() {
+        let (temp, backend, state) = health_scheduler_fixture((1000, 100));
+        state.config.write().unwrap().health_check_interval_secs = 300;
+        let gate = || {
+            Arc::new(UsageGate {
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            })
+        };
+        let first = gate();
+        *backend.usage_gate.lock().unwrap() = Some(first.clone());
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        tokio::time::timeout(Duration::from_secs(1), first.started.notified())
+            .await
+            .unwrap();
+
+        let path = temp.path().join("registered-during-sample");
+        let mut index = ws_ckpt_common::SnapshotIndex::new(path.clone());
+        let meta = ws_ckpt_common::SnapshotMeta {
+            message: None,
+            metadata: None,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: None,
+            child_ids: vec![],
+        };
+        for n in 0..=ws_ckpt_common::ADVISORY_SNAPSHOT_LIMIT {
+            index.snapshots.insert(n.to_string(), meta.clone());
+        }
+        let second = gate();
+        *backend.usage_gate.lock().unwrap() = Some(second.clone());
+        state
+            .register_workspace("registered-during-sample".into(), path, index)
+            .unwrap();
+        first.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), second.started.notified())
+            .await
+            .expect("registration must trigger the second sample");
+        assert_eq!(
+            state
+                .health_advisory_snapshot()
+                .unwrap()
+                .over_limit_workspace_count,
+            0
+        );
+
+        let third = gate();
+        *backend.usage_gate.lock().unwrap() = Some(third.clone());
+        state.unregister_workspace("registered-during-sample").await;
+        second.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), third.started.notified())
+            .await
+            .expect("unregistration must trigger the third sample");
+        assert_eq!(
+            state
+                .health_advisory_snapshot()
+                .unwrap()
+                .over_limit_workspace_count,
+            1
+        );
+        third.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state
+                .health_advisory_snapshot()
+                .unwrap()
+                .over_limit_workspace_count
+                != 0
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the cache must reflect unregistration");
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn independent_mock_diagnostics_allow_concurrent_advisory_sampling() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 950));
+        // Real Btrfs probes share a slot and may wait for diagnostic cleanup.
+        backend.stall_deleted_probe.store(true, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.deleted_probe_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("diagnostics must start");
+        let before = backend.usage_probe_calls.load(Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) <= before {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("sampling must continue while diagnostics are stalled");
+        assert_eq!(
+            backend.deleted_probe_calls.load(Ordering::SeqCst),
+            1,
+            "the original diagnostic is still stalled"
+        );
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_probe_slot_recovers_sampling_after_diagnostic_timeout() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 950));
+        backend.share_probe_slot.store(true, Ordering::SeqCst);
+        backend.stall_deleted_probe.store(true, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.deleted_probe_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("diagnostics must acquire the shared slot");
+        let before = backend.usage_probe_calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            backend.usage_probe_calls.load(Ordering::SeqCst),
+            before,
+            "usage must wait while the mock diagnostic holds the shared slot"
+        );
+        // The in-progress probe remains stalled; later diagnostics can complete.
+        backend.stall_deleted_probe.store(false, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) <= before {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("usage must resume after the stalled diagnostic times out");
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn huge_health_interval_waits_without_panicking_and_can_be_woken() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        state.config.write().unwrap().health_check_interval_secs = u64::MAX;
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.health_advisory_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("initial sample must complete");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !scheduler.is_finished(),
+            "an unrepresentable interval must not panic"
+        );
+        state.advisory_notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("notifications must wake an unrepresentable interval");
+        assert!(!scheduler.is_finished());
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_retries_default_interval_failure_without_busy_loop() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        state.config.write().unwrap().health_check_interval_secs = 300;
+        backend.usage_failures_remaining.store(1, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        let recovered = tokio::time::timeout(Duration::from_secs(7), async {
+            while state.health_advisory_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            recovered.is_ok(),
+            "startup failure must retry before 300 seconds"
+        );
+        assert_eq!(backend.usage_probe_calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(
+            backend.usage_probe_calls.load(Ordering::SeqCst),
+            2,
+            "success must restore the normal interval"
+        );
+        backend.usage_failures_remaining.store(1, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(292), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the normal refresh must eventually run");
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) < 4 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("a later failure must also retry promptly");
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_bounds_retries_when_sampling_keeps_failing() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 950));
+        state.config.write().unwrap().health_check_interval_secs = 300;
+        backend
+            .usage_failures_remaining
+            .store(100, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        tokio::time::sleep(Duration::from_secs(16)).await;
+        let attempts = backend.usage_probe_calls.load(Ordering::SeqCst);
+        scheduler.abort();
+        let _ = scheduler.await;
+        assert!(
+            (3..=4).contains(&attempts),
+            "expected bounded five-second retries, got {attempts}"
+        );
+        assert_eq!(
+            backend.deleted_probe_calls.load(Ordering::SeqCst),
+            0,
+            "retries must not run diagnostics"
+        );
+        assert!(state.health_advisory_snapshot().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn short_health_interval_retries_before_sample_freshness_expires() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        state.config.write().unwrap().health_check_interval_secs = 1;
+        backend.usage_failures_remaining.store(1, Ordering::SeqCst);
+        let refresh_state = state.clone();
+        let scheduler = tokio::spawn(async move {
+            super::health_advisory_loop(&refresh_state).await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.health_advisory_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a one-second interval must retry before the two-second freshness limit");
+        assert_eq!(backend.usage_probe_calls.load(Ordering::SeqCst), 2);
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn notifications_do_not_bypass_failed_refresh_backoff() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        state.config.write().unwrap().health_check_interval_secs = 0;
+        backend
+            .usage_failures_remaining
+            .store(100, Ordering::SeqCst);
+        let gate = Arc::new(UsageGate {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *backend.usage_gate.lock().unwrap() = Some(gate.clone());
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        tokio::time::timeout(Duration::from_secs(1), gate.started.notified())
+            .await
+            .expect("the first sample must enter the backend");
+        for _ in 0..20 {
+            state.advisory_notify.notify_one();
+        }
+        gate.release.notify_one();
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            state.advisory_notify.notify_one();
+        }
+        assert_eq!(
+            backend.usage_probe_calls.load(Ordering::SeqCst),
+            1,
+            "notifications must not bypass the five-second failure backoff"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                state.advisory_notify.notify_one();
+            }
+        })
+        .await
+        .expect("backoff must not be extended by notifications");
+        scheduler.abort();
+        let _ = scheduler.await;
+        assert_eq!(backend.usage_probe_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_keeps_advisories_when_diagnostics_are_disabled() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 950));
+        state.config.write().unwrap().health_check_interval_secs = 0;
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.health_advisory_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("zero interval must still populate the advisory");
+        tokio::time::sleep(Duration::from_secs(301)).await;
+        assert!(
+            backend.usage_probe_calls.load(Ordering::SeqCst) >= 2,
+            "zero interval must refresh periodically"
+        );
+        assert_eq!(backend.deleted_probe_calls.load(Ordering::SeqCst), 0);
+
+        state.config.write().unwrap().health_check_interval_secs = 1;
+        state.config_notify.notify_waiters();
+        state.advisory_notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.deleted_probe_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("enabling diagnostics must wake the scheduler");
+        let before_disable = backend.usage_probe_calls.load(Ordering::SeqCst);
+        state.config.write().unwrap().health_check_interval_secs = 0;
+        state.config_notify.notify_waiters();
+        state.advisory_notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.usage_probe_calls.load(Ordering::SeqCst) <= before_disable {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("disabling diagnostics must refresh the advisory on reload");
+        let diagnostics_after_disable = backend.deleted_probe_calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(
+            backend.deleted_probe_calls.load(Ordering::SeqCst),
+            diagnostics_after_disable
+        );
+        assert!(state.health_advisory_snapshot().is_some());
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
+
+    #[tokio::test]
+    async fn health_advisory_waits_for_busy_workspace_and_publishes_complete_count() {
+        let (temp, _backend, state) = health_scheduler_fixture((1000, 950));
+        let meta = ws_ckpt_common::SnapshotMeta {
+            message: None,
+            metadata: None,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: None,
+            child_ids: vec![],
+        };
+        for workspace_id in ["first-busy", "second-busy"] {
+            let path = temp.path().join(workspace_id);
+            let mut index = ws_ckpt_common::SnapshotIndex::new(path.clone());
+            for n in 0..=ws_ckpt_common::ADVISORY_SNAPSHOT_LIMIT {
+                index.snapshots.insert(n.to_string(), meta.clone());
+            }
+            state
+                .register_workspace(workspace_id.into(), path, index)
+                .unwrap();
+        }
+        state.seed_health_advisory_snapshot(8, 10, 1, Duration::ZERO);
+        let workspace = state.get_by_wsid("first-busy").unwrap();
+        let guard = workspace.write().await;
+        let refresh_state = state.clone();
+        let refresh = tokio::spawn(async move { refresh_state.refresh_health_advisory().await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !refresh.is_finished(),
+            "refresh must wait for the busy workspace"
+        );
+        assert_eq!(
+            state
+                .health_advisory_snapshot()
+                .unwrap()
+                .over_limit_workspace_count,
+            8
+        );
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), refresh)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let sample = state.health_advisory_snapshot().unwrap();
+        assert_eq!(sample.over_limit_workspace_count, 2);
+        assert_eq!((sample.fs_total_bytes, sample.fs_used_bytes), (1000, 950));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_recovers_after_usage_probe_timeouts() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 100));
+        // Stall the startup refresh, periodic refresh, and diagnostic fallback.
+        backend.usage_stalls_remaining.store(3, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state.clone()));
+        let recovered = tokio::time::timeout(Duration::from_secs(40), async {
+            while state.health_advisory_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        scheduler.abort();
+        let _ = scheduler.await;
+
+        assert!(
+            recovered.is_ok(),
+            "stalled diagnostics must not stop refreshes"
+        );
+        assert!(backend.usage_probe_calls.load(Ordering::SeqCst) >= 4);
+        assert_eq!(backend.max_active_usage_probes.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.active_usage_probes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_scheduler_refreshes_after_deleted_subvolume_probe_stalls() {
+        use std::sync::atomic::Ordering;
+
+        let (_temp, backend, state) = health_scheduler_fixture((1000, 950));
+        backend.stall_deleted_probe.store(true, Ordering::SeqCst);
+        let scheduler = tokio::spawn(super::health_check_loop(state));
+        let diagnostic_started = tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.deleted_probe_calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let usage_calls = backend.usage_probe_calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        let refreshed = backend.usage_probe_calls.load(Ordering::SeqCst) > usage_calls;
+        scheduler.abort();
+        let _ = scheduler.await;
+
+        assert!(diagnostic_started.is_ok());
+        assert!(
+            refreshed,
+            "a stalled dead-list query must not stop refreshes"
+        );
+        assert_eq!(backend.max_active_usage_probes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn health_advisory_refresh_serializes_probes_and_preserves_failed_samples() {
+        use crate::state::DaemonState;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = UsageProbeBackend::new(Ok((1000, 950)), Ok(vec![]));
+        backend.data_root = temp.path().join("data");
+        backend.snapshots_root = temp.path().join("snapshots");
+        let backend = Arc::new(backend);
+        let config = DaemonConfig {
+            health_check_interval_secs: 30,
+            ..DaemonConfig::default()
+        };
+        let state = Arc::new(DaemonState::new(
+            config,
+            backend.clone(),
+            temp.path().join("state"),
+        ));
+        let workspace_path = temp.path().join("workspace");
+        state
+            .register_workspace(
+                "ws-advisory".into(),
+                workspace_path.clone(),
+                ws_ckpt_common::SnapshotIndex::new(workspace_path),
+            )
+            .unwrap();
+
+        state.seed_health_advisory_snapshot(0, 10, 1, std::time::Duration::from_secs(20));
+        assert!(state
+            .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(1))
+            .await
+            .is_err());
+        let retained = state.health_advisory_snapshot().unwrap();
+        assert_eq!((retained.fs_total_bytes, retained.fs_used_bytes), (10, 1));
+        state.config.write().unwrap().health_check_interval_secs = 1;
+        assert!(state.health_advisory_snapshot().is_none());
+        state.config.write().unwrap().health_check_interval_secs = 30;
+
+        let (first, second) = tokio::join!(
+            state.refresh_health_advisory(),
+            state.refresh_health_advisory()
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            backend.max_active_usage_probes.load(Ordering::SeqCst),
+            1,
+            "concurrent refreshes must not overlap backend usage probes"
+        );
+        let sample = state.health_advisory_snapshot().unwrap();
+        assert_eq!((sample.fs_total_bytes, sample.fs_used_bytes), (1000, 950));
+
+        state.seed_health_advisory_snapshot(0, 10, 1, std::time::Duration::from_secs(20));
+        let workspace = state.get_by_wsid("ws-advisory").unwrap();
+        let _guard = workspace.write().await;
+        assert!(state
+            .refresh_health_advisory_with_timeout(Duration::from_millis(20))
+            .await
+            .is_err());
+        let retained = state.health_advisory_snapshot().unwrap();
+        assert_eq!((retained.fs_total_bytes, retained.fs_used_bytes), (10, 1));
+
+        let error_state = DaemonState::new(
+            DaemonConfig {
+                health_check_interval_secs: 30,
+                ..DaemonConfig::default()
+            },
+            Arc::new(UsageProbeBackend::new(
+                Err("test backend error".into()),
+                Ok(vec![]),
+            )),
+            temp.path().join("error-state"),
+        );
+        assert!(error_state.refresh_health_advisory().await.is_err());
+        assert!(error_state.health_advisory_snapshot().is_none());
+        error_state.seed_health_advisory_snapshot(2, 10, 1, std::time::Duration::from_secs(20));
+        assert!(error_state.refresh_health_advisory().await.is_err());
+        let retained = error_state.health_advisory_snapshot().unwrap();
+        assert_eq!(
+            (
+                retained.over_limit_workspace_count,
+                retained.fs_total_bytes,
+                retained.fs_used_bytes
+            ),
+            (2, 10, 1)
+        );
+        error_state
+            .config
+            .write()
+            .unwrap()
+            .health_check_interval_secs = 1;
+        assert!(error_state.health_advisory_snapshot().is_none());
+        error_state
+            .config
+            .write()
+            .unwrap()
+            .health_check_interval_secs = 30;
+        error_state.seed_health_advisory_snapshot(2, 10, 1, std::time::Duration::from_secs(61));
+        assert!(error_state.refresh_health_advisory().await.is_err());
+        assert!(error_state.health_advisory_snapshot().is_none());
     }
 
     #[tokio::test]

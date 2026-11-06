@@ -23,6 +23,11 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     for (name, agent) in spec["agents"].as_object().ok_or(Error::InvalidSchema)? {
         adapters.insert(agent["adapter"].as_str().ok_or(Error::InvalidSchema)?);
         require(
+            agent.get("qoder_sdk").is_none() || agent["adapter"] == "qoder-sdk",
+            &format!("/spec/agents/{name}/qoder_sdk"),
+            "Qoder SDK grants require the Qoder SDK Adapter",
+        )?;
+        require(
             agent.get("qoder").is_none() || agent["adapter"] == "qoder",
             &format!("/spec/agents/{name}/qoder"),
             "Qoder settings require the Qoder Adapter",
@@ -59,6 +64,11 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             &format!("{path}/required"),
             "a disabled event cannot be required",
         )?;
+        require(
+            name != "input.submit" || event.get("match").is_none(),
+            &path,
+            "input.submit has no tool selectors",
+        )?;
         validate_tools(event, &path, &adapters)?;
         let mut ids = BTreeSet::new();
         for (index, step) in event["steps"]
@@ -68,6 +78,11 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             .enumerate()
         {
             let path = format!("{path}/steps/{index}");
+            require(
+                name != "input.submit" || step.get("match").is_none(),
+                &path,
+                "input.submit has no tool selectors",
+            )?;
             validate_tools(step, &path, &adapters)?;
             let id = step["id"].as_str().ok_or(Error::InvalidSchema)?;
             require(ids.insert(id), &format!("{path}/id"), "duplicate step ID")?;
@@ -128,7 +143,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
                         matches!(effect, "observe" | "block" | "replace_input" | "ask")
                     }
                     "tool.after" => matches!(effect, "observe" | "replace_result"),
-                    "security.violation" => matches!(effect, "observe" | "block"),
+                    "input.submit" | "security.violation" => matches!(effect, "observe" | "block"),
                     _ => effect == "observe",
                 };
                 require(allowed, &path, "effect is not defined for this event")?;
@@ -142,7 +157,10 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
             require(
                 match on_error {
                     "report" => true,
-                    "block" => matches!(name.as_str(), "tool.before" | "security.violation"),
+                    "block" => matches!(
+                        name.as_str(),
+                        "input.submit" | "tool.before" | "security.violation"
+                    ),
                     "withhold_result" => name == "tool.after",
                     _ => false,
                 },

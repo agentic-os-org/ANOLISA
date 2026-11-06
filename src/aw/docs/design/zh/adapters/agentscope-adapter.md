@@ -2,7 +2,7 @@
 
 [English](../../en/adapters/agentscope-adapter.md)
 
-`agentscope` Adapter 面向 AgentScope **2.0.6**，要求 **Python >=3.11**
+`agentscope` Adapter 的已验证基线为 AgentScope **2.0.6**，要求 **Python >=3.11**
 （[SDK 要求](https://pypi.org/project/agentscope/2.0.6/)），通过明确接线的公共 `Agent` 工厂
 工作。复用 AW 本地服务、binding、有界 `aw hook` 客户端、前台 launcher、readiness
 与生成文件清理；不把 SDK 标记为 QwenPaw，也不依赖 QwenPaw 插件加载器。
@@ -11,8 +11,8 @@
 
 `aw run --config FILE --agent TARGET` 选择配置中的 `adapter: agentscope`。
 `argv` 首项为应用 Python 解释器，随后为 `.py` 脚本或 `-m MODULE` 与应用参数。
-不支持 `-I`、`-E`、`-c` 等解释器覆盖选项。有界 preflight 使用同一解释器核对
-`importlib.metadata.version("agentscope") == "2.0.6"`。
+不支持 `-I`、`-E`、`-c` 等解释器覆盖选项。有界 preflight 使用同一解释器记录
+`importlib.metadata.version("agentscope")`。原生导入与工厂注册检查所需 middleware 接口。
 
 AW 向前台 worker 提供自有 `aw_agentscope.py` 导入目录和 `AW_NATIVE_CONFIG`。
 应用显式修改公共工厂：
@@ -41,6 +41,26 @@ Bridge 不 monkeypatch SDK，也不自动发现应用里的任意 Agent。**每�
 最终 `tool_call.input`。AW 后面的 middleware 仍可改写参数，属于此合同以外的路径。
 不替换或放宽原生权限门禁。
 
+## 输入提交与轮次归属
+
+常驻工厂构造公共 `Agent` 子类 `AwSubmissionAgent`，以
+`reply`、`reply_stream` 包围原生入口并管理完整轮次。`AwSubmissionMiddleware.on_reply`
+在业务中间件之后、原生 memory/模型操作之前检查实际用户文本。Adapter 通过共享
+submission 合同归一化 `session_id`、`aw_turn_id`、`input_text`，输入事件没有工具身份。
+全部输入步骤使用同一截止时间；拒绝抛出 `SubmissionDenied`，普通扫描故障遵循 block/report。
+
+已有 `AwTaskScope` 在检查前打开并确认 Service 子 binding、启用 invocation ledger。
+上下文局部 Scope 供本轮原生工具任务复用，并发 Agent 实例保持隔离。
+部分消费的流须由调用方在消费任务内显式关闭。工厂用一个自有任务驱动原生流，
+每次消费请求只推进一个事件。提前关闭通过 SDK 取消路径恢复该任务并消费中断结果，
+让顺序工具和并发工具在原上下文中完成收尾。清理抵御重复取消，Scope 和调用账本
+保留到工具收尾完成后再释放。完整工具结果在调用记录回收后交付，原生中断停止
+迭代时，AW 中间件已完成收尾。未确认关闭继续保留待清理状态，并阻止新分配。同 Agent 重叠回复、嵌套派发和 fork 后
+继承的工厂对象明确拒绝。本实现复用现有 Service 合同。
+
+消息形状、原生续跑与流所有权见[输入合同](../../../../../../docs/developer-guide/zh/aw/agents/agentscope.md#在回复前检查用户输入)。
+未配置输入路由时继续使用原有工厂与进程级 Scope。
+
 ## 原生工具语义
 
 Bridge 保持三条约束：被接受的策略输入保留 SDK 解码后的参数值和类型；每个阶段使用同一
@@ -68,6 +88,16 @@ AW 使用 AgentScope 的 `on_acting`，位于原生参数校验和权限检查�
   观察步骤和原生用户 Hook 先收到原始结果，压缩再修改模型可见的最终文本。
   回调故障按 report 处理后仍继续压缩。所有步骤共享 deadline 和 once-only 声明，
   事件预算仍为 **1..55000 ms**。
+- 严格 after 步骤（`on_error: withhold_result`）对完成的响应把关。传输失败、Hook
+  非零退出和无法解码的 Hook stdout 会标记本次调用，由最外层 AW 包装在所有 after
+  Hook 展开后以 `ToolResponse(state=ERROR)` 占位结果替换未检查原文：模型不会收到
+  原始文本，外层 after Hook 仍持有关联准入的原始 payload，且不受 hook 顺序或
+  `replace_result` 组合影响。该故障动作仅在桥支持完成响应替换的 SDK 版本上准入。
+  安装严格 after 路由时，调用包装抑制中间 `ToolChunk` 帧，在全部检查和调用回收
+  完成后，以最终采用的响应内容发送一帧完成 chunk，再交付响应对象。原生流消费者
+  与模型上下文收到相同的受检文本或拦截占位结果，无需累积 chunk 缓冲。
+  门控覆盖该目标的全部工具，包括严格步骤 selector 之外的工具。未配置严格 after
+  路由的目标保持原生流式行为，包括 Tokenless 压缩。
 - 生成的 Hook 配置只向最后一个已准入的结构化替换步骤授予替换权限。native 和观察
   Hook 的 stdout 不能替换结果，所有回调在最终步骤之前保留相同的关联响应。
   Bridge 校验该权限必须为布尔值，且只能用于 after。
@@ -124,8 +154,14 @@ dispatch 旁路不经过这里，需要独立接点。框架终态成功与内�
 
 首版支持一个前台 Python worker，不支持 fork 型 Gunicorn supervisor、子 worker
 自动接线或远端沙箱。常驻业务服务需要显式处理每个 worker/会话的 launch 与 binding
-归属。本地服务每实例最多保留 1024 个事件关联（约 512 对 before/after），release
-之前不会因为 session ID 改变而重置预算。不隐含远端命令取消、热加载或 OS 隔离能力。
+归属。每次公开 reply 先保留 root 请求占用，打开子 Scope，读取不可变策略并验证原生
+路由，再确认 ACK 后开始模型与工具派发。工具注册和退休复用原有 Scope ledger。
+middleware 按该轮快照构造，保留业务顺序，更新不会修改活跃调用的配置。
+
+回复在原生任务与回调排空后关闭子 Scope，再确认释放请求占用。打开响应丢失时保持
+占用；释放结果未确认时，下一次回复前重试。`aw update` 复用公共空闲准入与原子激活，
+下一次回复采用新策略并保留同一个 Agent。SDK、模型和启动项变化仍需重启；常驻 Scope
+暂不承接原生 evidence 采集。操作见[策略更新](../../../../../../docs/developer-guide/zh/aw/deployment/policy-updates.md)。
 
 已有 `native-hook/v1alpha1`、结构化 Provider 和默认布尔 Hook 均可使用。布尔 Hook
 返回 `true` 时产生配置的 effects；before 的 `effects: [observe, block]` 匹配 true 即
@@ -138,10 +174,24 @@ block、未成功结果及中间 chunk 不压缩；无效替换报告故障并�
 sec-core 的 `scan_code`/`observe_tool` 和 Tokenless 的 `pre_tool`/`post_tool`。
 PreTool 拒绝原始尝试，把完整重试参数交给模型；新调用必须重新通过原生权限和
 sec-core。RTK 归属来自新执行参数，与被拒绝调用的 ID 无关，可避免重复压缩。
-sec-core 映射必须匹配 Toolkit 的准确工具名和参数指针。RTK 需独立安装；
+sec-core 映射必须匹配 Toolkit 的准确工具名和参数指针。
 `aw config init` 仍面向 Qoder/OpenClaw。
 
 ## 验证
+
+输入验收用锁定 SDK 工厂访问本地 HTTP 模型，覆盖 block/report 故障策略，并让
+真实 sec-core Provider 调用受控扫描 CLI。断言包括拒绝时模型与工具执行为零、
+逐轮 Scope 释放及恢复、消息映射、原生权限、完成结果严格拦截，以及工具运行中
+提前关闭回复流；顺序工具与并发工具均验证异步收尾完成后才允许下一轮。扫描 CLI
+为夹具；该验收不代表已部署扫描 daemon 的业务验收。
+
+```bash
+python -B crates/aw-cli/tests/agentscope_submission.py \
+  --aw target/debug/aw \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/agentscope-submission
+```
+
 
 标准 `aw-service` 测试覆盖 preflight 拒绝、事件归一化，以及只声称版本但没有
 工厂/readiness 的进程不会被采纳；无需安装 SDK。

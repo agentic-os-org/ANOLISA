@@ -97,6 +97,8 @@ impl Default for RuntimeConfig {
 pub struct ReconciliationRuntime {
     queue: Arc<WorkQueue>,
     handles: Vec<JoinHandle<()>>,
+    storage_retry: Duration,
+    scope_cleanup_started: bool,
 }
 impl ReconciliationRuntime {
     /// # Errors
@@ -128,6 +130,8 @@ impl ReconciliationRuntime {
         let mut service = Self {
             queue: queue.clone(),
             handles: vec![],
+            storage_retry: config.storage_retry,
+            scope_cleanup_started: false,
         };
         for index in 0..config.workers {
             let repository = repository.clone();
@@ -200,6 +204,36 @@ impl ReconciliationRuntime {
             self.queue.fail();
             Err(StoreError::Unavailable)
         }
+    }
+
+    /// Starts one owned Scope cleanup worker after discovery is wired.
+    /// # Errors
+    /// Returns Invalid on repeat registration or Unavailable if stopped or spawning fails.
+    /// # Panics
+    /// Panics if internal queue state is poisoned.
+    pub fn set_scope_cleanup(
+        &mut self,
+        cleanup: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), StoreError> {
+        if self.scope_cleanup_started {
+            return Err(StoreError::Invalid);
+        }
+        if self.queue.state.lock().unwrap().stopped {
+            return Err(StoreError::Unavailable);
+        }
+        let queue = self.queue.clone();
+        let interval = self.storage_retry;
+        self.spawn("scope-cleanup-worker".into(), move || {
+            while !queue.state.lock().unwrap().stopped {
+                cleanup();
+                // wait_tick ignores Binding notifications until timeout or stop.
+                if !queue.wait_tick(interval) {
+                    break;
+                }
+            }
+        })?;
+        self.scope_cleanup_started = true;
+        Ok(())
     }
 
     pub fn enqueuer(&self) -> Arc<WorkQueue> {
@@ -448,6 +482,7 @@ fn scheduling_decision(
             // to the timer rather than immediately retrying.
             Ok((Some((*at).max(now.saturating_add(1))), true))
         }
+        Ok(Disposition::DeferredAt { at }) => Ok((Some((*at).max(now.saturating_add(1))), false)),
         Ok(Disposition::Superseded) => Ok((Some(retry_at(now, delay)), true)),
         Ok(Disposition::Skipped) => repository.get_binding_state(id).map(|record| {
             let deadline = record

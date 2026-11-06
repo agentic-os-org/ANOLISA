@@ -480,6 +480,84 @@ async fn spawn_with_env(
 }
 
 #[tokio::test]
+async fn literal_search_recalls_saved_filenames_via_mcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+    let saved = call_tool(
+        &mut reader,
+        &mut stdin,
+        100,
+        "mem_write",
+        json!({
+            "path": "notes/deployment.md",
+            "content": "deploymentmarker config.toml example.com v1.2.3 NOT NULL"
+        }),
+    )
+    .await;
+
+    // Wait for a plain keyword to prove the file is indexed before testing
+    // syntax-sensitive text. This separates query failures from watcher lag.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut request_id = 101;
+    let indexed = loop {
+        let response = call_tool(
+            &mut reader,
+            &mut stdin,
+            request_id,
+            "memory_search",
+            json!({"query": "deploymentmarker", "top_k": 5}),
+        )
+        .await;
+        request_id += 1;
+        if extract_text(&response).contains("notes/deployment.md") {
+            break true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let mut responses = Vec::new();
+    for query in [
+        "config.toml",
+        "example.com",
+        "v1.2.3",
+        "deploymentmarker NOT",
+    ] {
+        let response = call_tool(
+            &mut reader,
+            &mut stdin,
+            request_id,
+            "memory_search",
+            json!({"query": query, "top_k": 5}),
+        )
+        .await;
+        request_id += 1;
+        responses.push((query, response));
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+
+    assert!(extract_text(&saved).contains("wrote"), "{saved}");
+    assert!(indexed, "control keyword must confirm indexing completed");
+    for (query, response) in responses {
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        let hits: Value = serde_json::from_str(&extract_text(&response)).unwrap();
+        // The server also indexes a seeded README, whose wording may match.
+        // Exact result sets and all-terms precedence are covered by store tests.
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["path"] == "notes/deployment.md"),
+            "query {query:?} must recall the saved note: {response}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tier_b_observe_search_and_context_via_mcp() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;

@@ -200,7 +200,7 @@ Summary:
 
 - **Version**: Python 3.11.6 (pinned)
 - **Package manager**: [uv](https://docs.astral.sh/uv/)
-- **Formatting**: black + isort (`line-length = 100`)
+- **Formatting**: black (line length 88) + isort (line length 80); use `make python-code-pretty`
 - **Linting**: [ruff](https://docs.astral.sh/ruff/) (F, E, W, I, TID252, ANN, S-subset, etc.)
 - **Type annotations**: required on all function parameters and return types
 - **Imports**: absolute only (`from agent_sec_cli.xxx import yyy`); no relative imports
@@ -272,9 +272,14 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **agent-sec-core** | [`src/agent-sec-core/AGENTS.md`](src/agent-sec-core/AGENTS.md) | Python environment, ruff/black rules, hermes-plugin, capability system |
 | **anolisa** | [`distribution/anolisa/AGENTS.md`](distribution/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
 | **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
+| **tokenless** | [`src/tokenless/AGENTS.md`](src/tokenless/AGENTS.md) | Build/install entrypoints, RPM ownership, ANOLISA metadata boundaries |
+| **agent-memory** | [`src/agent-memory/AGENTS.md`](src/agent-memory/AGENTS.md) | Packaging inputs, service path rendering, RPM and raw metadata ownership |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
 | **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Framework crates and native Hook gates |
 | **AW Providers** | [`providers/AGENTS.md`](providers/AGENTS.md) | Independent collaboration workspaces and Provider contracts |
+
+AW documentation under `docs/` and `contribute/` also follows the audience and
+writing rules in [`src/aw/AGENTS.md`](src/aw/AGENTS.md#documentation-audiences-and-writing).
 
 ## 11.1 File Placement & Documentation Structure
 

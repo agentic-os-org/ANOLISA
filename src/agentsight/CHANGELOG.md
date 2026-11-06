@@ -1,5 +1,101 @@
 # Changelog
 
+## 0.16.0
+
+### Breaking changes
+- Model aliases that resolve to the same tokenizer share one cache slot; automatic aliases no longer appear as separate low-level registrations.
+
+### Features
+- Add secret-file read protection: an enforce-only template stops a selected agent process tree from reading explicitly configured secret files, exposed through a dedicated HTTP route.
+- Observe Qoder CLI gateway calls and record prompts, tools, session IDs and token usage; the schema 6 default configuration adds Qoder discovery and gateway rules for new installations (upgrades need a manual step, see Upgrade notes).
+- Add a Cline session parser to the trajectory collector.
+- Sort token savings sessions by the displayed metrics; CSV export follows the visible order.
+
+### Fixes
+- Keep Codex shell calls in requests, answers and streams, retain Codex result ownership, and include last-only Codex usage tails.
+- Open listed Gemini sessions, isolate Gemini tool responses, count Gemini reasoning tokens, read the generation config, classify the remaining stop reasons, and clear rewound Gemini snapshots.
+- Read null Anthropic usage, SysOM response envelopes and tool_use snapshots, DeepSeek resource stops, and skip Responses sub-endpoint usage while labelling Responses and native operations.
+- Flatten null tool outputs and results to empty, decode block arrays encoded as strings, and preserve string assistant replies, native stop strings and unknown risk reason text.
+- Retain unmatched batch results, batch tool completion times, recorded identity in batch exports, and local session usage.
+- Isolate concurrent storage writes and write agent configuration atomically.
+- Bound LLM HTTP request attempts with per-attempt timeouts, gate the LLM preferences query, guard optimize endpoint retargeting, and serve non-object trajectories intact.
+- Merge overlapping inference windows, measure structured triage messages, require complete RSS evidence, correct signed RSS trend claims, reject nonfinite capture timings, and guard the token-limit ratio against a zero cap.
+- Report process termination status, replay interrupted recovery phases, canonicalize exported result IDs, and share tool-failure precedence.
+- Keep a tool result the provider declared successful instead of re-judging it from the result text.
+- Keep the parsed file path in the post-edit format hook when the payload carries non-list `edits`, so formatting is no longer silently skipped.
+- Reduce the `recvfrom` SCM_RIGHTS eBPF stack usage below the verifier's 512-byte limit in the x86_64 and aarch64 enforcer objects.
+- Make the endpoint match-nothing sentinel unreachable in the policy compiler.
+- Reset the causal panel when the identity changes.
+- Harden benchmark campaigns: tolerate partial artifacts, count only usable checks, skip recovery records that cannot be grouped, treat a null evaluation block as a failed gate, stop tracer and server process groups, and make `test.sh` exit non-zero on failures.
+
+### Docs
+- Document LLM query authentication in the dashboard guide.
+
+### Upgrade notes
+- Configuration moves from schema 5 to 6. The upgrade merges top-level sections only: sections already present, such as `cmdline` and `https`, are kept as they are and do not receive new default entries. A configuration carried over from 0.15.3 therefore lacks the Qoder CLI rules; to observe Qoder CLI, add `cmdline.allow` entries with `agent_name` `QoderCLI` for `qodercli*`, `*/qodercli*` and `*qodercli*`, and add `*.qoder.sh` to the `https` rules, as in the shipped default `src/agentsight/agentsight.json`.
+- The pre-upgrade file is saved beside the active configuration as `<file>.bak.<timestamp>`, for example `/etc/agentsight/config.json.bak.<timestamp>` for RPM installations.
+- The enforcer map layout changed, so stale pinned engines are reinstalled on upgrade rather than reusing incompatible pins.
+
+## 0.15.3
+
+### Fixes
+- Preserve final token usage in cost analysis and scope final answers to the latest turn.
+- Preserve ATIF developer instructions and recorded tool completion times.
+- Decode stacked HTTP content codings and keep missing throughput measurements unknown.
+- Preserve Hermes fallback call identity and clear empty Hermes histories.
+- Cover legacy guards in write-access preflight and close file-guard content-loss entries.
+- Validate resource capture quality before accepting benchmark results.
+
+### Changed
+- Keep ANOLISA discovery contract ownership in the distribution.
+
+## 0.15.2
+
+### Features
+- Enforce structured file-protection policies: classify policy paths, lower them into map entries, apply them, and enforce structured kernel deletion, rename/exchange, and ordinary file writes.
+- Advertise structured file protection as a capability.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs: `agentsight-core` owns programs, configuration and services; `agentsight-plugins` holds the DSH integration; `agentsight` remains as a compatibility package that depends on the exact-version core.
+- Programs install to the system binary directory, and `make install` consumes prebuilt files without activating services. (BREAKING)
+
+### Tests
+- Cover structured policies end to end and assert matched file guard audit rules.
+
+## 0.15.1
+
+### Breaking changes
+- Unify file installation: `make install` now installs prebuilt files without activation, `make install-core` and `make install-plugins` select programs, configuration and services or native host integration resources, local installation defaults to `PREFIX=/usr/local` with an empty `AWPRJ`, and `DESTDIR` only prepends the packaging root. `make build` still compiles components through the root Makefile.
+
+### Features
+- Enforce structured file protection: activated policies deny `unlink`, `rmdir`, boundary-crossing rename and exchange, and ordinary `write`/`pwrite` on protected regular files, with denial events naming the operation. Truncate, `O_TRUNC`, shared writable mmap and dynamic mounts stay out of scope, and no content-immutability guarantee is claimed.
+- Accept structured policies through ActPlane in enforce mode and report four supported structured capabilities in the health response; the integration guide now documents ordinary-write and Apply stability limits instead of blanket rejection.
+- Add the structured file-protection policy contract behind the above: normalized protections, static and re-resolved protected topology, race-safe path resolution, legacy `path_rename` hook support, self-owned policy activation and detach, transactional policy map staging, policy generations in pinned maps, and a structured policy map ABI.
+- Add resource limit checks.
+
+### Changed
+- Choose the runtime and DSH integration separately using the core and plugins RPMs.
+- Split RPM file ownership into `agentsight-core` and `agentsight-plugins`; core owns service resources and installs independently.
+
+### Performance
+- Cache GenAI identifier hashes, vectorize SSL executable scans, and stream capture database queries.
+
+### Fixes
+- Explain file guard activation, report file guard capability, and validate file protection boundaries.
+- Ship per-architecture BPF objects so the enforcer payload follows the build target.
+- Attach SSL uprobes earlier to catch the first TLS connections, add verified Codex TLS offsets, and bound unknown process registration.
+- Preserve partial Qoder batch usage, usage-only batch records, bare JSON SSE usage, and the last usable batch usage.
+- Honor successful Gemini tool calls, retain Gemini function responses, and replay Gemini session previews.
+- Retain local session identity, attach local replies to their calls, disambiguate echoed tool call IDs, and compare complete repeated turns.
+- Preserve user config on schema migration and make session controls accessible.
+- Report cleanup errors from a failed activation without losing the original compile or kernel failure classification.
+- Keep partial campaign reports and worker results, lock resource build publication, reject impossible benchmark metrics, preserve missing drop counters, bound recovery evidence by phase, and verify executed regression commands.
+
+### Upgrade notes
+- The enforcer control protocol moves from v4 to v5 and is not backward compatible: a 0.15.0 client paired with a 0.15.1 enforcer has every request rejected as `UnsupportedVersion`, including health checks. Upgrade the client and the enforcer together.
+- Full and agent-file-guard upgrades replace stale v4 hook layouts instead of silently accepting unenforced ordinary-write policies.
+- Review the installation targets above before rollout: `make install` no longer activates what it installs, and deployments relying on the previous single-target behavior must call `make install-core` and `make install-plugins` explicitly.
+
 ## 0.15.0
 
 ### Features
@@ -22,6 +118,8 @@
 - Preserve literal capture-database paths containing URI punctuation and valid JSONL records around damaged lines, with warnings for discarded records.
 - Treat missing or invalid recovery observations as gaps, reject invalid final drop counters, and report unproven recovery gates instead of claiming an improvement.
 - Read modern h2load request-latency summaries correctly, preserving mean, median, p95 and p99 without borrowing fields from adjacent rows.
+- Restore the macOS release builds so the published 0.15.0 artifacts include the macOS package.
+- Publish benchmark campaign artifacts atomically so an interrupted run cannot leave a partially written manifest.
 
 ### Performance
 - Compute benchmark latency percentiles from one sorted snapshot and release unused fallback samples to reduce long-run work and memory use. (#8888)

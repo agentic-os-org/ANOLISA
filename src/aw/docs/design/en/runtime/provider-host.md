@@ -15,9 +15,10 @@ embedding application.
 | Layer | Responsibility |
 | --- | --- |
 | `aw-config` | Parse desired configuration and validate static references |
-| `aw-provider` | Check protocol messages, offline preflight and capability admission |
+| `aw-core::admission` | Validate offline preflight, capability admission and immutable `PolicyCandidate` / `AdmittedPolicy` snapshots |
+| `aw-provider` | Check protocol messages, Provider evidence and view contracts |
 | `aw-exec` | Execute literal commands with bounded byte transport and owned cleanup |
-| `aw-host` | Retain execution context, prepare Providers and invoke admitted event steps |
+| `aw-host` | Retain execution context, discover Providers and invoke admitted event steps |
 | Embedding Adapter | Supply trusted capabilities, normalize events, schedule steps and apply native effects |
 
 The Host reuses these libraries without making offline admission execute
@@ -29,7 +30,24 @@ create Core receipts or change Core's final-dispatch requirements.
 
 ## Prepare a fixed context
 
-Call `Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`.
+Preparation separates pure Core admission from Provider process discovery:
+
+1. `AdmissionEngine::preflight(bytes, target, capabilities)` validates the
+   configuration document, computes the exact-byte SHA-256 revision, and
+   returns a `PolicyCandidate` with static step requirements.
+2. `Host::discover(&candidate, context, deadline, cancelled)` acquires managed
+   package leases and runs `describe` and `validate_config` for referenced
+   structured Providers without re-parsing configuration bytes, returning
+   `PreparedProviders`.
+3. `AdmissionEngine::admit(candidate, prepared.evidence())` validates the
+   discovered Provider evidence and produces an immutable `AdmittedPolicy`.
+4. `Host::from_admitted(policy, prepared)` verifies that revision, target,
+   Adapter capabilities, discovered Provider evidence, and prepared Provider
+   commands match before constructing the `Host`.
+
+Standalone callers can also call
+`Host::prepare(bytes, target, capabilities, context, deadline, cancelled)`,
+which delegates to the same four steps.
 `bytes` is the complete configuration document; its exact bytes determine the
 SHA-256 revision retained in every call. `target` selects a configured Agent.
 The caller supplies `AdapterCapabilities` for the actual version and entrypoint;
@@ -64,6 +82,7 @@ adopted a policy. The admitted surface remains:
 
 | Event | Candidate effects | Failure action |
 | --- | --- | --- |
+| `input.submit` | `observe`, `block` | `report`, or `block` with Adapter support |
 | `tool.before` | `observe`, `block` | `report`, or `block` with Adapter support |
 | `tool.after` | `observe`, `replace_result` | `report`, or `withhold_result` with explicit Adapter failure-action evidence |
 
@@ -159,6 +178,10 @@ Provider or Hook invocation process and emits no candidate effects. Enabled
 structured Providers still complete preparation discovery and configuration
 validation. Skipped steps keep their claim, correlated record and ordinary
 completion path, allowing successor steps and terminal cleanup to proceed.
+Every protocol validates the normalized event before selection or execution,
+including native hooks. Missing tool identity fails the claimed invocation and
+retains its configured error action; no hook process starts for malformed data.
+
 The service records `kind: skipped` in its completed metadata audit. Invalid,
 expired or cancelled events remain failures under the configured `on_error`.
 

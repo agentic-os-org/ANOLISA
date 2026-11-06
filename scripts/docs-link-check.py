@@ -8,10 +8,12 @@ External URLs, mailto and pure in-page anchors are skipped.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 # Inline links and images: [text](target) / ![alt](target) — both follow the
 # same relative path resolution rules, so a single pattern covers them.
@@ -33,6 +35,7 @@ def files_to_check(root: Path) -> list[Path]:
         [
             "git",
             "ls-files",
+            "-z",
             "--cached",
             "--others",
             "--exclude-standard",
@@ -47,11 +50,10 @@ def files_to_check(root: Path) -> list[Path]:
             ":(glob)deprecated/copilot-shell/docs/**/*.md",
         ],
         capture_output=True,
-        text=True,
         check=True,
         cwd=root,
     )
-    return [root / line for line in out.stdout.splitlines() if line]
+    return [root / os.fsdecode(name) for name in out.stdout.split(b"\0") if name]
 
 
 def check_file(md: Path, root: Path) -> list[str]:
@@ -63,7 +65,7 @@ def check_file(md: Path, root: Path) -> list[str]:
         target = match.group(1)
         if target.startswith(SKIP_PREFIXES):
             continue
-        path_part = target.split("#", 1)[0]
+        path_part = unquote(target.split("#", 1)[0])
         if not path_part:
             continue
         resolved = (md.parent / path_part).resolve()

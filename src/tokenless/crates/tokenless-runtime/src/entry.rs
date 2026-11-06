@@ -2,9 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::Value;
 use tokenless_ccr::{RecoveryMethod, StashStore, extract_hash, is_valid_hash, recovery_hashes};
@@ -27,10 +25,8 @@ use crate::{
 };
 
 const MIN_RESPONSE_CHARS: usize = 200;
-const RTK_TIMEOUT: Duration = Duration::from_secs(5);
 
-mod native_find;
-mod rtk;
+mod native_output;
 
 /// Per-call behavior resolved by a transport frontend.
 #[derive(Debug, Clone)]
@@ -45,8 +41,8 @@ pub struct EntryOptions {
     pub html_extraction_enabled: bool,
     /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,
-    /// Resolved RTK executable for PreTool.
-    pub rtk_path: Option<PathBuf>,
+    /// Tokenless executable whose `rtk` subcommand runs rewritten PreTool commands.
+    pub rtk_launcher: Option<PathBuf>,
     /// Resolved state directory propagated to RTK commands.
     pub rtk_data_dir: Option<PathBuf>,
 }
@@ -82,6 +78,13 @@ pub struct EntryOutcome {
 
 /// Dispatches a v2 transport request to one typed lifecycle service.
 ///
+/// PreTool runs RTK in the calling process, and RTK assumes that process is
+/// short-lived: it caches trusted filters and project files for the process
+/// lifetime and can wait on `git` without a deadline. This function sets no
+/// deadline; `tokenless compress` ends the rewrite and the processes RTK
+/// started after 5 seconds. A long-lived host runs PreTool through
+/// `tokenless compress` instead, as the Python SDK does.
+///
 /// # Errors
 ///
 /// Returns [`RuntimeError`] when the selected lifecycle operation fails.
@@ -105,12 +108,12 @@ pub fn dispatch_with_store(
                 )
             }
             Request::PreTool(request) => (
-                Response::PreTool(pre_tool_with_optional_rtk(
+                Response::PreTool(pre_tool_with_rewriter(
                     request,
                     &envelope.attribution,
-                    options.rtk_path.as_deref(),
+                    options.rtk_launcher.as_deref(),
                     options.rtk_data_dir.as_deref(),
-                    RTK_TIMEOUT,
+                    |command| rtk_rewrite(options.rtk_launcher.as_deref(), command),
                 )?),
                 None,
                 None,
@@ -314,27 +317,37 @@ fn collect_markers(value: &Value, recovery: &RecoveryMethod, markers: &mut BTree
     }
 }
 
-pub(crate) fn pre_tool_with_rtk(
-    request: &PreToolRequest,
-    attribution: &Attribution,
-    rtk_path: &Path,
-    data_dir: &Path,
-) -> Result<PreToolResponse, RuntimeError> {
-    pre_tool_with_optional_rtk(
-        request,
-        attribution,
-        Some(rtk_path),
-        Some(data_dir),
-        RTK_TIMEOUT,
-    )
+/// Rewrites with the embedded RTK under the user's current RTK configuration.
+///
+/// The rewritten command runs `launcher` later, so a launcher that has left its
+/// path passes the command through unchanged: once an upgrade or uninstall
+/// replaces the running executable, Linux names it `<path> (deleted)`.
+fn rtk_rewrite(launcher: Option<&Path>, command: &str) -> rtk::RewriteOutcome {
+    if let Some(path) = launcher.filter(|path| !path.is_file()) {
+        warn_launcher_gone(path);
+        return rtk::RewriteOutcome::Passthrough;
+    }
+    rtk::rewrite(command, &rtk::RewriteOptions::load())
 }
 
-fn pre_tool_with_optional_rtk(
+/// Reports once per process that rewriting has stopped, so the lost savings
+/// are visible without repeating on every tool call.
+fn warn_launcher_gone(path: &Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        crate::warn_soft(&format!(
+            "tokenless: RTK launcher {} is no longer a file; commands pass through without rewriting",
+            path.display()
+        ));
+    });
+}
+
+fn pre_tool_with_rewriter(
     request: &PreToolRequest,
     attribution: &Attribution,
-    rtk_path: Option<&Path>,
+    rtk_launcher: Option<&Path>,
     data_dir: Option<&Path>,
-    timeout: Duration,
+    rewrite: impl FnOnce(&str) -> rtk::RewriteOutcome,
 ) -> Result<PreToolResponse, RuntimeError> {
     let Some(arguments) = request.arguments.as_object() else {
         return Ok(pre_tool_passthrough(request));
@@ -348,46 +361,37 @@ fn pre_tool_with_optional_rtk(
     if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
         return Ok(pre_tool_passthrough(request));
     }
-    // Preserve native execution for build logs and path lists owned by PostTool.
-    if is_post_tool_owned_command(command) {
+    // Preserve native execution for previews, build logs and path lists.
+    if keeps_command_native(command) {
         return Ok(pre_tool_passthrough(request));
     }
-    let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
+    let rtk_launcher = rtk_launcher.ok_or(RuntimeError::RtkLauncherUnavailable)?;
     let data_dir = data_dir.ok_or(RuntimeError::RtkDataDirectoryUnavailable)?;
 
-    let mut child = Command::new(rtk_path);
-    child
-        .arg("rewrite")
-        .arg(command)
-        .env("TOKENLESS_AGENT_ID", &attribution.agent_id)
-        .env("TOKENLESS_DATA_DIR", data_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    if let Some(session_id) = &attribution.session_id {
-        child.env("TOKENLESS_SESSION_ID", session_id);
-    }
-    if let Some(tool_use_id) = &attribution.tool_use_id {
-        child.env("TOKENLESS_TOOL_USE_ID", tool_use_id);
-    }
-    let (status, stdout) = rtk::run(child, rtk_path, timeout)?;
-    let code = status.code().ok_or(RuntimeError::RtkTerminated)?;
-    if matches!(code, 1 | 2) {
-        return Ok(pre_tool_passthrough(request));
-    }
-    if !matches!(code, 0 | 3) {
-        return Err(RuntimeError::RtkUnexpectedExit { code });
-    }
-    let rewritten = stdout.trim();
+    // Ask keeps the rewrite and leaves the prompt to the host, as exit 3 of
+    // `rtk rewrite` does.
+    let rewritten = match rewrite(command) {
+        rtk::RewriteOutcome::Allow(rewritten) | rtk::RewriteOutcome::Ask(rewritten) => rewritten,
+        rtk::RewriteOutcome::Deny | rtk::RewriteOutcome::Passthrough => {
+            return Ok(pre_tool_passthrough(request));
+        }
+    };
+    let rewritten = rewritten.trim();
     if rewritten.is_empty() || rewritten == command {
         return Ok(pre_tool_passthrough(request));
     }
     let anchored = if request.tool_name.eq_ignore_ascii_case("PowerShell") {
-        anchor_powershell_rtk(rewritten, rtk_path, attribution, data_dir)
+        let Some(anchored) =
+            anchor_powershell_rtk(command, rewritten, rtk_launcher, attribution, data_dir)
+        else {
+            return Ok(pre_tool_passthrough(request));
+        };
+        anchored
     } else {
         anchor_rtk_prefix_with_outcomes(
             command,
             rewritten,
-            rtk_path,
+            rtk_launcher,
             attribution,
             data_dir,
             |expected, render| {
@@ -445,7 +449,16 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
     }
 }
 
-fn is_post_tool_owned_command(command: &str) -> bool {
+fn keeps_command_native(command: &str) -> bool {
+    command_has_segment(command, segment_keeps_native)
+}
+
+/// Uses the same shell segments and transparent wrappers as PreTool ownership.
+pub(crate) fn is_search_command(command: &str) -> bool {
+    command_has_segment(command, native_output::is_search)
+}
+
+fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
     // Empty quoted words still consume wrapper arguments.
@@ -482,7 +495,7 @@ fn is_post_tool_owned_command(command: &str) -> bool {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if character == '\n' && segment_is_post_tool_owned(&words) {
+            if character == '\n' && matches_segment(&words) {
                 return true;
             }
             if character == '\n' {
@@ -493,7 +506,7 @@ fn is_post_tool_owned_command(command: &str) -> bool {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if segment_is_post_tool_owned(&words) {
+            if matches_segment(&words) {
                 return true;
             }
             words.clear();
@@ -505,13 +518,13 @@ fn is_post_tool_owned_command(command: &str) -> bool {
     if word_started {
         words.push(word);
     }
-    segment_is_post_tool_owned(&words)
+    matches_segment(&words)
 }
 
-fn segment_is_post_tool_owned(words: &[String]) -> bool {
-    // Broader transparent-prefix support is specific to find; build/test routing
-    // retains its existing wrapper contract below.
-    if native_find::invokes_find(words) {
+fn segment_keeps_native(words: &[String]) -> bool {
+    // RTK smart-truncates --max-lines rather than preserving a head window.
+    // Keep previews and complete search listings native through supported wrappers.
+    if native_output::owns_command(words) {
         return true;
     }
     let mut index = words
@@ -641,13 +654,41 @@ fn is_python_pytest(arguments: &[String], start: usize) -> bool {
     )
 }
 
+/// Anchors a PowerShell rewrite to `rtk_launcher`, or returns `None` when an
+/// inserted `rtk` is not where PowerShell starts a command.
+///
+/// Each inserted word becomes a call-operator invocation of the launcher's
+/// `rtk` subcommand. The call stays native, so `$?` and `$LASTEXITCODE` keep
+/// their meaning, and the script's pipelines, conditions, arguments and quoting
+/// stay intact.
 fn anchor_powershell_rtk(
+    original: &str,
     rewritten: &str,
-    rtk_path: &Path,
+    rtk_launcher: &Path,
     attribution: &Attribution,
     data_dir: &Path,
-) -> String {
+) -> Option<String> {
     let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let offsets = inserted_rtk_offsets(original, rewritten);
+    // The scanner follows shell quoting, so words it cannot see (after a
+    // PowerShell backtick escape, for example) would run a missing `rtk`.
+    if offsets.is_empty()
+        || rtk_word_count(rewritten) != rtk_word_count(original) + offsets.len()
+        || !offsets
+            .iter()
+            .all(|offset| starts_powershell_command(rewritten, *offset))
+    {
+        return None;
+    }
+    let invocation = format!("& {} rtk", quote(&rtk_launcher.to_string_lossy()));
+    let mut body = String::with_capacity(rewritten.len() + offsets.len() * invocation.len());
+    let mut copied_until = 0;
+    for offset in offsets {
+        body.push_str(&rewritten[copied_until..offset]);
+        body.push_str(&invocation);
+        copied_until = offset + 3;
+    }
+    body.push_str(&rewritten[copied_until..]);
     let values = [
         ("TOKENLESS_AGENT_ID", attribution.agent_id.as_str()),
         (
@@ -660,12 +701,7 @@ fn anchor_powershell_rtk(
         ),
         ("TOKENLESS_DATA_DIR", &data_dir.to_string_lossy()),
     ];
-    // A child scope's alias binds native RTK calls without parsing or translating
-    // RTK's script. Its pipelines, conditions, arguments and quoting stay intact.
-    let mut script = format!(
-        "& {{ [CmdletBinding()] param(); Set-Alias -Name rtk -Value {} -Scope Local; ",
-        quote(&rtk_path.to_string_lossy())
-    );
+    let mut script = String::from("& { [CmdletBinding()] param(); ");
     for (index, (name, _)) in values.iter().enumerate() {
         script.push_str(&format!(
             "$tokenlessOld{index} = [Environment]::GetEnvironmentVariable('{name}', 'Process'); "
@@ -675,7 +711,7 @@ fn anchor_powershell_rtk(
     for (name, value) in values {
         script.push_str(&format!("$env:{name} = {}; ", quote(value)));
     }
-    script.push_str(rewritten);
+    script.push_str(&body);
     script.push_str("\n} finally { $tokenlessOk = $?; $tokenlessExit = $LASTEXITCODE; ");
     for (index, (name, _)) in values.iter().enumerate() {
         script.push_str(&format!(
@@ -685,21 +721,43 @@ fn anchor_powershell_rtk(
     // $? is read-only. An advanced script block must report its own failure;
     // Ignore preserves that status without adding stderr or an $Error entry.
     script.push_str("$global:LASTEXITCODE = $tokenlessExit } if (-not $tokenlessOk) { $ErrorActionPreference = 'Ignore'; $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([Exception]::new('Command failed'), 'TokenlessCommandFailed', [System.Management.Automation.ErrorCategory]::NotSpecified, $null)) } }");
-    script
+    Some(script)
+}
+
+/// Whether the word at `offset` begins a PowerShell command.
+///
+/// A lone `&` is rejected: before a command it is the call operator, which
+/// the inserted invocation would duplicate.
+fn starts_powershell_command(script: &str, offset: usize) -> bool {
+    let before = script[..offset].trim_end_matches([' ', '\t']);
+    before.is_empty()
+        || before.ends_with("&&")
+        || before.ends_with([';', '|', '{', '(', '\n', '\r'])
+}
+
+/// Counts `rtk` occurrences delimited by characters that cannot extend a command name.
+fn rtk_word_count(text: &str) -> usize {
+    let extends = |character: char| character.is_alphanumeric() || matches!(character, '_' | '-');
+    text.match_indices("rtk")
+        .filter(|(index, _)| {
+            !text[..*index].chars().next_back().is_some_and(extends)
+                && !text[index + 3..].chars().next().is_some_and(extends)
+        })
+        .count()
 }
 
 #[cfg(test)]
 fn anchor_rtk_prefix(
     original: &str,
     rewritten: &str,
-    rtk_path: &Path,
+    rtk_launcher: &Path,
     attribution: &Attribution,
     data_dir: &Path,
 ) -> String {
     anchor_rtk_prefix_with_outcomes(
         original,
         rewritten,
-        rtk_path,
+        rtk_launcher,
         attribution,
         data_dir,
         |_, _| None,
@@ -709,12 +767,12 @@ fn anchor_rtk_prefix(
 fn anchor_rtk_prefix_with_outcomes(
     original: &str,
     rewritten: &str,
-    rtk_path: &Path,
+    rtk_launcher: &Path,
     attribution: &Attribution,
     data_dir: &Path,
     begin: impl FnOnce(usize, &dyn Fn(&str) -> String) -> Option<String>,
 ) -> String {
-    let quoted_path = shell_quote(&rtk_path.to_string_lossy());
+    let invocation = format!("{} rtk", shell_quote(&rtk_launcher.to_string_lossy()));
     let prefix = format!(
         "env TOKENLESS_AGENT_ID={} TOKENLESS_SESSION_ID={} TOKENLESS_TOOL_USE_ID={} TOKENLESS_DATA_DIR={} ",
         shell_quote(&attribution.agent_id),
@@ -722,15 +780,61 @@ fn anchor_rtk_prefix_with_outcomes(
         shell_quote(attribution.tool_use_id.as_deref().unwrap_or_default()),
         shell_quote(&data_dir.to_string_lossy()),
     );
-    // RTK can preserve arbitrary configured transparent prefixes before its
-    // wrapper. The first divergence in each rewritten segment locates the
-    // inserted wrapper without replacing `rtk` arguments in that prefix.
-    // Backtick and double-quoted command substitutions are left untouched
-    // because they require the host parser.
     let original_segments = bare_rtk_offsets_by_segment(original);
     let rewritten_segments = bare_rtk_offsets_by_segment(rewritten);
-    let mut replacements = Vec::new();
-    for (segment_index, (rewritten_start, tokens)) in rewritten_segments.iter().enumerate() {
+    let replacements = inserted_rtk_offsets(original, rewritten);
+
+    // Opaque substitutions or existing RTK references may execute untracked wrappers.
+    let all_tracked = original_segments
+        .iter()
+        .all(|(_, tokens)| tokens.is_empty())
+        && !original.contains("rtk")
+        && !original.contains('`')
+        && !original.contains("$(")
+        && rewritten_segments
+            .iter()
+            .map(|(_, tokens)| tokens.len())
+            .sum::<usize>()
+            == replacements.len();
+    let render = |run: Option<&str>| {
+        let mut anchored = String::with_capacity(
+            rewritten.len() + replacements.len() * (prefix.len() + invocation.len()),
+        );
+        let mut copied_until = 0;
+        for (ordinal, offset) in replacements.iter().copied().enumerate() {
+            anchored.push_str(&rewritten[copied_until..offset]);
+            anchored.push_str(&prefix);
+            if let Some(run) = run {
+                anchored.push_str(&format!(
+                    "TOKENLESS_RTK_RUN_ID={} TOKENLESS_RTK_ORDINAL={ordinal} ",
+                    shell_quote(run)
+                ));
+            }
+            anchored.push_str(&invocation);
+            copied_until = offset + 3;
+        }
+        anchored.push_str(&rewritten[copied_until..]);
+        anchored
+    };
+    begin(if all_tracked { replacements.len() } else { 0 }, &|run| {
+        render(Some(run))
+    })
+    .unwrap_or_else(|| render(None))
+}
+
+/// Offsets of the `rtk` words RTK inserted into `rewritten`.
+///
+/// RTK can preserve arbitrary configured transparent prefixes before its
+/// wrapper. The first divergence in each rewritten segment locates the
+/// inserted wrapper without replacing `rtk` arguments in that prefix.
+/// Backtick and double-quoted command substitutions are left untouched
+/// because they require the host parser.
+fn inserted_rtk_offsets(original: &str, rewritten: &str) -> Vec<usize> {
+    let original_segments = bare_rtk_offsets_by_segment(original);
+    let mut offsets = Vec::new();
+    for (segment_index, (rewritten_start, tokens)) in
+        bare_rtk_offsets_by_segment(rewritten).iter().enumerate()
+    {
         let original_segment = original_segments.get(segment_index);
         let original_count = original_segment.map_or(0, |(_, tokens)| tokens.len());
         if tokens.len() > original_count {
@@ -747,7 +851,7 @@ fn anchor_rtk_prefix_with_outcomes(
             let insertion_floor = rewritten_start
                 + (rewritten_suffix.len() - rewritten_trimmed.len())
                 + common_prefix_len;
-            replacements.extend(
+            offsets.extend(
                 tokens
                     .iter()
                     .copied()
@@ -755,42 +859,7 @@ fn anchor_rtk_prefix_with_outcomes(
             );
         }
     }
-
-    // Opaque substitutions or existing RTK references may execute untracked wrappers.
-    let all_tracked = original_segments
-        .iter()
-        .all(|(_, tokens)| tokens.is_empty())
-        && !original.contains("rtk")
-        && !original.contains('`')
-        && !original.contains("$(")
-        && rewritten_segments
-            .iter()
-            .map(|(_, tokens)| tokens.len())
-            .sum::<usize>()
-            == replacements.len();
-    let render = |run: Option<&str>| {
-        let mut anchored =
-            String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
-        let mut copied_until = 0;
-        for (ordinal, offset) in replacements.iter().copied().enumerate() {
-            anchored.push_str(&rewritten[copied_until..offset]);
-            anchored.push_str(&prefix);
-            if let Some(run) = run {
-                anchored.push_str(&format!(
-                    "TOKENLESS_RTK_RUN_ID={} TOKENLESS_RTK_ORDINAL={ordinal} ",
-                    shell_quote(run)
-                ));
-            }
-            anchored.push_str(&quoted_path);
-            copied_until = offset + 3;
-        }
-        anchored.push_str(&rewritten[copied_until..]);
-        anchored
-    };
-    begin(if all_tracked { replacements.len() } else { 0 }, &|run| {
-        render(Some(run))
-    })
-    .unwrap_or_else(|| render(None))
+    offsets
 }
 
 fn bare_rtk_offsets_by_segment(command: &str) -> Vec<(usize, Vec<usize>)> {
@@ -1209,41 +1278,48 @@ mod tests {
         }
     }
 
+    /// Writes a batch file standing in for `tokenless.exe`: PowerShell calls
+    /// it with `rtk` first, as the anchored script does.
+    #[cfg(windows)]
+    fn fake_launcher(directory: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let launcher = directory.join("tokenless launcher.cmd");
+        std::fs::write(&launcher, body).unwrap();
+        launcher
+    }
+
     #[cfg(windows)]
     #[test]
     fn powershell_binding_preserves_script_exit_and_restores_environment() {
-        let path = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32/cmd.exe");
+        let directory = tempfile::tempdir().unwrap();
+        // %1 is `rtk` and %2 the rewritten program, so %3 is the exit status.
+        let launcher = fake_launcher(
+            directory.path(),
+            "@if not \"%1\"==\"rtk\" exit /b 99\r\n@echo %TOKENLESS_AGENT_ID%\r\n@exit /b %3\r\n",
+        );
         let mut attribution = tokenless_protocol::Attribution::new("test-agent");
         attribution.session_id = Some("session 'quoted'".into());
         let shell =
             std::env::var("TOKENLESS_TEST_POWERSHELL").unwrap_or_else(|_| "powershell.exe".into());
-        for (command, status, last_exit, process_exit) in [
+        for (original, rewritten, status, last_exit, process_exit) in [
+            ("git 7", "rtk git 7", "False", 7, 1),
+            ("git 0", "rtk git 0", "True", 0, 0),
             (
-                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'",
-                "False",
-                7,
-                1,
-            ),
-            (
-                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 0'",
-                "True",
-                0,
-                0,
-            ),
-            (
-                "rtk /d /c 'echo %TOKENLESS_AGENT_ID%&exit /b 7'; Write-Output 'done'",
+                "git 7; Write-Output 'done'",
+                "rtk git 7; Write-Output 'done'",
                 "True",
                 7,
                 0,
             ),
         ] {
             let script = super::anchor_powershell_rtk(
-                command,
-                &path,
+                original,
+                rewritten,
+                &launcher,
                 &attribution,
                 std::path::Path::new("C:/data with spaces"),
-            );
+            )
+            .unwrap();
+            // A user `rtk` alias must not capture the anchored invocation.
             let preamble = "$env:TOKENLESS_AGENT_ID='before'; Set-Alias rtk Write-Output; $ErrorActionPreference='Stop'; $Error.Clear();";
             let output = std::process::Command::new(&shell)
                 .args(["-NoProfile", "-NonInteractive", "-Command", &format!(
@@ -1264,7 +1340,7 @@ mod tests {
                 ])
                 .output()
                 .unwrap();
-            assert_eq!(output.status.code(), Some(process_exit), "{command}");
+            assert_eq!(output.status.code(), Some(process_exit), "{rewritten}");
             assert!(output.stderr.is_empty(), "{:?}", output.stderr);
         }
     }
@@ -1272,12 +1348,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn powershell_binding_restores_environment_on_throw() {
+        let directory = tempfile::tempdir().unwrap();
+        let launcher = fake_launcher(directory.path(), "@exit /b 0\r\n");
         let script = super::anchor_powershell_rtk(
-            "throw 'expected-error'",
-            std::path::Path::new("C:/unused/rtk.exe"),
+            "git status; throw 'expected-error'",
+            "rtk git status; throw 'expected-error'",
+            &launcher,
             &tokenless_protocol::Attribution::new("test-agent"),
             std::path::Path::new("C:/data"),
-        );
+        )
+        .unwrap();
         let shell =
             std::env::var("TOKENLESS_TEST_POWERSHELL").unwrap_or_else(|_| "powershell.exe".into());
         let output = std::process::Command::new(shell)
@@ -1290,11 +1370,8 @@ mod tests {
             "expected-error;env=before"
         );
     }
-    #[cfg(unix)]
-    use std::fs;
+
     use std::sync::atomic::{AtomicUsize, Ordering};
-    #[cfg(unix)]
-    use std::time::Instant;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -1314,29 +1391,9 @@ mod tests {
             diff_compression_enabled: false,
             html_extraction_enabled: false,
             stash_enabled: true,
-            rtk_path: None,
+            rtk_launcher: None,
             rtk_data_dir: Some(PathBuf::from("/tmp/tokenless-test")),
         }
-    }
-
-    // A forked child holds every fd of the process until it execs, so a script
-    // still open for writing on another thread makes this thread's exec fail
-    // with ETXTBSY (`ExecutableFileBusy`). Tests that write and run scripts
-    // hold this lock across both steps.
-    #[cfg(unix)]
-    fn serialize_rtk_scripts() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    #[cfg(unix)]
-    fn write_executable(path: &Path, script: &str) {
-        fs::write(path, script).unwrap();
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt as _;
-        permissions.set_mode(0o700);
-        fs::set_permissions(path, permissions).unwrap();
     }
 
     /// Wraps [`InMemoryStore`] counting every trait-level touch — stash calls
@@ -1591,36 +1648,150 @@ mod tests {
         );
     }
 
+    /// Fails the test when PreTool reaches RTK for a command it must keep.
+    fn rtk_must_not_run(command: &str) -> rtk::RewriteOutcome {
+        panic!("RTK must not see {command:?}")
+    }
+
+    fn bash_request(command: &str) -> PreToolRequest {
+        PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": command, "timeout": 30}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        }
+    }
+
     #[test]
-    #[cfg(unix)]
-    fn pre_tool_applies_rtk_exit_zero_and_anchors_path() {
-        let _serial = serialize_rtk_scripts();
+    fn pre_tool_applies_rtk_rewrite_and_anchors_launcher() {
         let directory = tempdir().unwrap();
-        let rtk = directory.path().join("fake rtk");
-        write_executable(&rtk, "#!/bin/sh\nprintf 'rtk grep --count error log'\n");
-        let response = pre_tool_with_rtk(
-            &PreToolRequest {
+        let response = pre_tool_with_rewriter(
+            &bash_request("git status"),
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless bin/tokenless")),
+            Some(directory.path()),
+            |command| {
+                assert_eq!(command, "git status");
+                rtk::RewriteOutcome::Allow("rtk git status".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(response.action, PreToolAction::ReplaceArguments);
+        assert_eq!(response.output_optimization, OutputOptimization::Rtk);
+        assert_eq!(response.arguments["timeout"], 30);
+        let command = response.arguments["command"].as_str().unwrap();
+        assert!(
+            command.starts_with("env TOKENLESS_AGENT_ID=test "),
+            "{command}"
+        );
+        assert!(
+            command.ends_with("'/opt/tokenless bin/tokenless' rtk git status"),
+            "{command}"
+        );
+    }
+
+    #[test]
+    fn search_modes_share_native_ownership_and_post_tool_recognition() {
+        for command in [
+            "grep -n 'foo|bar;baz' 'source file.py'",
+            "cd /testbed && grep -n '__array_function__\\|NotImplemented' quantity.py",
+            "rg --files",
+            "rg -l match src",
+            "grep -c match source.py",
+            "rg -q match src",
+            "rg --json match src",
+            "rg --null -l match src",
+            "git status | grep modified",
+            "grep match source.py | sort",
+            "echo start; rg -n match src",
+            "echo start\nrg -n match src",
+            "LANG=C command /usr/bin/grep match source.py",
+            "env -u TEMP timeout -k 5 30 command rg match src",
+            "nohup nice -n 5 /usr/bin/grep match source.py",
+            "time -f '' rg match src",
+            "uv run rg match src",
+            "gr\\\nep match source.py",
+        ] {
+            let request = bash_request(command);
+            let response = pre_tool_with_rewriter(
+                &request,
+                &Attribution::new("test"),
+                None,
+                None,
+                rtk_must_not_run,
+            )
+            .unwrap();
+            assert_eq!(response.arguments, request.arguments, "{command}");
+            assert_eq!(response.action, PreToolAction::Passthrough);
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert!(is_search_command(command), "{command}");
+        }
+        for command in [
+            "echo 'grep match src | rg x'",
+            "printf '%s' \"rg match src; grep x\"",
+            "rtk grep match src",
+            "timeout --bogus 30 rg match src",
+            "time -f rg echo match",
+            "find . -type f",
+            "head -40 source.py",
+        ] {
+            assert!(!is_search_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn pre_tool_preserves_native_source_previews() {
+        for command in [
+            "head -40 source.py",
+            "head -n 40 'source file.py'",
+            "head --lines=40 source.py",
+            "tail -n 40 source.py",
+            "tail --lines=40 source.py",
+            "wc -l source.py; head -40 source.py",
+            "cd /testbed && head -40 source.py",
+            "cat source.py | head -40",
+            "git diff | tail -40",
+            "env LANG=C timeout 10 command /usr/bin/head -40 source.py",
+            "nohup nice -n 5 tail -40 source.py",
+            "uv run head -40 source.py",
+            "he\\\nad -40 source.py",
+        ] {
+            let request = PreToolRequest {
                 tool_name: "Bash".into(),
-                arguments: json!({"command": "grep error log"}),
+                arguments: json!({"command": command, "timeout": 30}),
                 command_field: "command".into(),
                 capabilities: PreToolCapabilities {
                     replace_arguments: true,
                     block_and_suggest: false,
                 },
-            },
-            &Attribution::new("test"),
-            &rtk,
-            directory.path(),
-        )
-        .unwrap();
-        assert_eq!(response.action, PreToolAction::ReplaceArguments);
-        assert_eq!(response.output_optimization, OutputOptimization::Rtk);
-        assert!(
-            response.arguments["command"]
-                .as_str()
-                .unwrap()
-                .contains("fake rtk")
-        );
+            };
+            let response = pre_tool_with_rewriter(
+                &request,
+                &Attribution::new("test"),
+                None,
+                None,
+                rtk_must_not_run,
+            )
+            .unwrap_or_else(|error| panic!("{command:?}: {error}"));
+            assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert_eq!(response.arguments, request.arguments);
+        }
+        for command in [
+            "echo 'head -40 source.py'",
+            "echo 'rg tail source.py'",
+            "time echo head",
+            "timeout 10 rtk read source.py --max-lines 40",
+            "rtk head -40 source.py",
+            "rtk tail -40 source.py",
+            "env LANG=C timeout 10 rtk head -40 source.py",
+            "command rtk tail -40 source.py",
+        ] {
+            assert!(!keeps_command_native(command), "{command}");
+        }
     }
 
     #[test]
@@ -1649,13 +1820,13 @@ mod tests {
                     block_and_suggest: false,
                 },
             };
-            // No RTK path or data directory: invoking RTK would fail this call.
-            let response = pre_tool_with_optional_rtk(
+            // No launcher or data directory, and RTK panics if consulted.
+            let response = pre_tool_with_rewriter(
                 &request,
                 &Attribution::new("test"),
                 None,
                 None,
-                RTK_TIMEOUT,
+                rtk_must_not_run,
             )
             .unwrap();
             assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
@@ -1665,9 +1836,9 @@ mod tests {
         for command in [
             "echo 'find . -name *.json'",
             "printf '%s' find",
-            "rg find README.md",
+            "echo 'rg find README.md'",
             "fd document",
-            "rg --files",
+            "echo 'rg --files'",
             "rtk find . -name '*.json'",
             "noglob echo find",
             "nocorrect printf '%s' 'find . -type f'",
@@ -1678,7 +1849,7 @@ mod tests {
             "command exec cargo test",
             "command env -i cargo test",
         ] {
-            assert!(!is_post_tool_owned_command(command), "{command}");
+            assert!(!keeps_command_native(command), "{command}");
         }
     }
 
@@ -1723,7 +1894,7 @@ mod tests {
             "timeout 30 \\\n  find . -type f",
             "fi\\\nnd . -type f",
         ] {
-            let response = pre_tool_with_optional_rtk(
+            let response = pre_tool_with_rewriter(
                 &PreToolRequest {
                     tool_name: "Bash".into(),
                     arguments: json!({"command": command}),
@@ -1736,7 +1907,7 @@ mod tests {
                 &Attribution::new("test"),
                 None,
                 None,
-                RTK_TIMEOUT,
+                rtk_must_not_run,
             )
             .unwrap_or_else(|error| panic!("{command:?}: {error}"));
             assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
@@ -1744,7 +1915,7 @@ mod tests {
             assert_eq!(response.arguments["command"], command);
         }
         for command in [
-            "timeout 30 rg find README.md",
+            "timeout 30 echo 'rg find README.md'",
             "time echo find",
             "nohup rtk find . -type f",
             "timeout 30 rtk find . -type f",
@@ -1769,7 +1940,7 @@ mod tests {
             "command '' find . -type f",
             "timeout 30 '' find . -type f",
         ] {
-            assert!(!is_post_tool_owned_command(command), "{command}");
+            assert!(!keeps_command_native(command), "{command}");
         }
     }
 
@@ -1784,13 +1955,13 @@ mod tests {
             "fi\\\nnd . -type f",
             "env \\\n  RUSTFLAGS=-C \\\n  cargo test",
         ] {
-            assert!(is_post_tool_owned_command(command), "{command:?}");
+            assert!(keeps_command_native(command), "{command:?}");
         }
         for command in [
             "echo 'command \\\n find . -type f'",
             "printf '%s' \"noglob \\\n find . -type f\"",
         ] {
-            assert!(!is_post_tool_owned_command(command), "{command:?}");
+            assert!(!keeps_command_native(command), "{command:?}");
         }
     }
 
@@ -1811,7 +1982,7 @@ mod tests {
         ];
         for command in commands {
             assert!(
-                is_post_tool_owned_command(command),
+                keeps_command_native(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1823,10 +1994,10 @@ mod tests {
             "npm run lint",
             "cat build.log",
             "echo 'cargo test'",
-            "rg pytest README.md",
+            "echo 'rg pytest README.md'",
         ] {
             assert!(
-                !is_post_tool_owned_command(command),
+                !keeps_command_native(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
@@ -1854,7 +2025,7 @@ mod tests {
             "make -j8",
         ] {
             assert!(
-                is_post_tool_owned_command(command),
+                keeps_command_native(command),
                 "expected BuildLog ownership for {command:?}"
             );
         }
@@ -1862,33 +2033,37 @@ mod tests {
         for command in [
             "cargo +nightly fmt",
             "env -i cat build.log",
-            "env -u RUSTC grep error log",
+            "env -u RUSTC echo 'grep error log'",
         ] {
             assert!(
-                !is_post_tool_owned_command(command),
+                !keeps_command_native(command),
                 "unexpected BuildLog ownership for {command:?}"
             );
         }
     }
 
+    fn pre_tool_with_rtk(
+        request: &PreToolRequest,
+        attribution: &Attribution,
+        rtk_launcher: &Path,
+        data_dir: &Path,
+    ) -> Result<PreToolResponse, RuntimeError> {
+        pre_tool_with_rewriter(
+            request,
+            attribution,
+            Some(rtk_launcher),
+            Some(data_dir),
+            |command| rtk_rewrite(Some(rtk_launcher), command),
+        )
+    }
+
     #[test]
-    #[cfg(unix)]
     fn pre_tool_build_log_owner_behind_env_flag_beats_rtk_rewriting() {
         let directory = tempdir().unwrap();
-        let rtk = directory.path().join("fake rtk");
-        write_executable(&rtk, "#!/bin/sh\nprintf 'rtk env -i cargo test'\n");
         let response = pre_tool_with_rtk(
-            &PreToolRequest {
-                tool_name: "Bash".into(),
-                arguments: json!({"command": "env -i cargo test"}),
-                command_field: "command".into(),
-                capabilities: PreToolCapabilities {
-                    replace_arguments: true,
-                    block_and_suggest: false,
-                },
-            },
+            &bash_request("env -i cargo test"),
             &Attribution::new("test"),
-            &rtk,
+            Path::new("/opt/tokenless/tokenless"),
             directory.path(),
         )
         .unwrap();
@@ -1898,6 +2073,30 @@ mod tests {
             response.arguments["command"].as_str().unwrap(),
             "env -i cargo test"
         );
+    }
+
+    #[test]
+    fn pre_tool_passes_through_once_the_launcher_leaves_its_path() {
+        let directory = tempdir().unwrap();
+        let launcher = directory.path().join("tokenless");
+        std::fs::write(&launcher, "").unwrap();
+        let rewrite = |launcher: &Path| {
+            pre_tool_with_rtk(
+                &bash_request("git status"),
+                &Attribution::new("test"),
+                launcher,
+                directory.path(),
+            )
+            .unwrap()
+        };
+        assert_eq!(rewrite(&launcher).action, PreToolAction::ReplaceArguments);
+
+        // `/proc/self/exe` after the running executable was replaced.
+        let replaced = directory.path().join("tokenless (deleted)");
+        let response = rewrite(&replaced);
+        assert_eq!(response.action, PreToolAction::Passthrough);
+        assert_eq!(response.output_optimization, OutputOptimization::None);
+        assert_eq!(response.arguments["command"], "git status");
     }
 
     #[test]
@@ -1911,12 +2110,12 @@ mod tests {
                 block_and_suggest: false,
             },
         };
-        let response = pre_tool_with_optional_rtk(
+        let response = pre_tool_with_rewriter(
             &request,
             &Attribution::new("test"),
             None,
             None,
-            RTK_TIMEOUT,
+            rtk_must_not_run,
         )
         .unwrap();
         assert_eq!(response.action, PreToolAction::Passthrough);
@@ -1926,14 +2125,14 @@ mod tests {
 
     #[test]
     fn pre_tool_anchor_preserves_quoted_arguments_and_handles_subshells() {
-        let path = Path::new("/opt/tokenless/rtk");
+        let path = Path::new("/opt/tokenless/tokenless");
         let data_dir = Path::new("/tenant/tokenless");
         let attribution = Attribution {
             agent_id: "agent".into(),
             session_id: Some("session".into()),
             tool_use_id: Some("call".into()),
         };
-        let prefix = "env TOKENLESS_AGENT_ID=agent TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=call TOKENLESS_DATA_DIR=/tenant/tokenless /opt/tokenless/rtk";
+        let prefix = "env TOKENLESS_AGENT_ID=agent TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=call TOKENLESS_DATA_DIR=/tenant/tokenless /opt/tokenless/tokenless rtk";
         assert_eq!(
             anchor_rtk_prefix(
                 "grep -E 'foo | rtk bar' src && git status",
@@ -2033,7 +2232,7 @@ mod tests {
     #[test]
     fn rtk_receipts_cover_all_wrappers_or_keep_conservative_ownership() {
         let attribution = Attribution::new("test");
-        let path = Path::new("/opt/tokenless/rtk");
+        let path = Path::new("/opt/tokenless/tokenless");
         let anchored = anchor_rtk_prefix_with_outcomes(
             "git log && git show",
             "rtk git log && rtk git show",
@@ -2126,54 +2325,49 @@ mod tests {
             },
         };
         assert!(matches!(
-            pre_tool_with_optional_rtk(
+            pre_tool_with_rewriter(
                 &applicable,
                 &Attribution::new("test"),
                 None,
                 None,
-                RTK_TIMEOUT
+                rtk_must_not_run
             ),
-            Err(RuntimeError::RtkUnavailable)
+            Err(RuntimeError::RtkLauncherUnavailable)
         ));
     }
 
     #[test]
-    #[cfg(unix)]
-    fn pre_tool_honors_rtk_exit_contract_and_preserves_arguments() {
-        let _serial = serialize_rtk_scripts();
+    fn pre_tool_honors_rtk_outcomes_and_preserves_arguments() {
         let directory = tempdir().unwrap();
-        let request = PreToolRequest {
-            tool_name: "Bash".into(),
-            arguments: json!({"command": "grep error log", "timeout": 30}),
-            command_field: "command".into(),
-            capabilities: PreToolCapabilities {
-                replace_arguments: true,
-                block_and_suggest: false,
-            },
-        };
-        for code in [1, 2] {
-            let rtk = directory.path().join(format!("rtk-{code}"));
-            write_executable(&rtk, &format!("#!/bin/sh\nprintf 'changed'\nexit {code}\n"));
-            let response =
-                pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path())
-                    .unwrap();
+        let request = bash_request("git status");
+        let launcher = Path::new("/opt/tokenless/tokenless");
+        for outcome in [
+            rtk::RewriteOutcome::Passthrough,
+            rtk::RewriteOutcome::Deny,
+            rtk::RewriteOutcome::Allow(String::new()),
+            rtk::RewriteOutcome::Allow("git status".into()),
+        ] {
+            let response = pre_tool_with_rewriter(
+                &request,
+                &Attribution::new("test"),
+                Some(launcher),
+                Some(directory.path()),
+                |_| outcome,
+            )
+            .unwrap();
             assert_eq!(response.action, PreToolAction::Passthrough);
-            assert_eq!(response.arguments, request.arguments);
-        }
-        for (name, output) in [("empty", ""), ("unchanged", "grep error log")] {
-            let rtk = directory.path().join(format!("rtk-{name}"));
-            write_executable(&rtk, &format!("#!/bin/sh\nprintf '%s' '{output}'\n"));
-            let response =
-                pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path())
-                    .unwrap();
-            assert_eq!(response.action, PreToolAction::Passthrough);
+            assert_eq!(response.output_optimization, OutputOptimization::None);
             assert_eq!(response.arguments, request.arguments);
         }
 
-        let rtk = directory.path().join("rtk-3");
-        write_executable(&rtk, "#!/bin/sh\nprintf 'optimized command'\nexit 3\n");
-        let response =
-            pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path()).unwrap();
+        let response = pre_tool_with_rewriter(
+            &request,
+            &Attribution::new("test"),
+            Some(launcher),
+            Some(directory.path()),
+            |_| rtk::RewriteOutcome::Ask("optimized command".into()),
+        )
+        .unwrap();
         assert_eq!(response.action, PreToolAction::ReplaceArguments);
         assert_eq!(response.output_optimization, OutputOptimization::Rtk);
         assert_eq!(response.arguments["command"], "optimized command");
@@ -2181,224 +2375,97 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn pre_tool_passes_attribution_and_rejects_unexpected_exit() {
-        let _serial = serialize_rtk_scripts();
+    fn pre_tool_carries_attribution_into_the_rewritten_command() {
         let directory = tempdir().unwrap();
         let request = PreToolRequest {
             tool_name: "Bash".into(),
-            arguments: json!({"command": "original"}),
+            arguments: json!({"command": "git status"}),
             command_field: "command".into(),
             capabilities: PreToolCapabilities {
                 replace_arguments: false,
                 block_and_suggest: true,
             },
         };
-        let rtk = directory.path().join("rtk-env");
-        write_executable(
-            &rtk,
-            "#!/bin/sh\nprintf '%s:%s:%s:%s' \"$TOKENLESS_AGENT_ID\" \"$TOKENLESS_SESSION_ID\" \"$TOKENLESS_TOOL_USE_ID\" \"$TOKENLESS_DATA_DIR\"\n",
-        );
         let attribution = Attribution {
             agent_id: "agent".into(),
             session_id: Some("session".into()),
             tool_use_id: Some("call".into()),
         };
-        let response = pre_tool_with_rtk(&request, &attribution, &rtk, directory.path()).unwrap();
+        let response = pre_tool_with_rewriter(
+            &request,
+            &attribution,
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(directory.path()),
+            |_| rtk::RewriteOutcome::Allow("rtk git status".into()),
+        )
+        .unwrap();
         assert_eq!(response.action, PreToolAction::BlockAndSuggest);
-        assert_eq!(
-            response.arguments["command"],
-            format!("agent:session:call:{}", directory.path().display())
-        );
-
-        let unexpected = directory.path().join("rtk-9");
-        write_executable(&unexpected, "#!/bin/sh\nexit 9\n");
-        assert!(matches!(
-            pre_tool_with_rtk(&request, &attribution, &unexpected, directory.path()),
-            Err(RuntimeError::RtkUnexpectedExit { code: 9 })
-        ));
-        assert!(matches!(
-            pre_tool_with_rtk(
-                &request,
-                &attribution,
-                &directory.path().join("missing-rtk"),
-                directory.path(),
-            ),
-            Err(RuntimeError::RtkSpawn { .. })
-        ));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn pre_tool_timeout_is_an_operation_error() {
-        let _serial = serialize_rtk_scripts();
-        let directory = tempdir().unwrap();
-        let rtk = directory.path().join("rtk-slow");
-        write_executable(&rtk, "#!/bin/sh\nsleep 1\n");
-        let request = PreToolRequest {
-            tool_name: "Bash".into(),
-            arguments: json!({"command": "original"}),
-            command_field: "command".into(),
-            capabilities: PreToolCapabilities {
-                replace_arguments: true,
-                block_and_suggest: false,
-            },
-        };
-        let started = Instant::now();
-        assert!(matches!(
-            pre_tool_with_optional_rtk(
-                &request,
-                &Attribution::new("test"),
-                Some(&rtk),
-                Some(directory.path()),
-                Duration::from_millis(20)
-            ),
-            Err(RuntimeError::RtkTimeout)
-        ));
-        assert!(started.elapsed() < Duration::from_millis(500));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn pre_tool_deadline_includes_stdout_held_by_a_descendant() {
-        let _serial = serialize_rtk_scripts();
-        for parent in ["exit 0", "wait"] {
-            let directory = tempdir().unwrap();
-            let rtk = directory.path().join("rtk-inherited-stdout");
-            let pid_file = directory.path().join("descendant.pid");
-            write_executable(
-                &rtk,
-                &format!(
-                    "#!/bin/sh\nsleep 2 &\nprintf '%s' \"$!\" > '{}'\nprintf 'rtk git status'\n{parent}\n",
-                    pid_file.display()
-                ),
-            );
-            let request = PreToolRequest {
-                tool_name: "Bash".into(),
-                arguments: json!({"command": "git status"}),
-                command_field: "command".into(),
-                capabilities: PreToolCapabilities {
-                    replace_arguments: true,
-                    block_and_suggest: false,
-                },
-            };
-            let started = Instant::now();
-            let result = pre_tool_with_optional_rtk(
-                &request,
-                &Attribution::new("test"),
-                Some(&rtk),
-                Some(directory.path()),
-                Duration::from_millis(100),
-            );
-            assert!(
-                matches!(result, Err(RuntimeError::RtkTimeout)),
-                "{parent}: {result:?}"
-            );
-            assert!(started.elapsed() < Duration::from_secs(1), "{parent}");
-
-            #[cfg(target_os = "linux")]
-            {
-                let pid = fs::read_to_string(pid_file).unwrap();
-                let stat_path = format!("/proc/{pid}/stat");
-                let cleanup_started = Instant::now();
-                while let Ok(stat) = fs::read_to_string(&stat_path) {
-                    // An orphan zombie is already stopped and cannot hold a pipe.
-                    let state = stat.rsplit_once(')').unwrap().1.trim_start();
-                    if state.starts_with(['Z', 'X']) {
-                        break;
-                    }
-                    assert!(cleanup_started.elapsed() < Duration::from_secs(1));
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn pre_tool_collects_descendant_output_before_the_deadline() {
-        let _serial = serialize_rtk_scripts();
-        let directory = tempdir().unwrap();
-        let rtk = directory.path().join("rtk-delayed-output");
-        write_executable(
-            &rtk,
-            "#!/bin/sh\nprintf 'optimized '\n(sleep 0.05; printf 'command') &\nexit 0\n",
-        );
-        let request = PreToolRequest {
-            tool_name: "Bash".into(),
-            arguments: json!({"command": "original"}),
-            command_field: "command".into(),
-            capabilities: PreToolCapabilities {
-                replace_arguments: true,
-                block_and_suggest: false,
-            },
-        };
-        let response = pre_tool_with_optional_rtk(
-            &request,
-            &Attribution::new("test"),
-            Some(&rtk),
-            Some(directory.path()),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-        assert_eq!(response.arguments["command"], "optimized command");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn pre_tool_preserves_invalid_utf8_output_errors() {
-        let _serial = serialize_rtk_scripts();
-        let directory = tempdir().unwrap();
-        let rtk = directory.path().join("rtk-invalid-utf8");
-        write_executable(&rtk, "#!/bin/sh\nprintf '\\377'\n");
-        let request = PreToolRequest {
-            tool_name: "Bash".into(),
-            arguments: json!({"command": "original"}),
-            command_field: "command".into(),
-            capabilities: PreToolCapabilities {
-                replace_arguments: true,
-                block_and_suggest: false,
-            },
-        };
-        let result = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path());
+        let command = response.arguments["command"].as_str().unwrap();
         assert!(
-            matches!(
-                &result,
-                Err(RuntimeError::RtkOutput(error)) if error.kind() == std::io::ErrorKind::InvalidData
-            ),
-            "{result:?}"
+            command.starts_with(&format!(
+                "env TOKENLESS_AGENT_ID=agent TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=call TOKENLESS_DATA_DIR={} TOKENLESS_RTK_RUN_ID=",
+                shell_quote(&directory.path().to_string_lossy())
+            )),
+            "{command}"
+        );
+        assert!(
+            command.ends_with(" TOKENLESS_RTK_ORDINAL=0 /opt/tokenless/tokenless rtk git status"),
+            "{command}"
         );
     }
 
     #[test]
-    #[cfg(unix)]
-    fn pre_tool_drains_large_rtk_output_before_exit() {
-        let _serial = serialize_rtk_scripts();
-        let directory = tempdir().unwrap();
-        let rtk = directory.path().join("rtk-large-output");
-        write_executable(
-            &rtk,
-            &format!("#!/bin/sh\nprintf 'optimized {}'\n", "x".repeat(256 * 1024)),
-        );
-        let request = PreToolRequest {
-            tool_name: "Bash".into(),
-            arguments: json!({"command": "original"}),
-            command_field: "command".into(),
-            capabilities: PreToolCapabilities {
-                replace_arguments: true,
-                block_and_suggest: false,
-            },
-        };
-        let response = pre_tool_with_optional_rtk(
-            &request,
-            &Attribution::new("test"),
-            Some(&rtk),
-            Some(directory.path()),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-        assert_eq!(response.action, PreToolAction::ReplaceArguments);
-        assert!(response.arguments["command"].as_str().unwrap().len() > 256 * 1024);
+    fn powershell_anchor_calls_the_launcher_only_at_command_starts() {
+        let launcher = Path::new("C:/Program Files/Tokenless/tokenless.exe");
+        let attribution = Attribution::new("test");
+        let data_dir = Path::new("C:/data");
+        let invocation = "& 'C:/Program Files/Tokenless/tokenless.exe' rtk";
+        for (original, rewritten, expected) in [
+            (
+                "git status",
+                "rtk git status",
+                format!("{invocation} git status"),
+            ),
+            (
+                "git log | Select-Object -First 2; git status",
+                "rtk git log | Select-Object -First 2; rtk git status",
+                format!("{invocation} git log | Select-Object -First 2; {invocation} git status"),
+            ),
+            (
+                "if ($ok) { git diff } && (ls)",
+                "if ($ok) { rtk git diff } && (rtk ls)",
+                format!("if ($ok) {{ {invocation} git diff }} && ({invocation} ls)"),
+            ),
+            (
+                "Write-Output 'it''s rtk'; git status",
+                "Write-Output 'it''s rtk'; rtk git status",
+                format!("Write-Output 'it''s rtk'; {invocation} git status"),
+            ),
+        ] {
+            let script =
+                anchor_powershell_rtk(original, rewritten, launcher, &attribution, data_dir)
+                    .unwrap_or_else(|| panic!("{rewritten:?} was not anchored"));
+            assert!(script.contains(&format!("{expected}\n}}")), "{script}");
+            assert!(!script.contains("Set-Alias"), "{script}");
+        }
+        for (original, rewritten) in [
+            // A wrapper's argument is not a command PowerShell would resolve.
+            ("timeout 30 git status", "timeout 30 rtk git status"),
+            // After a background `&` the inserted call operator would double up.
+            ("Start-Job {} & git status", "Start-Job {} & rtk git status"),
+            // A PowerShell backtick escape hides the insertion from the scanner.
+            (
+                "Write-Output `\"; git status",
+                "Write-Output `\"; rtk git status",
+            ),
+            ("git status", "git status"),
+        ] {
+            assert!(
+                anchor_powershell_rtk(original, rewritten, launcher, &attribution, data_dir)
+                    .is_none(),
+                "{rewritten:?}"
+            );
+        }
     }
 
     #[test]

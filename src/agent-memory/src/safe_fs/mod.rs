@@ -17,9 +17,14 @@
 //! Linux-only (the parent crate already is). Requires kernel ≥ 5.6 for
 //! openat2 + ResolveFlag; AOS ships 6.x.
 
+mod atomic;
+
+pub use atomic::write_atomic;
+
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
@@ -110,17 +115,86 @@ pub fn write(root: BorrowedFd<'_>, rel: &Path, content: &[u8]) -> Result<u64> {
 /// Write only if the file doesn't exist; fails with `AlreadyExists`
 /// otherwise. This is the create-new semantic mem_write wants when
 /// `overwrite=false`.
+///
+/// On a write or flush error, remove the incomplete file so the caller can
+/// retry. If cleanup also fails, report both errors. This does not make
+/// writes atomically visible or clean up after process termination.
 pub fn write_create_new(root: BorrowedFd<'_>, rel: &Path, content: &[u8]) -> Result<u64> {
-    let mut f = open_in_root(
+    // Hold the parent through cleanup: an ordinary directory rename must not
+    // redirect removal to a different tree at the former parent pathname.
+    let parent_path = rel
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = rel.file_name().ok_or_else(|| {
+        MemoryError::InvalidArgument(format!("'{}' has no file name", rel.display()))
+    })?;
+    // Splitting off the leaf must not turn `new/` or `new/.` into a file
+    // creation: these spellings require a directory in the original path.
+    if rel
+        .as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|b| *b == b'/')
+        .next()
+        != Some(name.as_encoded_bytes())
+    {
+        return Err(MemoryError::InvalidArgument(format!(
+            "'{}' does not end in a file name",
+            rel.display()
+        )));
+    }
+    let name = Path::new(name);
+    let parent = open_in_root(
         root,
-        rel,
+        parent_path,
+        OFlag::O_PATH | OFlag::O_DIRECTORY,
+        Mode::empty(),
+    )?;
+    let mut f = open_in_root(
+        parent.as_fd(),
+        name,
         OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o644),
     )?;
-    f.write_all(content)?;
-    f.flush()?;
+    if let Err(error) = f.write_all(content).and_then(|()| f.flush()) {
+        if let Err(cleanup) = remove_failed_creation(&parent, name, &f) {
+            return Err(MemoryError::Other(format!(
+                "create '{}': {error}; removing incomplete file failed: {cleanup}",
+                rel.display()
+            )));
+        }
+        return Err(MemoryError::Io(error));
+    }
     Ok(content.len() as u64)
 }
+
+fn remove_failed_creation(parent: &File, name: &Path, created: &File) -> Result<()> {
+    use nix::errno::Errno;
+    use nix::fcntl::AtFlags;
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
+    let stat =
+        match nix::sys::stat::fstatat(Some(parent.as_raw_fd()), name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        {
+            Ok(stat) => stat,
+            Err(Errno::ENOENT) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+    let metadata = created.metadata()?;
+    // A destination already replaced by another operation is no longer ours.
+    // This check is best effort; callers still need to serialize external
+    // renames of the same leaf against writes and their failure cleanup.
+    if stat.st_dev != metadata.dev() || stat.st_ino != metadata.ino() {
+        return Ok(());
+    }
+    match unlinkat(Some(parent.as_raw_fd()), name, UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(Errno::ENOENT) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod create_cleanup_tests;
 
 pub fn append(root: BorrowedFd<'_>, rel: &Path, content: &[u8]) -> Result<u64> {
     let mut f = open_in_root(
@@ -209,7 +283,16 @@ pub fn assert_no_symlink_traversal(root: BorrowedFd<'_>, rel: &Path) -> Result<(
 /// 4. For directories, recurses.
 /// 5. Finally removes the now-empty top-level directory.
 pub fn remove_dir_all_safe(root: BorrowedFd<'_>, rel: &Path, abs: &Path) -> Result<()> {
-    remove_dir_all_recursive(root, rel, abs)?;
+    remove_dir_all_recursive(root, rel, abs, false)?;
+    std::fs::remove_dir(abs)?;
+    Ok(())
+}
+
+/// Remove restore-owned staging, temporarily granting owner write/search on readable
+/// directories. Call only for disposable staging, never retained trash or live
+/// user content. Restore directory modes even if recursive deletion fails.
+pub(crate) fn remove_restore_staging(root: BorrowedFd<'_>, rel: &Path, abs: &Path) -> Result<()> {
+    remove_dir_all_recursive(root, rel, abs, true)?;
     std::fs::remove_dir(abs)?;
     Ok(())
 }
@@ -225,7 +308,12 @@ pub fn remove_dir_all_safe(root: BorrowedFd<'_>, rel: &Path, abs: &Path) -> Resu
 /// `fdopendir` lists names; `fstatat(parent_fd, name, AT_SYMLINK_NOFOLLOW)`
 /// classifies each entry without traversing symlinks; `unlinkat` removes
 /// by parent-fd + name with no path re-resolution.
-fn remove_dir_all_recursive(root: BorrowedFd<'_>, rel: &Path, abs: &Path) -> Result<()> {
+fn remove_dir_all_recursive(
+    root: BorrowedFd<'_>,
+    rel: &Path,
+    abs: &Path,
+    staging: bool,
+) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
     // Open the parent directory as O_RDONLY so we can fdopendir it.
@@ -235,76 +323,116 @@ fn remove_dir_all_recursive(root: BorrowedFd<'_>, rel: &Path, abs: &Path) -> Res
         .resolve(safe_resolve());
     let parent_fd = openat2_owned(root, rel, parent_how)?;
 
-    // Snapshot dirents into a Vec so we can drop the Dir handle (and its
-    // dirent buffer) before recursing. Without this, deep trees keep one
-    // Dir open per stack frame and can exhaust RLIMIT_NOFILE.
-    let entries: Vec<(std::ffi::OsString, nix::libc::mode_t)> = {
-        // fdopendir consumes the fd, so dup it: we still need parent_fd
-        // as the anchor for fstatat / unlinkat below.
-        let dir_fd = parent_fd
-            .try_clone()
-            .map_err(|e| MemoryError::Other(format!("dup parent fd {}: {e}", rel.display())))?;
-        let mut dir = nix::dir::Dir::from(dir_fd)
-            .map_err(|e| MemoryError::Other(format!("fdopendir {}: {e}", rel.display())))?;
-
-        let mut out = Vec::new();
-        for entry_res in dir.iter() {
-            let entry = entry_res
-                .map_err(|e| MemoryError::Other(format!("readdir {}: {e}", rel.display())))?;
-            let name_bytes = entry.file_name().to_bytes();
-            if name_bytes == b"." || name_bytes == b".." {
-                continue;
-            }
-            let name_os = std::ffi::OsStr::from_bytes(name_bytes).to_os_string();
-
-            // Classify via fstatat anchored at parent_fd, never via path.
-            // AT_SYMLINK_NOFOLLOW: lstat semantics — never traverses a link.
-            let stat = nix::sys::stat::fstatat(
-                Some(parent_fd.as_raw_fd()),
-                name_os.as_os_str(),
-                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-            )
-            .map_err(|e| {
-                MemoryError::Other(format!("fstatat {}: {e}", rel.join(&name_os).display()))
-            })?;
-            out.push((name_os, stat.st_mode));
-        }
-        out
-        // `dir` drops here, releasing the dup'd fd before we recurse.
+    // chmod the held inode rather than a re-resolved path. This permission
+    // exception belongs only to disposable restore staging; ordinary removal
+    // still observes the user's read-only modes.
+    use nix::sys::stat::{Mode, fchmod, fstat};
+    let original = if staging {
+        Some(
+            fstat(parent_fd.as_raw_fd())
+                .map_err(|e| {
+                    MemoryError::Other(format!("read restore staging mode {}: {e}", rel.display()))
+                })?
+                .st_mode
+                & 0o7777,
+        )
+    } else {
+        None
     };
-
-    for (name_os, mode) in entries {
-        let child_rel = rel.join(&name_os);
-        let ifmt = mode & nix::libc::S_IFMT;
-
-        if ifmt == nix::libc::S_IFLNK {
-            return Err(MemoryError::PathOutsideMount(
-                child_rel.display().to_string(),
-            ));
-        }
-        if ifmt == nix::libc::S_IFDIR {
-            let child_abs = abs.join(&name_os);
-            remove_dir_all_recursive(root, &child_rel, &child_abs)?;
-            nix::unistd::unlinkat(
-                Some(parent_fd.as_raw_fd()),
-                name_os.as_os_str(),
-                nix::unistd::UnlinkatFlags::RemoveDir,
-            )
-            .map_err(|e| {
-                MemoryError::Other(format!("unlinkat dir {}: {e}", child_rel.display()))
-            })?;
-        } else {
-            nix::unistd::unlinkat(
-                Some(parent_fd.as_raw_fd()),
-                name_os.as_os_str(),
-                nix::unistd::UnlinkatFlags::NoRemoveDir,
-            )
-            .map_err(|e| {
-                MemoryError::Other(format!("unlinkat file {}: {e}", child_rel.display()))
-            })?;
-        }
+    let restore_mode = original.filter(|mode| mode & 0o300 != 0o300);
+    if let Some(mode) = restore_mode {
+        fchmod(
+            parent_fd.as_raw_fd(),
+            Mode::from_bits_truncate(mode | 0o300),
+        )
+        .map_err(|e| {
+            MemoryError::Other(format!(
+                "make restore staging {} removable: {e}",
+                rel.display()
+            ))
+        })?;
     }
-    Ok(())
+    let result = (|| {
+        // Snapshot dirents into a Vec so we can drop the Dir handle (and its
+        // dirent buffer) before recursing. Without this, deep trees keep one
+        // Dir open per stack frame and can exhaust RLIMIT_NOFILE.
+        let entries: Vec<(std::ffi::OsString, nix::libc::mode_t)> = {
+            // fdopendir consumes the fd, so dup it: we still need parent_fd
+            // as the anchor for fstatat / unlinkat below.
+            let dir_fd = parent_fd
+                .try_clone()
+                .map_err(|e| MemoryError::Other(format!("dup parent fd {}: {e}", rel.display())))?;
+            let mut dir = nix::dir::Dir::from(dir_fd)
+                .map_err(|e| MemoryError::Other(format!("fdopendir {}: {e}", rel.display())))?;
+
+            let mut out = Vec::new();
+            for entry_res in dir.iter() {
+                let entry = entry_res
+                    .map_err(|e| MemoryError::Other(format!("readdir {}: {e}", rel.display())))?;
+                let name_bytes = entry.file_name().to_bytes();
+                if name_bytes == b"." || name_bytes == b".." {
+                    continue;
+                }
+                let name_os = std::ffi::OsStr::from_bytes(name_bytes).to_os_string();
+
+                // Classify via fstatat anchored at parent_fd, never via path.
+                // AT_SYMLINK_NOFOLLOW: lstat semantics — never traverses a link.
+                let stat = nix::sys::stat::fstatat(
+                    Some(parent_fd.as_raw_fd()),
+                    name_os.as_os_str(),
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                )
+                .map_err(|e| {
+                    MemoryError::Other(format!("fstatat {}: {e}", rel.join(&name_os).display()))
+                })?;
+                out.push((name_os, stat.st_mode));
+            }
+            out
+            // `dir` drops here, releasing the dup'd fd before we recurse.
+        };
+
+        for (name_os, mode) in entries {
+            let child_rel = rel.join(&name_os);
+            let ifmt = mode & nix::libc::S_IFMT;
+
+            if ifmt == nix::libc::S_IFLNK {
+                return Err(MemoryError::PathOutsideMount(
+                    child_rel.display().to_string(),
+                ));
+            }
+            if ifmt == nix::libc::S_IFDIR {
+                let child_abs = abs.join(&name_os);
+                remove_dir_all_recursive(root, &child_rel, &child_abs, staging)?;
+                nix::unistd::unlinkat(
+                    Some(parent_fd.as_raw_fd()),
+                    name_os.as_os_str(),
+                    nix::unistd::UnlinkatFlags::RemoveDir,
+                )
+                .map_err(|e| {
+                    MemoryError::Other(format!("unlinkat dir {}: {e}", child_rel.display()))
+                })?;
+            } else {
+                nix::unistd::unlinkat(
+                    Some(parent_fd.as_raw_fd()),
+                    name_os.as_os_str(),
+                    nix::unistd::UnlinkatFlags::NoRemoveDir,
+                )
+                .map_err(|e| {
+                    MemoryError::Other(format!("unlinkat file {}: {e}", child_rel.display()))
+                })?;
+            }
+        }
+        Ok(())
+    })();
+    if let Some(mode) = restore_mode {
+        fchmod(parent_fd.as_raw_fd(), Mode::from_bits_truncate(mode)).map_err(|e| {
+            MemoryError::Other(format!(
+                "restore staging mode {} after cleanup ({result:?}): {e}",
+                rel.display()
+            ))
+        })?;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -398,5 +526,51 @@ mod tests {
         let root = open_root(tmp.path()).unwrap();
         let err = assert_no_symlink_traversal(root.as_fd(), Path::new("link/file.md")).unwrap_err();
         assert!(matches!(err, MemoryError::PathOutsideMount(_)));
+    }
+
+    #[test]
+    fn staging_cleanup_restores_modes_on_error_and_keeps_ordinary_removal_strict() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        for mode in [0o500, 0o444, 0o644] {
+            let tmp = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let root = open_root(tmp.path()).unwrap();
+            let ordinary = tmp.path().join("ordinary");
+            let staging = tmp.path().join("staging");
+            std::fs::create_dir(&ordinary).unwrap();
+            std::fs::create_dir(&staging).unwrap();
+            std::fs::write(ordinary.join("keep.md"), "keep").unwrap();
+            std::fs::write(outside.path().join("keep.md"), "outside").unwrap();
+            symlink(outside.path(), staging.join("link")).unwrap();
+            for directory in [&ordinary, &staging] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            let ordinary_result =
+                remove_dir_all_safe(root.as_fd(), Path::new("ordinary"), &ordinary);
+            let staging_result =
+                remove_restore_staging(root.as_fd(), Path::new("staging"), &staging);
+            let restored_mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o777;
+            for directory in [&ordinary, &staging] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            assert!(ordinary_result.is_err());
+            assert!(matches!(
+                staging_result,
+                Err(MemoryError::PathOutsideMount(_))
+            ));
+            assert_eq!(restored_mode, mode);
+            assert_eq!(
+                std::fs::read_to_string(ordinary.join("keep.md")).unwrap(),
+                "keep"
+            );
+            assert_eq!(
+                std::fs::read_to_string(outside.path().join("keep.md")).unwrap(),
+                "outside"
+            );
+        }
     }
 }

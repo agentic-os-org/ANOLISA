@@ -23,7 +23,6 @@ This automatically installs the correct prebuilt binary for your platform.
 | Binary | Description |
 |--------|-------------|
 | `tokenless` | Main CLI — content-aware protocol, direct compression, retrieval, and stats |
-| `rtk` | Command rewriting engine (filters CLI output noise) |
 
 TOON (Token-Oriented Object Notation) encoding is built into `tokenless`
 via the `toon-format` library — see `tokenless compress-toon` /
@@ -98,9 +97,9 @@ tokenless compress-toon -f data.json
 tokenless decompress-toon -f data.toon
 
 # Command rewriting (filters CLI output noise)
-rtk ls -la
+tokenless rtk ls -la
 # Or use rewrite subcommand
-rtk rewrite "ls -la"
+tokenless rtk rewrite "ls -la"
 
 # Report the current hard-disabled Tool Ready status
 tokenless env-check --all
@@ -109,7 +108,7 @@ tokenless env-check --all
 ## Build from Source
 
 Source builds support **Linux and Windows x64**. Windows uses
-`./scripts/build-windows.ps1` from the component directory; see
+`./packaging/build/build-windows.ps1` from the component directory; see
 [Windows build instructions](../../../docs/developer-guide/en/tokenless/windows.md#build-and-test-on-windows).
 Windows ARM64 is unsupported. macOS users should install the prebuilt
 binaries via `npm install -g anolisa-tokenless`; the macOS CLI binaries are
@@ -128,9 +127,10 @@ make install
 ### Prerequisites
 
 - **Linux** host (glibc-based distribution)
-- **Rust** toolchain >= 1.91 (required by rtk v0.49.0)
-- **just** — build runner for rtk setup
-- **Git** — for rtk source download
+- **Rust** toolchain >= 1.91 (required by RTK v0.49.0)
+- **just** — build runner for RTK source setup
+- **Git** and **patch** — for the pinned RTK source download
+- **Node.js 22+ and npm** — for the framework plugin build and validation
 
 ## Packaging for npm
 
@@ -138,10 +138,10 @@ The npm packer reads prebuilt native executables from this fixed layout:
 
 ```text
 target/npm-prebuilt/
-├── linux-x64/{tokenless,rtk}
-├── linux-arm64/{tokenless,rtk}
-├── darwin-x64/{tokenless,rtk}
-└── darwin-arm64/{tokenless,rtk}
+├── linux-x64/tokenless
+├── linux-arm64/tokenless
+├── darwin-x64/tokenless
+└── darwin-arm64/tokenless
 ```
 
 Validating Linux packages requires GNU `readelf` from binutils. The packer
@@ -151,7 +151,7 @@ baseline.
 Package one target:
 
 ```bash
-node npm/scripts/package-npm.js --target linux-arm64
+node packaging/npm/package-npm.js --target linux-arm64
 ```
 
 For the current host, the Make entry point can build the native executables
@@ -164,7 +164,7 @@ make npm-package
 Package the complete matrix:
 
 ```bash
-node npm/scripts/package-npm.js --all
+node packaging/npm/package-npm.js --all
 # or
 make npm-package-all
 ```

@@ -41,9 +41,32 @@ SkillFS。
 # 推荐包安装
 sudo anolisa --install-mode system install skillfs
 
-# 开发者源码构建
-cd src/skillfs
-cargo +1.86.0 build --release
+# Alternative: complete RPM installation from a configured repository
+sudo yum install skillfs
+```
+
+| RPM | 内容 |
+|---|---|
+| `skillfs` | 兼容聚合包：对 core、skills 的精确 version/release 依赖 |
+| `skillfs-core` | CLI、FUSE 运行依赖、许可证和文档 |
+| `skillfs-skills` | 内置挂载 skill；依赖同版本 core |
+
+只需要 CLI 和文件系统时，选择 `sudo yum install skillfs-core`。
+不生成 plugin RPM。安装不会自动挂载文件系统，须按下文显式启动挂载。
+本地 RPM 安装或升级应在同一事务中选择匹配 version/release 的产物。
+
+### 源码构建（开发者）
+
+在 Linux 的仓库根目录执行：
+
+```bash
+make -C src/skillfs build
+```
+
+可执行文件位于 `src/skillfs/target/release/skillfs`。构建完成后，如需安装到系统：
+
+```bash
+sudo make -C src/skillfs install
 ```
 
 ## Source 布局
@@ -323,6 +346,13 @@ agent：
 2. 可选的 **OS 适配器** stage 第二个执行，且只作用于 `SKILL.md`，在 Ubuntu/Debian
    与 Alinux/Anolis 约定之间改写发行版相关字面量。
 
+uv 可用时，启发式归一化保留 `pip install --user` 和 `pip3 install --user`，因为 uv
+不支持 pip 的用户目录安装模式。该选项可以位于包名以及 `2>&1` 等文件描述符
+重定向之前或之后。普通 pip 安装仍可改写成 `uv pip install`，包括相邻的 shell
+命令、列表或散文中的行内代码，以及后接括号说明的命令。每个行内代码片段单独
+检查。指定解释器的 `python -m pip` 调用保持不变。未结束的参数、续行和命令
+替换也会保留原始 pip 调用。
+
 启发式归一化选择 Yarn 时，仅把不带参数的 `npm install` 改写成 `yarn install`。
 带包名、选项或重定向的安装命令保持原样：Yarn 使用 `add` 添加依赖，并不支持所有 npm
 选项。例如，`npm install lodash` 保持不变；如果技能要求使用 Yarn，请直接写出对应命令。
@@ -346,6 +376,12 @@ directive），或两者都关闭——空流水线原样返回选中的字节�
 `SKILL.md` 无法读取，操作会返回错误（虚拟读取边界通常为 `ENOENT`），绝不会重试 live
 source。`getattr` 大小、部分读取与完整读取始终基于同一份转换结果。只有 `SKILL.md`
 会被适配——其他 Markdown、shell、Python 与配置文件原样透传。
+
+directive stage 在挂载启动时记录命令可用性。Linux 上直接检查 `PATH` 中的
+可执行文件，不依赖 `which`，也不会执行被探测的命令。可执行符号链接及相对或
+空 `PATH` 项按常规查找位置处理；目录、断链及有效用户无权执行的文件不算可用命令。
+未设置 `PATH` 时使用平台默认搜索路径。
+固定命令白名单保持不变。更改 `PATH` 或安装命令后需重新挂载；读取技能时不会重新探测环境。
 
 ### 关闭 directive stage
 

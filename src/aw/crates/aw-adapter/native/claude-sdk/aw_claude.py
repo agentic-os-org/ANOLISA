@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from importlib.metadata import version
 import json
 import logging
 import os
@@ -44,8 +43,6 @@ class Bridge:
     """Compose one foreground SDK client with its private AW launch binding."""
 
     def __init__(self) -> None:
-        if version("claude-agent-sdk") != "0.2.88":
-            raise RuntimeError("AW requires claude-agent-sdk 0.2.88")
         self.config = json.loads(Path(os.environ["AW_CLAUDE_CONFIG"]).read_text())
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
@@ -55,7 +52,7 @@ class Bridge:
             raise ValueError("AW configuration requires hooks")
         for hook in hooks:
             if (
-                hook.get("event") not in {"tool.before", "tool.after"}
+                hook.get("event") not in {"input.submit", "tool.before", "tool.after"}
                 or not isinstance(hook.get("step"), str)
                 or not hook["step"]
                 or hook.get("on_error") not in {"report", "block"}
@@ -69,6 +66,7 @@ class Bridge:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
         if len(encoded) > 1024 * 1024:
             raise CallbackFailure("native_input_limit")
+        close = ["--close-event", "true"] if hook.get("close_event") else []
         proc = await asyncio.create_subprocess_exec(
             self.config["executable"],
             "hook",
@@ -82,6 +80,7 @@ class Bridge:
             hook["step"],
             "--on-error",
             hook["on_error"],
+            *close,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -122,18 +121,29 @@ class Bridge:
             raise CallbackFailure("invalid_native_response")
         updated = specific.get("updatedToolOutput")
         original = payload.get("tool_response")
+        # Native MCP tools adopt a string replacement of the whole
+        # model-visible projection; the CLI keeps its own error state.
         if (
             not hook["replace_result"]
             or payload.get("hook_event_name") != "PostToolUse"
-            or payload.get("tool_name") != "Bash"
-            or not isinstance(original, dict)
-            or not isinstance(updated, dict)
-            or not isinstance(updated.get("stdout"), str)
-            or {**updated, "stdout": original.get("stdout")} != original
             or result
             != {
                 "hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}
             }
+        ):
+            raise CallbackFailure("invalid_native_response")
+        if str(payload.get("tool_name", "")).startswith("mcp__") and isinstance(
+            original, (str, list)
+        ):
+            if not isinstance(updated, str):
+                raise CallbackFailure("invalid_native_response")
+            return result
+        if (
+            payload.get("tool_name") != "Bash"
+            or not isinstance(original, dict)
+            or not isinstance(updated, dict)
+            or not isinstance(updated.get("stdout"), str)
+            or {**updated, "stdout": original.get("stdout")} != original
         ):
             raise CallbackFailure("invalid_native_response")
         return result
@@ -180,9 +190,7 @@ class Bridge:
         return {}
 
     def options(self, options: ClaudeAgentOptions) -> ClaudeAgentOptions:
-        """Retain existing matchers and vetoes; reject unchecked argument rewrites."""
-        if options.setting_sources != [] or options.settings is not None or options.plugins:
-            raise ValueError("AW Claude SDK requires setting_sources=[] and no settings/plugins")
+        """Compose SDK callbacks; CLI-loaded Hooks retain their native scheduling."""
         if any(
             key != "strict-mcp-config" or value is not None
             for key, value in options.extra_args.items()
@@ -303,7 +311,12 @@ async def _create_task_client(options: ClaudeAgentOptions) -> AsyncIterator[Clau
     bridge = Bridge()
     composed = bridge.options(options)
     _CLIENT_CREATED = True
-    async with ClaudeSDKClient(options=composed) as client:
+    if any(hook["event"] == "input.submit" for hook in bridge.config["hooks"]):
+        from aw_foreground import CheckedClient
+        client = CheckedClient(composed, bridge)
+    else:
+        client = ClaudeSDKClient(options=composed)
+    async with client:
         bridge.ready()
         yield client
 

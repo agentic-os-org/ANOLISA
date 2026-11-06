@@ -3,7 +3,9 @@
 //!
 //! Core invokes a trusted Host and journals facts. It never starts an Agent,
 //! installs OS protection, dispatches tools or manufactures adoption evidence.
+//! [`admission`] checks Hook policy capability without executing anything.
 
+pub mod admission;
 pub mod journal;
 pub mod ports;
 

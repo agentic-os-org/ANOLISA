@@ -5,6 +5,10 @@ use super::{RawInputCapture, RawInputEvent};
 
 pub(super) fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
     match capture {
+        RawInputCapture::TrialWaiting { id, .. } => RawInputEvent::TrialControl {
+            id: id.clone(),
+            action: "cancel".into(),
+        },
         RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
             RawInputEvent::CardCancel(id.clone())
         }
@@ -25,9 +29,13 @@ pub(super) fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
 }
 
 pub(in crate::raw_input) fn releases_capture(event: &RawInputEvent) -> bool {
+    if let RawInputEvent::TrialControl { action, .. } = event {
+        return !action.starts_with("focus_");
+    }
     matches!(
         event,
-        RawInputEvent::CardApprove(_)
+        RawInputEvent::TrialControl { .. }
+            | RawInputEvent::CardApprove(_)
             | RawInputEvent::CardApproveTurn(_)
             | RawInputEvent::CardAlwaysTrust(_)
             | RawInputEvent::CardDeny(_)
@@ -117,7 +125,7 @@ pub(super) fn question_choice_count(capture: &RawInputCapture) -> usize {
             allow_free_text,
             ..
         } => shared_question_choice_count(*option_count, *allow_free_text),
-        RawInputCapture::TextQuestion { .. } => 0,
+        RawInputCapture::TextQuestion { .. } | RawInputCapture::TrialWaiting { .. } => 0,
         RawInputCapture::Approval { .. }
         | RawInputCapture::Consultation { .. }
         | RawInputCapture::Evidence { .. }

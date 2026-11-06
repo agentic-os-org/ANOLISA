@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Response framing regressions through Parser → Aggregator → Analyzer → GenAI → SQLite.
 mod common;
 
@@ -178,6 +180,27 @@ fn compressed_response_is_decoded_after_framing() {
         &format!(
             "Content-Encoding: gzip\r\nContent-Length: {}\r\n",
             compressed.len()
+        ),
+    );
+    check(&bytes.chunks(17).collect::<Vec<_>>());
+}
+
+#[test]
+fn stacked_response_codings_preserve_usage_messages_and_tool_index() {
+    use std::io::Write;
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&body()).unwrap();
+    let gzip = gzip.finish().unwrap();
+    let mut encoded = Vec::new();
+    {
+        let mut outer = brotli::CompressorWriter::new(&mut encoded, 4096, 3, 22);
+        outer.write_all(&gzip).unwrap();
+    }
+    let bytes = response(
+        &encoded,
+        &format!(
+            "Content-Encoding: gzip, br\r\nContent-Length: {}\r\n",
+            encoded.len()
         ),
     );
     check(&bytes.chunks(17).collect::<Vec<_>>());

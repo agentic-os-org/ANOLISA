@@ -4,9 +4,10 @@
 
 ## Purpose
 
-`anolisa-tokenless` is the framework-neutral, in-process Tokenless SDK. A platform wheel contains
-the PyO3 runtime and the pinned RTK executable, so Python applications do not require `tokenless`
-or `rtk` on `PATH`.
+`anolisa-tokenless` is the framework-neutral Tokenless SDK. BeforeModel, PostTool and Retrieve run
+in process through the PyO3 runtime; PreTool runs in a child process, as described below. A platform
+wheel contains the PyO3 runtime and the matching `tokenless` executable, so Python applications do
+not require `tokenless` or `rtk` on `PATH`.
 
 The public `TokenlessSdk` maps four host lifecycle boundaries to Tokenless behavior:
 
@@ -29,12 +30,50 @@ lifecycle operations are Tokenless contracts rather than OpenAI requests.
 
 `tokenless-runtime` owns one SQLite Stash and statistics recorder. Schema and response compression
 share that Stash and roll back keys whenever a candidate is discarded. TOON is linked as a Rust
-library and never starts a process. RTK is used only when an adapter supplies `command_field`; every
-rewritten wrapper is anchored to the packaged executable and carries per-execution attribution.
+library and never starts a process. RTK is linked into the `tokenless` executable, and
+`TokenlessSdk.pre_tool` starts `tokenless compress` for each call when an adapter supplies
+`command_field`, because RTK assumes one process per command: it caches trusted filters and project
+files for the process lifetime and can wait on `git rev-parse` without a deadline. Each call therefore
+sees current RTK state. The SDK gives the child 5 seconds, kills its process group (`taskkill /T` on
+Windows) on timeout, and on any failure logs a warning and passes the command through. Every
+rewritten wrapper calls the packaged `tokenless` executable as `tokenless rtk` and carries
+per-execution attribution.
 Content detection, thresholds, TOON selection, diagnostics, authorization, and Stash policy remain
 in Rust Core rather than Python configuration. A shell tool's `PostToolRequest` carries the executed
 command line in `command`; Core, not the adapter, reports a plain print of local files as
 `file_read` so that a printed HTML page stays verbatim while data in that output still compresses.
+
+PreTool preserves recognized native `head` and `tail` calls using the same direct-call and
+built-in wrapper recognition as `find`, including nesting and shell line continuations. Every
+argument form keeps native execution, including byte windows and follow mode. A recognized call
+keeps its entire pipeline or compound command outside RTK rewriting. This avoids structural
+truncation in RTK's `read --max-lines` path; explicit RTK calls retain their existing behavior.
+Custom `hooks.transparent_prefixes` are not inspected, so calls behind those prefixes may still
+be rewritten. The rule is independent of search path sharing and retains the existing PostTool
+file-read policy.
+
+The same native-command recognition covers every `grep` and `rg` mode. `git grep`,
+`xargs grep`, and custom wrapper prefixes are outside this recognition. PostTool reuses
+that parser for `command_output` searches and routes them, like the native `Grep` tool, only to
+`SearchResultsCompressor`. Its unified entry recognizes numbered path matches and path lists;
+format recognition and savings checks stay inside the compressor. Disabled search compression
+or no candidate returns the original, including with `force_json`, without trying another domain.
+Qoder's native Bash adapter sends only `stdout` to Core, even when it is short or empty or
+`stderr` is larger, and preserves every other field when rewrapping the result.
+
+This protection covers the complete output of any compound command containing a recognized
+search. For example, `grep -q needle Cargo.toml && cargo build` also keeps its build log
+unchanged: the hook supplies no per-command output boundaries. This deliberately reduces
+existing build/test and other domain compression coverage until mixed-output regions can be
+handled without omitting search matches. Pipelines such as `rg -l TODO src | xargs cat` also
+retain their output, even though the final content is file text rather than a path list.
+Tokenless adds no truncation fallback; host output limits still apply. `max_input_bytes`
+limits compression work and passes oversized input through rather than capping returned text.
+
+An enabled search compressor that produces no candidate uses the common `no_savings`
+arbitration and zero Stash counters when a persistent store is attached. Disabled search compression
+and lifecycle gates still pass through. Command metadata on API and file-read results does
+not activate shell-search protection; the exact native tool name `Grep` retains its contract.
 
 The SDK never stores a process-global current session. `before_model` returns the exact visible
 marker set. An adapter declares whether it has a marker-authorized recovery path and owns any
@@ -44,7 +83,7 @@ in that set. Host applications
 retain raw tool values for UI and business logic and pass only copied, final model-visible text to
 `post_tool`. Retrieve output never enters PostTool again.
 
-QwenWork's hook adapter normalizes its two workspace Shell MCP names to `Bash`
+QwenWork's hook adapter normalizes recognized workspace Shell MCP names to `Bash`
 before either lifecycle request. It unwraps only an exact single plain text block;
 unknown block arrays pass through without compression. The workspace event's
 absolute `cwd` anchors `.tokenless` state for both hooks and the RTK command.
@@ -53,7 +92,7 @@ Plugin-private binaries are resolved by the adapter. Neither that private PATH
 nor workspace state implies model-visible recovery access, so these paths declare
 `recovery.kind = none`.
 
-Invalid inputs, missing packaged RTK, lifecycle operation failures, attachment failures, and
+Invalid inputs, a missing packaged `tokenless` executable, lifecycle operation failures, attachment failures, and
 tool-name collisions fail fast. Normal Core dispositions such as passthrough, no savings, and
 recoverability unavailable return typed results. A candidate is applied only when it is strictly
 smaller; schema and response truncation must also remain retrievable.
@@ -85,9 +124,10 @@ checks transport behavior, not model answer quality or billing savings.
 
 ## Search path sharing
 
-PostTool routes detected `search_results` through `SearchResultsCompressor` when search path
-sharing is enabled and text replacement is available. Routing depends on content, not the command
-or agent name. Numbered search records require `api_response` origin. Successful `path:line:text` listings with at least three records can share full
+PostTool routes native `Grep` and recognized shell `grep`/`rg` output directly through
+`SearchResultsCompressor` when search path sharing and text replacement are available.
+Other tools retain content-based routing: numbered records require `api_response` origin,
+and plain path lists also accept command output. Successful `path:line:text` listings with at least three records can share full
 paths across consecutive rows. Line numbers, row text, order and line endings remain byte-reversible.
 The input contract excludes colons in paths and context listings. Unsupported rows reject the whole
 candidate; byte length and estimated tokens must both decrease before normal Runtime arbitration.
@@ -103,9 +143,10 @@ the candidate. Bare relative roots use letters, digits, `.`, `_`, or `-`; paths 
 `./`, or `../` can include spaces and quoted or backslash characters, encoded as JSON strings.
 The compressor never reads files or normalizes paths. Both `file_content` and `file_read` origins
 bypass this path-list strategy; existing file-read JSON, table, and log handling is unchanged.
-Established source and table detection takes precedence over plain path-list detection. A bounded
+For tools outside the search-only route, established source and table detection takes precedence over plain path-list detection. A bounded
 path probe stops at its last complete line so a byte cut inside a path or CRLF is not a record.
-The selected path-list candidate is built once from the full input and reused for arbitration.
+Outside the dedicated search route, eligibility checks parse the full path list before the
+compressor parses it to build a candidate. The candidate then goes through common arbitration.
 
 The path-list view starts with
 `[Path list; all received paths retained; full path = base + each paths entry]`, followed by compact
@@ -217,11 +258,12 @@ settings.
 
 ## Packaging and validation
 
-`make python-wheel` builds the pinned RTK version, stages it as
-`anolisa_tokenless/_bin/rtk`, and creates a CPython 3.11 stable-ABI platform wheel. Cross-platform
-builders may set `PYTHON_RTK_BINARY` to the RTK executable built for the same wheel target.
-`make test-python-runtime` installs the wheel in a fresh environment and exercises all four
-lifecycles plus statistics queries without relying on a system RTK binary.
+`make python-wheel` builds `tokenless`, stages it as `anolisa_tokenless/_bin/tokenless`, and
+creates a CPython 3.11 stable-ABI platform wheel.
+Cross-platform builders may set `PYTHON_TOKENLESS_BINARY` to the `tokenless` executable built for
+the same wheel target. `make test-python-runtime` installs the wheel in a fresh environment and
+exercises all four lifecycles plus statistics queries without relying on a system `tokenless` or
+RTK binary.
 
 `anolisa-tokenless-agentscope` supports AgentScope 1.0.11 through 1.0.x and 2.0.x. The 1.x adapter
 uses a Tokenless Toolkit, a model proxy, and public instance hooks. The 2.x adapter uses

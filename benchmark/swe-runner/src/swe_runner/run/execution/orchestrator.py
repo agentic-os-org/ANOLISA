@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -29,6 +30,10 @@ from swe_runner.run.execution.instance_runner import run_instance
 from swe_runner.run.io.output_store import RunOutputStore
 
 logger = logging.getLogger(__name__)
+
+
+class DuplicateInstanceError(ValueError):
+    """Raised when a selected batch repeats an instance ID used for workspace and output paths."""
 
 
 class Orchestrator:
@@ -55,6 +60,11 @@ class Orchestrator:
         """Run instances sequentially or concurrently based on workers setting."""
         if not instances:
             return []
+
+        counts = Counter(instance.instance_id for instance in instances)
+        duplicate_ids = sorted(instance_id for instance_id, count in counts.items() if count > 1)
+        if duplicate_ids:
+            raise DuplicateInstanceError(f"Duplicate instance IDs in selected batch: {', '.join(duplicate_ids)}")
 
         output_store = RunOutputStore(output_dir)
         if not self._redo:

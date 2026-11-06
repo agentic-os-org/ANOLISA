@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Pagination } from '../components/Pagination';
 import {
   createCredentialBinding,
+  createFileReadBinding,
   detachEnforcementBinding,
   enforcementSupportsMode,
   enforcementViolationTotal,
@@ -110,6 +111,7 @@ export const RiskEnforcementPage: React.FC = () => {
   const highlightRef = useRef<HTMLTableRowElement | null>(null);
   const [violationOffset, setViolationOffset] = useState(0);
   const VIOLATION_LIMIT = 20;
+  const [denyRead, setDenyRead] = useState(false);
 
   const agentIdFilter = searchParams.get('agent_id');
   const highlightBindingParam = searchParams.get('highlight_binding');
@@ -203,7 +205,7 @@ export const RiskEnforcementPage: React.FC = () => {
     health?.ready === true
       && !submitting
       && !detachingId
-      && supportsMode(mode)
+      && (denyRead ? health.capabilities.file_read_protection === true : supportsMode(mode))
       && !bindingLimitReached,
   );
   const canDetach = !detachingId;
@@ -229,17 +231,24 @@ export const RiskEnforcementPage: React.FC = () => {
     setSubmitting(true);
     setOperationResult('');
     try {
-      await createCredentialBinding({
-        agent_id: agentId.trim(),
-        root_pid: parsedPid,
-        source_path: path.trim(),
-        session_id: sessionId.trim() || undefined,
-        trusted_endpoint: trustedEndpoint.trim() || undefined,
-        revision: Math.floor(Date.now() / 1000),
-        mode,
-        taint_ttl_secs: 900,
-        destination_scope: 'public_ipv4',
-      });
+      if (denyRead) {
+        await createFileReadBinding({
+          agent_id: agentId.trim(), root_pid: parsedPid, path: path.trim(),
+          session_id: sessionId.trim() || undefined,
+        });
+      } else {
+        await createCredentialBinding({
+          agent_id: agentId.trim(),
+          root_pid: parsedPid,
+          source_path: path.trim(),
+          session_id: sessionId.trim() || undefined,
+          trusted_endpoint: trustedEndpoint.trim() || undefined,
+          revision: Math.floor(Date.now() / 1000),
+          mode,
+          taint_ttl_secs: 900,
+          destination_scope: 'public_ipv4',
+        });
+      }
       setAgentId('');
       setRootPid('');
       setPath('');
@@ -280,7 +289,18 @@ export const RiskEnforcementPage: React.FC = () => {
     : health.capabilities.test_development
       ? t('risk.capability.testDev')
       : t('risk.capability.prod');
-  const allowsCredentialEnforcement = health?.capabilities.credential_enforce === true;
+  const fileDeleteGuardLabel = health?.capabilities.file_delete_guard === true
+    ? health.capabilities.file_delete_guard_mode
+      ? t('risk.capability.fileDeleteGuardWithMode', {
+        mode: health.capabilities.file_delete_guard_mode,
+      })
+      : t('risk.capability.fileDeleteGuard')
+    : null;
+  const allowsCredentialEnforcement = health?.capabilities.credential_enforce === true
+    || health?.capabilities.file_read_protection === true;
+  const bindingPath = (binding: EnforcementBinding): string =>
+    binding.request.file_protection_policy?.targets.map((target) => target.path).join(', ')
+      || policyFilePath(binding.request.policy_dsl || '');
 
   return (
     <div className="mx-auto w-full max-w-screen-xl space-y-6 p-6">
@@ -390,7 +410,7 @@ export const RiskEnforcementPage: React.FC = () => {
                       })}
                       className="max-w-xs break-all px-4 py-3 font-mono text-xs text-gray-700"
                     >
-                      {policyFilePath(binding.request.policy_dsl)}
+                      {bindingPath(binding)}
                     </td>
                     <td className="px-4 py-3 text-gray-700">
                       {(() => {
@@ -421,7 +441,7 @@ export const RiskEnforcementPage: React.FC = () => {
                         aria-label={t('risk.bindings.detachAria', {
                           agentId: binding.request.agent_id,
                           pid: binding.request.root_pid,
-                          path: policyFilePath(binding.request.policy_dsl),
+                          path: bindingPath(binding),
                         })}
                         disabled={!canDetach || binding.state === 'detached'}
                         onClick={() => void handleDetach(binding.request.binding_id)}
@@ -442,7 +462,20 @@ export const RiskEnforcementPage: React.FC = () => {
         <form onSubmit={handleCreate} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <h2 className="font-semibold text-gray-900">{t('risk.form.title')}</h2>
           <p className="mt-1 text-xs text-gray-500">{capabilityLabel}</p>
+          {fileDeleteGuardLabel && (
+            <p className="mt-1 text-xs text-gray-600">{fileDeleteGuardLabel}</p>
+          )}
           <div className="mt-4 space-y-4">
+            <label className="block text-sm font-medium text-gray-700">
+              {t('risk.form.policyTemplate')}
+              <select value={denyRead ? 'deny_read' : 'credential'}
+                onChange={(event) => setDenyRead(event.target.value === 'deny_read')}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 font-normal">
+                <option value="credential">{t('risk.form.credentialTemplate')}</option>
+                <option value="deny_read">{t('risk.form.denyReadTemplate')}</option>
+              </select>
+            </label>
+            {denyRead && <p className="text-xs text-gray-500">{t('risk.form.denyReadHelp')}</p>}
             <label className="block text-sm font-medium text-gray-700">
               Agent ID
               <input
@@ -472,6 +505,7 @@ export const RiskEnforcementPage: React.FC = () => {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 font-normal"
               />
             </label>
+            {!denyRead && <>
             <label className="block text-sm font-medium text-gray-700">
               {t('risk.form.modeLabel')}
               <select
@@ -505,6 +539,7 @@ export const RiskEnforcementPage: React.FC = () => {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 font-normal"
               />
             </label>
+            </>}
             <label className="block text-sm font-medium text-gray-700">
               {t('risk.form.sessionIdLabel')}
               <input
@@ -521,7 +556,7 @@ export const RiskEnforcementPage: React.FC = () => {
           >
             {submitting ? t('risk.form.submit.loading') : t('risk.form.submit')}
           </button>
-          {!supportsMode(mode) && (
+          {!(denyRead ? health?.ready && health.capabilities.file_read_protection : supportsMode(mode)) && (
             <p className="mt-2 text-xs text-amber-700">
               {health?.ready === false
                 ? t('risk.form.mode.unreadyWarning')
