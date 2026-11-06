@@ -13,6 +13,7 @@
 //! comparison happens on the parsed value rather than the surrounding text, so
 //! `242391`, `242,391` and `24.2万` are recognised as the same fact.
 
+use std::borrow::Cow;
 use unicode_casefold::UnicodeCaseFold;
 
 /// Smallest count of significant digits a bare number needs before it is worth
@@ -72,6 +73,38 @@ pub struct Claim {
     pub value: Option<f64>,
 }
 
+#[derive(Clone, Copy)]
+struct ClaimRef<'a> {
+    text: &'a str,
+    class: ClaimClass,
+    value: Option<f64>,
+}
+
+impl ClaimRef<'_> {
+    fn to_claim(self) -> Claim {
+        Claim {
+            text: self.text.to_string(),
+            class: self.class,
+            value: self.value,
+        }
+    }
+
+    fn can_anchor_finding(&self) -> bool {
+        claim_class_can_anchor_finding(self.class)
+    }
+}
+
+fn claim_class_can_anchor_finding(class: ClaimClass) -> bool {
+    matches!(
+        class,
+        ClaimClass::Number
+            | ClaimClass::Date
+            | ClaimClass::Url
+            | ClaimClass::Path
+            | ClaimClass::Version
+    )
+}
+
 impl Claim {
     /// Whether this claim may anchor an ungrounded-onset finding.
     ///
@@ -79,14 +112,7 @@ impl Claim {
     /// legitimately change them, so a mismatch there is weak evidence and would
     /// mostly produce false accusations.
     pub fn can_anchor_finding(&self) -> bool {
-        matches!(
-            self.class,
-            ClaimClass::Number
-                | ClaimClass::Date
-                | ClaimClass::Url
-                | ClaimClass::Path
-                | ClaimClass::Version
-        )
+        claim_class_can_anchor_finding(self.class)
     }
 }
 
@@ -646,7 +672,7 @@ impl<'a> PathItemIndex<'a> {
                         let right = (index + 1, paths.list_item_ends[index + 1]);
                         let combined = paths.list_item_content_range(left.0, right.1);
                         if combined.0 < combined.1
-                            && paths.classifies_as_path(combined.0, combined.1)
+                            && paths.classifies_as_path_ref(combined.0, combined.1)
                         {
                             let left = list_item_completeness(
                                 &paths,
@@ -823,7 +849,7 @@ impl<'a> PathItemIndex<'a> {
             && Self::count(&self.schemes, start, equals) == 0
     }
 
-    fn classifies_as_path(&self, start: usize, end: usize) -> bool {
+    fn classifies_as_path_ref(&self, start: usize, end: usize) -> bool {
         let (start, end) = self.classification_range(start, end);
         if start >= end || self.byte_offsets[end] - self.byte_offsets[start] <= 2 {
             return false;
@@ -887,7 +913,7 @@ impl<'a> PathItemIndex<'a> {
             }
             value_start += 1;
         }
-        self.classifies_as_path(value_start, end)
+        self.classifies_as_path_ref(value_start, end)
     }
 }
 
@@ -1029,7 +1055,7 @@ fn has_following_attached_field(value: &str) -> bool {
             let suffix = trim_embedded_json_separators(&value[start..end]);
             split_attached_value(suffix).is_some()
                 || suffix.starts_with('"')
-                || classify_structural_segment(suffix)
+                || classify_structural_segment_ref(suffix)
                     .is_some_and(|claim| claim.can_anchor_finding())
         })
 }
@@ -1179,17 +1205,17 @@ fn standalone_relative_path_has_equals(key: &str, word: &str, value: &str) -> bo
     let Some(equals) = value.find('=') else {
         return false;
     };
-    slash < equals && classify_word(word).is_some_and(|claim| claim.class == ClaimClass::Path)
+    slash < equals && classify_word_ref(word).is_some_and(|claim| claim.class == ClaimClass::Path)
 }
 
-fn classify_attached_value(mut word: &str) -> Option<Claim> {
+fn classify_attached_value_ref(mut word: &str) -> Option<ClaimRef<'_>> {
     let original = word;
     let mut word_char_start = 0;
     let mut quoted_original = None;
     loop {
         let (key, value) = split_attached_value(word)?;
         if standalone_relative_path_has_equals(key, word, value) {
-            return classify_word(word);
+            return classify_word_ref(word);
         }
         let value_char_start = word_char_start + key.chars().count() + 1;
         if let Some((attached, attached_char_start)) = attached_value_after_list_residue(
@@ -1203,7 +1229,7 @@ fn classify_attached_value(mut word: &str) -> Option<Claim> {
             continue;
         }
         let trimmed = trim_attached_decoration(value);
-        let claim = classify_word(trimmed)?;
+        let claim = classify_word_ref(trimmed)?;
         if claim.class == ClaimClass::Date
             && claim
                 .text
@@ -1242,8 +1268,8 @@ fn has_unmatched_closing_bracket_before_path(word: &str) -> bool {
     false
 }
 
-fn classify_complete_word(word: &str) -> Option<Claim> {
-    let claim = classify_word(word)?;
+fn classify_complete_word_ref(word: &str) -> Option<ClaimRef<'_>> {
+    let claim = classify_word_ref(word)?;
     let attached = split_attached_value(word).is_some();
     if (claim.class == ClaimClass::Path && (attached || has_numeric_colon_suffix(word)))
         || has_unmatched_closing_bracket_before_path(word)
@@ -1271,7 +1297,7 @@ fn bracket_belongs_to_path(
         let item_end = path_item_end(paths, item_start, close);
         if !paths.has_slash(item_start, item_end)
             || paths.has_list_separator(open)
-            || !paths.classifies_as_path(item_start, item_end)
+            || !paths.classifies_as_path_ref(item_start, item_end)
         {
             return false;
         }
@@ -1293,9 +1319,9 @@ fn bracket_belongs_to_path(
         return false;
     }
     if !paths.has_equals(item_start, item_end) {
-        return paths.classifies_as_path(item_start, item_end);
+        return paths.classifies_as_path_ref(item_start, item_end);
     }
-    if paths.classifies_as_path(item_start, item_end) {
+    if paths.classifies_as_path_ref(item_start, item_end) {
         return true;
     }
     paths.classifies_as_attached_path(item_start, item_end)
@@ -1320,7 +1346,7 @@ fn list_item_completeness(
     if range.0 == range.1 {
         return ListItemCompleteness::Empty;
     }
-    if paths.classifies_as_path(range.0, range.1) {
+    if paths.classifies_as_path_ref(range.0, range.1) {
         return ListItemCompleteness::Complete;
     }
     let has_equals = paths.has_equals(range.0, range.1);
@@ -1355,10 +1381,10 @@ fn list_item_completeness(
 fn complete_list_item(item: &str) -> bool {
     let item = trim_decoration(item.trim());
     parse_number(item).is_some()
-        || as_version(item).is_some()
-        || as_date(item).is_some()
-        || as_path(item).is_some()
-        || classify_attached_value(item).is_some_and(|claim| {
+        || as_version_ref(item).is_some()
+        || as_date_ref(item).is_some()
+        || as_path_ref(item).is_some()
+        || classify_attached_value_ref(item).is_some_and(|claim| {
             matches!(
                 claim.class,
                 ClaimClass::Number | ClaimClass::Version | ClaimClass::Date
@@ -1400,7 +1426,10 @@ fn normalize_markdown_reference_label(chars: &[char]) -> Vec<char> {
 /// Bracketed commas are list structure when they separate complete numeric
 /// items. Commas inside quotes, URLs, and a path's own nested brackets remain
 /// content, so compact outer lists can mix those values with numbers.
-fn separate_bracketed_comma_lists(text: &str) -> String {
+fn separate_bracketed_comma_lists(text: &str) -> Cow<'_, str> {
+    if !text.contains('[') {
+        return Cow::Borrowed(text);
+    }
     let chars: Vec<char> = text.chars().collect();
     let quoted = quoted_chars(&chars);
     let literal_commas = literal_commas(&chars, &quoted);
@@ -1555,13 +1584,14 @@ fn separate_bracketed_comma_lists(text: &str) -> String {
                 },
             )
         })
-        .collect()
+        .collect::<String>()
+        .into()
 }
 
 /// Split serialized structure without consuming URLs or the brackets and commas
 /// that belong to a path. URL terminators delimit the URL, so fields after a
 /// quoted URL remain visible to the suffix scan.
-fn structural_segments(word: &str) -> Vec<String> {
+fn structural_segments(word: &str) -> Vec<Cow<'_, str>> {
     let chars: Vec<char> = word.chars().collect();
     let quoted = quoted_chars(&chars);
     let matched_brackets = matching_bracket_pairs(&chars, &quoted);
@@ -1577,7 +1607,7 @@ fn structural_segments(word: &str) -> Vec<String> {
             index += 1;
         }
         let candidate: String = chars[start..index].iter().collect();
-        if classify_word(trim_attached_decoration(&candidate))
+        if classify_word_ref(trim_attached_decoration(&candidate))
             .is_some_and(|claim| claim.class == ClaimClass::Path)
         {
             quoted_paths[start..index].fill(true);
@@ -1618,7 +1648,7 @@ fn structural_segments(word: &str) -> Vec<String> {
         let path_char = path_depth > 0 || quoted_paths[index];
         if !path_char && let Some(scheme_len) = url_scheme_len(&chars, index) {
             if !current.is_empty() {
-                segments.push(std::mem::take(&mut current));
+                segments.push(Cow::Owned(std::mem::take(&mut current)));
                 current_starts_with_digit = None;
             }
             index = decorated_url_end_chars(&chars, index, scheme_len);
@@ -1630,7 +1660,7 @@ fn structural_segments(word: &str) -> Vec<String> {
             && current_starts_with_digit == Some(true)
             && current
                 .get(current.len().saturating_sub(10)..)
-                .is_some_and(|suffix| as_date(suffix).is_some());
+                .is_some_and(|suffix| as_date_ref(suffix).is_some());
         if digit_group && !follows_date {
             index += 1;
             continue;
@@ -1639,7 +1669,7 @@ fn structural_segments(word: &str) -> Vec<String> {
             && (chars.get(index + 1) == Some(&':') || (index > 0 && chars[index - 1] == ':'));
         if !path_char && !identifier_colon && STRUCTURAL_SEPARATORS.contains(&c) {
             if !current.is_empty() {
-                segments.push(std::mem::take(&mut current));
+                segments.push(Cow::Owned(std::mem::take(&mut current)));
                 current_starts_with_digit = None;
             }
         } else {
@@ -1651,7 +1681,7 @@ fn structural_segments(word: &str) -> Vec<String> {
         index += 1;
     }
     if !current.is_empty() {
-        segments.push(current);
+        segments.push(Cow::Owned(current));
     }
     segments
 }
@@ -2306,7 +2336,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         let attached_value_claim = if root_json.is_some() {
             None
         } else {
-            classify_attached_value(attached_after_residue.unwrap_or(word))
+            classify_attached_value_ref(attached_after_residue.unwrap_or(word))
         };
         // Strip decoration, not content. Agents habitually wrap paths and
         // identifiers in markdown (`/var/log`, **error**), and a claim carrying
@@ -2326,7 +2356,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         let whole_word_claim = if root_json.is_some() {
             None
         } else {
-            attached_value_claim.or_else(|| classify_complete_word(word))
+            attached_value_claim.or_else(|| classify_complete_word_ref(word))
         };
         let whole_word_claim = whole_word_claim.filter(|claim| {
             claim.class != ClaimClass::Path
@@ -2335,7 +2365,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         });
         let word_stands_alone = whole_word_claim.is_some();
         if let Some(claim) = whole_word_claim {
-            claims.push(claim);
+            claims.push(claim.to_claim());
         }
         // Tool output is JSON far more often than prose, and its structure glues
         // values to their surroundings: `stargazers_count=242391`, or
@@ -2350,8 +2380,8 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         if word_stands_alone && let Some(attached) = attached_after_residue {
             let prefix = &json_word[..json_word.len() - attached.len()];
             for segment in structural_segments(prefix) {
-                if let Some(claim) = classify_structural_segment(&segment) {
-                    claims.push(claim);
+                if let Some(claim) = classify_structural_segment_ref(&segment) {
+                    claims.push(claim.to_claim());
                 }
             }
         }
@@ -2368,15 +2398,15 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 for (index, field) in fields.into_iter().enumerate() {
                     let field_claim_start = claims.len();
                     let complete_path = || {
-                        classify_complete_word(trim_attached_decoration(field))
+                        classify_complete_word_ref(trim_attached_decoration(field))
                             .filter(|claim| claim.class == ClaimClass::Path)
                     };
-                    if let Some(claim) = classify_attached_value(field).or_else(complete_path) {
-                        claims.push(claim);
+                    if let Some(claim) = classify_attached_value_ref(field).or_else(complete_path) {
+                        claims.push(claim.to_claim());
                     } else {
                         for segment in structural_segments(field) {
-                            if let Some(claim) = classify_structural_segment(&segment) {
-                                claims.push(claim);
+                            if let Some(claim) = classify_structural_segment_ref(&segment) {
+                                claims.push(claim.to_claim());
                             }
                         }
                     }
@@ -2413,8 +2443,8 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 }
             } else {
                 for segment in structural_segments(json_word) {
-                    if let Some(claim) = classify_structural_segment(&segment) {
-                        claims.push(claim);
+                    if let Some(claim) = classify_structural_segment_ref(&segment) {
+                        claims.push(claim.to_claim());
                     }
                 }
             }
@@ -2475,33 +2505,33 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
 }
 
 /// Classify a single whitespace-delimited word, if it carries a fact.
-fn classify_word(word: &str) -> Option<Claim> {
+fn classify_word_ref(word: &str) -> Option<ClaimRef<'_>> {
     if word.starts_with("http://") || word.starts_with("https://") {
         // Handled by `extract_urls`, which keeps punctuation out of the URL.
         return None;
     }
-    if let Some(date) = as_date(word) {
+    if let Some(date) = as_date_ref(word) {
         return Some(date);
     }
-    if let Some(version) = as_version(word) {
+    if let Some(version) = as_version_ref(word) {
         return Some(version);
     }
-    if let Some(path) = as_path(word) {
+    if let Some(path) = as_path_ref(word) {
         return Some(path);
     }
-    if let Some(number) = as_number(word) {
+    if let Some(number) = as_number_ref(word) {
         return Some(number);
     }
-    as_identifier(word)
+    as_identifier_ref(word)
 }
 
-fn classify_structural_segment(segment: &str) -> Option<Claim> {
-    let claim = classify_word(segment);
+fn classify_structural_segment_ref(segment: &str) -> Option<ClaimRef<'_>> {
+    let claim = classify_word_ref(segment);
     if segment.contains('/') {
         let trimmed = trim_attached_decoration(segment);
         if trimmed.len() != segment.len()
             && let Some(path) =
-                classify_word(trimmed).filter(|claim| claim.class == ClaimClass::Path)
+                classify_word_ref(trimmed).filter(|claim| claim.class == ClaimClass::Path)
         {
             return Some(path);
         }
@@ -2514,12 +2544,12 @@ fn classify_structural_segment(segment: &str) -> Option<Claim> {
     {
         return claim;
     }
-    classify_word(trimmed).or(claim)
+    classify_word_ref(trimmed).or(claim)
 }
 
 /// ISO-like dates, and years only when carrying a 年/月/日 marker so that a
 /// bare `1999` stays a number.
-fn as_date(word: &str) -> Option<Claim> {
+fn as_date_ref(word: &str) -> Option<ClaimRef<'_>> {
     let trimmed = word.trim_end_matches(['年', '月', '日']);
     let digits = trimmed.chars().filter(|c| c.is_ascii_digit()).count();
     let dashes = trimmed.matches('-').count();
@@ -2531,8 +2561,8 @@ fn as_date(word: &str) -> Option<Claim> {
         && trimmed != word;
 
     if is_iso || is_marked_year {
-        return Some(Claim {
-            text: trimmed.to_string(),
+        return Some(ClaimRef {
+            text: trimmed,
             class: ClaimClass::Date,
             value: None,
         });
@@ -2541,7 +2571,7 @@ fn as_date(word: &str) -> Option<Claim> {
 }
 
 /// `1.2.3` / `v1.2.3` style versions.
-fn as_version(word: &str) -> Option<Claim> {
+fn as_version_ref(word: &str) -> Option<ClaimRef<'_>> {
     let body = word.strip_prefix('v').unwrap_or(word);
     let parts: Vec<&str> = body.split('.').collect();
     if parts.len() >= 3
@@ -2549,8 +2579,8 @@ fn as_version(word: &str) -> Option<Claim> {
             .iter()
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
     {
-        return Some(Claim {
-            text: word.to_string(),
+        return Some(ClaimRef {
+            text: word,
             class: ClaimClass::Version,
             value: None,
         });
@@ -2558,12 +2588,12 @@ fn as_version(word: &str) -> Option<Claim> {
     None
 }
 
-fn as_path(word: &str) -> Option<Claim> {
+fn as_path_ref(word: &str) -> Option<ClaimRef<'_>> {
     if !looks_like_path(word) {
         return None;
     }
-    Some(Claim {
-        text: word.to_string(),
+    Some(ClaimRef {
+        text: word,
         class: ClaimClass::Path,
         value: None,
     })
@@ -2600,6 +2630,10 @@ fn has_extension(segment: &str) -> bool {
 }
 
 fn as_number(word: &str) -> Option<Claim> {
+    as_number_ref(word).map(ClaimRef::to_claim)
+}
+
+fn as_number_ref(word: &str) -> Option<ClaimRef<'_>> {
     let candidate = word.trim_start_matches(['约', '~', '≈', '+']);
     if !candidate.chars().any(|c| c.is_ascii_digit()) {
         return None;
@@ -2614,15 +2648,15 @@ fn as_number(word: &str) -> Option<Claim> {
     if significant < MIN_SIGNIFICANT_DIGITS && !abbreviated {
         return None;
     }
-    Some(Claim {
-        text: candidate.to_string(),
+    Some(ClaimRef {
+        text: candidate,
         class: ClaimClass::Number,
         value: Some(value),
     })
 }
 
 /// Code-like names: qualified paths or multi-word snake/camel identifiers.
-fn as_identifier(word: &str) -> Option<Claim> {
+fn as_identifier_ref(word: &str) -> Option<ClaimRef<'_>> {
     let qualified = word.contains("::") || (word.contains('.') && !word.ends_with('.'));
     let snake = word.contains('_') && word.len() > 4;
     let camel = word.len() > 4
@@ -2633,8 +2667,8 @@ fn as_identifier(word: &str) -> Option<Claim> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'))
     {
-        return Some(Claim {
-            text: word.to_string(),
+        return Some(ClaimRef {
+            text: word,
             class: ClaimClass::Identifier,
             value: None,
         });
