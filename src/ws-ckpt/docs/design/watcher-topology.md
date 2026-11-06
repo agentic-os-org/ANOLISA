@@ -110,7 +110,7 @@ treated as a first-class failure mode, not logged-and-forgotten:
   classes. The single-instance topology does not preclude any of these; they
   are additive to the route table.
 
-### The walk-pause cost (silent; tracked as a follow-up issue)
+### The walk-pause cost (fail closed around it; #8448)
 
 The overflow above is one half of the shared-queue cost. The other half has
 no counter: notify 6.1.1 runs `watch()` (a `WalkDir` over the whole tree) and
@@ -119,31 +119,50 @@ thread, and it does not read the inotify fd while a walk is in progress.
 With one shared instance that thread serves the whole daemon, so events from
 *every* workspace wait in the kernel queue until the walk finishes.
 
-`check_workspace_quiescent` decides from what the forwarder delivered during
-its final 100 ms quiet period. When that window falls inside a walk longer
-than ~100 ms, the flag keeps the `false` the check itself stored, and the
-decision returns a false `Safe` while the workspace is still being written.
-The per-route coverage epoch cannot detect this: the checked route's epoch,
-degraded mark, and watcher identity are all unchanged, because the walk
-belongs to another workspace.
+The hazard is the false `Safe`, not the pause itself. `check_workspace_quiescent`
+decides from what arrived during its final 100 ms quiet period; when that
+window falls inside a walk, the flag keeps the `false` the check itself
+stored and the decision reports `Safe` while the workspace is still being
+written. The per-route coverage epoch cannot detect it: the checked route's
+epoch, degraded mark, and watcher identity are all unchanged, because the
+walk belongs to another workspace.
 
 Measured on a release build during the #7592 review: with a writer appending
 every 10 ms and an unrelated 1,000-directory / 100,000-file workspace
 registering 80 ms into the check (walk of about 170 ms), the check returned
-`Safe` 5/5 under this design and 0/5 under the per-workspace topology; with
-50 files per directory (walk of about 87 ms) it returned 0/5. Triggers
-include the rollback re-arm, large-workspace init, the heal path, watcher
-restore at startup, and notify's auto-add when an agent creates or moves in
-a large directory (`npm install`, `git clone`, `mv`).
+`Safe` 5/5 under the shared topology and 0/5 under the per-workspace
+topology; with 50 files per directory (walk of about 87 ms) it returned 0/5.
+Triggers include the rollback re-arm, large-workspace init, the heal path,
+watcher restore at startup, and notify's auto-add when an agent creates or
+moves in a large directory (`npm install`, `git clone`, `mv`).
 
-Unlike the overflow, this pause produces no `IN_Q_OVERFLOW`, no counter, and
-no latch — it is silent. It follows from the one-instance/one-thread
-topology rather than from any specific bug in the registration code, and is
-tracked as a follow-up issue rather than a blocker for the shared-instance
-change. Candidate directions for that follow-up: a delivery barrier through
-the shared queue before returning `Safe`; an instance-wide registration
-epoch (partial — it misses notify's internal auto-add); or sharding /
-per-workspace instances.
+The fix keeps the topology and makes the observation veto itself around the
+pause:
+
+- **Registrations we drive** (`add_route`, overlapping release/re-arm) run
+  inside an instance-wide registration epoch and in-flight counter. `watch()`
+  returns only after notify's walk is done, so the bracket is exact. A check
+  that starts while a registration is in flight returns `false`; a quiet
+  period that spans an epoch change is void.
+- **notify's internal auto-add** is detected from the event that triggers it —
+  `CreateKind::Folder`, or a directory `RenameMode::To/Both` — and bumps an
+  instance-wide auto-add sequence. The callback runs inside notify's
+  `handle_inotify` pass, before that pass processes its accumulated
+  `add_watches`; a control message (`unwatch` of a path that is never
+  registered) sent from another thread during the callback is therefore
+  answered only after the pass — including its walks — finishes. That reply
+  is the barrier that advances the covered sequence. A check refuses to start
+  while `auto_add_covered < auto_add_seq`, and a new auto-add event during the
+  window voids the decision.
+- **The idle shortcut** (`flag == false` ⇒ `Safe`) is disabled for 250 ms
+  after any registration walk: events generated during the walk may still be
+  queued when the check starts, and silence is not evidence until they have
+  drained.
+
+The pause itself remains — events still wait behind a walk, so an operator
+can still see delayed delivery and, under sustained pressure, the overflow
+handled above. What can no longer happen is a `Safe` decision produced by
+delivery paused for another workspace's walk (#8448).
 
 ## Shared architecture
 
@@ -179,10 +198,13 @@ per-workspace instances.
   mark (fail closed) and releases its own partial registration with a
   bounded failure cascade.
 - **Quiescence.** `check_quiescent` fails closed while the route is degraded,
-  and snapshots the coverage epoch before its quiet period: an interruption
+  and snapshots both the per-route coverage epoch and the instance-wide
+  registration/auto-add generations before its quiet period: an interruption
   that both started and ended inside the observation window leaves the route
-  healthy again with a silent flag that proves nothing, so the epoch moving
-  voids the `Safe` decision.
+  healthy again with a silent flag that proves nothing, so any generation
+  moving voids the `Safe` decision. It also refuses to start while a
+  registration or auto-add walk is in flight, and disables the idle shortcut
+  until queued events have had time to drain.
 - **Initialization cache.** `WatcherCache` caches only successful
   initialization; transient `inotify_init` failures (`EMFILE`/`ENFILE`/
   `ENOMEM`) are retried by the next registration instead of leaving a
@@ -206,6 +228,12 @@ Invariants future changes must preserve:
 8. The `watcher_shared_instance` suite runs in its own test binary on purpose
    (instance counting via `/proc/self/fd` blurs when the lib tests share the
    process); keep it isolated.
+9. Every kernel `watch()`/`unwatch()` runs inside a `RegistrationGuard`; an
+   un-bracketed registration reintroduces the #8448 false-`Safe` window for
+   every workspace.
+10. Directory create/move-in events bump `auto_add_seq` and arm the barrier;
+    a check may trust silence only when `auto_add_covered >= auto_add_seq`
+    and the settle window is closed.
 
 ## References
 
@@ -214,3 +242,5 @@ Invariants future changes must preserve:
 - #4049 — quiescence model (orthogonal to topology).
 - #7592 discussion — same-machine comparison data and the review rounds that
   shaped the overlap and epoch handling.
+- #8448 — false-`Safe` window during registration walks; the registration
+  epoch and auto-add barrier described above.

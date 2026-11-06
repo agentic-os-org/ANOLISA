@@ -54,15 +54,21 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 - **运维指引。** 任何非零溢出都值得告警:它意味着事件被丢弃、受影响 workspace 在窗口内被按"活跃"对待。溢出持续增长时应调高 `fs.inotify.max_queued_events`、降低 restore/rollback 重挂扫描的并行度,或在静默期重建后安排受影响 checkpoint 重跑。
 - **后续加固选项(未实现;记录下来让取舍空间可见):** 基于*速率*的溢出阈值升级为 ERROR 状态行;溢出窗口后对 checkpoint 被拒的 workspace 做重扫;若某部署持续溢出,按 workspace 类别拆成少量实例池。单实例拓扑不妨碍其中任何一项——它们都是路由表之上的增量改动。
 
-### walk 暂停代价(静默;已建后续 issue 跟踪)
+### walk 暂停代价(以 fail-closed 封闭;#8448)
 
 上面的溢出是共享队列代价的一半;另一半没有计数器:notify 6.1.1 在其唯一的事件循环线程上执行 `watch()`(对整棵树的 `WalkDir`)以及对新建/移入目录的 auto-add,且 walk 进行期间不读 inotify fd。共享单实例下该线程服务整个 daemon,因此*所有* workspace 的事件都要在内核队列里等到 walk 结束。
 
-`check_workspace_quiescent` 依据 forwarder 在最后 100 ms 静默期内投递的内容做决策。当该窗口落进一次长于 ~100 ms 的 walk 时,标志保持检查自己存入的 `false`,决策在 workspace 仍在被写入时返回错误的 `Safe`。per-route coverage epoch 检测不到它:被检查 route 的 epoch、degraded 标记与 watcher 身份都没有变化,因为 walk 属于另一个 workspace。
+真正的风险不是暂停本身,而是错误的 `Safe`。`check_workspace_quiescent` 依据最后 100 ms 静默期内送达的事件做决策;当该窗口落进一次 walk 时,标志保持检查自己存入的 `false`,决策在 workspace 仍在被写入时返回 `Safe`。per-route coverage epoch 检测不到它:被检查 route 的 epoch、degraded 标记与 watcher 身份都没有变化,因为 walk 属于另一个 workspace。
 
-#7592 评审中的 release 构建实测:写入方每 10 ms 追加一次,检查开始 80 ms 后注册一个无关的 1000 目录 / 100000 文件 workspace(walk 约 170 ms),本设计下检查 5/5 返回 `Safe`,每 workspace 实例拓扑下 0/5;每目录 50 文件(walk 约 87 ms)时 0/5。触发场景包括回滚 re-arm、大 workspace init、heal 路径、启动时 watcher restore,以及 agent 新建/移入大目录时 notify 的 auto-add(`npm install`、`git clone`、`mv`)。
+#7592 评审中的 release 构建实测:写入方每 10 ms 追加一次,检查开始 80 ms 后注册一个无关的 1000 目录 / 100000 文件 workspace(walk 约 170 ms),共享拓扑下检查 5/5 返回 `Safe`,每 workspace 实例拓扑下 0/5;每目录 50 文件(walk 约 87 ms)时 0/5。触发场景包括回滚 re-arm、大 workspace init、heal 路径、启动时 watcher restore,以及 agent 新建/移入大目录时 notify 的 auto-add(`npm install`、`git clone`、`mv`)。
 
-与溢出不同,该暂停不产生 `IN_Q_OVERFLOW`、没有计数、没有 latch——它是静默的。它源自单实例/单线程拓扑而非注册代码的具体 bug,因此按后续 issue 跟踪,不阻塞共享实例改动。后续候选方向:返回 `Safe` 前穿过共享队列的投递屏障;实例级注册 epoch(部分方案——覆盖不到 notify 内部 auto-add);或分片 / 每 workspace 实例。
+修复保留该拓扑,让静默期观察在暂停周围自行作废:
+
+- **由我们驱动的注册**(`add_route`、重叠释放/re-arm)包在实例级注册 epoch 与 in-flight 计数之间。`watch()` 只在 notify 的 walk 完成后返回,因此区间是精确的。检查开始时若有注册在途则返回 `false`;静默期跨越 epoch 变化则作废。
+- **notify 内部的 auto-add** 由触发它的事件识别——`CreateKind::Folder`,或目录的 `RenameMode::To/Both`——并递增实例级 auto-add 序列。回调运行在 notify 的 `handle_inotify` 处理批次内、该批次处理累积的 `add_watches` 之前;因此在回调期间由另一线程发出的控制消息(对一条从未注册的路径执行 `unwatch`)只会在该批次——包括其 walk——结束后才被应答。该应答就是推进 covered 序列的屏障。检查在 `auto_add_covered < auto_add_seq` 时拒绝开始;窗口内出现新的 auto-add 事件则作废决策。
+- **idle 快捷路径**(`flag == false` ⇒ `Safe`)在任意注册 walk 结束后 250 ms 内禁用:walk 期间产生的事件可能仍在队列里,排空前静默不能作为证据。
+
+暂停本身仍在——事件依然要等在 walk 之后,运维仍可能看到事件投递延迟,持续压力下仍会出现上面处理的队列溢出。但由"为其他 workspace 的 walk 暂停投递"造成的 `Safe` 决策不会再出现(#8448)。
 
 ## 共享架构设计
 
@@ -71,7 +77,7 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 - **锁纪律。** `watcher` 互斥锁串行化注册类变更,且总在 `routes` 之前获取;`routes` 的写锁绝不跨 `watch()`/`unwatch()` 调用持有(notify 事件循环在分发回调里取 `routes.read()`——跨调用持写锁会让自己死锁事件循环)。coverage 表是叶子锁。事件路径除 route 读锁外不取任何锁。
 - **发布顺序。** `add_route` 先发布 route 再挂内核 watch:覆盖该路径的描述符在 `watch()` 之前不存在,因此每个可能送达的事件都已能找到 route。注册失败会回滚发布,并释放递归 walk 已装入的部分描述符(notify 6.1.1 自身不回滚)。
 - **保重叠的释放。** notify 6.1.1 每路径一个描述符,且递归 `unwatch(root)` 会移除路径以 `root` 为前缀的*所有*描述符——包括重叠幸存者赖以工作的描述符。`unwatch_preserving_overlaps` 在第一个描述符消失前把每个重叠幸存者置为"writing"并标记 uncovered;然后 unwatch;再逐个 re-arm 幸存者。re-arm 失败保留 degraded 标记(fail closed),并以有界级联释放自身的部分注册。
-- **静默期。** `check_quiescent` 在 route degraded 时 fail closed,并在静默期前快照 coverage epoch:一个在观察窗口内开始又结束的中断会让 route 恢复健康、留下一个证明不了任何事的静默标志,因此 epoch 变化即推翻 `Safe` 决策。
+- **静默期。** `check_quiescent` 在 route degraded 时 fail closed,并在静默期前同时快照 per-route coverage epoch 与实例级注册/auto-add 代际:一个在观察窗口内开始又结束的中断会让 route 恢复健康、留下一个证明不了任何事的静默标志,因此任意代际变化即推翻 `Safe` 决策。注册或 auto-add walk 在途时检查拒绝开始;idle 快捷路径也会等到排队事件排空后才恢复。
 - **初始化缓存。** `WatcherCache` 只缓存成功的初始化;瞬态 `inotify_init` 失败(`EMFILE`/`ENFILE`/`ENOMEM`)由下一次注册重试,而不是让 watcher 死到 daemon 重启。
 
 ## 一致性指引
@@ -86,6 +92,8 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 6. `watch_seq` 每次 `start` 单调递增。
 7. `WatcherHealthOk` 字段 wire-frozen;只允许追加式变更。
 8. `watcher_shared_instance` 套件刻意独立成测试二进制(经 `/proc/self/fd` 数实例,与 lib 测试共享进程会糊掉计数);保持隔离。
+9. 每次内核 `watch()`/`unwatch()` 都必须在 `RegistrationGuard` 内执行;未包住的注册会重新引入针对所有 workspace 的 #8448 假 `Safe` 窗口。
+10. 目录 create/移入事件必须递增 `auto_add_seq` 并挂起屏障;只有当 `auto_add_covered >= auto_add_seq` 且 settle 窗口关闭时,检查才可信任静默。
 
 ## 参考
 
@@ -93,3 +101,4 @@ workspace 一个 `notify::recommended_watcher`。内容涵盖选择该拓扑的�
 - #7669 —— 每 workspace 实例 + 告警 + 硬拒绝的替代方案。
 - #4049 —— 静默期模型(与拓扑正交)。
 - #7592 讨论 —— 同机对比数据,以及塑造重叠处理与 epoch 机制的各轮评审。
+- #8448 —— 注册 walk 期间的假 `Safe` 窗口;即上述注册 epoch 与 auto-add 屏障。
