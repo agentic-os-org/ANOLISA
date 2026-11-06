@@ -68,12 +68,20 @@ def string_value(
     return normalized[:max_length]
 
 
+# The qwen-code-extension hooks identify themselves as "qwen-code" (with a
+# hyphen); the approved telemetry name is "qwencode". Normalize the alias so
+# the attribution is not silently dropped by the allowlist.
+_AGENT_NAME_ALIASES = {"qwen-code": AgentName.QWENCODE.value}
+
+
 def agent_name_value(value: Any) -> str:
     """Return an approved agent product name or an empty string."""
     if not isinstance(value, str):
         return ""
+    normalized = value.strip()
+    normalized = _AGENT_NAME_ALIASES.get(normalized, normalized)
     try:
-        return AgentName(value.strip()).value
+        return AgentName(normalized).value
     except ValueError:
         return ""
 
