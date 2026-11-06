@@ -148,6 +148,14 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/agentscope/aw_scope_ledger.py"),
         )?;
         context.files.write(
+            "aw_private.py",
+            include_bytes!("../../native/qwenpaw/aw_private.py"),
+        )?;
+        context.files.write(
+            "aw_execution.py",
+            include_bytes!("../../native/agentscope/aw_execution.py"),
+        )?;
+        context.files.write(
             "aw_submission.py",
             include_bytes!("../../native/agentscope/aw_submission.py"),
         )?;

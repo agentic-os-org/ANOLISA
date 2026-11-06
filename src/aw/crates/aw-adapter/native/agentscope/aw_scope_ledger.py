@@ -155,16 +155,37 @@ async def wait_owned(task: asyncio.Task) -> asyncio.CancelledError | None:
 
 
 async def close_turn_scope(scope: "AwTaskScope") -> None:
-    """Release root occupancy only after the native child is drained."""
-    await scope.close()
-    await scope.release()
+    """Join the same owned cleanup across cancellation and concurrent retries."""
+    task = scope.cleanup_task
+    if task is None or task.done():
+        task = asyncio.create_task(_close_turn_scope(scope))
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        scope.cleanup_task = task
+    await asyncio.shield(task)
 
 
-async def open_turn_scope(config: dict[str, Any]) -> "AwTaskScope":
+async def _close_turn_scope(scope: "AwTaskScope") -> None:
+    """Release root occupancy only after native drain and confirmed revocation."""
+    try:
+        await scope.close()
+        if scope.closed and not any(not task.done() for task in scope.tasks):
+            if scope.execution is not None:
+                await scope.execution.revoke()
+            await scope.release()
+    finally:
+        if scope.reservation is not None:
+            _unclosed_scopes.add(scope)
+
+
+async def open_turn_scope(config: dict[str, Any], execution_factory=None) -> "AwTaskScope":
     """Allocate a reply scope through the existing Service lifecycle."""
     global _atexit_registered
     await _retry_unclosed_scopes()
     scope = AwTaskScope(config)
+    if execution_factory is not None:
+        from aw_execution import AwExecution
+
+        scope.execution = AwExecution(execution_factory)
     if not _atexit_registered:
         atexit.register(_exit_cleanup)
         _atexit_registered = True
@@ -182,12 +203,14 @@ async def open_turn_scope(config: dict[str, Any]) -> "AwTaskScope":
             raise interrupted
         opening.result()
     except BaseException:
-        if scope.reservation is not None:
-            cleanup = asyncio.create_task(close_turn_scope(scope))
-            await wait_owned(cleanup)
-            cleanup.result()
-        if (scope.handle is not None and not scope.closed) or scope.reservation is not None:
-            _unclosed_scopes.add(scope)
+        try:
+            if scope.reservation is not None or scope.execution is not None:
+                cleanup = asyncio.create_task(close_turn_scope(scope))
+                await wait_owned(cleanup)
+                cleanup.result()
+        finally:
+            if (scope.handle is not None and not scope.closed) or scope.reservation is not None:
+                _unclosed_scopes.add(scope)
         raise
     scope.owner_task = asyncio.current_task()
     return scope
@@ -198,6 +221,8 @@ class AwTaskScope:
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
+        self.execution = None
+        self.cleanup_task: asyncio.Task | None = None
         self.pid = os.getpid()
         self.handle: dict[str, Any] | None = None
         self.closed = False
@@ -251,6 +276,7 @@ class AwTaskScope:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=True,
+                    env=self.config.get("provider_environment"),
                 )
                 stdout, stderr = await proc.communicate(
                     json.dumps(value).encode()
@@ -284,6 +310,9 @@ class AwTaskScope:
             return
         if self.config.get("resident_policy_reload") and self.reservation is None:
             await self.reserve()
+        if self.execution is not None:
+            await self.execution.acquire()
+            self.config = {**self.config, "provider_environment": dict(self.execution.lease.hook_environment)}
         # Providers spawned by this scope inherit the admitted launch
         # environment (without bridge import paths), matching root-binding
         # Provider semantics.
@@ -493,6 +522,9 @@ class AwTaskScope:
         close_event: bool = False,
     ) -> tuple[int, bytes, bytes]:
         self._check()
+        from aw_execution import public_value
+
+        payload = public_value(payload)
         return await self._command(
             "invoke",
             {"scope": self.handle, "native_input": json.dumps(payload)},
