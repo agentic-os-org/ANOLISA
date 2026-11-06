@@ -889,6 +889,60 @@ fn explicit_path_keys_drop_the_prefix_before_bare_relative_paths() {
 }
 
 #[test]
+fn serialized_json_strings_replay_typed_paths() {
+    for text in [
+        r#""{\"path\":\"/tmp/a.txt\"}""#,
+        r#"result "{\"path\":\"/tmp/a.txt\"}""#,
+        r#"result "{\"a\":\"/tmp/a.txt x\"}""#,
+        r#"「"{\"a\":\"/tmp/a.txt x\"}"」"#,
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec!["/tmp/a.txt"],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn serialized_json_strings_keep_same_word_suffix_claims() {
+    for (text, expected_paths, expected_numbers) in [
+        (
+            r#"result "{\"a\":\"/tmp/a.txt x\"}",count=500"#,
+            vec!["/tmp/a.txt"],
+            vec![500.0],
+        ),
+        (
+            r#"result "{\"a\":\"/tmp/a.txt x\"}",path=/tmp/c.txt"#,
+            vec!["/tmp/a.txt", "/tmp/c.txt"],
+            vec![],
+        ),
+        (
+            r#"result "{\"a\":\"/tmp/a.txt x\"}"path=/tmp/c.txt"#,
+            vec!["/tmp/a.txt", "/tmp/c.txt"],
+            vec![],
+        ),
+        (
+            r#""{\"a\":\"/tmp/a.txt x\"}","{\"b\":\"/tmp/b.txt y\"}""#,
+            vec!["/tmp/a.txt", "/tmp/b.txt"],
+            vec![],
+        ),
+        (
+            r#""{\"a\":\"/tmp/a.txt\"}","{\"b\":\"/tmp/b.txt\"}""#,
+            vec!["/tmp/a.txt", "/tmp/b.txt"],
+            vec![],
+        ),
+    ] {
+        let claims = extract_claims(text);
+        let mut paths = texts_of(&claims, ClaimClass::Path);
+        paths.sort_unstable();
+        assert_eq!(paths, expected_paths, "{text}: {claims:?}");
+        assert_eq!(number_values(text), expected_numbers, "{text}: {claims:?}");
+    }
+}
+
+#[test]
 fn serialized_json_suffix_preserves_raw_fields_and_unclosed_paths() {
     let text = r#""{\"a\":[200,404]}",count=500,"/tmp/z.txt"#;
     let claims = extract_claims(text);
@@ -910,6 +964,79 @@ fn serialized_json_suffix_keeps_pipe_inside_path() {
         "{claims:?}"
     );
     assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn ordinary_fields_between_serialized_json_strings_preserve_both_payloads() {
+    for text in [
+        r#""{\"a\":[200,404]}",count=500,"{\"b\":[600,700]}""#,
+        r#"x="{\"a\":[200,404]}",count=500,y="{\"b\":[600,700]}""#,
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            number_values(text),
+            vec![200.0, 404.0, 500.0, 600.0, 700.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn serialized_json_replay_crosses_colon_boundaries() {
+    let text = r#"x="{\"a\":[200,404]}":y="{\"b\":[600,700]}""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn serialized_json_replay_crosses_serialized_newline_boundaries() {
+    let text = r#"x="{\"a\":[200,404]}"\ncount=500\ny="{\"b\":[600,700]}""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 500.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn field_segmented_multiword_json_preserves_pending() {
+    let text = r#"x="[\"a;b c\",200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn pending_json_replay_crosses_colon_before_a_later_payload() {
+    let text = r#"x="[1, 2]":y="[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn whole_word_json_replay_crosses_colon_boundaries() {
+    let text = r#""[200,404]":y="[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn whole_word_json_replay_crosses_serialized_newline_boundaries() {
+    let text = r#""[200,404]"\ny="[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
 }
 
 #[test]
@@ -1062,6 +1189,50 @@ fn root_json_string_preserves_identifier_claims() {
 }
 
 #[test]
+fn unclosed_prose_does_not_hide_nested_serialized_json_paths() {
+    let text = r#""unclosed result "{\"path0\":[\"/tmp/a,b.txt\",{\"b1\":\"/tmp/c.txt\"}]}""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a,b.txt", "/tmp/c.txt"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn unclosed_prose_does_not_hide_later_serialized_json() {
+    let text = r#""unclosed result "{\"a\":\"/tmp/a.txt x\"}" count=500 path=/tmp/c.txt"#;
+    let claims = extract_claims(text);
+    let mut paths = texts_of(&claims, ClaimClass::Path);
+    paths.sort_unstable();
+    assert_eq!(paths, vec!["/tmp/a.txt", "/tmp/c.txt"], "{claims:?}");
+    assert_eq!(number_values(text), vec![500.0], "{claims:?}");
+}
+
+#[test]
+fn serialized_json_string_can_close_after_whitespace() {
+    let text = r#""{\"a\":\"/tmp/a.txt x\"} ""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn unclosed_trailing_json_preserves_raw_numeric_claims() {
+    let text = r#""{\"a\":\"/tmp/a.txt x\"}","500"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![500.0], "{claims:?}");
+}
+
+#[test]
 fn root_deep_containers_complete_on_a_small_stack() {
     let text = format!("{}200,404{}", "[".repeat(64), "]".repeat(64));
     std::thread::Builder::new()
@@ -1092,6 +1263,28 @@ fn serialized_containers_match_value_replay() {
         let actual = json_typed_claims(serde_json::Value::String(text.to_string()));
         assert_eq!(actual, expected, "{text}");
     }
+}
+
+#[test]
+fn nested_serialized_strings_complete_on_a_small_stack() {
+    let mut text = "[200,404]".to_string();
+    for _ in 0..16 {
+        text = serde_json::to_string(&text).unwrap();
+    }
+    std::thread::Builder::new()
+        .stack_size(32 * 1024)
+        .spawn(move || {
+            let claims = extract_claims(&text);
+            let numbers: Vec<_> = claims
+                .iter()
+                .filter(|claim| claim.class == ClaimClass::Number)
+                .filter_map(|claim| claim.value)
+                .collect();
+            assert_eq!(numbers, vec![200.0, 404.0], "{claims:?}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

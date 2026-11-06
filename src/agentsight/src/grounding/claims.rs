@@ -276,6 +276,8 @@ fn quote_closer_table(closer: char) -> Option<usize> {
     }
 }
 
+/// Index candidate closers once so unmatched opening quotes cannot repeatedly
+/// rescan the remaining suffix.
 fn quote_closers(chars: &[char]) -> [Vec<usize>; 5] {
     let mut closers: [Vec<usize>; 5] = Default::default();
     let mut escaped = false;
@@ -325,6 +327,8 @@ fn quoted_chars(chars: &[char]) -> Vec<bool> {
     let closers = quote_closers(chars);
     let mut index = 0;
     while index < chars.len() {
+        // In an embedded serialized fragment, both delimiters arrive escaped;
+        // treating the closing `\"` as quoted content hides the whole item.
         if chars[index] == '"' && escaped_by_backslash(chars, index) {
             if let Some(close) = closing_escaped_double_quote(chars, index) {
                 quoted[index - 1..=close].fill(true);
@@ -397,59 +401,6 @@ fn matching_bracket_pairs(chars: &[char], quoted: &[bool]) -> Vec<(usize, usize)
         }
     }
     matches
-}
-
-fn decorated_url_end(text: &str, start: usize) -> usize {
-    let rest = &text[start..];
-    let bold = text[..start].ends_with("**");
-    let parenthesized = text[..start].ends_with('(');
-    let mut paren_depth = usize::from(parenthesized);
-    for (offset, c) in rest.char_indices() {
-        if is_url_terminator(c) {
-            return offset;
-        }
-        if bold && c == '*' && rest[offset..].starts_with("**") {
-            return offset;
-        }
-        if parenthesized {
-            match c {
-                '(' => paren_depth += 1,
-                ')' => {
-                    paren_depth -= 1;
-                    if paren_depth == 0 {
-                        return offset;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    rest.len()
-}
-
-fn trim_url_trailing_punctuation(url: &str) -> &str {
-    let mut matched_closes = vec![false; url.len()];
-    let mut open_parens = Vec::new();
-    for (index, c) in url.char_indices() {
-        match c {
-            '(' => open_parens.push(index),
-            ')' => {
-                if open_parens.pop().is_some() {
-                    matched_closes[index] = true;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut end = url.len();
-    while let Some((index, c)) = url[..end].char_indices().next_back() {
-        if (c == ')' && matched_closes[index]) || !is_url_trailing_punctuation(c) {
-            break;
-        }
-        end = index;
-    }
-    &url[..end]
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -981,6 +932,8 @@ fn trim_attached_decoration(value: &str) -> &str {
         if !is_decoration(c) {
             break;
         }
+        // Only a non-empty matched bracket inside the path is content; decoration
+        // around the whole value trims from both ends.
         if c == ']' && matched_closes[index] && preserve_path_brackets {
             break;
         }
@@ -1055,6 +1008,8 @@ fn attached_field_boundaries(value: &str) -> Vec<(usize, usize)> {
     boundaries
 }
 
+/// Whether decoration would hide structured content. Separators followed only
+/// by ordinary pathname text remain legal pathname punctuation.
 fn has_following_attached_field(value: &str) -> bool {
     let boundaries = attached_field_boundaries(value);
     boundaries
@@ -1112,34 +1067,6 @@ fn attached_field_segments(word: &str) -> Option<Vec<&str>> {
 fn has_numeric_colon_suffix(word: &str) -> bool {
     word.rsplit_once(':')
         .is_some_and(|(_, suffix)| parse_number(trim_decoration(suffix)).is_some())
-}
-
-fn has_unmatched_closing_bracket_before_path(word: &str) -> bool {
-    let mut bracket_depth = 0usize;
-    for c in word.chars() {
-        match c {
-            '/' => return false,
-            '[' => bracket_depth += 1,
-            ']' if bracket_depth == 0 => return true,
-            ']' => bracket_depth -= 1,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn classify_complete_word(word: &str) -> Option<Claim> {
-    let claim = classify_word(word)?;
-    let attached = split_attached_value(word).is_some();
-    if (claim.class == ClaimClass::Path && (attached || has_numeric_colon_suffix(word)))
-        || has_unmatched_closing_bracket_before_path(word)
-    {
-        return None;
-    }
-    if (claim.class != ClaimClass::Path || attached) && has_following_attached_field(word) {
-        return None;
-    }
-    Some(claim)
 }
 
 fn has_empty_list_prefix(value: &str) -> bool {
@@ -1299,6 +1226,34 @@ fn classify_attached_value(mut word: &str) -> Option<Claim> {
         }
         return Some(claim);
     }
+}
+
+fn has_unmatched_closing_bracket_before_path(word: &str) -> bool {
+    let mut bracket_depth = 0usize;
+    for c in word.chars() {
+        match c {
+            '/' => return false,
+            '[' => bracket_depth += 1,
+            ']' if bracket_depth == 0 => return true,
+            ']' => bracket_depth -= 1,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn classify_complete_word(word: &str) -> Option<Claim> {
+    let claim = classify_word(word)?;
+    let attached = split_attached_value(word).is_some();
+    if (claim.class == ClaimClass::Path && (attached || has_numeric_colon_suffix(word)))
+        || has_unmatched_closing_bracket_before_path(word)
+    {
+        return None;
+    }
+    if (claim.class != ClaimClass::Path || attached) && has_following_attached_field(word) {
+        return None;
+    }
+    Some(claim)
 }
 
 fn bracket_belongs_to_path(
@@ -1701,179 +1656,6 @@ fn structural_segments(word: &str) -> Vec<String> {
     segments
 }
 
-fn classify_structural_segment(segment: &str) -> Option<Claim> {
-    let claim = classify_word(segment);
-    if segment.contains('/') {
-        let trimmed = trim_attached_decoration(segment);
-        if trimmed.len() != segment.len()
-            && let Some(path) =
-                classify_word(trimmed).filter(|claim| claim.class == ClaimClass::Path)
-        {
-            return Some(path);
-        }
-    }
-    let trimmed = trim_decoration(segment);
-    if trimmed.len() == segment.len()
-        || claim
-            .as_ref()
-            .is_some_and(|claim| claim.class != ClaimClass::Date)
-    {
-        return claim;
-    }
-    classify_word(trimmed).or(claim)
-}
-
-fn is_embedded_json_decoration(c: char) -> bool {
-    matches!(
-        c,
-        '(' | ')'
-            | '`'
-            | '*'
-            | ','
-            | ';'
-            | '|'
-            | '.'
-            | '!'
-            | '?'
-            | '。'
-            | '！'
-            | '？'
-            | '，'
-            | '；'
-            | '（'
-            | '）'
-            | '【'
-            | '】'
-            | '「'
-            | '」'
-            | '“'
-            | '”'
-            | '‘'
-            | '’'
-    )
-}
-
-fn trim_embedded_json_separators(mut value: &str) -> &str {
-    loop {
-        let mut start = 0;
-        for (index, c) in value.char_indices() {
-            let relative_path =
-                c == '.' && (value[index..].starts_with("./") || value[index..].starts_with("../"));
-            if relative_path || !is_embedded_json_decoration(c) {
-                break;
-            }
-            start = index + c.len_utf8();
-        }
-        let trimmed = &value[start..];
-        if let Some(rest) = trimmed.strip_prefix("\\n") {
-            value = rest;
-        } else {
-            return trimmed;
-        }
-    }
-}
-
-fn embedded_json_candidate(word: &str) -> &str {
-    let candidate = split_attached_value(word).map_or(word, |(_, value)| value);
-    let candidate = trim_embedded_json_separators(candidate);
-    if candidate.starts_with('"') {
-        return candidate;
-    }
-    let mut field_start = 0;
-    let mut backslashes = 0usize;
-    for (index, c) in candidate.char_indices() {
-        if c == '"' && backslashes % 2 == 0 {
-            let prefix = &candidate[field_start..index];
-            let value = split_attached_value(prefix).map_or(prefix, |(_, value)| value);
-            if value
-                .trim_start_matches(is_embedded_json_decoration)
-                .is_empty()
-            {
-                return &candidate[index..];
-            }
-            return candidate;
-        }
-        if c == '\\' && candidate[index + 1..].starts_with('n') {
-            field_start = index + 2;
-            backslashes = 0;
-            continue;
-        }
-        if is_embedded_json_decoration(c) || matches!(c, ':' | '：') {
-            field_start = index + c.len_utf8();
-        }
-        if c == '\\' {
-            backslashes += 1;
-        } else {
-            backslashes = 0;
-        }
-    }
-    candidate
-}
-
-fn has_unescaped_double_quote(value: &str) -> bool {
-    let mut backslashes = 0usize;
-    for c in value.chars() {
-        if c == '"' && backslashes % 2 == 0 {
-            return true;
-        }
-        if c == '\\' {
-            backslashes += 1;
-        } else {
-            backslashes = 0;
-        }
-    }
-    false
-}
-
-fn embedded_json_string_prefix(value: &str) -> Option<(usize, serde_json::Value)> {
-    let rest = value.strip_prefix('"')?;
-    let mut backslashes = 0usize;
-    for (offset, c) in rest.char_indices() {
-        if c == '"' && backslashes % 2 == 0 {
-            let end = offset + 2;
-            return serde_json::from_str::<serde_json::Value>(&value[..end])
-                .ok()
-                .filter(|value| matches!(value, serde_json::Value::String(_)))
-                .map(|value| (end, value));
-        }
-        if c == '\\' {
-            backslashes += 1;
-        } else {
-            backslashes = 0;
-        }
-    }
-    None
-}
-
-fn serialized_json_container_bytes(text: &str) -> Vec<bool> {
-    let mut protected = vec![false; text.len()];
-    let mut cursor = 0;
-    let mut backslashes = 0usize;
-    while cursor < text.len() {
-        let Some(c) = text[cursor..].chars().next() else {
-            break;
-        };
-        if c == '"'
-            && backslashes % 2 == 0
-            && let Some((end, serde_json::Value::String(decoded))) =
-                embedded_json_string_prefix(&text[cursor..])
-            && parse_serialized_json_container(&decoded).is_some()
-        {
-            protected[cursor..cursor + end].fill(true);
-            cursor += end;
-            backslashes = 0;
-            continue;
-        }
-        if c == '\\' {
-            backslashes += 1;
-        } else {
-            backslashes = 0;
-        }
-        cursor += c.len_utf8();
-    }
-    protected
-}
-
 enum SerializedJsonNode {
     Number(serde_json::Number),
     String(String),
@@ -2234,9 +2016,167 @@ fn json_typed_claims_from(
     claims
 }
 
+fn is_embedded_json_decoration(c: char) -> bool {
+    matches!(
+        c,
+        '(' | ')'
+            | '`'
+            | '*'
+            | ','
+            | ';'
+            | '|'
+            | '.'
+            | '!'
+            | '?'
+            | '。'
+            | '！'
+            | '？'
+            | '，'
+            | '；'
+            | '（'
+            | '）'
+            | '【'
+            | '】'
+            | '「'
+            | '」'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+    )
+}
+
+fn trim_embedded_json_separators(mut value: &str) -> &str {
+    loop {
+        let mut start = 0;
+        for (index, c) in value.char_indices() {
+            let relative_path =
+                c == '.' && (value[index..].starts_with("./") || value[index..].starts_with("../"));
+            if relative_path || !is_embedded_json_decoration(c) {
+                break;
+            }
+            start = index + c.len_utf8();
+        }
+        let trimmed = &value[start..];
+        if let Some(rest) = trimmed.strip_prefix("\\n") {
+            value = rest;
+        } else {
+            return trimmed;
+        }
+    }
+}
+
+fn embedded_json_candidate(word: &str) -> &str {
+    let candidate = split_attached_value(word).map_or(word, |(_, value)| value);
+    let candidate = trim_embedded_json_separators(candidate);
+    if candidate.starts_with('"') {
+        return candidate;
+    }
+    let mut field_start = 0;
+    let mut backslashes = 0usize;
+    for (index, c) in candidate.char_indices() {
+        if c == '"' && backslashes % 2 == 0 {
+            let prefix = &candidate[field_start..index];
+            let value = split_attached_value(prefix).map_or(prefix, |(_, value)| value);
+            if value
+                .trim_start_matches(is_embedded_json_decoration)
+                .is_empty()
+            {
+                return &candidate[index..];
+            }
+            return candidate;
+        }
+        if c == '\\' && candidate[index + 1..].starts_with('n') {
+            field_start = index + 2;
+            backslashes = 0;
+            continue;
+        }
+        if is_embedded_json_decoration(c) || matches!(c, ':' | '：') {
+            field_start = index + c.len_utf8();
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    candidate
+}
+
+fn has_unescaped_double_quote(value: &str) -> bool {
+    let mut backslashes = 0usize;
+    for c in value.chars() {
+        if c == '"' && backslashes % 2 == 0 {
+            return true;
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    false
+}
+
+fn starts_unclosed_embedded_json(word: &str) -> bool {
+    embedded_json_candidate(word)
+        .strip_prefix('"')
+        .is_some_and(|rest| !has_unescaped_double_quote(rest))
+}
+
+fn embedded_json_string_prefix(value: &str) -> Option<(usize, serde_json::Value)> {
+    let rest = value.strip_prefix('"')?;
+    let mut backslashes = 0usize;
+    for (offset, c) in rest.char_indices() {
+        if c == '"' && backslashes % 2 == 0 {
+            let end = offset + 2;
+            return serde_json::from_str::<serde_json::Value>(&value[..end])
+                .ok()
+                .filter(|value| matches!(value, serde_json::Value::String(_)))
+                .map(|value| (end, value));
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    None
+}
+
+fn serialized_json_container_bytes(text: &str) -> Vec<bool> {
+    let mut protected = vec![false; text.len()];
+    let mut cursor = 0;
+    let mut backslashes = 0usize;
+    while cursor < text.len() {
+        let Some(c) = text[cursor..].chars().next() else {
+            break;
+        };
+        if c == '"'
+            && backslashes % 2 == 0
+            && let Some((end, serde_json::Value::String(decoded))) =
+                embedded_json_string_prefix(&text[cursor..])
+            && parse_serialized_json_container(&decoded).is_some()
+        {
+            protected[cursor..cursor + end].fill(true);
+            cursor += end;
+            backslashes = 0;
+            continue;
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+        cursor += c.len_utf8();
+    }
+    protected
+}
+
 enum EmbeddedJsonReplacement {
     NotJson,
     Complete,
+    Pending { candidate: String, start: usize },
 }
 
 fn raw_json_gap_claims(value: &str, json_follows: bool) -> Vec<Claim> {
@@ -2321,11 +2261,17 @@ fn replace_embedded_json_claims(
     word_claims.retain(|claim| !matches!(claim.class, ClaimClass::Number | ClaimClass::Path));
     word_claims.extend(replayed_claims);
     if let Some(candidate) = pending {
+        let pending_start = start + word_claims.len();
         word_claims.extend(
             extract_claims(&candidate)
                 .into_iter()
                 .filter(|claim| matches!(claim.class, ClaimClass::Number | ClaimClass::Path)),
         );
+        claims.append(&mut word_claims);
+        return EmbeddedJsonReplacement::Pending {
+            candidate,
+            start: pending_start,
+        };
     }
     word_claims.extend(raw_json_gap_claims(remainder, false));
     claims.append(&mut word_claims);
@@ -2347,28 +2293,30 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
     claims.extend(extract_urls(text));
     claims.extend(extract_quoted(text));
     let normalized = separate_bracketed_comma_lists(text);
-    for json_word in normalized.split_whitespace() {
+    let mut pending_embedded_json: Option<(usize, String)> = None;
+    for word in normalized.split_whitespace() {
         let word_claim_start = claims.len();
-        let attached_after_residue =
-            if root_json.is_none() && split_attached_value(json_word).is_none() {
-                attached_field_after_closing_bracket(json_word)
-            } else {
-                None
-            };
+        let json_word = word;
+        let attached_after_residue = if root_json.is_none() && split_attached_value(word).is_none()
+        {
+            attached_field_after_closing_bracket(word)
+        } else {
+            None
+        };
         let attached_value_claim = if root_json.is_some() {
             None
         } else {
-            classify_attached_value(attached_after_residue.unwrap_or(json_word))
+            classify_attached_value(attached_after_residue.unwrap_or(word))
         };
         // Strip decoration, not content. Agents habitually wrap paths and
         // identifiers in markdown (`/var/log`, **error**), and a claim carrying
         // those marks would never match the plain form sitting in the evidence —
         // a path the user typed themselves would be reported as sourceless.
-        let undecorated = trim_decoration(json_word);
+        let undecorated = trim_decoration(word);
         let word = if root_json.is_some() {
             json_word
         } else if looks_like_path(undecorated) {
-            trim_attached_decoration(json_word)
+            trim_attached_decoration(word)
         } else {
             undecorated
         };
@@ -2389,6 +2337,16 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         if let Some(claim) = whole_word_claim {
             claims.push(claim);
         }
+        // Tool output is JSON far more often than prose, and its structure glues
+        // values to their surroundings: `stargazers_count=242391`, or
+        // `\"stargazers_count\": 244618,\n` where the escaped newline leaves
+        // `244618,\n` as one whitespace-delimited word that parses as nothing.
+        // Splitting on the structural characters exposes such a value.
+        //
+        // Digit-group separators are spliced out first so a decorated token
+        // cannot break at a thousands separator and invent a fragment claim.
+        // Embedded URLs stay out of this pass, while their prefixes and suffixes
+        // can still carry independent serialized fields.
         if word_stands_alone && let Some(attached) = attached_after_residue {
             let prefix = &json_word[..json_word.len() - attached.len()];
             for segment in structural_segments(prefix) {
@@ -2397,21 +2355,6 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 }
             }
         }
-        // Tool output is JSON far more often than prose, and its structure glues
-        // values to their surroundings: `stargazers_count=242391`, or
-        // `\"stargazers_count\": 244618,\n` where the escaped newline leaves
-        // `244618,\n` as one whitespace-delimited word that parses as nothing.
-        // Splitting on the structural characters exposes such a value.
-        //
-        // Digit-group separators are spliced out first. The stands-alone guard
-        // below only spares a word that is *entirely* a number, so `数**：244,781`
-        // fails it on its prefix and would then break at the thousands
-        // separator, inventing a "244" no evidence supports. A comma doing real
-        // structural work, as between two JSON fields, is left to separate.
-        // The sparing guard matches `classify_word`'s URL check exactly:
-        // a bare `http`-prefixed word that is not a URL (`http_code=242391`,
-        // curl -w style) is a key=value fact token, and sparing it hid its
-        // value from the grounding check entirely.
         let mut field_json_replay = false;
         if !word_stands_alone {
             let fields = if root_json.is_some() {
@@ -2420,8 +2363,9 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 attached_field_segments(json_word)
             };
             if let Some(fields) = fields {
-                field_json_replay = true;
-                for field in fields {
+                field_json_replay = pending_embedded_json.is_none();
+                let last_field = fields.len().checked_sub(1);
+                for (index, field) in fields.into_iter().enumerate() {
                     let field_claim_start = claims.len();
                     let complete_path = || {
                         classify_complete_word(trim_attached_decoration(field))
@@ -2437,7 +2381,34 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                         }
                     }
                     if root_json.is_none() {
-                        let _ = replace_embedded_json_claims(&mut claims, field_claim_start, field);
+                        let replacement =
+                            replace_embedded_json_claims(&mut claims, field_claim_start, field);
+                        let continues_beyond_field = match &replacement {
+                            EmbeddedJsonReplacement::Pending { .. } => true,
+                            EmbeddedJsonReplacement::NotJson => {
+                                starts_unclosed_embedded_json(field)
+                            }
+                            EmbeddedJsonReplacement::Complete => false,
+                        };
+                        // A separator inside an unclosed string belongs to the original token.
+                        if field_json_replay && Some(index) != last_field && continues_beyond_field
+                        {
+                            field_json_replay = false;
+                        }
+                        if field_json_replay && Some(index) == last_field {
+                            match replacement {
+                                EmbeddedJsonReplacement::Complete => {}
+                                EmbeddedJsonReplacement::Pending { candidate, start } => {
+                                    pending_embedded_json = Some((start, candidate));
+                                }
+                                EmbeddedJsonReplacement::NotJson => {
+                                    if starts_unclosed_embedded_json(field) {
+                                        pending_embedded_json =
+                                            Some((field_claim_start, field.to_string()));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             } else {
@@ -2448,8 +2419,42 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 }
             }
         }
+        // Segmented fields already replayed their JSON; a whole-word pass would
+        // discard those typed claims and reparse the separators as raw content.
         if root_json.is_none() && !field_json_replay {
-            let _ = replace_embedded_json_claims(&mut claims, word_claim_start, json_word);
+            match replace_embedded_json_claims(&mut claims, word_claim_start, json_word) {
+                EmbeddedJsonReplacement::Complete => pending_embedded_json = None,
+                EmbeddedJsonReplacement::Pending { candidate, start } => {
+                    pending_embedded_json = Some((start, candidate));
+                }
+                EmbeddedJsonReplacement::NotJson => {
+                    if starts_unclosed_embedded_json(json_word)
+                        && (pending_embedded_json.is_none() || json_word != "\"")
+                    {
+                        pending_embedded_json = Some((word_claim_start, json_word.to_string()));
+                    } else if let Some((start, candidate)) = pending_embedded_json.as_mut() {
+                        candidate.push(' ');
+                        candidate.push_str(json_word);
+                        if has_unescaped_double_quote(json_word) {
+                            match replace_embedded_json_claims(&mut claims, *start, candidate) {
+                                EmbeddedJsonReplacement::Complete => {
+                                    pending_embedded_json = None;
+                                }
+                                EmbeddedJsonReplacement::Pending { candidate, start } => {
+                                    pending_embedded_json = Some((start, candidate));
+                                }
+                                EmbeddedJsonReplacement::NotJson => {
+                                    pending_embedded_json = None;
+                                    if starts_unclosed_embedded_json(json_word) {
+                                        pending_embedded_json =
+                                            Some((word_claim_start, json_word.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     // In valid JSON, a comma separates values rather than grouping digits.
@@ -2488,6 +2493,28 @@ fn classify_word(word: &str) -> Option<Claim> {
         return Some(number);
     }
     as_identifier(word)
+}
+
+fn classify_structural_segment(segment: &str) -> Option<Claim> {
+    let claim = classify_word(segment);
+    if segment.contains('/') {
+        let trimmed = trim_attached_decoration(segment);
+        if trimmed.len() != segment.len()
+            && let Some(path) =
+                classify_word(trimmed).filter(|claim| claim.class == ClaimClass::Path)
+        {
+            return Some(path);
+        }
+    }
+    let trimmed = trim_decoration(segment);
+    if trimmed.len() == segment.len()
+        || claim
+            .as_ref()
+            .is_some_and(|claim| claim.class != ClaimClass::Date)
+    {
+        return claim;
+    }
+    classify_word(trimmed).or(claim)
 }
 
 /// ISO-like dates, and years only when carrying a 年/月/日 marker so that a
@@ -2613,6 +2640,59 @@ fn as_identifier(word: &str) -> Option<Claim> {
         });
     }
     None
+}
+
+fn decorated_url_end(text: &str, start: usize) -> usize {
+    let rest = &text[start..];
+    let bold = text[..start].ends_with("**");
+    let parenthesized = text[..start].ends_with('(');
+    let mut paren_depth = usize::from(parenthesized);
+    for (offset, c) in rest.char_indices() {
+        if is_url_terminator(c) {
+            return offset;
+        }
+        if bold && c == '*' && rest[offset..].starts_with("**") {
+            return offset;
+        }
+        if parenthesized {
+            match c {
+                '(' => paren_depth += 1,
+                ')' => {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        return offset;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    rest.len()
+}
+
+fn trim_url_trailing_punctuation(url: &str) -> &str {
+    let mut matched_closes = vec![false; url.len()];
+    let mut open_parens = Vec::new();
+    for (index, c) in url.char_indices() {
+        match c {
+            '(' => open_parens.push(index),
+            ')' => {
+                if open_parens.pop().is_some() {
+                    matched_closes[index] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut end = url.len();
+    while let Some((index, c)) = url[..end].char_indices().next_back() {
+        if (c == ')' && matched_closes[index]) || !is_url_trailing_punctuation(c) {
+            break;
+        }
+        end = index;
+    }
+    &url[..end]
 }
 
 /// URLs, trimmed of trailing sentence punctuation.
