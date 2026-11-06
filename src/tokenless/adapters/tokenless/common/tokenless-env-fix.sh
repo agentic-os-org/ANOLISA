@@ -23,7 +23,9 @@ FIX_LOG="${FIX_LOG_DIR}/env-fix.log"
 # below never silently drop their stderr because the directory is missing.
 mkdir -p "$FIX_LOG_DIR" 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPEC_FILE="${SCRIPT_DIR}/tool-ready-spec.json"
+# Overridable through the same variable the hook and the Rust CLI read
+# (TOKENLESS_TOOL_READY_SPEC); the default is unchanged.
+SPEC_FILE="${TOKENLESS_TOOL_READY_SPEC:-${SCRIPT_DIR}/tool-ready-spec.json}"
 
 # Detect system package manager by underlying mechanism (rpm/dpkg/apk),
 # then pick the best frontend within that family.
@@ -619,7 +621,22 @@ fix_tool_from_spec() {
 
   # Collect all dep entries from required + recommended
   local all_deps
-  all_deps=$(echo "$tool_spec" | jq -c --arg mgr "$PACKAGE_MANAGER" '[(.required // []) + (.recommended // []) | .[] | if type == "string" then (if test("[>=<]") then {binary: (split("[>=<]") | .[0]), version: (capture("[>=<]+[0-9.]+"; "g") | .[0]), package: (split("[>=<]") | .[0]), manager: $mgr} else {binary: ., package: ., manager: $mgr} end) else . end]' 2>/dev/null || echo '[]')
+  # Split the constraint off with sub(), not split(): jq's split() takes a
+  # literal separator, so "[>=<]" never matched, and capture() with no
+  # named groups returned {}, on which the trailing .[0] raised
+  # "Cannot index object with number". jq exited 5 and the
+  # "|| echo '[]'" below swallowed it, so every dep of the tool was
+  # silently skipped, not just the constrained one -- there is no BLOCKED
+  # line to grep for. For single-line entries, only ">=" carries a
+  # constraint here, matching the Rust authority (env_check.rs
+  # normalize_dep, which splits on the first ">="). A single-line name
+  # such as "node<20" stays whole and validate_name() rejects it instead
+  # of reinterpreting it as a ">=20" constraint. The version is
+  # whatever follows that same prefix (ltrimstr), not an independent
+  # "^[^>=]*" strip: the two anchors disagreed on "a=b>=1.0" -- this file
+  # produced "=b>=1.0" where env_check.rs produces ">=1.0" -- and only
+  # validate_name()'s character set kept them in step by accident.
+  all_deps=$(echo "$tool_spec" | jq -c --arg mgr "$PACKAGE_MANAGER" '[(.required // []) + (.recommended // []) | .[] | if type == "string" then (if test(">=") then (sub(">=.*$"; "") as $name | {binary: $name, version: ltrimstr($name), package: $name, manager: $mgr}) else {binary: ., package: ., manager: $mgr} end) else . end]' 2>/dev/null || echo '[]')
 
   local count
   count=$(echo "$all_deps" | jq 'length' 2>/dev/null || echo 0)
