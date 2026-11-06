@@ -91,7 +91,10 @@ def register(ctx: Any) -> None:
             event=EVENTS[event], command=command, timeout=timeout,
             fail_closed=action == "block",
         )
-        callbacks.append((EVENTS[event], _make_callback(spec)))
+        callback = _make_callback(spec)
+        if getattr(session, "skills", None) is not None and event == "tool.before":
+            callback = session.skills.callback(callback, hook)
+        callbacks.append((EVENTS[event], callback))
 
     # Hermes owns callback order, tool concurrency, timeout handling and the
     # interpretation of stdout/exit 2. AW does not introduce another scheduler.

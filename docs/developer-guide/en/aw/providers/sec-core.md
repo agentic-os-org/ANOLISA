@@ -365,6 +365,22 @@ skips BOM assets before AW runs; that native loading path remains unsupported.
 Read-file loading, automatic context injection and
 Skill-internal commands require their own policies.
 
+Hermes local chat uses `native:hermes:skill_view` with the same Provider and
+`check_skill` step. The Adapter obtains the actual native registry handler and
+`_locate_skill` selection, checks its canonical directory, and pins raw `SKILL.md`
+text before native preprocessing. Directory aliases and native project precedence
+are preserved. Source edits, a changed handler or a competing selection cannot
+replace the checked content. Concurrent invocations retain independent snapshots.
+Native disabled, platform and quarantine gates retain authority.
+
+The supported source is a local directory's main manifest. Plugin-qualified
+Skills, legacy flat files and `file_path` references produce resolution errors;
+use `on_error: block` to deny them. Slash/preload injection and direct reads need
+separate boundaries. Skill scripts/templates retain native execution after the
+trust decision and need their own execution policies. The `skill-provider` suite
+uses the real AW, Provider and Hermes CLI with a controlled Ledger CLI and local
+model endpoint; signing and daemon authorization remain in the existing Ledger suites.
+
 ## Trace correlation
 
 The bridge passes native IDs to sec-core through the JSON `--trace-context` argument, with `agent_name` set to the Adapter name. It reads `trace_id`, `session_id`, `run_id`, `call_id` and `tool_call_id` from `event.native`, accepting snake_case and camelCase aliases. OpenClaw uses `native.event` then `native.context`; Hermes uses `native` then `native.extra`.

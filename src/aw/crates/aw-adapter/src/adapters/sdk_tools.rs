@@ -118,10 +118,14 @@ pub(super) fn invocation_uuid(value: &str) -> bool {
 
 /// Select Skill resolution only for an admitted check of that native tool.
 pub(crate) fn checks_skill(step: &AdmittedStep, adapter: &str) -> bool {
+    checks_skill_tool(step, adapter, "Skill")
+}
+
+pub(crate) fn checks_skill_tool(step: &AdmittedStep, adapter: &str, tool: &str) -> bool {
     step.event == "tool.before"
         && matches!(&step.execution, StepExecution::Provider { operation, .. } if operation == "check_skill")
         && step.matches_tool(&json!({"agent":{"adapter":adapter},
-            "tool":{"name":"Skill","native_name":"Skill"}}))
+            "tool":{"name":tool,"native_name":tool}}))
 }
 
 #[cfg(test)]
@@ -154,6 +158,9 @@ mod tests {
         let (_, hooks) =
             super::super::qwenpaw::event_routes(&document, &[step.clone()], false).unwrap();
         assert_eq!(hooks[0]["skill_check"], true);
+        step.step_tools = vec!["native:hermes:skill_view".into()];
+        assert!(checks_skill_tool(&step, "hermes", "skill_view"));
+        assert!(!checks_skill(&step, "hermes"));
         step.execution = StepExecution::Provider {
             operation: "scan_code".into(),
             effects: vec!["observe".into()],

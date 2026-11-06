@@ -146,6 +146,9 @@ Skill。daemon 管理员须授权实际 Skill 目录（包括符号链接目标�
 指令进入模型前拒绝。解析错误、目录无权限、后端不可达和超时也会阻断，
 审计将检查失败与不可信内容分别记录。AW 不替用户签名或授予目录权限。
 
+Hermes 本地 chat 在同一步骤选择 `native:hermes:skill_view`，在原生渲染前检查
+目录型主 manifest；支持范围见 [Hermes Skill 来源](../../../developer-guide/zh/aw/agents/hermes.md#skill-信任检查)。
+
 同一个工具的 Skill Ledger 检查选择 AW 或原生安全 Hook，避免重复执行。
 交互 `ask` 尚未提供。来源支持与故障处理见[集成参考](../../../developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
 停用时移除 `check-skill` 步骤和 `skill` 设置。

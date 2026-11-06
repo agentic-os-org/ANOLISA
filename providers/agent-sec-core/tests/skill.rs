@@ -83,6 +83,35 @@ fn skill_states_preserve_trust_and_explicit_modes() {
 }
 
 #[test]
+fn native_skill_alias_keeps_resolution_and_unknown_tool_checks() {
+    let fixture = support::Directory::new(json!({"stdout":{"status":"pass"}}));
+    let mut request = invocation();
+    request["event"]["agent"]["adapter"] = json!("hermes");
+    request["event"]["tool"]["name"] = json!("skill_view");
+    request["event"]["tool"]["native_name"] = json!("skill_view");
+    assert_eq!(
+        run(request.clone(), &fixture.cli())["effects"][0]["reason_code"],
+        "skill_pass"
+    );
+    request["event"]["native"]["aw_skill"]["name"] = json!("different");
+    assert_eq!(
+        run(request.clone(), &fixture.cli())["error_code"],
+        "skill_resolution_error"
+    );
+    request["event"]["agent"]["adapter"] = json!("qwenpaw");
+    assert_eq!(
+        run(request.clone(), &fixture.cli())["error_code"],
+        "skill_tool_unmapped"
+    );
+    request["event"]["tool"]["native_name"] = json!("unmapped_tool");
+    assert_eq!(
+        run(request, &fixture.cli())["error_code"],
+        "skill_tool_unmapped"
+    );
+    fixture.assert_stopped();
+}
+
+#[test]
 fn skill_checks_coexist_with_submission_configuration() {
     let fixture = support::Directory::new(json!({"stdout":{"status":"pass"}}));
     let mut request = invocation();

@@ -289,6 +289,18 @@ AW 对已提供的文件沿用 AgentScope 的 UTF-8-SIG 解码，支持 BOM。�
 2.2.2.post1 App 的运行时缓存会在 AW 执行前跳过 BOM 资产，这条原生加载路径仍不支持。
 通过读文件加载、自动注入上下文和 Skill 内部命令的执行需要各自配置策略。
 
+Hermes 本地 chat 使用同一 Provider 与 `check_skill` 步骤，选择
+`native:hermes:skill_view`。Adapter 获取实际原生工具注册项与 `_locate_skill`
+选择结果，检查规范化目录，并在原生预处理前固定原始 `SKILL.md` 文本。
+目录别名与原生项目优先级继续生效。来源变化、工具处理函数变化或竞争对象不能替换
+受检内容；并发调用各自保留快照。原生禁用、平台限制和隔离规则继续有效。
+
+支持本地目录的主 manifest；插件限定 Skill、旧式单文件与 `file_path` 引用返回解析
+错误，通过 `on_error: block` 阻止加载。斜杠命令、预加载注入和直接读取需要独立接点。
+Skill 脚本与模板在信任判定后沿用原生执行，并需要各自的执行策略。
+`skill-provider` 使用真实 AW、Provider、Hermes CLI，以及受控 Ledger CLI 和本地
+模型端点；真实签名与 daemon 授权沿用已有 Ledger 验收。
+
 ## Trace 关联
 
 bridge 通过 JSON `--trace-context` 参数向 sec-core 传递原生 ID，`agent_name` 使用 Adapter 名称。从 `event.native` 读取 `trace_id`、`session_id`、`run_id`、`call_id` 和 `tool_call_id`，接受 snake_case 与 camelCase 别名。OpenClaw 依次读取 `native.event`、`native.context`；Hermes 依次读取 `native`、`native.extra`。

@@ -83,6 +83,10 @@ Native acceptance is registered as `skill-ledger` for both adapters, with the
 QwenPaw `skill-objects` suite covering native duplicate selection, source pinning
 and cancellation in the [native matrix](../../../../src/aw/tests/native-matrix.json).
 
+Hermes local chat supports directory-based `skill_view` through the same
+`tool.before` check. See [Hermes Skill sources](../../../developer-guide/en/aw/agents/hermes.md#skill-trust)
+for native selection and source limits.
+
 ## MCP and policy updates
 
 | Entrypoint | Managed MCP | Idle policy updates |

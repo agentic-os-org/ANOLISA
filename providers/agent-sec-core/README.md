@@ -23,7 +23,7 @@ PII blocking with `on_error: block` to stop injection risks, sensitive user text
 before a model request. See the [submission configuration](../../docs/developer-guide/en/aw/providers/sec-core.md#user-submission-checks).
 
 Qoder SDK and QwenPaw can also check their native `Skill` tool before loading
-instructions. Enable `config.skill: true` and select `check_skill` on
+instructions. Hermes uses the same check for native `skill_view`. Enable `config.skill: true` and select `check_skill` on
 `tool.before`; see [Skill checks](../../docs/developer-guide/en/aw/providers/sec-core.md#validate-skills-before-loading)
 for directory authorization, trust states and supported local sources.
 

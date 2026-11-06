@@ -93,13 +93,19 @@ impl Adapter for Hermes {
         if !native["tool_input"].is_object() {
             return Err("Hermes callback requires a tool_input object".into());
         }
+        let mut input = native["tool_input"].clone();
+        let mut native = native.clone();
+        if tool == "skill_view" {
+            input["skill"] = input["name"].clone();
+            native["aw_skill"] = native["extra"]["aw_skill"].clone();
+        }
         Ok(json!({
             "name": event,
             "agent": {"adapter": "hermes", "binding_id": binding.target,
                       "instance_id": binding.instance_id},
             "session_id": session,
             "tool": {"name": tool, "native_name": tool, "call_id": call,
-                     "input": native["tool_input"], "result": native["extra"]["result"]},
+                     "input": input, "result": native["extra"]["result"]},
             "native": native,
         }))
     }
@@ -301,8 +307,16 @@ impl PreparedLaunch for Prepared {
             }
             let budget = self.budget(event)?;
             for step in &selected {
-                hooks.push(json!({"event":event, "step":step.step_id,
-                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.replaces_result}));
+                let mut hook = json!({"event":event, "step":step.step_id,
+                    "on_error":step.on_error, "timeout":budget.div_ceil(1000) + 4, "replace_result":step.replaces_result});
+                if context.steps.iter().any(|admitted| {
+                    admitted.event == event
+                        && admitted.step_id == step.step_id
+                        && super::sdk_tools::checks_skill_tool(admitted, "hermes", "skill_view")
+                }) {
+                    hook["skill_check"] = json!(true);
+                }
+                hooks.push(hook);
             }
             events.insert(
                 event.into(),
@@ -332,6 +346,10 @@ impl PreparedLaunch for Prepared {
             .files
             .write("hermes-launch.json", &serde_json::to_vec(&launch)?)?;
         let mut command = self.input.command.clone();
+        context.files.write(
+            "aw_skill.py",
+            include_bytes!("../../native/hermes/aw_skill.py"),
+        )?;
         let entrypoint = context.files.write(
             "hermes-entrypoint.py",
             include_bytes!("../../native/hermes/launch.py"),

@@ -343,6 +343,21 @@ fn native_ids_and_error_results_are_not_fabricated_or_decoded() {
 }
 
 #[test]
+fn skill_metadata_preserves_native_arguments_and_adopts_shared_provider_contract() {
+    let native = json!({"hook_event_name":"pre_tool_call", "cwd":"/work", "session_id":"session",
+        "tool_name":"skill_view", "tool_input":{"name":"local", "file_path":null},
+        "extra":{"tool_call_id":"call", "api_request_id":"request",
+            "aw_skill":{"name":"local", "directory":"/skills/local", "source":"hermes-local"}}});
+    let event = Hermes
+        .normalize(&binding(), "tool.before", &native)
+        .unwrap();
+    assert_eq!(event["tool"]["input"]["skill"], "local");
+    assert_eq!(event["tool"]["input"]["name"], "local");
+    assert_eq!(event["native"]["tool_input"], native["tool_input"]);
+    assert_eq!(event["native"]["aw_skill"], native["extra"]["aw_skill"]);
+}
+
+#[test]
 fn native_cli_rejects_profile_switches_and_unverified_entrypoints() {
     let argv = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     assert!(check_args(&argv(&["chat", "--oneshot", "--query", "hello"])).is_ok());

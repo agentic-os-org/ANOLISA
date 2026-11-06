@@ -44,3 +44,16 @@ For plugin mismatch, stop Hermes and configuration writers, move `<profile>/plug
 To roll back, inspect `backup` and `displaced`, restore selected configuration and retain intentional later edits. AW has no Hermes plugin uninstall command.
 Stop AW after exiting Hermes. Inspect reported paths on publication or cleanup failure; preserve unknown files.
 See the [Hermes contract](../../../../../src/aw/docs/design/en/adapters/hermes-adapter.md) for probes, atomic publication and conflicts.
+
+## Skill trust
+
+Enable `check_skill` on `tool.before` with selector `native:hermes:skill_view`,
+using the [shared security Provider](../providers/sec-core.md#validate-skills-before-loading).
+AW resolves the native registry and local directory selection, checks the canonical
+Skill directory, then supplies the checked manifest to native rendering. Native
+disabled, platform and quarantine decisions remain effective.
+
+This supports the main `SKILL.md` of directory-based `skill_view` calls. Plugin-qualified
+sources, legacy flat files and `file_path` references return resolution errors;
+`on_error: block` denies their loading. Slash commands, preload, direct file reads
+and inline Skill commands need their own policy boundaries.
