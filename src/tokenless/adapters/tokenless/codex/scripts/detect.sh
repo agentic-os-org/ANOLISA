@@ -2,8 +2,13 @@
 # Detect whether the tokenless CLI is installed and functional.
 #
 # Output:
-#   JSON on stdout:  {"installed": true, "version": "0.1.0", "path": "/usr/bin/tokenless"}
-#                    or {"installed": false}
+#   JSON on stdout when installed (jq and the no-jq fallback):
+#   {
+#     "installed": true,
+#     "version": "0.1.0",
+#     "path": "/usr/bin/tokenless"
+#   }
+#   or {"installed": false}
 # Exit code: 0 either way (fail-open — plugin activation is controlled by capabilities)
 
 set -euo pipefail
@@ -18,11 +23,11 @@ fi
 # Fallback paths
 if [[ -z "$TOKENLESS_BIN" ]]; then
     for fp in \
-        "$HOME/.local/bin/tokenless" \
+        "${HOME:-}/.local/bin/tokenless" \
         "/usr/local/bin/tokenless" \
         "/usr/bin/tokenless" \
-        "$HOME/.local/share/anolisa/tokenless/tokenless" \
-        "$HOME/.local/lib/anolisa/tokenless/tokenless"; do
+        "${HOME:-}/.local/share/anolisa/tokenless/tokenless" \
+        "${HOME:-}/.local/lib/anolisa/tokenless/tokenless"; do
         if [[ -f "$fp" && -x "$fp" ]]; then
             TOKENLESS_BIN="$fp"
             break
