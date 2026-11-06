@@ -129,7 +129,12 @@ impl Adapter for Pi {
 }
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        super::super::adapter::catalog::PI.capabilities(&self.version, "sdk")
+        let mut capabilities =
+            super::super::adapter::catalog::PI.capabilities(&self.version, "sdk");
+        capabilities
+            .failure_actions
+            .insert("tool.after".into(), vec!["withhold_result".into()]);
+        capabilities
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         routes(&self.input.document, steps).map(|_| ())

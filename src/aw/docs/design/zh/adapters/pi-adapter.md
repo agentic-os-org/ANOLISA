@@ -91,10 +91,30 @@ after 的取消路径。保留 Pi 顺序准备、并行执行的调度：after �
 事件，不运行剩余步骤，包含 `on_error:block` 下原生非法 JSON、非零/信号退出及
 执行故障。关闭失败会报告，且不会把拒绝变成允许。受管 `tool.after` 步骤在
 `on_error: report` 下 Provider 调用失败时收到中性回复：审计已记录该故障，
-未检查的原始结果保留，同一会话可继续下一次 prompt。before 故障、
-block/withhold 故障、取消、身份与清理失败仍停止任务。SDK 取消或本地传输上限可能在 helper
+未检查的原始结果保留，同一会话可继续下一次 prompt。
+`on_error: withhold_result` 下，已审计的 Provider 执行、超时和回复故障通过 SDK 原生
+错误路径丢弃完整结果，模型与订阅者收到 `AW post-tool check failed; result withheld by policy`，
+同一会话可继续下一次 prompt。before 故障、block 故障、取消、身份与清理失败仍停止任务。SDK 取消或本地传输上限可能在 helper
 确认关闭前终止它；已打开事件随后在原截止时间或 binding release 时终结，不延长
 预算。这与已等待完成的策略拒绝路径不同。
+
+## 严格工具输出
+
+为 `scan_tool_output` 配置 `on_error: withhold_result`，要求工具数据进入模型或
+Agent 订阅者前完成检查。此路由要求两个 Pi 包均为 0.84.2，使用已验证的
+`Agent.processEvents` 交付边界。目标包含任一严格 after 路由时，AW 抑制该目标全部
+`tool_execution_update`，包括路由选择器范围外的工具。原生最终事件携带采用后的
+结果，不重放中间 chunk。未配置严格 after 路由的目标保留原生流及 Tokenless report 行为。
+
+调用 Provider 前，AW 复制原生 after 回调覆盖后的生效结果。严格交付返回独立字段，
+并在分发前将完整已检查快照写入 Pi 新建的最终结果对象，覆盖 nullish 回退及 Pi
+原本保留的 execute 额外字段。工具或回调持有的引用在 Provider 调用、清理和最终
+交付期间发生变化，不会改变已检查的结果。
+
+PII 风险复用已校验的文本替换，保留原生状态和 metadata。检查失败或保留字段包含
+敏感数据时，SDK 错误路径丢弃整个原结果并提供固定占位文本。私有 `aw_withheld`
+回复只由已审计的 Provider 故障产生，原生 Hook 无法伪造。协议、身份、取消和清理
+故障继续沿用受管任务的失败处理。
 
 ## Callback 协议与验证
 
@@ -163,3 +183,14 @@ python3 crates/aw-cli/tests/fixtures/pi/submission-smoke.py \
 block/report 语义、input/context/provider-request 扩展拒绝、其他输入入口、并行会话/并发 prompt、abort/dispose
 及资源回收。模型端点独立断言被拒输入不得到达。扫描夹具不代表 sec-core 规则效果或
 业务镜像验收。
+
+```bash
+python3 crates/aw-cli/tests/fixtures/pi/strict-smoke.py \
+  --aw target/debug/aw --root target/pi-sdk-validation \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/pi-strict-output
+```
+
+此入口使用真实 SDK、HTTP 模型传输和 sec-core Provider，scanner 为受控 fixture。
+覆盖敏感文本跨 chunk、AW 安装前注册的原生事件订阅、模型请求、保留 metadata、
+工具及 callback 错误、扫描故障、取消、下一次输入和新任务。

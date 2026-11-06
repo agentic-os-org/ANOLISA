@@ -18,7 +18,8 @@ export function configuration() {
       !["input.submit", "tool.before", "tool.after"].includes(hook.event) ||
       typeof hook.step !== "string" ||
       !hook.step ||
-      !["report", "block"].includes(hook.on_error) ||
+      !["report", "block", "withhold_result"].includes(hook.on_error) ||
+      (hook.on_error === "withhold_result" && hook.event !== "tool.after") ||
       !Number.isInteger(hook.budget_ms) ||
       hook.budget_ms < 1 ||
       hook.budget_ms > 55000
@@ -61,15 +62,15 @@ async function invoke(config, hook, payload, signal) {
         input, hook.budget_ms + 3000, signal);
   const { code, stdout } = response;
   if (code !== 0) throw new Error(`callback_exit_${code}`);
-  const directive = stdout.length
-    ? JSON.parse(stdout.toString("utf8"))
-    : {};
+  let directive;
+  try { directive = stdout.length ? JSON.parse(stdout.toString("utf8")) : {}; }
+  catch { throw new Error("invalid_pi_directive_json"); }
   if (
     !directive ||
     typeof directive !== "object" ||
     Array.isArray(directive) ||
     Object.keys(directive).some(
-      (key) => !["block", "reason", "aw_replacement"].includes(key),
+      (key) => !["block", "reason", "aw_replacement", "aw_withheld"].includes(key),
     ) ||
     (directive.block !== undefined &&
       typeof directive.block !== "boolean") ||
@@ -79,6 +80,10 @@ async function invoke(config, hook, payload, signal) {
   ) {
     throw new Error("unsupported_pi_directive");
   }
+  if (Object.hasOwn(directive, "aw_withheld") &&
+      (hook.event !== "tool.after" || hook.on_error !== "withhold_result" ||
+       directive.aw_withheld !== true || Object.keys(directive).length !== 1))
+    throw new Error("unauthorized_pi_withholding");
   if (Object.hasOwn(directive, "aw_replacement")) {
     if (
       hook.event !== "tool.after" ||
@@ -133,6 +138,7 @@ export function installSessionBridge(session, scope = null) {
   const previousBefore = agent.beforeToolCall;
   const previousAfter = agent.afterToolCall;
   const active = new Map();
+  const checkedResults = new Map();
   const producer = scope ? modelProducer(scope) : null;
   const beforeRoutes = config.hooks.filter(
     (hook) => hook.event === "tool.before",
@@ -140,12 +146,18 @@ export function installSessionBridge(session, scope = null) {
   const afterRoutes = config.hooks.filter(
     (hook) => hook.event === "tool.after",
   );
+  const strict = afterRoutes.some(hook => hook.on_error === "withhold_result");
+  const previousEvents = agent.processEvents;
+  if (strict && typeof previousEvents !== "function")
+    throw new Error("AW strict Pi output requires the native event dispatch seam");
   const evaluate = async (routes, payload, signal) => {
+    let withhold = false;
     for (const hook of routes) {
       try {
         const directive = await invoke(config, hook, payload, signal);
+        if (directive.aw_withheld) { withhold = true; continue; }
         if (Object.hasOwn(directive, "aw_replacement"))
-          return { replacement: directive.aw_replacement };
+          return withhold ? { withhold: true } : { replacement: directive.aw_replacement };
         if (directive.block)
           return {
             block: true,
@@ -172,6 +184,8 @@ export function installSessionBridge(session, scope = null) {
           agent.abort();
           throw new Error("AW managed task stopped after a callback failure");
         }
+        if (hook.event === "tool.after" && hook.on_error === "withhold_result")
+          throw new Error("AW post-tool check failed; result withheld by policy");
         if (hook.event === "tool.before" && hook.on_error === "block") {
           return {
             block: true,
@@ -181,7 +195,7 @@ export function installSessionBridge(session, scope = null) {
         }
       }
     }
-    return undefined;
+    return withhold ? { withhold: true } : undefined;
   };
   let before = async function (context, signal) {
     config.scope?.checkExecution();
@@ -235,15 +249,27 @@ export function installSessionBridge(session, scope = null) {
       process.stderr.write(
         "AW tool.after skipped: completed call lacks preparation identity\n",
       );
+      if (strict) throw new WithheldResult();
       return await previousAfter?.call(agent, context, signal);
     }
-    const original = await previousAfter?.call(agent, context, signal);
-    const result = { ...context.result };
+    let original;
+    try { original = await previousAfter?.call(agent, context, signal); }
+    catch (error) {
+      if (strict) throw new Error("AW native after callback failed; result withheld by policy");
+      throw error;
+    }
+    let result = { ...context.result };
     for (const key of ["content", "details", "usage", "terminate"]) {
       result[key] = original?.[key] ?? result[key];
     }
     const isError = original?.isError ?? context.isError;
     try {
+      if (strict) {
+        // Tools and native callbacks may retain and mutate their result objects
+        // while the Provider or invocation cleanup is awaiting I/O.
+        try { result = structuredClone(result); }
+        catch { throw new Error("AW could not snapshot tool result; result withheld by policy"); }
+      }
       const directive = await evaluate(
         afterRoutes,
         {
@@ -253,7 +279,12 @@ export function installSessionBridge(session, scope = null) {
         },
         signal,
       );
-      if (directive?.replacement) {
+      // Pi's native error path discards the entire unchecked result envelope.
+      if (directive?.withhold) throw new WithheldResult();
+      if (strict) {
+        if (directive?.replacement)
+          result.content[0].text = directive.replacement.content[0].text;
+      } else if (directive?.replacement) {
         return {
           ...(original ?? {}),
           content: [
@@ -268,21 +299,45 @@ export function installSessionBridge(session, scope = null) {
       if (config.scope) await config.scope.finish(identity.invocation_id);
       active.delete(context.toolCall.id);
     }
+    if (strict) {
+      checkedResults.set(context.toolCall.id, result);
+      // A truthy override makes Pi allocate a fresh final result envelope.
+      return { ...result, isError };
+    }
     return original;
   };
   if (config.scope) {
     const guarded = (callback) => async (context, signal) => {
       try { return await callback(context, signal); }
-      catch (error) { config.scope.failed = true; agent.abort(); throw error; }
+      catch (error) {
+        if (!(error instanceof WithheldResult)) { config.scope.failed = true; agent.abort(); }
+        throw error;
+      }
     };
     before = guarded(before);
     after = guarded(after);
   }
   let managed = true;
+  const events = strict ? async function (event) {
+    if (managed && event.type === "tool_execution_update") return;
+    if (managed && event.type === "tool_execution_end") {
+      const result = checkedResults.get(event.toolCallId);
+      checkedResults.delete(event.toolCallId);
+      if (result) {
+        // Pi merges overrides using ?? and keeps extra fields from execute().
+        // Replace those aliases on its fresh envelope before any subscriber or
+        // model message can observe it, including null/absent and extra fields.
+        for (const key of Reflect.ownKeys(event.result)) delete event.result[key];
+        Object.defineProperties(event.result, Object.getOwnPropertyDescriptors(result));
+      }
+    }
+    return await previousEvents.call(this, event);
+  } : null;
   // ponytail: descriptors last for this Agent; rebind with a fresh factory result.
   for (const [key, callback] of [
     ["beforeToolCall", before],
     ["afterToolCall", after],
+    ...(strict ? [["processEvents", events]] : []),
   ]) {
     let current = callback;
     Object.defineProperty(agent, key, {
@@ -355,18 +410,23 @@ export function installSessionBridge(session, scope = null) {
     },
     async drain() {
       try { if (config.scope) await config.scope.drain(); }
-      finally { active.clear(); producer?.clear(); }
+      finally { active.clear(); checkedResults.clear(); producer?.clear(); }
     },
     dispose() {
       managed = false;
       if (agent.beforeToolCall === before)
         agent.beforeToolCall = previousBefore;
       if (agent.afterToolCall === after) agent.afterToolCall = previousAfter;
+      if (strict && agent.processEvents === events) agent.processEvents = previousEvents;
       delete agent[installed];
       active.clear();
+      checkedResults.clear();
       unsubscribe();
     },
   };
+}
+class WithheldResult extends Error {
+  constructor() { super("AW post-tool check failed; result withheld by policy"); }
 }
 const installed = Symbol("aw.pi.installed");
 

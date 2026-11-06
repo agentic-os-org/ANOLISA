@@ -56,6 +56,14 @@ AW 每次生成 invocation UUID 配对，原工具 ID 保留于 `native`，提�
 复现的 SDK 验收见 [Adapter 合同](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/docs/design/zh/adapters/pi-adapter.md)。
 修改策略前退出 Agent 并停止原服务；审计状态按同样的本地服务清理流程保留或删除。
 
+严格输出检查使用 sec-core `scan_tool_output`，并设置
+`on_error: withhold_result`。两个 Pi 包均须为 0.84.2。配置任一严格 after 路由后，
+目标全部工具的中间更新被抑制，订阅者和模型只收到采用后的最终结果。AW 扫描并交付
+生效结果的独立快照，包含原生 after 回调覆盖值及 metadata；工具或回调随后修改
+保留的原对象，不会改变交付内容。PII 风险替换
+文本；扫描故障丢弃完整结果并返回固定占位文本，同一会话可继续后续输入。
+未配置严格路由的目标保留原生流及 Tokenless report 行为。
+
 ## 检查用户输入
 
 [Pi 输入检查示例](../../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)

@@ -1050,6 +1050,14 @@
     "hermes-submission": {
       "target": "aw-adapter/lib/aw_adapter",
       "test": "adapters::hermes::tests::submission_requires_native_text_identity_and_quiet_query"
+    },
+    "pi-strict-version": {
+      "target": "aw-cli/test/pi",
+      "test": "strict_output_rejects_unverified_versions_before_application_import"
+    },
+    "pi-strict-fault": {
+      "target": "aw-adapter/lib/aw_adapter",
+      "test": "callback::strict_tests::pi_withholding_requires_an_audited_provider_fault"
     }
   },
   "agents": {
@@ -1321,7 +1329,9 @@
         "scope-pi-order",
         "coverage-native-identity",
         "pi-submission",
-        "pi-submission-projection"
+        "pi-submission-projection",
+        "pi-strict-fault",
+        "pi-strict-version"
       ],
       "tokenless": [
         "final-replacement",

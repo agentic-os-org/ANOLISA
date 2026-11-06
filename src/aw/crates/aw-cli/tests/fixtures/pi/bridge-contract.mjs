@@ -16,6 +16,7 @@ function fixture(
   t,
   {
     authorized = true,
+    strict = false,
     mode = "replace",
     content = [{ type: "text", text: "native" }],
   } = {},
@@ -29,6 +30,10 @@ let input='';for await (const chunk of process.stdin) input+=chunk;
 const payload=JSON.parse(input);const result=structuredClone(payload.tool_response);
 if(result.content.length === 1 && result.content[0].type === 'text') result.content[0].text='compact';
 const mode=${JSON.stringify(mode)};
+if(mode==='withhold') { console.log('{"aw_withheld":true}'); process.exit(0); }
+if(mode==='invalid') { console.log('invalid'); process.exit(0); }
+if(mode==='exit') process.exit(1);
+if(mode==='clean') { console.log('{}'); process.exit(0); }
 if(mode==='metadata') result.isError=!result.isError;
 if(mode==='empty') result.content[0].text='';
 if(mode==='number') result.content[0].text=7;
@@ -46,7 +51,7 @@ console.log(JSON.stringify({aw_replacement:result}));
       {
         event: "tool.after",
         step: "replace",
-        on_error: "report",
+        on_error: strict ? "withhold_result" : "report",
         budget_ms: 1000,
       },
     ],
@@ -63,6 +68,7 @@ console.log(JSON.stringify({aw_replacement:result}));
     isError: true,
     terminate: false,
   };
+  const events = [];
   const agent = {
     beforeToolCall: async () => {
       beforeCalls++;
@@ -72,6 +78,7 @@ console.log(JSON.stringify({aw_replacement:result}));
       return original;
     },
     subscribe: () => () => {},
+    processEvents: async event => events.push(event),
   };
   const originalBefore = agent.beforeToolCall;
   const originalAfter = agent.afterToolCall;
@@ -91,6 +98,7 @@ console.log(JSON.stringify({aw_replacement:result}));
   };
   return {
     agent,
+    events,
     context,
     original,
     installed,
@@ -110,6 +118,45 @@ test("authorized text replacement calls native callbacks once and preserves over
   assert.equal(result.isError, true);
   assert.equal(result.terminate, false);
   assert.deepEqual(f.counts(), { beforeCalls: 1, afterCalls: 1 });
+});
+
+for (const mode of ["clean", "replace"])
+  test(`strict ${mode} delivers detached metadata and the full checked envelope`, async (t) => {
+    const f = fixture(t, { strict: true, mode });
+    f.original.details = null;
+    f.context.result.details = null;
+    f.context.result.extra = { value: "checked" };
+    await f.agent.beforeToolCall(f.context);
+    const override = await f.agent.afterToolCall(f.context);
+    // These aliases can survive beyond the callback, including invocation cleanup.
+    f.original.content[0].text = "unchecked";
+    f.original.usage.input = 99;
+    f.context.result.details = { value: "unchecked" };
+    f.context.result.extra.value = "unchecked";
+    f.context.result.addedToolNames = ["unchecked"];
+    // Pi 0.84.2 adopts supported overrides and retains execute()'s extra fields.
+    const delivered = { ...f.context.result };
+    for (const key of ["content", "details", "usage", "terminate"])
+      delivered[key] = override[key] ?? delivered[key];
+    await f.agent.processEvents({ type: "tool_execution_end", toolCallId: f.context.toolCall.id,
+      result: delivered, isError: override.isError });
+    assert.equal(delivered.content[0].text, mode === "clean" ? "native" : "compact");
+    assert.equal(delivered.details, null);
+    assert.deepEqual(delivered.extra, { value: "checked" });
+    assert.deepEqual(delivered.usage, { input: 0, output: 0 });
+    assert.equal(delivered.terminate, false);
+    assert.equal(f.events[0].isError, true);
+    assert(!JSON.stringify(f.events).includes("unchecked"));
+    assert.equal(f.context.result.extra.value, "unchecked");
+  });
+
+test("strict snapshot errors do not expose the uncloneable value", async (t) => {
+  const f = fixture(t, { strict: true, mode: "clean" });
+  f.original.details = { callback: function PRIVATE_OUTPUT_SECRET() {} };
+  await f.agent.beforeToolCall(f.context);
+  await assert.rejects(f.agent.afterToolCall(f.context), {
+    message: "AW could not snapshot tool result; result withheld by policy",
+  });
 });
 for (const [name, options] of [
   ["unauthorized replacement", { authorized: false }],
@@ -193,4 +240,39 @@ test("unconfirmed input retirement fences the next prompt after drain", async (t
       assert.equal(scope.submissionSequence, 1);
     } finally { bridge.dispose(); }
   }
+});
+
+test("strict after withholds audited faults and suppresses every intermediate update", async (t) => {
+  const f = fixture(t, { strict: true, mode: "withhold" });
+  await f.agent.beforeToolCall(f.context);
+  await f.agent.processEvents({ type: "tool_execution_update", partialResult: "private" });
+  assert.deepEqual(f.events, []);
+  await assert.rejects(f.agent.afterToolCall(f.context), /result withheld by policy/);
+  const event = { type: "tool_execution_end", result: "native error placeholder" };
+  await f.agent.processEvents(event);
+  assert.deepEqual(f.events, [event]);
+  assert.throws(() => { f.agent.processEvents = () => {}; }, /AW owns/);
+  f.installed.dispose();
+  await f.agent.processEvents({ type: "tool_execution_update", partialResult: "native" });
+  assert.equal(f.events.length, 2);
+});
+
+for (const mode of ["invalid", "exit", "metadata"])
+  test(`strict ${mode} remains a callback failure`, async (t) => {
+    const f = fixture(t, { strict: true, mode });
+    await f.agent.beforeToolCall(f.context);
+    await assert.rejects(f.agent.afterToolCall(f.context), /result withheld by policy/);
+  });
+
+test("report-only streams and final replacements retain native semantics", async (t) => {
+  const f = fixture(t);
+  const event = { type: "tool_execution_update", partialResult: "native" };
+  await f.agent.processEvents(event);
+  assert.strictEqual(f.events[0], event);
+});
+
+test("non-strict callbacks cannot consume an audited withholding marker", async (t) => {
+  const f = fixture(t, { mode: "withhold" });
+  await f.agent.beforeToolCall(f.context);
+  assert.strictEqual(await f.agent.afterToolCall(f.context), f.original);
 });

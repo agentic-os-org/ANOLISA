@@ -138,10 +138,9 @@ pub fn response(
         return Err("invalid failure action".into());
     }
     if output["status"] != "ok" {
-        // Claude recovery requires a completed, audited Provider fault. Scope/RPC,
+        // Recoverable native dispositions require a completed, audited Provider fault. Scope/RPC,
         // native directive, cancellation and cleanup errors remain failures.
-        let claude_fault = adapter_id == "claude-sdk"
-            && output["status"] == "error"
+        let provider_fault = output["status"] == "error"
             && output["kind"] == "provider"
             && output["effects"] == serde_json::json!([])
             && (matches!(
@@ -149,6 +148,19 @@ pub fn response(
                 Some("exit" | "incomplete_input" | "provider" | "protocol")
             ) || (output["failure"] == "transport"
                 && output["failure_detail"] == "deadline_exceeded"));
+        if adapter_id == "pi"
+            && provider_fault
+            && event == "tool.after"
+            && on_error == "withhold_result"
+            && output["failure_action"] == on_error
+        {
+            return Ok(HookOutput {
+                exit: Exit::Code(0),
+                stdout: serde_json::to_vec(&serde_json::json!({"aw_withheld": true}))?,
+                stderr: Vec::new(),
+            });
+        }
+        let claude_fault = adapter_id == "claude-sdk" && provider_fault;
         if claude_fault && event == "input.submit" && output["failure_action"] == on_error {
             writeln!(
                 diagnostics,
@@ -156,7 +168,8 @@ pub fn response(
             )?;
             return Ok(adapter.reply(on_error == "block"));
         }
-        if (adapter_id == "pi" || (claude_fault && on_error == "report"))
+        if (adapter_id == "pi" || claude_fault)
+            && on_error == "report"
             && output["failure_action"] == "report"
             && event == "tool.after"
         {
@@ -598,43 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn pi_native_validation_cannot_bypass_early_close_or_inject_replacement() {
-        for valid in [
-            b"".as_slice(),
-            br#"{}"#,
-            br#"{"block":true,"reason":"retry"}"#,
-        ] {
-            assert!(validate_pi_native("tool.before", &Exit::Code(0), valid).is_ok());
-        }
-        for invalid in [
-            b" ".as_slice(),
-            b"invalid",
-            b"null",
-            b"[]",
-            br#"{"block":"yes"}"#,
-            br#"{"reason":null}"#,
-            br#"{"aw_replacement":{"content":[]}}"#,
-            br#"{"approval":true}"#,
-        ] {
-            assert!(validate_pi_native("tool.before", &Exit::Code(0), invalid).is_err());
-        }
-        assert!(validate_pi_native("tool.after", &Exit::Code(0), br#"{"block":true}"#).is_err());
-        assert!(validate_pi_native("tool.before", &Exit::Code(2), b"{}").is_err());
-        assert!(validate_pi_native("tool.before", &Exit::Signal(15), b"{}").is_err());
-        let output = json!({"status":"ok","kind":"native","native":{"stdout":br#"{"aw_replacement":{}}"#.to_vec(),"stderr":[],"exit_code":0,"signal":null}});
-        assert!(response(
-            adapter::select("pi").unwrap(),
-            "tool.after",
-            "report",
-            output,
-            "pi",
-            &json!({}),
-            &mut Vec::new()
-        )
-        .is_err());
-    }
-
-    #[test]
     fn sdk_early_close_preserves_denial_exit_and_failure_policy() {
         for adapter in ["agentscope", "claude-sdk", "qwenpaw", "qoder-sdk"] {
             for (exit, on_error, expected) in [
@@ -684,3 +660,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod strict_tests;

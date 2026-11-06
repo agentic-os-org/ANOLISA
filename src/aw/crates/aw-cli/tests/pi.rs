@@ -368,3 +368,31 @@ fn independently_versioned_pi_packages_keep_policy_and_cleanup() {
         service.released(&fixture);
     }
 }
+
+#[test]
+fn strict_output_rejects_unverified_versions_before_application_import() {
+    for name in ["pi-coding-agent", "pi-agent-core"] {
+        let fixture = Fixture::new();
+        let mut document = setup(&fixture);
+        policy(&fixture, &mut document, "normal");
+        document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+        let package = fixture
+            .root
+            .join(format!("node_modules/@earendil-works/{name}/package.json"));
+        let mut metadata: Value = serde_json::from_slice(&fs::read(&package).unwrap()).unwrap();
+        metadata["version"] = json!("0.84.3");
+        fs::write(package, metadata.to_string()).unwrap();
+        fs::write(
+            fixture.root.join("app.mjs"),
+            "throw new Error('business module imported');",
+        )
+        .unwrap();
+        let service = Service::start(&fixture, &document);
+        let output = fixture.run(launch(&fixture));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(stderr.contains("AW strict Pi output requires"), "{stderr}");
+        assert!(!stderr.contains("business module imported"), "{stderr}");
+        service.released(&fixture);
+    }
+}
