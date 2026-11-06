@@ -343,6 +343,10 @@ ANOLISA 基于 [Apache License 2.0](LICENSE) 发布。
 [变更日志](https://agentic-os.sh/zh/changelog/) ·
 [Agent 入口](https://agentic-os.sh/zh/agents/)
 
+统一源码构建要求 Bash 4.4 或更高版本。受限网络环境可以配置
+`NODE_DIST_MIRROR` 和 `RUSTUP_INIT_SCRIPT_URL`，具体用法见
+[下载源](docs/user-guide/zh/getting-started/building.md#下载源)。
+
 Agent Security Core 的相关安全参考资料如下：
 [AARM 登记条目（Aligned）](https://aarm.dev/builders/agentseccore-anolisa) ·
 [OWASP Agentic Top 10 控制映射](docs/user-guide/zh/agent-sec-core/owasp-agentic-top10.md)。

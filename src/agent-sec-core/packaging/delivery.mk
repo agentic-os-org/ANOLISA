@@ -23,6 +23,8 @@ DELIVERY_CONFIGDIR := $(call delivery_input,CONFIGDIR,$(DELIVERY_SYSCONFDIR)/age
 DELIVERY_UNITDIR := $(call delivery_input,UNITDIR,$(DELIVERY_PREFIX_BASE)/lib/systemd/system)
 DELIVERY_BUILD_DIR := $(call delivery_input,BUILD_DIR,$(DELIVERY_ROOT)/target)
 DELIVERY_BUILD_OUTPUT := $(abspath $(DELIVERY_BUILD_DIR))
+# Monorepo checkouts share the top-level license through a symlink.
+DELIVERY_LICENSE_SOURCE := $(or $(realpath $(DELIVERY_ROOT)/LICENSE),$(DELIVERY_ROOT)/LICENSE)
 
 DELIVERY_INSTALL_ARGS = INSTALL_PROFILE=system V2_BIN_BUILD_DIR="$(DELIVERY_BUILD_OUTPUT)/v2/bin" BUILD_DIR="$(DELIVERY_BUILD_OUTPUT)" DESTDIR="$(DELIVERY_DESTDIR)" \
 	PREFIX="$(DELIVERY_PREFIX)" BINDIR="$(DELIVERY_BINDIR)" LIBDIR="$(DELIVERY_LIBDIR)" \
@@ -64,7 +66,7 @@ layout: delivery-validate-layout ## Show the public build/install layout
 DELIVERY_CORE_INPUTS = \
 	$(foreach binary,$(V2_RUNTIME_BINARIES),--executable "$(DELIVERY_BUILD_OUTPUT)/v2/bin/$(binary)" --target-file "$(DELIVERY_BINDIR)/$(binary)") \
 	--executable "$(DELIVERY_BUILD_OUTPUT)/linux-sandbox" \
-	--file "$(DELIVERY_ROOT)/LICENSE" \
+	--file "$(DELIVERY_LICENSE_SOURCE)" \
 	--file "$(DELIVERY_ROOT)/packaging/systemd/agent-sec-core-v2.service.in" \
 	--file "$(DELIVERY_ROOT)/packaging/systemd/skillsec.json" \
 	--target-file "$(DELIVERY_BINDIR)/linux-sandbox" \
@@ -126,7 +128,7 @@ delivery-validate-install: delivery-validate-core delivery-validate-plugins deli
 delivery-install-core-files:
 	$(MAKE) -C "$(DELIVERY_ROOT)" install-cli-v2-source install-sandbox install-systemd-system install-gateway $(DELIVERY_INSTALL_ARGS)
 	install -d -m 0755 "$(DELIVERY_DESTDIR)$(DELIVERY_DATADIR)"
-	install -p -m 0644 "$(DELIVERY_ROOT)/LICENSE" "$(DELIVERY_DESTDIR)$(DELIVERY_DATADIR)/LICENSE"
+	install -p -m 0644 "$(DELIVERY_LICENSE_SOURCE)" "$(DELIVERY_DESTDIR)$(DELIVERY_DATADIR)/LICENSE"
 
 delivery-install-plugins-files:
 	$(MAKE) -C "$(DELIVERY_ROOT)" install-source-v2-cosh-extension install-codex-plugin install-qoder-plugin \

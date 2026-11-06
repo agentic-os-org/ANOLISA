@@ -307,16 +307,28 @@ Developers building from source should use the repository-level entry point:
 ./scripts/build-all.sh --component sec-core
 ```
 
-Before installing files, the source-build entry point checks Node.js 20 or
-newer, Python 3, bubblewrap, GnuPG, and `jq`. It installs the Rust CLI, sandbox,
-and host-level daemon with `sudo`, while default-mode integration resources
-remain in user paths. Agent hooks use the host `python3`; the Qoder plugin
-installer currently requires Python >= 3.11, < 3.12. User mode reports all missing system runtime packages with one
-install command and exits; install them and rerun the same command.
-`--ignore-deps` bypasses this verification for pre-provisioned hosts.
+The wrapper prepares Node.js 22 or newer and system `python3` for build helpers,
+then checks declared runtime dependencies before host installation. The backend
+supports system file installation only; `--no-install` builds without installing.
+`--ignore-deps` skips dependency preparation and verification on a provisioned
+host. Agent hooks use the host `python3`; the Qoder installer requires
+Python >= 3.11, < 3.12.
+
+The default source layout uses `PREFIX=/usr/local` and `AWPRJ=anolisa`: programs
+are under `/usr/local/bin`, and framework resources under
+`/usr/local/share/anolisa/agent-sec-core/adapters`. File installation does not
+start the daemon or change framework user configuration. For an existing source
+installation, first review the
+[legacy systemd unit migration](../../docs/user-guide/en/agent-sec-core/index.md#migrate-a-legacy-source-installed-service)
+to preserve administrator settings and retire an older `/etc/systemd/system`
+override. Then follow
+[daemon startup and health verification](../../docs/user-guide/en/agent-sec-core/index.md#start-the-source-installed-daemon)
+before deploying an integration. Custom prefixes and namespaces follow the
+layout reported by `make -C src/agent-sec-core layout` from the repository root.
 
 The source build does not register the component in ANOLISA state. Use the
-installed integration scripts instead of `anolisa adapter enable`; see
+installed integration scripts as the framework's user, without `sudo`, instead
+of `anolisa adapter enable`; see
 [Source-build Integration](../../docs/user-guide/en/agent-sec-core/index.md#source-build-integration).
 
 An ANOLISA-managed raw package or adopted RPM places the framework adapters.

@@ -240,13 +240,16 @@ jobs:
         run: bash tests/test-check-component-versions.sh
 
   check-build-runtime-deps:
-    name: Check build runtime dependencies
+    name: Check unified build scripts
     runs-on: anolisa-k8s-general-ci-x64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test aggregated runtime dependency preflight
-        run: bash tests/test-build-all-runtime-deps.sh
+      - name: Test build orchestration, prerequisites and runtime preflight
+        run: |
+          bash tests/test-build-all.sh
+          bash tests/test-build-env.sh
+          bash tests/test-build-all-runtime-deps.sh
 
   # =========================================================================
   # Step 3: Build & Lint copilot-shell
