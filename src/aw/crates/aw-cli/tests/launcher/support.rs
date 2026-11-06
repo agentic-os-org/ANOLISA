@@ -324,6 +324,15 @@ impl Process {
 }
 impl Drop for Process {
     fn drop(&mut self) {
+        if thread::panicking() {
+            eprintln!(
+                "owned process: {}\nstatus: {:?}\nstdout:\n{}\nstderr:\n{}",
+                self.value,
+                self.child.try_wait(),
+                fs::read_to_string(&self.stdout).unwrap_or_default(),
+                fs::read_to_string(&self.stderr).unwrap_or_default(),
+            );
+        }
         if self.child.try_wait().unwrap().is_none() {
             // This unreaped Child reserves its PID; signal only the owned launcher.
             unsafe {

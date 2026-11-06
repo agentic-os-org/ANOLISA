@@ -161,7 +161,11 @@ fn external_install_first_hook_busy_detach_isolation_and_owned_cleanup() {
         .as_array_mut()
         .unwrap()
         .push(json!({"matcher":"unused","hooks":[{"type":"command","command":"/bin/true"}]}));
-    fs::write(&settings, edited.to_string()).unwrap();
+    // The native watcher must only observe complete settings snapshots.
+    let staged = settings.with_extension("user-edit");
+    fs::write(&staged, edited.to_string()).unwrap();
+    fs::set_permissions(&staged, fs::metadata(&settings).unwrap().permissions()).unwrap();
+    fs::rename(staged, &settings).unwrap();
     success(install(&fixture, pid, true));
     assert_eq!(service.status()["bindings"], 0);
     let cleaned: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
