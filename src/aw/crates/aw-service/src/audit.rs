@@ -1,5 +1,7 @@
 //! Bounded metadata chains using the existing durable journal storage contract.
 
+pub(crate) mod source;
+
 use aw_core::{journal::FileJournal, ports::Journal};
 use aw_host::{CallRecord, Failure, FailureAction, Invocation, Method, StepOutput};
 use serde_json::{json, Value};
@@ -19,6 +21,7 @@ use crate::{rejected, Result};
 pub(crate) struct Audit {
     journal: Mutex<FileJournal>,
     directory: PathBuf,
+    pub(crate) source_id: String,
     failed: AtomicBool,
     recent: Mutex<VecDeque<Value>>,
     #[cfg(test)]
@@ -32,6 +35,12 @@ pub(crate) struct Audit {
     /// Test-only terminal-write failure: 1 before writing, 2 after writing.
     #[cfg(test)]
     pub(crate) activation_failure: std::sync::atomic::AtomicUsize,
+    /// Test-only observed-fact terminal failure: 1 before writing, 2 after writing.
+    #[cfg(test)]
+    pub(crate) fact_close_failure: std::sync::atomic::AtomicUsize,
+    /// Test-only callback arrivals before the invocation and fact locks.
+    #[cfg(test)]
+    pub(crate) observation_attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl Audit {
@@ -48,6 +57,8 @@ impl Audit {
     }
 
     pub(crate) fn new(directory: &Path) -> Result<Self> {
+        // Compile contracts before admission so schema setup cannot consume Hook budgets.
+        crate::public_projection::registry()?;
         if let Ok(metadata) = fs::symlink_metadata(directory) {
             // SAFETY: geteuid has no pointer arguments or preconditions.
             if !metadata.is_dir()
@@ -61,6 +72,7 @@ impl Audit {
         Ok(Self {
             journal: Mutex::new(journal),
             directory: directory.into(),
+            source_id: source::initialize(directory)?,
             failed: AtomicBool::new(false),
             recent: Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -71,6 +83,10 @@ impl Audit {
             activation_appends: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             activation_failure: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            fact_close_failure: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            observation_attempts: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -101,7 +117,7 @@ impl Audit {
         self.mutate(|journal| journal.claim(key, &record))
     }
 
-    pub(crate) fn append(&self, key: &str, record: Value) -> Result<Value> {
+    pub(crate) fn append(&self, key: &str, mut record: Value) -> Result<Value> {
         #[cfg(test)]
         if record["phase"] == "started" {
             self.started_appends.fetch_add(1, Ordering::Release);
@@ -113,10 +129,15 @@ impl Audit {
         } else {
             None
         };
+        if record.is_object() {
+            record["createdAt"] = json!(crate::runtime::facts::timestamp()?);
+        }
         self.mutate(|journal| {
             #[cfg(test)]
             let failure = if record["phase"] == "closed" && record["status"] == "active" {
                 self.activation_failure.load(Ordering::Acquire)
+            } else if record["phase"] == "closed" && record["status"] == "observed" {
+                self.fact_close_failure.load(Ordering::Acquire)
             } else {
                 0
             };

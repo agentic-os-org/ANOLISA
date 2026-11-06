@@ -36,6 +36,39 @@ impl Error {
     }
 }
 
+/// Native terminal status when the callback carries an explicit supported result state.
+/// Absence remains unknown; tool text and successful callback transport are not status.
+pub fn result_status(adapter: &str, event: &Value) -> Option<&'static str> {
+    if event["name"] != "tool.after" {
+        return None;
+    }
+    let result = &event["tool"]["result"];
+    match adapter {
+        "qwenpaw" | "agentscope" => match result["state"].as_str() {
+            Some("success") => Some("success"),
+            Some("error") => Some("error"),
+            Some("interrupted") => Some("interrupted"),
+            Some("denied") => Some("denied"),
+            _ => None,
+        },
+        "qoder-sdk" => match event["native"]["hook_event_name"].as_str() {
+            Some("PostToolUseFailure") if result["is_interrupt"] == true => Some("interrupted"),
+            Some("PostToolUseFailure") => Some("error"),
+            Some("PostToolUse") if result["isError"] == true || result["is_error"] == true => {
+                Some("error")
+            }
+            Some("PostToolUse") => Some("success"),
+            _ => None,
+        },
+        "qoder" | "pi" => match result["isError"].as_bool() {
+            Some(true) => Some("error"),
+            Some(false) => Some("success"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 type Result<T> = std::result::Result<T, Error>;
 
 /// Canonical native comparison for one event's callback phases.

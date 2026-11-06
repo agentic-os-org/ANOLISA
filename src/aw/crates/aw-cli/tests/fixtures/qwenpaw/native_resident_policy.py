@@ -84,7 +84,16 @@ class ResidentPolicyTests:
         empty["spec"]["events"] = {}
         await self.update_policy(empty)
         await self.request(mw, agent, [call])
-        self.assertEqual(mw.config["hooks"], [])
+        self.assertEqual(
+            {(hook["event"], hook["step"]) for hook in mw.config["hooks"]},
+            {("tool.before", "$aw.observe"), ("tool.after", "$aw.observe")},
+        )
+        records = [json.loads(line) for path in (self.root / "s/journal").glob("*.jsonl")
+                   for line in path.read_text().splitlines()]
+        facts = [record["record"].get("plan", {}).get("executionEvent") for record in records]
+        observed = [fact for fact in facts if fact and fact["data"]["subject"]["configRevision"]["value"] == mw.config["policy_revision"]]
+        self.assertEqual({fact["data"]["name"] for fact in observed}, {"tool.before", "tool.after"})
+        self.assertTrue(all(fact["data"]["association"]["status"] == "verified" for fact in observed))
         self.assertNotEqual(mw.config["policy_revision"], first_revision)
         await self.update_policy(self.document)
         call.input = '{"deny":true}'
@@ -173,7 +182,10 @@ class ResidentPolicyTests:
             candidate["spec"]["events"] = {}
             await self.update_policy(candidate)
             await self.request(f.mw, f.agent, [f.call])
-            self.assertEqual(f.mw.config["hooks"], [])
+            self.assertEqual(
+                {(hook["event"], hook["step"]) for hook in f.mw.config["hooks"]},
+                {("tool.before", "$aw.observe"), ("tool.after", "$aw.observe")},
+            )
             await self.update_policy(self.document)
             results = await self.request(f.mw, f.agent, [f.call])
             self.assertEqual(len(f.calls), 3)

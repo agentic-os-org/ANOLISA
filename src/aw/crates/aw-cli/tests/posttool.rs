@@ -51,7 +51,14 @@ fn optional_projection_does_not_remove_large_results_from_the_journal() {
         );
         let mut journaled = false;
         for entry in fs::read_dir(fixture.root.join("state/journal")).unwrap() {
-            let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "jsonl")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(path).unwrap();
             assert!(!text.contains(&"x".repeat(128)));
             let records: Vec<Value> = text
                 .lines()

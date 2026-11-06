@@ -85,9 +85,14 @@ fn empty_initial_policy_still_registers_both_stable_routes() {
     for route in routes.values() {
         assert!(route.steps.contains_key(DISPATCH));
     }
-    let empty = plan(&document("qwenpaw"), "target", &[], "tool.before").unwrap();
-    assert!(empty.groups.is_empty());
-    assert_eq!(empty.budget_ms, 1000);
+    for adapter in ["qoder", "qwenpaw", "qoder-sdk"] {
+        for event in ["tool.before", "tool.after"] {
+            let empty = plan(&document(adapter), "target", &[], event).unwrap();
+            assert!(empty.groups.is_empty());
+            assert_eq!(empty.budget_ms, 1000);
+            assert_eq!(empty.observe, adapter != "qoder", "{adapter}: {event}");
+        }
+    }
 }
 
 #[test]

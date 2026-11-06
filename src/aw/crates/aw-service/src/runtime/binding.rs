@@ -98,6 +98,8 @@ impl Runtime {
 impl Instance {
     pub(super) fn prepared(bytes: Vec<u8>, context: ProcessContext, host: aw_host::Host) -> Self {
         Self {
+            run: None,
+            native_facts: Arc::default(),
             bytes,
             context,
             reload: None,

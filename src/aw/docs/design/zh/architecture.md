@@ -110,6 +110,12 @@ service 继续负责运行期激活与策略代次。见[编辑合同](configura
 原生 Hook 脚本也通过 `aw-exec` 执行，保留原始输出和退出码，不经过 Provider 握手。
 AgentSight 是独立的可选观测来源；`aw inspect` 的只读视图不参与 Hook 准入。
 
+`aw-service` 在持久 Journal 中独立生产白名单公共运行事实。配置策略的 Hook 记录
+`ExecutionEvent` 与 Provider 完成事实；Qoder SDK 和 QwenPaw 无策略工具回调也保留
+原生关联和结果状态。CLI 的 Worker 启动、结束事实不依赖 Sight。公共投影复用原始
+记录序号、摘要和持久时间；正文只计算摘要，实际效果采用与覆盖范围缺少证据时保留
+未确认状态。详见 [公共对象](runtime/public-objects.md)。
+
 Skill 校验复用 `tool.before` 与既有的 opaque `event.native` 扩展。
 Qoder SDK 或 QwenPaw Adapter 提供 `aw_skill`（请求名称、规范化目录、来源）或
 解析错误。sec-core Provider 调用公开的只读 Ledger 检查并映射信任状态，目录授权

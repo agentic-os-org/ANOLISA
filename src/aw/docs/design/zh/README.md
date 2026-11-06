@@ -37,6 +37,8 @@
 
 [公共运行与审计对象](runtime/public-objects.md)
 
+服务独立于 Sight 捕获公共元数据，按保留的来源身份和创建时间逐条投影已验证的 Journal 记录。
+
 [来源连接器](integrations/agentsight/agentsight-readonly.md) · [证据上下文](runtime/evidence-context.md) · [集成规划](integrations/agentsight/agentsight-integration.md)
 
 独立进程登记的身份、去重与 Ready 门禁见[本地服务](runtime/local-service.md#独立登记)。
