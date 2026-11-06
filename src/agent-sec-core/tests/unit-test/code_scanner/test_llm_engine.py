@@ -239,3 +239,35 @@ class TestExtractVerdict:
     def test_both_pass_and_deny_returns_none(self) -> None:
         verdict, reason = _extract_verdict("PASS and DENY")
         assert verdict is None
+
+    def test_fenced_nested_json_deny(self) -> None:
+        """Fenced output with a nested object keeps its DENY verdict."""
+        content = (
+            "```json"
+            + chr(10)
+            + '{"verdict": "DENY", "reason": "blocked spoof", "details": {"rule": "C"}}'
+            + chr(10)
+            + "```"
+        )
+        verdict, reason = _extract_verdict(content)
+        assert verdict == "DENY"
+        assert reason == "blocked spoof"
+
+    def test_fenced_nested_json_pass(self) -> None:
+        content = (
+            "```json"
+            + chr(10)
+            + '{"verdict": "PASS", "reason": "no rule matched", "counts": {"a": 1}}'
+            + chr(10)
+            + "```"
+        )
+        verdict, reason = _extract_verdict(content)
+        assert verdict == "PASS"
+        assert reason == "no rule matched"
+
+    def test_nested_json_unfenced(self) -> None:
+        verdict, reason = _extract_verdict(
+            '{"verdict": "DENY", "reason": "r1", "details": {"x": 1}}'
+        )
+        assert verdict == "DENY"
+        assert reason == "r1"
