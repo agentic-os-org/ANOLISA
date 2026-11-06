@@ -2229,6 +2229,7 @@ export async function fetchOptimizeConfig(): Promise<OptimizeLlmConfig> {
  */
 export async function saveOptimizeConfig(body: {
   api_key?: string;
+  current_api_key?: string;
   base_url?: string;
   model?: string;
   search_timeout_secs?: number;
