@@ -363,46 +363,78 @@ fn public_cli_pretool_and_posttool_share_the_executed_wrapper() {
                 });
             serde_json::from_slice(&output.stdout).unwrap()
         };
-        for original in ["git status", "rg 'foo|bar' src"] {
+        let original = "git status";
+        let mut before = f.request("hermes");
+        before["event"]["tool"]["input"]["command"] = json!(original);
+        before["budget_ms"] = json!(5000);
+        let reply = invoke(before.clone());
+        assert_eq!(reply["effects"][0]["type"], "block", "{reply}");
+        let retry: Value = serde_json::from_str(
+            reply["effects"][0]["text"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("[tokenless:rewrite] Retry this tool with arguments: ")
+                .unwrap(),
+        )
+        .unwrap();
+        let words = shlex::split(retry["command"].as_str().unwrap()).unwrap();
+        assert!(
+            words
+                .windows(2)
+                .any(|pair| pair[0] == launcher.to_str().unwrap() && pair[1] == "rtk"),
+            "{retry}"
+        );
+        before["event"]["tool"]["input"] = retry;
+        before["event"]["tool"]["call_id"] = json!("fresh-retry");
+        assert_eq!(invoke(before.clone())["effects"], json!([]));
+        before["operation"] = json!("post_tool");
+        before["allowed_effects"] = json!(["replace_result"]);
+        before["event"]["name"] = json!("tool.after");
+        let text =
+            serde_json::to_string_pretty(&json!({"values":(0..100).collect::<Vec<_>>()})).unwrap();
+        before["event"]["tool"]["result"] = json!(text);
+        before["event"]["tool"]["result_projection"] =
+            json!({"text":text,"status":"success","content_origin":"api_response"});
+        assert_eq!(invoke(before.clone())["effects"], json!([]));
+        let wire: Value = serde_json::from_slice(&fs::read(&captured).unwrap()).unwrap();
+        assert_eq!(wire["input"]["output_optimization"], "rtk");
+        // The same synthetic output is compressible when it has no RTK owner.
+        before["event"]["tool"]["input"]["command"] = json!(original);
+        let reply = invoke(before);
+        assert_eq!(reply["effects"][0]["type"], "replace_result", "{reply}");
+
+        for original in ["grep -rn needle src", "rg -n 'foo|bar' src"] {
             let mut before = f.request("hermes");
             before["event"]["tool"]["input"]["command"] = json!(original);
             before["budget_ms"] = json!(5000);
-            let reply = invoke(before.clone());
-            assert_eq!(reply["effects"][0]["type"], "block", "{reply}");
-            let retry: Value = serde_json::from_str(
-                reply["effects"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .strip_prefix("[tokenless:rewrite] Retry this tool with arguments: ")
-                    .unwrap(),
-            )
-            .unwrap();
-            let words = shlex::split(retry["command"].as_str().unwrap()).unwrap();
-            assert!(
-                words
-                    .windows(2)
-                    .any(|pair| pair[0] == launcher.to_str().unwrap() && pair[1] == "rtk"),
-                "{retry}"
-            );
-            before["event"]["tool"]["input"] = retry;
-            before["event"]["tool"]["call_id"] = json!("fresh-retry");
             assert_eq!(invoke(before.clone())["effects"], json!([]));
+            let wire: Value = serde_json::from_slice(&fs::read(&captured).unwrap()).unwrap();
+            assert_eq!(wire["input"]["arguments"], before["event"]["tool"]["input"]);
+
             before["operation"] = json!("post_tool");
             before["allowed_effects"] = json!(["replace_result"]);
             before["event"]["name"] = json!("tool.after");
-            let text =
-                serde_json::to_string_pretty(&json!({"values":(0..100).collect::<Vec<_>>()}))
-                    .unwrap();
+            let path = "src/customer_service/handlers/deployment_status.rs";
+            let text = (1..=30)
+                .map(|line| format!("{path}:{line}:needle foo bar\n"))
+                .collect::<String>();
             before["event"]["tool"]["result"] = json!(text);
-            before["event"]["tool"]["result_projection"] =
-                json!({"text":text,"status":"success","content_origin":"api_response"});
-            assert_eq!(invoke(before.clone())["effects"], json!([]));
-            let wire: Value = serde_json::from_slice(&fs::read(&captured).unwrap()).unwrap();
-            assert_eq!(wire["input"]["output_optimization"], "rtk");
-            // The same synthetic output is compressible when it has no RTK owner.
-            before["event"]["tool"]["input"]["command"] = json!(original);
+            before["event"]["tool"]["result_projection"] = json!({"text":text,"status":"success","content_origin":"command_output","command":original});
             let reply = invoke(before);
+            assert_eq!(reply["effects"].as_array().unwrap().len(), 1, "{reply}");
             assert_eq!(reply["effects"][0]["type"], "replace_result", "{reply}");
+            let matches = (1..=30)
+                .map(|line| format!("{line}:needle foo bar\n"))
+                .collect::<String>();
+            assert_eq!(
+                reply["effects"][0]["text"],
+                format!(
+                    "[Search results grouped by file; all received lines retained]\nFile={path:?}\n{matches}"
+                )
+            );
+            let wire: Value = serde_json::from_slice(&fs::read(&captured).unwrap()).unwrap();
+            assert_eq!(wire["input"]["output_optimization"], "none");
+            assert_eq!(wire["input"]["command"], original);
         }
     }
     assert!(!decoy_marker.exists());

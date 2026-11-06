@@ -450,6 +450,15 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
 }
 
 fn keeps_command_native(command: &str) -> bool {
+    command_has_segment(command, segment_keeps_native)
+}
+
+/// Uses the same shell segments and transparent wrappers as PreTool ownership.
+pub(crate) fn is_search_command(command: &str) -> bool {
+    command_has_segment(command, native_output::is_search)
+}
+
+fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
     // Empty quoted words still consume wrapper arguments.
@@ -486,7 +495,7 @@ fn keeps_command_native(command: &str) -> bool {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if character == '\n' && segment_keeps_native(&words) {
+            if character == '\n' && matches_segment(&words) {
                 return true;
             }
             if character == '\n' {
@@ -497,7 +506,7 @@ fn keeps_command_native(command: &str) -> bool {
                 words.push(std::mem::take(&mut word));
                 word_started = false;
             }
-            if segment_keeps_native(&words) {
+            if matches_segment(&words) {
                 return true;
             }
             words.clear();
@@ -509,12 +518,12 @@ fn keeps_command_native(command: &str) -> bool {
     if word_started {
         words.push(word);
     }
-    segment_keeps_native(&words)
+    matches_segment(&words)
 }
 
 fn segment_keeps_native(words: &[String]) -> bool {
     // RTK smart-truncates --max-lines rather than preserving a head window.
-    // Keep head/tail and find native through the supported wrappers.
+    // Keep previews and complete search listings native through supported wrappers.
     if native_output::owns_command(words) {
         return true;
     }
@@ -1660,13 +1669,13 @@ mod tests {
     fn pre_tool_applies_rtk_rewrite_and_anchors_launcher() {
         let directory = tempdir().unwrap();
         let response = pre_tool_with_rewriter(
-            &bash_request("grep error log"),
+            &bash_request("git status"),
             &Attribution::new("test"),
             Some(Path::new("/opt/tokenless bin/tokenless")),
             Some(directory.path()),
             |command| {
-                assert_eq!(command, "grep error log");
-                rtk::RewriteOutcome::Allow("rtk grep --count error log".into())
+                assert_eq!(command, "git status");
+                rtk::RewriteOutcome::Allow("rtk git status".into())
             },
         )
         .unwrap();
@@ -1679,9 +1688,58 @@ mod tests {
             "{command}"
         );
         assert!(
-            command.ends_with("'/opt/tokenless bin/tokenless' rtk grep --count error log"),
+            command.ends_with("'/opt/tokenless bin/tokenless' rtk git status"),
             "{command}"
         );
+    }
+
+    #[test]
+    fn search_modes_share_native_ownership_and_post_tool_recognition() {
+        for command in [
+            "grep -n 'foo|bar;baz' 'source file.py'",
+            "cd /testbed && grep -n '__array_function__\\|NotImplemented' quantity.py",
+            "rg --files",
+            "rg -l match src",
+            "grep -c match source.py",
+            "rg -q match src",
+            "rg --json match src",
+            "rg --null -l match src",
+            "git status | grep modified",
+            "grep match source.py | sort",
+            "echo start; rg -n match src",
+            "echo start\nrg -n match src",
+            "LANG=C command /usr/bin/grep match source.py",
+            "env -u TEMP timeout -k 5 30 command rg match src",
+            "nohup nice -n 5 /usr/bin/grep match source.py",
+            "time -f '' rg match src",
+            "uv run rg match src",
+            "gr\\\nep match source.py",
+        ] {
+            let request = bash_request(command);
+            let response = pre_tool_with_rewriter(
+                &request,
+                &Attribution::new("test"),
+                None,
+                None,
+                rtk_must_not_run,
+            )
+            .unwrap();
+            assert_eq!(response.arguments, request.arguments, "{command}");
+            assert_eq!(response.action, PreToolAction::Passthrough);
+            assert_eq!(response.output_optimization, OutputOptimization::None);
+            assert!(is_search_command(command), "{command}");
+        }
+        for command in [
+            "echo 'grep match src | rg x'",
+            "printf '%s' \"rg match src; grep x\"",
+            "rtk grep match src",
+            "timeout --bogus 30 rg match src",
+            "time -f rg echo match",
+            "find . -type f",
+            "head -40 source.py",
+        ] {
+            assert!(!is_search_command(command), "{command}");
+        }
     }
 
     #[test]
@@ -1724,7 +1782,7 @@ mod tests {
         }
         for command in [
             "echo 'head -40 source.py'",
-            "rg tail source.py",
+            "echo 'rg tail source.py'",
             "time echo head",
             "timeout 10 rtk read source.py --max-lines 40",
             "rtk head -40 source.py",
@@ -1778,9 +1836,9 @@ mod tests {
         for command in [
             "echo 'find . -name *.json'",
             "printf '%s' find",
-            "rg find README.md",
+            "echo 'rg find README.md'",
             "fd document",
-            "rg --files",
+            "echo 'rg --files'",
             "rtk find . -name '*.json'",
             "noglob echo find",
             "nocorrect printf '%s' 'find . -type f'",
@@ -1857,7 +1915,7 @@ mod tests {
             assert_eq!(response.arguments["command"], command);
         }
         for command in [
-            "timeout 30 rg find README.md",
+            "timeout 30 echo 'rg find README.md'",
             "time echo find",
             "nohup rtk find . -type f",
             "timeout 30 rtk find . -type f",
@@ -1936,7 +1994,7 @@ mod tests {
             "npm run lint",
             "cat build.log",
             "echo 'cargo test'",
-            "rg pytest README.md",
+            "echo 'rg pytest README.md'",
         ] {
             assert!(
                 !keeps_command_native(command),
@@ -1975,7 +2033,7 @@ mod tests {
         for command in [
             "cargo +nightly fmt",
             "env -i cat build.log",
-            "env -u RUSTC grep error log",
+            "env -u RUSTC echo 'grep error log'",
         ] {
             assert!(
                 !keeps_command_native(command),
@@ -2281,13 +2339,13 @@ mod tests {
     #[test]
     fn pre_tool_honors_rtk_outcomes_and_preserves_arguments() {
         let directory = tempdir().unwrap();
-        let request = bash_request("grep error log");
+        let request = bash_request("git status");
         let launcher = Path::new("/opt/tokenless/tokenless");
         for outcome in [
             rtk::RewriteOutcome::Passthrough,
             rtk::RewriteOutcome::Deny,
             rtk::RewriteOutcome::Allow(String::new()),
-            rtk::RewriteOutcome::Allow("grep error log".into()),
+            rtk::RewriteOutcome::Allow("git status".into()),
         ] {
             let response = pre_tool_with_rewriter(
                 &request,

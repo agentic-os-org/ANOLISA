@@ -53,22 +53,17 @@ class HookParity(unittest.TestCase):
     def test_schema_hook_matches_the_goldens(self):
         self.run_matrix("before_model", corpus.SCHEMA_HOOK, corpus.SCHEMA_AGENTS)
 
-    def test_qoder_payloads_outside_stdout_remain_json_text(self):
-        # These are contract fixtures, not shapes observed from native Qoder
-        # Bash. Qoder's object renderer would hide their results/stderr fields.
-        for name, field, expected in (
-            ("bash_array_truncation", "results", "entry-000"),
-            ("build_log_cargo_failure", "stderr", "error[E0308]"),
-        ):
+    def test_qoder_payloads_outside_stdout_remain_untouched(self):
+        # Short or empty stdout must not make Bash metadata or stderr the
+        # compression target, regardless of their size.
+        for name in ("bash_array_truncation", "build_log_cargo_failure"):
             with self.subTest(fixture=name):
                 source = Path(corpus.fixture_path("post_tool", name)).read_text()
                 proc = corpus.run_hook(
                     corpus.RESPONSE_HOOK, source, corpus.RESPONSE_AGENTS["qoder-cli"]
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
-                output = json.loads(proc.stdout)["hookSpecificOutput"]["updatedToolOutput"]
-                self.assertIsInstance(output, str)
-                self.assertIn(expected, str(json.loads(output)[field]))
+                self.assertEqual(json.loads(proc.stdout), {})
 
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")

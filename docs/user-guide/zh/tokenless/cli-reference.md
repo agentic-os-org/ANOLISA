@@ -159,7 +159,7 @@ Linux 和 macOS 上改写在一个子 `tokenless` 进程中进行，该进程自
 `pre_tool` 使用链接进 Tokenless 的 RTK 库改写命令，不会在 `PATH` 中查找独立的 `rtk`
 可执行文件。改写后的命令以绝对路径调用当前运行的 `tokenless`，形式为 `tokenless rtk`，
 因此始终使用同一版本的 RTK。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
-原生形式，使其输出只有一个 PostTool 所有者。包含已识别原生 `find`、`head` 或 `tail`
+原生形式，使其输出只有一个 PostTool 所有者。包含已识别原生 `find`、`head`、`tail`、`grep` 或 `rg`
 调用的整条命令也保持原生形式。保护覆盖直接调用，以及 RTK 的内置前缀：
 `env`、`command`、`exec`、`noglob`、`nocorrect`、
 `builtin`、`timeout`、`time`、`nice`、`nohup` 和 `uv run`，支持嵌套和 Shell 反斜杠换行续行。
@@ -171,6 +171,13 @@ Linux 和 macOS 上改写在一个子 `tokenless` 进程中进行，该进程自
 当已识别的调用出现在 Pipeline 或复合命令中时，整条命令跳过改写。这避免了 RTK 将
 `head` 改写为 `read --max-lines` 后进行结构截断，遗漏请求行范围内的函数体。
 显式 `rtk` 命令仍按显式调用处理。此 PreTool 规则不禁用适用的 PostTool 压缩，文件读取策略不变。
+已识别的 `grep`、`rg` 所有模式保持原生执行，PostTool 只使用搜索压缩器。关闭搜索压缩、
+格式不支持或无收益时保留原文，设置 `force_json` 也不改变此行为。
+
+此保护同样覆盖包含已识别搜索的复合命令的完整输出，包括 `grep -q needle Cargo.toml && cargo build`。
+由于缺少各子命令的输出边界，目前混合的构建/测试日志保持原样，结果可能比之前的日志压缩通路更大。
+Tokenless 不截断这些结果，仅宿主自身的输出限制生效。`git grep`、`xargs grep` 和自定义 Wrapper
+前缀不在这里描述的原生 grep/rg 识别范围。
 
 Agent-facing
 `retrieve` 在读取 Stash 前根据 `visible_markers` 授权
@@ -205,7 +212,7 @@ RTK 支持跨多行处理已支持的命令，并对 Pipeline 应用保守规则
 Shell 表达式都会被重写。`sudo` 命令保持原样透传，自动重写不会将 RTK 插入特权命令。
 
 使用 `tokenless rtk rewrite 'COMMAND'` 可以查看建议的重写结果，而不执行命令。
-Tokenless 按上文规则让已识别的构建/测试命令及原生 `find`、`head`、`tail` 调用（包括含此类调用的整条复合命令）
+Tokenless 按上文规则让已识别的构建/测试命令及原生 `find`、`head`、`tail`、`grep`、`rg` 调用（包括含此类调用的整条复合命令）
 跳过 RTK 改写。PostTool 可以共享有净收益的纯路径列表；混合输出和不支持的 `find` 格式保持原样。
 
 ### 输出恢复

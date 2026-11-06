@@ -60,6 +60,16 @@ const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
 
 /// Recognizes the inner executable without changing build/test wrapper policy.
 pub(super) fn owns_command(words: &[String]) -> bool {
+    inner_command(words)
+        .is_some_and(|command| matches!(command, "find" | "head" | "tail" | "grep" | "rg"))
+}
+
+/// Identifies native search executables through the same transparent wrappers.
+pub(super) fn is_search(words: &[String]) -> bool {
+    inner_command(words).is_some_and(|command| matches!(command, "grep" | "rg"))
+}
+
+fn inner_command(words: &[String]) -> Option<&str> {
     let mut index = 0;
     while let Some(word) = words.get(index) {
         if is_environment_assignment(word)
@@ -86,17 +96,13 @@ pub(super) fn owns_command(words: &[String]) -> bool {
             .iter()
             .find(|wrapper| wrapper.name == command_basename(word))
         {
-            let Some(inner) = wrapper_inner_index(wrapper, &words[index..]) else {
-                return false;
-            };
+            let inner = wrapper_inner_index(wrapper, &words[index..])?;
             index += inner;
         } else {
             break;
         }
     }
-    words
-        .get(index)
-        .is_some_and(|word| matches!(command_basename(word), "find" | "head" | "tail"))
+    words.get(index).map(|word| command_basename(word))
 }
 
 fn wrapper_inner_index(wrapper: &ProcessWrapper, words: &[String]) -> Option<usize> {

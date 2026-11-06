@@ -286,9 +286,11 @@ class RealCorePreToolTest(unittest.TestCase):
                 "TOKENLESS_STATS_ENABLED": "0",
                 "TOKENLESS_SLS_ENABLED": "0",
             }
+            payload = pre_tool_payload()
+            payload["tool_input"]["command"] = "git status"
             proc = subprocess.run(
                 [sys.executable, corpus.PRE_TOOL_HOOK],
-                input=json.dumps(pre_tool_payload()),
+                input=json.dumps(payload),
                 capture_output=True,
                 text=True,
                 env=env,
@@ -298,9 +300,17 @@ class RealCorePreToolTest(unittest.TestCase):
             output = json.loads(proc.stdout)["hookSpecificOutput"]
             command = output["tool_input"]["command"]
             launcher = os.path.realpath(corpus.DEBUG_TOKENLESS_BIN)
-            self.assertIn(f" {launcher} rtk grep error log", command)
+            self.assertIn(f" {launcher} rtk git status", command)
             self.assertIn("TOKENLESS_AGENT_ID=qoder-cli", command)
             self.assertEqual(output["updatedInput"]["timeout"], 30)
+            for command in ["grep error log", "env LANG=C timeout 30 rg --files"]:
+                payload["tool_input"]["command"] = command
+                proc = subprocess.run(
+                    [sys.executable, corpus.PRE_TOOL_HOOK], input=json.dumps(payload),
+                    capture_output=True, text=True, env=env, timeout=15,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(json.loads(proc.stdout), {})
 
 
 if __name__ == "__main__":

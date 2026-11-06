@@ -280,7 +280,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pre_tool_uses_core_rewrite_and_preserves_input(self) -> None:
         sdk = self.sdk()
-        original_arguments = {"command": "grep needle file.txt", "other": [1]}
+        original_arguments = {"command": "git status", "other": [1]}
         result = await sdk.pre_tool(
             PreToolRequest(
                 tool_name="shell",
@@ -295,10 +295,10 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.action, PreToolAction.REPLACE_ARGUMENTS)
         self.assertEqual(result.output_optimization, OutputOptimization.RTK)
-        self.assertEqual(original_arguments["command"], "grep needle file.txt")
+        self.assertEqual(original_arguments["command"], "git status")
         # The CLI names itself by its resolved path.
         launcher = os.path.realpath(sdk._rtk_launcher)
-        self.assertIn(f"{launcher} rtk grep", result.arguments["command"])
+        self.assertIn(f"{launcher} rtk git status", result.arguments["command"])
         self.assertIn("TOKENLESS_AGENT_ID=sdk-agent", result.arguments["command"])
         self.assertIn("TOKENLESS_SESSION_ID=sdk-session", result.arguments["command"])
         self.assertIn("TOKENLESS_TOOL_USE_ID=call-7", result.arguments["command"])
@@ -306,6 +306,17 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             f"TOKENLESS_DATA_DIR={self.temporary_directory.name}",
             result.arguments["command"],
         )
+
+    async def test_pre_tool_leaves_search_commands_for_post_tool(self) -> None:
+        sdk = self.sdk()
+        for command in ("grep needle file.txt", "rg 'foo|bar' src"):
+            with self.subTest(command=command):
+                request = self.pre_tool_request(command)
+                result = await sdk.pre_tool(request)
+                self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
+                self.assertEqual(result.output_optimization, OutputOptimization.NONE)
+                self.assertEqual(request.arguments, {"command": command, "other": [1]})
+                self.assertEqual(result.arguments, request.arguments)
 
     async def test_pre_tool_leaves_build_log_commands_for_post_tool(self) -> None:
         sdk = self.sdk()
