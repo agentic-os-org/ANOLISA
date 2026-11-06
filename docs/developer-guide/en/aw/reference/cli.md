@@ -59,3 +59,44 @@ Help and discovery run offline. `aw -V` reports the CLI crate version.
 ## Independent instance JSON
 
 `aw instance` uses the `aw-instance/v1` envelope, separating `result.state`, operation errors and preparation audit keys. See [independent instances](../deployment/independent-instances.md) for fields, confirmation deadlines and duplicate-request handling.
+
+## Public audit export
+
+`aw audit-export` reads one page from an existing same-user service state directory.
+The service may be stopped. Use its configured state path; do not create an empty
+replacement. The journal directory must be owned by the effective user with mode
+0700, its source descriptor and chain files with mode 0600. The request file is
+bounded to 16 KiB and must be regular. The CLI accepts no control operation.
+
+```bash
+AW_STATE=/absolute/private/state
+AW_QUERY="$HOME/aw-audit-query.json"
+cat > "$AW_QUERY" <<'JSON'
+{"api_version":"audit-export.aw/v1alpha1","operation":{"type":"enumerate","cursor":null,"limit":64}}
+JSON
+aw audit-export --state-dir "$AW_STATE" --request "$AW_QUERY"
+```
+
+A successful response has `error: null`, a durable `source_id`, and `result.keys`.
+Copy `result.next_cursor` into the next enumeration request until it is null.
+`result.changed` reports key-set changes while continuation still progresses.
+The cursor retains the first page's `through` ceiling; a new scan collects later
+and newly earlier keys. Retain per-chain checkpoints and bound the consumer loop.
+For each key, send `{"type":"read","chain_id":"KEY","cursor":null,"limit":64}`
+as `operation`, retaining the same `api_version` wrapper. Replace `KEY` with a
+returned key. Continue with that response's `result.cursor` in the next read.
+
+Read responses contain the ExecutionEvent, public AuditRecords, captured tip,
+`caught_up`, `terminal` and fixed limits. A page counts source positions, so it can
+have no public records and still advance. Only `caught_up && terminal` completes
+a chain; revisit open chains and periodically start a new inventory scan.
+Persist records and cursors atomically, deduplicate by producer and UID, and
+compare object digests on replay. Historical producer generations remain intact.
+The response never contains private journal records. See the
+[export contract](../../../../../src/aw/docs/design/en/runtime/audit-export.md)
+for schema names, bounds, corruption and missing-history handling.
+
+Protocol failures return `result: null` and a stable `error` code, with exit 1.
+Command syntax/request-file I/O failures use stderr. Cancellation has no write
+side effects. After the one-shot command exits there is no resource to stop.
+Remove `"$AW_QUERY"` when the request file is no longer needed.

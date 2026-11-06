@@ -70,6 +70,8 @@ enum Command {
     Update(Update),
     /// Query service and optional Provider views; may execute view commands
     Inspect(Inspect),
+    /// Read one public audit page without connecting to the control socket
+    AuditExport(AuditExport),
     /// Register, confirm, query or release an application-owned instance using stdin JSON
     Instance(Instance),
     /// Send one operation from stdin JSON to an existing service
@@ -367,5 +369,18 @@ struct Instance {
     connect: bool,
     /// Total input, connection and request budget
     #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..=60000))]
+    timeout_ms: u64,
+}
+
+#[derive(Args, Debug, PartialEq)]
+struct AuditExport {
+    /// Existing private service state directory; reads its retained journal
+    #[arg(long, value_name = "ABS_DIR")]
+    state_dir: String,
+    /// Bounded JSON request file; does not accept a control operation
+    #[arg(long, value_name = "ABS_FILE")]
+    request: String,
+    /// Cooperative read deadline in milliseconds
+    #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(1..=60000))]
     timeout_ms: u64,
 }

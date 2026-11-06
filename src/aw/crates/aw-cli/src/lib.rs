@@ -1,5 +1,6 @@
 //! Unified AW command presentation and orchestration over reusable framework libraries.
 
+mod audit_export;
 mod cli;
 mod command;
 mod output;

@@ -121,3 +121,7 @@ See [Contributing](CONTRIBUTING.md) for source builds, tests and CI entrypoints.
 `aw config add-native-source` records native source references without opening or
 rewriting their files. The shared loader API retains native configuration and
 reports admission separately from activation; see [configuration](../../docs/user-guide/en/aw/configuration.md#record-native-configuration-sources).
+
+Local audit consumers can use `aw audit-export` to read retained metadata after
+service shutdown. See [audit export](../../docs/user-guide/en/aw/cli-reference.md#aw-audit-export)
+for the owned state directory and bounded read interface.

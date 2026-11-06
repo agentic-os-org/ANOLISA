@@ -37,7 +37,7 @@ mappings are listed in the [sec-core configuration reference](../../../../../doc
 
 ## Evidence and observation
 
-[Public runtime/audit objects](runtime/public-objects.md)
+[Public runtime/audit objects](runtime/public-objects.md) · [Incremental audit reads](runtime/audit-export.md)
 
 The service captures public metadata independently of Sight and projects each
 verified Journal record using retained source identity and creation time.
