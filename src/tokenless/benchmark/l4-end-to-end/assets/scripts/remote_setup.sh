@@ -13,6 +13,21 @@
 #   L4_REMOTE_WORK remote workspace root  (default: /root/l4)
 #   L4_NODE_VERSION pinned Node release   (default: v24.20.0)
 #   L4_PY_VERSION pinned CPython for the swe-runner venv (default: 3.12.14)
+#   L4_OPENCLAW_VERSION pinned OpenClaw release (default: the one l4_env.sh names)
+#   L4_HEADROOM_CONSTRAINTS  pip constraints file ON the host for the headroom
+#                 venv, e.g. the `pip freeze --exclude-editable` of the environment
+#                 the lower layers measured headroom in (default: unconstrained)
+#
+# ISOLATION: everything this script installs lands under $L4_REMOTE_WORK -- Node
+# and its global npm prefix ($WORK/node), the Rust toolchains ($WORK/cargo,
+# $WORK/rustup), pip configuration, and a private HOME ($WORK/home) that holds
+# ~/.openclaw, ~/.local and ~/.tokenless for the benchmark only. The host's
+# /usr/local/bin, /opt/node, /root/.openclaw, /root/.cargo, /root/.pip and
+# /root/.bashrc are never written, so the harness can share a machine that runs
+# its own OpenClaw. System packages are verified, not installed: a missing
+# prerequisite fails the setup instead of changing the host. The resulting
+# environment is defined once, in l4_env.sh, and every script that runs on the
+# host sources it.
 #
 # Expects the source trees to be present under $L4_REMOTE_WORK already:
 #   tokenless/  headroom/  runner/  swe-runner/ (the prompt corpus clone)
@@ -116,45 +131,45 @@ step() { echo "[inner] === $1 ==="; }
 # mirror and every later install in that venv can use the cache normally.
 pip_bootstrap() { "$1/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel; }
 
-# openclaw's global bin lives in /opt/node/bin (step 5 installs Node there);
-# /root/.cargo/bin carries the Rust toolchain and cargo-installed binaries.
-export PATH=/usr/local/bin:/opt/node/bin:/root/.cargo/bin:$PATH
+# Private prefixes and HOME; see ISOLATION in the header. Every later step reads
+# these instead of the host locations it used to write.
+ENV_SH="$WORK/anolisa/src/tokenless/benchmark/l4-end-to-end/assets/scripts/l4_env.sh"
+[ -f "$ENV_SH" ] || fail "l4_env_missing (run remote_sync.sh first)"
+# shellcheck source=l4_env.sh
+. "$ENV_SH" "$WORK"
+NODE_DIR="$WORK/node"
+export npm_config_prefix="$NODE_DIR" npm_config_cache="$WORK/npm-cache" npm_config_userconfig="$WORK/npmrc"
+export PIP_CONFIG_FILE="$WORK/pip.conf"
+mkdir -p "$HOME" "$CARGO_HOME" "$RUSTUP_HOME"
 export CARGO_TERM_COLOR=never
 
-# --- 1. base OS packages ----------------------------------------------------
-# alinux4 preinstalls gcc, make, curl, ca-certificates, xz, python3-devel and
-# pkgconf-pkg-config; the rest are missing on a clean image. Named individually
-# because alinux4 has no build-essential metapackage, and `dnf install` of an
-# already-present package is a no-op, so listing all of them stays idempotent.
-# python3-venv does not exist here either -- venv ships inside python3-libs.
-#
-# patchelf is required by the headroom proxy build, not the base tooling: maturin
-# uses it to set the rpath on the compiled _core extension and, without it, quietly
-# leaves _core.abi3.so out of the package tree. The proxy then imports fine as a
-# CLI (pure Python) but fails at `import headroom._core`, so arms c and d could not
-# activate at all -- a failure that only surfaced in the dry run, eight steps later.
-step "dnf base packages"
-dnf -y install \
-    gcc gcc-c++ make pkgconf-pkg-config openssl-devel \
-    git rsync curl ca-certificates tar xz jq bc python3-devel patch patchelf \
-    > "$LOG/dnf_install.log" 2>&1 || fail dnf_install
+# --- 1. base OS prerequisites, verified only --------------------------------
+# A shared host is not ours to change, so nothing is installed system-wide: the
+# build tools must already be present, and patchelf -- which maturin needs to set
+# the rpath on headroom's compiled _core extension (without it the proxy imports
+# as pure Python and fails at `import headroom._core`) -- comes from PyPI into a
+# private tools venv instead of the distro.
+step "base prerequisites"
+for tool in gcc g++ make pkg-config git rsync curl tar xz patch python3; do
+    command -v "$tool" >/dev/null 2>&1 || fail "missing_prerequisite_$tool"
+done
+[ -f /usr/include/openssl/ssl.h ] || fail missing_prerequisite_openssl_devel
 python3 -m venv --help >/dev/null 2>&1 || fail python3_venv_missing
+if [ ! -x "$WORK/venv-tools/bin/patchelf" ]; then
+    rm -rf "$WORK/venv-tools"
+    python3 -m venv "$WORK/venv-tools" || fail venv_tools
+    "$WORK/venv-tools/bin/pip" install --no-cache-dir patchelf \
+        > "$LOG/patchelf_install.log" 2>&1 || fail patchelf_install
+fi
+"$WORK/venv-tools/bin/patchelf" --version > "$LOG/patchelf_version.txt" 2>&1 || fail patchelf_missing
 
 # --- 2. container runtime ---------------------------------------------------
 # swe-runner executes every instance inside its SWE-bench image, so docker is a
-# hard precondition, not an optional extra. The distro package (24.0.9) is used
-# rather than docker-ce: it is already in the alinux4 repos and needs no
-# third-party repo setup. enable --now covers the reboot case; a clean image has
-# the package absent AND the unit stopped, and only starting it would leave a
-# host that works today and fails after the next restart.
+# hard precondition. It is a host service, so it is required, not provisioned.
 step "docker"
-if ! docker info >/dev/null 2>&1; then
-    dnf -y install docker > "$LOG/dnf_docker.log" 2>&1 || fail dnf_docker
-    systemctl enable --now docker > "$LOG/docker_enable.log" 2>&1 || fail docker_enable
-fi
 docker info > "$LOG/docker_info.log" 2>&1 || fail docker_unusable
 
-# --- 3. package index configuration, persisted ------------------------------
+# --- 3. package index configuration, private ---------------------------------
 # Only pypi and crates.io are mirrored, and purely for transfer speed -- both
 # serve identical artefacts, so the component under test is unaffected.
 #
@@ -164,16 +179,12 @@ docker info > "$LOG/docker_info.log" 2>&1 || fail docker_unusable
 # forced the build onto an unpinned stable toolchain. Mirroring rustup would
 # change *which compiler* builds the comparison side; mirroring pypi does not.
 #
-# Persisted to .bashrc so interactive debugging shells resolve the same
-# toolchain and Node as the non-interactive run.
+# Written into $CARGO_HOME and $WORK/pip.conf, which only this workspace reads.
 step "package indexes"
-grep -q 'PATH=/usr/local/bin:/opt/node/bin' /root/.bashrc 2>/dev/null || \
-    echo 'export PATH=/usr/local/bin:/opt/node/bin:/root/.cargo/bin:$PATH' >> /root/.bashrc
-mkdir -p /root/.cargo /root/.pip
 printf '[source.crates-io]\nreplace-with = "aliyun"\n[source.aliyun]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' \
-    > /root/.cargo/config.toml
+    > "$CARGO_HOME/config.toml"
 printf '[global]\nindex-url = https://mirrors.aliyun.com/pypi/simple/\ntrusted-host = mirrors.aliyun.com\n' \
-    > /root/.pip/pip.conf
+    > "$PIP_CONFIG_FILE"
 
 # --- 4. Rust toolchain, including headroom's pinned version -----------------
 # Two toolchains are installed on purpose. tokenless builds with stable; the
@@ -182,49 +193,45 @@ printf '[global]\nindex-url = https://mirrors.aliyun.com/pypi/simple/\ntrusted-h
 # read from the file rather than hardcoded so a headroom bump does not silently
 # fall back to stable here.
 step "rust toolchain"
-if ! /root/.cargo/bin/rustc --version >/dev/null 2>&1; then
+if ! "$CARGO_HOME/bin/rustc" --version >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        -o /tmp/rustup-init > "$LOG/rustup_fetch.log" 2>&1 || fail rustup_fetch
-    chmod +x /tmp/rustup-init
-    /tmp/rustup-init -y --no-modify-path --default-toolchain stable \
+        -o "$WORK/rustup-init" > "$LOG/rustup_fetch.log" 2>&1 || fail rustup_fetch
+    chmod +x "$WORK/rustup-init"
+    "$WORK/rustup-init" -y --no-modify-path --default-toolchain stable \
         > "$LOG/rustup_init.log" 2>&1 || fail rustup_init
 fi
-/root/.cargo/bin/rustc --version || fail rustc_missing
+"$CARGO_HOME/bin/rustc" --version || fail rustc_missing
 
 HEADROOM_PIN=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
     "$WORK/headroom/rust-toolchain.toml" 2>/dev/null | head -1)
 [ -n "$HEADROOM_PIN" ] || fail headroom_pin_unreadable
 echo "[inner] headroom pins rust $HEADROOM_PIN"
-if ! /root/.cargo/bin/rustc "+$HEADROOM_PIN" --version >/dev/null 2>&1; then
+if ! "$CARGO_HOME/bin/rustc" "+$HEADROOM_PIN" --version >/dev/null 2>&1; then
     # The pin's components (rustfmt, clippy) come along because the toolchain
     # file names them; rustup reads it when the toolchain is installed by name.
-    /root/.cargo/bin/rustup toolchain install "$HEADROOM_PIN" \
+    "$CARGO_HOME/bin/rustup" toolchain install "$HEADROOM_PIN" \
         > "$LOG/rustup_pin.log" 2>&1 || fail rustup_pin_install
 fi
-/root/.cargo/bin/rustc "+$HEADROOM_PIN" --version > "$LOG/headroom_toolchain.txt" 2>&1 \
+"$CARGO_HOME/bin/rustc" "+$HEADROOM_PIN" --version > "$LOG/headroom_toolchain.txt" 2>&1 \
     || fail headroom_pin_missing
 
 # --- 5. Node that satisfies openclaw's engine range -------------------------
 # alinux4 has no nodejs package at a usable version, so Node is installed from
 # the official tarball regardless. The version is pinned rather than discovered:
 # a moving Node version would make results non-reproducible. openclaw requires
-# >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0.
+# >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0. It lives in $NODE_DIR and is
+# reached through PATH only, never through a /usr/local/bin symlink.
 step "node $NODE_VERSION"
-if [ "$(/usr/local/bin/node -v 2>/dev/null)" != "$NODE_VERSION" ]; then
+if [ "$("$NODE_DIR/bin/node" -v 2>/dev/null)" != "$NODE_VERSION" ]; then
     cd "$WORK" || fail cd_work
     curl -sSL --max-time 900 -o node.tar.xz \
         "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-x64.tar.xz" \
         > "$LOG/node_fetch.log" 2>&1 || fail node_fetch
     tar xJf node.tar.xz || fail node_untar
-    rm -rf /opt/node && mv "node-$NODE_VERSION-linux-x64" /opt/node
+    rm -rf "$NODE_DIR" && mv "node-$NODE_VERSION-linux-x64" "$NODE_DIR"
     rm -f node.tar.xz
-    # /usr/local/bin precedes /usr/bin, so these take precedence over anything
-    # the distro might later install.
-    ln -sf /opt/node/bin/node /usr/local/bin/node
-    ln -sf /opt/node/bin/npm /usr/local/bin/npm
-    ln -sf /opt/node/bin/npx /usr/local/bin/npx
 fi
-/usr/local/bin/node -v || fail node_missing
+"$NODE_DIR/bin/node" -v || fail node_missing
 
 # Generous retries and timeout rather than a registry substitution: the default
 # registry serves tarballs from these hosts at ~1.4 MB/s, and a mirror could lag
@@ -238,15 +245,27 @@ npm config set fetch-timeout 600000
 # tree-sitter-bash never build their native bits, so failures surface much later
 # as missing-plugin errors. The package list is explicit rather than a blanket
 # opt-out so a new transitive dependency cannot silently gain script execution.
-step "openclaw"
-if ! openclaw --version >/dev/null 2>&1; then
+#
+# The guard names the private binary and the release l4_env.sh pins: neither a
+# host-wide openclaw on PATH nor whatever npm currently tags latest may satisfy it.
+# A workspace config another release wrote is refused rather than migrated in
+# place; removing $HOME/.openclaw lets the pinned release provision it afresh.
+step "openclaw $L4_OPENCLAW_VERSION"
+openclaw_release() { awk '$1 == "OpenClaw" { print $2; exit }'; }
+if [ "$("$NODE_DIR/bin/openclaw" --version 2>/dev/null | openclaw_release)" != "$L4_OPENCLAW_VERSION" ]; then
     npm install -g \
         --allow-scripts=openclaw,@google/genai,koffi,tree-sitter-bash,protobufjs \
-        openclaw > "$LOG/openclaw_install.log" 2>&1 || fail openclaw_install
+        "openclaw@$L4_OPENCLAW_VERSION" > "$LOG/openclaw_install.log" 2>&1 || fail openclaw_install
 fi
-# Expose openclaw where the rest of the tooling looks for it.
-ln -sf /opt/node/bin/openclaw /usr/local/bin/openclaw
-openclaw --version || fail openclaw_missing
+"$NODE_DIR/bin/openclaw" --version > "$LOG/openclaw_version.txt" 2>&1 || fail openclaw_missing
+[ "$(openclaw_release < "$LOG/openclaw_version.txt")" = "$L4_OPENCLAW_VERSION" ] || fail openclaw_version
+[ "$(command -v openclaw)" = "$NODE_DIR/bin/openclaw" ] || fail openclaw_not_private
+touched=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("meta", {}).get("lastTouchedVersion", ""))' \
+    "$HOME/.openclaw/openclaw.json" 2>/dev/null || true)
+if [ -n "$touched" ] && [ "$touched" != "$L4_OPENCLAW_VERSION" ]; then
+    echo "[inner] $HOME/.openclaw/openclaw.json was written by OpenClaw $touched" >&2
+    fail openclaw_config_from_other_release
+fi
 
 # headroom's openclaw plugin keeps headroom-ai as a runtime npm dependency
 # rather than bundling it.
@@ -269,7 +288,7 @@ npm ls -g headroom-ai >/dev/null 2>&1 || \
 # whichever just applies them.
 step "tokenless"
 cd "$WORK/tokenless" || fail cd_tokenless
-if [ ! -x /root/.cargo/bin/just ]; then
+if [ ! -x "$CARGO_HOME/bin/just" ]; then
     cargo install just > "$LOG/install_just.log" 2>&1 || fail install_just
 fi
 just setup-rtk > "$LOG/setup_rtk.log" 2>&1 || {
@@ -302,18 +321,38 @@ sha256sum target/release/tokenless > "$LOG/tokenless_binary.sha256" \
 # through `tail`, which buffered everything away, so a 27-minute hang looked
 # like silence instead of showing where it blocked.
 step "headroom venv"
+# headroom pins its own source revision but only ranges for its dependencies, so
+# an unconstrained install resolves whatever is newest that day -- and with
+# litellm's release cadence the resolver can backtrack for a long time. A
+# constraints file reproduces a known environment instead; the resolved set is
+# recorded either way.
+HR_CONSTRAINTS=()
+if [ -n "${L4_HEADROOM_CONSTRAINTS:-}" ]; then
+    [ -f "$L4_HEADROOM_CONSTRAINTS" ] || fail headroom_constraints_missing
+    cp "$L4_HEADROOM_CONSTRAINTS" "$LOG/headroom_constraints.txt" || fail headroom_constraints_copy
+    HR_CONSTRAINTS=(-c "$LOG/headroom_constraints.txt")
+fi
+# 配置身份包括源码 revision 与约束内容；已有环境不能仅凭 import 成功复用。
+HR_REFERENCE="$(git -C "$WORK/headroom" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [ "${#HR_CONSTRAINTS[@]}" -gt 0 ]; then
+    constraints_digest=$(sha256sum "$LOG/headroom_constraints.txt") || fail headroom_constraints_digest
+    HR_REFERENCE="$HR_REFERENCE ${constraints_digest%% *}"
+else
+    HR_REFERENCE="$HR_REFERENCE unconstrained"
+fi
+HR_PREVIOUS=$(cat "$WORK/venv-headroom/.l4-reference" 2>/dev/null || true)
 # Guard on the native extension, not just `import headroom`. The pure-Python
 # package imports even when maturin failed to place _core.abi3.so, so guarding on
 # `import headroom` let a venv missing the proxy extension pass and skip the
 # rebuild -- exactly how the missing-patchelf breakage survived into the dry run.
-if ! "$WORK/venv-headroom/bin/python" -c "import headroom._core" >/dev/null 2>&1; then
+if [[ "$HR_REFERENCE" == unknown\ * ]] || [ "$HR_PREVIOUS" != "$HR_REFERENCE" ] || ! "$WORK/venv-headroom/bin/python" -c "import headroom._core" >/dev/null 2>&1; then
     rm -rf "$WORK/venv-headroom"
     python3 -m venv "$WORK/venv-headroom" || fail venv_headroom
     pip_bootstrap "$WORK/venv-headroom" \
         > "$LOG/headroom_pip_base.log" 2>&1 || fail headroom_pip_base
     PIP_PROGRESS_BAR=off \
-        "$WORK/venv-headroom/bin/pip" install -v -e "$WORK/headroom[proxy]" \
-        > "$LOG/headroom_pip.log" 2>&1 || fail headroom_pip
+        "$WORK/venv-headroom/bin/pip" install -v ${HR_CONSTRAINTS[@]+"${HR_CONSTRAINTS[@]}"} \
+        -e "$WORK/headroom[proxy]" > "$LOG/headroom_pip.log" 2>&1 || fail headroom_pip
 fi
 echo "[setup] headroom built with: $(cat "$LOG/headroom_toolchain.txt")"
 
@@ -326,9 +365,11 @@ echo "[setup] headroom built with: $(cat "$LOG/headroom_toolchain.txt")"
 # change the component under test.
 if ! "$WORK/venv-headroom/bin/python" -c \
         "from tree_sitter_language_pack import get_parser; get_parser('python')" >/dev/null 2>&1; then
-    "$WORK/venv-headroom/bin/pip" install "tree-sitter-language-pack==0.13.0" \
+    "$WORK/venv-headroom/bin/pip" install ${HR_CONSTRAINTS[@]+"${HR_CONSTRAINTS[@]}"} "tree-sitter-language-pack==0.13.0" \
         > "$LOG/tree_sitter.log" 2>&1 || fail tree_sitter
 fi
+"$WORK/venv-headroom/bin/pip" freeze > "$LOG/headroom_freeze.txt" 2>&1 || fail headroom_freeze
+printf '%s\n' "$HR_REFERENCE" > "$WORK/venv-headroom/.l4-reference" || fail headroom_reference
 
 # --- 9. swe-runner venv -----------------------------------------------------
 # The interpreter has to be provisioned first. swe-runner declares
@@ -423,11 +464,13 @@ done
 
 # --- 10. tokenless openclaw extension ----------------------------------------
 # swe-runner's sandbox probes these host locations:
-#   binaries:  /usr/share/tokenless/bin, ~/.local/bin,
+#   binaries:  PATH, /usr/share/tokenless/bin, ~/.local/bin,
 #              ~/.openclaw/extensions/tokenless/bin
 #   extension: ~/.openclaw/extensions/tokenless
-# The Makefile's default INSTALL_PROFILE=user targets $HOME/.local, landing
-# binaries in ~/.local/bin, which is already on that probe list.
+# INSTALL_PROFILE=user is spelled out because this runs as root, and the
+# component's newer delivery entry point defaults root to the system profile
+# (/usr/local); the user profile targets $HOME/.local, i.e. the private
+# $WORK/home/.local/bin that l4_env.sh puts first on PATH.
 #
 # The umbrella `build` / `install` targets are skipped on purpose: `build` would
 # rebuild both crates with a plain `cargo build --release`, discarding the
@@ -444,8 +487,10 @@ cd "$WORK/tokenless" || fail cd_tokenless2
 # anchored exclude list in remote_sync.sh. The old file-exists guard is exactly
 # what let a stale plugin be deployed and measured as the new one.
 make build-openclaw-plugin > "$LOG/plugin_build.log" 2>&1 || fail plugin_build
-make install-binaries install-helpers install-adapter-resources \
+make INSTALL_PROFILE=user install-binaries install-helpers install-adapter-resources \
     > "$LOG/plugin_install.log" 2>&1 || fail plugin_install
+[ "$(command -v tokenless)" = "$HOME/.local/bin/tokenless" ] || fail tokenless_not_private
+[ -f "$TOKENLESS_TOOL_READY_SPEC" ] || fail tokenless_spec_missing
 # Record the exact bytes deployed so the report can tie numbers to a bundle. No
 # 2>&1 || true: a failed sha256sum must not leave its error text in the file for
 # provenance to mistake for a digest -- fail loudly instead.
@@ -456,12 +501,16 @@ sha256sum adapters/tokenless/openclaw/dist/index.js > "$LOG/tokenless_dist.sha25
 # the target before the deploy step on a host where openclaw has never run.
 # Creating the profile dir and calling install.sh directly is equivalent —
 # install.sh shells out to `openclaw plugins install <path> --force`.
-mkdir -p /root/.openclaw/extensions
-SHARE=/root/.local/share/anolisa/adapters/tokenless
+mkdir -p "$HOME/.openclaw/extensions"
+SHARE="$L4_TOKENLESS_SHARE"
 # Deploy unconditionally: install.sh passes --force, so this replaces an older
 # deployed bundle. The old "skip if the extension dir exists" guard meant a
-# rerun never picked up freshly built source.
+# rerun never picked up freshly built source. OPENCLAW_BIN is passed explicitly
+# because install.sh puts /usr/local/bin ahead of PATH: on a host with its own
+# openclaw there, that copy would register the plugin and rewrite the workspace
+# config in its own schema version.
 ANOLISA_TARGET=openclaw ANOLISA_COMPONENT=tokenless ANOLISA_ADAPTER_DIR="$SHARE" \
+    OPENCLAW_BIN="$NODE_DIR/bin/openclaw" \
     bash "$SHARE/openclaw/scripts/install.sh" \
     > "$LOG/tokenless_deploy.log" 2>&1 || fail tokenless_deploy
 
@@ -488,11 +537,12 @@ openclaw plugins install "$PWD/dist" --force --accept-capabilities \
 
 # --- 12. arm isolation: both plugins installed, neither globally enabled ----
 # headroom claims the exclusive "contextEngine" slot, so the arms must toggle
-# plugins per run. swe-runner copies ~/.openclaw/openclaw.json into each
-# per-instance profile and only symlinks an extension into <profile>/extensions
-# when the matching flag is set — which means a plugin left enabled *globally*
-# would leak into the baseline arm and make every delta meaningless. Disabling
-# both here makes the per-profile symlink the only activation path.
+# plugins per run. swe-runner copies ~/.openclaw/openclaw.json (the private
+# $WORK/home one) into each per-instance profile and only symlinks an extension
+# into <profile>/extensions when the matching flag is set -- which means a plugin
+# left enabled in that config would leak into the baseline arm and make every
+# delta meaningless. Disabling both here makes the per-profile symlink the only
+# activation path.
 step "arm isolation"
 openclaw plugins disable headroom  > "$LOG/disable_headroom.log"  2>&1 || true
 openclaw plugins disable tokenless > "$LOG/disable_tokenless.log" 2>&1 || true
@@ -508,13 +558,18 @@ INNER
 # and losing that race means reading the *previous* run's verdict, reporting a
 # failure that has already been fixed, and exiting while the real setup carries
 # on in the background. Deleting it here leaves no stale verdict to misread.
+# Only the nohup'd command is backgrounded, inside the braces, with its stdin
+# detached: a trailing `&` would background the whole `&&` list in a subshell
+# that keeps this ssh session's descriptors open, holding the launch call
+# for the full length of the setup instead of returning to the poll below.
 echo "[setup] launching remote setup under nohup"
 remote_ssh "rm -f $L4_REMOTE_WORK/logs/setup.status && \
     chmod +x $L4_REMOTE_WORK/remote_setup_inner.sh && \
-    L4_REMOTE_WORK=$L4_REMOTE_WORK L4_NODE_VERSION=$L4_NODE_VERSION \
-    L4_PY_VERSION=$L4_PY_VERSION \
-    nohup bash $L4_REMOTE_WORK/remote_setup_inner.sh \
-    > $L4_REMOTE_WORK/logs/setup.log 2>&1 &" || true
+    { L4_REMOTE_WORK=$L4_REMOTE_WORK L4_NODE_VERSION=$L4_NODE_VERSION \
+      L4_PY_VERSION=$L4_PY_VERSION L4_OPENCLAW_VERSION=${L4_OPENCLAW_VERSION:-} \
+      L4_HEADROOM_CONSTRAINTS=${L4_HEADROOM_CONSTRAINTS:-} \
+      nohup bash $L4_REMOTE_WORK/remote_setup_inner.sh \
+      > $L4_REMOTE_WORK/logs/setup.log 2>&1 < /dev/null & }" || true
 
 # --- 3. Poll the status file with short ssh calls ----------------------------
 # Each poll is its own short-lived ssh call, so no single command approaches the

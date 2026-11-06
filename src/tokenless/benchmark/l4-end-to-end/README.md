@@ -58,11 +58,13 @@ l4-end-to-end/
 ```
 
 `assets/scripts/` holds, in run order: `remote_sync.sh`, `remote_setup.sh`,
-`remote_verify.sh`, `remote_run.sh` (the on-host sweep), `remote_fleet.sh` (the
-multi-host driver), `run_repeats.sh`, `clean_between_repeats.sh`,
-`evaluate_all.sh`, and the analysis scripts `analyze_runs.py`,
-`analyze_solve_rate.py`, `analyze_reproducibility.py`, and
-`audit_prompt_disclosure.py`.
+`remote_verify.sh`, `remote_run.sh` (the on-host sweep), `run_pilot.sh` (the
+sweep under a spending cap), `remote_fleet.sh` (the multi-host driver),
+`run_repeats.sh`, `clean_between_repeats.sh`, `evaluate_all.sh`, and the analysis
+scripts `analyze_runs.py`, `analyze_solve_rate.py`, `analyze_reproducibility.py`,
+and `audit_prompt_disclosure.py`. `l4_env.sh` is the private environment every
+on-host script sources, and `extract_tool_results.py` collects each arm's
+pre/post-compression tool results.
 
 ## Running
 
@@ -72,7 +74,8 @@ remote host. Credentials come from the environment and are never committed.
 ```bash
 export L4_SSH_HOST=<host>              # remote benchmark box
 # Existing default SSH identity is used; optionally set L4_SSH_KEY explicitly.
-export HEADROOM_SRC=~/git_repo/headroom  # local comparison-side checkout
+export HEADROOM_SRC=~/git_repo/headroom  # local comparison-side checkout, or:
+# export HEADROOM_REMOTE_CLONE=<checkout on the host> HEADROOM_REV=<commit>
 
 ./assets/scripts/remote_sync.sh    # 1. ship sources (+ unit suite once a venv exists)
 ./assets/scripts/remote_setup.sh   # 2. provision (30-60 min on a cold host)
@@ -80,11 +83,104 @@ export HEADROOM_SRC=~/git_repo/headroom  # local comparison-side checkout
 ./assets/scripts/remote_verify.sh  # 4. pre-flight; must exit 0 before any billed run
 ```
 
-`remote_setup.sh` is idempotent and safe to re-run: every step is guarded by a
-check for its own output, so a resumed run skips what already succeeded.
+After preflight, continue on the benchmark host, with the provider key already
+in its process environment. The following commands are run from the same
+workspace; do not put the key value in shell history or script files:
+
+```bash
+export L4_REMOTE_WORK=/root/l4
+SCRIPTS=$L4_REMOTE_WORK/anolisa/src/tokenless/benchmark/l4-end-to-end/assets/scripts
+L4_ARMS=a,b,c L4_DRY_RUN=1 bash "$SCRIPTS/remote_run.sh"
+# Billed step: run only after pilot budget approval.
+L4_ARMS=a,b,c L4_COST_CAP=300 bash "$SCRIPTS/run_pilot.sh"
+# After the pilot exits, score its patches; this step makes no model calls.
+L4_EVAL_REPEATS=1 L4_EVAL_ARMS="a b c" bash "$SCRIPTS/evaluate_all.sh"
+```
+
+Keep the pilot terminal connected, or launch the pilot itself with `setsid nohup`
+and retain its PID for cancellation. TERM/INT and normal exit reap the detached
+sweep process group; exit 2 means unreliable metering and exit 3 means the cap
+stopped it. These are diagnostic outcomes, not successful full runs. Do not
+start an uncapped full campaign merely because a pilot started or completed.
+
+Back in this directory on the operator's machine, collect before analysing:
+
+```bash
+L4_HOSTS="$L4_SSH_HOST" ./assets/scripts/remote_fleet.sh collect
+python3 assets/scripts/analyze_solve_rate.py --evals runs --runs runs
+python3 assets/scripts/analyze_runs.py --runs runs --repeat 1 --configs-dir assets/configs
+```
+
+For a fleet, set `L4_HOSTS` in shard order and evaluate on each host before
+collection. Inspect every exit code, the solve report's `evaluation_complete`,
+and the economics report's validity/provenance gates before citing results.
+
+`remote_setup.sh` is safe to re-run: output checks resume completed steps, but
+Tokenless is rebuilt incrementally and a changed Headroom revision or constraints
+fingerprint recreates its venv. The resolved dependency freeze is recorded.
 `remote_verify.sh` is the gate that must pass before a run is worth paying for —
 each of its checks guards a failure mode that would otherwise produce plausible
 but meaningless numbers rather than an error.
+
+**The host may be shared.** Everything is installed under `$L4_REMOTE_WORK`
+(default `/root/l4`): Node and openclaw, the Rust toolchains, the venvs, and a
+private `HOME` holding the benchmark's `~/.openclaw`, `~/.local` and
+`~/.tokenless`. System packages are verified, never installed, and no file under
+the host user's home, `/usr/local` or `/opt` is written. `l4_env.sh` defines that
+environment once. Two parts of it are not obvious: the inherited `PATH` is
+replaced, because swe-runner and the tokenless plugin both resolve binaries from
+`PATH` first and a host user's `~/.local/bin` may hold another tokenless; and
+tokenless resolves its default state, tool-ready spec and env-fix script from the
+passwd home rather than `$HOME`, so each is redirected explicitly
+(`TOKENLESS_DATA_DIR`, `TOKENLESS_TOOL_READY_SPEC`, `TOKENLESS_ENV_FIX_SCRIPT`)
+and the three `config.json` toggles are pinned through their environment
+overrides. `remote_verify.sh` check 0 proves every lookup lands in the workspace.
+The container sweep in `clean_between_repeats.sh` matches every OpenClaw sandbox
+on the host, so it runs only with `L4_CLEAN_CONTAINERS=1`. If containers remain
+without this opt-in, repeat cleanup refuses to proceed; inspection or removal
+failure is not reported as a clean testbed. Each cleanup records the observed
+container presence and opt-in in `logs/cleanup.provenance`, with repeat/phase
+and started/completed outcomes. Repeats require completed pre- and post-clean
+records for that repeat; absent or partial records set `cleanup_incomplete`.
+Log collection failures return non-zero rather than silently losing provenance.
+The preflight verifies
+both the deployed Tokenless executable and the plugin bundle against their
+freshly built counterparts.
+
+**Pilot under a cap.** `run_pilot.sh` runs one repeat (default arms A, B, C on
+the first instance of each shard; E and F duplicate C, and D needs a canary
+rollout) and stops the sweep once the spend reaches
+`L4_COST_CAP` minus a margin. Spend is read from the live transcript stores and
+priced as an upper bound (cached input at the full input price); the ledger in
+`out/repeat-1/pilot-cost.json` also carries a discounted view at the published
+cached price and a full-scale estimate. An unreadable existing store or a known
+per-turn/aggregate mismatch stops the sweep with `stop_reason=metering_failure`
+and exit 2; a cap stop is separately recorded and exits 3. Sweep failures retain
+a non-zero exit status. Required input/output/cache-read usage fields must be
+non-negative integers; missing or null fields are not fabricated zeroes.
+Missing data is not a zero-cost observation.
+
+**Readiness is not compression.** `L4_DRY_RUN=1` checks local proxy endpoints and
+wiring without sending a completion or warming a model. Only the subsequent
+instance run proves actual compression; its first provider call remains in the
+instance's billed usage. All paired arms default to `L4_WORKERS=1`: shared proxy
+counters can prove per-instance intervention only for serial runs, and a sweep
+containing C–F rejects a different worker count.
+
+**Tool-result capture.** With `L4_CAPTURE_TOOL_RESULTS=1` (the default) every arm
+writes `tool-results.json`: arm B from tokenless' stats store, arms C–F from the
+proxy's message log, for which the proxies run with `--log-messages`. The flag is
+identical for C–F; it only enlarges the line each proxy already logs per request,
+a cost A and B do not carry, so per-request latency is not compared across that
+boundary. Each row is one changed tool result — `{instance, arm, call_id,
+tool_name, original, compressed}` — the input of the LLM semantic evaluation.
+Tokenless capture includes both `compress-response` and `compress-toon`. When
+recovery payloads cannot be exported, `retrieval` is null and
+`recovery_observation` is `unobservable`, not an observed empty recovery store.
+Tokenless retrieval-event rows, where available, are recorded separately as
+`recovery_events`; they are not substitutes for the original payload. Headroom's
+recovery-tool count reads the current session's SQLite transcript when JSONL is
+absent; missing transcript sources yield null rather than zero.
 
 ## Arms and their configuration
 
@@ -175,6 +271,21 @@ headroom also declares `contracts.tools: ["headroom_retrieve"]`, so arms C–F
 expose one tool that A and B do not. That is a behavioural difference beyond
 compression and belongs in the limitations section alongside the toolchain
 deviation.
+
+**What arm B exercises under the pinned OpenClaw.** tokenless rewrites a command
+only when the host hands its PreTool hook a stable tool-call id, and keeps the
+command unchanged otherwise. In sandboxed runs on OpenClaw 2026.8.2 no rewrite
+has fired, although replaying the same commands through `tokenless compress`
+rewrites about one in five, and the plugin rewrites them as soon as it is given
+an id; the host evidently supplies none on this path. `tokenless_retrieve` does
+not reach the agent's tool list either. Arm B therefore measures PostTool
+compression of tool results alone, which on SWE-bench Lite's short shell outputs
+mostly ends in `no_savings` or a pass-through. A strong activation record proves
+the hooks ran, not that the model saw anything different, so the report counts
+changed results separately. A release that does supply the id adds a
+requirement: rewritten commands name the host's tokenless executable and data
+directory by absolute path, and both must be mounted into the sandbox before
+such a command can run there.
 
 **Memory is on by default, and it is the one trap that corrupts everything
 downstream.** `plugins.slots.memory` defaults to `memory-core`, and OpenClaw
@@ -270,15 +381,16 @@ script header records that narrower current boundary.
 
 | Fact | Consequence in `remote_setup.sh` |
 |---|---|
-| Target OS is Alibaba Cloud Linux 4 (dnf/rpm), not Debian/apt | package names and the installer are dnf's, verified against a live host; `nodejs` is not packaged at a usable version |
+| Target OS is Alibaba Cloud Linux 4 (dnf/rpm), not Debian/apt | the build prerequisites (gcc, make, git, rsync, openssl headers, python3 venv) are checked and a missing one fails the setup; nothing is installed through dnf, and `patchelf` comes from PyPI into a private tools venv |
 | `nodejs.org`, `static.rust-lang.org`, and `registry.npmjs.org` answer directly; `huggingface.co` remains blocked | Node/Rust/npm fetches go direct; datasets and the comparison-side tokenizer use `${HF_ENDPOINT:-https://hf-mirror.com}`. pypi and crates.io stay mirrored purely for transfer speed |
-| dnf ships no Node in openclaw's required range | the pinned `L4_NODE_VERSION` tarball is fetched from `nodejs.org`, unpacked to `/opt/node`, and symlinked into `/usr/local/bin` |
+| dnf ships no Node in openclaw's required range | the pinned `L4_NODE_VERSION` tarball is fetched from `nodejs.org` and unpacked to `$L4_REMOTE_WORK/node`, reached through `PATH` only |
 | `npm install -g openclaw` succeeds while skipping install scripts | bundled plugins are never materialised and `koffi` / `tree-sitter-bash` never build native bits; the install passes an explicit `--allow-scripts` list |
+| npm's latest OpenClaw moves under the runner: 2026.11.1 rejects the `agents.list` profiles swe-runner writes, which 2026.8.2 accepts with a deprecation warning | the release is pinned in `l4_env.sh` (`L4_OPENCLAW_VERSION`, default `2026.8.2`, the release the runner's transcript reader was built against); setup installs exactly it and refuses a workspace config another release wrote, and `remote_verify.sh` checks the release and that a runner-shaped profile loads |
 | `registry.npmjs.org` can time out mid-tarball under load | npm is given generous retries and a raised timeout rather than a registry substitution |
 | tokenless links RTK as a library from `third_party/rtk`, a gitignored checkout that `just setup-rtk` clones and patches | `just setup-rtk` runs before the one `cargo build`, against the pinned tag and tracked patches, so the embedded RTK is the pinned one; its revision is recorded in `logs/rtk_commit.txt` |
 | tokenless' `detect.sh` exits 1 when `~/.openclaw` does not exist | the profile dir is created and `install.sh` is invoked directly, which is equivalent |
 | `tree-sitter-language-pack` 1.16.x ships a 2.4 MB wheel and downloads grammars at first use | pinned to `0.13.0` (~20 MB, grammars built in) so `--code-aware` parses offline instead of failing closed |
-| pip/cargo mirror and toolchain settings must persist across steps and shells | written to `/root/.pip/pip.conf`, `/root/.cargo/config.toml`, and `/root/.bashrc`; no `/etc/environment` is written |
+| pip/cargo mirror and toolchain settings must persist across steps and shells | written to `$L4_REMOTE_WORK/pip.conf` and `$L4_REMOTE_WORK/cargo/config.toml`, which only the workspace's environment reads; no shell rc file and no `/etc/environment` is written |
 
 ### Upstream URL composition
 
@@ -347,6 +459,22 @@ proxy's own counters, and a run without it is void rather than a data point.
 
 ## Offline regression checks
 
+The component target `make test-benchmark-l4 L4_TEST_PYTHON=<venv-python>` runs the
+L4 offline pytest suite, the shared SQLite billing regressions, and checks every
+L4 shell script with `bash -n`. The
+Tokenless CI job invokes it in a private Python 3.12 environment with pytest,
+pydantic and tiktoken; it makes no Docker or model calls. Required billing-module
+imports fail the tests instead of skipping them when dependencies are missing.
+
+`remote_fleet.sh collect` retrieves `out/`, `logs/` and the complete `eval/` tree,
+including `.eval-complete`. `analyze_solve_rate.py --evals <runs-root> --runs
+<runs-root>` can read this collected host layout and validate the current
+predictions. Report design fields are read from the matching arm configuration
+snapshot, not a cached model/cost constant; use `analyze_runs.py --configs-dir
+<original-configs>` for historical runs. Workers, timeout and pull registry are
+recorded in the sweep summary; missing historical runtime values remain unknown.
+
+
 Run `python -m pytest src/tokenless/benchmark/l4-end-to-end/tests -q` from the
 repository root. The checks use synthetic run trees and stub build/evaluation
 commands; they do not connect to a host, invoke Docker or call a model.
@@ -362,7 +490,18 @@ Evaluation completion is bound to the predictions SHA-256. Changed predictions
 are scored under a distinct run id; pending or failed attempts cannot reuse a
 prior completion marker. Solve-rate collection selects only the matching report
 for fingerprinted cells, without changing the official FAIL_TO_PASS/PASS_TO_PASS
-criterion. Legacy unfingerprinted reports remain readable.
+criterion. The collector also compares the marker with the current `preds.json`;
+use `--runs <collected-run-root>` when runs and evaluations were collected into
+separate directories. Unbound historical reports require explicit
+`--allow-legacy` and are labeled `legacy_unverified`; without a selected-task
+denominator they can be inspected but cannot yield a solve rate. The denominator
+comes from `selection.json` or run metadata, not just submitted patches, so
+preparation failures, timeouts and patch-extraction failures remain unresolved.
+A completed attempt with no predictions contributes zero resolved tasks; an
+unfinished attempt or patches lacking a current evaluation remain `unscored`
+and suppress the pooled rate. Every retry archives the old run tree before
+creating new predictions, results and profiles. A newly started but unfinished
+sweep invalidates its prior clean verdict, report and scoring marker.
 
 ## Inputs this repository does not contain
 

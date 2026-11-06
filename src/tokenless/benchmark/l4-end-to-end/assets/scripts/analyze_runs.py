@@ -796,7 +796,14 @@ DESIGN = {
 def shared_configuration(config_dir):
     """从本次指定的配置快照读取共享字段，拒绝配置之间的分歧。"""
     values = []
-    for path in sorted(glob.glob(f"{config_dir}/arm-*.json")):
+    paths = sorted(glob.glob(f"{config_dir}/arm-*.json"))
+    required = {DESIGN["arm_definitions"][arm]["config"] for arm in ARMS}
+    missing = required - {os.path.basename(path) for path in paths}
+    if missing:
+        raise SystemExit(
+            f"configuration snapshot is missing executed arms: {sorted(missing)}"
+        )
+    for path in paths:
         with open(path, encoding="utf-8") as config_file:
             config = json.load(config_file)
         primary = config["agents"]["defaults"]["model"]["primary"]
@@ -810,7 +817,7 @@ def shared_configuration(config_dir):
                 "api": provider["api"],
                 "context_window": model.get("contextWindow"),
                 "max_tokens": model.get("maxTokens"),
-                "context_window_authored": True,
+                "context_window_authored": model.get("contextWindow") is not None,
                 "reasoning": model.get("reasoning"),
                 "provider_timeout_seconds": provider.get("timeoutSeconds"),
                 "plugins_slots_memory": config.get("plugins", {})
@@ -940,7 +947,19 @@ def provenance(runs, hosts_map, aliases):
                 cleanup_by_host[host] = cleanup_file.read().splitlines()
         else:
             cleanup_by_host[host] = None
+    cleanup_incomplete = False
+    if REPEAT > 1:
+        for lines in cleanup_by_host.values():
+            for phase in ("pre", "post"):
+                matching = [
+                    line
+                    for line in (lines or [])
+                    if f"repeat={REPEAT} phase={phase} " in line
+                ]
+                if not matching or "outcome=completed" not in matching[-1]:
+                    cleanup_incomplete = True
     prov = {
+        "cleanup_incomplete": cleanup_incomplete,
         "cleanup_by_host": cleanup_by_host,
         "anolisa_commit": anolisa_commit,
         "tokenless_plugin": tokenless_plugin,
@@ -957,6 +976,7 @@ def provenance(runs, hosts_map, aliases):
             tokenless_hash_complete,
             reference_hash_complete,
             alias_complete,
+            not cleanup_incomplete,
         )
     )
     return prov

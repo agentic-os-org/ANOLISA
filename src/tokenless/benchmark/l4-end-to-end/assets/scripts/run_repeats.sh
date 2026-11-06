@@ -23,11 +23,11 @@ export L4_ALLOW_GREEDY_REPEAT=1
 REPEATS=("$@")
 [ "${#REPEATS[@]}" -eq 0 ] && REPEATS=(2 3 4 5)
 
-echo "RUN_REPEATS start $(date -u +%FT%TZ) repeats=${REPEATS[*]} host=$(hostname)"
+echo "RUN_REPEATS start $(date -u +%FT%TZ) repeats=${REPEATS[*]} host=$(hostname) cleanup_enabled=${L4_CLEAN_CONTAINERS:-0}"
 fails=0
 for N in "${REPEATS[@]}"; do
     echo "===== $(date -u +%FT%TZ) REPEAT $N: clean ====="
-    if ! bash "$HERE/clean_between_repeats.sh"; then
+    if ! L4_REPEAT="$N" L4_CLEAN_PHASE=pre bash "$HERE/clean_between_repeats.sh"; then
         echo "RUN_REPEATS pre-clean failed; no billed run will start" >&2
         exit 1
     fi
@@ -36,11 +36,9 @@ for N in "${REPEATS[@]}"; do
     rc=$?
     [ "$rc" -eq 0 ] || fails=$((fails + 1))
     echo "===== $(date -u +%FT%TZ) REPEAT $N: end rc=$rc ====="
-    # Clear immediately after every repeat, including the last one. The next
-    # repeat also pre-cleans defensively, but post-cleaning guarantees no live SWE
-    # testbed or OpenClaw agent state survives the campaign at all.
+    # 每轮完成后也清理；共享主机未授权容器移除时拒绝继续，不宣称已清理。
     echo "===== $(date -u +%FT%TZ) REPEAT $N: post-clean ====="
-    bash "$HERE/clean_between_repeats.sh" || exit 1
+    L4_REPEAT="$N" L4_CLEAN_PHASE=post bash "$HERE/clean_between_repeats.sh" || exit 1
 done
 echo "RUN_REPEATS done $(date -u +%FT%TZ) failed_repeats=$fails"
 [ "$fails" -eq 0 ] || exit 1

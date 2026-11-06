@@ -398,7 +398,8 @@ phase_collect() {
         fi
         ${SSH_PW[@]+"${SSH_PW[@]}"} rsync -az --no-owner --no-group \
             -e "ssh ${SSH_OPTS[*]}" \
-            "$L4_SSH_USER@$host:$L4_REMOTE_WORK/logs/" "$dest/logs/" || true
+            "$L4_SSH_USER@$host:$L4_REMOTE_WORK/logs/" "$dest/logs/" \
+            || { say "log collection FAILED on $host; provenance is incomplete"; return 1; }
         for f in prompts.provenance shard.provenance l4_instances.txt; do
             ${SSH_PW[@]+"${SSH_PW[@]}"} scp "${SSH_OPTS[@]}" \
                 "$L4_SSH_USER@$host:$L4_REMOTE_WORK/$f" "$dest/$f" >/dev/null 2>&1 || true

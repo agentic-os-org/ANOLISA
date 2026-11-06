@@ -12,6 +12,9 @@
 #   L4_SSH_USER   remote user              (default: root)
 #   L4_REMOTE_WORK remote workspace root   (default: /root/l4)
 #   HEADROOM_SRC  local headroom checkout  (default: ~/git_repo/headroom)
+#   HEADROOM_REMOTE_CLONE  a headroom git checkout already ON the host; when set,
+#                 $L4_REMOTE_WORK/headroom is cloned from it at HEADROOM_REV
+#                 instead of being synced from HEADROOM_SRC (required with it)
 #   PROMPTS_SRC   local prompt-corpus clone (default: ~/git_repo/swe-with-prompt)
 #   L4_SKIP_TESTS set to 1 to skip the remote unit suite
 #
@@ -31,6 +34,8 @@ L4_SSH_PASS="${L4_SSH_PASS:-}"
 L4_SSH_USER="${L4_SSH_USER:-root}"
 L4_REMOTE_WORK="${L4_REMOTE_WORK:-/root/l4}"
 HEADROOM_SRC="${HEADROOM_SRC:-$HOME/git_repo/headroom}"
+HEADROOM_REMOTE_CLONE="${HEADROOM_REMOTE_CLONE:-}"
+HEADROOM_REV="${HEADROOM_REV:-}"
 PROMPTS_SRC="${PROMPTS_SRC:-$HOME/git_repo/swe-with-prompt}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +54,13 @@ if [ ! -d "$ANOLISA_SRC/src/tokenless" ]; then
          "(no src/tokenless); run this script from inside the repository" >&2
     exit 1
 fi
-if [ ! -d "$HEADROOM_SRC" ]; then
+if [ -n "$HEADROOM_REMOTE_CLONE" ]; then
+    # A revision is mandatory here: the comparison side must be named by commit,
+    # not by whatever the host's checkout happens to point at today.
+    case "$HEADROOM_REV" in
+        *[!0-9a-f]* | "") echo "error: HEADROOM_REMOTE_CLONE needs HEADROOM_REV=<commit sha>" >&2; exit 1 ;;
+    esac
+elif [ ! -d "$HEADROOM_SRC" ]; then
     echo "error: headroom source not found at $HEADROOM_SRC (set HEADROOM_SRC)" >&2
     exit 1
 fi
@@ -186,15 +197,56 @@ sync_tree() {
     echo "[sync] $label complete in $((SECONDS - started))s, remote ${sz:-?}"
 }
 
+# A linked worktree's .git is a file naming a gitdir on this machine. Shipped
+# as-is it turns every git call on the host into an error, so it stays behind,
+# and the revision travels in $L4_REMOTE_WORK/anolisa.provenance instead, which
+# remote_run.sh falls back to. Dirty tracked files are counted so a run from an
+# uncommitted tree cannot pass as that revision.
+[ -f "$ANOLISA_SRC/.git" ] && ANOLISA_EXCLUDES+=(--exclude /.git)
+ANOLISA_REV="$(git -C "$ANOLISA_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
+ANOLISA_DIRTY="$(git -C "$ANOLISA_SRC" status --porcelain --untracked-files=no 2>/dev/null | grep -c . || true)"
+
 sync_tree anolisa "$L4_REMOTE_WORK/anolisa" \
     -az --delete "${RSYNC_OPTS[@]}" "${ANOLISA_EXCLUDES[@]}" \
     -e "ssh ${SSH_OPTS[*]}" \
     "$ANOLISA_SRC/" "$L4_SSH_USER@$L4_SSH_HOST:$L4_REMOTE_WORK/anolisa/"
+printf 'revision=%s\ndirty_tracked_files=%s\n' "$ANOLISA_REV" "$ANOLISA_DIRTY" | \
+    ${SSH_PW[@]+"${SSH_PW[@]}"} ssh "${SSH_OPTS[@]}" "$L4_SSH_USER@$L4_SSH_HOST" \
+        "cat > '$L4_REMOTE_WORK/anolisa.provenance'"
+echo "[sync] anolisa ${ANOLISA_REV:0:12}, $ANOLISA_DIRTY dirty tracked files"
 
-sync_tree headroom "$L4_REMOTE_WORK/headroom" \
-    -az --delete "${RSYNC_OPTS[@]}" "${HEADROOM_EXCLUDES[@]}" \
-    -e "ssh ${SSH_OPTS[*]}" \
-    "$HEADROOM_SRC/" "$L4_SSH_USER@$L4_SSH_HOST:$L4_REMOTE_WORK/headroom/"
+if [ -n "$HEADROOM_REMOTE_CLONE" ]; then
+    # Cloned on the host from a checkout that is already there, so the pinned
+    # revision needs no transfer at all. A plain clone copies tracked files only:
+    # the source checkout's build artefacts cannot leak into the measured build.
+    # An existing $L4_REMOTE_WORK/headroom that is not a clone of that checkout is
+    # refused for the same reason link_or_refuse below refuses a real directory.
+    echo "[sync] headroom -> $L4_REMOTE_WORK/headroom (clone of $HEADROOM_REMOTE_CLONE at ${HEADROOM_REV:0:12})"
+    clone_script=$(cat <<'SH'
+set -eu
+src=$1 rev=$2 dest=$3
+if [ -e "$dest" ]; then
+    origin=$(git -C "$dest" config --get remote.origin.url 2>/dev/null || true)
+    [ "$origin" = "$src" ] || { echo "error: $dest exists and is not a clone of $src" >&2; exit 1; }
+    git -C "$dest" fetch --quiet origin
+else
+    git clone --quiet --no-checkout "$src" "$dest"
+fi
+git -C "$dest" checkout --quiet --detach "$rev"
+[ -z "$(git -C "$dest" status --porcelain --untracked-files=no)" ] || { echo "error: $dest has local changes" >&2; exit 1; }
+echo "[sync] headroom at $(git -C "$dest" rev-parse HEAD)"
+SH
+)
+    # %q quoting, because ssh hands the remote shell one flat command string.
+    ${SSH_PW[@]+"${SSH_PW[@]}"} ssh "${SSH_OPTS[@]}" "$L4_SSH_USER@$L4_SSH_HOST" \
+        "bash -c $(printf '%q' "$clone_script") clone $(printf '%q ' "$HEADROOM_REMOTE_CLONE" "$HEADROOM_REV" "$L4_REMOTE_WORK/headroom")" \
+        || { echo "error: headroom clone on the host failed" >&2; exit 1; }
+else
+    sync_tree headroom "$L4_REMOTE_WORK/headroom" \
+        -az --delete "${RSYNC_OPTS[@]}" "${HEADROOM_EXCLUDES[@]}" \
+        -e "ssh ${SSH_OPTS[*]}" \
+        "$HEADROOM_SRC/" "$L4_SSH_USER@$L4_SSH_HOST:$L4_REMOTE_WORK/headroom/"
+fi
 
 # The corpus goes to its own directory, passed to the runner as --prompts-dir,
 # rather than into the runner's packaged prompts/ path. Keeping it outside the
