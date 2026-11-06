@@ -156,6 +156,122 @@ class TestUserAgentConversation:
         assert "user_agent" not in task
 
 
+class TestUserAgentLLMUnavailable:
+    """An unreachable UserAgent LLM must end the trial as an error.
+
+    _call_user_agent_llm returns None for a genuine [DONE]; an outage of
+    the endpoint itself (import failure or exhausted retries) must not be
+    recorded as "User satisfied" — the session would then be graded as a
+    completed conversation with no error marker anywhere.
+    """
+
+    def _write_c_task(self, tmp_path):
+        task_yaml = tmp_path / "task.yaml"
+        task_yaml.write_text(
+            "task_id: C001_test\n"
+            "user_agent:\n"
+            "  enabled: true\n"
+            "  persona: test persona\n"
+            "  max_rounds: 8\n",
+            encoding="utf-8",
+        )
+        return str(task_yaml)
+
+    def test_llm_outage_is_error_not_satisfaction(self, tmp_path):
+        """Every request failing ends the dialogue as an error, not [DONE]."""
+        import ce_runner.agent as agent_mod
+        from ce_runner.agent import (last_agent_error,
+                                     run_agent_with_user_agent)
+
+        task_yaml = self._write_c_task(tmp_path)
+        session_file = str(tmp_path / "session.jsonl")
+
+        fake_openai = MagicMock()
+        create = fake_openai.OpenAI.return_value.chat.completions.create
+        create.side_effect = RuntimeError("401 Unauthorized")
+
+        agent_mod._clear_agent_error()
+        with patch.dict(sys.modules, {"openai": fake_openai}), \
+             patch("time.sleep"), \
+             patch.object(agent_mod, "run_agent",
+                          return_value=session_file) as run_mock, \
+             patch.object(agent_mod, "_get_last_assistant_has_tool_calls",
+                          return_value=False), \
+             patch.object(agent_mod, "_build_conversation_for_user_agent",
+                          return_value=[]), \
+             patch.object(agent_mod, "_run_agent_continue") as cont_mock:
+            result = run_agent_with_user_agent(
+                "sess-ua-outage", task_yaml, timeout=10,
+                ua_config={"api_key": "k", "base_url": "http://invalid",
+                           "model_id": "m"})
+
+        assert result == ""
+        assert last_agent_error() == "user_agent_llm_unavailable"
+        run_mock.assert_called_once()
+        cont_mock.assert_not_called()
+
+    def test_missing_openai_package_is_error_not_satisfaction(self, tmp_path):
+        """Import failure of openai ends the dialogue as an error."""
+        import ce_runner.agent as agent_mod
+        from ce_runner.agent import (last_agent_error,
+                                     run_agent_with_user_agent)
+
+        task_yaml = self._write_c_task(tmp_path)
+        session_file = str(tmp_path / "session.jsonl")
+
+        class _BrokenOpenAI:
+            def __getattr__(self, name):
+                raise ImportError(f"No module named 'openai'")
+
+        agent_mod._clear_agent_error()
+        with patch.dict(sys.modules, {"openai": _BrokenOpenAI()}), \
+             patch.object(agent_mod, "run_agent",
+                          return_value=session_file), \
+             patch.object(agent_mod, "_get_last_assistant_has_tool_calls",
+                          return_value=False), \
+             patch.object(agent_mod, "_build_conversation_for_user_agent",
+                          return_value=[]), \
+             patch.object(agent_mod, "_run_agent_continue") as cont_mock:
+            result = run_agent_with_user_agent(
+                "sess-ua-import", task_yaml, timeout=10,
+                ua_config={"api_key": "k", "base_url": "http://invalid",
+                           "model_id": "m"})
+
+        assert result == ""
+        assert last_agent_error() == "user_agent_llm_unavailable"
+        cont_mock.assert_not_called()
+
+    def test_genuine_done_still_ends_normally(self, tmp_path):
+        """A real [DONE] reply keeps the satisfied path: session returned."""
+        import ce_runner.agent as agent_mod
+        from ce_runner.agent import run_agent_with_user_agent
+
+        task_yaml = self._write_c_task(tmp_path)
+        session_file = str(tmp_path / "session.jsonl")
+
+        fake_openai = MagicMock()
+        resp = MagicMock()
+        resp.choices[0].message.content = "ok [DONE]"
+        fake_openai.OpenAI.return_value.chat.completions.create.return_value = resp
+
+        agent_mod._clear_agent_error()
+        with patch.dict(sys.modules, {"openai": fake_openai}), \
+             patch.object(agent_mod, "run_agent",
+                          return_value=session_file), \
+             patch.object(agent_mod, "_get_last_assistant_has_tool_calls",
+                          return_value=False), \
+             patch.object(agent_mod, "_build_conversation_for_user_agent",
+                          return_value=[]), \
+             patch.object(agent_mod, "_run_agent_continue") as cont_mock:
+            result = run_agent_with_user_agent(
+                "sess-ua-done", task_yaml, timeout=10,
+                ua_config={"api_key": "k", "base_url": "http://invalid",
+                           "model_id": "m"})
+
+        assert result == session_file
+        cont_mock.assert_not_called()
+
+
 class TestServiceHealthCheck:
     """Test service health check before execution."""
 
