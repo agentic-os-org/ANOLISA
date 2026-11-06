@@ -342,10 +342,68 @@ fn attached_field_boundaries_do_not_depend_on_claim_values() {
 }
 
 #[test]
+fn standalone_relative_paths_keep_field_like_punctuation() {
+    for path in [
+        "a,b/c=d.txt",
+        "a;b/c=d.txt",
+        "a|b/c=d.txt",
+        "a，b/c=d.txt",
+        "a,b/c/d",
+    ] {
+        let claims = extract_claims(path);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{path}");
+    }
+}
+
+#[test]
+fn standalone_relative_paths_do_not_drop_equals_prefixed_segments() {
+    for path in ["a=b/c=d.txt", "a=b/c=d/e"] {
+        let claims = extract_claims(path);
+        assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path], "{path}");
+    }
+}
+
+#[test]
 fn undecorated_urls_keep_trailing_asterisks() {
     let url = "https://example.test/x*";
     let claims = extract_claims(url);
     assert_eq!(texts_of(&claims, ClaimClass::Url), vec![url]);
+}
+
+#[test]
+fn empty_list_decoration_does_not_glue_a_later_key_to_a_path() {
+    for text in [
+        "key=[]path=/tmp/a",
+        "key=`[]`path=/tmp/a",
+        "key=([])path=/tmp/a",
+        "key=\"[]\"path=/tmp/a",
+        "key=**[]**path=/tmp/a",
+        "key=[[]]path=/tmp/a.txt",
+        r"key=\[\]path=/tmp/a.txt",
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![if text.contains(".txt") {
+                "/tmp/a.txt"
+            } else {
+                "/tmp/a"
+            }],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn empty_list_decoration_preserves_relative_path_equals() {
+    let claims = extract_claims("key=[]a=b/c=d.txt");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["a=b/c=d.txt"]);
+}
+
+#[test]
+fn explicit_path_keys_drop_the_prefix_before_bare_relative_paths() {
+    let claims = extract_claims("path=a/b=c.txt");
+    assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["a/b=c.txt"]);
 }
 
 #[test]

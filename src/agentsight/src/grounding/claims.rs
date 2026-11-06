@@ -570,27 +570,163 @@ fn classify_complete_word(word: &str) -> Option<Claim> {
     Some(claim)
 }
 
-fn classify_attached_value(word: &str) -> Option<Claim> {
-    let (_, value) = split_attached_value(word)?;
-    let trimmed = trim_attached_decoration(value);
-    let claim = classify_word(trimmed)?;
-    if claim.class == ClaimClass::Date
-        && claim
-            .text
-            .chars()
-            .any(|c| STRUCTURAL_SEPARATORS.contains(&c))
+fn has_empty_list_prefix(value: &str) -> bool {
+    let mut depth = 0usize;
+    let mut matched = false;
+    for c in value.chars() {
+        if !is_decoration(c) {
+            break;
+        }
+        match c {
+            '[' => depth += 1,
+            ']' if depth > 0 => {
+                depth -= 1;
+                matched = true;
+            }
+            _ => {}
+        }
+    }
+    matched
+}
+
+fn is_list_wrapper_decoration(c: char) -> bool {
+    matches!(
+        c,
+        ')' | '}' | '`' | '*' | '"' | '\'' | '>' | '”' | '’' | '」' | '）' | '】'
+    )
+}
+
+fn attached_field_after_closing_bracket_at<'a>(
+    value: &'a str,
+    value_char_start: usize,
+    quoted: &[bool],
+) -> Option<(&'a str, usize)> {
+    if !value.contains(']') {
+        return None;
+    }
+    let mut bracket_depth = 0usize;
+    let mut decorated_prefix = true;
+    for (char_index, (index, c)) in value.char_indices().enumerate() {
+        let prefix_decoration = decorated_prefix && is_decoration(c);
+        if quoted[value_char_start + char_index] && !prefix_decoration {
+            decorated_prefix = false;
+            continue;
+        }
+        if !is_decoration(c) {
+            decorated_prefix = false;
+        }
+        match c {
+            '[' => bracket_depth += 1,
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                if bracket_depth == 0 {
+                    let start = index + c.len_utf8();
+                    let suffix = &value[start..];
+                    let attached = suffix.trim_start_matches(is_list_wrapper_decoration);
+                    if split_attached_value(attached).is_some() {
+                        let decorations = suffix[..suffix.len() - attached.len()].chars().count();
+                        return Some((attached, value_char_start + char_index + 1 + decorations));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn attached_field_after_closing_bracket(value: &str) -> Option<&str> {
+    let chars: Vec<char> = value.chars().collect();
+    let quoted = quoted_chars(&chars);
+    attached_field_after_closing_bracket_at(value, 0, &quoted).map(|(attached, _)| attached)
+}
+
+fn attached_value_after_list_residue<'a>(
+    value: &'a str,
+    value_char_start: usize,
+    original: &str,
+    quoted_original: &mut Option<Vec<bool>>,
+) -> Option<(&'a str, usize)> {
+    if let Some(suffix) = value.strip_prefix("[]") {
+        let attached = suffix.trim_start_matches(is_list_wrapper_decoration);
+        if split_attached_value(attached).is_some() {
+            let decorations = suffix[..suffix.len() - attached.len()].chars().count();
+            return Some((attached, value_char_start + 2 + decorations));
+        }
+    }
+    if !value
+        .trim_start_matches(|c| is_decoration(c) && c != '[' && c != ']')
+        .starts_with('[')
     {
         return None;
     }
-    if claim.class == ClaimClass::Path
-        && (has_unmatched_closing_bracket_before_path(trimmed) || has_numeric_colon_suffix(trimmed))
+    let quoted = quoted_original.get_or_insert_with(|| {
+        let chars: Vec<char> = original.chars().collect();
+        quoted_chars(&chars)
+    });
+    attached_field_after_closing_bracket_at(value, value_char_start, quoted)
+}
+
+fn standalone_relative_path_has_equals(key: &str, word: &str, value: &str) -> bool {
+    if key == "path"
+        || value.starts_with(['/', '.'])
+        || value.chars().next().is_some_and(is_decoration)
     {
-        return None;
+        return false;
     }
-    if has_following_attached_field(value) {
-        return None;
+    let Some(slash) = value.find('/') else {
+        return false;
+    };
+    let Some(equals) = value.find('=') else {
+        return false;
+    };
+    slash < equals && classify_word(word).is_some_and(|claim| claim.class == ClaimClass::Path)
+}
+
+fn classify_attached_value(mut word: &str) -> Option<Claim> {
+    let original = word;
+    let mut word_char_start = 0;
+    let mut quoted_original = None;
+    loop {
+        let (key, value) = split_attached_value(word)?;
+        if standalone_relative_path_has_equals(key, word, value) {
+            return classify_word(word);
+        }
+        let value_char_start = word_char_start + key.chars().count() + 1;
+        if let Some((attached, attached_char_start)) = attached_value_after_list_residue(
+            value,
+            value_char_start,
+            original,
+            &mut quoted_original,
+        ) {
+            word = attached;
+            word_char_start = attached_char_start;
+            continue;
+        }
+        let trimmed = trim_attached_decoration(value);
+        let claim = classify_word(trimmed)?;
+        if claim.class == ClaimClass::Date
+            && claim
+                .text
+                .chars()
+                .any(|c| STRUCTURAL_SEPARATORS.contains(&c))
+        {
+            return None;
+        }
+        let glued_path = split_attached_value(trimmed)
+            .is_some_and(|(_, nested_value)| !nested_value.contains('='));
+        if claim.class == ClaimClass::Path
+            && (has_unmatched_closing_bracket_before_path(trimmed)
+                || has_numeric_colon_suffix(trimmed)
+                || (has_empty_list_prefix(value) && glued_path))
+        {
+            return None;
+        }
+        if has_following_attached_field(value) {
+            return None;
+        }
+        return Some(claim);
     }
-    Some(claim)
 }
 
 fn classify_structural_segment(segment: &str) -> Option<Claim> {
@@ -621,7 +757,13 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
     claims.extend(extract_urls(text));
     claims.extend(extract_quoted(text));
     for json_word in text.split_whitespace() {
-        let attached_value_claim = classify_attached_value(json_word);
+        let attached_after_residue = if split_attached_value(json_word).is_none() {
+            attached_field_after_closing_bracket(json_word)
+        } else {
+            None
+        };
+        let attached_value_claim =
+            classify_attached_value(attached_after_residue.unwrap_or(json_word));
         // Strip decoration, not content. Agents habitually wrap paths and
         // identifiers in markdown (`/var/log`, **error**), and a claim carrying
         // those marks would never match the plain form sitting in the evidence —
@@ -644,6 +786,15 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         let word_stands_alone = whole_word_claim.is_some();
         if let Some(claim) = whole_word_claim {
             claims.push(claim);
+        }
+        if word_stands_alone && let Some(attached) = attached_after_residue {
+            let prefix = &json_word[..json_word.len() - attached.len()];
+            let degrouped = splice_digit_groups(prefix);
+            for segment in degrouped.split(STRUCTURAL_SEPARATORS) {
+                if let Some(claim) = classify_structural_segment(segment) {
+                    claims.push(claim);
+                }
+            }
         }
         // Tool output is JSON far more often than prose, and its structure glues
         // values to their surroundings: `stargazers_count=242391`, or
