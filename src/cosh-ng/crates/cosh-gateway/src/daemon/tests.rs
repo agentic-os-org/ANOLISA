@@ -1448,6 +1448,28 @@ fn daemon_admission_accepts_only_the_exact_brokered_core_selector() {
 }
 
 #[test]
+fn pagination_bounds_are_rejected_before_dispatch() {
+    assert!(handler::validate_pagination(1, None).is_ok());
+    assert!(handler::validate_pagination(64, None).is_ok());
+    assert!(handler::validate_pagination(64, Some(0)).is_ok());
+    assert!(handler::validate_pagination(64, Some(i64::MAX as u64)).is_ok());
+
+    for limit in [0u16, 65, u16::MAX] {
+        assert!(matches!(
+            handler::validate_pagination(limit, None),
+            Err(GatewayDaemonError::Protocol(_))
+        ));
+    }
+
+    for after_revision in [i64::MAX as u64 + 1, u64::MAX] {
+        assert!(matches!(
+            handler::validate_pagination(64, Some(after_revision)),
+            Err(GatewayDaemonError::Protocol(_))
+        ));
+    }
+}
+
+#[test]
 fn task_handler_has_no_execution_or_persistence_dependencies() {
     let source = include_str!("handler.rs");
     for forbidden in [
