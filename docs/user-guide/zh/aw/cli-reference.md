@@ -51,6 +51,7 @@ aw config init --help
 | `aw commands` | 枚举公开命令，可输出机器可读的参数信息 |
 | `aw completion` | 打印 Shell 补全脚本 |
 | `aw instance` | 使用 JSON 登记、确认、查询和释放业务自管实例 |
+| `aw audit-export` | 无需控制连接，读取一页保留的公共审计元数据 |
 | `aw request` | 将 stdin JSON 操作发送给服务，供集成与诊断使用 |
 | `aw policy` | 运行 AW 的 command Provider 协议，供自定义规则集成使用 |
 
@@ -300,3 +301,14 @@ aw instance --socket "$AW_SOCKET" --connect
 ```
 
 成功发现返回 `result.connected: true` 与服务 identity。业务继续管理自身进程；释放实例保留其他实例和 daemon。请求字段、Ready 接线、任务 Scope 与失败恢复见[独立实例接入](../../../developer-guide/zh/aw/deployment/independent-instances.md)。
+
+## `aw audit-export`
+
+以服务所属用户读取保留的审计元数据。必填 `--state-dir ABS_DIR`（包含 `journal/` 的
+已有服务状态目录）和 `--request ABS_FILE`（普通 JSON 请求文件）。
+可选 `--timeout-ms` 接受 1–60000，默认 5000。输出固定为 JSON；报告错误时退出码为 1。
+服务停止后仍可读取；此命令不启动或停止后台进程。
+
+使用服务配置指定的状态目录，或 `aw service serve` 的目录参数。
+没有保留源描述符的旧 Journal 返回 `source_missing`，旧版链返回 `unsupported_history`。
+有界枚举示例与消费进度规则见 [CLI 自动化参考](../../../developer-guide/zh/aw/reference/cli.md#公共审计导出)。

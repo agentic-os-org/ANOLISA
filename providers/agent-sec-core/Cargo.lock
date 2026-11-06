@@ -92,6 +92,7 @@ dependencies = [
  "aw-config",
  "aw-contracts",
  "aw-provider",
+ "libc",
  "serde_json",
  "sha2",
  "thiserror",

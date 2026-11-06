@@ -223,7 +223,7 @@ development environment and checks.
 | Provider messages and View protocol | `aw-provider/schemas/` |
 | Provider private configuration and backend data | The concrete Provider directory |
 
-`aw-contracts/schemas/` contains only registered, tested contracts, currently 23.
+`aw-contracts/schemas/` contains only registered, tested contracts, currently 28.
 Plan, evidence and other v1 contracts remain active; the four capability profiles
 use v2 inputs and outputs. Eight unregistered capability v1 drafts had no consumers
 in this repository and were removed. Their contents remain in Git history.
@@ -273,3 +273,8 @@ Later `aw update` uses the existing idle activation gate. `install --remove`
 uses Unbind to close complete request/tool admission atomically, then removes
 owned native registration and private artifacts. External processes are neither
 launched nor signalled by this path. Ordinary `aw run` keeps child supervision.
+
+Public audit consumers use `aw audit-export` → `aw-service::audit_export` →
+`aw-core::journal::reader`. The reader pins owned storage and verifies bounded
+source chains; Service projects retained public objects without a control RPC.
+See [incremental audit reads](runtime/audit-export.md) for cursors and gaps.
