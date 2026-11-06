@@ -35,7 +35,7 @@ pub struct EntryOptions {
     pub compression_enabled: bool,
     /// Whether API search records and non-file path lists may share paths.
     pub search_path_sharing_enabled: bool,
-    /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
+    /// Whether command-output Git diffs may omit context with original recovery. Enabled by default.
     pub diff_compression_enabled: bool,
     /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,

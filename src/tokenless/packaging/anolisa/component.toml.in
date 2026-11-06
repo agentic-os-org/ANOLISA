@@ -54,6 +54,26 @@ source = "adapters/manifest.json"
 target = "{datadir}/adapters/{component}/manifest.json"
 mode = "0644"
 
+[[component.layout.files]]
+source = "adapters/hook_dispatch.py"
+target = "{datadir}/adapters/{component}/hook_dispatch.py"
+mode = "0644"
+
+[[component.layout.files]]
+source = "adapters/cosh-ng/"
+target = "{datadir}/adapters/{component}/cosh-ng/"
+mode = "0644"
+
+[[component.layout.files]]
+source = "adapters/copilot-shell/"
+target = "{datadir}/adapters/{component}/copilot-shell/"
+mode = "0644"
+
+[[component.layout.files]]
+source = "adapters/unknown/"
+target = "{datadir}/adapters/{component}/unknown/"
+mode = "0644"
+
 [component.health_check]
 type = "binary_version"
 binary = "{bindir}/tokenless"

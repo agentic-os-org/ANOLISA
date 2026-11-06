@@ -39,9 +39,13 @@ CONTRACT_MOCK = ROOT / "tests/contract/mock_tokenless.py"
 SPEC = importlib.util.spec_from_file_location("qwenwork_lifecycle", SOURCE / "scripts/lifecycle.py")
 lifecycle = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(lifecycle)
-UTILS_SPEC = importlib.util.spec_from_file_location("qwenwork_utils", COMMON / "hook_utils.py")
-utils = importlib.util.module_from_spec(UTILS_SPEC)
-UTILS_SPEC.loader.exec_module(utils)
+sys.path.insert(0, str(COMMON))
+sys.path.insert(0, str(COMMON.parent.parent))
+import hook_utils as utils
+import hook_dispatch
+
+qwenwork_adapter = hook_dispatch.load_adapter("qwenwork")
+claude_adapter = hook_dispatch.load_adapter("claude-code")
 REAL_BIN = os.environ.get("TOKENLESS_TEST_BIN")
 WORKSPACE_SHELL_TOOLS = (
     "mcp__workspace__bash",
@@ -688,7 +692,7 @@ class QwenWorkInstallTests(unittest.TestCase):
         self.prepare_detached_plugin()
         self.assertEqual(set(self.hooks), {"PreToolUse", "PostToolUse"})
         matcher = self.hooks["PreToolUse"][0]["matcher"]
-        self.assertEqual(set(WORKSPACE_SHELL_TOOLS), set(utils._QWENWORK_WORKSPACE_SHELLS))
+        self.assertEqual(set(WORKSPACE_SHELL_TOOLS), set(qwenwork_adapter._QWENWORK_WORKSPACE_SHELLS))
         self.assertLessEqual({"Bash", *WORKSPACE_SHELL_TOOLS}, set(matcher.split("|")))
         for tool in ("Bash", *WORKSPACE_SHELL_TOOLS):
             self.assertIsNotNone(re.fullmatch(matcher, tool))
@@ -746,7 +750,7 @@ class QwenWorkInstallTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 payload = self.payload([{"type": "text", "text": '{"count": 2}'}], tool)
                 payload["cwd"] = str(self.root)
-                self.assertIs(utils.prepare_hook_input(payload, "claude-code"), payload)
+                self.assertIs(claude_adapter.prepare_input(payload), payload)
         self.assertEqual(snapshot(self.root), before)
 
     def test_workspace_shell_aliases_rewrite_preserve_arguments_and_deduplicate(self) -> None:
@@ -882,8 +886,8 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                         with contextlib.redirect_stdout(io.StringIO()) as output:
                             with contextlib.redirect_stderr(io.StringIO()):
                                 with self.assertRaises(SystemExit) as stopped:
-                                    utils.prepare_hook_input(
-                                        {"tool_name": tool, "cwd": str(self.root)}, "qwenwork"
+                                    qwenwork_adapter.prepare_input(
+                                        {"tool_name": tool, "cwd": str(self.root)}
                                     )
                         self.assertEqual(stopped.exception.code, 0)
                         self.assertEqual(json.loads(output.getvalue()), {})
@@ -1060,17 +1064,17 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         with mock.patch.dict(
             os.environ, {"QODER_PLUGIN_ROOT": str(self.target)}
         ), mock.patch.object(sys, "platform", "darwin"):
-            self.addCleanup(setattr, utils, "_QWENWORK_RECOVERY", None)
-            utils.prepare_hook_input(payload, "qwenwork")
-            self.assertTrue(utils.tokenless_retrieve_command_available())
+            self.addCleanup(setattr, qwenwork_adapter, "_QWENWORK_RECOVERY", None)
+            qwenwork_adapter.prepare_input(payload)
+            self.assertTrue(qwenwork_adapter.recovery_available())
             for command in (
                 f"tokenless retrieve {key}",
                 f"tokenless retrieve '{key.upper()}'",
                 f"tokenless retrieve '<<tokenless:{key}>>'",
             ):
-                updated = utils.rewrite_qwenwork_retrieve("Bash", {"command": command})
+                updated = qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": command})
                 self.assertIsNotNone(updated)
-                self.assertTrue(utils.is_tokenless_retrieve_command("Bash", updated))
+                self.assertTrue(qwenwork_adapter.is_retrieve_result("Bash", updated))
             for command in (
                 "tokenless retrieve bad",
                 f"tokenless retrieve {key}; echo extra",
@@ -1080,19 +1084,19 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                 f"tokenless retrieve {key} --stash-db other.db",
                 updated["command"] + " | cat",
             ):
-                self.assertIsNone(utils.rewrite_qwenwork_retrieve("Bash", {"command": command}))
-                self.assertFalse(utils.is_tokenless_retrieve_command("Bash", {"command": command}))
+                self.assertIsNone(qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": command}))
+                self.assertFalse(qwenwork_adapter.is_retrieve_result("Bash", {"command": command}))
             with mock.patch.object(sys, "platform", "win32"):
-                utils.prepare_hook_input(payload, "qwenwork")
-                self.assertFalse(utils.tokenless_retrieve_command_available())
+                qwenwork_adapter.prepare_input(payload)
+                self.assertFalse(qwenwork_adapter.recovery_available())
             hooks = self.target / "hooks/hooks.json"
             configuration = json.loads(hooks.read_text())
             configuration["hooks"]["PreToolUse"] = []
             hooks.write_text(json.dumps(configuration))
-            utils.prepare_hook_input(payload, "qwenwork")
-            self.assertFalse(utils.tokenless_retrieve_command_available())
+            qwenwork_adapter.prepare_input(payload)
+            self.assertFalse(qwenwork_adapter.recovery_available())
             self.assertIsNone(
-                utils.rewrite_qwenwork_retrieve("Bash", {"command": f"tokenless retrieve {key}"})
+                qwenwork_adapter.rewrite_qwenwork_retrieve("Bash", {"command": f"tokenless retrieve {key}"})
             )
 
     def test_registered_array_and_pretool_attribution(self) -> None:
@@ -1276,8 +1280,8 @@ class RealDataDirectoryTests(unittest.TestCase):
                             for part in shlex.split(command)
                             if part.startswith("TOKENLESS_DATA_DIR=")
                         )
-                        utils.prepare_hook_input(
-                            {"tool_name": "mcp__workspace__bash", "cwd": str(root)}, "qwenwork"
+                        qwenwork_adapter.prepare_input(
+                            {"tool_name": "mcp__workspace__bash", "cwd": str(root)}
                         )
                         identity = uuid.uuid4().hex
                         marker = Path(

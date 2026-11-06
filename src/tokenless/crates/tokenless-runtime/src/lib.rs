@@ -63,7 +63,7 @@ pub struct RuntimeConfig {
     pub compression_enabled: bool,
     /// Whether search records and non-file path lists share paths. Enabled by default.
     pub search_path_sharing_enabled: bool,
-    /// Whether command-output Git diffs may omit context with original recovery. Disabled by default.
+    /// Whether command-output Git diffs may omit context with original recovery. Enabled by default.
     pub diff_compression_enabled: bool,
     /// Whether complete HTML documents are rendered as Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
@@ -77,7 +77,7 @@ impl Default for RuntimeConfig {
             sls_enabled: false,
             compression_enabled: true,
             search_path_sharing_enabled: true,
-            diff_compression_enabled: false,
+            diff_compression_enabled: true,
             html_extraction_enabled: true,
         }
     }
@@ -1834,10 +1834,10 @@ mod tests {
     }
 
     #[test]
-    fn html_rendering_is_on_and_diff_cropping_off_by_default() {
+    fn html_rendering_and_diff_cropping_are_on_by_default() {
         let config = RuntimeConfig::default();
         assert!(config.html_extraction_enabled);
-        assert!(!config.diff_compression_enabled);
+        assert!(config.diff_compression_enabled);
     }
 
     #[test]

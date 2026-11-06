@@ -11,7 +11,7 @@ import re
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
@@ -176,6 +176,11 @@ class Attribution:
             raise ValueError("session_id must not be empty")
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    return default if not value else value.lower() in ("1", "true", "yes")
+
+
 @dataclass(frozen=True)
 class TokenlessConfig:
     """State and packaged-resource configuration for the lifecycle SDK."""
@@ -183,9 +188,18 @@ class TokenlessConfig:
     data_dir: str | os.PathLike[str] | None = None
     retrieve_tool_name: str = "tokenless_retrieve"
     rtk_enabled: bool = True
-    search_path_sharing_enabled: bool = True
-    diff_compression_enabled: bool = False
-    html_extraction_enabled: bool = True
+    search_path_sharing_enabled: bool = field(
+        default_factory=lambda: _env_flag("TOKENLESS_SEARCH_PATH_SHARING_ENABLED", True)
+    )
+    diff_compression_enabled: bool = field(
+        default_factory=lambda: _env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", True)
+    )
+    html_extraction_enabled: bool = field(
+        default_factory=lambda: _env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", True)
+    )
+    compression_enabled: bool = field(
+        default_factory=lambda: _env_flag("TOKENLESS_COMPRESSION_ENABLED", True)
+    )
 
     def __post_init__(self) -> None:
         try:
@@ -344,6 +358,7 @@ class TokenlessSdk:
         self.config = config or TokenlessConfig()
         self.runtime = TokenlessRuntime(
             self.config.data_dir,
+            compression_enabled=self.config.compression_enabled,
             search_path_sharing_enabled=self.config.search_path_sharing_enabled,
             diff_compression_enabled=self.config.diff_compression_enabled,
             html_extraction_enabled=self.config.html_extraction_enabled,

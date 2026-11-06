@@ -19,20 +19,25 @@ for flag migration, pipeline behavior, and output recovery.
 
 Agent adapters are available for:
 
-- **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core.
+- **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core, with conversation-scoped static-tool recovery.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
 - **Hermes Agent plugin** — delegates block-and-suggest command rewriting and model-bound result optimization to Core, with Marker-directed recovery through its shell tool.
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, response compression, and Marker-directed recovery via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, Marker-directed recovery, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
-- **OpenCode plugin** — schema/response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
+- **OpenCode plugin** — response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's V1 local plugin API; Schema passes through without static recovery authorization.
 - **Qwen Code extension** — command rewriting and registered but hard-disabled Tool Ready; current host releases cannot replace post-tool output and skip the declared schema event.
 - **QwenPaw plugin** — schema compression, RTK command rewriting, response/TOON compression, and static-tool recovery through an AgentScope middleware registered by QwenPaw's plugin system; the plugin embeds the `anolisa_tokenless` wheel in-process.
-- **DeepSeek Harness plugin** — native response compression, Marker-directed recovery, and environment-error attribution through DSH's `tools/post-execute` seam.
+- **DeepSeek Harness plugin** — RTK retry suggestions, native response compression, Marker-directed recovery, and environment-error attribution through DSH's tool lifecycle.
 
 For framework developers, the Python SDK has a framework-neutral layer and an **AgentScope-specific
 layer**. Together they cover schema compression, RTK rewriting, response compression, TOON,
 retrieval, and attribution.
+
+The SDK, QwenPaw, and AgentScope inherit the same compression environment switches as the CLI;
+explicit `TokenlessConfig` arguments take precedence. Diff cropping is enabled by default. See
+[compression coverage and protocol limits](../../docs/user-guide/en/tokenless/framework-integration.md#compression-coverage-and-protocol-limits)
+for the remaining host restrictions.
 
 ## Features
 
@@ -42,23 +47,23 @@ retrieval, and attribution.
 | Content-aware response compression | workload-dependent | Routes successful JSON through `JsonCompressor`; complete candidates retain all fields and empty values; those saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, unittest/Django, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
 | Search path sharing | workload-dependent | Enabled by default: API search records and recognized native shell searches share consecutive paths; pure path lists from commands or APIs share a directory prefix, retaining every received path and byte. File reads skip the path-list strategy. Disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False` |
-| Git Diff context cropping | workload-dependent | Opt in with `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` or SDK `diff_compression_enabled=True`; preserves all changed lines, reduces context per hunk, and provides original recovery. Disabled by default; stable whole-Agent token savings have not been established |
+| Git Diff context cropping | workload-dependent | Enabled by default; disable with `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` or SDK `diff_compression_enabled=False`; preserves all changed lines, reduces context per hunk, and provides original recovery. Stable whole-Agent token savings have not been established |
 | HTML page rendering | workload-dependent | Enabled by default: renders complete HTML documents from commands or APIs as Markdown, removes only enumerated non-content elements (scripts, styles, navigation, banners, footers, asides, form controls, media embeds) with counts in the view header, and provides original recovery; disable with `TOKENLESS_HTML_EXTRACTION_ENABLED=0` or SDK `html_extraction_enabled=False`; file reads pass through |
 | CSV/TSV table compression | workload-dependent | Preserves every cell and row/column order while compacting quoting and record separators; returns the original when there is no benefit. No row sampling or Stash writes. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.6% on reference response | Encodes JSON to TOON format for LLMs; since TOON spec v4.4 this also covers nested record arrays and objects keyed by ID, which previously encoded larger than compact JSON |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported); recognized build/test commands and direct or built-in-wrapper `find`, `head`, `tail`, `grep`, and `rg` invocations keep the entire command native, even when search path sharing is disabled; custom RTK wrapper prefixes are outside this protection |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
-| OpenClaw plugin | — | RTK ✅, lossless live PostTool ✅, Schema/Retrieve unavailable in the host |
-| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅; Cosh-NG supports response compression and Marker-command recovery, while legacy copilot-shell remains lossless-only; Common BeforeModel passes schemas through without authorized Retrieve |
+| OpenClaw plugin | — | RTK ✅, live PostTool ✅, static Retrieve ✅ with a conversation UUID; Schema unavailable |
+| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅; Cosh-NG supports response compression and Marker-command recovery, while legacy copilot-shell passes PostTool through; Common BeforeModel passes schemas through without authorized Retrieve |
 | Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Core-owned command rewriting/response/TOON ✅, Marker-command recovery ✅, Schema unavailable |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, Marker-command recovery ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Marker-command recovery ✅ on Claude Code 2.1.121 or newer |
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Environment diagnostics ✅, Response compression — protocol-blocked |
-| OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅, Marker-command recovery ✅ |
+| OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema passthrough, Response compression ✅, TOON ✅, Marker-command recovery ✅ |
 | Qwen Code extension | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response/Schema replacement unavailable in current host |
 | QwenPaw plugin | — | Schema compression ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Retrieve Tool recovery ✅ |
-| DeepSeek Harness plugin | — | Response compression ✅, Marker-command recovery ✅, Environment-error attribution ✅ |
+| DeepSeek Harness plugin | — | RTK retry suggestions ✅, Response compression ✅, Marker-command recovery ✅, Environment-error attribution ✅ |
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
@@ -588,22 +593,28 @@ The plugin translates OpenClaw tool hooks and live result middleware into Protoc
 | Tool Ready | `before_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | PreTool | `before_tool_call` | Sends `exec` arguments to Core and applies the returned RTK rewrite | ✅ Active |
 | PostTool | `registerAgentToolResultMiddleware` | Replaces supported tool text before the same-turn model request | ✅ Active |
-| BeforeModel / Retrieve | — | OpenClaw exposes neither a reliable schema-transform seam nor marker-authorized recovery | — |
+| Retrieve | `registerTool` / `llm_input` / `after_compaction` | Recovers visible markers through static `tokenless_retrieve`, isolated by conversation UUID; compaction revokes previous grants | ✅ Active |
+| Schema | — | Prompt hooks cannot replace model tool schemas | — |
 
 Core owns RTK execution, JSON detection, compaction, TOON selection, thresholds, diagnostics, and final
 arbitration. The plugin carries Core's per-call `output_optimization` from PreTool into the matching
 PostTool request. Core resumes processing only when complete execution receipts confirm unchanged
 output and PostTool supplies the exact registered execution command, restoring the original command
 for file-origin checks; changed or unconfirmed output bypasses
-compression. The local CLI recovery command is a trusted
-operator entry rather than Agent authorization, so the plugin applies only lossless candidates.
+compression. RTK fallback accepts only lossless candidates. Other results can use the static
+`tokenless_retrieve` tool for HTML, Diff, log reduction, and JSON truncation. Keep this tool allowed
+by the host's tool policy. Without the tool API or a conversation UUID, only lossless candidates apply.
+Prompt submission refreshes the allowed marker set. Compaction revokes old grants until the next
+prompt supplies retained history; newly compressed results remain immediately recoverable.
+Session end clears authorization, and a new conversation
+cannot reuse another conversation's authorization. Retrieved originals bypass compression.
 
 The plugin declares `contracts.agentToolResultMiddleware: ["openclaw"]` and must be explicitly
 enabled in OpenClaw. PostTool replaces a single text block while preserving the rest of the tool
 result; media and multi-block results pass through. It does not register a separate transcript
 compression hook, so persistence does not compress or count the same result again.
 
-Both operations use the single `tokenless compress` entry point and fail open if Tokenless is
+Compression operations use the single `tokenless compress` entry point and fail open if Tokenless is
 missing or returns an invalid response. For PostTool, fail-open retains the result received
 from the host, including any prior truncation. Legacy hosts such as 2026.8.2 cap text at
 100,000 UTF-16 code units when middleware is registered. They remain supported with this
@@ -794,9 +805,9 @@ make codex-install
 
 ## OpenCode Plugin
 
-Schema compression uses the host's model-facing JSON Schema while preserving its runtime
-parameter validator. Hosts that expose only a runtime validator skip schema compression;
-response compression and command rewriting remain available.
+The V1 `tool.definition` hook lacks the session/model-call context needed for authorized static
+Schema recovery, so the Common Hook preserves definitions. Response compression and command
+rewriting remain available. Supporting OpenCode's V2 plugin API requires a separate migration.
 
 The local plugin uses OpenCode's mutable tool hooks, so compressed output
 replaces the original model-visible response instead of being appended to it.
@@ -806,7 +817,7 @@ replaces the original model-visible response instead of being appended to it.
 | Tool Ready | `tool.execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
 | Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
-| Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
+| Schema compression | `tool.definition` | Preserves schemas without static recovery authorization | — |
 
 Enable the installed plugin through ANOLISA, then restart OpenCode:
 
@@ -1032,6 +1043,25 @@ transformed. Tool Ready remains hard-disabled.
 For installed-package checks and optional real Agent tasks, see the
 [release regression suite](tests/release_regression/README.md). It reports
 tool-output savings and retrieval overhead separately.
+
+To replay the OpenClaw plugin loader and compaction contract, first run
+`make test-adapters` to build the debug CLI and plugin. With Node.js 24.15.0, install
+the host in a temporary directory and run the explicit contract target:
+
+```bash
+openclaw_test_root="$(mktemp -d)"
+npm install --prefix "$openclaw_test_root" --ignore-scripts --no-audit --no-fund openclaw@2026.6.6
+make test-openclaw-host-contract OPENCLAW_TEST_DIST="$openclaw_test_root/node_modules/openclaw/dist"
+```
+
+Both the minimum supported version, 2026.6.6, and 2026.8.2 pass this replay;
+repeat with `openclaw@2026.8.2` to check that version. The minimum host already
+emits `after_compaction` during automatic compaction. The target requires
+`OPENCLAW_TEST_DIST` and fails if it is absent, rather than skipping the host
+test. It checks manifest tool registration, immediate compaction revocation,
+new-result recovery and all three Core recovery reference formats, including
+historical `<<tokenless:HASH>>` markers. It uses local Core and host callbacks
+without calling a model.
 
 To check OpenClaw's live delivery boundary with a locally scripted model, build the
 CLI and plugin, then run the command matching your local Docker image:

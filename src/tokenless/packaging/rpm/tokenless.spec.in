@@ -157,6 +157,11 @@ for framework in openclaw hermes qwenpaw qoder qwenwork claude-code codex openco
         "$adapters/$framework/scripts/"
 done
 install -m 0644 adapters/tokenless/manifest.json "$adapters/"
+install -m 0644 adapters/tokenless/hook_dispatch.py "$adapters/"
+for host in claude-code qoder qwenwork opencode cosh-ng copilot-shell codex qwencode unknown; do
+    install -d -m 0755 "$adapters/$host"
+    install -m 0644 "adapters/tokenless/$host/hook_adapter.py" "$adapters/$host/"
+done
 install -m 0644 adapters/tokenless/common/tool-ready-spec.json \
     adapters/tokenless/common/cosh-extension.json "$adapters/common/"
 install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh "$adapters/common/"
@@ -214,6 +219,12 @@ install -m 0755 adapters/tokenless/common/tokenless-env-fix.sh "$extension/"
 install -m 0755 adapters/tokenless/common/hooks/*.py adapters/tokenless/common/hooks/*.sh \
     "$extension/hooks/"
 install -m 0644 adapters/tokenless/common/hooks/tool_categories.json "$extension/hooks/"
+install -d -m 0755 "$extension/hooks/adapters"
+install -m 0644 adapters/tokenless/hook_dispatch.py "$extension/hooks/adapters/"
+for host in cosh-ng copilot-shell unknown; do
+    install -d -m 0755 "$extension/hooks/adapters/$host"
+    install -m 0644 "adapters/tokenless/$host/hook_adapter.py" "$extension/hooks/adapters/$host/"
+done
 install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml "$extension/commands/"
 
 # Capture intended modes before RPM build-root processing strips executable bits

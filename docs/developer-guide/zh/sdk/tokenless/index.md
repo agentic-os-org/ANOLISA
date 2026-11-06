@@ -298,6 +298,20 @@ config = TokenlessConfig(
 解析 Wheel 内置的 `tokenless` 可执行文件。压缩阈值、内容检测、TOON 选择、诊断、授权和 Stash 策略都属于 Core
 行为，不是 Python 配置。
 
+生命周期 SDK 在构造 `TokenlessConfig` 时读取以下环境默认值：
+
+| SDK 字段 | 环境变量 | 默认值 |
+|----------|----------|--------|
+| `compression_enabled` | `TOKENLESS_COMPRESSION_ENABLED` | `True` |
+| `search_path_sharing_enabled` | `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | `True` |
+| `html_extraction_enabled` | `TOKENLESS_HTML_EXTRACTION_ENABLED` | `True` |
+| `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
+
+显式构造参数优先于环境变量。未设置或空值采用默认值；`1`、`true`、`yes` 忽略大小写后
+启用，其他值关闭。`compression_enabled=False` 保留原始输出并记录符合条件的压缩候选
+（dry-run），不会关闭 RTK。AgentScope 和 QwenPaw 继承相同默认值。
+直接调用 `TokenlessRuntime` 时仍使用其显式构造配置。
+
 ### Runtime 直接调用示例
 
 不需要由 `TokenlessSdk` 协调 Agent 生命周期、希望直接执行 Tokenless 操作时，使用

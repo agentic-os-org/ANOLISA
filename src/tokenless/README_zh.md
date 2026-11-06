@@ -20,7 +20,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
 | 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
-| Git Diff 上下文裁剪 | 取决于工作负载 | 通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 或 SDK `diff_compression_enabled=True` 启用；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。默认关闭，尚未证实稳定的 Agent 整轮 token 收益 |
+| Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |
@@ -88,15 +88,19 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 ### Agent Adapter
 
-- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损实时 PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
-- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 保持无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
+SDK、QwenPaw 和 AgentScope 继承与 CLI 相同的压缩环境开关，显式 `TokenlessConfig`
+参数优先。Diff 裁剪默认开启。各宿主的剩余边界见
+[压缩覆盖与协议限制](../../docs/user-guide/zh/tokenless/framework-integration.md#压缩覆盖与协议限制)。
+
+- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和实时 PostTool 优化，提供按会话授权的静态恢复工具；宿主 Prompt Hook 不支持替换 Schema
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 透传 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
 - **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core，并通过已有 Shell Tool 支持 Marker 命令恢复；无 Schema 压缩
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline + Marker 命令恢复
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
   协议不支持替换原始输出，因此不追加压缩副本
-- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
-- **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
+- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON + Marker 命令恢复；V1 插件缺少静态恢复授权，Schema 透传
+- **DeepSeek Harness 插件** — 通过 DSH 工具生命周期接入 RTK 重试建议、响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
 
@@ -105,8 +109,11 @@ OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_cal
 结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、TOON、阈值、诊断与最终仲裁；Plugin
 把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool。只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
 Core 才恢复原命令以检查文件来源并继续处理；已改变或无法确认的输出保持旁路。
-本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
-候选。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
+RTK 回退仅接受无损候选。其他结果可通过静态 `tokenless_retrieve` 工具恢复 HTML、Diff、
+日志缩减和 JSON 截断的原文；宿主工具策略需允许该工具。缺少工具注册 API 或会话 UUID 时
+只接受无损候选。提交 prompt 时从当前历史刷新 Marker 授权；compaction 撤销旧授权，直到
+下次提交 prompt 时根据保留历史重建。新压缩结果仍可立即恢复。会话结束清空授权，新会话不能沿用其他会话的
+权限。取回原文不会再次压缩。插件声明 `contracts.agentToolResultMiddleware: ["openclaw"]`，并需在宿主中显式启用。
 PostTool 替换单个文本块并保留结果其他字段；Media 与多个 Content Block 透传。不再注册
 独立的持久化压缩 hook，避免重复压缩和重复统计。Fail-open 保留宿主交付的结果，
 包括此前发生的截断。2026.8.2 等旧版宿主在注册 middleware 后会把文本限制在
@@ -323,11 +330,11 @@ Session，再传入启用 Tokenless 的 Session。
 
 ### OpenCode 安装
 
-Schema 压缩使用宿主提供给模型的 JSON Schema，并保留运行时参数校验器。
-仅提供运行时校验器的宿主会跳过 Schema 压缩；响应压缩和命令重写仍然可用。
+V1 `tool.definition` 缺少按 Marker 授权静态恢复所需的会话／模型调用上下文，
+Common Hook 因此保留原始 Schema。响应压缩和命令重写仍然可用；OpenCode V2 插件 API 需要单独迁移。
 
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
-RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
+RTK 命令重写和响应/TOON 压缩；`tool.definition` 保持工具 Schema 原样。
 压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
 响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
@@ -682,6 +689,21 @@ tokenless env-check --tool Shell --fix
 
 安装产物检查与可选的真实 Agent 任务见
 [发布前回归测试](tests/release_regression/README_zh.md)，分别报告工具输出节省和恢复开销。
+
+要回放 OpenClaw 插件加载和 compaction 契约，先运行 `make test-adapters` 构建 debug CLI
+和插件。使用 Node.js 24.15.0，将宿主安装到临时目录，再运行显式的契约测试目标：
+
+```bash
+openclaw_test_root="$(mktemp -d)"
+npm install --prefix "$openclaw_test_root" --ignore-scripts --no-audit --no-fund openclaw@2026.6.6
+make test-openclaw-host-contract OPENCLAW_TEST_DIST="$openclaw_test_root/node_modules/openclaw/dist"
+```
+
+最低支持版 2026.6.6 和 2026.8.2 均已通过这项回放；将安装版本换成 `openclaw@2026.8.2`
+即可验证后者。最低版本已在自动 compaction 时触发 `after_compaction`。此目标必须提供
+`OPENCLAW_TEST_DIST`，缺少时直接失败，不会跳过宿主测试。它检查 manifest 工具注册、
+compaction 立即撤权、新结果恢复，以及 Core 接受的三种恢复引用，包括历史
+`<<tokenless:HASH>>` Marker。测试只调用本地 Core 和宿主回调，不调用模型。
 
 要用本地脚本模型检查 OpenClaw 的实时交付边界，先构建 CLI 和插件，再执行
 与本地 Docker 镜像对应的命令：

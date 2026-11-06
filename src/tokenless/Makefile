@@ -52,6 +52,8 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
 .PHONY: test-install-methods test-install-script test-install-docs \
         test-npm-postinstall test-npm-postinstall-strict
 
+.PHONY: test-openclaw-host-contract
+
 .PHONY: qwenwork-install qwenwork-uninstall test-qwenwork \
         test-qwenwork-install test-qwenwork-hooks
 
@@ -269,6 +271,7 @@ test-integration: test-hook-parity test-claude-code-detect test-stale-helper-cle
 	python3 tests/test_verify_release_versions.py
 	python3 tests/test_qwenpaw_plugin.py
 	python3 tests/test_cosh_ng_compat.py
+	python3 tests/test_host_adapter_isolation.py
 	python3 tests/test_stats_http.py
 
 .PHONY: test-headroom-pipeline-worker
@@ -358,6 +361,8 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	bash tests/test-openclaw-adapter-install.sh
 	@echo "==> Testing openclaw Protocol v2 lifecycle..."
 	node --test tests/test-openclaw-lifecycle-v2.mjs
+	cargo build --locked -p tokenless-cli
+	node --test tests/test-adapter-core-integration.mjs
 	@echo "==> Testing native dsh adapter bundle..."
 	bash tests/test-dsh-adapter.sh
 	@echo "==> Testing qoder adapter installer..."
@@ -375,6 +380,13 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 	bash tests/test-qwenpaw-adapter-install.sh
 	# Run after npm packaging has restored its stale-version fixture.
 	$(MAKE) test-qwenwork-install
+
+test-openclaw-host-contract: stamp-adapter-templates
+	@test -n "$(OPENCLAW_TEST_DIST)" && test -d "$(OPENCLAW_TEST_DIST)" \
+	    || { echo "ERROR: set OPENCLAW_TEST_DIST to the installed OpenClaw dist directory" >&2; exit 1; }
+	@test -x target/debug/tokenless && test -f "$(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js" \
+	    || { echo "ERROR: run make test-adapters to build the CLI and plugin first" >&2; exit 1; }
+	OPENCLAW_TEST_DIST="$(OPENCLAW_TEST_DIST)" node --test tests/test-adapter-core-integration.mjs
 
 test-python-runtime: python-wheel
 	@bash tests/test-python-runtime.sh
@@ -526,10 +538,7 @@ cosh-extension-install: validate-adapter-layout
 	@echo "==> Installing tokenless cosh extension..."
 	@rm -rf "$(TOKENLESS_COSH_EXTENSION_DIR)"
 	@install -d -m 0755 "$(TOKENLESS_COSH_EXTENSION_DIR)/hooks" "$(TOKENLESS_COSH_EXTENSION_DIR)/commands"
-	cp -pr "$(TOKENLESS_ADAPTER_DIR)/common/hooks/." "$(TOKENLESS_COSH_EXTENSION_DIR)/hooks/"
-	cp -pr "$(TOKENLESS_ADAPTER_DIR)/common/commands/." "$(TOKENLESS_COSH_EXTENSION_DIR)/commands/"
-	install -p -m 0644 "$(TOKENLESS_ADAPTER_DIR)/common/cosh-extension.json" "$(TOKENLESS_COSH_EXTENSION_DIR)"/
-	find "$(TOKENLESS_COSH_EXTENSION_DIR)" -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+	bash packaging/payload.sh extension "$(TOKENLESS_ADAPTER_DIR)" "$(TOKENLESS_COSH_EXTENSION_DIR)" legacy
 	@echo "==> tokenless cosh extension installed to $(TOKENLESS_COSH_EXTENSION_DIR)"
 
 cosh-extension-uninstall: validate-adapter-layout
@@ -691,6 +700,7 @@ help:
 	@echo "  test-rtk-integration  Test the embedded RTK's Tokenless patches"
 	@echo "  test-benchmark-rtk-probe  Test the L1 runner's bounded rtk --version probe"
 	@echo "  test-hook-scripts  Test the dependency-free hook bash suites (run in CI)"
+	@echo "  test-openclaw-host-contract  Replay the installed host contract (OPENCLAW_TEST_DIST required)"
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"

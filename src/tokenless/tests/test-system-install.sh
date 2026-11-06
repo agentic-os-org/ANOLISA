@@ -105,6 +105,11 @@ cp -R "$ROOT/packaging" "$SOURCE/packaging"
 cp "$ROOT/Makefile" "$SOURCE/Makefile"
 cp "$ROOT/Cargo.toml" "$SOURCE/Cargo.toml"
 cp "$ROOT/LICENSE" "$SOURCE/LICENSE"
+cp "$ROOT/adapters/tokenless/hook_dispatch.py" "$ADAPTERS/"
+for host in cosh-ng copilot-shell unknown; do
+    mkdir -p "$ADAPTERS/$host"
+    cp "$ROOT/adapters/tokenless/$host/hook_adapter.py" "$ADAPTERS/$host/"
+done
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/tokenless"
 chmod 0755 "$TMP/bin/tokenless"
 for relative in manifest.json common/cosh-extension.json common/tool-ready-spec.json; do

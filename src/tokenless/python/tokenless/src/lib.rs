@@ -280,7 +280,7 @@ impl PyTokenlessRuntime {
         *,
         compression_enabled=true,
         search_path_sharing_enabled=true,
-        diff_compression_enabled=false,
+        diff_compression_enabled=true,
         html_extraction_enabled=true,
         stats_enabled=true,
         sls_enabled=false

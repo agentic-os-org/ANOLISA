@@ -21,6 +21,15 @@ Tool Ready 在产品范围内硬关闭，不属于该 API。
 
 ## 协议与状态
 
+Python Hook 的宿主协议规则放在各自的
+`adapters/tokenless/<host>/hook_adapter.py`：输入解析、能力检查和返回信封由该宿主负责。
+例如 Cosh-NG 将 Shell 替换结果序列化为文本，Claude Code 和千问办公保留结构化字段，
+Qoder 保留原生 Bash 的 stdout 对象。`common/hooks` 负责 Protocol v2 通信、归一化结果的
+通用转换和生命周期状态。原有命令文件保留为启动入口，宿主选择位于
+`adapters/tokenless/hook_dispatch.py`。Cosh 扩展随包携带自己的适配器，独立复制的千问办公
+插件加载自身目录中的适配器和公共运行库。OpenClaw、DSH、Hermes 及 Python SDK 集成
+继续使用各自现有的宿主入口。压缩器选择和压缩结果的接受策略仍由 Core 负责。
+
 Adapter 把框架对象转换为四组不可变 Request/Response：`BeforeModelRequest`、
 `PreToolRequest`、`PostToolRequest` 和 `RetrieveRequest`。`Attribution` 要求 Agent 和
 Session 标识；PreTool 与普通 PostTool 还必须提供 Tool Use 标识。工具 Schema 统一为
@@ -71,16 +80,23 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 千问办公的 Hook Adapter 在两个生命周期请求之前，将识别到的工作区 Shell MCP 名称统一为
 `Bash`。仅对恰好一个普通文本块解包；未知块数组直接透传。工作区事件的绝对 `cwd`
 确定 `.tokenless` 状态位置，两个 Hook 和 RTK 命令共用它。原生 Bash 保留原有状态位置
-及结构化响应处理。插件私有二进制也由 Adapter 解析；私有 PATH 或工作区状态不代表
-模型可以调用恢复命令，因此这些路径声明 `recovery.kind = none`。
+及结构化响应处理。插件私有二进制也由 Adapter 解析；macOS 上经验证的 PreTool 桥接将
+独立恢复命令绑定到该二进制及相同的状态、Stash 选择和归属。桥接不可用时，私有运行时
+路径声明 `recovery.kind = none`。桥接和精确恢复识别由千问办公适配器独立负责。
 
 非法输入、内置 `tokenless` 可执行文件缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
 OpenClaw 2026.6.6 或更高版本通过已声明且显式启用的工具结果 middleware，在模型消费前
-调用 PostTool。Adapter 保留结果信封，只处理单文本结果，声明 `recovery.kind = none`，
-并保留逐调用 RTK 归属信息。不再通过单独的持久化 hook 重复处理结果。Adapter 捕获压缩
+调用 PostTool。Adapter 保留结果信封，只处理单文本结果，并保留逐调用 RTK 归属信息。
+静态 `tokenless_retrieve` 工具的工厂收到会话 UUID 后才声明工具恢复能力。Adapter 从
+提交 prompt 时的 `llm_input` 重建可见 Marker 集合；历史没有恢复指令时跳过 Core，并加入
+刚交付的 Stash Key。`after_compaction` 不提供消息内容，因此撤销此前授权，直到下次提交
+prompt 时取得保留的历史。会话结束时清空状态。工具执行时向 Core Retrieve 提供该会话的
+Marker 集合，取回内容绕过 PostTool。
+缺少工具 API 或 UUID 时仅接受无损压缩；RTK 输出在回执查询前仍声明 `recovery.kind = none`。
+不再通过单独的持久化 hook 重复处理结果。Adapter 捕获压缩
 失败并保留收到的宿主结果，因为宿主会把 middleware 抛出的异常转为工具失败。
 旧版 middleware 预处理可能已裁剪文本或元数据。Tokenless 不会在 API 最低版本之上
 额外拒绝这些宿主，也不会重建缺失内容。仅 `applied` 压缩替换文本；工具错误诊断仍可
@@ -98,6 +114,11 @@ python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-polic
 消费、历史重放、持久化和统计。旧版截断作为预期限制验证；normalized 策略要求完整
 原生输入进入 middleware，并无损交付 JSON 候选。此测试验证传输行为，不验证模型
 回答质量或计费节省。
+
+Python 生命周期配置在构造时读取总开关、搜索、HTML 和 Diff 环境开关。显式
+`TokenlessConfig` 参数优先于环境默认值，解析后的开关传入进程内 Runtime，因此也覆盖
+QwenPaw 和 AgentScope；直接 Runtime 构造仍采用显式配置。Diff 默认开启，关闭压缩
+总开关只选择 dry-run，不会关闭 PreTool RTK。
 
 ## 搜索路径共享
 

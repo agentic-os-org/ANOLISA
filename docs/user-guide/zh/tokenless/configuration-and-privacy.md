@@ -64,15 +64,16 @@ tokenless stats disable
 
 ## 可选 Git Diff 上下文裁剪
 
-Git Diff 裁剪默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
-`TOKENLESS_DIFF_COMPRESSION_ENABLED=1` 启用；取消变量或设为 `0` 关闭。
-`1`、`true`、`yes`（不区分大小写）表示启用。此开关独立于总压缩开关，
+Git Diff 裁剪默认开启。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。未设置或空值保留默认开启；
+`1`、`true`、`yes`（不区分大小写）表示启用，其他非空值表示关闭。此开关独立于总压缩开关，
 不是 `config.json` 字段。启用裁剪后，设置 `TOKENLESS_COMPRESSION_ENABLED=0`
 会测量候选，但仍返回原文。
 
 Rust 使用 `RuntimeConfig.diff_compression_enabled`；Python 使用
-`TokenlessConfig(diff_compression_enabled=True)` 或原生 `TokenlessRuntime`
-的同名参数。SDK 参数默认 false，显式配置；上述 CLI 环境变量不覆盖 SDK 参数。
+`TokenlessConfig(diff_compression_enabled=False)` 或原生 `TokenlessRuntime`
+的同名参数关闭。两者默认 true。`TokenlessConfig` 继承环境默认值，QwenPaw 和 AgentScope
+也适用；显式参数优先。直接调用原生 Runtime 时采用其显式构造配置。
 
 压缩器处理成功命令输出中收到的完整普通 Git Diff，需要文本替换能力、可用的
 Stash 和支持的恢复方式。保留全部增删行、元信息，以及修改附近两行可用上下文。
@@ -147,7 +148,7 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 | `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
-| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
+| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认开启；`0` 关闭；显式 SDK 参数优先 |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关 | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量
