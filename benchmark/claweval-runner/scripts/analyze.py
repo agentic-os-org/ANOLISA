@@ -62,6 +62,9 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
 
+sys.path.insert(0, str(SCRIPT_DIR))
+from report_configuration import resolve_report_configuration  # noqa: E402
+
 FAILURE_CATEGORIES = [
     "search_unavailable",
     "tool_loop",
@@ -77,53 +80,22 @@ FAILURE_CATEGORIES = [
 
 # ── Config loading ──────────────────────────────────────────────────────────
 
-def load_config(config_path: str | None, cli_args) -> dict:
-    """Load settings from config YAML with CLI overrides."""
-    defaults = {
-        "trace_dir": None,
-        "tasks_dir": None,
-        "judge_api_key": "",
-        "judge_base_url": "",
-        "judge_model_id": "",
-    }
 
-    if config_path:
-        cfg_file = Path(config_path)
-        with open(cfg_file) as f:
-            cfg = yaml.safe_load(f) or {}
-
-        judge = cfg.get("judge", {})
-        dflts = cfg.get("defaults", {})
-        claw_eval_dir = cfg_file.parent
-
-        defaults["judge_api_key"] = judge.get("api_key", "")
-        defaults["judge_base_url"] = judge.get("base_url", "")
-        defaults["judge_model_id"] = judge.get("model_id", "")
-
-        defaults["trace_dir"] = str(claw_eval_dir / dflts.get("trace_dir", "traces"))
-        defaults["tasks_dir"] = str(claw_eval_dir / dflts.get("tasks_dir", "tasks"))
-
-    # CLI overrides
-    if cli_args.trace_dir:
-        defaults["trace_dir"] = cli_args.trace_dir
-    if cli_args.tasks_dir:
-        defaults["tasks_dir"] = cli_args.tasks_dir
-    if cli_args.judge_model:
-        defaults["judge_model_id"] = cli_args.judge_model
-    if cli_args.judge_base_url:
-        defaults["judge_base_url"] = cli_args.judge_base_url
-    if cli_args.judge_api_key:
-        defaults["judge_api_key"] = cli_args.judge_api_key
-
-    if defaults["trace_dir"] is None:
-        defaults["trace_dir"] = str(REPO_DIR / "claw-eval" / "traces")
-    if defaults["tasks_dir"] is None:
-        defaults["tasks_dir"] = str(REPO_DIR / "claw-eval" / "tasks")
-
-    return defaults
+def load_config(config_path: str | None, cli_args: argparse.Namespace) -> dict:
+    """Resolve report settings using the shared configuration precedence."""
+    return resolve_report_configuration(
+        config_path,
+        repository_dir=REPO_DIR,
+        trace_dir=cli_args.trace_dir,
+        tasks_dir=cli_args.tasks_dir,
+        judge_model=cli_args.judge_model,
+        judge_base_url=cli_args.judge_base_url,
+        judge_api_key=cli_args.judge_api_key,
+    )
 
 
 # ── Trial report generation ─────────────────────────────────────────────────
+
 
 def load_task_info(task_id: str, tasks_dir: str) -> dict:
     yaml_path = os.path.join(tasks_dir, task_id, "task.yaml")
