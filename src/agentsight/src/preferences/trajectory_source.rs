@@ -22,10 +22,9 @@ pub const PREFERENCE_TRAJECTORY_MAX_ROWS: usize = 50;
 /// unified rows. Trajectories whose ATIF JSON fails to parse are skipped
 /// with a debug log — a single corrupted row must not fail the request.
 ///
-/// Rows are returned newest-first: the store yields documents newest-first
-/// and [`rows_from_atif_json`] emits each document's turns newest-first, so
-/// the concatenation is globally ordered — the order the shared turn
-/// selection contract in [`crate::preferences::api`] requires.
+/// Rows with known turn timestamps are returned newest-first across documents.
+/// Unknown timestamps follow them in stable document/turn order. Collection
+/// time selects documents but does not date their historical user turns.
 ///
 /// # Errors
 /// Returns an error when the store query itself fails.
@@ -42,6 +41,7 @@ pub fn load_window_rows(
     for (session_id, atif_json) in &documents {
         rows.extend(rows_from_atif_json(session_id, atif_json, &mut next_id));
     }
+    rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp_ns));
     Ok(rows)
 }
 
