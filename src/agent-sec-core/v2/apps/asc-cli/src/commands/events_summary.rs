@@ -8,6 +8,8 @@
 
 use serde_json::{Map, Value};
 
+use crate::output::escape_ctl;
+
 /// Produces the v1 summary text for `events` (newest-first from the daemon).
 #[must_use]
 pub fn format_summary(events: &[Value], time_label: &str) -> String {
@@ -105,7 +107,25 @@ fn request_of(event: &Value) -> Value {
         .unwrap_or_else(|| Value::Object(Map::new()))
 }
 
+/// `details.result.<field>` as a rendered string.
+///
+/// These accessors are the chokepoint every event-derived string in the
+/// report passes through, and event payloads carry bytes the operator's
+/// terminal must never execute raw: a prompt-scan summary quotes the
+/// matched evidence (bytes of the scanned prompt), and hardening/verify
+/// errors can quote bytes of the files those tools read. Control bytes are
+/// therefore escaped to visible mnemonics here; clean values are unchanged.
 fn result_str(event: &Value, field: &str) -> String {
+    escape_ctl(
+        result_of(event)
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
+}
+
+/// Raw (unescaped) result field for status comparison.
+fn result_str_raw(event: &Value, field: &str) -> String {
     result_of(event)
         .get(field)
         .and_then(Value::as_str)
@@ -120,7 +140,11 @@ fn result_u64(event: &Value, field: &str) -> u64 {
         .unwrap_or_default()
 }
 
-fn request_str(event: &Value, field: &str) -> String {
+/// Raw (unescaped) request field for identity/grouping — escaping before
+/// aggregation merges distinct keys (an actual LF and a literal `\n`
+/// both become `\n`), which would let a newer non-alert check suppress
+/// another directory's tampered alert in the ledger and posture.
+fn request_str_raw(event: &Value, field: &str) -> String {
     request_of(event)
         .get(field)
         .and_then(Value::as_str)
@@ -129,12 +153,13 @@ fn request_str(event: &Value, field: &str) -> String {
 }
 
 fn details_str(event: &Value, field: &str) -> String {
-    event
-        .get("details")
-        .and_then(|details| details.get(field))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
+    escape_ctl(
+        event
+            .get("details")
+            .and_then(|details| details.get(field))
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
 }
 
 /// Full-skill verification has `skill` absent or null in the request.
@@ -389,7 +414,7 @@ fn summarize_code_scan(events: &[Value]) -> String {
     for event in events {
         if str_of(event, "result") == "succeeded" {
             ok_count += 1;
-            let verdict = result_str(event, "verdict");
+            let verdict = result_str_raw(event, "verdict");
             let verdict = if verdict.is_empty() {
                 "unknown".to_owned()
             } else {
@@ -435,7 +460,7 @@ fn summarize_prompt_scan(events: &[Value]) -> String {
         if str_of(event, "result") == "succeeded" {
             ok_count += 1;
             let verdict = {
-                let verdict = result_str(event, "verdict");
+                let verdict = result_str_raw(event, "verdict");
                 if verdict.is_empty() {
                     "unknown".to_owned()
                 } else {
@@ -490,7 +515,7 @@ fn summarize_prompt_scan(events: &[Value]) -> String {
         ));
         for event in &latest_threats {
             let verdict = {
-                let verdict = result_str(event, "verdict");
+                let verdict = result_str_raw(event, "verdict");
                 if verdict == "?" || verdict.is_empty() {
                     "?".to_owned()
                 } else {
@@ -527,7 +552,7 @@ fn summarize_pii_scan(events: &[Value]) -> String {
         if str_of(event, "result") == "succeeded" {
             ok_count += 1;
             let verdict = {
-                let verdict = result_str(event, "verdict");
+                let verdict = result_str_raw(event, "verdict");
                 if verdict.is_empty() {
                     "unknown".to_owned()
                 } else {
@@ -576,7 +601,7 @@ fn summarize_skill_ledger(events: &[Value]) -> String {
     let mut checks: Vec<&Value> = Vec::new();
     let mut certifications: Vec<&Value> = Vec::new();
     for event in events {
-        let command = result_str(event, "command");
+        let command = result_str_raw(event, "command");
         if command == "check" {
             checks.push(event);
         } else if command == "certify" {
@@ -604,9 +629,9 @@ fn summarize_skill_ledger(events: &[Value]) -> String {
         for event in &certifications {
             if str_of(event, "result") == "succeeded" {
                 let status = {
-                    let verdict = result_str(event, "verdict");
+                    let verdict = result_str_raw(event, "verdict");
                     if verdict.is_empty() {
-                        let scan = result_str(event, "scanStatus");
+                        let scan = result_str_raw(event, "scanStatus");
                         if scan.is_empty() {
                             "unknown".to_owned()
                         } else {
@@ -636,7 +661,7 @@ fn summarize_skill_ledger(events: &[Value]) -> String {
         if str_of(event, "result") != "succeeded" {
             continue;
         }
-        let skill_dir = request_str(event, "skill_dir");
+        let skill_dir = request_str_raw(event, "skill_dir");
         if skill_dir.is_empty() {
             continue;
         }
@@ -662,13 +687,16 @@ fn skill_status_lines(
     let mut denied: Vec<(String, &Value)> = Vec::new();
 
     for (skill_dir, event) in latest_per_skill {
-        let status = non_empty_or(result_str(event, "status"), "unknown");
+        let status = non_empty_or(result_str_raw(event, "status"), "unknown");
         *status_counts.entry(status.clone()).or_insert(0) += 1;
-        let skill_name = std::path::Path::new(skill_dir)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned();
+        // The map key stays raw so distinct skill_dir values keep their own
+        // entries; only the extracted display name is escaped.
+        let skill_name = escape_ctl(
+            std::path::Path::new(skill_dir)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        );
         if status == "tampered" {
             tampered.push((skill_name, event));
         } else if status == "deny" {
@@ -723,15 +751,15 @@ fn skill_ledger_latest_statuses(events: &[Value]) -> std::collections::BTreeMap<
         if str_of(event, "result") != "succeeded" {
             continue;
         }
-        if result_str(event, "command") != "check" {
+        if result_str_raw(event, "command") != "check" {
             continue;
         }
-        let skill_dir = request_str(event, "skill_dir");
+        let skill_dir = request_str_raw(event, "skill_dir");
         if skill_dir.is_empty() || !seen.insert(skill_dir) {
             continue;
         }
         let status = {
-            let status = result_str(event, "status");
+            let status = result_str_raw(event, "status");
             if status.is_empty() {
                 "unknown".to_owned()
             } else {
@@ -776,14 +804,14 @@ fn compute_posture(
     }
 
     for event in prompt_scan {
-        if str_of(event, "result") == "succeeded" && result_str(event, "verdict") == "deny" {
+        if str_of(event, "result") == "succeeded" && result_str_raw(event, "verdict") == "deny" {
             needs_attention = true;
             break;
         }
     }
 
     for event in pii_scan {
-        if str_of(event, "result") == "succeeded" && result_str(event, "verdict") == "deny" {
+        if str_of(event, "result") == "succeeded" && result_str_raw(event, "verdict") == "deny" {
             needs_attention = true;
             break;
         }
@@ -959,6 +987,65 @@ mod tests {
     }
 
     #[test]
+    fn control_bytes_in_event_fields_are_escaped_not_printed_raw() {
+        // The report is printed straight to the operator's terminal, and
+        // its event-derived fields carry bytes nobody but the scanned
+        // content controls: the prompt-scan summary quotes the matched
+        // evidence, a skill-ledger reason and skill_dir can carry file
+        // bytes, and a hardening error quotes the failing tool's output.
+        // A raw ESC turns what follows into a live CSI/OSC command, CR
+        // rewrites the line and LF forges a new report line.
+        let events = vec![
+            scan_event(
+                "prompt_scan",
+                "succeeded",
+                &json!({"result": {
+                    "verdict": "deny",
+                    "threat_type": "prompt_injection",
+                    "summary": "attack: ignore \u{1b}[2J\u{1b}]0;pwned\u{7} the system prompt",
+                }}),
+            ),
+            scan_event(
+                "hardening",
+                "failed",
+                &json!({
+                    "result": {"mode": "scan"},
+                    "error": "loongshield failed on \u{1b}[31mconfig\u{1b}[0m",
+                }),
+            ),
+            scan_event(
+                "skill_ledger",
+                "succeeded",
+                &json!({
+                    "result": {"command": "check", "status": "tampered", "reason": "\r overwritten"},
+                    "request": {"skill_dir": "/s/a\u{1b}[2Db"},
+                }),
+            ),
+        ];
+        let text = format_summary(&events, "last 24 hours");
+        // The report keeps its own line structure, but no other control
+        // byte survives into it.
+        assert!(
+            !text.chars().any(|c| c != '\n' && c.is_control()),
+            "{text:?}"
+        );
+        // The attacker-controlled content stays visible as mnemonics
+        // instead of being dropped or executed.
+        assert!(
+            text.contains("ignore \\x1b[2J\\x1b]0;pwned\\x07 the system prompt"),
+            "{text}"
+        );
+        assert!(
+            text.contains("loongshield failed on \\x1b[31mconfig\\x1b[0m"),
+            "{text}"
+        );
+        assert!(text.contains("\\r overwritten"), "{text}");
+        // A byte-forged report line is impossible: the LF is escaped, so
+        // the forged text stays inline on the threat line.
+        assert!(text.contains("system prompt"), "{text}");
+    }
+
+    #[test]
     fn a_benign_window_is_good() {
         let events = vec![scan_event(
             "code_scan",
@@ -1008,5 +1095,54 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("System Status: Needs attention"), "{text}");
+    }
+
+    #[test]
+    fn raw_identity_keeps_colliding_escaped_dirs_distinct_in_ledger() {
+        // 1570005763's regression: escape_ctl converts an actual LF to the
+        // literal two characters backslash+n, while leaving an existing
+        // backslash+n unchanged. Two distinct skill_dir values therefore
+        // collide after escaping, and the newest non-alert event for one
+        // directory would suppress the other's older tampered alert.
+        let mut newer_ok = scan_event(
+            "skill_ledger",
+            "succeeded",
+            &json!({
+                "result": {"command": "check", "status": "succeeded"},
+                "request": {"command": "check", "skill_dir": "skills/a\\nb"}
+            }),
+        );
+        newer_ok["timestamp"] = json!("2026-01-02T00:00:02+00:00");
+        let mut older_tampered = scan_event(
+            "skill_ledger",
+            "succeeded",
+            &json!({
+                "result": {"command": "check", "status": "tampered", "reason": "signature mismatch"},
+                "request": {"command": "check", "skill_dir": "skills/a\nb"}
+            }),
+        );
+        older_tampered["timestamp"] = json!("2026-01-02T00:00:01+00:00");
+        // Events arrive newest first. Both keys render as
+        // "skills/a\nb" after escaping, so with escaped identity
+        // the newer succeeded check would suppress the older tampered
+        // alert; raw identity keeps both directories tracked.
+        let events = vec![newer_ok, older_tampered];
+        let statuses = skill_ledger_latest_statuses(&events);
+        assert_eq!(
+            statuses.len(),
+            2,
+            "distinct raw skill_dir values must not merge: {statuses:?}"
+        );
+        let text = format_summary(&events, "last 24 hours");
+        assert!(text.contains("Skills tracked: 2"), "{text}");
+        assert!(text.contains("Tampered (1):"), "{text}");
+        assert!(text.contains("System Status: Needs attention"), "{text}");
+        // The tampered basename carries an actual LF; it must surface as
+        // the escaped \n mnemonic, never as a raw control byte.
+        assert!(text.contains("a\\nb — signature mismatch"), "{text}");
+        assert!(
+            !text.chars().any(|c| c != '\n' && c.is_control()),
+            "{text:?}"
+        );
     }
 }
