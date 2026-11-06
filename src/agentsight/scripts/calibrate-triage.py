@@ -53,7 +53,11 @@ def measure(atif_json):
         "n_user_turns": sum(1 for s in steps if s.get("source") == "user"),
         "n_tool_calls": sum(len(s.get("tool_calls") or []) for s in steps),
         "max_agent_len": max(
-            (message_length(s.get("message")) for s in steps if s.get("source") == "agent"),
+            (
+                message_length(s.get("message"))
+                for s in steps
+                if s.get("source") == "agent"
+            ),
             default=0,
         ),
     }
@@ -65,11 +69,15 @@ def classify(m, max_agent_len):
     # trajectory with neither agent text nor tool calls recorded nothing.
     # Tool-only transcripts are work (71 steps / 84 calls / zero agent text in
     # the corpus the Rust comment documents), not emptiness.
-    if m["n_steps"] <= 1 or (m["max_agent_len"] == 0 and m["n_tool_calls"] == 0):
+    if m["max_agent_len"] == 0 and m["n_tool_calls"] == 0:
         return "empty"
     # More than one user turn means the topic was carried forward, which the
     # design treats as evidence of value regardless of the other inputs.
-    if m["n_tool_calls"] == 0 and m["n_user_turns"] <= 1 and m["max_agent_len"] < max_agent_len:
+    if (
+        m["n_tool_calls"] == 0
+        and m["n_user_turns"] <= 1
+        and m["max_agent_len"] < max_agent_len
+    ):
         return "useless"
     return "substantive"
 
@@ -109,7 +117,9 @@ def main():
             excluded.append((bucket, m, (first_msg or "")[:70]))
 
         n = m["n_tool_calls"]
-        tool_dist["0" if n == 0 else "1-5" if n <= 5 else "6-20" if n <= 20 else "20+"] += 1
+        tool_dist[
+            "0" if n == 0 else "1-5" if n <= 5 else "6-20" if n <= 20 else "20+"
+        ] += 1
 
     total = len(rows)
     if total == 0:
