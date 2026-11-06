@@ -201,6 +201,10 @@ const BASH_DOCUMENTS: &[(&str, &str)] = &[
         "shell-tamper-sensitive-file",
         include_str!("../rules/bash/shell-tamper-sensitive-file.yaml"),
     ),
+    (
+        "shell-tls-bypass",
+        include_str!("../rules/bash/shell-tls-bypass.yaml"),
+    ),
 ];
 
 /// `(file stem, document)` for every Python YAML file, in file-name order.

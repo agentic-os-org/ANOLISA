@@ -174,3 +174,118 @@ fn disk_wipe_matches_v1_behaviour() {
         assert_eq!(matched, *expected, "diverged from V1 on: {case}");
     }
 }
+
+/// Cover the transfer-tool and runtime TLS bypasses that no shipped rule
+/// matched before `shell-tls-bypass` was added.
+const SHELL_TLS_BYPASS_CASES: &[(&str, bool)] = &[
+    ("curl -k https://example.invalid/payload", true),
+    ("curl -khttps://example.invalid", false),
+    ("curl --insecure https://example.invalid", true),
+    ("curl -fsSL https://example.invalid/install.sh", false),
+    ("curl https://example.invalid -o payload", false),
+    ("wget --no-check-certificate https://example.invalid", true),
+    ("wget --no-check-certificate https://a.invalid -O x", true),
+    ("wget -q https://example.invalid", false),
+    ("NODE_TLS_REJECT_UNAUTHORIZED=0 node fetch.js", true),
+    ("env NODE_TLS_REJECT_UNAUTHORIZED=0 node fetch.js", true),
+    ("NODE_TLS_REJECT_UNAUTHORIZED=1 node fetch.js", false),
+    ("node fetch.js", false),
+];
+
+#[test]
+fn shell_tls_bypass_matches_documented_variants() {
+    let rule = load_rules(Language::Bash)
+        .expect("rule set loads")
+        .into_iter()
+        .find(|rule| rule.rule_id == "shell-tls-bypass")
+        .expect("shell-tls-bypass is shipped");
+    let regex = Regex::new(&rule.regex).expect("pattern compiles");
+    for (case, expected) in SHELL_TLS_BYPASS_CASES {
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "shell-tls-bypass on: {case}");
+    }
+}
+
+/// `git config http.sslVerify false` persists the bypass to repository or
+/// global config; only the one-shot `-c` form was detected before.
+const GIT_SSL_BYPASS_CASES: &[(&str, bool)] = &[
+    ("git config http.sslVerify false", true),
+    ("git config --global http.sslVerify false", true),
+    ("git config http.sslVerify true", false),
+    ("git -c http.sslVerify=false clone https://example.invalid", true),
+    ("GIT_SSL_NO_VERIFY=true git clone https://example.invalid", true),
+    ("git pull", false),
+];
+
+#[test]
+fn git_ssl_bypass_covers_the_persistent_config_form() {
+    let rule = load_rules(Language::Bash)
+        .expect("rule set loads")
+        .into_iter()
+        .find(|rule| rule.rule_id == "shell-git-ssl-bypass")
+        .expect("shell-git-ssl-bypass is shipped");
+    let regex = Regex::new(&rule.regex).expect("pattern compiles");
+    for (case, expected) in GIT_SSL_BYPASS_CASES {
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "shell-git-ssl-bypass on: {case}");
+    }
+}
+
+/// npm/yarn persist the bypass through `config set` and per-invocation
+/// `--strict-ssl=false`; only the lowercase env-variable form was detected.
+const PKG_TLS_BYPASS_CASES: &[(&str, bool)] = &[
+    ("npm config set strict-ssl false", true),
+    ("npm install --strict-ssl=false express", true),
+    ("yarn config set strict-ssl false", true),
+    ("npm_config_strict_ssl=false npm install", true),
+    ("npm config set strict-ssl true", false),
+    ("npm install express", false),
+    ("yarn add react", false),
+];
+
+#[test]
+fn pkg_tls_bypass_covers_config_and_flag_forms() {
+    let rule = load_rules(Language::Bash)
+        .expect("rule set loads")
+        .into_iter()
+        .find(|rule| rule.rule_id == "shell-pkg-tls-bypass")
+        .expect("shell-pkg-tls-bypass is shipped");
+    let regex = Regex::new(&rule.regex).expect("pattern compiles");
+    for (case, expected) in PKG_TLS_BYPASS_CASES {
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "shell-pkg-tls-bypass on: {case}");
+    }
+}
+
+/// `requests`/`httpx` calls with `verify=False` disable verification per call
+/// and are the most common Python TLS bypass after the three already shipped.
+const PY_TLS_BYPASS_CASES: &[(&str, bool)] = &[
+    ("requests.get(url, verify=False)", true),
+    ("requests.post(url, data=p, verify=False)", true),
+    ("httpx.get(url, verify=False)", true),
+    ("requests.get(url)", false),
+    ("requests.get(url, verify=True)", false),
+    ("ssl._create_unverified_context()", true),
+];
+
+#[test]
+fn py_tls_bypass_covers_per_call_verify_false() {
+    let rule = load_rules(Language::Python)
+        .expect("rule set loads")
+        .into_iter()
+        .find(|rule| rule.rule_id == "py-tls-bypass")
+        .expect("py-tls-bypass is shipped");
+    let regex = Regex::new(&rule.regex).expect("pattern compiles");
+    for (case, expected) in PY_TLS_BYPASS_CASES {
+        let matched = regex
+            .is_match(case)
+            .expect("match does not exhaust backtracking");
+        assert_eq!(matched, *expected, "py-tls-bypass on: {case}");
+    }
+}

@@ -9,6 +9,9 @@ regex: |-
   \b(pip3?|python3?\s+-m\s+pip)\b[^;|&\n]*install[^;|&\n]*--trusted-host
   |\buv\b[^;|&\n]*--trusted-host
   |\bnpm_config_strict_ssl\s*=\s*false
+  |\bnpm\b[^;|&\n]*\bconfig\b[^;|&\n]*\bset\b[^;|&\n]*strict-ssl\s+false\b
+  |\bnpm\b[^;|&\n]*--strict-ssl=false
+  |\byarn\b[^;|&\n]*\bconfig\b[^;|&\n]*\bset\b[^;|&\n]*strict-ssl\s+false\b
   |\bcomposer\b[^;|&\n]*(disable-tls|--no-verify)
   |\bCARGO_HTTP_CHECK_REVOKE\s*=\s*false
 severity: warn
