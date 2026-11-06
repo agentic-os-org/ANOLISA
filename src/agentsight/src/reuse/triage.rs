@@ -38,7 +38,8 @@ pub const DEFAULT_MAX_AGENT_LEN: usize = 2_000;
 ///   no longer called empty.
 /// - `triage-4` no deterministic finding accuses at all; `bad` needs a model
 ///   review or a person. See `super::summarize`.
-const TRIAGE_RULES_VERSION: &str = "triage-4";
+/// - `triage-5` a single recorded step still counts its answer and tool work.
+const TRIAGE_RULES_VERSION: &str = "triage-5";
 
 /// Thresholds for [`classify`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,7 +197,7 @@ pub fn classify(
     // or assistant text anywhere — so keying on the answer length alone called a
     // 71-step, 84-call trajectory empty. Tool activity is work, and a long chain
     // of real calls and results is the most reusable shape there is.
-    if metrics.n_steps <= 1 || (metrics.max_agent_len == 0 && metrics.n_tool_calls == 0) {
+    if metrics.max_agent_len == 0 && metrics.n_tool_calls == 0 {
         return outcome(
             TrajectoryLabel::Useless,
             "轨迹既无 Agent 回答也无工具调用，没有可复用内容".to_string(),
@@ -405,7 +406,7 @@ mod tests {
         let a = TriageConfig::default();
         let b = TriageConfig { max_agent_len: 900 };
         assert_ne!(a.version(), b.version());
-        assert!(a.version().starts_with("triage-4/"));
+        assert!(a.version().starts_with("triage-5/"));
     }
 
     #[test]
