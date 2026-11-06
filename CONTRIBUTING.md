@@ -263,22 +263,11 @@ Before requesting review, confirm that:
 
 ## Documentation synchronization
 
-Documentation changes must follow
-[`specs/documentation-standard.md`](specs/documentation-standard.md) and keep
-English and Chinese pages semantically equivalent. Command examples remain
-identical in both languages. The root guide stays a cross-component overview;
-long usage and architecture material belongs in the canonical locations below.
+Follow the [PR documentation update rules in §5 of the documentation standard](specs/documentation-standard.md#5-pr-documentation-update-rules)
+to identify which pages to update in the same PR. Keep English and Chinese pages
+semantically equivalent and command examples identical.
 
-| Change | Update in the same PR |
-| --- | --- |
-| CLI command or flag | Component `README.md` and the relevant `docs/user-guide/` page. |
-| Configuration option | Component `README.md` and the relevant `docs/user-guide/` page. |
-| Installation method | Shared installation/quickstart pages as applicable, the component manual, and its README. |
-| Architecture or protocol | `src/<component>/docs/design/`. |
-| New component | Root README and `NOTICE` when applicable. |
-
-Daily feature and fix PRs update README and user-guide pages. Release version
-bump PRs aggregate user-perceivable entries into `CHANGELOG*.md`.
+Release version bump PRs aggregate user-perceivable entries into `CHANGELOG*.md`.
 
 ## License
 

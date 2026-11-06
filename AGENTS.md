@@ -250,11 +250,25 @@ Use [`.github/pull_request_template.md`](.github/pull_request_template.md) as th
 
 ## 9. Documentation Rules
 
-> **MANDATORY**: All documentation rules — file naming, bilingual conventions, CHANGELOG format, file placement, user-guide standards — are defined in [`specs/documentation-standard.md`](specs/documentation-standard.md). You MUST read that file before creating, renaming, or modifying any documentation file. Non-compliance will be rejected in review.
+Before changing documentation or public behavior, you MUST read the English
+[`specs/documentation-standard.md`](specs/documentation-standard.md) and the
+scoped `AGENTS.md` for each affected component, if present. Select the scoped
+rules by subject, including when editing documentation under `docs/` or
+`contribute/`.
+
+1. Identify the reader's task, applicable version, and canonical page before
+   editing.
+2. Check changed examples and support claims against the target implementation
+   and release or Preview artifacts, as applicable. In the PR, report what was
+   checked statically, parsed, or run and any relevant gap.
+3. Update affected canonical pages and their language counterparts in the same
+   PR. If moving content, preserve public links and anchors and update affected
+   navigation and generated entry points.
 
 > **MANDATORY**: When introducing a new `src/<name>/` component, you MUST read and follow [`specs/component-onboarding.md`](specs/component-onboarding.md) before opening the scaffold PR.
 
-This section intentionally does not duplicate the spec. Do NOT invent documentation rules from memory or prior context — the spec is the single source of truth.
+The English specifications define the detailed rules; Chinese companions are
+for reference.
 
 ## 10. Code Standards (General)
 
@@ -278,16 +292,15 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Framework crates and native Hook gates |
 | **AW Providers** | [`providers/AGENTS.md`](providers/AGENTS.md) | Independent collaboration workspaces and Provider contracts |
 
-AW documentation under `docs/` and `contribute/` also follows the audience and
-writing rules in [`src/aw/AGENTS.md`](src/aw/AGENTS.md#documentation-audiences-and-writing).
-
 ## 11.1 File Placement & Documentation Structure
 
-> **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §2–§4 for the complete file placement rules, bilingual naming convention, and component-level file requirements. Do NOT rely on cached or memorized rules — read the spec file directly.
+Follow [§9](#9-documentation-rules). Naming, file placement, and component file
+requirements are in §§1–4 of the documentation standard.
 
 ## 12. User Guide Documentation Standards
 
-> **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §4.6 for user-guide writing standards including installation priority, content boundaries, framing principles, and bilingual language rules. You MUST comply — skipping this spec and writing docs from assumptions is a blocking review issue.
+Follow [§9](#9-documentation-rules) and §4.6 of the documentation standard for
+installation paths, content boundaries, and first-use guidance.
 
 ---
 

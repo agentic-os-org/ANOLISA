@@ -2,9 +2,11 @@
 
 [中文版](README_zh.md)
 
-This directory separates the user manual from documentation about developing
-ANOLISA. Start with the [user guide](user-guide/en/index.md) to install or use
-components; this page explains how documentation sources are organized.
+Choose a guide by what you want to accomplish. The
+[user guide](user-guide/en/index.md) covers installing, using, and operating
+ANOLISA. The [developer guide](developer-guide/en/index.md) covers integrating
+or extending ANOLISA from another project. To change, test, or release ANOLISA
+itself, start with the [contribution guide](../CONTRIBUTING.md).
 
 ## Directory layout
 
@@ -14,7 +16,7 @@ ANOLISA/
 ├── CONTRIBUTING_zh.md
 ├── contribute/
 │   └── {en,zh}/
-│       ├── aw/building.md
+│       ├── aw/                  # Build and release verification
 │       ├── cosh-ng/             # Component development and testing
 │       └── ws-ckpt/packaging.md
 └── docs/
@@ -26,7 +28,10 @@ ANOLISA/
     │       ├── index.md
     │       ├── getting-started/
     │       │   ├── quickstart.md
-    │       │   └── …            # Shared installation, build, test and troubleshooting
+    │       │   ├── installation.md
+    │       │   ├── building.md  # Current location; see below
+    │       │   ├── testing.md   # Current location; see below
+    │       │   └── …
     │       └── {component}/index.md
     └── developer-guide/
         └── {en,zh}/
@@ -38,11 +43,16 @@ ANOLISA/
 
 The user manual keeps component directories side by side. Each component's
 `index.md` introduces its functionality, includes its first-use steps, and links
-to further chapters when needed. Shared tasks live in `getting-started/`, so
-users and contributors can refer to the same installation, build, test, and
-troubleshooting instructions. The project Quickstart stays a separate short
-journey with links to the next task; `getting-started/` does not need another
-index page.
+to further chapters when needed. Shared user tasks live in `getting-started/`.
+The project Quickstart gives a short path to a first result; `getting-started/`
+does not need another index page. The existing `building.md` and `testing.md`
+remain at their current paths while their material is separated by task.
+
+For a supported source installation, the user guide may link to a self-contained
+build section in the contribution guide. The user page states the supported
+platform and version and explains how to install and verify the artifact. The
+build section owns the toolchain requirements, commands, and artifact paths.
+Development setup and PR checks belong in the contribution guide.
 
 Website navigation groups are defined in [`navigation.yaml`](navigation.yaml).
 They organize reading paths without imposing the same hierarchy on source
@@ -74,10 +84,12 @@ separate documentation sources.
 
 General contribution instructions live in the repository's
 [contribution guide](../CONTRIBUTING.md), with component development chapters in
-[`contribute/`](../contribute/en/). SDK and integration documentation is collected
-in [`developer-guide/`](developer-guide/en/index.md). Component technical designs
-stay with their source under `src/<component>/docs/` or the component's
-registered source root.
+[`contribute/`](../contribute/en/). Public SDK, API, and integration documentation
+is collected in [`developer-guide/`](developer-guide/en/index.md). Component
+design rationale, invariants, and internal interfaces stay with the implementation
+under `src/<component>/docs/design/` or the corresponding directory in the
+component's registered source root. Follow the existing ownership, location, and
+review process for project-wide or cross-component ADRs.
 
 The same navigation YAML defines the SDK and AW integration dropdown and the
 contribution sidebar. The website renders the existing root and component

@@ -1,21 +1,29 @@
 # ANOLISA Documentation Standard
 
+[中文版（评审参考）](documentation-standard_zh.md)
+
 > Canonical reference for documentation structure, naming, bilingual conventions, and maintenance rules.
 > Both human contributors and AI agents MUST follow this specification.
+> This English text is authoritative. The Chinese companion is for reference.
 
 ## Agent Navigation (for documentation tasks)
 
-Agents enter this repository via `AGENTS.md` (auto-loaded by tooling). For **documentation-related work**, `AGENTS.md` §9/§11.1/§12 redirects here with MANDATORY directives. The reading priority for documentation tasks is:
+For documentation work, start with the repository's `AGENTS.md` §9. Read in
+this order:
 
 1. `AGENTS.md` — natural entry; contains redirect to this spec
 2. `specs/documentation-standard.md` — normative documentation rules (this file)
-3. `src/<component>/AGENTS.md` — scoped module rules (if working on that component)
-4. `src/<component>/README.md` — component context
+3. Applicable component `AGENTS.md` files — use the subject of the change,
+   even when the document is under `docs/`, `contribute/`, or another directory
+4. The component README and the canonical references for the affected task
 
-**Source of truth hierarchy:**
+**Sources of truth:**
 
-- Code > README/user-guide > design docs
-- Before generating or modifying documentation: read source code, verify CLI examples against `clap`/`argparse` definitions, never document unimplemented features as available
+- Check behavior against the implementation, CLI definitions, and schemas for
+  the documented version. A design document alone does not establish behavior.
+- Check installation and support claims against the applicable release or
+  named Preview, its artifacts, and the scope of verification. Code on `main`
+  does not establish that a feature or package has been released.
 
 Before writing or revising design documents, technical explanations or change
 summaries, also read the [change description standard](change-description-standard.md).
@@ -29,6 +37,7 @@ placement, bilingual and maintenance rules.
 | Scope | English (default) | Chinese | Notes |
 |-------|-------------------|---------|-------|
 | Repo root / component root | `FILE.md` | `FILE_zh.md` | No suffix = English |
+| `specs/` rule documents | `FILE.md` | `FILE_zh.md` (optional) | Chinese companions aid review; English is authoritative |
 | `docs/` directory guide | `docs/README.md` | `docs/README_zh.md` | Explains the documentation layout |
 | `docs/` long-form guides | `docs/{type}/en/` | `docs/{type}/zh/` | Directory-based separation |
 
@@ -116,8 +125,8 @@ docs/
 │   │   │   ├── quickstart.md  # One short cross-component first-use journey
 │   │   │   ├── installation.md
 │   │   │   ├── anolisa-cli.md
-│   │   │   ├── building.md
-│   │   │   ├── testing.md
+│   │   │   ├── building.md    # Current location; see §3.1
+│   │   │   ├── testing.md     # Current location; see §3.1
 │   │   │   └── troubleshooting.md
 │   │   ├── aw/
 │   │   │   ├── index.md
@@ -127,7 +136,7 @@ docs/
 │   │   │   └── owasp-agentic-top10.md
 │   │   └── {component}/       # Flat component directories, each with index.md
 │   └── zh/                    # Mirrors the English manual
-└── developer-guide/           # Existing developer docs; separate migration
+└── developer-guide/           # External integration and extension
     ├── en/
     │   └── {component}/
     └── zh/
@@ -136,16 +145,26 @@ docs/
 
 ### 3.1 What Goes Where
 
-| Content type | Location | NOT here |
-|-------------|----------|----------|
-| Full user-facing how-to / reference | `docs/user-guide/{en,zh}/` | — |
-| Developer architecture / IPC / hooks | `docs/developer-guide/{en,zh}/` | Component root |
-| Archived manuals for deprecated components | `deprecated/<component>/docs/` | Published user/developer guides |
-| Component design docs | `src/<component>/docs/` | `docs/` top level |
-| Cross-component quick start | `docs/user-guide/{en,zh}/getting-started/quickstart.md` | Component entry pages |
-| Build and test instructions | `docs/user-guide/{en,zh}/getting-started/{building,testing}.md` | Duplicate command inventories |
+Choose the canonical location by what the reader needs to accomplish. The
+reader's technical background and the commands used do not determine placement.
 
-> **Note on component README**: README.md serves as a **summary entry point** (positioning + quick-start + basic install/use). It is NOT a full how-to or reference manual. Complete usage documentation belongs in `docs/user-guide/`. When CLI/config changes occur, update both the README summary and the user-guide reference.
+| Reader's task | Canonical location | Scope |
+|---------------|--------------------|-------|
+| Install, use, or operate ANOLISA | `docs/user-guide/{en,zh}/` | Supported installation, configuration, first use, upgrade, troubleshooting, and recovery in the reader's own environment |
+| Integrate or extend ANOLISA from another project | `docs/developer-guide/{en,zh}/` | Public SDKs, APIs, protocols, Provider and adapter development, deployment integration, and integration verification |
+| Change, verify, or release ANOLISA itself | Root or component `CONTRIBUTING*.md`; `contribute/{en,zh}/` | Development setup, source builds and debugging, regression and PR checks, and project packaging and releases |
+| Understand or change a component's implementation | Component-local `docs/design/` and other internal references | Design rationale, internal interfaces, invariants, and implementation or migration plans |
+
+Use the test's purpose to decide where to document it. Verifying a deployed
+installation belongs in the user guide; verifying an external integration
+belongs in the developer guide; validating a source change belongs in the
+contribution guide. Shared `getting-started/building.md` and `testing.md` still
+exist in the user-guide tree. The table above governs new content and is the
+target for separating their existing material in a later migration.
+
+A component README is a summary and an entry point. Include positioning,
+basic first use, and links to the full guides. Keep public CLI or configuration
+reference material in the guide for its intended reader.
 
 Deprecated component manuals are retained with their source, with the component
 README linking to the archive. Keep archived relative links checked, but remove
@@ -154,7 +173,8 @@ archive lives in `deprecated/copilot-shell/docs/`.
 
 ### 3.2 Design Documents
 
-Design documents live **only** in the component's own directory:
+Component design documents in this repository live in the component's own
+directory:
 
 ```
 src/<component>/docs/design/    ← component-specific design docs
@@ -179,10 +199,15 @@ root registered in `.github/components.json`, such as
 `distribution/anolisa/docs/design/`. Component-local documentation stays with its
 component when that directory moves.
 
-Design docs are **never** placed at:
+Component design docs are **never** placed at:
 - Repository root
 - `docs/` top level
 - `docs/user-guide/` or `docs/developer-guide/`
+
+This placement rule does not change the ownership, location, or review process
+of project-wide or cross-component ADRs. Follow the applicable ADR governance
+and reference the existing decision. Record the decision's review status
+separately from implementation, validation, and release status.
 
 ### 3.3 Public Website and Agent Endpoints
 
@@ -224,6 +249,16 @@ Developer Guide, Changelog, and the Agent entry point.
 Pages builds run automatically for relevant changes merged to `main`.
 Pull requests build and validate the artifact without deploying it, and
 `workflow_dispatch` remains available for an explicit manual deployment.
+
+### 3.4 Documentation Collaboration: Do and Don't
+
+| Do | Don't |
+|----|-------|
+| Identify the reader, task, applicable version, and canonical page before editing. | Classify content by a command name, toolchain, or the writer's role. |
+| For procedures, give the relevant prerequisites, working directory, permissions, observable result, and stop or rollback steps. | Treat a successful build or process start as proof that a feature took effect. |
+| Verify changed examples and claims against the target version. Report what was checked statically, parsed, or run, and any relevant gap. | Present planned work, a development-only build, or an unverified host combination as a supported workflow. |
+| Maintain each public contract or procedure in one canonical place. Summarize, link, or generate it elsewhere. | Maintain parallel copies of the same full reference or build recipe in multiple guides. |
+| Update the current instructions in both languages. If moving a page or section, preserve published URLs and anchors and update navigation and generated entry points as needed. | Append a release narrative in place of updating the affected instructions, or leave one language or entry point behind. |
 
 ## 4. Component-Level Files
 
@@ -282,11 +317,22 @@ AgentSight captures kernel-level events without modifying agent code...
 
 ### 4.6 User Guide Writing Standards
 
-**Installation priority** (all component docs MUST follow this order):
+**Installation priority:** Lead with a supported, obtainable installation
+method for the documented platform and version. Prefer the CLI route
+(`anolisa install <component>`) when supported for that target. Document other
+supported channels, such as RPM or a standalone bundle, when applicable. State
+the required install scope and privileges. If the only available path is a
+Preview, name its version or commit, artifact source, and limitations.
 
-1. `anolisa install <component>` — always first (agentsight / agent-sec-core require `sudo` system mode)
-2. RPM package (`yum install`) — alternative for Alinux users
-3. Source build — developers only, always last
+**Supported source installation:** A user guide MAY offer source installation
+as an alternative when the project supports building and using the resulting
+artifact. State when to choose it, the supported platform and release tag or
+named Preview commit, and how to install and verify the result. Link to a
+self-contained build section in the contribution guide for toolchain
+requirements, build commands, and artifact paths. Readers must be able to use
+that section without setting up a contributor workflow or running PR checks.
+Keep the full build recipe there. A build that exists only for source debugging
+or PR verification is not a user installation option.
 
 **Content boundaries:**
 
@@ -297,7 +343,9 @@ AgentSight captures kernel-level events without modifying agent code...
 **Framing:**
 
 - Open with a value proposition ("why install this?"), not architecture description
-- Cross-component integration stories belong in user-guide (e.g. "install AgentSight + Tokenless, savings appear in Dashboard")
+- Show how users get a result from supported components together. Place the
+  implementation of an integration, such as writing a Provider, in the
+  developer guide.
 
 **Language rules for bilingual docs:**
 
@@ -317,17 +365,22 @@ The `docs/README*.md` pair describes this layout for documentation maintainers.
 
 ## 5. PR Documentation Update Rules
 
-When a PR introduces any of the following changes, documentation MUST be updated in the same PR:
+When a PR makes any of the following changes, update the affected canonical
+documentation and its language counterpart in the same PR. Update README,
+website, and Agent entry summaries where their claims or links change.
 
 | Change type | Required doc update |
 |-------------|-------------------|
-| New/modified CLI command or flag | Component README (summary) + user-guide (full reference) |
-| New/modified config option | Component README (summary) + user-guide (full reference) |
+| User-facing CLI, configuration, or operational behavior | User guide and affected usage examples |
+| Public SDK, API, Provider protocol, or automation contract | Developer reference and affected integration examples; user guide if use or support changes |
 | Installation method change | Shared installation/quickstart pages as applicable + component index and README |
-| Architecture or protocol change | Component `docs/design/` |
+| Internal architecture or protocol change | Affected component design or internal reference, following applicable ADR rules |
+| Build, test, or release process change | Affected contribution or packaging guide |
 | New component added | Root README + NOTICE (if applicable) |
 
-**CHANGELOG update timing**: Daily feature/fix PRs update README and user-guide only; CHANGELOG is written exclusively in **release version bump PRs** that aggregate all user-perceivable changes since the last release.
+**CHANGELOG update timing**: Feature and fix PRs update the relevant guides.
+CHANGELOG is written exclusively in **release version bump PRs** that aggregate
+all user-perceivable changes since the last release.
 
 **Release-note requirement (all release components)**: Every component with a
 non-null `release_tag_prefix` in `.github/components.json` MUST include exactly
@@ -346,4 +399,4 @@ created; the workflow does not fall back to commit subjects or another version.
 
 ---
 
-*Last updated: 2026-10-23*
+*Last updated: 2026-11-06*
