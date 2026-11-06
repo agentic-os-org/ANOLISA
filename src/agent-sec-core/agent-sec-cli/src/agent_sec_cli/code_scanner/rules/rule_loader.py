@@ -36,7 +36,7 @@ def _resolve_refs(data: Dict[str, Any], shared: Dict[str, Any], rule_name: str) 
     ref_key = data.pop("target_regexes_ref", None)
     if ref_key is None:
         return
-    if ref_key not in shared:
+    if not isinstance(ref_key, str) or ref_key not in shared:
         raise ErrRuleRefResolve(rule_name)
     data["target_regexes"] = shared[ref_key]
 
@@ -66,7 +66,12 @@ def load_rules(language: Language) -> List[RuleDefinition]:
                 raise ErrRuleYamlParse(yaml_file.stem)
         if data is None:
             continue
-        data["regex"] = data["regex"].replace("\n", "")
+        if not isinstance(data, dict):
+            raise ErrRuleValidation(yaml_file.stem)
+        regex = data.get("regex")
+        if not isinstance(regex, str):
+            raise ErrRuleValidation(yaml_file.stem)
+        data["regex"] = regex.replace("\n", "")
         _resolve_refs(data, shared, yaml_file.stem)
         try:
             rules.append(RuleDefinition(**data))
