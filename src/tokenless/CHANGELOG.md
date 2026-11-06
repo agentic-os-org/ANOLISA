@@ -9,6 +9,20 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-06
+
+### Changed
+
+- **Breaking for source installations:** `make install`, framework registration, and removal now default to `AWPRJ=anolisa`, placing adapters and extensions in the shared ANOLISA namespace. To keep or remove an existing independent installation, pass `AWPRJ=` explicitly with the same profile and path overrides used for installation. Installation rejects resources owned by another installation; removal preserves them and warns. RPM/raw layouts and runtime configuration paths are unchanged ([#9462](https://github.com/agentic-os-org/ANOLISA/pull/9462)).
+
+### Fixed
+
+- JSON depth limits now preserve numeric, Boolean, and null leaves with their original types instead of replacing them with string markers. These leaves no longer create Stash entries or count as truncations; objects, arrays, and strings keep their existing depth-limit behavior ([#7743](https://github.com/agentic-os-org/ANOLISA/pull/7743)).
+- Recognized native `grep` and `rg` calls, including supported wrappers and compound commands containing them, now bypass RTK rewriting and use only lossless search compression in PostTool. Every received match is retained; disabled search compression, unsupported formats, and no savings preserve the original output even with `force_json`. Mixed command output also stays unchanged when search boundaries cannot be identified, which can increase result size ([#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)).
+- Qoder native Bash compression now replaces only string `stdout`, including short or empty values, preserving `stderr`, exit status, and every other result field ([#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)).
+- QwenWork on macOS can retrieve stashed output through its private plugin executable even when the model shell has no global `tokenless` command. Standalone `tokenless retrieve <HASH>` calls use the Hook's data directory and session identifiers, and recovered output bypasses further compression. Recovery requires the private executable, valid state directory, and registered rewrite Hook; Windows and other hosts retain their existing behavior ([#9622](https://github.com/agentic-os-org/ANOLISA/pull/9622)).
+- AgentScope 1.x and 2.x retain complete tool results when optional PostTool compression fails, including protocol errors and incompatible SDK wheel signatures. The adapter logs the failure without exposing partial replacement text or recovery hints; cancellation still propagates ([#8928](https://github.com/agentic-os-org/ANOLISA/pull/8928)).
+
 ## [0.9.3] - 2026-11-05
 
 ### Added

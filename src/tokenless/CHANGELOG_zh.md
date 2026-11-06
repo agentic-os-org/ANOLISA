@@ -9,6 +9,20 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.4] - 2026-11-06
+
+### 变更
+
+- **源码安装的不兼容变更：** `make install`、框架注册和卸载现在默认使用 `AWPRJ=anolisa`，将适配器和扩展放入 ANOLISA 共享命名空间。要保留或卸载已有的独立安装，请显式传入 `AWPRJ=`，并沿用安装时的 profile 和路径覆盖。安装会拒绝覆盖其他安装拥有的资源；卸载会保留这些资源并发出警告。RPM/raw 布局和运行时配置路径保持不变（[#9462](https://github.com/agentic-os-org/ANOLISA/pull/9462)）。
+
+### 修复
+
+- JSON 深度限制现在保留数字、布尔值和 null 叶子的原始类型，不再将其替换为字符串标记。这些叶子不再写入 Stash，也不再计入截断次数；对象、数组和字符串沿用原有的深度限制行为（[#7743](https://github.com/agentic-os-org/ANOLISA/pull/7743)）。
+- 可识别的原生 `grep` 和 `rg` 调用现在绕过 RTK 改写，PostTool 仅使用无损搜索压缩，包括受支持的包装命令和包含这些调用的复合命令。每条收到的匹配记录均会保留；搜索压缩被禁用、格式不受支持或无法节省时，即使启用 `force_json` 也保留原始输出。无法识别搜索边界的混合命令输出同样保持原样，因此结果可能更大（[#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)）。
+- Qoder 原生 Bash 压缩现在仅替换字符串 `stdout`，包括较短或为空的值，保留 `stderr`、退出状态及所有其他结果字段（[#9615](https://github.com/agentic-os-org/ANOLISA/pull/9615)）。
+- macOS 上的 QwenWork 即使在模型 Shell 中没有全局 `tokenless` 命令，也能通过插件私有可执行文件取回 Stash 原文。独立的 `tokenless retrieve <HASH>` 调用沿用 Hook 的数据目录和会话标识，恢复后的输出不会再次压缩。恢复能力要求私有可执行文件、有效状态目录和已注册的改写 Hook；Windows 和其他宿主保持原有行为（[#9622](https://github.com/agentic-os-org/ANOLISA/pull/9622)）。
+- AgentScope 1.x 和 2.x 在可选的 PostTool 压缩失败时保留完整工具结果，包括协议错误和 SDK Wheel 签名不兼容。适配器会记录失败，不向调用方暴露部分替换文本或恢复提示；取消信号仍会向上传播（[#8928](https://github.com/agentic-os-org/ANOLISA/pull/8928)）。
+
 ## [0.9.3] - 2026-11-05
 
 ### 新增

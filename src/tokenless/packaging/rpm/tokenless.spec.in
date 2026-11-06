@@ -389,6 +389,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Nov 06 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Preserve scalar JSON types beyond the depth limit without stashing them
+- Preserve native grep/rg matches and Qoder Bash result metadata
+- Restore QwenWork private-runtime retrieval and retain AgentScope results on errors
+- Default source installs to ANOLISA paths while retaining explicit independent layouts
+
 * Thu Nov 05 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.3-1
 - Link RTK into tokenless as tokenless rtk and stop shipping a separate rtk
 - Require Rust 1.91, git and patch for source builds
