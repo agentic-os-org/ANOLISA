@@ -13,6 +13,9 @@ mod diagnostics;
 #[allow(dead_code, unused_imports)]
 #[path = "evidence/public.rs"]
 mod evidence;
+#[cfg(test)]
+#[path = "command/exit_classify_multibyte_tests.rs"]
+mod exit_classify_multibyte_tests;
 #[allow(dead_code, unused_imports)]
 #[path = "hooks/public.rs"]
 mod hooks;
