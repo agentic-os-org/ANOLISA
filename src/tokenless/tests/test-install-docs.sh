@@ -796,4 +796,34 @@ has "$QODER_ADAPTER_UNINSTALL" "qoder_registration_present" \
 hasnt "$QODER_ADAPTER_UNINSTALL" "WARNING: qodercli not found, cannot unregister plugin" \
   "qoder no longer treats a missing CLI as a successful unregister"
 
+# --- Codex detect: README success example matches both printers ---------------
+# detect.sh pretty-prints a successful probe from jq and from the no-jq
+# fallback. The adapter README used to show a compact one-line object, which
+# neither path emits. The missing-CLI result stays the one-line object.
+CODEX_ADAPTER_README="$TOKENLESS_ROOT/adapters/tokenless/codex/README.md"
+CODEX_DETECT="$TOKENLESS_ROOT/adapters/tokenless/codex/scripts/detect.sh"
+for f in "$CODEX_ADAPTER_README" "$CODEX_DETECT"; do
+  [ -f "$f" ] || { echo "FAIL missing file: $f" >&2; exit 1; }
+done
+has "$CODEX_ADAPTER_README" '  "installed": true,' \
+  "codex README shows the pretty-printed installed field"
+has "$CODEX_ADAPTER_README" '  "version": "0.1.0",' \
+  "codex README shows the pretty-printed version field"
+has "$CODEX_ADAPTER_README" '  "path": "/home/user/.local/bin/tokenless"' \
+  "codex README shows the pretty-printed path field"
+has "$CODEX_ADAPTER_README" 'jq` and the no-`jq` fallback both print this object' \
+  "codex README states that jq and the fallback share the success shape"
+hasnt "$CODEX_ADAPTER_README" \
+  '{"installed": true, "version": "0.1.0", "path": "/home/user/.local/bin/tokenless"}' \
+  "codex README no longer shows the compact success object"
+has "$CODEX_DETECT" '${HOME:-}/.local/bin/tokenless' \
+  "codex detect guards HOME expansions in fallback paths"
+has "$CODEX_DETECT" '  "installed": true,' \
+  "codex detect fallback pretty-prints installed"
+has "$CODEX_DETECT" "jq -n --arg ver" \
+  "codex detect keeps the jq success object uncompacted"
+hasnt "$CODEX_DETECT" \
+  '{"installed": true, "version": "0.1.0", "path": "/usr/bin/tokenless"}' \
+  "codex detect comment no longer shows the compact success object"
+
 echo "install-docs test passed"

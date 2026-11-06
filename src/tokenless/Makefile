@@ -76,7 +76,7 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
 # other components' targets as well, and a shared line is a merge conflict
 # waiting to happen.
 .PHONY: test-install-methods test-install-script test-install-docs \
-        test-npm-postinstall test-npm-postinstall-strict
+        test-codex-detect-home test-npm-postinstall test-npm-postinstall-strict
 
 .PHONY: qwenwork-install qwenwork-uninstall test-qwenwork \
         test-qwenwork-install test-qwenwork-hooks
@@ -564,6 +564,20 @@ test-install-script:
 test-install-docs:
 	@echo "==> Testing install-method documentation consistency..."
 	@bash tests/test-install-docs.sh
+
+test-codex-detect-home:
+	@echo "==> Testing Codex detect.sh HOME-unset fail-open..."
+	@bash tests/test-codex-detect-home.sh
+
+# Joined to test-integration by a prerequisite-only rule, the same way
+# `test: test-install-methods` is joined above: that target's own
+# prerequisite line is extended by several components at once and is a
+# recurring merge conflict, while GNU make unions the prerequisites of rules
+# that carry no recipe. It has to hang off test-integration rather than
+# test-install-methods -- that aggregate is the standalone curl installer and
+# the docs that describe it, and no workflow calls it, so the guard would
+# only ever run on a developer machine.
+test-integration: test-codex-detect-home
 
 # The npm package postinstall shares ~/.local/share/anolisa/adapters/tokenless
 # with the anolisa CLI, so it has to identify the current owner before replacing
