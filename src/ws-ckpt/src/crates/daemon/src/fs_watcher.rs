@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::time::{Duration, Instant};
 
-use notify::event::{AccessKind, AccessMode};
+use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{error, warn};
 
@@ -12,6 +13,180 @@ use tracing::{error, warn};
 /// tests can observe re-arming (a fresh watcher has a strictly larger seq)
 /// without waiting on inotify event delivery.
 static WATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long after any registration walk the "no writes observed" shortcut is
+/// disabled. notify's event loop does not read the inotify descriptor while
+/// it walks a tree, so events generated during (and right after) a walk can
+/// still be queued when a quiescence check starts. The shortcut is only safe
+/// once those events have had time to drain.
+const REGISTRATION_SETTLE: Duration = Duration::from_millis(250);
+
+/// A path that is never registered. `unwatch` on it is a pure control
+/// message to notify's event loop: the reply proves the loop finished any
+/// registration walk it was already executing (including its internal
+/// auto-add walk) and is back to handling messages.
+const REGISTRATION_BARRIER_PATH: &str = "/proc/self/__ws_ckpt_registration_barrier__";
+
+/// Instance-wide registration activity for the shared watcher.
+///
+/// notify 6.1.1 runs every recursive `watch()` walk and every auto-add of a
+/// newly created or moved-in directory on its single event-loop thread, and
+/// does not read the inotify descriptor while walking. With one shared
+/// instance that thread serves every workspace, so a walk pauses event
+/// delivery for all of them (#8448). A quiescence check must therefore not
+/// treat a quiet window that overlaps a registration as evidence: the flag
+/// can stay silent only because the events are still queued in the kernel.
+///
+/// `epoch`/`active` cover the registrations we drive ourselves (the caller
+/// blocks in `watch()` until the walk is done); `auto_add_*` cover notify's
+/// internal auto-add, whose end is observed through a control-message
+/// barrier on the same event loop.
+#[derive(Default)]
+struct RegistrationState {
+    /// Bumped at the start and at the end of every registration we drive.
+    /// A check that sees a different value at decision time cannot trust the
+    /// observation window.
+    epoch: AtomicU64,
+    /// Registrations currently in flight. Non-zero at the start or at the
+    /// decision means events may still be queued behind a walk.
+    active: AtomicU32,
+    /// Directory create/rename-in events notify may turn into an auto-add
+    /// walk (one per event), and the highest sequence the barrier proved
+    /// finished.
+    auto_add_seq: AtomicU64,
+    auto_add_covered: AtomicU64,
+    /// One barrier round-trip at a time; a burst of directory events is
+    /// covered by the same message.
+    barrier_in_flight: AtomicBool,
+    /// After a registration ends, queued events may still be undelivered:
+    /// the "not writing => Safe" shortcut stays disabled until this instant.
+    settle_until: Mutex<Option<Instant>>,
+}
+
+impl RegistrationState {
+    fn begin(&self) {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn end(&self) {
+        // Publish the settle window before the in-flight count drops: a
+        // check that observes "not busy" must also observe "settling", or
+        // it could take the idle shortcut against still-queued events.
+        self.settle();
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// A registration walk just finished; queued events need time to drain
+    /// before a silent flag may be trusted again.
+    fn settle(&self) {
+        *self
+            .settle_until
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(Instant::now() + REGISTRATION_SETTLE);
+    }
+
+    fn settling(&self) -> bool {
+        self.settle_until
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn busy(&self) -> bool {
+        self.active.load(Ordering::Acquire) > 0
+    }
+
+    /// Every auto-add event counted so far has had a post-walk barrier
+    /// reply, so no walk is known to be in flight.
+    fn auto_add_settled(&self) -> bool {
+        self.auto_add_covered.load(Ordering::Acquire) >= self.auto_add_seq.load(Ordering::Acquire)
+    }
+}
+
+/// Route- and instance-level evidence that a quiet window stayed valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QuiescenceEvidence {
+    coverage_epoch: u64,
+    registration_epoch: u64,
+    auto_add_seq: u64,
+}
+
+/// Whether a registration walk is pausing event delivery on `shared`, so a
+/// silent write flag proves nothing (#8448).
+pub(crate) fn delivery_paused(shared: &Arc<SharedWatcher>) -> bool {
+    !shared.registration_quiet()
+}
+
+/// One quiet-period attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObservationAttempt {
+    /// The window stayed quiet and the evidence was valid throughout.
+    Quiet,
+    /// A write was observed inside the window.
+    Active,
+    /// The window overlapped a registration walk / coverage change: its
+    /// silence proves nothing and the check must observe again.
+    Unstable,
+}
+
+/// One shared quiet-period attempt.
+///
+/// The watcher helper and the daemon gate both call this, so the
+/// registration/coverage evidence cannot drift between the two entry points
+/// (#8448). `still_current` must re-read the same evidence and reject a
+/// replaced watcher; `settling` only disables the not-writing shortcut, since
+/// events queued behind a just-finished walk can still be undelivered.
+pub(crate) async fn observe_once<F>(
+    flag: &AtomicBool,
+    force_observation: bool,
+    settling: bool,
+    still_current: F,
+) -> ObservationAttempt
+where
+    F: Fn() -> bool,
+{
+    if !still_current() {
+        return ObservationAttempt::Unstable;
+    }
+    if !force_observation && !settling && !flag.load(Ordering::Acquire) {
+        return if still_current() {
+            ObservationAttempt::Quiet
+        } else {
+            ObservationAttempt::Unstable
+        };
+    }
+    // Wait 100ms quiet period
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    flag.store(false, Ordering::Release);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    if flag.load(Ordering::Acquire) {
+        return ObservationAttempt::Active;
+    }
+    if still_current() {
+        ObservationAttempt::Quiet
+    } else {
+        ObservationAttempt::Unstable
+    }
+}
+
+/// Pairs `begin` with `end` on every return path (including the failure
+/// branches that release partial registrations).
+struct RegistrationGuard<'a>(&'a RegistrationState);
+
+impl<'a> RegistrationGuard<'a> {
+    fn new(registration: &'a RegistrationState) -> Self {
+        registration.begin();
+        Self(registration)
+    }
+}
+
+impl Drop for RegistrationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
 
 /// Recursive workspace write watcher. CLOSE_WRITE clears the flag so
 /// checkpoint can skip the quiescence wait when all writers have closed.
@@ -47,9 +222,12 @@ pub struct WorkspaceWatcher {
 /// handles on each root (normally one; a re-arm briefly keeps two).
 type Routes = RwLock<HashMap<PathBuf, Vec<Arc<AtomicBool>>>>;
 
-struct SharedWatcher {
-    watcher: Mutex<RecommendedWatcher>,
+pub(crate) struct SharedWatcher {
+    watcher: Arc<Mutex<RecommendedWatcher>>,
     routes: Arc<Routes>,
+    /// Instance-wide registration activity (ours and notify's auto-add);
+    /// see [`RegistrationState`].
+    registration: Arc<RegistrationState>,
     /// Cumulative inotify queue overflows (`IN_Q_OVERFLOW`) observed on
     /// this instance, exposed through the watcher-health IPC surface.
     queue_overflows: Arc<AtomicU64>,
@@ -105,18 +283,57 @@ impl SharedWatcher {
     fn new() -> anyhow::Result<Self> {
         let routes = Arc::new(RwLock::new(HashMap::<PathBuf, Vec<Arc<AtomicBool>>>::new()));
         let queue_overflows = Arc::new(AtomicU64::new(0));
+        let registration = Arc::new(RegistrationState::default());
+        // The event callback needs to send a control message back through the
+        // event loop that is currently running it. The slot is filled right
+        // after the watcher is built; no event can fire before the first
+        // route is published, which happens after `new` returns.
+        let control: Arc<OnceLock<Weak<Mutex<RecommendedWatcher>>>> = Arc::new(OnceLock::new());
         let callback_routes = Arc::clone(&routes);
         let callback_overflows = Arc::clone(&queue_overflows);
+        let callback_registration = Arc::clone(&registration);
+        let callback_control = Arc::clone(&control);
         let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            forward_event(&callback_routes, &callback_overflows, res)
+            forward_event(
+                &callback_routes,
+                &callback_overflows,
+                &callback_registration,
+                &callback_control,
+                res,
+            )
         })
         .map_err(|e| anyhow::anyhow!("Failed to init notify watcher: {}", e))?;
+        let watcher = Arc::new(Mutex::new(watcher));
+        let _ = control.set(Arc::downgrade(&watcher));
         Ok(Self {
-            watcher: Mutex::new(watcher),
+            watcher,
             routes,
             queue_overflows,
+            registration,
             coverage: RwLock::new(HashMap::new()),
         })
+    }
+
+    fn begin_registration(&self) -> RegistrationGuard<'_> {
+        RegistrationGuard::new(&self.registration)
+    }
+
+    fn registration_epoch(&self) -> u64 {
+        self.registration.epoch.load(Ordering::Acquire)
+    }
+
+    fn auto_add_seq(&self) -> u64 {
+        self.registration.auto_add_seq.load(Ordering::Acquire)
+    }
+
+    fn registration_settling(&self) -> bool {
+        self.registration.settling()
+    }
+
+    /// No registration walk is known to be in flight and no auto-add event is
+    /// waiting for its barrier reply.
+    fn registration_quiet(&self) -> bool {
+        !self.registration.busy() && self.registration.auto_add_settled()
     }
 
     /// Cumulative `IN_Q_OVERFLOW` count on this instance.
@@ -221,6 +438,7 @@ impl SharedWatcher {
         root: &Path,
         failed: &mut Vec<PathBuf>,
     ) {
+        let _registration = self.begin_registration();
         let survivors: Vec<PathBuf> = {
             let routes = self.routes.write().unwrap_or_else(|err| err.into_inner());
             let survivors: Vec<PathBuf> = routes
@@ -268,6 +486,7 @@ impl SharedWatcher {
     }
 
     fn add_route(&self, workspace_path: &Path, flag: Arc<AtomicBool>) -> anyhow::Result<()> {
+        let _registration = self.begin_registration();
         let mut watcher = self.watcher.lock().unwrap_or_else(|err| err.into_inner());
         // Publish the route BEFORE arming the kernel watch. notify installs
         // kernel descriptors synchronously inside `watch()`, so an event
@@ -371,7 +590,13 @@ impl SharedWatcher {
 }
 
 /// Apply one notify event to every registered workspace containing it.
-fn forward_event(routes: &Arc<Routes>, queue_overflows: &AtomicU64, res: notify::Result<Event>) {
+fn forward_event(
+    routes: &Arc<Routes>,
+    queue_overflows: &AtomicU64,
+    registration: &Arc<RegistrationState>,
+    control: &Arc<OnceLock<Weak<Mutex<RecommendedWatcher>>>>,
+    res: notify::Result<Event>,
+) {
     let event = match res {
         Ok(event) => event,
         Err(e) => {
@@ -403,6 +628,15 @@ fn forward_event(routes: &Arc<Routes>, queue_overflows: &AtomicU64, res: notify:
         }
         return;
     }
+    if is_dir_registration_event(&event) {
+        // notify follows a directory create or move-in with an internal
+        // recursive auto-add walk on this same event-loop thread, after the
+        // callback returns and before it reads the inotify descriptor again.
+        // Count it and arm a barrier that can only be answered once that
+        // walk is over (#8448).
+        let target = registration.auto_add_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        arm_registration_barrier(registration, control, target);
+    }
     let writing = match &event.kind {
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => true,
         EventKind::Access(AccessKind::Close(AccessMode::Write)) => false,
@@ -421,6 +655,86 @@ fn forward_event(routes: &Arc<Routes>, queue_overflows: &AtomicU64, res: notify:
     }
 }
 
+/// Whether notify may follow this event with an internal recursive auto-add
+/// walk. notify 6.1.1 calls `add_watch_by_event` only from its CREATE and
+/// MOVED_TO branches, and only when the event carries `ISDIR`; a file create
+/// or rename cannot start a walk.
+fn is_dir_registration_event(event: &Event) -> bool {
+    match &event.kind {
+        EventKind::Create(CreateKind::Folder) => true,
+        EventKind::Modify(ModifyKind::Name(RenameMode::To | RenameMode::Both)) => {
+            event.paths.iter().any(|path| {
+                std::fs::metadata(path)
+                    .map(|meta| meta.is_dir())
+                    .unwrap_or(false)
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Prove through notify's own event loop that every auto-add walk counted up
+/// to `target` has finished.
+///
+/// The barrier is an `unwatch` of a path that is never registered: notify
+/// turns it into a control message and answers it on the event-loop thread.
+/// A message sent while the loop is executing `handle_inotify` (which is
+/// where the event callback runs, and where the auto-add walks happen) is
+/// only handled after that pass returns, so the reply is ordered after the
+/// walk. While the message is in flight, further directory events keep
+/// bumping `auto_add_seq`; the loop covers them with another round-trip
+/// instead of claiming them covered.
+fn arm_registration_barrier(
+    registration: &Arc<RegistrationState>,
+    control: &Arc<OnceLock<Weak<Mutex<RecommendedWatcher>>>>,
+    target: u64,
+) {
+    if registration.barrier_in_flight.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let owner = Arc::clone(registration);
+    let registration = Arc::clone(registration);
+    let control = Arc::clone(control);
+    let spawned = std::thread::Builder::new()
+        .name("ws-ckpt-watcher-barrier".to_string())
+        .spawn(move || {
+            let mut target = target;
+            loop {
+                if let Some(watcher) = control.get().and_then(Weak::upgrade) {
+                    let _ = watcher
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .unwatch(Path::new(REGISTRATION_BARRIER_PATH));
+                }
+                registration.settle();
+                registration
+                    .auto_add_covered
+                    .fetch_max(target, Ordering::AcqRel);
+                let next = registration.auto_add_seq.load(Ordering::Acquire);
+                if registration.auto_add_covered.load(Ordering::Acquire) >= next {
+                    registration
+                        .barrier_in_flight
+                        .store(false, Ordering::Release);
+                    if registration.auto_add_covered.load(Ordering::Acquire)
+                        >= registration.auto_add_seq.load(Ordering::Acquire)
+                    {
+                        return;
+                    }
+                    if registration.barrier_in_flight.swap(true, Ordering::AcqRel) {
+                        return;
+                    }
+                    target = registration.auto_add_seq.load(Ordering::Acquire);
+                    continue;
+                }
+                target = next;
+            }
+        });
+    if let Err(e) = spawned {
+        error!("failed to spawn the watcher registration barrier: {}", e);
+        owner.barrier_in_flight.store(false, Ordering::Release);
+    }
+}
+
 /// The process-wide shared watcher instance. Only successful
 /// initialization is cached: `Inotify::init` can fail for transient
 /// process/system pressure (`EMFILE`, `ENFILE`, `ENOMEM` — for example the
@@ -429,10 +743,30 @@ fn forward_event(routes: &Arc<Routes>, queue_overflows: &AtomicU64, res: notify:
 /// permanently dead watcher until the daemon restarts. The cache mutex
 /// also serializes initialization attempts, so concurrent registrations
 /// never race to open more than one instance.
+/// Production shares one instance for the whole daemon. Tests run many
+/// daemons (and watcher scenarios) in one process, so under `cfg(test)` the
+/// cache is per-thread: quiescence is instance-wide, and a registration
+/// started by another test would otherwise be (correctly) reported as "not
+/// quiescent" and make unrelated tests nondeterministic. Multi-route sharing
+/// within a test is unchanged; it is covered by
+/// `tests/watcher_shared_instance.rs`.
+#[cfg(not(test))]
 static SHARED_WATCHER: WatcherCache = WatcherCache::new();
 
+#[cfg(test)]
+std::thread_local! {
+    static SHARED_WATCHER: WatcherCache = const { WatcherCache::new() };
+}
+
 fn shared_watcher() -> anyhow::Result<Arc<SharedWatcher>> {
-    SHARED_WATCHER.get_or_init_with(SharedWatcher::new)
+    #[cfg(not(test))]
+    {
+        SHARED_WATCHER.get_or_init_with(SharedWatcher::new)
+    }
+    #[cfg(test)]
+    {
+        SHARED_WATCHER.with(|cache| cache.get_or_init_with(SharedWatcher::new))
+    }
 }
 
 /// Cumulative inotify queue overflows on the shared watcher instance, for
@@ -440,12 +774,48 @@ fn shared_watcher() -> anyhow::Result<Arc<SharedWatcher>> {
 /// initialized — nothing is being watched, so nothing could have
 /// overflowed.
 pub fn shared_queue_overflows() -> Option<u64> {
-    SHARED_WATCHER
-        .cached
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .as_ref()
-        .map(|shared| shared.queue_overflows())
+    #[cfg(not(test))]
+    {
+        SHARED_WATCHER
+            .cached
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .map(|shared| shared.queue_overflows())
+    }
+    #[cfg(test)]
+    {
+        SHARED_WATCHER.with(|cache| {
+            cache
+                .cached
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .as_ref()
+                .map(|shared| shared.queue_overflows())
+        })
+    }
+}
+
+/// Holds an instance-wide registration in flight, exactly as `watch()` does
+/// while walking a tree. Tests use it to prove a gate fails closed while
+/// another workspace's registration delays event delivery (#8448).
+#[cfg(test)]
+pub(crate) struct TestRegistrationHold(Arc<SharedWatcher>);
+
+#[cfg(test)]
+impl TestRegistrationHold {
+    pub(crate) fn begin() -> Self {
+        let shared = shared_watcher().expect("shared watcher");
+        shared.registration.begin();
+        Self(shared)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestRegistrationHold {
+    fn drop(&mut self) {
+        self.0.registration.end();
+    }
 }
 
 /// Cache holding the one successfully initialized [`SharedWatcher`];
@@ -536,8 +906,41 @@ impl WorkspaceWatcher {
     /// interrupted in between (possibly restored already), so the flag's
     /// silence proves nothing about the writes that happened while no
     /// descriptor covered them.
-    pub(crate) fn coverage_epoch(&self) -> u64 {
-        self.shared.coverage_epoch(&self.workspace_path)
+    /// Evidence sampled before a quiescence observation.
+    ///
+    /// The write flag only proves silence when coverage and event delivery
+    /// stayed continuous for the whole observation: `coverage_epoch` covers
+    /// this route, the registration counters cover the shared instance's
+    /// recursive walks (ours and notify's auto-add), which pause delivery for
+    /// every workspace (#8448).
+    pub(crate) fn quiescence_evidence(&self) -> QuiescenceEvidence {
+        QuiescenceEvidence {
+            coverage_epoch: self.shared.coverage_epoch(&self.workspace_path),
+            registration_epoch: self.shared.registration_epoch(),
+            auto_add_seq: self.shared.auto_add_seq(),
+        }
+    }
+
+    /// The instance this watcher is registered on.
+    pub(crate) fn shared(&self) -> &Arc<SharedWatcher> {
+        &self.shared
+    }
+
+    /// Whether a just-finished registration walk may still have events queued
+    /// behind it.
+    pub(crate) fn delivery_settling(&self) -> bool {
+        self.shared.registration_settling()
+    }
+
+    /// Whether `evidence` still describes this watcher: coverage stayed
+    /// continuous, no registration walk ran, and the route is not degraded.
+    pub(crate) fn quiescence_evidence_is_current(&self, evidence: QuiescenceEvidence) -> bool {
+        !self.is_degraded()
+            && !self.shared.route_degraded(&self.workspace_path)
+            && self.shared.coverage_epoch(&self.workspace_path) == evidence.coverage_epoch
+            && self.shared.registration_quiet()
+            && self.shared.registration_epoch() == evidence.registration_epoch
+            && self.shared.auto_add_seq() == evidence.auto_add_seq
     }
 
     /// Check if workspace is quiescent (no recent writes).
@@ -548,36 +951,21 @@ impl WorkspaceWatcher {
         if self.is_degraded() {
             return false;
         }
-        // Snapshot the coverage generation with the flag: the quiet
-        // period below is only evidence when kernel coverage stays
-        // continuous throughout it.
-        let observed_epoch = self.shared.coverage_epoch(&self.workspace_path);
-        if !self.is_writing.load(Ordering::Acquire) {
-            return true;
-        }
-        // Wait 100ms quiet period
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        // Reset and check again
-        self.is_writing.store(false, Ordering::Release);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if self.is_writing.load(Ordering::Acquire) {
+        // A registration walk pauses delivery for the shared instance, so the
+        // flag may stay silent only because its events are still queued. A
+        // check must not start during one (#8448).
+        if delivery_paused(&self.shared) {
             return false;
         }
-        // The flag stayed silent, but that only proves quiescence when
-        // coverage was continuous for the whole observation: a survivor
-        // re-arm under an overlapping release interrupts coverage
-        // mid-observation, and writes to directories the recursive walk
-        // had not reached yet leave no event. An interruption that both
-        // started and ended inside the window leaves the route healthy
-        // again with a silent flag that proves nothing — the epoch
-        // detects it. Report activity so the caller re-observes once
-        // coverage is stable (#7592 review, P1).
-        if self.shared.route_degraded(&self.workspace_path)
-            || self.shared.coverage_epoch(&self.workspace_path) != observed_epoch
+        let evidence = self.quiescence_evidence();
+        match observe_once(&self.is_writing, false, self.delivery_settling(), || {
+            self.quiescence_evidence_is_current(evidence)
+        })
+        .await
         {
-            return false;
+            ObservationAttempt::Quiet => true,
+            ObservationAttempt::Active | ObservationAttempt::Unstable => false,
         }
-        true
     }
 
     /// Stop watching. Called when workspace is deleted.
@@ -693,6 +1081,8 @@ mod tests {
         use notify::event::Flag;
         let routes = Arc::new(RwLock::new(HashMap::new()));
         let overflows = AtomicU64::new(0);
+        let registration = Arc::new(RegistrationState::default());
+        let control: Arc<OnceLock<Weak<Mutex<RecommendedWatcher>>>> = Arc::new(OnceLock::new());
         let ws_a = Arc::new(AtomicBool::new(false));
         let ws_b = Arc::new(AtomicBool::new(false));
         routes
@@ -705,7 +1095,7 @@ mod tests {
             .insert(PathBuf::from("/ws/b"), vec![Arc::clone(&ws_b)]);
 
         let overflow = Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan));
-        forward_event(&routes, &overflows, overflow);
+        forward_event(&routes, &overflows, &registration, &control, overflow);
 
         assert!(ws_a.load(Ordering::Acquire), "workspace A must be latched");
         assert!(ws_b.load(Ordering::Acquire), "workspace B must be latched");
@@ -713,7 +1103,7 @@ mod tests {
 
         // Ordinary unrelated events must not count as overflows.
         let other = Ok(Event::new(EventKind::Other));
-        forward_event(&routes, &overflows, other);
+        forward_event(&routes, &overflows, &registration, &control, other);
         assert_eq!(overflows.load(Ordering::Relaxed), 1);
     }
 
@@ -949,5 +1339,77 @@ mod tests {
         assert!(shared.coverage.read().unwrap().contains_key(&paths[0]));
         drop(kept);
         assert!(!shared.coverage.read().unwrap().contains_key(&paths[0]));
+    }
+
+    #[tokio::test]
+    async fn registration_in_flight_is_not_quiescent() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        let _registration = RegistrationGuard::new(&watcher.shared.registration);
+
+        assert!(
+            !watcher.check_quiescent().await,
+            "an in-flight registration walk pauses event delivery for every workspace; \
+             a silent flag proves nothing until it finishes (#8448)"
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_spanning_a_registration_walk_is_void() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        // Drive the full quiet-period path instead of the idle shortcut.
+        watcher.is_writing_flag().store(true, Ordering::Release);
+        let shared = Arc::clone(&watcher.shared);
+        let check = tokio::spawn(async move { watcher.check_quiescent().await });
+
+        // A registration walk that starts and ends inside the observation
+        // window: the flag's silence cannot be evidence because events
+        // generated during the walk were still queued.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(RegistrationGuard::new(&shared.registration));
+
+        assert!(
+            !check.await.unwrap(),
+            "a quiet period that spans a registration walk proves nothing and must void \
+             the Safe decision (#8448)"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_check_after_a_registration_does_not_take_the_shortcut() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        let started = Instant::now();
+
+        assert!(watcher.check_quiescent().await);
+        assert!(
+            started.elapsed() >= Duration::from_millis(190),
+            "a check that starts right after a registration must observe the full quiet \
+             period instead of trusting a flag that may predate the queued events \
+             (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_add_barrier_covers_a_new_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let watcher = WorkspaceWatcher::start(dir.path()).unwrap();
+        let shared = Arc::clone(&watcher.shared);
+        let before = shared.auto_add_seq();
+
+        std::fs::create_dir(dir.path().join("created")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while shared.auto_add_seq() == before || !shared.registration.auto_add_settled() {
+            assert!(
+                Instant::now() < deadline,
+                "notify's auto-add walk was never proven complete by the barrier \
+                 (seq={}, covered={})",
+                shared.auto_add_seq(),
+                shared.registration.auto_add_covered.load(Ordering::Acquire)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
