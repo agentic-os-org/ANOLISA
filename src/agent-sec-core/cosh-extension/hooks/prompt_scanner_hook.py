@@ -140,6 +140,10 @@ def main() -> None:
         print(_allow())
         return
 
+    if not isinstance(input_data, dict):
+        print(_allow())
+        return
+
     # 2. Extract user prompt text
     prompt_text = input_data.get("prompt", "")
     if not prompt_text or not isinstance(prompt_text, str) or not prompt_text.strip():
