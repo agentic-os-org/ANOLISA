@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { dirname, join } = require('node:path');
 const { runInNewContext } = require('node:vm');
 const test = require('node:test');
 
@@ -34,6 +35,7 @@ function viewer({ readFailure = false } = {}) {
       dependencies[index] = deps;
     },
   };
+  const output = dirname(process.env.AGENTSIGHT_ATIF_PAGE_BUILD);
   runInNewContext(readFileSync(process.env.AGENTSIGHT_ATIF_PAGE_BUILD, 'utf8'), {
     exports, URLSearchParams,
     setTimeout: () => 0,
@@ -63,6 +65,7 @@ function viewer({ readFailure = false } = {}) {
       if (name === '../utils/trajectoryTextFilter') return require(process.env.AGENTSIGHT_TRAJECTORY_FILTER_BUILD);
       if (name === '../utils/optimizationStrategies') return require(process.env.AGENTSIGHT_STRATEGIES_BUILD);
       if (name === '../utils/roundModel') return require(process.env.AGENTSIGHT_ROUND_MODEL_BUILD);
+      if (name === '../utils/text') return require(join(output, '../utils/text.js'));
       if (name.startsWith('../components/')) return {};
       throw new Error(`Unexpected ATIF viewer dependency ${name}`);
     },

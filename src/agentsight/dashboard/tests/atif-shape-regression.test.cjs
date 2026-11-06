@@ -49,6 +49,7 @@ function viewer(locale = 'en-US') {
         if (name === '../utils/optimizationStrategies') return require(join(output, '../utils/optimizationStrategies.js'));
         if (name === '../utils/savings') return require(join(output, '../utils/savings.js'));
         if (name === '../utils/trajectoryTextFilter') return require(join(output, '../utils/trajectoryTextFilter.js'));
+        if (name === '../utils/text') return require(join(output, '../utils/text.js'));
         if (name === '../utils/apiClient') return {
           fetchAtifBySession: (...args) => new Promise((resolve, reject) => requests.push({ kind: 'session', args, resolve, reject })),
           fetchTrajectoryAtif: (...args) => new Promise((resolve, reject) => requests.push({ kind: 'collected', args, resolve, reject })),
