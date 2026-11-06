@@ -13,6 +13,8 @@
 //! comparison happens on the parsed value rather than the surrounding text, so
 //! `242391`, `242,391` and `24.2万` are recognised as the same fact.
 
+use unicode_casefold::UnicodeCaseFold;
+
 /// Smallest count of significant digits a bare number needs before it is worth
 /// grounding. Below this the number is either arithmetic or an index, and
 /// demanding a source for it is the over-flagging this pipeline exists to stop.
@@ -1432,7 +1434,7 @@ fn normalize_markdown_reference_label(chars: &[char]) -> Vec<char> {
                 normalized.push(' ');
                 pending_space = false;
             }
-            normalized.extend(c.to_lowercase());
+            normalized.extend(c.case_fold());
         }
     }
     normalized

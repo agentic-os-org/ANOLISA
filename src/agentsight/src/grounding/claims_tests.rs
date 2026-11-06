@@ -585,8 +585,72 @@ fn quoted_closing_brackets_do_not_close_the_outer_list() {
 }
 
 #[test]
+fn reference_markdown_labels_keep_grouped_numbers_whole() {
+    for text in [
+        "[244,781][ref]\n[ref]: https://example.test",
+        "[244,781][]\n[244,781]: https://example.test",
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn an_unmatched_leading_apostrophe_does_not_hide_list_structure() {
+    assert_eq!(number_values("'90s [200,404]"), vec![200.0, 404.0]);
+}
+
+#[test]
+fn shortcut_markdown_labels_keep_grouped_numbers_whole() {
+    let text = "[244,781]\n\n[244,781]: https://example.test";
+    assert_eq!(separate_bracketed_comma_lists(text), text);
+    assert_eq!(number_values(text), vec![244_781.0]);
+}
+
+#[test]
+fn shortcut_markdown_labels_normalize_label_whitespace() {
+    let text = "[244,\n781]\n\n[244, 781]: https://example.test";
+    assert_eq!(number_values(text), vec![244_781.0]);
+}
+
+#[test]
+fn shortcut_markdown_labels_normalize_label_case() {
+    for text in [
+        "[count=244,781]\n\n[COUNT=244,781]: https://example.test",
+        "[count=244,\n781]\n\n[COUNT=244, 781]: https://example.test",
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn shortcut_markdown_labels_use_unicode_case_folding() {
+    for text in [
+        "[ß=244,781]\n\n[SS=244,781]: https://example.test",
+        "[ς=244,781]\n\n[Σ=244,781]: https://example.test",
+    ] {
+        assert_eq!(number_values(text), vec![244_781.0], "{text}");
+    }
+}
+
+#[test]
+fn a_decade_apostrophe_does_not_quote_a_later_list() {
+    assert_eq!(number_values("'90s [200,404] 'x'"), vec![200.0, 404.0]);
+}
+
+#[test]
 fn compact_mixed_lists_keep_numbers_adjacent_to_versions() {
     assert_eq!(number_values("[200,v1.2.3,500]"), vec![200.0, 500.0]);
+}
+
+#[test]
+fn quoted_brackets_respect_non_ascii_quote_pairs() {
+    for text in [
+        "result [“]”,200,404]",
+        "result [「]」,200,404]",
+        "result [‘]’,200,404]",
+    ] {
+        assert_eq!(number_values(text), vec![200.0, 404.0], "{text}");
+    }
 }
 
 #[test]
@@ -838,6 +902,14 @@ fn standalone_paths_keep_terminal_brackets() {
     let path = "/tmp/a[200]";
     let claims = extract_claims(path);
     assert_eq!(texts_of(&claims, ClaimClass::Path), vec![path]);
+}
+
+#[test]
+fn colon_after_prose_list_does_not_make_a_reference_definition() {
+    assert_eq!(
+        number_values("status codes [200,404]: observed"),
+        vec![200.0, 404.0]
+    );
 }
 
 #[test]
