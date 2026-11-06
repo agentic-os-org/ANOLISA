@@ -4,7 +4,8 @@
 //! to ATIF v1.7 documents for trajectory display. These agents share a common
 //! JSONL format with event types: `runtime-config`, `user`, `assistant`.
 //! Codex rollouts use a different envelope schema and are delegated to the
-//! collector crate's Codex converter.
+//! collector crate's Codex converter. Cline whole-document tasks and their
+//! sibling UI streams use the corresponding path-aware Cline converter.
 //!
 //! Content blocks within messages:
 //! - `assistant` content: `thinking`, `text`, `tool_use`
@@ -27,6 +28,10 @@ pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
 
+    if let Some(result) = agentsight_trajectory_collector::cline::convert_task_file(path, &content)
+    {
+        return result;
+    }
     let claude = path.components().any(|part| part.as_os_str() == ".claude");
     convert_content_with_source(&content, claude)
 }

@@ -619,6 +619,61 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_once_routes_cline_task() {
+        let base = tmp_dir("cline-route");
+        let storage = base.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev");
+        let task = storage.join("tasks/task-123");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::create_dir_all(storage.join("state")).unwrap();
+        std::fs::write(
+            storage.join("state/taskHistory.json"),
+            serde_json::json!([{
+                "id": "task-123",
+                "cwdOnTaskInitialization": "/workspace/demo-app"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            task.join("api_conversation_history.json"),
+            serde_json::json!([
+                {"role":"user","content":[{"type":"text","text":"inspect auth"}]},
+                {"role":"assistant","content":[{"type":"text","text":"done"}]}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            task.join("ui_messages.json"),
+            serde_json::json!([
+                {"ts":1763071200000i64,"type":"say","say":"task","text":"inspect auth","conversationHistoryIndex":0},
+                {"ts":1763071201000i64,"type":"say","say":"api_req_started","text":"{\"tokensIn\":10,\"tokensOut\":5,\"cost\":0.01}","conversationHistoryIndex":1}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        let config = CollectorConfig {
+            scan_interval_secs: 1,
+            scan_dirs: Some(vec![storage]),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+        };
+        scan_once(&store, &config);
+        assert_eq!(store.count().unwrap(), 1);
+
+        let rec = store.get("task-123").unwrap().unwrap();
+        assert_eq!(rec.source, "cline");
+        assert_eq!(rec.project, "demo-app");
+        assert_eq!(rec.first_user_message.as_deref(), Some("inspect auth"));
+        assert_eq!(rec.total_prompt_tokens, Some(10));
+        assert_eq!(rec.total_completion_tokens, Some(5));
+        let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
+        assert_eq!(doc["session_id"], "task-123");
+        assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
     fn test_scan_once_reads_a_bom_prefixed_rollout() {
         let base = tmp_dir("codex-bom");
         // The same rollout the routing test ingests, with the byte-order mark
