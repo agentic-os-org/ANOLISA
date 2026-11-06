@@ -27,6 +27,10 @@
 #   L4_PULL_REGISTRY    registry to pull eval images via (default: docker.m.daocloud.io)
 #   L4_DRY_RUN=1        start every proxy, prove every arm's activation and check
 #                       the config/port wiring, then stop short of the billed run
+#   L4_CAPTURE_TOOL_RESULTS  1 (default) records every tool result before and
+#                       after compression into <arm>/tool-results.json, from
+#                       tokenless' stats store (arm B) or the proxy's message log
+#                       (arms C-F, which then run with --log-messages); 0 disables
 #
 # Run remote_verify.sh first. Everything it checks is a precondition here and is
 # not re-checked. Then run this once with L4_DRY_RUN=1: the activation evidence
@@ -43,6 +47,7 @@ set -uo pipefail
 W="${L4_REMOTE_WORK:-/root/l4}"
 LOG=$W/logs
 CFGDIR=$W/anolisa/src/tokenless/benchmark/l4-end-to-end/assets/configs
+SCRIPTS=$W/anolisa/src/tokenless/benchmark/l4-end-to-end/assets/scripts
 RUNNER=$W/venv-swe/bin/swe-runner
 HEADROOM=$W/venv-headroom/bin/headroom
 # The corpus is synced to its own directory rather than into the runner's packaged
@@ -62,10 +67,21 @@ L4_WORKERS=${L4_WORKERS:-1}
 # host has already exhausted it. Routing every host through the same mirror also
 # keeps the arms identically configured, which the paired comparison requires.
 L4_PULL_REGISTRY=${L4_PULL_REGISTRY:-docker.m.daocloud.io}
+L4_CAPTURE_TOOL_RESULTS=${L4_CAPTURE_TOOL_RESULTS:-1}
+# --log-messages makes the proxy store each request's pre- and post-compression
+# messages in its JSONL log; it is a logging switch, identical for arms C-F.
+CAPTURE_FLAGS=()
+[ "$L4_CAPTURE_TOOL_RESULTS" = "1" ] && CAPTURE_FLAGS=(--log-messages)
 SWEEP=$W/out/repeat-$L4_REPEAT
 SUMMARY=$SWEEP/sweep-summary.txt
 
-export PATH=/usr/local/bin:/opt/node/bin:/root/.cargo/bin:$PATH
+# The workspace's private environment (see remote_setup.sh ISOLATION and
+# l4_env.sh): openclaw's config and profile symlinks, tokenless' stats and stash,
+# and headroom's CCR store all live under its HOME, and PATH resolves only the
+# workspace's own binaries, so a sweep never reads or writes the host user's own
+# ~/.openclaw or ~/.tokenless.
+# shellcheck source=l4_env.sh
+. "$SCRIPTS/l4_env.sh" "$W" || { echo "[sweep] FATAL: $SCRIPTS/l4_env.sh missing" >&2; exit 1; }
 # huggingface.co is unreachable from this host; the mirror is. Without it every
 # dataset load burns ~30s on retries before falling back to the local cache, and
 # the headroom proxy stalls indefinitely fetching its tokenizer.
@@ -295,6 +311,7 @@ start_proxy() {
         nohup "$HEADROOM" proxy \
             --port "$port" \
             "$@" \
+            ${CAPTURE_FLAGS[@]+"${CAPTURE_FLAGS[@]}"} \
             --openai-api-url https://dashscope.aliyuncs.com/compatible-mode \
             --no-telemetry \
             --no-subscription-tracking \
@@ -459,12 +476,26 @@ run_arm() {
     local runlog=$LOG/arm_$arm.repeat$L4_REPEAT.log
     mkdir -p "$out"
     if [ "${L4_DRY_RUN:-0}" != 1 ]; then
-        # 先撤销上次报告与评分资格，再执行可能中断的新 attempt。
+        # 每次重跑使用新的 run tree；旧 prediction、结果和 profile 不得进入新评分。
+        if [ -d "$out/run" ]; then
+            mkdir -p "$out/previous-attempts" || return 1
+            local archive_id
+            archive_id=$(python3 -c 'import uuid; print(uuid.uuid4().hex)') || return 1
+            mv "$out/run" "$out/previous-attempts/$archive_id" || return 1
+        fi
         rm -f "$out/report.json" "$out/tool-results.json"
         mkdir -p "$W/eval/repeat-$L4_REPEAT-arm-$arm"
         printf '%s\n' pending > "$W/eval/repeat-$L4_REPEAT-arm-$arm/.eval-complete" || return 1
     fi
 
+    if [ "${L4_DRY_RUN:-0}" != 1 ]; then
+        python3 - "$out/selection.json" "$INSTANCE_IDS" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as selection:
+    json.dump({"instance_ids": sys.argv[2].split(","), "attempt_complete": False}, selection)
+PY
+        [ "$?" -eq 0 ] || return 1
+    fi
     note "--- arm $arm  config=$CFGNAME flags=${RFLAGS[*]:-none} port=${PORT:-direct}"
     [ -f "$cfg" ] || { note "  config missing: $cfg"; return 1; }
 
@@ -488,6 +519,8 @@ run_arm() {
 
     local started ended
     started=$(date +%s)
+    local started_iso
+    started_iso=$(date -u +%FT%TZ)
     # --redo forces every selected instance to execute even if a prior attempt in
     # this output dir left a result: a repeat must actually re-call the model, not
     # resume a partial sweep and inherit an earlier run's trajectory.
@@ -510,6 +543,22 @@ run_arm() {
     note "  runner rc=$rc elapsed=$((ended - started))s"
 
     [ -n "$PORT" ] && stats_snapshot "$PORT" > "$out/stats.after.json"
+
+    # Pre/post-compression tool results for the semantic sample. Capture is
+    # evidence, not a gate: a failure is noted and leaves the arm's verdict alone.
+    if [ "$L4_CAPTURE_TOOL_RESULTS" = "1" ]; then
+        local capture=(--arm "$arm" --since "$started_iso" --output "$out/tool-results.json"
+                       --instance-list "$L4_INSTANCE_LIST" --profiles-dir "$out/run/openclaw-profiles")
+        if [ -n "$PORT" ]; then
+            capture+=(--proxy-log "$LOG/proxy_$arm.repeat$L4_REPEAT.requests.jsonl")
+        elif [ "$arm" = b ]; then
+            capture+=(--stats-db "$TOKENLESS_DATA_DIR/stats.db")
+        fi
+        if [ -n "$PORT" ] || [ "$arm" = b ]; then
+            python3 "$SCRIPTS/extract_tool_results.py" "${capture[@]}" >> "$SUMMARY" 2>&1 \
+                || note "  tool-result capture failed for arm $arm (evidence only)"
+        fi
+    fi
 
     # `swe-runner run` returns 0 even when every instance failed, so the exit
     # status is recorded but never trusted as evidence.
@@ -655,7 +704,11 @@ PY
 # ---------------------------------------------------------------------------
 note "sweep repeat=$L4_REPEAT arms=$L4_ARMS instances=$INSTANCE_COUNT temperature=${L4_TEMPERATURE:-unset}"
 note "runtime workers=$L4_WORKERS timeout=$L4_TIMEOUT pull_registry=$L4_PULL_REGISTRY"
-note "revision=$(git -C "$W/anolisa" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# A tree synced from a linked worktree carries no .git; remote_sync.sh then
+# records the revision beside it instead.
+revision=$(git -C "$W/anolisa" rev-parse --short HEAD 2>/dev/null) \
+    || revision=$(sed -n 's/^revision=//p' "$W/anolisa.provenance" 2>/dev/null | cut -c1-9)
+note "revision=${revision:-unknown}"
 note "model_alias=$MODEL_ALIAS"
 [ "${L4_DRY_RUN:-0}" = "1" ] && note "DRY RUN: no instance will be executed and no tokens spent"
 # The alias timestamp is not a nicety: without a reading on both sides of the
@@ -670,8 +723,24 @@ IFS=,
 read -ra arms <<< "$L4_ARMS"
 IFS=$saved_ifs
 for arm in "${arms[@]}"; do
-    run_arm "$arm" || failed_arms+=("$arm")
+    run_arm "$arm"
+    arm_rc=$?
     stop_proxy
+    if [ "${L4_DRY_RUN:-0}" != 1 ]; then
+        # 取消或异常中断不会到达此处，缺失评分时必须保留 incomplete 状态。
+        python3 - "$SWEEP/arm-$arm/selection.json" "$arm_rc" <<'PY'
+import json, os, sys
+path, status = sys.argv[1], int(sys.argv[2])
+with open(path, encoding="utf-8") as selection:
+    doc = json.load(selection)
+doc.update(attempt_complete=True, attempt_exit=status)
+with open(path + ".tmp", "w", encoding="utf-8") as selection:
+    json.dump(doc, selection)
+os.replace(path + ".tmp", path)
+PY
+        [ "$?" -eq 0 ] || arm_rc=1
+    fi
+    [ "$arm_rc" -eq 0 ] || failed_arms+=("$arm")
 done
 
 drift_ok=1

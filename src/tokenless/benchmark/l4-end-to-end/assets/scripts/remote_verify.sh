@@ -51,10 +51,17 @@ remote_ssh() {
 }
 
 echo "[verify] running pre-flight checks on $L4_SSH_HOST"
-remote_ssh "L4_REMOTE_WORK=$L4_REMOTE_WORK L4_INSTANCE_LIST=$L4_INSTANCE_LIST L4_PROMPTS_DIR=$L4_PROMPTS_DIR bash -s" <<'CHECKS'
+remote_ssh "L4_REMOTE_WORK=$L4_REMOTE_WORK L4_INSTANCE_LIST=$L4_INSTANCE_LIST L4_PROMPTS_DIR=$L4_PROMPTS_DIR L4_OPENCLAW_VERSION=${L4_OPENCLAW_VERSION:-} bash -s" <<'CHECKS'
 set -uo pipefail
-export PATH=/usr/local/bin:/opt/node/bin:/root/.cargo/bin:$PATH
 WORK="${L4_REMOTE_WORK:-/root/l4}"
+# The workspace's private HOME and prefixes (see remote_setup.sh ISOLATION):
+# every check below inspects the benchmark's own openclaw, never the host's.
+ENV_SH="$WORK/anolisa/src/tokenless/benchmark/l4-end-to-end/assets/scripts/l4_env.sh"
+if [ ! -f "$ENV_SH" ]; then
+    echo "  FAIL  $ENV_SH missing; run remote_sync.sh first"
+    echo "PREFLIGHT_RC=1"; exit 1
+fi
+. "$ENV_SH" "$WORK"
 LIST="${L4_INSTANCE_LIST:-$WORK/l4_instances.txt}"
 PROMPTS="${L4_PROMPTS_DIR:-$WORK/prompts}"
 
@@ -66,24 +73,95 @@ rc=0
 pass() { echo "  PASS  $1"; }
 fail() { echo "  FAIL  $1"; rc=1; }
 
+echo "=== 0. the workspace's own binaries win every lookup ==="
+# On a shared host the user's own openclaw or tokenless may sit on a directory
+# the sweep could reach. Each name must resolve inside the workspace, and the
+# deployed tokenless must be the binary this checkout built.
+for pair in "openclaw:$WORK/node/bin/openclaw" "tokenless:$HOME/.local/bin/tokenless"; do
+    name=${pair%%:*}
+    want=${pair#*:}
+    got=$(command -v "$name" || true)
+    if [ "$got" = "$want" ]; then
+        pass "$name resolves to $want"
+    else
+        fail "$name resolves to '${got:-nothing}', expected $want"
+    fi
+done
+built=$(sha256sum "$WORK/tokenless/target/release/tokenless" 2>/dev/null | cut -d' ' -f1)
+deployed=$(sha256sum "$HOME/.local/bin/tokenless" 2>/dev/null | cut -d' ' -f1)
+if [ -n "$built" ] && [ "$built" = "$deployed" ]; then
+    pass "deployed tokenless is the binary built from the synced checkout"
+else
+    fail "deployed tokenless differs from target/release/tokenless; re-run remote_setup.sh"
+fi
+# 插件 bundle 同样是被测代码，不能只校验其调用的二进制。
+plugin_built=$(sha256sum "$WORK/tokenless/adapters/tokenless/openclaw/dist/index.js" 2>/dev/null | cut -d' ' -f1)
+plugin_deployed=$(sha256sum "$HOME/.openclaw/extensions/tokenless/dist/index.js" 2>/dev/null | cut -d' ' -f1)
+if [ -n "$plugin_built" ] && [ "$plugin_built" = "$plugin_deployed" ]; then
+    pass "deployed tokenless plugin matches the freshly built bundle"
+else
+    fail "deployed tokenless plugin differs from the built bundle; re-run remote_setup.sh"
+fi
+# RTK is linked into that binary; rewritten commands launch it as `tokenless rtk`.
+if tokenless rtk --version >/dev/null 2>&1; then
+    pass "embedded RTK answers through tokenless rtk"
+else
+    fail "tokenless rtk --version failed; PreTool rewrites would not run"
+fi
+for path in "$TOKENLESS_TOOL_READY_SPEC" "$TOKENLESS_ENV_FIX_SCRIPT"; do
+    if [ -f "$path" ]; then pass "workspace copy present: $path"; else fail "missing $path"; fi
+done
+private_version=$("$WORK/node/bin/openclaw" --version 2>/dev/null | awk '$1 == "OpenClaw" { print $2; exit }')
+if [ "$private_version" = "$L4_OPENCLAW_VERSION" ]; then
+    pass "workspace OpenClaw is the pinned $L4_OPENCLAW_VERSION"
+else
+    fail "workspace OpenClaw is '${private_version:-none}', l4_env.sh pins $L4_OPENCLAW_VERSION; re-run remote_setup.sh"
+fi
+# Every openclaw that edits the workspace config stamps its version into it. A
+# different version there means some other openclaw (the host's) wrote it.
+touched=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("meta", {}).get("lastTouchedVersion", ""))' \
+    "$HOME/.openclaw/openclaw.json" 2>/dev/null || true)
+if [ -n "$private_version" ] && [ "$touched" = "$private_version" ]; then
+    pass "workspace openclaw.json last written by the workspace's OpenClaw $private_version"
+else
+    fail "workspace openclaw.json last written by OpenClaw '${touched:-unknown}', the workspace runs '${private_version:-none}'"
+fi
+
 echo "=== 1. per-profile plugin isolation ==="
 # The failure this guards against is silent: if a scratch profile inherits the
 # globally installed plugin registry, the baseline arm runs with a compressor
 # attached and every delta measures nothing. Probe with a profile built exactly
 # the way swe-runner builds one — a verbatim copy of the global config.
-rm -rf "$WORK/probe-profile" /root/.openclaw-l4probe
+rm -rf "$WORK/probe-profile" "$HOME/.openclaw-l4probe"
 mkdir -p "$WORK/probe-profile"
-cp /root/.openclaw/openclaw.json "$WORK/probe-profile/openclaw.json" 2>/dev/null || {
-    fail "global openclaw.json missing — run remote_setup.sh first"
+cp "$HOME/.openclaw/openclaw.json" "$WORK/probe-profile/openclaw.json" 2>/dev/null || {
+    fail "workspace openclaw.json missing — run remote_setup.sh first"
     echo "PREFLIGHT_RC=$rc"; exit "$rc"
 }
-ln -s "$WORK/probe-profile" /root/.openclaw-l4probe
+ln -s "$WORK/probe-profile" "$HOME/.openclaw-l4probe"
 probe="$(openclaw --profile l4probe plugins list 2>&1 || true)"
 if echo "$probe" | grep -qiE '^\s*(headroom|tokenless)\b.*enabled'; then
     fail "a scratch profile inherits an enabled plugin; the baseline arm would be contaminated"
     echo "$probe" | grep -iE 'headroom|tokenless'
 else
     pass "scratch profile carries no enabled compressor plugin"
+fi
+# The runner then adds its agent in the agents.list dialect. A release that
+# rejects it fails every instance in prepare, which the dry run never reaches.
+python3 - "$WORK/probe-profile/openclaw.json" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+config.setdefault("agents", {}).setdefault("list", []).append({"id": "l4probe", "name": "l4probe"})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PY
+if openclaw --profile l4probe sandbox explain --agent l4probe >/dev/null 2>&1; then
+    pass "OpenClaw accepts the runner's agents.list profile"
+else
+    fail "OpenClaw rejects the runner's agents.list profile; every instance would fail in prepare"
 fi
 
 echo "=== 2. both plugins present but globally disabled ==="

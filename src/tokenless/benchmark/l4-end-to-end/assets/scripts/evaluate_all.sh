@@ -21,7 +21,8 @@ WORKERS=${L4_EVAL_WORKERS:-4}
 # The dataset is fetched through the mirror; the harness also needs it for the
 # gold test lists, not just for images.
 export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
-export PATH=/usr/local/bin:/opt/node/bin:$PATH
+# shellcheck source=l4_env.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/l4_env.sh" "$W"
 
 fails=0
 for rep in $REPEATS; do

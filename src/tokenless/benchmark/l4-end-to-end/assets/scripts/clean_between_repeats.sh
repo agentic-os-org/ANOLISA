@@ -20,14 +20,24 @@
 #     an arm silently degrade to baseline).
 #   - The prebuilt SWE-bench testbed images (the clean-checkout source) and the
 #     HuggingFace dataset cache (read-only gold data).
+#
+# ~ is the workspace's private HOME ($L4_REMOTE_WORK/home, see remote_setup.sh
+# ISOLATION), never the host user's. The container sweep matches every OpenClaw
+# sandbox on the host by label, which on a shared machine includes sandboxes that
+# are not the benchmark's; it therefore runs only with L4_CLEAN_CONTAINERS=1.
 set -uo pipefail
 
 W=${L4_REMOTE_WORK:-/root/l4}
+# shellcheck source=l4_env.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/l4_env.sh" "$W"
 LABEL="openclaw.sessionKey"
 
-echo "[clean] $(date -u +%FT%TZ) purging SWE + openclaw run state"
+echo "[clean] $(date -u +%FT%TZ) purging SWE + openclaw run state under $HOME"
 
 # 1. SWE testbed containers (label-scoped: never touches unrelated containers).
+mkdir -p "$W/logs" || exit 1
+printf '%s repeat=%s phase=%s outcome=started\n' "$(date -u +%FT%TZ)" \
+    "${L4_REPEAT:-unknown}" "${L4_CLEAN_PHASE:-manual}" >> "$W/logs/cleanup.provenance" || exit 1
 cids=$(docker ps -aq --filter "label=$LABEL" 2>/dev/null) || {
     echo "[clean] cannot inspect sandbox containers; cleanliness is unverified" >&2
     exit 1
@@ -43,7 +53,10 @@ fi
 # stay scoped to this task rather than nuking every dangling volume on the host.
 scoped_vols=""
 if [ -n "$cids" ]; then
-    scoped_vols=$(docker inspect -f '{{range .Mounts}}{{if .Name}}{{.Name}}{{"\n"}}{{end}}{{end}}' $cids 2>/dev/null | sort -u)
+    scoped_vols=$(docker inspect -f '{{range .Mounts}}{{if .Name}}{{.Name}}{{"\n"}}{{end}}{{end}}' $cids 2>/dev/null | sort -u) || {
+            echo "[clean] cannot inspect sandbox volumes; cleanliness is unverified" >&2
+            exit 1
+        }
     echo "[clean] removing $(echo "$cids" | wc -l | tr -d ' ') openclaw sandbox container(s)"
     docker rm -f $cids >/dev/null 2>&1 || { echo "[clean] container removal failed" >&2; exit 1; }
 else
@@ -55,7 +68,10 @@ fi
 # back to a host-wide `dangling=true` sweep. The default matters on a shared
 # machine: an unconditional sweep would remove volumes belonging to unrelated
 # tasks, contradicting step 1's label scoping.
-dangling=$(docker volume ls -qf dangling=true 2>/dev/null)
+dangling=$(docker volume ls -qf dangling=true 2>/dev/null) || {
+    echo "[clean] cannot inspect dangling volumes; cleanliness is unverified" >&2
+    exit 1
+}
 if [ "${L4_CLEAN_ALL_DANGLING_VOLUMES:-0}" = "1" ]; then
     vols=$dangling
 else
@@ -66,14 +82,16 @@ if [ -n "$vols" ]; then
 fi
 
 # 3. OpenClaw persistent agent-state DB (regenerated per run).
-rm -f /root/.openclaw/state/openclaw.sqlite \
-      /root/.openclaw/state/openclaw.sqlite-wal \
-      /root/.openclaw/state/openclaw.sqlite-shm 2>/dev/null || exit 1
+rm -f "$HOME/.openclaw/state/openclaw.sqlite" \
+      "$HOME/.openclaw/state/openclaw.sqlite-wal" \
+      "$HOME/.openclaw/state/openclaw.sqlite-shm" 2>/dev/null || exit 1
 
 # 4. Stale run-local profile symlinks.
-find /root -maxdepth 1 -name '.openclaw-*' -type l -delete 2>/dev/null || exit 1
+find "$HOME" -maxdepth 1 -name '.openclaw-*' -type l -delete 2>/dev/null || exit 1
 
 # Report what survived, so a reader can confirm the plugins and images are intact.
-echo "[clean] plugins kept: $(ls /root/.openclaw/extensions 2>/dev/null | tr '\n' ' ')"
+echo "[clean] plugins kept: $(ls "$HOME/.openclaw/extensions" 2>/dev/null | tr '\n' ' ')"
 echo "[clean] testbed images kept: $(docker images 2>/dev/null | grep -ciE 'sweb|swe-bench' || true)"
+printf '%s repeat=%s phase=%s outcome=completed\n' "$(date -u +%FT%TZ)" \
+    "${L4_REPEAT:-unknown}" "${L4_CLEAN_PHASE:-manual}" >> "$W/logs/cleanup.provenance" || exit 1
 echo "[clean] done"
