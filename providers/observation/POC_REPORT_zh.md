@@ -1,0 +1,142 @@
+# AW ptrace Runtime Hook POC 实测报告
+
+[English](POC_REPORT.md)
+
+2026-11-06，独立 advise Sidecar 和真实 AW 生命周期演示已在 Linux x86-64 跑通；普通构建因强杀风险默认拒绝观测。
+原生验收结果为 **55 PASS、5 FAIL、4 SKIP**。5 个失败均发生在活跃写入期间强杀
+tracer，目标因 SIGTRAP 退出。**P0 未通过；P1 未实现、未执行。当前生产观测与改写
+均为 No-Go。** 后续处理见 [Go/No-Go](GO_NO_GO.md)。
+
+## 验证对象与环境
+
+主线基线和参考提交固定在 [SOURCE.md](SOURCE.md)。AW CLI 从该 main 检出构建，
+以普通用户身份运行。正式 AW 框架、wire、配置 Schema、能力矩阵及安装器均未修改；
+独立 Rust 实验包与锁定依赖全部位于 `providers/observation/`。
+
+原生环境为 x86-64，内核 `6.6.102-5.3.1.alnx4.x86_64`，普通 UID 1000，原有
+Yama `ptrace_scope=0`，OpenSSL 3.0.12、GCC 12.3.0、Python 3.11.6、Rust 1.97.1。
+本地开发机为 AArch64，已实测 CLI 在打开事件文件前返回 `unsupported_architecture`。
+原生 ptrace 验收仅在 x86-64 实验机进行，全程未调整系统 ptrace 或安全设置。
+
+C 客户端向本机 TLS 服务端发送合成固定字节，每个线程拥有独立连接和缓冲区。
+服务端在双向 TLS 关闭完成后核验字节数与 SHA-256。结果只覆盖合成 OpenSSL fixture，
+未使用真实 Agent 流量、模型账号，也不代表 Native SDK 采用验收。
+
+## 安全准入与竞态恢复
+
+普通构建的 `observe` 已在读取 permit、创建输出及附着之前拒绝执行，返回
+`observation_disabled`。这是当前 fail-closed 措施；实验功能需要显式构建
+`unsafe-lab`。实验构建会标明危险实验状态，P1 继续禁用。
+
+本轮修复了四条恢复路径：断点安装前先登记清理责任；clone/fork 子线程继承清理责任；
+退出线程返回 ESRCH 时继续处理其他线程；中断停止期间残留的硬件 SIGTRAP 先消费其
+投递停止，再抑制并 Detach。初始线程集合按 TID 集合核对，group-stop 使用 LISTEN，
+等待 SIGCONT，Detach 后保留原组停止状态。读取寄存器失败时保留清理责任并报告错误，
+不会把无法识别的调试信号直接当成可安全转发的信号。
+
+压力诊断实际捕获了中断停止与硬件信号投递之间的竞态：线程处于事件停止状态，
+`PTRACE_PEEKSIGINFO` 仍能看到排队的硬件 SIGTRAP。清除 DR7 后直接 Detach 会使
+它随后到达目标。修复后，最终 100 轮测试中实际处理了 3 次此类残留信号。
+
+| 新增验收 | 最终结果 |
+| --- | --- |
+| 默认构建拒绝，3 轮 | 3 PASS；没有事件文件，目标无 tracer，服务端字节校验通过 |
+| 9 个阶段注入可处理错误 × 1/4/16 线程 × 3 轮 | 81 PASS；目标续跑、服务端校验及回收通过 |
+| 同样阶段真实 SIGKILL | 36 PASS、45 FAIL；失败全部为目标 SIGTRAP 退出 |
+| 恢复后退出路径，16 线程、100 轮 | 100 PASS；包含实际待投递硬件信号的消费 |
+| 线程反复创建、忙进程附着、组停止恢复、组停止期间 Detach | 1/4/8/16 线程共 16 PASS；四轮线程创建的完整活动窗口命中数准确 |
+| 原验收矩阵重新运行 | 55 PASS、5 FAIL、4 SKIP；失败仍全部来自 tracer SIGKILL |
+| 真实 AW 演示重新运行 | 400 条已关联事件、100 条未登记事件，owner 退出后 binding 为零 |
+
+45 个确定性强杀失败覆盖五个阶段：所有线程断点已安装、断点停止、RF 已设置、
+CONT 前、CONT 后，每阶段 9 次。安装完成但 TLS 写入尚未开始的用例，在 tracer
+退出、TracerPid 归零后仍因下一次写入崩溃，说明自动解除 ptrace 关系无法完成本实现的
+调试状态恢复。部分安装阶段只修改主线程；这些通过结果不能推广为活跃工作线程安全。
+
+**可处理错误的恢复通过了声明范围内的实验；实际 tracer SIGKILL 仍无法安全恢复。**
+默认拒绝入口没有把这一缺口标记为 P0 通过，也未使用 EXITKILL、目标侧 SIGTRAP
+handler 或全局安全设置变更。原始失败和修复后的结果分别保留在任务证据中，当前数值
+见[性能与安全数据](measurements/20261106.json)。
+
+## 验收矩阵
+
+| 用例 | 实际结果 |
+| --- | --- |
+| 已有 1/4/8/16 线程，各 3 轮 | 每轮 300/1200/2400/4800 次写入均对应命中；服务端摘要一致；正常 Detach |
+| 附着后创建线程 | 4/8/16 线程对应 400/800/1600 次命中；TRACECLONE 初始化与清理通过 |
+| SSL_write_ex | 100 次入口事件，服务端确认字节 |
+| 0 B / 4096 B / 4097 B | 长度准确；4097 B 摘要为空并报告覆盖缺口 |
+| 分片写入 | 500 次 7 字节写入；仅统计写入，不拼接模型请求 |
+| 事件数与速率上限 | 丢弃数量明确；Coverage 为 unknown 并带超限原因 |
+| 持续有界负载 | 65,536 次命中；保留 10 条、丢弃 65,526 条；服务端确认 8,388,608 字节 |
+| 正常 Detach / SIGINT / SIGTERM | 目标继续运行，TracerPid 归零；提前 Detach 后服务端仍核验全部字节 |
+| 外来信号 | SIGUSR1 正确到达 fixture handler 一次 |
+| 目标 SIGKILL / owner 退出 | Sidecar 结束；owner 退出后 AW binding 归零 |
+| 活跃写入期间 tracer SIGKILL | **5/5 FAIL**：目标以信号 5（SIGTRAP）退出；未安装目标侧 trap handler 掩盖故障 |
+| 陈旧 start/namespace/boot/exe/fingerprint | 附着前拒绝；UID 与 executable inode 变化也由单元测试覆盖 |
+| 无调试权限 / 第二个 debugger | 明确拒绝；目标和原 debugger 保持原归属 |
+| 不支持的 TLS / offsets / enforce | 返回 unsupported，不猜偏移、不修改 payload |
+| Exec / fork | 拒绝不支持的迁移并 Detach；exec 目标保持存活，fork fixture 正常完成 |
+| 真实 AW Instance 与 Scope | CLI register → pending_ready → ready → open_scope → acknowledge，导入关联与存活身份一致 |
+| 同 PID 两个 AW Instance | 保持归属歧义，实例和 Scope ID 为空 |
+| 未登记普通进程 | 仅 observed/unassociated，不生成 Ready、工具 ID 或 Scope 权限 |
+| 已有真实 uProbe | **SKIP**：实验机没有可用且已授权的 AgentSight/uProbe 环境；代码会拒绝入口 int3 |
+| 内核实际 PID 复用 | **SKIP**：已测试陈旧身份变体，未强制 PID 回卷复用 |
+| 其他 TLS 实现 / 静态 ABI | **SKIP**：当前不支持，无兼容性声明 |
+| P1 等长改写 | **SKIP**：崩溃恢复门槛失败，enforce 模式被拒绝 |
+
+正常 fixture 的写入失败数为零，未主动截断的观测命中率为 100%。所有传输事件的
+语义 Coverage 和发送采用状态仍为 unknown；合成服务端的字节确认单独记录。
+提前停止的 observer 只覆盖其实际活动窗口。
+
+## 性能
+
+载荷为 128 字节，每线程 300 次写入；每个并发数分别运行 3 次基线和 3 次 tracer。
+表中分位数取每轮结果的中位数，max 取三轮最大值。吞吐包含本机 TLS 建连与关闭，
+用于同环境比较。精确数值及源码摘要见 [性能数据](measurements/20261106.json)。
+
+| 线程数 | 基线写入 p99 µs | 开启观测后写入 p99 µs | tracer 暂停 p50/p95/p99/max µs | 基线 → 观测写入数/秒 | 峰值 RSS KiB | tracer CPU 秒 |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| 1 | 6.21 | 250.63 | 53 / 64 / 75 / 126 | 6582 → 4174 | 3244 | 0.02 |
+| 4 | 8.12 | 426.13 | 97 / 185 / 221 / 466 | 19346 → 13997 | 3244 | 0.07 |
+| 8 | 12.43 | 993.38 | 206 / 417 / 487 / 752 | 31320 → 15454 | 3256 | 0.14 |
+| 16 | 9.48 | 1891.33 | 433 / 860 / 965 / 1353 | 51436 → 15821 | 3256 | 0.29 |
+
+tracer 暂停从取得 wait 状态计时至 PTRACE_CONT，包含待处理停止队列的等待，
+不包含内核唤醒 tracer 之前的调度时间。客户端写入延迟覆盖完整同步 SSL 调用。
+本次 p99 差值约 0.24–1.88 ms，低于初始 5 ms 目标；两个分位数之差并非逐次配对
+测得的附加延迟。16 线程吞吐下降约 69%，高频小块写入仍有明显成本。
+
+单独 2.000 秒空闲窗口消耗 0.06 CPU 秒，约为**单核 3%**，主要来自当前 100 µs
+轮询。CPU 计数受时钟 tick 精度限制。65,536 次持续写入耗时 3.425 秒：客户端写入
+p99 为 **1.644 ms**，最大 **3.818 ms**；tracer 暂停 p99 为 **821 µs**，最大
+**1240 µs**。样本和保留事件数量均受上限控制。
+
+早期逐次恢复线程的循环出现过 2.46 秒写入长尾，原因是低 TID 饥饿。交付实现先收齐
+已停止事件再逐个恢复。上述表格和持续负载结果均来自修正后的实现；早期失败数据仅作
+问题定位证据保留。
+
+## 复现与检查
+
+构建、演示及验收命令见 [README](README_zh.md)。验收脚本因五个真实崩溃用例返回
+**1**，未将已知失败包装为通过。原生 Rust 默认构建 6 个测试、实验构建 5 个测试通过，关联 Python 测试
+4 个通过；格式、AArch64 与 x86-64 目标的 Clippy（拒绝 warning）和身份校验通过。
+一条命令的演示产生 400 条已登记事件、100 条未登记事件，收尾后 AW binding 为零。
+
+每个用例的 `result.json`、私有 JSONL、服务端确认、stderr 和汇总 `results.json`
+保存在指定输出目录。独立任务 handoff 保留本次实际输出及命令日志。按任务书限定，
+本次未运行正式 AW 全量 gate：现有框架、测试及已声明 Provider workspace 均未修改，
+新增实验 workspace 单独验证。文档 lint/link 结果记录在 handoff。
+
+## 限制与清理
+
+SIGKILL 安全性仍未解决。移除 payload 修改和共享代码页断点后，tracer 死亡时的
+待处理 debug trap 仍可能终止目标。本实现没有 watchdog，也未宣称强杀恢复成功。
+已覆盖有限的线程增删及 job-control group stop；未覆盖并发修改同一 payload 缓冲区、无限线程增删、
+动态库替换、真实 PID/namespace 重建及生产负载。摘要也无法阻止对已知短报文的猜测。
+
+本次创建的 tracer、客户端、服务端均已回收，私有 AW daemon 已停止，owner 清理后
+binding 数归零。没有修改已有 Agent 配置、系统 ptrace 设置或 AgentSight 进程。
+回滚只需移除实验目录/本地提交及明确指定的测试输出；不存在正式运行入口或安装记录
+需要回滚。[架构说明](ARCHITECTURE_NOTES.md)中的身份导出和查询桥属于后续建议，
+尚未实现正式服务接入。
