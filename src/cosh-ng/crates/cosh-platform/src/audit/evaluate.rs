@@ -311,6 +311,74 @@ mod tests {
     }
 
     #[test]
+    fn balanced_requires_approval_for_user_credential_stores() {
+        // Standard per-user credential stores used to ride the read-only
+        // fall-through: ~/.aws/credentials (AWS CLI long-term keys),
+        // ~/.netrc, ~/.git-credentials, ~/.docker/config.json,
+        // ~/.kube/config, ~/.gnupg/*. The glob `*` crosses `/`, so each
+        // family covers the ~, /home/<user>, and /root spellings.
+        for cmd in [
+            "cat ~/.aws/credentials",
+            "head /home/deploy/.aws/credentials",
+            "tail /root/.aws/credentials",
+            "cat ~/.netrc",
+            "head /home/deploy/.netrc",
+            "grep host ~/.git-credentials",
+            "cat /home/deploy/.git-credentials",
+            "cat ~/.docker/config.json",
+            "cat ~/.kube/config",
+            "cat ~/.gnupg/private-keys-v1.d/1.key",
+            "head /root/.gnupg/secring.gpg",
+        ] {
+            assert_outcome(cmd, Outcome::RequireApproval);
+        }
+    }
+
+    #[test]
+    fn strict_denies_user_credential_stores() {
+        // The same family must be Deny under strict — the tier /etc/passwd
+        // already uses. Before the fix these were Allow'd under BOTH
+        // presets while /etc/passwd was guarded: a strictly more sensitive
+        // file got a strictly weaker outcome.
+        let loaded = builtin::strict();
+        for cmd in [
+            "cat ~/.aws/credentials",
+            "cat ~/.netrc",
+            "cat ~/.git-credentials",
+            "cat ~/.docker/config.json",
+            "cat ~/.kube/config",
+            "cat ~/.gnupg/private-keys-v1.d/1.key",
+            "cat /home/deploy/.aws/credentials",
+        ] {
+            let action = parse_action_string(cmd).unwrap();
+            let d = evaluate(&action, &loaded);
+            assert_eq!(
+                d.outcome,
+                Outcome::Deny,
+                "for input {:?}: expected Deny, got {:?} (matched={:?})",
+                cmd,
+                d.outcome,
+                d.matched_rule
+            );
+        }
+    }
+
+    #[test]
+    fn balanced_still_allows_ordinary_home_and_config_reads() {
+        // Non-regression: the new globs must not swallow ordinary dotfiles
+        // or configuration reads.
+        for cmd in [
+            "cat ~/.bashrc",
+            "cat ~/.gitconfig",
+            "cat ~/README.md",
+            "cat /etc/hosts",
+            "cat ~/.config/cosh/config.toml",
+        ] {
+            assert_outcome(cmd, Outcome::Allow);
+        }
+    }
+
+    #[test]
     fn balanced_still_allows_non_sensitive_readonly() {
         for cmd in [
             "cat /etc/hosts",
