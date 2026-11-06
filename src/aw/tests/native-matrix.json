@@ -1385,7 +1385,7 @@
       "mode": "automated",
       "versions": {},
       "npm_fixture": "crates/aw-cli/tests/fixtures/pi",
-      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch.",
+      "boundary": "Published Coding Agent/Core SDK 0.84.2 public factories and tool loop, including real Tokenless; deterministic model stream and scanner/RTK fixtures. Managed model-produced identities, one persistent session with 1,280 calls over five executions (768 in one execution), active-state reclamation, RSS/FD/thread samples and cleanup. Text input.submit uses the real sec-core Provider, a controlled scanner CLI and local HTTP model, covering denial recovery, faults, alternate ingress, cancellation and rejection of input/context/before_provider_request extension transformations before model dispatch. Direct transformContext/convertToLlm user-content rewrites and onPayload mutations are rejected; unchanged callbacks retain native dispatch. Strict output uses the verified 0.84.2 Agent.processEvents boundary, suppressing partial tool updates target-wide and adopting safe final results before early listeners and HTTP model requests. Controlled scanner faults withhold the full result and allow the next prompt; cancellation and native callback faults retain task failure and cleanup.",
       "cases": [
         {
           "name": "public-factory",
@@ -1836,6 +1836,53 @@
                   "bindings": 0,
                   "events": 0,
                   "invocations": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "strict-output",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/strict-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/pi-strict-output"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/pi-strict-output/results.json",
+              "cases": {
+                "at": "",
+                "key": "scenario",
+                "names": [
+                  "clean",
+                  "risk",
+                  "error",
+                  "invalid",
+                  "timeout",
+                  "metadata",
+                  "extra",
+                  "tool-error",
+                  "native-error",
+                  "cancel",
+                  "after-metadata",
+                  "after-extra",
+                  "mutation-content",
+                  "mutation-metadata",
+                  "mutation-extra",
+                  "mutation-after"
+                ],
+                "values": {
+                  "status": "passed"
                 }
               }
             }

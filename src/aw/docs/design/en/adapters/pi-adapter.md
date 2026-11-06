@@ -92,7 +92,8 @@ reach after with `isError:true`.
 
 The original after callback runs first. AW observes its field-by-field replacement
 using Pi's nullish merge semantics, including image normalization and `isError`.
-Native callback exceptions keep the SDK's error behavior. AW before supports
+Native callback exceptions keep the SDK's error behavior; strict output uses a
+generic error message to avoid exposing unchecked callback data. AW before supports
 `observe`/`block`, including a Provider's literal retry reason. Pi adds the denied
 tool result to the next model context; AW never executes a suggestion or rewrites
 arguments. A model retry is a new call through all before checks and native permissions.
@@ -126,11 +127,39 @@ close is reported and never changes a denial into an allow. A managed
 `tool.after` step whose Provider invocation fails under `on_error: report`
 receives a neutral reply: the audit already records the fault, the unchecked
 original result is kept, and the same session continues with its next prompt.
-Before-tool faults, block/withhold faults, cancellation, identity and cleanup
-failures keep stopping the task. SDK cancellation or a
+Under `on_error: withhold_result`, audited Provider execution, timeout and
+response faults discard the complete result through the native SDK error path;
+the model and subscribers receive `AW post-tool check failed; result withheld by policy`, and
+the next prompt can use the same session. Before-tool faults, block faults,
+cancellation, identity and cleanup failures keep stopping the task. SDK cancellation or a
 local transport limit may terminate the helper before it can acknowledge close;
 any already opened event then reaches its original deadline or binding release,
 without extending its budget. This differs from an awaited policy denial.
+
+## Strict tool output
+
+Configure `scan_tool_output` with `on_error: withhold_result` to require inspection
+before tool data reaches the model or Agent subscribers. This route requires both
+Pi packages at 0.84.2, whose `Agent.processEvents` delivery boundary is verified.
+AW suppresses `tool_execution_update` for the entire target whenever any strict
+after route is configured, including tools outside that route's selectors. The
+native final event contains the adopted result; AW does not replay partial chunks.
+Targets without a strict after route retain native streaming and report-mode
+Tokenless behavior.
+
+Before invoking Providers, AW clones the effective result after native callback
+overrides. Strict adoption returns detached fields and restores the full checked
+snapshot on Pi's newly allocated final envelope before dispatch. This covers
+nullish fallbacks and extra execute-result fields that Pi otherwise retains.
+References held by tools or callbacks cannot change the scanned result during
+Provider calls, cleanup or final delivery.
+
+PII risk uses the existing validated text replacement and preserves native status
+and metadata. If inspection fails or the retained envelope contains sensitive
+fields, the SDK error path discards the entire original result and supplies the
+fixed placeholder. The private `aw_withheld` reply comes only from an audited
+Provider fault; native Hooks cannot forge it. Protocol, identity, cancellation and
+cleanup failures retain their managed task failure behavior.
 
 ## Callback protocol and verification
 
@@ -208,3 +237,15 @@ Provider exit/timeout/invalid output under block/report, input/context/provider-
 alternate ingress, concurrent sessions/prompts, abort/dispose and empty resource
 usage. A separate model-endpoint assertion fails if rejected input arrives.
 The scanner fixture does not certify sec-core rules or a deployed business image.
+
+```bash
+python3 crates/aw-cli/tests/fixtures/pi/strict-smoke.py \
+  --aw target/debug/aw --root target/pi-sdk-validation \
+  --sec-core-provider ../../providers/agent-sec-core/target/debug/aw-provider-sec-core \
+  --output target/pi-strict-output
+```
+
+This uses the real SDK, HTTP model transport and sec-core Provider with a controlled
+scanner. It checks split sensitive chunks, native events registered before AW,
+model requests, retained metadata, tool and callback errors, scanner failures,
+cancellation, next prompts and new tasks.

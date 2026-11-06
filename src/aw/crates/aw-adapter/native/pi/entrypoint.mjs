@@ -27,6 +27,7 @@ function packages(application) {
       throw new Error(`Unsupported ${fullName} module layout`);
     resolved[name] = join(directory, entry);
     if (name === "pi-coding-agent") resolved.version = metadata.version;
+    else resolved.coreVersion = metadata.version;
     if (name === "pi-coding-agent")
       require = createRequire(pathToFileURL(resolved[name]));
   }
@@ -46,6 +47,10 @@ if (process.env.AW_PI_PROBE === "1") {
 } else {
   const [application, ...args] = process.argv.slice(2);
   const resolved = packages(application);
+  const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
+  if (configuration().hooks.some(hook => hook.on_error === "withhold_result") &&
+      (resolved.version !== "0.84.2" || resolved.coreVersion !== "0.84.2"))
+    throw new Error("AW strict Pi output requires pi-coding-agent and pi-agent-core 0.84.2");
   const sdk = await import(pathToFileURL(resolved["pi-coding-agent"]).href);
   const core = await import(pathToFileURL(resolved["pi-agent-core"]).href);
   for (const [name, value] of [["AgentSession", sdk.AgentSession], ["Agent", core.Agent]])
@@ -64,7 +69,6 @@ if (process.env.AW_PI_PROBE === "1") {
     const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
     await runWorker(app, sdk, core, args);
   } else {
-  const { configuration } = await import(new URL("./bridge.mjs", import.meta.url));
   if (configuration().hooks.some(hook => hook.event === "input.submit"))
     throw new Error("AW Pi input.submit requires the runWorker factory");
   const installations = new Map();

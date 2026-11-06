@@ -64,6 +64,17 @@ for exact callback semantics, identity, cancellation, capacity and reproducible
 SDK acceptance. Exit Agents and stop the original service before changing policy;
 retain/remove the audit state using the same local-service cleanup procedure.
 
+For strict output inspection, set the sec-core `scan_tool_output` step to
+`on_error: withhold_result`. Both Pi packages must be 0.84.2. Configuring any strict
+after route suppresses intermediate tool updates across the target; subscribers
+and the model receive only the adopted final result. AW scans a detached snapshot
+of the effective result and delivers that snapshot, including native after-callback
+overrides and metadata. Later mutations of retained result objects do not change
+the delivered result. PII risk replaces text;
+scanner faults discard the full result and return a fixed placeholder. The same
+session can continue after a scanner fault. Targets without strict routes retain
+native streaming and report-mode Tokenless.
+
 ## Check user submissions
 
 Use the [Pi submission example](../../../../../src/aw/crates/aw-service/examples/aw.pi-submission.yaml)
