@@ -86,7 +86,10 @@ def scan(
         return _error_result(language, 0, ErrInputEmpty())
 
     # LLM mode: delegate to LLM engine, bypass regex rules entirely.
-    if mode == "llm":
+    # Case/whitespace-insensitive: the CLI passes --mode through unvalidated,
+    # and a silent fallthrough to the regex engine is indistinguishable from
+    # a deliberate engine choice in the result summary.
+    if isinstance(mode, str) and mode.strip().lower() == "llm":
         return scan_with_llm(code, language)
 
     try:
