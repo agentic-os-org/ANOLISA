@@ -30,6 +30,7 @@ from hook_utils import (
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
+    rewrite_qwenwork_retrieve,
     run_compress,
     skip,
     warn,
@@ -75,6 +76,21 @@ def main() -> None:
         skip()
 
     tool_name = input_data.get("tool_name", "")
+    recovery_input = rewrite_qwenwork_retrieve(tool_name, tool_input)
+    if recovery_input is not None:
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "tool_input": {"command": recovery_input["command"]},
+                        "updatedInput": recovery_input,
+                    }
+                }
+            )
+        )
+        return
+
     # Managed engines call their Windows shell "Bash"; the legacy engine runs Bash.
     if (
         os.name == "nt"

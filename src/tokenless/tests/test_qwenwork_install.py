@@ -24,6 +24,7 @@ import subprocess
 import tempfile
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any
@@ -993,7 +994,106 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         )
         self.assertFalse((self.bin / "spawn_log").exists())
         request = json.loads((private_bin / "request.json").read_text())
-        self.assertEqual(request["capabilities"]["recovery"], {"kind": "none"})
+        self.assertEqual(
+            request["capabilities"]["recovery"],
+            {"kind": "shell" if sys.platform == "darwin" else "none"},
+        )
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS private recovery bridge")
+    def test_private_recovery_without_global_path_and_concurrent_attribution(self) -> None:
+        self.prepare_detached_plugin()
+        private = self.target / "bin/tokenless"
+        private.parent.mkdir()
+        private.write_text(
+            "#!/usr/bin/env python3\nimport json, os, sys\n"
+            "if sys.argv[1] == 'retrieve':\n"
+            " print(json.dumps({'hash':sys.argv[2], 'env':{k:v for k,v in os.environ.items() "
+            "if k.startswith('TOKENLESS_') or k == 'DSH_TOKENLESS_STASH_DB'}}))\n"
+            "else:\n"
+            f" os.execv(sys.executable, [sys.executable, {str(CONTRACT_MOCK)!r}, *sys.argv[1:]])\n"
+        )
+        private.chmod(0o755)
+        (self.bin / "tokenless").unlink()
+        data = self.root / "custom state '$;`"
+        self.env.update(TOKENLESS_DATA_DIR=str(data), TOKENLESS_STASH_DB=str(data / "selected.db"))
+
+        def recover(index: int) -> tuple[dict, dict]:
+            key = f"{index:024x}"
+            payload = self.payload(
+                "original " * 400, "Bash" if index == 0 else WORKSPACE_SHELL_TOOLS[index - 1]
+            )
+            payload.update(
+                cwd=str(self.root), session_id=f"session-{index}", tool_use_id=f"call-{index}"
+            )
+            payload["tool_input"] = {"command": f"tokenless retrieve '{key}'", "timeout": 30}
+            rewritten = self.replay("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]
+            self.assertEqual(rewritten["timeout"], 30)
+            result = subprocess.run(
+                ["/bin/bash", "-c", rewritten["command"]],
+                capture_output=True,
+                text=True,
+                env={**self.env, "TOKENLESS_DATA_DIR": str(self.root / "wrong")},
+                check=True,
+            )
+            payload["tool_input"] = rewritten
+            self.assertEqual(self.replay("PostToolUse", payload), {})
+            return json.loads(result.stdout), payload
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(recover, range(4)))
+        for index, (result, _) in enumerate(results):
+            self.assertEqual(result["hash"], f"{index:024x}")
+            self.assertEqual(result["env"]["TOKENLESS_DATA_DIR"], str(data))
+            self.assertEqual(result["env"]["TOKENLESS_STASH_DB"], str(data / "selected.db"))
+            self.assertEqual(result["env"]["DSH_TOKENLESS_STASH_DB"], "")
+            self.assertEqual(result["env"]["TOKENLESS_SESSION_ID"], f"session-{index}")
+            self.assertEqual(result["env"]["TOKENLESS_TOOL_USE_ID"], f"call-{index}")
+            self.assertEqual(result["env"]["TOKENLESS_AGENT_ID"], "qwenwork")
+
+    def test_private_recovery_requires_complete_bridge_and_exact_command(self) -> None:
+        self.prepare_detached_plugin()
+        private = self.target / "bin/tokenless"
+        private.parent.mkdir()
+        shutil.copy2(self.bin / "tokenless", private)
+        key = "abcdef0123456789abcdef01"
+        payload = self.payload("", "Bash")
+        with mock.patch.dict(
+            os.environ, {"QODER_PLUGIN_ROOT": str(self.target)}
+        ), mock.patch.object(sys, "platform", "darwin"):
+            self.addCleanup(setattr, utils, "_QWENWORK_RECOVERY", None)
+            utils.prepare_hook_input(payload, "qwenwork")
+            self.assertTrue(utils.tokenless_retrieve_command_available())
+            for command in (
+                f"tokenless retrieve {key}",
+                f"tokenless retrieve '{key.upper()}'",
+                f"tokenless retrieve '<<tokenless:{key}>>'",
+            ):
+                updated = utils.rewrite_qwenwork_retrieve("Bash", {"command": command})
+                self.assertIsNotNone(updated)
+                self.assertTrue(utils.is_tokenless_retrieve_command("Bash", updated))
+            for command in (
+                "tokenless retrieve bad",
+                f"tokenless retrieve {key}; echo extra",
+                f"tokenless retrieve {key} | cat",
+                f"tokenless retrieve {key} > out",
+                "tokenless retrieve $(id)",
+                f"tokenless retrieve {key} --stash-db other.db",
+                updated["command"] + " | cat",
+            ):
+                self.assertIsNone(utils.rewrite_qwenwork_retrieve("Bash", {"command": command}))
+                self.assertFalse(utils.is_tokenless_retrieve_command("Bash", {"command": command}))
+            with mock.patch.object(sys, "platform", "win32"):
+                utils.prepare_hook_input(payload, "qwenwork")
+                self.assertFalse(utils.tokenless_retrieve_command_available())
+            hooks = self.target / "hooks/hooks.json"
+            configuration = json.loads(hooks.read_text())
+            configuration["hooks"]["PreToolUse"] = []
+            hooks.write_text(json.dumps(configuration))
+            utils.prepare_hook_input(payload, "qwenwork")
+            self.assertFalse(utils.tokenless_retrieve_command_available())
+            self.assertIsNone(
+                utils.rewrite_qwenwork_retrieve("Bash", {"command": f"tokenless retrieve {key}"})
+            )
 
     def test_registered_array_and_pretool_attribution(self) -> None:
         self.prepare_detached_plugin()
