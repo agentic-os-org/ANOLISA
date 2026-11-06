@@ -164,6 +164,10 @@ fn render_path_prompt_notice<W: Write>(
     if event.component.as_deref() != Some("path_prompt") {
         return Ok(());
     }
+    // The path-prompt interception path keeps the echoed input on the prompt
+    // line and suppresses the synthetic empty-line repaint; ensure the notice
+    // starts on its own line so the panel border isn't glued to user input.
+    writeln!(output)?;
     let input = if crate::types::request_has_sensitive_input(request) {
         "<redacted>"
     } else {
