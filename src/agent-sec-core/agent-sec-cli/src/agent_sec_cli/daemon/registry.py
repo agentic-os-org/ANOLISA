@@ -108,9 +108,15 @@ async def _invoke_handler(
     request: DaemonRequest,
     runtime: DaemonRuntime,
 ) -> HandlerResult:
-    handler_result = spec.handler(request, runtime)
-    if inspect.isawaitable(handler_result):
-        handler_result = await handler_result
+    if inspect.iscoroutinefunction(spec.handler):
+        handler_result = await spec.handler(request, runtime)
+    else:
+        # Every registered handler today is a plain sync function doing
+        # SQLite/filesystem work. Running it on the event-loop thread makes
+        # asyncio.wait_for unable to preempt it: the advertised timeout_ms
+        # never fires and one slow handler stalls every concurrent
+        # connection. Offload to a worker thread so the timeout is real.
+        handler_result = await asyncio.to_thread(spec.handler, request, runtime)
 
     if isinstance(handler_result, HandlerResult):
         return handler_result
