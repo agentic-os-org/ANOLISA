@@ -46,9 +46,23 @@ def _parse_metrics(metrics_json: str | None) -> dict[str, Any]:
     if not metrics_json:
         return {}
     try:
-        return json.loads(metrics_json)
+        metrics = json.loads(metrics_json)
     except (json.JSONDecodeError, TypeError):
         return {}
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def _safe_nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _safe_tool_name(value: Any) -> str:
+    return value if isinstance(value, str) and value else "unknown"
 
 
 def build_session_report(
@@ -75,10 +89,14 @@ def build_session_report(
         metrics = _parse_metrics(ev.metrics_json)
         if ev.hook == "after_llm_call":
             llm_calls += 1
-            req_bytes += int(metrics.get("request_payload_bytes", 0))
-            resp_bytes += int(metrics.get("response_stream_bytes", 0))
+            req_bytes += _safe_nonnegative_int(
+                metrics.get("request_payload_bytes", 0)
+            )
+            resp_bytes += _safe_nonnegative_int(
+                metrics.get("response_stream_bytes", 0)
+            )
         elif ev.hook == "before_tool_call":
-            name = metrics.get("tool_name", "unknown")
+            name = _safe_tool_name(metrics.get("tool_name", "unknown"))
             tool_counts[name] = tool_counts.get(name, 0) + 1
 
     _ALL_CATEGORIES = [
