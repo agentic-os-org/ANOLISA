@@ -40,8 +40,11 @@ class MiddlewareFixture(unittest.IsolatedAsyncioTestCase):
         chain = middleware if isinstance(middleware, list) else [middleware]
         for entry in chain:
             entry.hook.setdefault("budget_ms", 1000)
+        invocation = MODULE.AwInvocationMiddleware({"hooks": [entry.hook for entry in chain]})
+        # Scope transport has separate contracts; exercise the real stream policy here.
+        invocation.config = None
         agent = SimpleNamespace(
-            _acting_middlewares=[MODULE.AwInvocationMiddleware(), *chain],
+            _acting_middlewares=[invocation, *chain],
             _acting_impl=tool,
             state=SimpleNamespace(session_id="session"),
         )

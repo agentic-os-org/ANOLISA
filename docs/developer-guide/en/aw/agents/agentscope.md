@@ -108,5 +108,7 @@ except SubmissionDenied as error:
 ```
 
 A parked native reply and its later continuation are separate AW turns. Completed
-`ToolResponse` checks retain strict withholding; intermediate `ToolChunk` output
-remains outside that completed-result guarantee.
+`tool.after` routes with `on_error: withhold_result` suppress intermediate tool
+chunks and publish the checked final content after all checks and invocation
+cleanup. Both `reply_stream` consumers and the model receive the adopted text or
+the withheld placeholder. Targets with no strict after route retain native intermediate chunks.

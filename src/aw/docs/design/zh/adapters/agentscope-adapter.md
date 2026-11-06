@@ -93,8 +93,11 @@ AW 使用 AgentScope 的 `on_acting`，位于原生参数校验和权限检查�
   Hook 展开后以 `ToolResponse(state=ERROR)` 占位结果替换未检查原文：模型不会收到
   原始文本，外层 after Hook 仍持有关联准入的原始 payload，且不受 hook 顺序或
   `replace_result` 组合影响。该故障动作仅在桥支持完成响应替换的 SDK 版本上准入。
-  中间 `ToolChunk` 帧不缓冲：AgentScope 中间件接缝没有流门控，失败工具的部分
-  chunk 对完成响应边界之外的流式消费者仍可见。
+  安装严格 after 路由时，调用包装抑制中间 `ToolChunk` 帧，在全部检查和调用回收
+  完成后，以最终采用的响应内容发送一帧完成 chunk，再交付响应对象。原生流消费者
+  与模型上下文收到相同的受检文本或拦截占位结果，无需累积 chunk 缓冲。
+  门控覆盖该目标的全部工具，包括严格步骤 selector 之外的工具。未配置严格 after
+  路由的目标保持原生流式行为，包括 Tokenless 压缩。
 - 生成的 Hook 配置只向最后一个已准入的结构化替换步骤授予替换权限。native 和观察
   Hook 的 stdout 不能替换结果，所有回调在最终步骤之前保留相同的关联响应。
   Bridge 校验该权限必须为布尔值，且只能用于 after。

@@ -91,5 +91,7 @@ except SubmissionDenied as error:
     show_rejection(str(error))
 ```
 
-原生暂停回复及稍后的续跑分别对应独立 AW 轮次。完成的 `ToolResponse` 保留严格后置
-拦截，中间 `ToolChunk` 输出仍在完成结果保证的范围之外。
+原生暂停回复及稍后的续跑分别对应独立 AW 轮次。`tool.after` 路由配置
+`on_error: withhold_result` 后抑制中间工具 chunk，全部检查和调用清理完成后
+发布受检最终内容。`reply_stream` 消费者和模型收到相同的采用文本或拦截占位结果。
+未配置严格 after 路由的目标保持原生中间 chunk。

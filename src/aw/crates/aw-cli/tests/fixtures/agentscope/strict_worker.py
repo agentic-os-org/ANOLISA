@@ -32,6 +32,8 @@ class OfflineModel(ChatModelBase):
 
     async def __call__(self, *args: Any, **kwargs: Any) -> ChatResponse:
         self.round += 1
+        with (ROOT / "model-inputs.jsonl").open("a") as output:
+            output.write(json.dumps({"args": args, "kwargs": kwargs}, default=str) + "\n")
         return ChatResponse(
             content=self.calls if self.round == 1 else [TextBlock(text="done")], is_last=True
         )
@@ -71,7 +73,8 @@ class LocalTool(ToolBase):
     async def call(self, mode: str, uid: str) -> Any:
         with (ROOT / "executed.jsonl").open("a") as output:
             output.write(json.dumps({"uid": uid, "mode": mode}) + "\n")
-        yield ToolChunk(content=[TextBlock(text="partial")], is_last=False)
+        for text in ["sensi", "tive-", mode]:
+            yield ToolChunk(content=[TextBlock(text=text)], is_last=False)
         yield ToolChunk(content=[TextBlock(text=f"complete-{mode}")], is_last=True)
 
 
@@ -94,7 +97,12 @@ async def main() -> None:
         state=AgentState(session_id="session-strict"),
         injection_config=InjectionConfig(inject_runtime_state=False),
     )
-    await asyncio.wait_for(agent.reply(UserMsg("user", "run")), 60)
+    async def consume() -> None:
+        with (ROOT / "stream.jsonl").open("w") as output:
+            async for event in agent.reply_stream(UserMsg("user", "run")):
+                output.write(event.model_dump_json() + "\n")
+
+    await asyncio.wait_for(consume(), 60)
     print(json.dumps([agent.state.model_dump(mode="json")]))
 
 
