@@ -960,6 +960,10 @@ fn configure_raw_cli_command(command: &mut Command) {
         .env("TERM", "xterm-256color")
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
+        // glibc gettext lets LANGUAGE override LC_ALL unless the locale is
+        // C/POSIX, and C.UTF-8 is not; drop it so English-output assertions
+        // hold on hosts exporting a localized LANGUAGE.
+        .env_remove("LANGUAGE")
         .env("HOME", home)
         .env("GIT_DIR", git_work_tree.join(".git"))
         .env("GIT_WORK_TREE", git_work_tree);
