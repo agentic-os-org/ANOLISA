@@ -1277,3 +1277,89 @@ fn empty_agent_only_round_still_anchors() {
         "the fallback must still anchor a round with no agent message"
     );
 }
+
+fn alternative(attrib: &str, confidence: f32) -> AlternativeAttrib {
+    AlternativeAttrib {
+        attrib: attrib.into(),
+        confidence,
+        rationale: "plausible".into(),
+        fix: "fix".into(),
+    }
+}
+
+fn case_with_alternatives(attr: &Attribution) -> CausalCase {
+    let doc = partial_move_trajectory();
+    let req = CausalRequest {
+        session_id: "s".into(),
+        round_index: None,
+        complaint: "文件没有全部移过去".into(),
+        force: true,
+        id_kind: None,
+    };
+    let index = empty_index();
+    let mut case_ = build_case(&doc, &doc.steps, &req, &Verdicts::default(), attr, &index)
+        .expect("case builds from a well-formed trajectory");
+    gate_by_evidence(&mut case_, &index);
+    case_
+}
+
+#[test]
+fn alternative_candidates_are_normalized_clamped_ranked_and_primary_free() {
+    let attr = Attribution {
+        attrib: Some("prompt".into()),
+        alternative_attribs: vec![
+            alternative("Model", 0.7),
+            alternative("environment", 0.95),
+            alternative("prompt", 0.9),
+            alternative("agent", 87.0),
+            alternative("skill", -3.0),
+        ],
+        ..Attribution::default()
+    };
+
+    let case_ = case_with_alternatives(&attr);
+    let rendered: Vec<(&str, f32)> = case_
+        .alternative_attribs
+        .iter()
+        .map(|candidate| (candidate.attrib.as_str(), candidate.confidence))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![("agent", 1.0), ("model", 0.7), ("skill", 0.0)]
+    );
+}
+
+#[test]
+fn compliant_alternative_candidates_preserve_tie_order() {
+    let attr = Attribution {
+        attrib: Some("prompt".into()),
+        alternative_attribs: vec![
+            alternative("model", 0.8),
+            alternative("agent", 0.5),
+            alternative("skill", 0.5),
+        ],
+        ..Attribution::default()
+    };
+
+    let case_ = case_with_alternatives(&attr);
+    let rendered: Vec<(&str, f32)> = case_
+        .alternative_attribs
+        .iter()
+        .map(|candidate| (candidate.attrib.as_str(), candidate.confidence))
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![("model", 0.8), ("agent", 0.5), ("skill", 0.5)]
+    );
+}
+
+#[test]
+fn primary_case_variant_is_not_an_alternative() {
+    let attr = Attribution {
+        attrib: Some("model".into()),
+        alternative_attribs: vec![alternative("Model", 0.6)],
+        ..Attribution::default()
+    };
+
+    assert!(case_with_alternatives(&attr).alternative_attribs.is_empty());
+}
