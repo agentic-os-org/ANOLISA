@@ -9,110 +9,14 @@ use asc_policy_types::{
 };
 use std::os::unix::fs::PermissionsExt;
 
-#[test]
-fn repository_retains_sqlite_wal_locks_like_a_plain_connection() {
-    use std::os::unix::fs::MetadataExt;
-
-    let dir = private_dir();
-    let holds_deadman_lock = |name: &str| {
-        let inode = std::fs::metadata(dir.path().join(name))
-            .unwrap()
-            .ino()
-            .to_string();
-        let pid = std::process::id().to_string();
-        let locks = std::fs::read_to_string("/proc/locks").unwrap();
-        locks.lines().any(|line| {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            fields.len() >= 8
-                && fields[1] == "POSIX"
-                && fields[4] == pid
-                && fields[5].rsplit(':').next() == Some(inode.as_str())
-                && fields[6].parse::<u64>().is_ok_and(|start| start <= 128)
-                && (fields[7] == "EOF" || fields[7].parse::<u64>().is_ok_and(|end| end >= 128))
-        })
-    };
-    let plain = rusqlite::Connection::open(dir.path().join("plain.db")).unwrap();
-    plain
-        .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE example(value);")
-        .unwrap();
-    assert!(
-        holds_deadman_lock("plain.db-shm"),
-        "positive control must retain the WAL deadman lock"
-    );
-
-    let repository = SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap();
-    repository.check_writable().unwrap();
-    // An unrelated close() must not release SQLite's cross-process protection.
-    assert!(
-        holds_deadman_lock("policy-state.db-shm"),
-        "Repository file validation released SQLite's WAL deadman lock"
-    );
-    let initial = seed(&repository);
-    let applying = transition(&repository, &initial, BindingStatus::Applying);
-    assert_eq!(
-        repository
-            .get_binding_state(&initial.binding.spec.binding_id)
-            .unwrap(),
-        Some(applying)
-    );
-    assert!(
-        holds_deadman_lock("policy-state.db-shm"),
-        "Repository reads and writes must preserve SQLite's WAL deadman lock"
-    );
-}
-
-trait Repository: PapRepository + BindingStateRepository + BindingReconcileCatalog {}
-impl<T: PapRepository + BindingStateRepository + BindingReconcileCatalog> Repository for T {}
+mod common;
+use common::{Repository, private_dir, seed, transition};
 
 fn each(test: impl Fn(&dyn Repository)) {
     let dir = private_dir();
     test(&SqlitePolicyRepository::open(&dir.path().join("policy-state.db")).unwrap());
 }
 
-fn seed(repo: &dyn Repository) -> BindingStateSnapshot {
-    let binding: PreparedBinding = serde_json::from_str(include_str!(
-        "../../asc-policy-types/tests/fixtures/prepared-binding.json"
-    ))
-    .unwrap();
-    repo.put_policy(&binding.policy).unwrap();
-    repo.put_scope(&PreparedScope {
-        scope_id: binding.scope.scope_id.clone(),
-        selector: binding.scope.selector.clone(),
-        policy_snapshots: vec![binding.policy],
-        owner_uid: None,
-        status: ScopeStatus::Active,
-    })
-    .unwrap();
-    let intent = repo
-        .sync_scope_instances(&binding.scope.scope_id, &[binding.scope.process])
-        .unwrap()
-        .remove(0);
-    assert_eq!(intent.status_version, 1);
-    repo.get_binding_state(&intent.spec.binding_id)
-        .unwrap()
-        .unwrap()
-}
-fn transition(
-    repo: &dyn Repository,
-    current: &BindingStateSnapshot,
-    phase: BindingStatus,
-) -> BindingStateSnapshot {
-    let mut next = current.clone();
-    next.binding.status = phase.into();
-    let result = repo
-        .compare_exchange_binding_state(current, &BindingStateWrite::new(next))
-        .unwrap();
-    let WriteResult::Applied(receipt) = result else {
-        panic!("unexpected result {result:?}");
-    };
-    let next = repo
-        .get_binding_state(&current.binding.spec.binding_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(receipt.status_version, Some(next.status_version));
-    assert!(receipt.status_applied);
-    next
-}
 fn target() -> TargetRef {
     TargetRef {
         route: "test".into(),
@@ -519,13 +423,6 @@ fn keyset_recovery_does_not_skip_rows_deleted_on_previous_page() {
     }
     assert_eq!(removed, 8);
     assert_eq!(repo.list_scopes(10, 0).unwrap().total, 1);
-}
-
-fn private_dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir()
-        .unwrap()
 }
 
 #[test]
