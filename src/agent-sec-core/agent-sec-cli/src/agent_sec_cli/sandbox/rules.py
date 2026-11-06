@@ -67,7 +67,7 @@ DANGEROUS_RULES = [
         "args_contain": ["-delete", "-exec", "-execdir", "-ok", "-okdir"],
         "reason": "find 执行删除或外部命令",
     },
-    {"command": "sed", "flags": ["-i"], "reason": "sed 原地修改文件"},
+    {"command": "sed", "flags_prefix": ["-i", "--in-place"], "reason": "sed 原地修改文件"},
     {"command": "git", "subcommands": ["clean"], "reason": "git clean 删除未跟踪文件"},
     {"command": "sudo", "reason": "提权执行"},
 ]
