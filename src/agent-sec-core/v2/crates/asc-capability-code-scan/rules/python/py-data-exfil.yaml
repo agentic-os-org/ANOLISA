@@ -8,5 +8,5 @@ desc_zh: >-
 regex: |-
   \brequests\.(post|put|patch)\s*\([^)]*files\s*=
   |\b(storbinary|storlines)\s*\(
-  |\bsmtplib\.SMTP\s*\(
+  |\bsmtplib\.(SMTP|SMTP_SSL)\s*\(
 severity: warn
