@@ -844,6 +844,54 @@ mod tests {
         assert!(!loaded.state.source_selections.contains_key("example.ops"));
     }
 
+    #[test]
+    fn failed_commit_discards_journal_before_later_operations() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = source_package(temporary.path(), "example.failed");
+        let later_source = temporary.path().join("source-later");
+        fs::create_dir_all(&later_source).unwrap();
+        fs::write(
+            later_source.join(EXTENSION_CONFIG_FILENAME),
+            r#"{"schemaVersion":1,"name":"example.later","version":"1.0.0","compatibility":{"cosh":">=0.12.0"}}"#,
+        )
+        .unwrap();
+        let state_dir = temporary.path().join("states");
+        let installer =
+            ExtensionInstaller::new(temporary.path().join("extensions"), state_dir.clone());
+        let failed = installer.preflight_path_copy(&source).unwrap();
+        let later = installer.preflight_path_copy(&later_source).unwrap();
+
+        // Deterministic state persistence failure: the atomic-save temporary
+        // path is occupied by a directory, so the state file stays untouched.
+        let state_temp = state_dir.join(format!(".{}.tmp", crate::state::EXTENSIONS_STATE));
+        fs::create_dir_all(&state_temp).unwrap();
+        let error = installer
+            .commit(&failed.operation_id, &failed.capability_fingerprint)
+            .unwrap_err();
+        assert_eq!(error.code(), "extension_commit_rolled_back");
+        assert!(!installer.store.installation("example.failed").exists());
+        assert!(!installer
+            .store
+            .pending_commit_journal(&failed.operation_id)
+            .exists());
+
+        // A separate prepared operation commits while the failed one is
+        // abandoned; recovery must not replay the failed operation's journal.
+        fs::remove_dir(&state_temp).unwrap();
+        installer
+            .commit(&later.operation_id, &later.capability_fingerprint)
+            .unwrap();
+
+        let recovery = installer.recover().unwrap();
+        assert_eq!(recovery.rolled_back_pending_commits, 0);
+        assert!(installer.store.installation("example.later").exists());
+        assert!(state::load(Some(&state_dir))
+            .unwrap()
+            .state
+            .source_selections
+            .contains_key("example.later"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn link_commit_keeps_external_payload() {
