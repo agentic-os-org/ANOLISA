@@ -4,6 +4,11 @@ mod config;
 mod evaluate;
 mod mapping;
 mod storage;
+// Feeds the deterministic preservation check, which this observe-only shadow evaluation does
+// not request yet: mapping projects TaskScope alone with a zero evidence budget. Registered
+// here so the criterion is built and tested against real repositories before it is wired.
+#[allow(dead_code)]
+mod verifier;
 
 use std::io::{Read, Write};
 use std::sync::mpsc;

@@ -139,13 +139,21 @@ fn evaluate_unit(
             EvidenceFact::Rebuild { result, .. } => result,
         })
         .collect();
-    if results.contains(&RebuildResult::Identical) && results.contains(&RebuildResult::Unique) {
+    let identical = results.contains(&RebuildResult::Identical);
+    let unique = results.contains(&RebuildResult::Unique);
+    let absent = results.contains(&RebuildResult::Absent);
+    // Two byte-level claims can contradict each other, and absence contradicts any byte-level
+    // claim about the same resource. Either way the disagreement is surfaced rather than
+    // resolved by precedence, because no ordering between sources is trustworthy.
+    if (identical && unique) || (absent && (identical || unique)) {
         (Reason::ConflictingEvidence, refs)
     } else if results.contains(&RebuildResult::Unknown) {
         (Reason::Undetermined, refs)
-    } else if results.contains(&RebuildResult::Unique) {
+    } else if unique {
         (Reason::NeedsSnapshot, refs)
     } else {
+        // Either every qualified source reproduced the bytes, or the target does not
+        // exist and the candidate cannot destroy a result.
         (Reason::Allowed, refs)
     }
 }

@@ -169,6 +169,8 @@ pub enum RebuildResult {
     Identical,
     /// Existing bytes include results not reproduced by the retained recipe.
     Unique,
+    /// No current bytes exist, so no result can be lost.
+    Absent,
     /// Comparison could not establish either result.
     Unknown,
 }

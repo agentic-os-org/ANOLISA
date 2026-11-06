@@ -331,6 +331,87 @@ fn irrelevant_and_conflicting_evidence_cannot_turn_into_allowance() {
 }
 
 #[test]
+fn an_absent_target_allows_modification_and_contradicts_byte_claims() {
+    let mut value = request();
+    value.evidence[0].fact = EvidenceFact::Rebuild {
+        resource_id: "result-1".into(),
+        result: RebuildResult::Absent,
+    };
+    // Nothing exists to lose, so replacing the target destroys no result.
+    let allowed = check(&value).unwrap();
+    assert_eq!(allowed.answers[0].reason, Reason::Allowed);
+    assert_eq!(allowed.answers[0].value, AnswerValue::Allow);
+    assert_eq!(allowed.answers[0].confidence_ppm, 1_000_000);
+    assert_eq!(allowed.answers[0].evidence_refs, ["rebuild-1"]);
+    assert_eq!(allowed.outcome.control.candidate, CandidateControl::Allow);
+
+    // A second source claiming bytes for the same resource disagrees with absence; the
+    // disagreement is surfaced rather than resolved by letting either claim win.
+    for contradicting in [RebuildResult::Identical, RebuildResult::Unique] {
+        let mut value = request();
+        value.evidence[0].fact = EvidenceFact::Rebuild {
+            resource_id: "result-1".into(),
+            result: RebuildResult::Absent,
+        };
+        let mut second = value.evidence[0].clone();
+        second.id = "another-rebuild".into();
+        second.fact = EvidenceFact::Rebuild {
+            resource_id: "result-1".into(),
+            result: contradicting,
+        };
+        value.evidence.push(second);
+        let conflict = check(&value).unwrap();
+        assert_eq!(conflict.answers[0].reason, Reason::ConflictingEvidence);
+        assert_eq!(conflict.answers[0].value, AnswerValue::Unknown);
+        assert_eq!(
+            conflict.answers[0].evidence_refs,
+            ["another-rebuild", "rebuild-1"]
+        );
+        assert_eq!(conflict.outcome.control.candidate, CandidateControl::Block);
+        value.evidence.reverse();
+        assert_eq!(check(&value).unwrap().answers, conflict.answers);
+    }
+
+    // Absence next to an undetermined result stays fail-closed instead of allowing.
+    let mut value = request();
+    value.evidence[0].fact = EvidenceFact::Rebuild {
+        resource_id: "result-1".into(),
+        result: RebuildResult::Absent,
+    };
+    let mut second = value.evidence[0].clone();
+    second.id = "another-rebuild".into();
+    second.fact = EvidenceFact::Rebuild {
+        resource_id: "result-1".into(),
+        result: RebuildResult::Unknown,
+    };
+    value.evidence.push(second);
+    let undetermined = check(&value).unwrap();
+    assert_eq!(undetermined.answers[0].reason, Reason::Undetermined);
+    assert_eq!(
+        undetermined.outcome.control.candidate,
+        CandidateControl::Block
+    );
+}
+
+#[test]
+fn absent_is_the_serialized_form_of_a_missing_target() {
+    let mut value = request();
+    value.evidence[0].fact = EvidenceFact::Rebuild {
+        resource_id: "result-1".into(),
+        result: RebuildResult::Absent,
+    };
+    let encoded = serde_json::to_value(&value).unwrap();
+    assert_eq!(
+        encoded.pointer("/evidence/0/fact/parameters/result"),
+        Some(&json!("absent"))
+    );
+    assert_eq!(
+        decode_request(&serde_json::to_vec(&encoded).unwrap()),
+        Ok(value)
+    );
+}
+
+#[test]
 fn a_later_allow_does_not_erase_a_block_or_a_coverage_gap() {
     let mut value = decode_request(include_bytes!("../examples/missing-evidence.json")).unwrap();
     for scenarios in [
