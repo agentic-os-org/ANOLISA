@@ -48,7 +48,10 @@ pub(super) fn compound_segments(parsed: &ParsedCommand) -> Option<Vec<Vec<Vec<St
 /// (issue #1882): a readonly-compound execution plan exists for the
 /// whole command (see `build_readonly_compound_plan`), granting
 /// `CompoundReadonly` evidence in auto mode. Every other compound keeps
-/// `AskUser`, never auto-allow. Assessment aggregation is unchanged.
+/// `AskUser`, never auto-allow. The relaxation also never applies when
+/// any segment's assessment carries the sensitive-path gate: the
+/// compound honors the same fail-closed rule the simple path applies
+/// before evidence. Assessment aggregation is unchanged.
 pub(super) fn assess_stripped_compound(
     command: &str,
     shape: CommandShape,
@@ -111,7 +114,18 @@ pub(super) fn assess_stripped_compound(
             reasons.insert(0, primary);
         }
     }
-    let auto_allow = compound_readonly_evidence(command).filter(|_| policy.auto_mode);
+    // The simple path fails closed on sensitive targets before any
+    // readonly evidence is considered, and the compound path aggregates
+    // the same "sensitive-path" reason from its per-segment assessments —
+    // so the evidence grant must honor the same gate: a sensitive read
+    // anywhere in the compound keeps the whole compound on the approval
+    // path instead of auto-executing it.
+    let sensitive_path = reasons.contains(&"sensitive-path");
+    let auto_allow = if sensitive_path {
+        None
+    } else {
+        compound_readonly_evidence(command).filter(|_| policy.auto_mode)
+    };
     if auto_allow.is_some() {
         // The whole compound is auto-executable; the structural
         // "not-auto-executable" reason no longer applies.
