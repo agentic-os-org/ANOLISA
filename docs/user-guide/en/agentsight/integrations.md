@@ -39,6 +39,17 @@ Anything else works too — add a rule, as described in
   so use a binary rebuilt with the new entries. Requests sent before the probe attaches may still
   be missed. Custom CA settings such as `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE` can select rustls;
   these OpenSSL offsets do not cover that transport or WebSocket TLS.
+- **Cline** trajectories are collected automatically from each task's
+  `api_conversation_history.json` under
+  `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks` on Linux or
+  `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks` on macOS.
+  The task directory name becomes the session ID. Project names come from the basename of
+  `cwdOnTaskInitialization` in `state/taskHistory.json`, matched by task `id` or `ulid`, and fall
+  back to `(default)` when metadata is missing or invalid. The sibling `ui_messages.json` is merged
+  for message timestamps, Token usage, and cost rather than collected as a separate session. The
+  local session viewer reads the same task files. When overriding
+  `features.trajectory_collection.scan_dirs`, include either the `saoudrizwan.claude-dev` directory
+  or its `tasks` child.
 - **Gemini CLI** trajectories are collected from the session files under
   `~/.gemini/tmp/<project>/chats/session-*.jsonl`, no configuration needed. Project names come from
   each project directory's `.project_root` marker. The collector replays the CLI's correction records

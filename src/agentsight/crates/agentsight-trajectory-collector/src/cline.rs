@@ -19,6 +19,65 @@ use anyhow::Result;
 
 use agentsight_atif::{AtifTrajectory, FinalMetrics};
 
+/// Standard VS Code task roots on Linux.
+pub const LINUX_TASKS_ROOT: &str = ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks";
+/// Standard VS Code task roots on macOS.
+pub const MACOS_TASKS_ROOT: &str =
+    "Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks";
+/// Standard VS Code task roots supported by local discovery.
+pub const TASKS_ROOTS: &[&str] = &[LINUX_TASKS_ROOT, MACOS_TASKS_ROOT];
+pub(crate) const STORAGE_DIR: &str = "saoudrizwan.claude-dev";
+/// The Cline file that represents one discoverable task.
+pub const API_HISTORY_FILENAME: &str = "api_conversation_history.json";
+
+/// Derive the task identity from an API history path.
+pub fn task_session_id(path: &Path) -> Option<String> {
+    if path.file_name()?.to_str()? != API_HISTORY_FILENAME {
+        return None;
+    }
+    let id = path.parent()?.file_name()?.to_string_lossy().into_owned();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Map task IDs to project names using Cline's optional task-history index.
+///
+/// Both legacy numeric IDs and newer ULIDs are accepted. Missing, malformed,
+/// or incomplete history yields an empty or partial map and never blocks task
+/// discovery.
+pub fn task_projects(tasks_root: &Path) -> HashMap<String, String> {
+    let mut projects = HashMap::new();
+    let Some(storage_root) = tasks_root.parent() else {
+        return projects;
+    };
+    let Ok(content) = std::fs::read_to_string(storage_root.join("state/taskHistory.json")) else {
+        return projects;
+    };
+    let Ok(history) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
+        return projects;
+    };
+    for item in &history {
+        let Some(project) = item
+            .get("cwdOnTaskInitialization")
+            .and_then(|value| value.as_str())
+            .and_then(|cwd| Path::new(cwd).file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        for key in ["id", "ulid"] {
+            if let Some(id) = item
+                .get(key)
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.is_empty())
+            {
+                projects.insert(id.to_string(), project.clone());
+            }
+        }
+    }
+    projects
+}
+
 /// Per-request usage recovered from an `api_req_started` ui record.
 #[derive(Debug, Clone, Copy)]
 struct RequestUsage {
@@ -319,6 +378,31 @@ pub fn extract_private_metadata(
     extra
 }
 
+/// Convert a path-backed Cline API history document, including sibling UI and
+/// task-history metadata. Returns `None` for content that is not a Cline task.
+pub fn convert_task_file(path: &Path, content: &str) -> Option<Result<AtifTrajectory>> {
+    let mut events = record_array(content)?;
+    append_ui_records(path, &mut events);
+    let session_id = task_session_id(path);
+    let project = session_id
+        .as_deref()
+        .and_then(|id| {
+            let tasks_root = path.parent()?.parent()?;
+            task_projects(tasks_root).remove(id)
+        })
+        .unwrap_or_else(|| "(default)".to_string());
+    Some(
+        convert_cline_events(&events, "cline").map(|mut trajectory| {
+            trajectory.session_id = session_id;
+            trajectory
+                .extra
+                .get_or_insert_with(Default::default)
+                .extend(extract_private_metadata(&events, &project));
+            trajectory
+        }),
+    )
+}
+
 /// A user record that yields a step: genuine text beyond the auto-injected
 /// environment block (result-only carriers and injected-only records do not).
 fn user_yields_step(content: &serde_json::Value) -> bool {
@@ -613,6 +697,50 @@ mod tests {
         );
         normalize_events(&mut foreign);
         assert_eq!(foreign.len(), 1);
+    }
+
+    #[test]
+    fn test_path_backed_task_conversion_and_project_metadata() {
+        let base = std::env::temp_dir().join(format!("cline-path-{}", std::process::id()));
+        let tasks = base.join(STORAGE_DIR).join("tasks");
+        let task_id = "01K7W6W2F4R3J9N2M8D6V5S4T0";
+        let task = tasks.join(task_id);
+        std::fs::create_dir_all(&task).unwrap();
+        let state = base.join(STORAGE_DIR).join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("taskHistory.json"),
+            serde_json::json!([{
+                "id": "1763071200000",
+                "ulid": task_id,
+                "cwdOnTaskInitialization": "/workspace/demo-app"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let api_path = task.join(API_HISTORY_FILENAME);
+        std::fs::write(&api_path, api_content()).unwrap();
+        std::fs::write(task.join("ui_messages.json"), ui_content()).unwrap();
+
+        assert_eq!(task_session_id(&api_path).as_deref(), Some(task_id));
+        assert!(task_session_id(&task.join("ui_messages.json")).is_none());
+        let projects = task_projects(&tasks);
+        assert_eq!(projects.get(task_id).map(String::as_str), Some("demo-app"));
+        assert_eq!(
+            projects.get("1763071200000").map(String::as_str),
+            Some("demo-app")
+        );
+
+        let trajectory = convert_task_file(&api_path, &api_content())
+            .unwrap()
+            .unwrap();
+        assert_eq!(trajectory.session_id.as_deref(), Some(task_id));
+        assert_eq!(trajectory.extra.as_ref().unwrap()["project"], "demo-app");
+        assert!(!trajectory.steps.is_empty());
+
+        std::fs::write(state.join("taskHistory.json"), "not json").unwrap();
+        assert!(task_projects(&tasks).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

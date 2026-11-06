@@ -36,6 +36,13 @@ AgentSight 观测 Agent 时不需要被嵌进 Agent 里；同样，当机器上�
   需要使用包含新条目的重编译二进制。探针挂载前已发出的请求仍可能漏采。
   `CODEX_CA_CERTIFICATE` 或 `SSL_CERT_FILE` 等自定义 CA 设置可能切换到 rustls；
   这些 OpenSSL offset 不覆盖该路径或 WebSocket TLS。
+- **Cline** 轨迹会自动从各任务目录下的 `api_conversation_history.json` 采集，标准位置为 Linux 上的
+  `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks` 和 macOS 上的
+  `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks`。
+  任务目录名作为会话 ID。项目名取 `state/taskHistory.json` 中 `cwdOnTaskInitialization` 路径的最后一段，
+  通过任务 `id` 或 `ulid` 匹配；元数据缺失或无效时回退为 `(default)`。同目录的 `ui_messages.json`
+  会合并消息时间戳、Token 用量和成本，不会作为独立会话重复采集。本地会话查看器读取同一组任务文件。
+  覆盖 `features.trajectory_collection.scan_dirs` 时，需包含 `saoudrizwan.claude-dev` 目录或其 `tasks` 子目录。
 - **Gemini CLI** 轨迹直接从 `~/.gemini/tmp/<project>/chats/session-*.jsonl` 会话文件采集，无需配置。
   项目名取自各项目目录下的 `.project_root` 标记文件。采集器在转换前会重放 CLI 的修正记录
   （`$rewindTo`、`$patch`、`$set`），因此采集到的轨迹与 CLI 恢复会话时看到的对话一致；嵌套在父
