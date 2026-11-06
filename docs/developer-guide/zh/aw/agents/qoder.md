@@ -52,6 +52,20 @@ target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
+## 检查用户提交
+
+普通 print 和终端启动可通过 Qoder 的 `UserPromptSubmit` 命令 Hook 接入
+`input.submit`。将[提交检查](../../../../user-guide/zh/aw/security.md#检查用户提交)
+中已有的 sec-core `scan_user_input` 步骤加入同一配置。Provider 收到的
+`input.text` 是本次提交的 `prompt`；阻断效果或 `on_error: block` 检查失败时，
+原生 Hook 以退出码 2 阻止模型请求。`on_error: report` 会记录检查失败并放行。
+
+原生 `session_id` 和 `request_set_id` 将同次提交的串行或并行 AW 步骤关联起来。
+身份缺失时按该步骤的失败策略处理。已有原生 Hook 继续启用，其后续追加的上下文
+不属于本次提交文本快照。reloadable 和 attach 路由尚未接入此事件。
+普通 CLI 绑定最多保留 1,024 次不同受检提交的防重放记录，达到该数量前重新开启
+CLI 会话。
+
 ## 保留已有 Hook 与调度
 
 Qoder 继续加载原有 user、project 和 local 配置。AW 为本次会话生成回调条目，

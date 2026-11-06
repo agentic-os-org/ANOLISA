@@ -66,10 +66,12 @@ Explicit Adapters can use `aw instance` to register, confirm Ready, query and re
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Qoder CLI also checks the native `UserPromptSubmit` text through `input.submit`; see [Qoder input checks](../../docs/developer-guide/en/aw/agents/qoder.md#check-user-submissions).
 
 Pi `runWorker` factories also support literal user text checks before model dispatch; see the [Pi submission guide](../../docs/developer-guide/en/aw/agents/pi.md#check-user-submissions).
 

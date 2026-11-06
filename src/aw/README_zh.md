@@ -66,10 +66,12 @@ core 可独立使用；安全检查与压缩需安装对应 Provider 并通过�
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->
+
+Qoder CLI 也可通过 `input.submit` 检查原生 `UserPromptSubmit` 文本，见 [Qoder 输入检查](../../docs/developer-guide/zh/aw/agents/qoder.md#检查用户提交)。
 
 Pi `runWorker` 工厂支持模型派发前的字面量用户文本检查，接入方式见 [Pi 输入检查指南](../../docs/developer-guide/zh/aw/agents/pi.md#检查用户输入)。
 

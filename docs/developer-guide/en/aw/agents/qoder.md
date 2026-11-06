@@ -56,6 +56,24 @@ target/debug/aw status --config crates/aw-service/examples/aw.qoder.yaml
 target/debug/aw stop --config crates/aw-service/examples/aw.qoder.yaml
 ```
 
+## Check user submissions
+
+Ordinary print and terminal launches support `input.submit` through Qoder's
+`UserPromptSubmit` command Hook. Add the existing sec-core `scan_user_input`
+steps from [submission checks](../../../../user-guide/en/aw/security.md#check-user-submissions)
+to the same configuration. The Provider receives the submitted `prompt` as
+`input.text`; a block effect or `on_error: block` failure exits the native Hook
+with code 2 and prevents the model request. `on_error: report` permits the input
+after recording a check failure.
+
+The native `session_id` and `request_set_id` identify one submission across
+parallel or sequential AW steps. Missing identities fail according to the
+step's failure action. Existing native Hooks remain enabled; their subsequent
+context additions are outside the submitted-text snapshot. Reloadable and
+attached routes do not yet support this input event. Ordinary CLI bindings
+retain replay records for at most 1,024 distinct checked submissions; start a
+new CLI session before that limit.
+
 ## Keep existing Hooks and scheduling
 
 Qoder continues to load its normal user, project and local settings. AW creates
