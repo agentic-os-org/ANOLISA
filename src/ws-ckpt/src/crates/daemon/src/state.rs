@@ -1256,89 +1256,100 @@ impl DaemonState {
                 }
             }
         }
-        // Extract the AtomicBool from the watcher without holding the lock across await
-        let observation = {
-            let watchers = match self.watchers.lock() {
-                Ok(w) => w,
-                Err(_) => return Quiescence::Safe,
-            };
-            match watchers.get(ws_id) {
-                // Snapshot the coverage generation together with the flag:
-                // the quiet period below is only evidence when kernel
-                // coverage stays continuous throughout it.
-                Some(w) => Some((
-                    std::sync::Arc::clone(&w.is_writing_flag()),
-                    w.coverage_epoch(),
-                )),
-                None => None,
-            }
-        };
-        match observation {
-            None => Quiescence::Safe,
-            Some((flag, observed_epoch)) => {
-                // A freshly re-armed watcher's flag starts false and is set
-                // asynchronously by its forwarder task, so an already-active
-                // writer has not necessarily been observed yet: the check
-                // must complete the quiet-period observation instead of
-                // taking the not-writing shortcut to Safe.
-                if !fresh_watch && !flag.load(std::sync::atomic::Ordering::Acquire) {
-                    return Quiescence::Safe;
+        // Concurrent daemon operations on the same workspace (a heal
+        // re-arming the watch while a sibling check observes) can void a
+        // single window with our own registrations. Re-observe once before
+        // failing closed; a walk that outlasts both waits still reports
+        // activity, so #8448 stays fixed.
+        const ATTEMPTS: u8 = 2;
+        for attempt in 0..ATTEMPTS {
+            let last_attempt = attempt + 1 == ATTEMPTS;
+            // Sample the watcher without holding the table across `await`.
+            // The registration evidence is instance-wide: one recursive walk
+            // pauses delivery for every workspace, not just the one being
+            // registered (#8448).
+            let sampled = {
+                let watchers = match self.watchers.lock() {
+                    Ok(w) => w,
+                    Err(_) => return Quiescence::Safe,
+                };
+                match watchers.get(ws_id) {
+                    Some(w) => Some((
+                        std::sync::Arc::clone(&w.is_writing_flag()),
+                        w.quiescence_evidence(),
+                        w.delivery_settling(),
+                        w.is_degraded(),
+                        std::sync::Arc::clone(w.shared()),
+                    )),
+                    None => None,
                 }
-                // Wait 100ms quiet period
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                flag.store(false, std::sync::atomic::Ordering::Release);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if flag.load(std::sync::atomic::Ordering::Acquire) {
-                    Quiescence::Writing
-                } else if self.quiescence_observation_voided(ws_id, &flag, observed_epoch) {
-                    // The flag stayed silent, but that only proves
-                    // quiescence when coverage was continuous for the
-                    // whole observation: a survivor re-arm under an
-                    // overlapping release interrupts coverage
-                    // mid-observation, and writes to directories the
-                    // recursive walk had not reached yet leave no event
-                    // — the check observed them as silence (#7592
-                    // review, P1). Report activity so the caller
-                    // re-observes once coverage is stable.
-                    Quiescence::Writing
-                } else {
-                    Quiescence::Safe
+            };
+            let Some((flag, evidence, settling, degraded, shared)) = sampled else {
+                return Quiescence::Safe;
+            };
+            // Monitoring is unavailable: quiescence cannot be established.
+            if degraded {
+                return Quiescence::Writing;
+            }
+            // A walk pauses delivery for the shared instance, so the flag may
+            // stay silent only because its events are still queued. A check
+            // must not decide during one (#8448); the retry above covers a
+            // walk that is our own sibling operation finishing.
+            if crate::fs_watcher::delivery_paused(&shared) {
+                if last_attempt {
+                    return Quiescence::Writing;
+                }
+                continue;
+            }
+            // A freshly re-armed watcher's flag starts false and is set
+            // asynchronously by its forwarder task, so an already-active
+            // writer has not necessarily been observed yet: the check must
+            // complete the quiet-period observation instead of taking the
+            // not-writing shortcut to Safe.
+            let still_current =
+                || self.quiescence_observation_still_current(ws_id, &flag, &evidence);
+            match crate::fs_watcher::observe_once(&flag, fresh_watch, settling, still_current).await
+            {
+                crate::fs_watcher::ObservationAttempt::Quiet => return Quiescence::Safe,
+                crate::fs_watcher::ObservationAttempt::Active => return Quiescence::Writing,
+                // The window overlapped a write, a registration walk, or a
+                // coverage change: its silence proves nothing (#7592, #8448).
+                crate::fs_watcher::ObservationAttempt::Unstable => {
+                    if last_attempt {
+                        return Quiescence::Writing;
+                    }
                 }
             }
         }
+        // The loop only exits by returning; keep the type checker honest.
+        Quiescence::Writing
     }
 
-    /// Whether the quiet-period observation that snapshotted `flag` and
-    /// `observed_epoch` was invalidated afterwards: the route lost (or
-    /// lost and regained) kernel coverage, or the watcher was replaced,
-    /// so the observed flag's silence proves nothing. The decision to
-    /// return `Safe` must account for coverage changes during the
-    /// observation, not just the initial degraded check.
-    fn quiescence_observation_voided(
+    /// Whether the observation that sampled `observed_flag` is still valid:
+    /// the watcher was not replaced or unregistered, and its coverage and the
+    /// instance's delivery state did not change. `false` means the observed
+    /// silence proves nothing.
+    fn quiescence_observation_still_current(
         &self,
         ws_id: &str,
         observed_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-        observed_epoch: u64,
+        evidence: &crate::fs_watcher::QuiescenceEvidence,
     ) -> bool {
         let watchers = match self.watchers.lock() {
             Ok(w) => w,
             // The watcher table is permanently unavailable: cannot prove
             // the observation stayed valid — fail closed.
-            Err(_) => return true,
+            Err(_) => return false,
         };
         match watchers.get(ws_id) {
             // The watcher vanished mid-observation (unregister racing the
             // check): the observed flag belongs to a retired handle.
-            None => true,
+            None => false,
             Some(w) => {
-                // A concurrent heal replaced the watcher: the observed
-                // flag is retired, and its silence proves nothing.
-                !std::sync::Arc::ptr_eq(&w.is_writing_flag(), observed_flag)
-                    // Coverage was interrupted during the observation —
-                    // possibly restored already (the mark cleared), which
-                    // the interruption counter still detects.
-                    || w.is_degraded()
-                    || w.coverage_epoch() != observed_epoch
+                // A concurrent heal replaced the watcher: the observed flag
+                // is retired, and its silence proves nothing.
+                std::sync::Arc::ptr_eq(&w.is_writing_flag(), observed_flag)
+                    && w.quiescence_evidence_is_current(*evidence)
             }
         }
     }
@@ -3050,6 +3061,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quiescence_gate_fails_closed_while_another_workspace_registers() {
+        // The daemon entry point (guarded checkpoint/rollback, regular
+        // snapshots) must apply the same registration guard as the watcher
+        // helper: a recursive walk on the shared instance pauses event
+        // delivery for every workspace, so a silent flag is not evidence
+        // (#8448).
+        let (_root, state, anchor) = watcher_fixture();
+        let watcher =
+            crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm initial watch");
+        state.register_watcher("ws".to_string(), watcher);
+
+        // Another workspace's registration is walking the shared instance.
+        let hold = crate::fs_watcher::TestRegistrationHold::begin();
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Writing,
+            "an in-flight registration walk must void the daemon's silence evidence"
+        );
+
+        // Once the walk ends and its queued events drain, the idle workspace
+        // is safe again.
+        drop(hold);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Safe
+        );
+    }
+
+    #[tokio::test]
     async fn a_freshly_rearmed_watch_observes_an_already_active_writer() {
         // The reviewed gap: after the heal re-arms a stale watch mid-write,
         // the fresh watcher's flag starts false and is set asynchronously by
@@ -3071,10 +3112,13 @@ mod tests {
                 use std::io::Write as _;
                 let file = std::fs::File::create(live.join("busy.log")).unwrap();
                 let mut writer = std::io::BufWriter::new(file);
+                // Write faster than the observation's 100 ms window can
+                // elapse without an event, so a loaded runner cannot starve
+                // the forwarder for the whole window.
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     writeln!(writer, "busy").unwrap();
                     writer.flush().unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             })
         };
