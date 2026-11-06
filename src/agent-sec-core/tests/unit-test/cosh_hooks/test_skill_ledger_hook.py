@@ -230,6 +230,67 @@ def test_injects_trace_context_into_skill_ledger_show_command(
     assert captured["kwargs"]["check"] is False
 
 
+def test_key_init_invoked_with_no_baseline_when_keys_missing(monkeypatch, capsys):
+    """Keys missing -> the hook must run skill-ledger init --no-baseline.
+
+    Every existing test stubs _ensure_keys or pre-creates key files, so the
+    init invocation was never exercised: renaming the subcommand/verb or
+    dropping --no-baseline kept the suite green while key initialization
+    silently failed and every skill-ledger check fell open.
+    """
+    captured = []
+
+    def fake_run(args, **kwargs):
+        captured.append(args)
+        if "init" in args:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr=""
+            )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"latestStatus": "pass", "message": None}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(skill_ledger_hook, "_keys_exist", lambda: False)
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_resolve_skill_dir",
+        lambda _skill_name, _cwd: ("/project/.copilot-shell/skills/test-skill", False),
+    )
+    monkeypatch.setattr(skill_ledger_hook.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        skill_ledger_hook.sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "skill",
+                    "tool_input": {"skill": "test-skill"},
+                    "cwd": "/project",
+                    "trace_id": "trace-1",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "tool_use_id": "tool-1",
+                }
+            )
+        ),
+    )
+
+    skill_ledger_hook.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output == {"decision": "allow"}
+    init_cmds = [args for args in captured if "init" in args]
+    assert init_cmds, "key init command must be invoked when keys are missing"
+    init_cmd = init_cmds[0]
+    assert init_cmd[0] == "agent-sec-cli"
+    ctx_end = init_cmd.index("--trace-context") + 2
+    assert init_cmd[ctx_end:] == ["skill-ledger", "init", "--no-baseline"]
+
+
 # ---------------------------------------------------------------------------
 # Early exits and infrastructure fail-open tests
 # ---------------------------------------------------------------------------
