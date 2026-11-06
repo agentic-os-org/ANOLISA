@@ -136,7 +136,7 @@ Provider 的私有 `config` 接受以下字段：
 | 操作 | 事件 | 结果 |
 | --- | --- | --- |
 | `scan_code` | `tool.before` | `ok: true, verdict: pass` → `observe/code_pass`；`warn` 或 `deny` 按 `mode` 返回 `observe/code_risk` 或 `block/code_risk` |
-| `check_skill` | `tool.before` | 有效签名内容返回 `observe/skill_pass`；其他已完成的信任判定按 `mode` 观察或阻断 |
+| `check_skill` | `tool.before`, `input.submit` | 有效签名内容返回 `observe/skill_pass`；其他已完成的信任判定按 `mode` 观察或阻断 |
 | `observe_tool` | `tool.after` | `observe/tool_observed`，不调用扫描器 |
 
 `describe`、私有配置校验和工具后观察不访问 sec-core。工具前扫描使用字面参数和
@@ -240,6 +240,22 @@ Adapter 在 `event.native.aw_skill` 提供请求的 `name`、规范化 `director
 `agent-sec-cli skill-ledger check DIRECTORY`，期限受剩余预算限制。
 daemon 管理员须授权实际规范化目录并保证文件可访问，AW 不扩展目录授权或签名。
 内容评审、扫描和签名通过 [Skill Ledger 指南](../../../../user-guide/zh/agent-sec-core/skill-ledger.md)单独完成。
+
+Pi Coding Agent 在 `input.submit` 复用此操作。Adapter 提供
+`native.aw_skill_request` 与已解析的 `native.aw_skill`，两者名称必须一致。
+Pi 还提供 `aw_skill.digest`，值为读取快照时原始 `SKILL.md` 字节的 `sha256:<hex>`。
+现有 V2 `check` 响应提供已认证的 `manifestHash`。在 `pass` 后，Provider 读取
+本地 `.skill-meta/latest.json` 普通文件（上限 8 MiB），移除 `manifestHash` 和
+`signature`，递归排序对象键，再对紧凑 JSON 计算 SHA-256，结果必须与 CLI 返回值
+一致。清单须绑定选中的规范目录、V2 格式和 `pass` 状态；其中的
+`fileHashes["SKILL.md"]` 再与 Pi 快照摘要比较。Provider 身份需要该清单的读取权限。
+清单缺失、不可读、变化、伪造或快照摘要不匹配均返回 `skill_drifted`，在 `mode: block`
+下即使配置 `on_error: report` 也会阻断。CLI 返回摘要缺失或非法为 Provider 错误，
+按 `on_error` 处理；必需信任检查应配置 `block`。此过程使用 Ledger 现有字段与产物。
+两个字段都明确为 `null` 表示普通文本，返回 `observe/skill_not_requested`，不调用后端。
+缺少字段会返回错误。该操作声明 `event_adapters: {"input.submit": ["pi"]}`，
+其他 Adapter 在准入期被拒绝，`on_error` 不改变该结果。使用独立的 Pi 配置；
+其他 Agent 保留适用的工具加载前检查。接线见 [Pi Skill 输入](../agents/pi.md#校验-skill-输入)。
 
 | Ledger 状态 | 原因码 | `mode: block` |
 | --- | --- | --- |

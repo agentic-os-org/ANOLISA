@@ -534,3 +534,42 @@ fn submission_binds_text_and_turn_without_tool_fields() {
         Ok(Reply::Invocation(_))
     ));
 }
+
+#[test]
+fn operation_adapter_constraints_are_bounded_and_reference_declared_events() {
+    let protocol = Protocol::new().unwrap();
+    let describe = protocol
+        .parse_request(&bytes(&request("describe")))
+        .unwrap();
+    let mut reply = response();
+    reply["operations"] = json!([{
+        "name": "check", "events": ["input.submit", "tool.before"],
+        "effects": ["observe", "block"],
+        "event_adapters": {"input.submit": ["pi", "third-party"]}
+    }]);
+    assert!(matches!(
+        protocol.check_response(&describe, &bytes(&reply)),
+        Ok(Reply::Description(_))
+    ));
+    for constraints in [
+        json!({}),
+        json!({"unknown.event": ["pi"]}),
+        json!({"tool.after": ["pi"]}),
+        json!({"input.submit": []}),
+        json!({"input.submit": ["pi", "pi"]}),
+        json!({"input.submit": [""]}),
+        json!({"input.submit": ["*"]}),
+        json!({"input.submit": ["pi\n"]}),
+        json!({"input.submit": ["x".repeat(129)]}),
+        json!({"input.submit": (0..65).map(|i| format!("adapter-{i}")).collect::<Vec<_>>()}),
+    ] {
+        reply["operations"][0]["event_adapters"] = constraints;
+        assert!(
+            matches!(
+                protocol.check_response(&describe, &bytes(&reply)),
+                Err(Error::Invalid(_))
+            ),
+            "{reply}"
+        );
+    }
+}

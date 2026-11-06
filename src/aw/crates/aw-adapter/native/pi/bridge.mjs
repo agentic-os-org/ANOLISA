@@ -362,10 +362,10 @@ export function installSessionBridge(session, scope = null) {
     }
   });
   return {
-    async submit(text, turn, signal) {
+    async submit(text, turn, signal, skill) {
       const hooks = config.hooks.filter(hook => hook.event === "input.submit");
       if (!hooks.length) return;
-      const payload = { event: "input.submit", text, aw_turn_id: turn,
+      const payload = { ...skill, event: "input.submit", text, aw_turn_id: turn,
         session_id: identifier(session.sessionManager.getSessionId(), "session id") };
       // Reject local encoding errors before consuming the service sequence.
       if (Buffer.byteLength(JSON.stringify(payload)) > 1024 * 1024)

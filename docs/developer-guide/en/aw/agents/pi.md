@@ -104,7 +104,7 @@ A rejected check calls `preflightResult(false)` when provided.
 
 When input checking is configured, the supported source is interactive text.
 Images/attachments, `input`, `context` and `before_provider_request` extension handlers,
-expanded slash commands,
+expanded slash commands other than the checked `/skill:name` path below,
 `steer`, `followUp`, `sendUserMessage`, `sendCustomMessage`, direct Agent submission
 and concurrent prompts are rejected. Use `expandPromptTemplates: false` to submit
 literal slash text. Native prompt options are retained; model continuations and
@@ -126,3 +126,41 @@ and release a managed task. Cancellation is terminal for that session: create a
 fresh factory session afterward. Teardown waits up to 12 seconds for native abort,
 pending prompt/check cleanup and disposal, then releases the AW scope. A failed
 cleanup requires worker restart. A late scan reply cannot dispatch a model request.
+
+## Validate Skill submissions
+
+Use a separate Pi configuration for `input.submit/check_skill`, such as
+`aw.pi-submission.yaml`. The Provider declares this event as Pi-only; selecting
+Qoder SDK, QwenPaw or another Adapter from the same configuration fails admission
+before native hooks are ready, with either `on_error: block` or `report`.
+Input events have no Agent selectors. Run other Agents with a separate configuration
+that omits this input Skill step while retaining their prompt/PII steps and applicable
+tool-time Skill checks. Give the configurations distinct `metadata.name` values when
+using automatic daemon paths, or distinct explicit `state_dir` and endpoints.
+
+Enable `config.skill: true` and put `check_skill` before `scan_prompt` and
+`scan_user_input` on `input.submit`, as in the submission example above. Authorize
+and sign each canonical Skill directory using the [Skill Ledger](../../../../user-guide/en/agent-sec-core/skill-ledger.md).
+Then submit `/skill:name optional arguments` through the managed `session.prompt`.
+A valid signed Skill reaches the model; denied trust, changed source and a failed
+required check reject the prompt before model transport.
+
+For Coding Agent 0.84.2, AW selects the first matching object from the session's
+actual `resourceLoader.getSkills()`, fixes its directory `SKILL.md` text, and uses
+the SDK frontmatter parser and native command format. The final expanded text,
+including arguments, passes through all input checks. Native submission receives
+`expandPromptTemplates: false`, so it cannot select or expand a second object.
+Files are bounded to 1 MiB and rechecked after policy evaluation. The Provider also
+uses the existing V2 Ledger `manifestHash` to authenticate the local manifest,
+then compares its `fileHashes["SKILL.md"]` with the captured raw-file digest.
+This prevents directory swaps or forged manifest labels from approving another
+snapshot, using the existing backend interface. See the [Provider contract](../providers/sec-core.md#validate-skills-before-loading)
+for artifact access and limits. Use `on_error: block` for required Skill trust. A source change
+or unresolved source rejects adoption, including with `on_error: report`.
+
+Ordinary text and explicitly literal slash text carry explicit no-Skill metadata;
+`check_skill` returns `skill_not_requested` without contacting the Ledger. Unknown
+Skills, flat Markdown files and a same-named extension command have no checked
+source. Automatic context injection, direct file reads and Skill commands need
+policies at their own execution points. A bare pi-agent-core application must
+supply its business Skill loader before this Coding Agent source contract applies.

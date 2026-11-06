@@ -76,6 +76,10 @@ fully admitted steps are retained. Failure returns no partially prepared Host,
 and earlier completed calls are not rolled back. Preparation methods should
 therefore avoid side effects.
 
+Provider operation descriptions may constrain individual events through
+`event_adapters`. Admission matches these lists against the trusted selected Adapter;
+an unsupported target fails preparation independently of runtime `on_error`.
+
 Successful preparation establishes local protocol agreement. It does not verify
 native Hook installation, produce a `Ready` binding or prove that an Agent
 adopted a policy. The admitted surface remains:

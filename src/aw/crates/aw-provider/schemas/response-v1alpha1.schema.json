@@ -88,6 +88,46 @@
                 "minItems": 1,
                 "maxItems": 5,
                 "uniqueItems": true
+              },
+              "event_adapters": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 16,
+                "propertyNames": {
+                  "enum": [
+                    "session.start",
+                    "input.submit",
+                    "tool.before",
+                    "tool.after",
+                    "permission.request",
+                    "compact.before",
+                    "compact.after",
+                    "subagent.start",
+                    "subagent.stop",
+                    "turn.stop",
+                    "session.end",
+                    "model.before_request",
+                    "runtime.observed",
+                    "runtime.exited",
+                    "security.violation",
+                    "coverage.changed"
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 64,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[a-z][a-z0-9-]*$",
+                    "not": {
+                      "pattern": "[^a-z0-9-]"
+                    }
+                  }
+                }
               }
             }
           },

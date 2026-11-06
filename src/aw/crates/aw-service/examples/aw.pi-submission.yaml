@@ -1,6 +1,8 @@
 # Pi Coding Agent/Core 0.84.2, Node.js >=22.19.0, managed runWorker factory.
 # Replace executable/socket/application paths and start sec-core separately.
-# Literal user text only; see the Pi integration guide for unsupported ingress.
+# Pi-only input Skill policy; other Adapters need a separate configuration.
+# Use distinct metadata.name values with automatic daemon paths.
+# Literal user text and local /skill:name; sign/authorize Skill directories first.
 apiVersion: aw/v1alpha1
 kind: AWConfiguration
 metadata:
@@ -30,6 +32,7 @@ spec:
       config:
         version: 1
         mode: block
+        skill: true
         prompt: {mode: block, scan_mode: fast}
         pii: {input_mode: block, output_mode: observe}
   events:
@@ -37,6 +40,11 @@ spec:
       enabled: true
       required: true
       steps:
+        - id: skill
+          provider: security
+          operation: check_skill
+          effects: [observe, block]
+          on_error: block
         - id: prompt
           provider: security
           operation: scan_prompt

@@ -244,3 +244,51 @@ fn invalid_documents_fail_before_capability_rules() {
         ));
     }
 }
+
+#[test]
+fn event_adapter_constraints_reject_unsupported_targets_before_runtime_failure_policy() {
+    let mut doc = document();
+    doc["spec"]["agents"]["qoder-sdk"] = json!({"adapter": "qoder-sdk", "argv": ["/unused/agent"]});
+    let mut ops = operations();
+    ops[0]["events"] = json!(["tool.before", "input.submit"]);
+    ops[0]["event_adapters"] = json!({"input.submit": ["pi"]});
+    let constrained = evidence(&doc["spec"]["providers"]["policy"]["config"], ops.clone());
+    // The input-only constraint leaves the existing tool contract intact.
+    for adapter in ADAPTERS {
+        admit_policy(&doc, adapter, &capabilities(adapter), &constrained).unwrap();
+    }
+    ops[0].as_object_mut().unwrap().remove("event_adapters");
+    let unrestricted = evidence(&doc["spec"]["providers"]["policy"]["config"], ops);
+    for on_error in ["block", "report"] {
+        doc["spec"]["events"]["input.submit"] = json!({
+            "enabled": true, "required": true, "steps": [{
+                "id": "input", "provider": "policy", "operation": "check",
+                "effects": ["observe", "block"], "on_error": on_error
+            }]
+        });
+        for adapter in ["pi", "qoder-sdk", "qwenpaw"] {
+            let mut cap = capabilities(adapter);
+            cap.events.insert(
+                "input.submit".into(),
+                vec!["observe".into(), "block".into()],
+            );
+            let result = admit_policy(&doc, adapter, &cap, &constrained);
+            if adapter == "pi" {
+                assert_eq!(result.unwrap().steps().len(), 3);
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "Provider operation does not support the target Adapter for this event"
+                );
+            }
+            // Older Provider descriptions retain their existing declaration semantics.
+            assert_eq!(
+                admit_policy(&doc, adapter, &cap, &unrestricted)
+                    .unwrap()
+                    .steps()
+                    .len(),
+                3
+            );
+        }
+    }
+}

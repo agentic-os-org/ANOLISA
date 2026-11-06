@@ -261,6 +261,17 @@ impl Protocol {
                     if !names.insert(operation["name"].as_str()) {
                         return Err(Error::Invalid("duplicate operation name"));
                     }
+                    if let Some(constraints) = operation["event_adapters"].as_object() {
+                        let events = array(&operation["events"])?;
+                        if constraints
+                            .keys()
+                            .any(|event| !events.iter().any(|v| v == event))
+                        {
+                            return Err(Error::Invalid(
+                                "Adapter constraint references an undeclared event",
+                            ));
+                        }
+                    }
                 }
                 Ok(Reply::Description(Description(value)))
             }

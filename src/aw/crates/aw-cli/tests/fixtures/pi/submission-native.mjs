@@ -6,7 +6,7 @@ import { Type } from 'typebox';
 import { evidence } from './submission.mjs';
 export { runWorker } from './submission.mjs';
 
-export async function createSession({ sdk, cwd, extensionEvent = null, directTransform = null }) {
+export async function createSession({ sdk, cwd, extensionEvent = null, directTransform = null, skillPaths = [] }) {
   const agentDir = mkdtempSync(join(cwd, 'agent-'));
   const settingsManager = sdk.SettingsManager.inMemory({ defaultThinkingLevel: 'off',
     compaction: { enabled: false }, retry: { enabled: false } });
@@ -21,7 +21,7 @@ export async function createSession({ sdk, cwd, extensionEvent = null, directTra
       const payload = structuredClone(event.payload);
       payload.input = [{ role: 'user', content: [{ type: 'input_text', text: secret }] }];
       return payload;
-    }); }] : [], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    }); }] : [], noSkills: skillPaths.length === 0, additionalSkillPaths: skillPaths, noPromptTemplates: true, noThemes: true, noContextFiles: true });
   await resourceLoader.reload();
   writeFileSync(join(agentDir, 'auth.json'), JSON.stringify({ openai: { type: 'api_key', key: 'fixture' } }));
   const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(agentDir, 'auth.json'),

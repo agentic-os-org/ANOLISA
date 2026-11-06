@@ -241,7 +241,7 @@ class GateTests(GateFixture):
             ),
             (
                 "aw-provider-sec-core", self.root.parents[1] / "providers/agent-sec-core",
-                ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc"],
+                ["aw-exec", "aw-provider", "serde", "serde_json", "thiserror", "libc", "sha2"],
             ),
             (
                 "aw-package", self.root / "crates/aw-package",
