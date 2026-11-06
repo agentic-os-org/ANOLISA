@@ -6,45 +6,47 @@ Skill Score plans tasks for one Skill, executes them in controlled Docker enviro
 
 ## Install
 
-The fork preview has two independent delivery archives, each with a `.sha256` file. The base `sec-core-bundle-<version>-linux-x86_64.tar.gz` contains the standard base raw package, indexes, release manifest and matching ANOLISA installer. Downloading or installing it does not require the optional bundle. Verify the checksum from the trusted release, extract into an empty directory, then unpack its `v1/anolisa-cli-<installer-version>-linux-x86_64.tar.gz` to obtain the installer. The formal default channel may not contain this preview yet.
+### Install the base CLI
 
-Install the base component from the extracted repository:
+**Raw preview (Linux x86_64).** Verify the published checksum of `sec-core-bundle-<version>-linux-x86_64.tar.gz` and extract it into an empty directory. Unpack its `v1/anolisa-cli-<installer-version>-linux-x86_64.tar.gz` and install the `anolisa` executable in `/usr/local/bin`. Set the raw backend in `/etc/anolisa/repo.toml` to this trusted repository. Update the existing table if the configuration file already contains other backends.
 
-```sh
-sudo anolisa --install-mode system install sec-core --backend raw \
-  --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
+```toml
+schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "file:///absolute/path/to/preview/v1"
 ```
 
-Base install, update and repair do not obtain the scoring Python/Harbor runtime or build container images. `plan` needs only the base CLI and model configuration; other ASC adapters retain their existing dependencies.
+```sh
+sudo anolisa --install-mode system install sec-core --backend raw --version '<preview-version>'
+```
 
-For dynamic execution, download and verify `skill-score-bundle-<version>-linux-x86_64.tar.gz`, then extract it into the same directory. It contains the small optional raw package, source archive and runtime manifest, with Dockerfiles, build scripts, worker code and dependency locks. It contains no prebuilt container images or third-party Python runtime. Provide Linux x86_64, local Docker with BuildKit/Compose, usable network namespaces, firewall/conntrack and ptrace/strace, then explicitly install:
+**V2 RPM (Linux x86_64).** Install the existing package from the repository that contains the target ASC version.
+
+```sh
+sudo dnf install agent-sec-core
+```
+
+The base CLI and model configuration suffice for `plan`. The scoring Python/Harbor environment and container images are prepared on explicit request.
+
+### Enable dynamic scoring
+
+Raw users should verify the checksum of `skill-score-bundle-<version>-linux-x86_64.tar.gz` and extract it into the same directory as the base bundle. The two archives form one repository. The existing RPM already includes the runtime recipe. Provide local Docker with BuildKit/Compose, network namespaces, firewall/conntrack support and ptrace/strace, then run:
 
 ```sh
 sudo agent-sec-cli skillsec score install-runtime
 ```
 
-On a system raw installation, this command invokes ANOLISA with the repository and exact version recorded for the base component. Install the release-matched ANOLISA executable in /usr/local/bin or /usr/bin and keep the verified repository available. If a local repository moved, restore the matching release at its original location. Operators with a verified temporary installer, including FC template builders, can continue to use its explicit raw install command with the pinned repository and version.
-
-In a raw install result or dry run, `source_repo` and `artifact` are display labels. Explicit HTTP(S) sources show the scheme, host and optional port. Replaying a recorded source shows SHA-256 fingerprints. For a download URL, use the verified repository configuration and its distribution index.
-
-The base raw package accepts ANOLISA 0.3.21. The optional package needs 0.3.22 or later. If an older manager installed the base, upgrade the manager and verify the original raw repository and installed version. Point the system raw backend in `/etc/anolisa/repo.toml` to that verified source before running `sudo anolisa --install-mode system repair sec-core`. A repair that replays the base records its repository. Check the base row’s `raw_repository_sha256` in `anolisa --install-mode system --json status` before retrying `install-runtime`. If a healthy base returns `nothing-to-repair` and the fingerprint is still missing, use the verified source and exact version explicitly:
-
-```sh
-sudo anolisa --install-mode system install sec-core-skill-score --backend raw \
-  --repo 'file:///absolute/path/to/preview/v1' --version '<preview-version>'
-```
-
-To restore the unified command after a no-op repair, uninstall `sec-core` during a maintenance window and reinstall the same base version from the verified original repository using ANOLISA 0.3.22 or later. Confirm the base fingerprint in status before running `install-runtime`.
-
-On Linux x86_64 with the V2 RPM, install the base with `sudo dnf install agent-sec-core`, then use the same command above. The existing `agent-sec-core` RPM supplies build recipes. Explicit installation prepares the runtime under `/usr/lib/agent-sec-core/skill-score`; repeat the command after an RPM upgrade. Final package removal cleans owned generated environments. Mixed system raw and RPM CLI installations must be resolved before using this command.
+For raw, ASC uses the configured raw repository and the installed base version to obtain the optional recipe. For RPM, it verifies ownership of the installed recipe. Both paths use the same ASC preparation code to build or load the images and verify the worker. Use one system installation channel per host.
 
 Installation builds the work image and ASC network sidecar from the verified sources, obtains locked Python 3.12/Harbor dependencies, and checks the generated environment. The base image is pinned by digest; package managers inside the Dockerfiles still need network access. Different builds can produce different image IDs because not every system/transitive package is locked. An installation-local `image-build.json` binds the release manifest hash, actual base, tool inventory and both immutable config IDs, plus manifest IDs when present in the OCI export; readiness and execution verify that receipt. No pre-known output digest is claimed. Legacy Docker exports bind verified config IDs without inventing manifest IDs. A failed, timed-out or cancelled build reports the path to its private diagnostic log; successful builds remove that log.
 
-Both images are required for the current execution backend. Allow up to 30 minutes for component preparation (the image-build subprocess has a 25-minute limit), and reserve disk for image layers and temporary local export. Reserve memory for the controller and sidecar in addition to the work container's 4096 MiB. Build/network failure aborts installation without activating an incomplete runtime. `ANOLISA_SKILL_SCORE_SOURCE_DIR` can supply verified Python/uv archives and wheels. `ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` forbids dependency-download fallback but image construction still needs a network-capable build environment; `ANOLISA_SKILL_SCORE_OFFLINE=1` refuses fresh image construction. A restored, prepared FC template does not download or rebuild.
+Both images are required for the current execution backend. The image-build subprocess has a 25-minute limit. Reserve disk for image layers and temporary local export. Reserve memory for the controller and sidecar in addition to the work container's 4096 MiB. Build/network failure aborts installation without activating an incomplete runtime. `ANOLISA_SKILL_SCORE_SOURCE_DIR` can supply verified Python/uv archives and wheels. `ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` forbids dependency-download fallback but image construction still needs a network-capable build environment; `ANOLISA_SKILL_SCORE_OFFLINE=1` refuses fresh image construction. A restored, prepared FC template does not download or rebuild.
 
-`run` checks readiness and fails with an installation or repair suggestion when dependencies are absent or inconsistent. It never downloads, builds or pulls dependencies. There is no `prepare` command. Updating the base does not automatically update or install the optional component; install/update both to compatible versions explicitly. `install --all` explicitly selects all indexed components, including the optional one.
+For a raw upgrade, align the base and optional recipe packages to the same release, then run `sudo agent-sec-cli skillsec score install-runtime`. RPM users run the same command after upgrading the base RPM. ASC prepares an environment by manifest digest and switches `active-manifest.json` after successful verification. A compatible active worker remains available if preparing the new one fails. Rerun the command after correcting the failure or to repair damaged generated files. `run` uses only a ready, compatible environment.
 
-To remove dynamic execution dependencies, use `sudo anolisa --install-mode system uninstall sec-core-skill-score`. The hook removes owned inactive private environments, including environments retained by repair, while keeping the base component. Active runs or unresolved cleanup records block removal with a recovery message. Do not delete those records merely to bypass the check; first verify recovery of the exact request resources. Shared dependency caches and Docker images are not pruned by uninstall.
+For raw, `sudo anolisa --install-mode system uninstall sec-core-skill-score` removes the optional recipe and its owned inactive environments. RPM users remove them with the existing package. An active task or unconfirmed cleanup blocks removal until its resources have been recovered. Shared caches and Docker images can be reused.
 
 ## Configure the model service
 
@@ -109,6 +111,8 @@ Keep stderr even when no report was generated. In SkillEval, inspect the returne
 
 Report-v1 binds `content_hash` to the task and separates `decision`/`score` from `execution_status`, `dynamic_complete` and `cleanup_status`. Consumers require complete execution and cleanup; a score alone is insufficient. `execution[].completed` describes task completion, which differs from complete observation, probe activation and risk confirmation. An evidenced failure in the original Skill can be assessable even when its business task failed. An early Critical stop leaves unexecuted probes explicitly incomplete.
 
+After a probe times out and cleanup succeeds, a required probe can retry once. Other probes can still run within the remaining assessment budget. A probe that exhausts its attempts appears as incomplete in the report.
+
 `planning_notes` preserves unverified, non-blocking planning context. Runtime limitations, missing evidence and unsupported environments remain visible. Do not infer success by filtering limitation text. Preserve the task, report, `internal-report.json`, `evidence-catalog.json` and collected artifacts together. Evidence is bounded and read without following links; collection hashes establish integrity after collection, not independent authenticity of files writable by the evaluated container. The deployment owner controls artifact access and retention.
 
 Each `execution` item separates `execution_complete` (execution and evidence are complete) from `completed` (the business task succeeded). An Agent refusal or a Skill error can be fully assessed without making the business task successful.
@@ -117,15 +121,49 @@ Each `execution` item separates `execution_complete` (execution and evidence are
 
 ASC uses unmodified Harbor 0.22.0 through its public task Compose API. The work container shares the ASC sidecar's network namespace without Docker socket or network-management capabilities. The sidecar uses a fixed model-host TCP policy, preserves direct local/ICMP behavior, and rejects other traffic. This is not a general-purpose domain firewall. It uses an independent read-only hostname mapping; changing the work container's hosts file does not redirect the proxy. IPv6 needs separate acceptance.
 
-SkillEval owns FC templates, outer instance lifetime, credential injection, transfers, cancellation and operations. Template construction explicitly installs the matched base and optional components, and builds/verifies both images once. Restored instances execute the same ASC CLI as a standalone host. ASC owns only the inner request's Docker resources and reports their cleanup separately from SkillEval's outer FC cleanup.
+SkillEval owns the FC template, outer instance lifecycle, model credentials, transfers and cancellation. Template builders pin one release, install the base and call `install-runtime` to prepare or stage the worker. Directly installing the raw recipe places its files only. A builder using this route must also call `install-runtime`. Restored instances activate the staged worker offline before running `plan/run`. ASC manages the inner Docker resources for the request.
 
 Skill dependencies must be available inside the ASC work image. The planner records the tools required by the Skill using the default inventory as a reference. Before each probe runs, the worker checks these prerequisites inside the selected work image. Installing a document library or office tool only in the outer FC template does not make it available to the evaluated Skill. A deployment can reuse a pinned functionality-image Dockerfile to build its business dependencies, then add the ASC Agent and observation layer. Record the recipe commit and checksum, upstream base digest, actual installed versions and resulting image identities. Rebuilding a recipe does not establish that the result is identical to an existing published image. Standalone and FC installations each retain their verified image-build receipt.
 
 After the feature joins mainline and passes the same acceptance gates, switch the trusted release/index origin from the fork to the formal release channel. Keep the CLI, component names, model configuration and task/report contracts. OCI distribution is a future optimization, not a prerequisite for the first or formal release.
 
+### Preload images in a regular Dockerfile
+
+Image builders without a Docker daemon can install worker files first and defer activation to the execution host. Base and optional packages must come from the same release. This is a deployment artifact, not an additional public release bundle.
+
+On a Docker-capable Linux host, complete the normal explicit runtime installation with the intended business base. Export the verified images and their release-bound manifest to a new directory:
+
+```sh
+sudo /usr/local/lib/anolisa/sec-core-skill-score/prepare.sh \
+  --prefix /usr/local --export-preload /absolute/build-context/preload
+```
+
+The output contains `manifest.json` and `skill-score-images.tar.gz`. Transfer both through the platform's trusted build context. For RPM installations, use `/usr/lib/agent-sec-core/skill-score/prepare.sh --prefix /usr` instead. The export refuses an existing destination and checks the installed runtime, network capabilities and environment before saving images.
+
+In the final Dockerfile, install the base package and release-matched ANOLISA installer through the normal raw path, make the optional source repository available, then use:
+
+```dockerfile
+RUN ANOLISA_SKILL_SCORE_STAGE_ONLY=1 agent-sec-cli skillsec score install-runtime
+COPY --chown=0:0 preload/ /usr/local/lib/anolisa/sec-core-skill-score/preload/
+```
+
+Set `ANOLISA_SKILL_SCORE_STAGE_ONLY=1` for the ASC command in this build step. ASC prepares and verifies Python, Harbor and the worker and writes the staged record. Template activation requires a local Docker daemon. RPM users stage with the same command and place the archive under `/usr/lib/agent-sec-core/skill-score/preload/`.
+
+After the platform starts the local Docker daemon, activate before exposing the instance for scoring:
+
+```sh
+sudo agent-sec-cli skillsec score install-runtime
+```
+
+Activation verifies the staged files, release/source binding, archive checksum and image identities. Missing images load directly from the compressed local archive; no temporary uncompressed tar, image build or dependency download is needed. Existing matching images are reused. Network and environment checks must pass before readiness is recorded. A lost Docker data-root can be repopulated from the same archive. A missing or damaged preload for staged files fails with an actionable error, without falling back to an online build.
+
+Keep preload files owned by root and not writable by other users. The lifecycle lock prevents activation during scoring. Uninstall removes ASC-generated environments but retains these deployment-owned archives; the image owner removes them or replaces the complete image. Roll back by deploying the previous matched base, optional files and preload together. This flow does not start Docker, change the kernel, or require a new cloud publishing pipeline.
+
+During installation or offline activation, the readiness check records the tools observed inside the local work image. Each score run verifies the installed image identities before reusing this inventory. When a matching inventory is unavailable, the run collects one from the work image.
+
 ## Build and verify
 
-Develop on Linux using the pinned Rust toolchain and Docker/Compose. `packaging/skill-score/build-preview.sh` builds the native base, optional source component, matched installer and release-v4 metadata, then emits two independent bundles. Source and artifact identities bind the release. The former `RAW_SKILL_SCORE_PAYLOAD` mechanism is rejected; scoring Python 3.11 is not included. The retained Python scorer serves as a differential test oracle.
+Develop on Linux with the pinned Rust toolchain and Docker/Compose. `packaging/skill-score/build-preview.sh` produces the base bundle with its installer and release-v4 manifest, and the optional bundle with the raw build recipe and runtime manifest. The release manifest records the source commit and artifact checksums.
 
 For a prepared business base, set `ANOLISA_SKILL_SCORE_BASE_IMAGE` at explicit installation to a registry reference pinned by digest or a local immutable Docker image ID. A local image also requires `ANOLISA_SKILL_SCORE_BASE_RECIPE`, a JSON file with `source_repository`, `source_commit`, `dockerfile_path`, `dockerfile_sha256` and `upstream_base_image` (`reference`, `image_id`, `platform`). The builder validates the source/upstream identity and records actual output IDs in the installation-local receipt. These are trusted deployment inputs, not per-task options. Do not confuse Docker IDs with archive checksums or invent registry digests for images that have not been pushed.
 

@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -242,6 +243,72 @@ def record_environment(path: Path, identity: str) -> None:
         json.dump(expected, stream)
 
 
+def sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def reserve_candidate(root: Path) -> Path:
+    # The lifecycle lock permits one installer. Record the name before mkdir so
+    # interruption at any later point is recoverable even without a manifest.
+    directory(root / "environments")
+    name = ".candidate-" + uuid.uuid4().hex
+    (root / name).touch(mode=0o600, exist_ok=False)
+    sync_directory(root)  # Persist the ownership entry before its directory can exist.
+    path = root / "environments" / name
+    path.mkdir(mode=0o700)
+    return path
+
+
+def abandoned_candidates(root: Path) -> list[tuple[Path, Path]]:
+    owner = root.stat().st_uid
+    candidates = []
+    for marker in root.glob(".candidate-*"):
+        meta = marker.lstat()
+        if (
+            not re.fullmatch(r"\.candidate-[a-f0-9]{32}", marker.name)
+            or not stat.S_ISREG(meta.st_mode)
+            or meta.st_uid != owner
+            or meta.st_nlink != 1
+            or meta.st_mode & 0o077
+            or meta.st_size
+        ):
+            raise ValueError(f"unproven candidate ownership retained at {marker}")
+        path = root / "environments" / marker.name
+        try:
+            directory(path.parent)
+            meta = path.lstat()
+        except FileNotFoundError:
+            pass  # Interrupted before mkdir or after removal.
+        else:
+            if (
+                not stat.S_ISDIR(meta.st_mode)
+                or meta.st_uid != owner
+                or meta.st_mode & 0o077
+            ):
+                raise ValueError(f"unsafe candidate retained at {path}")
+        candidates.append((marker, path))
+    return candidates
+
+
+def remove_candidates(candidates: list[tuple[Path, Path]]) -> None:
+    for marker, path in candidates:
+        if path.exists():
+            if not shutil.rmtree.avoids_symlink_attacks:
+                raise RuntimeError(
+                    "safe descriptor-based directory removal is unavailable"
+                )
+            shutil.rmtree(path)
+        if path.parent.exists():
+            sync_directory(
+                path.parent
+            )  # Persist removal before releasing its ownership entry.
+        marker.unlink()
+
+
 def owned_environment(path: Path) -> None:
     name = re.fullmatch(r"([a-f0-9]{64})(?:\.retained-[a-f0-9]{32})?", path.name)
     if name is None:
@@ -305,16 +372,21 @@ def uninstall(root: Path) -> None:
     with exclusive(root):
         pending_cleanup(root)
         environments = root / "environments"
+        candidates = abandoned_candidates(root)
+        candidate_paths = {path for _, path in candidates}
         targets = []
         if environments.exists() or environments.is_symlink():
             directory(environments)
-            targets = list(environments.iterdir())
+            targets = [
+                path for path in environments.iterdir() if path not in candidate_paths
+            ]
             # Preflight every target before the first deletion, including retained
             # repair environments. Damaged/unknown ownership remains actionable.
             for target in targets:
                 owned_environment(target)
         if not shutil.rmtree.avoids_symlink_attacks:
             raise RuntimeError("safe descriptor-based directory removal is unavailable")
+        remove_candidates(candidates)
         (root / "active-manifest.json").unlink(missing_ok=True)
         (root / ".active-manifest.tmp").unlink(missing_ok=True)
         for target in targets:

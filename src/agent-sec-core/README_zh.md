@@ -65,6 +65,8 @@ CLI 命令与集成 capability surface。
 
 运行时安装器要求宿主机提供 Python 3.10 或更高版本。激活和评分需要访问本机系统 Docker 套接字。要将业务依赖装入工作镜像，可将 `ANOLISA_SKILL_SCORE_BASE_IMAGE` 设为固定的基础镜像引用，并按需通过 `ANOLISA_SKILL_SCORE_BASE_RECIPE` 指定其 JSON 配方路径。构建记录会保存所选基础镜像的身份。
 
+镜像构建器没有 Docker 时，可通过 `ANOLISA_SKILL_SCORE_STAGE_ONLY=1` 预置 worker 文件，并放入导出的、与版本绑定的镜像归档。Docker 启动后，仍由 `agent-sec-cli skillsec score install-runtime` 离线激活。raw/RPM 预置目录和构建命令见上述指南；默认安装继续保持轻量。
+
 ## V2 SkillSec 与 Policy CLI
 
 使用 `agent-sec-cli skillsec status` 查看状态，或运行 `agent-sec-cli skillsec --help`。

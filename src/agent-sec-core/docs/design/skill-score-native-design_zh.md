@@ -57,7 +57,7 @@ FC 隔离的是整个评测实例；内层容器继续隔离不可信的被测�
 
 `asc-cli` 的现有 `skill_score.rs` 从 exec 私有 Python CLI 改为直接调用该 crate。Python worker 保留 Harbor hooks、异常后的证据恢复和 ATIF/observer 适配；首版不为追求“薄 worker”重写全部观测归一化逻辑。worker 不做模型 Judge、风险严重度决定或最终扣分。
 
-删除的是评分专用 Python 3.11 环境，不是 ASC 所有 Python 组件；已有其他适配器不受这项决策影响。旧 Python 评分实现保留为迁移测试参考，完成等价性验证后退出发布包。六样本验收脚本调用已安装的原生 CLI。旧 Python 预览命令保留显式调用兼容，在帮助中隐藏。
+评测脚本调用已安装的 Rust CLI。Rust 测试使用 32 组固定样例核对扣分结果，独立的 Python 测试脚本可重新生成这些样例。可选运行包只携带 Harbor worker 实际使用的共享 Python 模块。
 
 主线现有规范强调 V2 Rust 运行时和 daemon 路径。本方案需要在同一组主线 PR 中明确增加“显式调用的本地评测能力”契约：它不连接 daemon，不是 daemon 不可用时的降级路径；其 Python Harbor 适配器属于明确列出的外部执行依赖。不能仅通过改名或进程分离宣称自动符合原规范。
 
@@ -72,7 +72,7 @@ FC 隔离的是整个评测实例；内层容器继续隔离不可信的被测�
 
 ```bash
 sudo anolisa --install-mode system install sec-core
-sudo anolisa --install-mode system install sec-core-skill-score
+sudo agent-sec-cli skillsec score install-runtime
 
 agent-sec-cli skillsec score plan /absolute/path/to/skill \
   --output-file /absolute/path/to/task.json
@@ -84,7 +84,7 @@ agent-sec-cli skillsec score run /absolute/path/to/task.json \
 
 保留 `run -` 标准输入方式、stdout 单个 JSON、stderr 进度，以及拒绝意外覆盖输出文件的行为。输出目录必须位于被测输入之外。`plan` 使用基础包中的 Rust 核心和模型配置，不要求可选执行组件或 Docker/Harbor。`run` 需要完整执行环境；未安装可选组件时非零退出，提示显式安装；已安装但损坏时提示修复。两种情况都不自动下载。
 
-这是一个 ASC 产品的可选安装单元，不是第二套公共 CLI 或新的服务。复用 `anolisa install <component>` 的现有形式，不新增 `--with`、`score install` 或 `prepare` 命令。当前安装器没有已落实的组件依赖自动求解能力，因此首版明确先装基础包，可选组件安装 helper 校验基础版本，不能依赖声明一个 dependency 就假定会自动安装。
+raw 和 RPM 均使用 `install-runtime`。ASC 按已装主包版本从配置的 raw 仓库取得配方，或使用现有 RPM 随附的配方。核对归属后，两条路径都进入 ASC 的准备代码。
 
 这里的轻量保证针对 `anolisa install sec-core`。现有 `anolisa install --all` 枚举全部组件，新可选组件注册后也会包含在内；将它作为显式安装全部组件的行为说明，不能把 `--all` 宣传成同样轻量。
 
@@ -206,37 +206,30 @@ Compose project 名与所有权标签由 request ID 预先确定，创建前写�
 
 ### 6.2 可选组件的安装、升级与修复
 
-用户显式安装或更新可选组件时，安装器执行：验证包与清单 → 校验基础 ASC 版本及宿主 → 校验构建源码和依赖 → 准备独立运行环境并构建镜像 → 校验 import、协议、Docker/Compose、两镜像 image ID 及网络能力 → 激活可选组件与清单 → 写入成功记录。
+Linux x86_64 使用统一命令 `sudo agent-sec-cli skillsec score install-runtime` 启用动态执行。基础 CLI 配好模型后即可运行 `plan`。第一方配方来自两种安装渠道：
 
-基础包安装与 Docker 状态无关。既然用户已经显式请求安装可选组件，Docker 缺失、daemon 不可用、权限不足、下载失败、哈希错误或依赖冲突均应使该次安装明确失败，不记录评分 ready，也不影响已安装的基础 ASC。可选组件升级准备失败保留旧执行环境并报错，不降级成“只安装基础包”。
+| 安装渠道 | ASC 获取配方的方式 |
+| --- | --- |
+| 系统 raw | 读取已装主包版本，让 ANOLISA 从配置的 raw 仓库安装精确版本 `sec-core-skill-score` 的文件。预览或 FC 模板可在 `/etc/anolisa/repo.toml` 中配置经校验的本地 `v1/` 仓库。 |
+| V2 RPM | 通过 RPM 数据库核对 CLI、准备脚本和运行时清单归属，使用现有 `agent-sec-core` RPM 随附的配方。 |
 
-运行环境按清单摘要保存；CLI 使用自己的清单找到对应环境，不使用全局“最新 worker”。准备成功才写 ready 状态；运行时仍做能力检查，因为 Docker 或内核环境可能变化。
+两个渠道共用 ASC 准备逻辑。ASC 校验配方，构建或加载两个镜像，在按运行时清单摘要命名的目录中准备 worker，再验证依赖、协议及网络能力。验证成功后才提交 `active-manifest.json`，供评分选择就绪环境。模板构建使用暂存模式，可在实例中继续离线激活。
 
-改动前，raw 首次安装有 hook，更新路径只进行依赖 preflight。本分支在 `distribution/anolisa` 中为 install/update 接入候选包准备生命周期，在移除旧文件之前完成耗时准备。通用安装器只处理已验证组件步骤、超时、取消与事务记录；Python/Harbor/镜像知识放在 ASC helper。基础 raw 包要求 ANOLISA 0.3.21，由安装器管理组件发现目录。可选 raw 包要求 0.3.22，由该版本在登记前完成候选包准备，并在安装或重放基础包时记录原始仓库。公开安装记录只保存索引的 SHA256，管理器通过仅所有者可读的仓库文件解析原地址。Skill Score 读取已安装主包的契约快照来核对版本。预览包绑定了支持候选包准备流程的安装器归档摘要。
+升级时先对齐目标版本的主包和配方，再执行统一命令。若准备失败，兼容的 CLI 仍可使用之前激活的环境。重复执行会复用健康环境，或修复已损坏的生成文件。基础包安装、raw 配方铺设、评测执行均无需准备动态环境。
 
-准备步骤从已验证候选包的 staging 目录执行新版本 helper，不能依赖初装时尚不存在或升级时仍为旧版的安装路径。该步骤与后续激活共同受现有组件安装锁和事务记录约束，避免并发安装互相覆盖。
-
-同版本安装/更新当前可能直接 NoOp，因此依赖被清理后不能只建议“重装同版本”。扩展既有 repair 生命周期，让 `anolisa repair sec-core-skill-score` 按该组件已安装清单重建缺失环境或镜像；基础 `anolisa repair sec-core` 不安装它。可选组件从未安装时应提示 install，repair 不隐式启用新能力。本分支已实现该组件目标及依赖修复；`run` 只给出建议，不自行下载。
-
-基础包与可选组件使用同一 ASC 发布版本及兼容清单，安装和运行均核对。首版不新增跨组件版本求解或原子升级框架；分别显式更新，版本暂不兼容时 `run` 明确拒绝并提示更新匹配组件。更新基础包不能自动获取此前未选择的动态执行依赖，仍可使用基础能力。
-
-重复安装 raw 可选包时，明确指定的业务基础镜像和配方必须与已保存的收据一致，才会报告就绪。系统 Docker 套接字所属组可以获取共享租约并创建私有请求记录。安装、修复和卸载获取独占租约，保留未确认清理的请求。与完整 worker 记录不匹配的目录项不会阻断这些操作。旧版共享目录中，若完整记录的写入者现无 Docker 权限，管理器会查询本机的容器、网络和卷。仍有匹配的 Compose 项目或无法核对资源时，需要管理员确认清理。
-
-基础包拥有唯一公共 CLI；可选组件拥有自己的 worker、版本化环境、ready 状态和安装记录，两包不得重复拥有文件或覆盖彼此入口。卸载可选组件保留基础 ASC，仅回收它拥有且没有活动任务使用的资源，不做全局镜像清理。
-
-安装 helper 幂等，下载有界，日志无密钥，取消能终止其子进程组。依赖准备失败时旧版文件和运行环境仍可用；切换失败时恢复旧文件及清单。保留旧版本依赖和镜像，避免正在运行的任务失去资源；校验缓存可保留供重试，临时不完整环境由 helper 清理。系统软件包安装的外部副作用不能假装能够完全回滚，应报告残留。禁止全局镜像清理。
-
-恢复旧版本应恢复对应清单和环境，但当前更新接口拒绝降级，不能承诺已有“一条 update 回滚”能力。首版提供验证过的运维恢复流程；是否新增通用降级命令单独决定，不作为评分架构的新要求。
+生命周期锁协调并发修改及活动任务。卸载 raw 可选组件或卸载 RPM 时清理归属明确且闲置的运行时文件。共享缓存、Docker 镜像和平台预置的归档分别管理。当资源清理尚未确认时，先完成恢复再卸载。回滚时一起恢复兼容版本与配套模板材料。
 
 ### 6.3 宿主、模板与离线边界
 
-Ubuntu 首选标准 raw 路径，不要求把 RPM 强装到 Ubuntu。RPM 继续是另一种发行格式；如发布包含评分的 RPM，其依赖安装、脚本和失败语义必须单独验证，不能照搬 raw hook 的保证。
+Ubuntu 部署使用系统 raw 包。RPM 系统使用现有 V2 RPM 和同一条 ASC 准备命令。
 
-完成评分准备需要可用 Docker daemon 才能构建并检查内层镜像。FC 模板最终化阶段由平台启动 Docker，再显式安装基础包及可选组件并验收。只有 Dockerfile 构建、没有 daemon 的阶段可以预置下载缓存，但不能标记评分 ready；最终必须经过镜像构建和检查。FC 模板是平台运行环境及配置的版本化定义，不等同于内层某个工作容器。
+完成评分准备需要可用 Docker daemon 才能构建或加载、检查内层镜像。没有 daemon 的镜像构建器在显式安装时使用 `ANOLISA_SKILL_SCORE_STAGE_ONLY=1`，预置 Python/Harbor/worker 文件并写入 `staged.json`，不写 `ready.json`。可运行 Docker 的构建机通过内部 `prepare.sh --export-preload` helper 导出已验证的安装；部署方将压缩归档及清单放入 raw 或 RPM 运行时根目录下的 `preload/`。该制品不进入公共源码 bundle。
 
-安装与执行必须使用同一 Docker daemon。首版验收默认本地系统 daemon 及对应用户权限，不自动切换到 rootless、远程 `DOCKER_HOST` 或其他 context；未覆盖的配置明确报不支持。FC 模板还需验证 Docker data-root 与镜像确实随模板恢复，不能仅凭安装记录判断镜像存在。
+平台启动 Docker 后，仍调用公共 `install-runtime` 命令：校验预置文件哈希、版本及源码身份、归档大小及校验和、预期镜像身份；仅在镜像缺失时直接加载压缩归档，复用现有网络及环境探针，全部成功后原子写入就绪记录。已有匹配镜像跳过加载，Docker 数据丢失后也无需重建镜像。预置材料缺失或损坏不会回退联网。该拆分适用于普通 Dockerfile 和既有镜像/模板发布流程，无需准备实例或新增云平台专用 ASC API。
 
-Python/uv 与 wheel 可以本地交付。`ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` 禁止这部分依赖回落网络，镜像构建仍需可联网的构建机；`ANOLISA_SKILL_SCORE_OFFLINE=1` 拒绝全新镜像构建。本版不宣称支持断网首次安装。已准备模板保留 worker 环境、构建回执和 Docker data-root，恢复后的任务不安装、不重建。
+激活与执行使用同一本地系统 Docker daemon 及对应用户权限，不自动切换到 rootless、远程 `DOCKER_HOST` 或其他 context。预置部署需要 worker 文件和归档随镜像/模板恢复；Docker data-root 可以在激活前重新创建。安装记录不代表镜像实际存在，平台负责启动 daemon，并在就绪后才派发任务。
+
+Python/uv 与 wheel 可以本地交付。`ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` 禁止这部分依赖回落网络，源码镜像构建仍需可联网构建机。`ANOLISA_SKILL_SCORE_OFFLINE=1` 拒绝全新镜像构建，但允许从已验证文件和归档激活。预置、导出、激活均受生命周期锁和未完成清理检查约束；保留 raw 归属/版本与 RPM 归属检查。卸载删除自身生成的环境，保留部署方提供的 preload 目录，由镜像所有者负责替换和回收。
 
 ## 7. SkillEval 接入与正式版迁移
 
@@ -244,14 +237,14 @@ SkillEval 继续复用现有安全评测管线；不在仓库复制评分规则�
 
 | 阶段 | SkillEval 的工作 |
 | --- | --- |
-| 模板构建 | 固定 ASC 版本与清单；平台准备 Docker；显式安装基础包及评分可选组件，由组件构建已校验源码并绑定实际 image ID；检查运行能力后复用平台流程发布模板 |
+| 模板构建 | 固定发布版本并核对两份 bundle，安装基础 ASC，再通过统一命令准备 worker 或暂存文件，配合离线镜像归档。直接安装 raw 配方文件的路径仍须调用 ASC 完成准备。 |
 | 实例执行 | 注入共享模型配置和受限凭据；上传固定 Skill；运行 `plan/run`；保留既有同路径/内容绑定 |
 | 结果获取 | 下载文件并做现有归档校验；消费新增完成/清理状态；展示风险、未知和失败，保留证据 |
 | 生命周期 | 承担 FC TTL、取消、下载重试、外层清理与运维观测，分别记录内外层资源状态 |
 
-SkillEval 提交 `145ab88d27ca35405fef4278a705d25045dc3d36` 已在兼容旧 `ANTHROPIC_*` 的基础上增加共享配置的受限传递及私有文件注入，不允许任意宿主环境透传。模板安装器将镜像准备交给可选组件，保留模板恢复后的就绪检查。这些源码变更不等同于已完成发布候选的实际验收。
+SkillEval 负责共享模型配置、私有凭据注入和实例就绪检查。发布验证需绑定 ASC、SkillEval 的提交以及基于相应制品构建的模板。
 
-源码获取和镜像构建发生在模板构建/更新时。每个评测任务复用已发布模板内的依赖和镜像，不重新下载或加载；模板恢复丢失镜像时明确失败，由平台重新构建或修复模板，不让任务执行偷偷承担安装。单机用户对应为可选组件安装/更新时准备，之后每次 `run` 同样复用本地环境。
+模板准备阶段在构建机获取源码依赖、构建镜像。各 FC 实例启动 Docker 后可加载校验通过的本地镜像归档，离线激活成功再运行 `plan/run`。归档损坏时由部署方重新构建或恢复模板材料。
 
 先从用户 fork 发布相同结构的固定预览版本，经过标准包、单机和 FC 验收；能力合入主线后，从正式 ASC 渠道发布，继续采用源码包交付。SkillEval 切换包和归档来源、固定版本/清单及模板版本，再跑验收；CLI、任务/报告及执行拓扑保持一致。正式制品地址、保留策略、发布权限和 SkillEval 构建环境的下载可达性需落实，不能把当前测试账号的可达性当作生产环境可达性。正式发布不要求同时迁移到 OCI 仓库。
 
@@ -262,7 +255,7 @@ SkillEval 提交 `145ab88d27ca35405fef4278a705d25045dc3d36` 已在兼容旧 `ANT
 | 1 | ANOLISA：ASC 契约、测试数据、设计规范 | 固定命令、输入摘要、报告与 worker 协议；明确本地评测架构契约；冻结 Python 参考与 golden fixtures | 迁移边界可测试，兼容变化可审阅 |
 | 2 | ANOLISA：`asc-model-client`、新 `asc-skill-score`、CLI | 共享百炼接入，Rust 规划/证据判定/计分；直接调用 worker | 固定模型响应与证据的差分通过，不改变无关扫描器行为 |
 | 3 | ANOLISA：`skill-score-runtime`、网络和证据实现 | worker-v1、完整快照、安全采证、源码脱敏、异常清理；统一兼容侧车 | 输入/证据边界和失败矩阵通过 Linux 验证 |
-| 4 | ANOLISA：ASC packaging、组件注册与发布 CI；`distribution/anolisa` | 基础包减重、小型可选源码包发布；SHA256/image ID 校验；显式依赖安装；初装升级事务与 repair；退出旧评分 Python 3.11 包 | 默认不下载重依赖；归档可验证安装；可选组件升级与修复可用；版本不匹配明确拒绝 |
+| 4 | ANOLISA：ASC 打包、raw 组件登记和 CI | 发布基础包和可选配方，核对源码及镜像身份，显式调用 ASC 准备 | 基础包轻量，重复激活可修复生成文件，升级失败时兼容的旧 worker 继续可用 |
 | 5 | SkillEval：security pipeline、`deploy/fc-security`、构建脚本及文档 | 统一模型配置、状态消费、模板显式安装可选组件，更新原 PR | 同一候选 ASC 制品完成 FC 平台回归 |
 | 6 | 两仓库的发布验证与说明 | 冻结候选版本，跑真实样本及故障测试，记录支持矩阵和 FPR | 证据绑定实际提交/制品；明确可合入与可发布范围 |
 
@@ -272,14 +265,14 @@ SkillEval 提交 `145ab88d27ca35405fef4278a705d25045dc3d36` 已在兼容旧 `ANT
 
 ### 9.1 确定性兼容
 
-使用冻结输入、模型响应与执行证据，比较 Python/Rust 的规范化计划和报告。覆盖根因去重、严重度、existence/dynamic 乘数、hygiene、Decimal half-up 舍入、Critical 确认门槛、错误路径与规划说明。明确列出的既有缺陷允许修正，其余不借迁移调整评分。固定模型输出的差分不能替代真实模型任务测试。
+使用固定的 Python 预期结果核对 Rust 扣分。使用固定模型响应和执行证据，通过 Rust 实现验证计划、报告和错误恢复。覆盖根因去重、严重度、existence/dynamic 乘数、hygiene、Decimal half-up 舍入、Critical 确认门槛、错误路径与规划说明。明确列出的既有缺陷允许修正，其余不借迁移调整评分。固定模型输出的差分不能替代真实模型任务测试。
 
 ### 9.2 安装与执行矩阵
 
 - 干净 Ubuntu 初装、旧版升级、缓存复用、无 daemon、断网、哈希不符、磁盘不足、取消、版本/协议不匹配。
 - 基础 install/update/repair 在有无 Docker 时均不下载评分依赖或镜像；未装可选组件的 `run` 明确报错且不下载。显式可选组件安装失败不影响基础 ASC；其升级失败保留旧执行环境。
-- 基础包/可选组件版本不匹配拒绝运行；基础安装后单独增加可选组件；可选组件卸载后基础命令仍可用，动态 run 明确提示未安装。
-- 新环境准备失败时旧版可用；切换失败可恢复旧版；同版本依赖被删除后 repair 恢复；离线全物料和缺物料；模板恢复后不下载也能运行。
+- 准备阶段要求配方与已装主包同版本，执行阶段校验当前 worker 与 CLI 的兼容性。增加或卸载 raw 可选组件后，基础 CLI 仍可用。
+- 升级失败时保留兼容的已激活环境。重复执行 `install-runtime` 能修复同版本丢失的依赖。验证完整和不完整的离线材料，并确认模板恢复后可离线激活。
 - 源码包篡改、超限、错误平台、缺失侧车、构建回执不匹配、构建失败或中断；失败不写 ready、不影响其他版本正在使用的镜像，评测执行不触发 registry 拉取。
 - 源码缓存命中仍核对摘要，构建后仍校验回执绑定的镜像身份；单机和 FC 分别记录实际 config ID 及存在时的 OCI manifest ID，允许 Docker 存储后端返回不同的 `.Id`。经典导出核对 config 原文摘要与层 diffID；损坏的 OCI 元数据不能降级为经典解析。覆盖经典与 containerd 存储，拒绝未绑定 ID、角色串换和错误平台，并使用解析后的不可变 ID 执行。模板构建后屏蔽制品下载源，恢复实例仍能执行评测，只保留任务实际所需网络；证明不存在每任务重新下载。
 - 正常任务、已知违规、Agent 拒绝、模型超时、取消、证据缺失/超限/伪造/不一致、worker 异常、清理失败和并发任务隔离。
@@ -311,8 +304,8 @@ SkillEval 提交 `145ab88d27ca35405fef4278a705d25045dc3d36` 已在兼容旧 `ANT
 ## 11. 当前源码落点
 
 - [公共 CLI 接入](../../v2/apps/asc-cli/src/commands/skill_score.rs)、[共享模型客户端](../../v2/crates/asc-model-client/src/lib.rs)。
-- [现有 Python 评分管线](../../agent-sec-cli/src/agent_sec_cli/skill_score/pipeline.py)、[输入读取](../../agent-sec-cli/src/agent_sec_cli/skill_score/io.py)、[百炼适配](../../agent-sec-cli/src/agent_sec_cli/skill_score/provider/bailian.py)。
+- [Rust 评分流程](../../v2/crates/asc-skill-score/src/lib.rs)、[评分基准生成器](../../tests/unit-test/skill-score/export_score_oracle.py)、[固定预期结果](../../v2/crates/asc-skill-score/assets/score-oracle.json)。
 - [worker 依赖声明](../../skill-score-runtime/pyproject.toml)、[Harbor 执行适配](../../skill-score-runtime/src/agent_sec_skill_score_runtime/harbor_runtime.py)、[证据归一化](../../skill-score-runtime/src/agent_sec_skill_score_runtime/observations.py)。
-- [组件清单](../../packaging/anolisa/component.toml)、[安装计划器](../../../../distribution/anolisa/crates/anolisa-core/src/planner.rs)、[raw 更新操作](../../../../distribution/anolisa/crates/anolisa-cli/src/commands/tier1/install/owned_ops.rs)。
-- [已有 GHCR 发布流水线](../../../../.github/workflows/docker-nightly.yaml)、[当前评分归档发布及安装验证](../../../../.github/workflows/sec-core-skill-score.yaml)。
+- [组件登记](../../packaging/anolisa/skill-score.toml)、[ASC 安装分派](../../v2/apps/asc-cli/src/commands/skill_score/install.rs)、[运行时准备](../../packaging/skill-score/optional/install.py)。
+- [Skill Score 归档构建和安装验证](../../../../.github/workflows/sec-core-skill-score.yaml)。
 - [现有 Skill Score 用户契约](../../../../docs/user-guide/zh/agent-sec-core/skill-score.md)、[SkillEval 集成 PR](https://code.alibaba-inc.com/chengshuyi.csy/skilleval/codereview/30699594)。

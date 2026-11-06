@@ -27,11 +27,15 @@ from typing import Any
 # Helpers also support direct --check invocation without leaving unowned bytecode.
 sys.dont_write_bytecode = True
 import image_build  # noqa: E402
+import preload  # noqa: E402
 from lifecycle import (  # noqa: E402
+    abandoned_candidates,
     exclusive,
     pending_cleanup,
     record_environment,
+    remove_candidates,
     request_directory,
+    reserve_candidate,
 )
 
 MAX_ARCHIVE = 2 * 1024**3
@@ -453,7 +457,7 @@ def environment_check(
     manifest: dict[str, Any],
     recovery_root: Path,
     image_ids: dict[str, str],
-) -> None:
+) -> dict[str, Any]:
     request_id = "install-" + uuid.uuid4().hex
     project = "asc-score-" + request_id + "__env"
     recovery_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -500,12 +504,14 @@ def environment_check(
                 ]
             )
             response = json.loads((root / "response.json").read_text())
+            inventory = response.get("result")
             if (
                 response.get("schema_version") != manifest["protocol_version"]
                 or response.get("request_id") != request_id
                 or response.get("error")
                 or response.get("cleanup_status") != "complete"
-                or not response.get("result")
+                or not isinstance(inventory, dict)
+                or inventory.get("docker_image") != image_ids["work"]
             ):
                 raise ValueError("worker readiness protocol did not complete cleanly")
     except Exception:
@@ -517,6 +523,7 @@ def environment_check(
             "inspect Docker resources matching both recorded request and Compose project labels"
         ) from None
     recovery.unlink()
+    return inventory
 
 
 def ready_matches(
@@ -541,6 +548,116 @@ def ready_matches(
         return True
     except (OSError, ValueError, KeyError, RuntimeError):
         return False
+
+
+def staged_matches(environment: Path, identity: str, manifest: dict[str, Any]) -> bool:
+    try:
+        staged = json.loads((environment / "staged.json").read_text())
+        inventory = environment / "installed-files.json"
+        if (
+            staged.get("schema") != "agent-sec-skill-score/staged-v1"
+            or staged.get("manifest_sha256") != identity
+            or staged.get("installed_files_sha256") != digest(inventory)
+        ):
+            return False
+        for item in json.loads(inventory.read_text()):
+            if not check_file(environment / safe_relative(item["file"]), item):
+                return False
+        python_check(environment, manifest)
+        return True
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
+
+
+def write_inventory(candidate: Path) -> Path:
+    files = [
+        {
+            "file": str(path.relative_to(candidate)),
+            "bytes": path.stat().st_size,
+            "sha256": digest(path),
+        }
+        for path in sorted(candidate.rglob("*"))
+        if path.is_file() and not path.is_symlink() and "__pycache__" not in path.parts
+    ]
+    inventory = candidate / "installed-files.json"
+    inventory.write_text(json.dumps(files, separators=(",", ":")) + "\n")
+    return inventory
+
+
+def mark_ready(
+    candidate: Path,
+    manifest: dict[str, Any],
+    identity: str,
+    receipt: dict,
+    inventory: dict,
+) -> None:
+    ready = {
+        "schema": "agent-sec-skill-score/ready-v1",
+        "manifest_sha256": identity,
+        "version": manifest["version"],
+        "source_commit": manifest["source_commit"],
+        "protocol_version": manifest["protocol_version"],
+        "worker_version": manifest["worker_version"],
+        "python_version": manifest["python"]["version"],
+        "harbor_version": manifest["harbor_version"],
+        "images": receipt["images"],
+        "image_build_sha256": digest(candidate / "image-build.json"),
+        "installed_files_sha256": digest(candidate / "installed-files.json"),
+        "environment": inventory,
+    }
+    contents = json.dumps(ready, indent=2) + "\n"
+    if len(contents) > 1024 * 1024:
+        # Older readers bound ready.json to 1 MiB. Large inventories can be probed live.
+        del ready["environment"]
+        contents = json.dumps(ready, indent=2) + "\n"
+    # A killed activation must never expose a partially written readiness record.
+    temporary = candidate / ".ready.tmp"
+    temporary.write_text(contents)
+    temporary.replace(candidate / "ready.json")
+
+
+def activate_preloaded(
+    root: Path, target: Path, manifest: dict, identity: str, cache: Path
+) -> Path:
+    receipt, archive = preload.read(root / "preload", manifest, identity)
+    already_ready = ready_matches(target, identity, manifest)
+    if already_ready:
+        if image_build.load(target, manifest, identity) != receipt:
+            raise ValueError(
+                "preload images differ from the installed runtime; rebuild the template"
+            )
+    elif not staged_matches(target, identity, manifest):
+        raise ValueError(
+            "preload activation requires intact staged files; rebuild the template"
+        )
+    request_directory(root, require_local_docker())
+    image_ids = images_ready(receipt)
+    if image_ids is None:
+        preload.load(archive, check_cancelled, cache)
+        image_ids = images_ready(receipt)
+    if image_ids is None:
+        raise ValueError(
+            "loaded images differ from the preloaded identities or platform"
+        )
+    network_check(image_ids)
+    if not already_ready:
+        # Restoring a receipt must not revive a stale readiness record.
+        (target / "ready.json").unlink(missing_ok=True)
+        # The worker validates this receipt before running its readiness checks.
+        temporary = target / f".image-build-{uuid.uuid4().hex}.tmp"
+        with temporary.open("x") as output:
+            try:
+                output.write(json.dumps(receipt, indent=2) + "\n")
+                output.flush()
+                os.fsync(output.fileno())
+                temporary.replace(target / "image-build.json")
+            finally:
+                temporary.unlink(missing_ok=True)
+    inventory = environment_check(target, manifest, root / "recovery", image_ids)
+    check_cancelled()
+    mark_ready(target, manifest, identity, receipt, inventory)
+    record_environment(target, identity)
+    return target
 
 
 def build_environment(
@@ -614,7 +731,27 @@ def prepare(payload: Path, prefix: Path, cache_root: Path) -> Path:
     root = runtime_root(prefix)
     with exclusive(root, create=True):
         pending_cleanup(root)
-        return prepare_locked(payload, prefix, cache_root)
+        remove_candidates(abandoned_candidates(root))
+        environment = prepare_locked(payload, prefix, cache_root)
+        if os.environ.get("ANOLISA_SKILL_SCORE_STAGE_ONLY") != "1":
+            # The package manager can replace its recipe before the new runtime is ready.
+            # Publish the verified environment's manifest only after activation succeeds.
+            manifest = (environment / "runtime-manifest.json").read_bytes()
+            if hashlib.sha256(manifest).hexdigest() != environment.name:
+                raise ValueError(
+                    "prepared runtime manifest does not match its environment"
+                )
+            check_cancelled()
+            pending = root / ".active-manifest.tmp"
+            pending.unlink(missing_ok=True)
+            try:
+                with pending.open("xb") as output:
+                    output.write(manifest)
+                    os.fchmod(output.fileno(), 0o644)
+                pending.replace(root / "active-manifest.json")
+            finally:
+                pending.unlink(missing_ok=True)
+        return environment
 
 
 def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
@@ -624,7 +761,7 @@ def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
     manifest = json.loads(manifest_path.read_text())
     manifest_digest = digest(manifest_path)
     validate_manifest(manifest, payload, prefix)
-    request_directory(runtime_root(prefix), require_local_docker())
+    stage_only = os.environ.get("ANOLISA_SKILL_SCORE_STAGE_ONLY") == "1"
     cache = cache_root / "sec-core-skill-score"
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     meta = cache.lstat()
@@ -645,61 +782,74 @@ def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
     environments = runtime_root(prefix) / "environments"
     environments.mkdir(parents=True, exist_ok=True)
     target = environments / manifest_digest
+    preloaded = environments.parent / "preload"
+    if preloaded.exists() or preloaded.is_symlink():
+        # A broken local artifact is never permission to download or rebuild.
+        if not stage_only:
+            return activate_preloaded(
+                environments.parent, target, manifest, manifest_digest, cache
+            )
+        preload.read(preloaded, manifest, manifest_digest)
+    if stage_only:
+        if staged_matches(target, manifest_digest, manifest):
+            return target
+        if target.exists():
+            raise ValueError(
+                "existing runtime cannot be restaged; use a clean image build"
+            )
+    else:
+        if (target / "staged.json").exists():
+            raise ValueError(
+                "staged runtime is missing its preload directory; rebuild the template"
+            )
+        request_directory(runtime_root(prefix), require_local_docker())
     if ready_matches(target, manifest_digest, manifest):
         receipt = image_build.load(target, manifest, manifest_digest)
         image_ids = images_ready(receipt)
         if image_ids is not None and image_build.matches_override(receipt):
             network_check(image_ids)
-            environment_check(
+            inventory = environment_check(
                 target, manifest, environments.parent / "recovery", image_ids
             )
+            check_cancelled()
+            mark_ready(target, manifest, manifest_digest, receipt, inventory)
             record_environment(target, manifest_digest)
             return target
-    staging = Path(tempfile.mkdtemp(prefix=".candidate-", dir=environments))
-    candidate = staging / manifest_digest
-    candidate.mkdir()
-    shutil.copyfile(manifest_path, candidate / "runtime-manifest.json")
+    staging = reserve_candidate(environments.parent)
     try:
-        receipt = image_build.build(
-            payload, candidate, manifest, manifest_digest, check_cancelled, cache
-        )
-        image_ids = images_ready(receipt)
-        if image_ids is None:
-            raise ValueError(
-                "built images disappeared or changed platform before activation"
+        candidate = staging / manifest_digest
+        candidate.mkdir()
+        shutil.copyfile(manifest_path, candidate / "runtime-manifest.json")
+        if not stage_only:
+            receipt = image_build.build(
+                payload, candidate, manifest, manifest_digest, check_cancelled, cache
             )
+            image_ids = images_ready(receipt)
+            if image_ids is None:
+                raise ValueError(
+                    "built images disappeared or changed platform before activation"
+                )
         build_environment(candidate, payload, manifest, cache, source, offline)
-        network_check(image_ids)
-        environment_check(
-            candidate, manifest, environments.parent / "recovery", image_ids
-        )
-        files = [
-            {
-                "file": str(path.relative_to(candidate)),
-                "bytes": path.stat().st_size,
-                "sha256": digest(path),
-            }
-            for path in sorted(candidate.rglob("*"))
-            if path.is_file()
-            and not path.is_symlink()
-            and "__pycache__" not in path.parts
-        ]
-        inventory = candidate / "installed-files.json"
-        inventory.write_text(json.dumps(files, separators=(",", ":")) + "\n")
-        ready = {
-            "schema": "agent-sec-skill-score/ready-v1",
-            "manifest_sha256": manifest_digest,
-            "version": manifest["version"],
-            "source_commit": manifest["source_commit"],
-            "protocol_version": manifest["protocol_version"],
-            "worker_version": manifest["worker_version"],
-            "python_version": manifest["python"]["version"],
-            "harbor_version": manifest["harbor_version"],
-            "images": receipt["images"],
-            "image_build_sha256": digest(candidate / "image-build.json"),
-            "installed_files_sha256": digest(inventory),
-        }
-        (candidate / "ready.json").write_text(json.dumps(ready, indent=2) + "\n")
+        if not stage_only:
+            network_check(image_ids)
+            inventory = environment_check(
+                candidate, manifest, environments.parent / "recovery", image_ids
+            )
+        check_cancelled()
+        installed_files = write_inventory(candidate)
+        if stage_only:
+            (candidate / "staged.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "agent-sec-skill-score/staged-v1",
+                        "manifest_sha256": manifest_digest,
+                        "installed_files_sha256": digest(installed_files),
+                    }
+                )
+                + "\n"
+            )
+        else:
+            mark_ready(candidate, manifest, manifest_digest, receipt, inventory)
         record_environment(candidate, manifest_digest)
         previous = None
         if target.exists():
@@ -715,14 +865,18 @@ def prepare_locked(payload: Path, prefix: Path, cache_root: Path) -> Path:
             raise
         return target
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        remove_candidates([(environments.parent / staging.name, staging)])
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", type=Path, required=True)
     parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument(
+        "--export-preload",
+        type=Path,
+        help="Export an already verified runtime for an image builder",
+    )
     parser.add_argument(
         "--check",
         action="store_true",
@@ -734,7 +888,9 @@ def main() -> None:
     try:
         payload = Path(__file__).resolve().parent
         prefix = args.prefix.absolute()
-        if args.check:
+        if args.check or args.export_preload:
+            if os.environ.get("ANOLISA_SKILL_SCORE_STAGE_ONLY") == "1":
+                raise ValueError("stage-only cannot be combined with check or export")
             root = runtime_root(prefix)
             with exclusive(root):
                 pending_cleanup(root)
@@ -748,20 +904,27 @@ def main() -> None:
                 image_ids = images_ready(receipt)
                 if not image_build.matches_override(receipt):
                     raise ValueError(
-                        "prepared business base image or recipe differs; explicitly repair sec-core-skill-score"
+                        "prepared business base image or recipe differs; run sudo agent-sec-cli skillsec score install-runtime"
                     )
                 if image_ids is None or not ready_matches(
                     environment, identity, manifest
                 ):
                     raise ValueError(
-                        "optional runtime is not ready; explicitly repair sec-core-skill-score"
+                        "optional runtime is not ready; run sudo agent-sec-cli skillsec score install-runtime"
                     )
                 network_check(image_ids)
                 environment_check(environment, manifest, root / "recovery", image_ids)
+                if args.export_preload:
+                    preload.export(
+                        args.export_preload.absolute(),
+                        receipt,
+                        image_ids,
+                        check_cancelled,
+                    )
             print(
                 json.dumps(
                     {
-                        "status": "ready",
+                        "status": "exported" if args.export_preload else "ready",
                         "actual_image_ids": image_ids,
                         "image_build_sha256": digest(environment / "image-build.json"),
                     }
@@ -776,7 +939,11 @@ def main() -> None:
         raise SystemExit(
             f"optional worker preparation failed: {type(exc).__name__}: {exc}"
         ) from None
-    print("Optional Skill Score runtime verified and prepared.")
+    print(
+        "Optional Skill Score files staged; activation required."
+        if os.environ.get("ANOLISA_SKILL_SCORE_STAGE_ONLY") == "1"
+        else "Optional Skill Score runtime verified and prepared."
+    )
 
 
 if __name__ == "__main__":
