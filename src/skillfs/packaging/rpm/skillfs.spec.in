@@ -77,6 +77,10 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/skills/skillfs-mount/
 
 %changelog
+* Fri Nov 06 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.6-1
+- Split core and skill resources and transfer discovery ownership to ANOLISA.
+- Release managed-process, virtual-slot, parsing and command adaptation fixes.
+
 * Wed Oct 28 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.4-1
 - Remove stale discovery entries after nested skill moves.
 - Preserve npm install arguments and literal chat log roots.
