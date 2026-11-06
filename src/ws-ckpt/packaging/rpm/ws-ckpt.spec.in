@@ -283,6 +283,30 @@ if [ -f "$state_dir/state" ]; then
 fi
 
 %changelog
+* Fri Nov 06 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.7.0-1
+- Added `limit` and `cursor` pagination to Hermes `ws-ckpt-list`
+- Added cached health advisory sampling; `health-check-interval=0` disables periodic diagnostics but retains advisory sampling; warnings are omitted when samples are incomplete or stale
+- Added skill-only per-turn snapshots, cron schedules and retention management without host plugins; orchestration is model-driven, not a guaranteed lifecycle hook
+- **BREAKING** Changed `make install` to install prebuilt files without building or activation; added selective `install-core`, `install-plugins` and `install-skills` targets
+- **BREAKING** Defaulted `make install` to `AWPRJ=anolisa`; use `AWPRJ=` for the independent layout
+- Moved RPM executables from `/usr/local/bin` to `/usr/bin`
+- Removed ANOLISA discovery contracts from standalone packages; new raw packages require ANOLISA ≥ 0.3.21
+- Improved cursor paging performance on long snapshot histories
+- Shared one inotify instance across workspaces; exposed missing watcher coverage and queue overflows in ws-ckpt and cosh checkpoint status
+- Preserved service enablement and activity when rolling back to the legacy unsplit RPM
+- Rejected unsafe snapshot IDs at the legacy IPC boundary
+- Detached idle loop associations before remount, with bounded retries for transient device holders
+- Enforced a 5 GiB minimum for btrfs-loop `img_size`; invalid configuration now fails startup instead of falling back to defaults; repair legacy values with `ws-ckpt config -g --img-size <GiB>`
+- Fixed out-of-range `auto_cleanup_keep` ages stopping periodic cleanup; such retentions now keep all snapshots
+- Honored `btrfs-base.btrfs_mount` and reused persisted native storage roots across restarts; mount changes require restart without data migration
+- Correctly parsed stringified Hermes rollback `preview`, preventing unintended rollback
+- Scoped rollback auto-checkpoint suppression to the target workspace and session
+- Bounded Hermes plugin activation and deactivation commands; failures or timeouts no longer block local installation or cleanup
+- Persisted Hermes workspace and cron configuration before activation
+- Resolved symlinked workspace paths in OpenClaw cwd checks
+- Corrected the skill's rollback parent-chain guidance: `-n 1` selects HEAD and `-n 2` its parent; undoing a completed turn selects that turn snapshot's parent
+- Corrected ws-ckpt IPC enum indices, payload fields and client-mirror compatibility in the cosh-ng reference; wire encoding is unchanged
+
 * Fri Oct 23 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.6.0-1
 - Added CI prebuilt packages for ws-ckpt
 - Added pagination to snapshot listings
