@@ -4,9 +4,10 @@
 
 `aw-contracts` defines a metadata contract for runtime producers and consumers
 such as AgentSight. Objects use `apiVersion`, `kind`, `metadata` and `data`;
-configuration retains its existing `spec` contract. The library validates objects
-and immutable references offline. Runtime production, public audit reads and
-Sight ingestion are subsequent integration steps.
+configuration retains its existing `spec` contract. The library validates objects and immutable references offline. `aw-service`
+produces these facts at native Hook and launcher boundaries, independently of
+optional AgentSight reads. Public audit transport and Sight ingestion consume
+this retained metadata through separate integrations.
 
 ## Registered shapes and APIs
 
@@ -76,9 +77,9 @@ session context. Native ID equality alone does not identify a public object.
 
 Times use the fixed UTC form `YYYY-MM-DDTHH:MM:SS.sssZ`. Missing native times and
 applicable-but-unknown identities use `null`, not empty strings or invented IDs.
-Configuration revisions hash the original configuration bytes. Input/result
-digests identify exact captured content bytes; they are not semantic JSON
-fingerprints or proof that content is retained. Object digests use the existing
+Configuration revisions hash the original configuration bytes. Input/result digests hash the UTF-8 JSON serialization of the selected normalized
+input/result value at capture time. They do not preserve the original native JSON
+spelling or prove that the body is retained. Object digests use the existing
 integer-only AW canonical metadata encoding. Metadata never includes the raw
 prompt, tool arguments/results, environment or native callback envelope.
 
@@ -108,6 +109,7 @@ producer identity. AW maintains codes by field domain:
 
 | Domain | Code | Meaning |
 | --- | --- | --- |
+| `association.gaps` | `aw.native_identity_unverified` | The available callback has not corroborated request identities |
 | `association.gaps` | `aw.native_turn_unavailable` | The native turn identity is unavailable |
 | `association.gaps` | `aw.instance_has_no_request` | An instance-level event has no request identity |
 | `coverage.gaps` | `aw.coverage_unmeasured` | Observation coverage has not been measured |
@@ -117,10 +119,16 @@ producer identity. AW maintains codes by field domain:
 | `coverage.gaps` | `aw.history_missing` | Requested history cannot be located |
 | `coverage.gaps` | `aw.retention_gap` | A known retention operation removed part of the requested history |
 | `coverage.gaps` | `aw.consumer_lag` | The consumer has a known backlog relative to the source |
+| Lifecycle `reasonCode` | `aw.native_adoption_unconfirmed` | Hook processing ended without native effect-adoption evidence |
+| Lifecycle `reasonCode` | `aw.launch_failed` | Launcher startup or readiness failed |
+| Lifecycle `reasonCode` | `aw.worker_failed` | The Hook event worker failed |
+| Lifecycle `reasonCode` | `aw.expired` / `aw.stopped` | The event deadline or service stop ended processing |
 | Lifecycle `reasonCode` | `aw.cancelled` | The turn was cancelled |
 | Lifecycle `reasonCode` | `aw.owner_lost` | The execution owner was lost before a terminal outcome was confirmed |
 | Lifecycle `reasonCode` | `aw.cancel_cleanup_pending` | Cancellation cleanup remains unfinished |
 | Provider `failureCode` | `aw.provider_timeout` | The Provider did not complete within its deadline |
+| Provider `failureCode` | `aw.transport` / `aw.exit` / `aw.incomplete_input` | Transport, process exit or incomplete input delivery failure |
+| Provider `failureCode` | `aw.native_environment` / `aw.provider` / `aw.protocol` | Invalid native environment, structured Provider failure or protocol failure |
 
 These codes define meanings for producers to implement. The journal/history and
 consumer-lag codes prepare the public-audit and Sight integrations; this library
@@ -211,31 +219,74 @@ position keep their UID and change their object digest, making conflicts visible
 Consumers use producer identity plus UID as the deduplication key and compare
 digests. Hashes alone do not authenticate or prove persistence.
 
-The future exporter must retain creation timestamps and deterministic fields
-across replay; it must not stamp historical objects with each read's time.
-Unknown historical facts need an explicit gap or a later migration contract.
-A new generation cannot recover write authority for a previous run. The schema
-and reference APIs neither read private Journal files nor implement a cursor,
-chain-tip verification, storage or retention policy.
+The runtime retains creation timestamps and deterministic fields across replay.
+Readers retain the original source generation; a new service generation cannot
+recover write authority for a previous run.
+
+## Runtime production and projection
+
+`aw-service` stores a validated `ExecutionEvent` in the existing Journal reservation's
+`plan.executionEvent`. The source-chain key is its opaque UID. Provider completion
+and closure records retain their creation time before the durable write. The
+FileJournal format-1 envelope, digest chain and existing private fields retain
+their meanings. A projection computes `sourceDigest` from the already retained
+envelope, avoiding a self-referencing digest in the stored record.
+
+`aw_service::public_projection::execution_event` validates the retained initial
+object; `project_record` projects one already verified envelope. A missing initial
+public object explicitly identifies a private or historical chain. Invalid public
+objects return errors. Intermediates such as step dispatch and raw native-hook
+completion have no public AuditRecord projection. Projection preserves producer,
+UID, time, sequence and digest across repeated reads.
+
+The audit directory contains a private `.aw-audit-source.json` descriptor with
+exactly `apiVersion: audit.aw/v1alpha1`, `kind: AuditSource` and a random 64-hex
+`sourceId`. This storage descriptor is separate from the registered public schemas.
+It is atomically installed with file/directory synchronization, owned by the
+service user, single-linked and mode 0600. The directory remains mode 0700.
+`producerId` is `aw-service`, `scopeId` is the retained source ID, and `generation`
+is the writing daemon's generation. Missing or invalid descriptors fail explicit
+reads; service initialization creates a descriptor for a previously uninitialized
+store without converting historical chains.
+
+| Runtime boundary | Recorded fact and limit |
+| --- | --- |
+| `aw run` child spawn / wait | `instance.started` / `instance.ended`, even with evidence disabled; reported PID is descriptive |
+| Configured input/tool Hook | Captured metadata and Provider completion; closure without native adoption remains `incomplete` |
+| Qoder SDK / QwenPaw tool callbacks without policy steps | Default metadata routes record before/after facts without starting a Sight worker or retaining bodies |
+| Native result | QwenPaw uses explicit ToolResponse state; SDK uses success/failure Hook types and explicit error flags; unknown states retain a gap |
+| Managed invocation retirement | Removes callback deduplication detail after the existing invocation ledger fences replay |
+| Unmanaged callback retention | At most 256 callback identities per instance; overflow records one durable `aw.observation_callback_limit` gap and rejects later new identities |
+
+Missing required public metadata records `aw.native_metadata_unavailable` in a
+private gap chain. Existing Scope lifecycle records retain parent/owner metadata;
+Scope IDs never substitute for native turn IDs. Public tool subjects retain the
+actual task instance and verified session/call association. Native references
+preserve native IDs separately from AW-normalized invocation IDs. `turn.ended`
+remains unproduced when the runtime lacks a confirmed native turn identity.
+
+Coverage remains `unknown` with `aw.coverage_unmeasured`. A completed observation
+chain acknowledges capture, while a completed Provider records its policy output.
+Neither proves native effect adoption. Public metadata excludes input/result
+bodies, environment, credentials and callback envelopes. Journal failure retains
+the existing fail-closed service behavior; source reads never retry execution.
 
 ## Compatibility and integration
 
 Existing configuration, Provider request/response, Evidence, Core contracts and
-FileJournal bytes/IDs remain unchanged. Public objects are not accepted as
-v1alpha1 Provider events or local service requests. The library does not migrate
-old records automatically. A later exporter maps private `status: error` to
-public `status: failed`, distinguishes absent decisions and skips unsupported
-private record kinds instead of relabelling them.
+registered schema bytes/IDs remain unchanged. New private records add capture
+metadata. Old readers can continue reading the format-1 Journal; old chains remain
+explicitly without public projection. The projection maps private `status: error`
+to public `status: failed` and keeps missing policy decisions distinct.
 
 Unknown object versions and fields are rejected. Published definitions retain
-their resource IDs and exact bytes; changes to accepted shape/meaning require
-an explicit version decision and conversion. Future Evidence and Provider
-profiles can reference the common values once their production/consumption is
-implemented. Removing this additive library feature restores the earlier API;
-there is no installed-state or data migration in this change.
+resource IDs and exact bytes; shape or meaning changes need explicit versioning.
+Rollback retains the extra metadata and source descriptor without converting or
+replaying the historical chains.
 
-The contract tests use Qoder SDK and QwenPaw metadata fixtures, all six event
-branches, nested unknown-field failures, date/identity/coverage invariants,
-reference changes and replay conflicts. They establish library conformance.
-Runtime producers, real native adoption, public reads, and Sight storage require
-separate end-to-end validation in the [integration roadmap](../integrations/agentsight/agentsight-integration.md).
+Contract tests cover all six event shapes and immutable references. Service tests
+cover disabled Sight, exact native association, deduplication and retirement,
+unknown results, durable failure, concurrent source initialization and replay across
+service generations. Native QwenPaw acceptance additionally checks the no-policy
+facts while changing policies on the same Agent. Hosted Qoder Worker adoption and
+Sight storage keep their separate [integration acceptance](../integrations/agentsight/agentsight-integration.md).

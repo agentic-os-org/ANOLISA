@@ -97,7 +97,7 @@ fn empty_policy_starts_native_app_and_releases_owned_files() {
         String::from_utf8_lossy(&output.stderr)
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["ready_hook_count"], 0);
+    assert_eq!(result["ready_hook_count"], 2);
     assert_eq!(result["tool_executed"], true);
     assert!(!fixture.root.join("order.jsonl").exists());
     preserved(&fixture);
@@ -116,7 +116,7 @@ fn app_versions_still_require_native_registration_and_cleanup() {
             format!("QwenPaw, version {version}"),
         );
         let result = fixture.successful(command);
-        assert_eq!(result["ready_hook_count"], 0);
+        assert_eq!(result["ready_hook_count"], 2);
         assert_eq!(result["tool_executed"], true);
         preserved(&fixture);
         service.released(&fixture);

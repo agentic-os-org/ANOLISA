@@ -23,6 +23,7 @@ use std::{
 mod binding;
 mod dispatch;
 mod evidence;
+pub(crate) mod facts;
 mod hooks;
 mod invocations;
 mod limits;
@@ -35,6 +36,8 @@ mod submissions;
 const MAX_STEPS: usize = 64;
 
 struct Instance {
+    run: Option<crate::RunOutcome>,
+    native_facts: Arc<Mutex<facts::NativeFacts>>,
     bytes: Vec<u8>,
     context: ProcessContext,
     reload: Option<policy::Reload>,
@@ -281,7 +284,7 @@ impl Runtime {
                         "generation":runtime.identity.generation,"config_revision":host.revision(),
                         "binding_id":host.target(),"instance_id":instance_id,"event_id":thread_key,
                         "adapter":host.capabilities().adapter,
-                    }), &candidate, association, event.deadline(), &policy).and_then(|seed| context.initialize(seed));
+                    }), &candidate, association.clone(), event.deadline(), &policy).and_then(|seed| context.initialize(seed));
                     let candidate_revision = match seed {
                         Ok(revision) => revision,
                         Err(error) => {
@@ -292,8 +295,14 @@ impl Runtime {
                         }
                     };
                     let handle = EventHandle { event_id: thread_key.clone(), instance_id: instance_id.clone(), steps: event.steps().map(|step| step.step_id.clone()).collect(), candidate_revision };
-                    let claimed = runtime.audit.claim(&thread_key, json!({"kind": "event", "identity": runtime.identity,
-                        "instance_id": instance_id, "binding_id": host.target(), "policy_revision":host.revision(), "host_event_id": event.id(), "event": metadata}));
+                    let public_event = runtime.hook_fact(&thread_key, &host, &instance_id, &candidate, &association);
+                    let claimed = public_event.and_then(|public_event| {
+                        let mut plan = json!({"kind": "event", "identity": runtime.identity,
+                            "instance_id": instance_id, "binding_id": host.target(), "policy_revision":host.revision(), "host_event_id": event.id(), "event": metadata});
+                        if let Some(event) = public_event { plan["executionEvent"] = event; }
+                        else { plan["publicProjectionGap"] = json!("aw.native_metadata_unavailable"); }
+                        runtime.audit.claim(&thread_key, plan)
+                    });
                     match claimed {
                         Ok(_) => {
                             if let Err(error) = context.seed().ok_or_else(|| rejected("context_not_ready")).and_then(|seed| runtime.observe_seed(&instance_id, seed)) {
