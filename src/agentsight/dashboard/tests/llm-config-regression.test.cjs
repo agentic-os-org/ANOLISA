@@ -66,10 +66,14 @@ async function configForm(config) {
   const selects = () => nodes(render(), (node) => node.type === 'select');
   const modelInput = () => nodes(render(), (node) => node.type === 'input'
     && ['opt.llm.model.placeholder', 'opt.llm.model.customPlaceholder'].includes(node.props.placeholder))[0];
+  const keyInputs = () => nodes(render(), (node) => node.type === 'input'
+    && node.props.autoComplete === 'off');
   await flush();
   return {
     model: () => modelInput()?.props.value,
     input(value) { modelInput().props.onChange({ target: { value } }); },
+    apiKey(value) { keyInputs()[0].props.onChange({ target: { value } }); },
+    currentApiKey(value) { keyInputs()[1].props.onChange({ target: { value } }); },
     async provider(value) { selects()[0].props.onChange({ target: { value } }); await flush(); },
     preset(value) { selects()[1].props.onChange({ target: { value } }); },
     async save() {
@@ -121,4 +125,28 @@ test('a custom model matching the next provider switches back to its known selec
   const saved = await form.save();
   assert.equal(saved.model, 'deepseek-reasoner');
   assert.equal(saved.base_url, 'https://api.deepseek.com/v1');
+});
+
+test('replacing a configured key submits the existing key as proof', async () => {
+  const form = await configForm({
+    api_key: 'sk-old••••abcd',
+    base_url: 'https://custom.example/v1',
+    model: 'original-model',
+  });
+  form.apiKey('sk-new-key');
+  form.currentApiKey('sk-old-key');
+  const saved = await form.save();
+  assert.equal(saved.api_key, 'sk-new-key');
+  assert.equal(saved.current_api_key, 'sk-old-key');
+});
+
+test('saving without editing the key omits both key fields', async () => {
+  const form = await configForm({
+    api_key: 'sk-old••••abcd',
+    base_url: 'https://custom.example/v1',
+    model: 'original-model',
+  });
+  const saved = await form.save();
+  assert.equal('api_key' in saved, false);
+  assert.equal('current_api_key' in saved, false);
 });
