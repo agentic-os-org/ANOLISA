@@ -567,19 +567,19 @@ fn sum_step_usage(steps: &[Step]) -> Option<(u64, u64, u64)> {
     seen.then_some(totals)
 }
 
-/// Join text from a content value: a plain string as-is, or an array of
-/// parts keeping their `.text` fields (other parts contribute nothing).
+/// Join the text members of a persisted PartListUnion, excluding binary parts.
 fn joined_text(content: Option<&serde_json::Value>) -> String {
+    fn text(part: &serde_json::Value) -> Option<&str> {
+        part.as_str()
+            .or_else(|| part.get("text").and_then(|v| v.as_str()))
+    }
     match content {
-        Some(serde_json::Value::String(s)) => s.trim().to_string(),
         Some(serde_json::Value::Array(parts)) => {
-            let texts: Vec<&str> = parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
-                .collect();
+            let texts: Vec<&str> = parts.iter().filter_map(text).collect();
             texts.join("\n").trim().to_string()
         }
-        _ => String::new(),
+        Some(part) => text(part).unwrap_or_default().trim().to_string(),
+        None => String::new(),
     }
 }
 
