@@ -31,7 +31,11 @@ export async function runWorker({ createSession }) {
     assert.equal(calls(), count, 'rejected input reached model');
   };
   try {
-    if (scenario === 'normal') {
+    if (scenario === 'capacity') {
+      for (let index = 0; index < 1024; index++) await reject(() => session.prompt('risk'));
+      await session.prompt('after capacity boundary');
+      assert.equal(calls(), 1);
+    } else if (scenario === 'normal') {
       for (const text of ['plain text', '中文输入', '  ', '']) {
         const count = calls();
         await session.prompt(text);
@@ -122,7 +126,9 @@ export async function runWorker({ createSession }) {
       if (groups.has(key)) assert.deepEqual(groups.get(key), event);
       groups.set(key, event);
     }
-    if (scenario === 'normal') {
+    if (scenario === 'capacity') {
+      assert.equal(groups.size, 1025);
+    } else if (scenario === 'normal') {
       assert.equal(new Set(events.map(event => event.session_id)).size, 2);
       assert.equal(groups.size, 12);
     }

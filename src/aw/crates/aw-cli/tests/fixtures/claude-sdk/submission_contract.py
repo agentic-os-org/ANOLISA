@@ -78,7 +78,8 @@ class Bridge:
         ]}
         self.calls = []
         self.failure = None
-        self.scope = SimpleNamespace(check=lambda: None)
+        self.turn = 0
+        self.scope = SimpleNamespace(check=lambda: None, next_submission=self.next_submission)
         self.invocations = Invocations(self)
         self.response = (0, b"")
         self.entered = asyncio.Event()
@@ -87,6 +88,10 @@ class Bridge:
         self.closing = asyncio.Event()
         self.close_response = (0, b"")
         self.cancel_close = False
+
+    async def next_submission(self):
+        self.turn += 1
+        return str(self.turn)
 
     def failure_reply(self, *args):
         self.failure = "protocol failed"

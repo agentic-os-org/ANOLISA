@@ -34,16 +34,18 @@ def main():
     parser.add_argument('--root', type=Path, required=True, help='locked npm installation')
     parser.add_argument('--sec-core-provider', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--capacity', action='store_true', help='check 1024 denials and recovery in one session')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     fixture = Path(__file__).resolve().parent
     (output / 'results.json').unlink(missing_ok=True)
     results = []
-    for scenario, action in [('normal', 'block'), ('error', 'block'), ('error', 'report'),
+    scenarios = [('normal', 'block'), ('error', 'block'), ('error', 'report'),
                              ('invalid', 'block'), ('invalid', 'report'),
                              ('timeout', 'block'), ('timeout', 'report'), ('abort', 'block'), ('dispose', 'block'),
-                             ('tools-report', 'block'), ('transforms', 'block')]:
+                             ('tools-report', 'block'), ('transforms', 'block')]
+    for scenario, action in ([('capacity', 'block')] if args.capacity else scenarios):
         name = scenario + '-' + action
         with tempfile.TemporaryDirectory(prefix='aw-pi-submit-') as temporary:
             root = Path(temporary)
@@ -132,7 +134,7 @@ def main():
             path.write_text(json.dumps(config))
             aw = str(args.aw.resolve())
             try:
-                code, out, err = call([aw, 'run', '--config', path, '--agent', 'pi'], root, env)
+                code, out, err = call([aw, 'run', '--config', path, '--agent', 'pi'], root, env, timeout=900 if args.capacity else 45)
                 (output / (name + '.stderr')).write_text(err)
                 (output / (name + '-model.json')).write_text(json.dumps(requests, ensure_ascii=False, indent=2))
                 for filename in ['scanner.jsonl', 'submissions.jsonl']:

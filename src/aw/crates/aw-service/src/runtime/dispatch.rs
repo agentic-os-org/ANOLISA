@@ -39,6 +39,7 @@ impl Runtime {
                 )
             }
             Operation::EnableInvocations { instance_id } => self.enable_invocations(&instance_id),
+            Operation::EnableSubmissions { instance_id } => self.enable_submissions(&instance_id),
             Operation::RegisterInvocation {
                 instance_id,
                 sequence,

@@ -34,11 +34,12 @@ Agent 生命周期结束，重新绑定使用新的工厂结果。直接调用 S
 ## 用户输入边界
 
 配置 `input.submit` 时要求 `runWorker`；传统 `run` 应用会在执行工厂前报错。
-常驻包装器开始一次执行，为提交生成独立 AW turn UUID，并读取原生 session ID。
+常驻包装器开始一次执行，为提交生成递增 AW turn 序号，并读取原生 session ID。
 `submission::normalize` 生成 `input.text`、`session_id` 和 `turn_id`，不构造工具调用。
 所有输入步骤复用已准入任务路由和共享事件预算，工具调用账本保持原有职责。
 策略拒绝或 block 故障后排空当前执行，同一会话可继续 prompt；report 故障保留原文继续。
-输入事件沿用 Service 已有的有界关联历史。
+输入事件使用 Service 顺序输入账本。每次检查在派发或恢复之前确认输入关闭，
+回收关联明细并保留防重放能力。1,024 条上限约束活动输入，不限制累计提交次数。
 
 支持边界为传给 `session.prompt` 的 interactive 字面量文本。`input`、`context` 和
 `before_provider_request` 扩展处理器、媒体、

@@ -83,6 +83,8 @@ async def check(bridge: Any, payload: dict[str, Any]) -> None:
     hooks = [hook for hook in bridge.config["hooks"] if hook["event"] == "input.submit"]
     if not hooks:
         return
+    if hasattr(bridge, "scope"):
+        payload = {**payload, "aw_turn_id": await bridge.scope.next_submission()}
     try:
         for hook in hooks:
             code, stdout = await bridge._transport(hook, payload)

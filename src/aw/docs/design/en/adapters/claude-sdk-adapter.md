@@ -32,7 +32,9 @@ The worker options cwd must equal the AW launch cwd.
 
 Configured `input.submit` routes wrap factory `query` and resident `connect(prompt)`
 before calling the SDK. `aw_submission` freezes a supported text message, creates
-one UUID turn, and reuses `submission::normalize`. The event's session identity is
+one turn, and reuses `submission::normalize`. Foreground clients use UUID turns;
+resident clients enable the Service submission ledger and issue decimal turns.
+Acknowledged input closure retires resident details while retaining replay rejection. The event's session identity is
 the SDK input envelope's `session_id` (or the `query` argument, whose native default
 is `default`). It is a submission label; the CLI creates its conversation UUID later.
 AW's binding instance and unique turn keep clients and sequential inputs separate.

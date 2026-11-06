@@ -136,6 +136,7 @@ class Scope:
         self.environment: dict[str, str] = {}
         self.invocation_limit = 0
         self.reservation: str | None = None
+        self.submission_sequence = None
 
     def check(self, *, cleanup: bool = False) -> None:
         if self.pid != os.getpid() or self.closed or self.handle is None:
@@ -291,6 +292,19 @@ class Scope:
             if not self.closed:
                 self.invalidate(error)
             raise
+
+    async def next_submission(self) -> str:
+        """Opt in once, then issue a turn immediately before its checked dispatch."""
+        self.check()
+        if self.submission_sequence is None:
+            code, _ = await command(self.config, "enable-input", self.handle, 6)
+            if code:
+                raise RuntimeError("AW submission protocol admission failed")
+            self.submission_sequence = 0
+        if self.submission_sequence >= (1 << 64) - 1:
+            raise RuntimeError("AW submission sequence exhausted")
+        self.submission_sequence += 1
+        return str(self.submission_sequence)
 
     async def invoke(self, hook: dict[str, Any], payload: dict[str, Any]) -> tuple[int, bytes]:
         code, stdout, stderr = await self.invoke_native(hook, payload)

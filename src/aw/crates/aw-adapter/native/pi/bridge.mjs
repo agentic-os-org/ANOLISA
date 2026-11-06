@@ -308,21 +308,43 @@ export function installSessionBridge(session, scope = null) {
   });
   return {
     async submit(text, turn, signal) {
+      const hooks = config.hooks.filter(hook => hook.event === "input.submit");
+      if (!hooks.length) return;
       const payload = { event: "input.submit", text, aw_turn_id: turn,
         session_id: identifier(session.sessionManager.getSessionId(), "session id") };
-      for (const hook of config.hooks.filter(hook => hook.event === "input.submit")) {
-        let directive;
-        try { directive = await invoke(config, hook, payload, signal); }
-        catch (error) {
+      // Reject local encoding errors before consuming the service sequence.
+      if (Buffer.byteLength(JSON.stringify(payload)) > 1024 * 1024)
+        throw new Error("native_input_limit");
+      if (config.scope) payload.aw_turn_id = await scope.nextSubmission();
+      try {
+        for (const hook of hooks) {
+          let directive;
+          try { directive = await invoke(config, hook, payload, signal); }
+          catch (error) {
+            scope.checkExecution();
+            if (signal.aborted) throw new Error("AW input check cancelled");
+            process.stderr.write(`AW input.submit/${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`);
+            if (hook.on_error === "block") throw new Error("AW input check failed; submission blocked");
+            continue;
+          }
           scope.checkExecution();
           if (signal.aborted) throw new Error("AW input check cancelled");
-          process.stderr.write(`AW input.submit/${hook.step} failed: ${error.message}; on_error=${hook.on_error}\n`);
-          if (hook.on_error === "block") throw new Error("AW input check failed; submission blocked");
-          continue;
+          if (directive.block) throw new Error(directive.reason ?? "Input blocked by AW policy");
         }
-        scope.checkExecution();
-        if (signal.aborted) throw new Error("AW input check cancelled");
-        if (directive.block) throw new Error(directive.reason ?? "Input blocked by AW policy");
+      } finally {
+        if (config.scope) {
+          // Cleanup retains its own bounded transport after cancellation fences execution.
+          try {
+            const reply = await scope.command("invoke", {
+              scope: scope.handle, native_input: JSON.stringify(payload),
+            }, 6000, { ...hooks[0], close_event: true });
+            if (reply.code !== 0 || reply.stdout.length)
+              throw new Error("AW input event cleanup failed");
+          } catch (error) {
+            scope.failed = true;
+            throw error;
+          }
+        }
       }
     },
     model: (stream) => producer.wrap(stream),

@@ -85,6 +85,17 @@ impl Runtime {
         // Keep the ledger guard until the cancellation claim is installed. A
         // concurrent retirement must not allow a late close to recreate state.
         let mut state = invocations.lock().map_err(|_| rejected("state_poisoned"))?;
+        let managed = if event == "input.submit" {
+            if let Some(ledger) = state.submissions.as_mut() {
+                ledger.claim(session, call, true, MAX_HOOK_EVENTS)?;
+                true
+            } else {
+                state.legacy_submissions = true;
+                false
+            }
+        } else {
+            state.ledger.is_some()
+        };
         if event != "input.submit" {
             if let Some(ledger) = state.ledger.as_ref() {
                 ledger.check_close(session, call)?;
@@ -96,10 +107,7 @@ impl Runtime {
         let cancelled = {
             // The worker shares this flag even before its handle is ready.
             let mut hooks = lock_until(&hooks, deadline, "event_open_timeout")?;
-            if (event == "input.submit" || state.ledger.is_none())
-                && !hooks.contains_key(&key)
-                && hooks.len() >= MAX_HOOK_EVENTS
-            {
+            if !managed && !hooks.contains_key(&key) && hooks.len() >= MAX_HOOK_EVENTS {
                 return Err(rejected("native_event_limit"));
             }
             let lease = hooks.entry(key).or_insert(Lease {
@@ -130,6 +138,14 @@ impl Runtime {
                     .saturating_duration_since(Instant::now())
                     .min(Duration::from_millis(5)),
             );
+        }
+        if event == "input.submit" && managed {
+            let mut state = invocations.lock().map_err(|_| rejected("state_poisoned"))?;
+            let mut hooks = hooks.lock().map_err(|_| rejected("state_poisoned"))?;
+            if let Some(ledger) = state.submissions.as_mut() {
+                ledger.retire(call);
+            }
+            hooks.remove(&correlation(event, session, call)?);
         }
         Ok(json!({"closed": true}))
     }
@@ -289,7 +305,13 @@ impl Runtime {
         // Select a protocol under the same guard as EnableInvocations.
         let mut state = invocations.lock().map_err(|_| rejected("state_poisoned"))?;
         let managed = if submit {
-            false
+            if let Some(ledger) = state.submissions.as_mut() {
+                ledger.claim(&session, &call, false, MAX_HOOK_EVENTS)?;
+                true
+            } else {
+                state.legacy_submissions = true;
+                false
+            }
         } else if let Some(ledger) = state.ledger.as_mut() {
             ledger.check(&value)?;
             true
@@ -297,7 +319,12 @@ impl Runtime {
             state.legacy_used = true;
             false
         };
-        drop(state);
+        let state = if submit && managed {
+            Some(state)
+        } else {
+            drop(state);
+            None
+        };
         let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
         if let Some(lease) = leases.get_mut(&correlation) {
             if lease.cancelled.load(Ordering::Acquire) {
@@ -361,6 +388,7 @@ impl Runtime {
         );
         // Initialization may wait on durable storage. Keep cancellation writable.
         drop(leases);
+        drop(state);
         let handle = self.open(instance_id, value, Some(native_input), deadline, cancelled)?;
         let mut leases = lock_until(&hooks, deadline, "event_open_timeout")?;
         let lease = leases

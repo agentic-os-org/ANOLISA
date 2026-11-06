@@ -17,7 +17,7 @@ pub fn correlation_source(event: &Value) -> Option<&'static str> {
 
 /// Whether the native bridge explicitly closes an abandoned event.
 pub fn supports_event_close(adapter: &str) -> bool {
-    matches!(adapter, "agentscope" | "claude-sdk")
+    matches!(adapter, "agentscope" | "claude-sdk" | "pi")
 }
 
 /// Normalize the callback and its optional completion frame without service state.

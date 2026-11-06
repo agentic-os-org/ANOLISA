@@ -258,6 +258,14 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
             )?;
             serde_json::to_writer(std::io::stdout().lock(), &snapshot)?;
         }
+        "enable-input" => {
+            client.call(
+                Operation::EnableSubmissions {
+                    instance_id: scope.binding.instance_id,
+                },
+                deadline,
+            )?;
+        }
         "enable" => {
             let result = client.call(
                 Operation::EnableInvocations {
