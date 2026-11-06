@@ -268,3 +268,78 @@ exit 0
         assert "token-report refused arm b" in result.stdout
     else:
         assert json.loads(report.read_text())["revision"] == "new"
+
+
+@pytest.mark.parametrize("script", ["remote_sync.sh", "remote_setup.sh", "remote_verify.sh", "remote_fleet.sh"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_ssh_uses_default_identity_unless_key_is_explicit(
+    tmp_path: Path, script: str, explicit: bool
+) -> None:
+    source = (SCRIPTS / script).read_text()
+    start = source.index("SSH_OPTS=(")
+    end = source.index("\nfi", start) + len("\nfi")
+    key = tmp_path / "explicit-key"
+    key.write_text("fixture-not-a-real-private-key")
+    env = dict(os.environ)
+    env.pop("L4_SSH_KEY", None)
+    if explicit:
+        env["L4_SSH_KEY"] = str(key)
+    result = subprocess.run(
+        ["bash", "-c", source[start:end] + '\nprintf "%s\\n" "${SSH_OPTS[@]}"; printf "pw_count=%s\\n" "${#SSH_PW[@]}"'],
+        env=env, check=False, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "StrictHostKeyChecking=yes" in result.stdout
+    assert "BatchMode=yes" in result.stdout
+    assert "pw_count=0" in result.stdout
+    assert "UserKnownHostsFile=/dev/null" not in result.stdout
+    assert ("IdentitiesOnly=yes" in result.stdout) == explicit
+    assert (str(key) in result.stdout) == explicit
+
+
+def test_model_snapshot_and_memory_isolation_are_shared_by_every_arm() -> None:
+    configs = SCRIPTS.parent / "configs"
+    for path in configs.glob("arm-*.json"):
+        document = json.loads(path.read_text())
+        assert document["agents"]["defaults"]["model"]["primary"] == "bench-qwen/qwen3.8-max-0902"
+        provider = document["models"]["providers"]["bench-qwen"]
+        assert provider["apiKey"] == "${DASHSCOPE_API_KEY}"
+        assert provider["models"][0]["id"] == "qwen3.8-max-0902"
+        assert "cost" not in provider["models"][0]
+        assert document["plugins"]["slots"]["memory"] == "none"
+    assert len(list(configs.glob("arm-*.json"))) == 6
+
+
+@pytest.mark.parametrize("channel,expected", [("stable", 1), ("canary", 0), ("dev", 0)])
+def test_interceptor_arm_does_not_silently_run_on_a_disabled_rollout(
+    channel: str, expected: int
+) -> None:
+    source = (SCRIPTS / "remote_run.sh").read_text()
+    start = source.index("arm_spec() {")
+    end = source.index("\n}", start) + len("\n}")
+    result = subprocess.run(
+        ["bash", "-c", 'die() { printf "%s\\n" "$*" >&2; exit 1; };\n' + source[start:end] + '\narm_spec d; printf "%s\\n" "${PFLAGS[@]}"'],
+        env=dict(os.environ, HEADROOM_ROLLOUT_CHANNEL=channel),
+        check=False, capture_output=True, text=True,
+    )
+    assert result.returncode == expected, result.stderr
+    if expected == 0:
+        assert "--intercept-tool-results" in result.stdout
+
+
+def test_proxy_default_mode_expectation_matches_current_cache_default() -> None:
+    source = (SCRIPTS / "remote_run.sh").read_text()
+    harness = ""
+    for name in ("arm_expect_present", "arm_expect_absent"):
+        start = source.index(f"{name}() {{")
+        harness += source[start:source.index("\n}", start) + len("\n}")] + "\n"
+    for arm in "cdef":
+        result = subprocess.run(["bash", "-c", harness + f"arm_expect_present {arm}; echo ---; arm_expect_absent {arm}"],
+                                check=False, capture_output=True, text=True)
+        assert result.returncode == 0
+        present, absent = (part.split() for part in result.stdout.split("---"))
+        # The refreshed proxy defaults to cache mode with code-aware compression on.
+        assert "Mode:[[:space:]]+token" in absent and "Code-Aware:[[:space:]]+DISABLED" in absent
+        assert not set(present) & set(absent)
+        if arm == "c":
+            assert set(present) == {"Mode:[[:space:]]+cache", "Code-Aware:[[:space:]]+ENABLED"}

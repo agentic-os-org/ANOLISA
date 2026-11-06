@@ -71,7 +71,7 @@ remote host. Credentials come from the environment and are never committed.
 
 ```bash
 export L4_SSH_HOST=<host>              # remote benchmark box
-export L4_SSH_PASS=<password>
+# Existing default SSH identity is used; optionally set L4_SSH_KEY explicitly.
 export HEADROOM_SRC=~/git_repo/headroom  # local comparison-side checkout
 
 ./assets/scripts/remote_sync.sh    # 1. ship sources (+ unit suite once a venv exists)
@@ -92,6 +92,18 @@ Six arms: A is the reference, B is the component under test, and C is the
 comparison side at its defaults. D, E, and F each apply exactly one
 comparison-side proxy switch relative to C — **not cumulatively** — so a
 difference from C is attributable to that single switch.
+
+For the refreshed Headroom version, the proxy default is `cache`, not `token`,
+and code-aware compression is on by default (`--code-aware/--no-code-aware`,
+default enabled once tree-sitter grammars are installed). The C/D/E/F startup
+expectations follow both defaults. F's explicit `--mode cache` and E's explicit
+`--code-aware` therefore duplicate C's default configuration -- their startup
+banners differ only in the port -- and neither is an independent compression
+contrast; do not report them as new mechanisms. D's interceptor requires an
+explicitly selected `canary`/`dev` rollout. Stable rollout is rejected before an
+inactive D arm can produce baseline-like numbers, and rollout selection must be
+reported as an experimental condition. These changes do not authorize a billed
+sweep before compressor/adapter preflight and pilot validation.
 
 | Arm | Base config | Plugin wiring | Extra proxy flags |
 | --- | --- | --- | --- |
@@ -182,30 +194,27 @@ results describe: these numbers characterise a memoryless agent, so they say
 nothing about how either side behaves once recall is in play. That belongs in the
 limitations section, not in a footnote.
 
-### Model id: rolling alias over dated snapshot, and why
+### Model snapshot and cost evidence
 
-DashScope offers `qwen3-coder-plus` alongside dated snapshots
-(`qwen3-coder-plus-2025-07-22`, `qwen3-coder-plus-2025-09-23`). The alias moves;
-a snapshot does not. Pinning a snapshot is the usual choice for a benchmark, and
-it was rejected here for a measured reason.
+Every arm now selects `qwen3.8-max-0902`, the fixed snapshot Alibaba Cloud's
+model-release notes also call `qwen3.8-max-2026-09-02`. The `0902` id is the one
+the compatible endpoint's `/v1/models` lists, and the drift sentinel in
+`remote_run.sh` looks the configured id up in that list, so the dated spelling
+would stop the sweep before its first call. `qwen3.8-max-prime`, listed beside
+it, is a higher-throughput SKU of the same model rather than a newer snapshot.
+The old `qwen3-coder-plus` rolling-alias run is historical evidence, not the
+configuration or cache-accounting evidence for this rerun.
 
-The two report usage differently. Four alternating minimal calls gave a stable
-result: the alias returns `prompt_tokens_details.cached_tokens`, the dated
-snapshot omits the field entirely. Cache accounting cannot be given up in this
-experiment, because compression rewrites the prompt prefix and prefix rewriting
-is exactly what invalidates a prompt cache. An arm could then cut prompt tokens
-while raising real cost, and without `cached_tokens` that outcome is
-indistinguishable from a win. Reproducibility was traded for the ability to see
-it.
+The real pilot must verify the snapshot is callable through the selected region
+and OpenAI-compatible endpoint, and record prompt/completion/cached usage fields.
+A missing cache field is unknown, not a zero-cache observation. Model `created`
+metadata remains recorded for traceability but does not prove identical weights.
+Zero model-pricing placeholders have been removed from the arm configs; actual
+cost requires region-specific provider prices and reported usage.
 
-The cost of that trade is real and is not hidden: the alias can be repointed
-mid-run, which would make earlier and later instances incomparable with no
-visible symptom. The only sentinel the API offers is the alias entry's `created`
-timestamp. It must be recorded before and after every run and reported alongside
-the results; if it changes, the run spans two models and is void. At the time
-these configs were written the value was `1785331635`
-(`2026-07-29T13:27:15Z`) — within a day of the run itself, which is direct
-evidence that this alias does move.
+The staged snapshot configuration and offline tests do not constitute a billed
+pilot or a successful L4 run. A missing provider key blocks both, without falling
+back to another model or reusing the old report.
 
 ### Unverified assumptions in these configs
 
