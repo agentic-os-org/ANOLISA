@@ -206,8 +206,8 @@ function installWorkflow(method, installName) {
 
 const quickstart = await readFile(path.join(repoRoot, 'docs/user-guide/en/getting-started/quickstart.md'), 'utf8');
 const installCommand = quickstart.match(
-  /curl\s+-fsSL\s+https:\/\/get\.agentic-os\.sh\s+\|\s+bash/,
-)?.[0];
+  /curl[\s\\]+-fsSL[\s\\]+https:\/\/get\.agentic-os\.sh[\s\\]+\|[\s\\]+bash/,
+)?.[0].replace(/\\\s*/g, ' ').replace(/\s+/g, ' ').trim();
 if (!installCommand) throw new Error('Could not derive the canonical install command from docs/user-guide/en/getting-started/quickstart.md');
 
 const agentsMarkdown = await readFile(path.join(repoRoot, 'AGENTS.md'), 'utf8');
