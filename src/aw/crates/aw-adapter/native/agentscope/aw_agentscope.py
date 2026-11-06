@@ -20,7 +20,7 @@ from agentscope._utils._common import _json_loads_with_repair
 from agentscope.exception import AgentOrientedException
 from agentscope.message import TextBlock, ToolResultState
 from agentscope.middleware import MiddlewareBase
-from agentscope.tool import ToolResponse
+from agentscope.tool import ToolChunk, ToolResponse
 
 _invocation_id: ContextVar[str] = ContextVar("aw_agentscope_invocation_id")
 _pending_closes: ContextVar[dict[str, tuple[AwToolMiddleware, dict[str, Any], float]]] = ContextVar(
@@ -59,6 +59,10 @@ class AwInvocationMiddleware(MiddlewareBase):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config
+        self._strict_output = any(
+            hook["event"] == "tool.after" and hook["on_error"] == "withhold_result"
+            for hook in (config or {}).get("hooks", [])
+        )
 
     @staticmethod
     def _effective_input(raw_input: Any) -> Any | None:
@@ -114,12 +118,15 @@ class AwInvocationMiddleware(MiddlewareBase):
                         await scope.register(invocation, call.name, effective_input)
                         registered = True
             async for item in next_handler():
+                # Only the checked final content may reach native stream consumers.
+                if self._strict_output and isinstance(item, ToolChunk):
+                    continue
                 # This wrapper is the outermost AW middleware, so strict
                 # withholding lands here after every after hook has observed
                 # the original response it was correlated against.
                 if isinstance(item, ToolResponse) and _withheld.get():
                     item = _withheld_response()
-                if owner is not None and isinstance(item, ToolResponse):
+                if (owner is not None or self._strict_output) and isinstance(item, ToolResponse):
                     # Sequential interruption stops native iteration at the final
                     # result. Retire this invocation before publishing that result.
                     final_response = item
@@ -176,6 +183,8 @@ class AwInvocationMiddleware(MiddlewareBase):
                 _invocation_scope.reset(scope_token)
                 _invocation_id.reset(token)
         if final_response is not None:
+            if self._strict_output:
+                yield ToolChunk(**final_response.model_dump(), is_last=True)
             yield final_response
 
 
@@ -426,7 +435,7 @@ class AwToolMiddleware(MiddlewareBase):
         input_kwargs: dict[str, Any],
         next_handler: Callable[..., AsyncGenerator[Any, None]],
     ) -> AsyncGenerator[Any, None]:
-        """Leave onion nesting, streaming chunks and independent tool concurrency unchanged."""
+        """Run final checks inside the invocation's optional strict stream gate."""
         call = input_kwargs["tool_call"]
         session_id = agent.state.session_id
         payload = {
@@ -448,9 +457,7 @@ class AwToolMiddleware(MiddlewareBase):
                 return
         async for item in next_handler():
             # ToolChunk is intermediate; ToolResponse is the completed native result.
-            # A withheld replacement keeps chunks untouched: strict after checks only
-            # the completed response, and buffering chunks would need a stream gate
-            # the AgentScope middleware seam does not expose.
+            # The outer invocation wrapper gates chunks for strict after routes.
             if self.hook["event"] == "tool.after" and isinstance(item, ToolResponse):
                 replacement = await self._run(
                     {**payload, "tool_response": item.model_dump(mode="json")}

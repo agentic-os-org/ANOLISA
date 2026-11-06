@@ -119,10 +119,14 @@ permission checks and immediately outside `Toolkit.call_tool`.
   hooks keep observing the correlated original payload they were admitted
   against, whatever the hook order or `replace_result` composition. Admission
   grants this failure action only on SDK versions whose bridge supports
-  completed-response replacement. Intermediate `ToolChunk` frames are not
-  buffered: the AgentScope middleware seam exposes no stream gate, so partial
-  chunks of a failing tool remain visible to streaming consumers outside the
-  completed-response boundary.
+  completed-response replacement. While any strict after route is installed,
+  the invocation wrapper suppresses intermediate `ToolChunk` frames. After all
+  checks and invocation retirement, it emits one final chunk using the adopted
+  response content, followed by the response itself. Native stream consumers and
+  model context therefore receive the same checked text or withheld placeholder.
+  Suppression applies to every tool in that target, including tools outside a
+  strict step's selector, without an accumulating chunk buffer. Targets with no
+  strict after route retain native streaming, including Tokenless compression.
 - Generated hook configuration grants replacement authority only to the final
   admitted structured replacement step. Native and observation Hook stdout cannot
   replace the result, so every callback keeps the same correlated response until

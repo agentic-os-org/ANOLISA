@@ -412,7 +412,8 @@ class StrictWithholdingTests(MiddlewareFixture):
                 with patch_invoke, redirect_stderr(diagnostic):
                     result = await self.execute(middleware, original)
                 self.assertEqual(self.executed, ["call"])
-                self.assertIs(result[0], self.chunk)
+                self.assertIsNot(result[0], self.chunk)
+                self.assertEqual(result[0].content, result[-1].content)
                 self.assertIsNot(result[-1], original)
                 self.assertEqual(result[-1].state, ToolResultState.ERROR)
                 self.assertEqual(
@@ -423,6 +424,50 @@ class StrictWithholdingTests(MiddlewareFixture):
                 if label == "invalid stdout":
                     self.assertIn("native_output_invalid", diagnostic.getvalue())
                     self.assertNotIn(original.content[0].text, diagnostic.getvalue())
+
+    async def test_strict_replacement_reaches_stream_without_changing_metadata(self) -> None:
+        original = ToolResponse(
+            id="kept", content=[TextBlock(text="sensitive original")],
+            metadata={"retained": True},
+        )
+        middleware = self.middleware("withhold_result")
+        middleware.hook["replace_result"] = True
+        replacement = original.model_dump(mode="json")
+        replacement["content"][0]["text"] = "redacted"
+        with patch.object(middleware, "_invoke", AsyncMock(return_value=(
+            0, json.dumps({"aw_replacement": replacement}).encode(), b"",
+        ))):
+            result = await self.execute(middleware, original)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].content, result[1].content)
+        self.assertTrue(result[0].is_last)
+        self.assertEqual(result[0].model_dump(mode="json", exclude={"is_last"}), replacement)
+        self.assertEqual(result[1].model_dump(mode="json"), replacement)
+        self.assertEqual(original.content[0].text, "sensitive original")
+
+    async def test_strict_success_preserves_native_error_and_interruption(self) -> None:
+        for state in [ToolResultState.ERROR, ToolResultState.INTERRUPTED]:
+            with self.subTest(state=state):
+                original = ToolResponse(state=state, content=[TextBlock(text="checked")],
+                                        metadata={"retained": True})
+                middleware = self.middleware("withhold_result")
+                with patch.object(middleware, "_invoke", AsyncMock(return_value=(0, b"", b""))):
+                    result = await self.execute(middleware, original)
+                self.assertIs(result[-1], original)
+                self.assertEqual(result[0].model_dump(exclude={"is_last"}), original.model_dump())
+                self.assertEqual(len(result), 2)
+
+    async def test_strict_cancellation_does_not_publish_pending_chunks(self) -> None:
+        original = ToolResponse(content=[TextBlock(text="sensitive original")])
+        middleware = self.middleware("withhold_result")
+        with patch.object(middleware, "_invoke", side_effect=asyncio.CancelledError()):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.execute(middleware, original)
+        # The same context can execute a later call after cancellation unwinds.
+        with patch.object(middleware, "_invoke", AsyncMock(return_value=(0, b"", b""))):
+            result = await self.execute(middleware, original)
+        self.assertEqual(len(result), 2)
+        self.assertIs(result[-1], original)
 
     async def test_report_faults_still_deliver_the_original_response(self) -> None:
         original = ToolResponse(content=[TextBlock(text="sensitive original")])
@@ -442,6 +487,7 @@ class StrictWithholdingTests(MiddlewareFixture):
                     result = await self.execute(middleware, original)
                 self.assertEqual(self.executed, ["call"])
                 self.assertIs(result[-1], original)
+                self.assertIs(result[0], self.chunk)
 
     async def test_a_faulted_strict_step_still_lets_later_hooks_run(self) -> None:
         original = ToolResponse(content=[TextBlock(text="sensitive original")])
@@ -502,7 +548,8 @@ class StrictWithholdingTests(MiddlewareFixture):
             result = await self.execute(hooks, original)
         self.assertEqual(seen, ["strict", "observer"])
         self.assertEqual(observed, [original.model_dump(mode="json")])
-        self.assertIs(result[0], self.chunk)
+        self.assertIsNot(result[0], self.chunk)
+        self.assertEqual(result[0].content, result[-1].content)
         self.assertIsNot(result[-1], original)
         self.assertEqual(result[-1].state, ToolResultState.ERROR)
         self.assertEqual(

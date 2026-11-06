@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from agentscope.agent import InjectionConfig
 from agentscope.credential import OpenAICredential
-from agentscope.event import ToolResultTextDeltaEvent
 from agentscope.message import AssistantMsg, Msg, TextBlock, UserMsg
 from agentscope.middleware import MiddlewareBase
 from agentscope.model import OpenAIChatModel
@@ -65,6 +64,7 @@ class LocalTool(ToolBase):
             output.write(json.dumps({"mode": mode}) + "\n")
         if mode == "wait":
             try:
+                (ROOT / "tool-running").touch()
                 yield ToolChunk(content=[TextBlock(text="partial")], is_last=False)
                 await asyncio.sleep(30)
                 raise AssertionError("tool survived stream close")
@@ -193,7 +193,7 @@ async def main():
         for concurrent in [True, False]:
             target = agent if concurrent else make("session-sequential", concurrent=False)
             label = "concurrent" if concurrent else "sequential"
-            for name in ["tool-cleaning", "tool-cancelled", "tool-release"]:
+            for name in ["tool-running", "tool-cleaning", "tool-cancelled", "tool-release"]:
                 (ROOT / name).unlink(missing_ok=True)
             async def verify_teardown():
                 while not (ROOT / "tool-cleaning").exists():
@@ -213,13 +213,26 @@ async def main():
                 finally:
                     (ROOT / "tool-release").touch()
             watcher = asyncio.create_task(verify_teardown())
-            try:
+            async def consume_active_tool():
                 async with aclosing(target.reply_stream(UserMsg("user", "tool-wait"))) as response:
-                    async for event in response:
-                        if isinstance(event, ToolResultTextDeltaEvent):
-                            break
+                    async for _ in response:
+                        pass
+            consumer = asyncio.create_task(consume_active_tool())
+            try:
+                # Strict after routes suppress tool chunks until checks complete.
+                for _ in range(500):
+                    if (ROOT / "tool-running").exists():
+                        break
+                    await asyncio.sleep(.01)
+                assert (ROOT / "tool-running").exists()
+                consumer.cancel()
+                result = await asyncio.wait_for(asyncio.gather(consumer, return_exceptions=True), 10)
+                assert isinstance(result[0], asyncio.CancelledError), result
                 await asyncio.wait_for(watcher, 5)
             finally:
+                if not consumer.done():
+                    consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
                 if not watcher.done():
                     watcher.cancel()
                     await asyncio.gather(watcher, return_exceptions=True)

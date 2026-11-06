@@ -172,6 +172,12 @@ def main() -> None:
             }
             # Each fault class must withhold the original text from the model
             # context and report an error-state placeholder instead.
+            stream = (root / "stream.jsonl").read_text()
+            model_inputs = (root / "model-inputs.jsonl").read_text()
+            deltas = [json.loads(line) for line in stream.splitlines()
+                      if json.loads(line)["type"] == "TOOL_RESULT_TEXT_DELTA"]
+            assert len(deltas) == 4, deltas
+            assert all(event["delta"] not in ["sensi", "tive-"] for event in deltas)
             withheld = 0
             for mode in ["timeout", "error", "invalid"]:
                 block = results[f"call-{mode}"]
@@ -179,12 +185,19 @@ def main() -> None:
                 assert f"complete-{mode}" not in text, f"{mode} leaked the original result"
                 assert "withheld by policy" in text, f"{mode} missed the placeholder: {block}"
                 assert block["state"] == "error", block
+                assert f"complete-{mode}" not in stream, mode
+                assert f"sensitive-{mode}" not in stream, mode
+                assert f"complete-{mode}" not in model_inputs, mode
                 withheld += 1
             assert withheld == 3, withheld
             # A healthy strict step still allows the checked result through.
             healthy = results["call-success"]
             assert "complete-success" in json.dumps(healthy["output"]), healthy
             assert healthy["state"] == "success", healthy
+            assert "complete-success" in stream and "withheld by policy" in stream
+            assert "complete-success" in model_inputs and "withheld by policy" in model_inputs
+            (args.output / "stream.jsonl").write_text(stream)
+            (args.output / "model-inputs.jsonl").write_text(model_inputs)
             # The outer observer stays correlated with the original response in
             # every mode: strict withholding replaces only the final model-visible
             # result, never the payload other after hooks observe.
