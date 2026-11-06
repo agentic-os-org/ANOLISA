@@ -2541,6 +2541,44 @@
               }
             }
           ]
+        },
+        {
+          "name": "input-submit",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/qoder/submission.py",
+            "--bin",
+            "{bin}",
+            "--agent-bin",
+            "{qoder}",
+            "--output",
+            "{output}/input-submit"
+          ],
+          "timeout_seconds": 240,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/input-submit/results.json",
+              "values": {
+                "passed": true,
+                "runtime_removed": true,
+                "native_version": "1.1.64"
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "block",
+                  "fault-block",
+                  "fault-report"
+                ],
+                "values": {
+                  "passed": true,
+                  "model_turns": 0
+                }
+              }
+            }
+          ]
         }
       ],
       "qoder_cli": {

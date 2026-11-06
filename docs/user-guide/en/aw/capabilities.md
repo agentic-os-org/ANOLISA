@@ -16,7 +16,7 @@ AW shares tool checks, result processing and custom rules across Agents. Adapter
 | `hermes` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `openclaw` | ✓ | ✓ | ✓ | ✓ | × | × |
 | `pi` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `qoder` | ✓ | ✓ | ✓ | ✓ | × | × |
+| `qoder` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qoder-sdk` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `qwenpaw` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 <!-- aw-regression-matrix:end -->

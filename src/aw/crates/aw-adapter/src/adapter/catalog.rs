@@ -38,7 +38,11 @@ impl Profile {
 pub(crate) const QODER: Profile = Profile {
     name: "qoder",
     adapter: &super::super::qoder::Qoder,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const QODER_SDK: Profile = Profile {

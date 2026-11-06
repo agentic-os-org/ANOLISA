@@ -1042,6 +1042,10 @@
     "submit-agentscope": {
       "target": "aw-cli/test/agentscope",
       "test": "submission_boundary_cleans_turns_and_preserves_failure_policy"
+    },
+    "submit-qoder-cli": {
+      "target": "aw-cli/test/launcher",
+      "test": "qoder_version::qoder_submission_checks_native_identity_and_failure_actions"
     }
   },
   "agents": {
@@ -1328,6 +1332,14 @@
           ],
           "replace_result": [
             "final-replacement"
+          ]
+        },
+        "input.submit": {
+          "observe": [
+            "submit-qoder-cli"
+          ],
+          "block": [
+            "submit-qoder-cli"
           ]
         }
       },

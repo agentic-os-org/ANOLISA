@@ -66,6 +66,8 @@ aw run --config "$AW_HOME/security.yaml" --agent qoder
 
 ## 检查用户提交
 
+Qoder CLI 可在 `input.submit` 下复用同一 `scan_user_input` 操作。将提交检查步骤加入普通 `adapter: qoder` 配置，通过 `aw run` 启动；具体范围见[原生输入接点](../../../developer-guide/zh/aw/agents/qoder.md#检查用户提交)。
+
 Claude SDK 应用可在前台或常驻模式使用 [Claude 提交示例](../../../../src/aw/crates/aw-service/examples/aw.claude-submission.yaml)，启用相同的两个扫描器，在原生提交前拒绝输入。输入形状和拒绝后恢复方式见 [Claude 接入说明](../../../developer-guide/zh/aw/agents/claude-sdk.md#提交前检查用户文本)。
 
 Qoder SDK 和 QwenPaw 应用可从
