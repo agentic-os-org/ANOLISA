@@ -352,6 +352,31 @@ fn quoted_chars(chars: &[char]) -> Vec<bool> {
     quoted
 }
 
+fn literal_commas(chars: &[char], quoted: &[bool]) -> Vec<bool> {
+    let mut literal = vec![false; chars.len()];
+    let mut index = 0;
+    while index < chars.len() {
+        let Some(scheme_len) = url_scheme_len(chars, index) else {
+            index += 1;
+            continue;
+        };
+        let end = decorated_url_end_chars(chars, index, scheme_len);
+        let mut content_end = end;
+        while content_end > index && is_url_trailing_punctuation(chars[content_end - 1]) {
+            content_end -= 1;
+        }
+        literal[index..content_end].fill(true);
+        index = end;
+    }
+
+    for (index, c) in chars.iter().enumerate() {
+        if quoted[index] && matches!(c, ',' | '，') {
+            literal[index] = true;
+        }
+    }
+    literal
+}
+
 fn matching_bracket_pairs(chars: &[char], quoted: &[bool]) -> Vec<(usize, usize)> {
     let mut matches = Vec::new();
     let mut open_brackets = Vec::new();
@@ -1384,6 +1409,198 @@ fn complete_list_item(item: &str) -> bool {
         })
 }
 
+fn comma_separates_list_items(paths: &PathItemIndex<'_>, index: usize) -> bool {
+    paths.list_item_separators[index]
+}
+
+fn is_reference_definition(chars: &[char], open: usize, close: usize) -> bool {
+    let mut line_start = open;
+    while line_start > 0 && chars[line_start - 1] == ' ' && open - line_start < 3 {
+        line_start -= 1;
+    }
+    chars.get(close + 1) == Some(&':') && (line_start == 0 || chars[line_start - 1] == '\n')
+}
+
+fn normalize_markdown_reference_label(chars: &[char]) -> Vec<char> {
+    let mut normalized = Vec::with_capacity(chars.len());
+    let mut pending_space = false;
+    for c in chars {
+        if c.is_whitespace() {
+            pending_space = !normalized.is_empty();
+        } else {
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.extend(c.to_lowercase());
+        }
+    }
+    normalized
+}
+
+/// Separate commas inside matched square brackets before whitespace tokenization.
+///
+/// Bracketed commas are list structure when they separate complete numeric
+/// items. Commas inside quotes, URLs, and a path's own nested brackets remain
+/// content, so compact outer lists can mix those values with numbers.
+fn separate_bracketed_comma_lists(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let quoted = quoted_chars(&chars);
+    let literal_commas = literal_commas(&chars, &quoted);
+    let paths = PathItemIndex::new(&chars);
+    let serialized_json = serialized_json_container_bytes(text);
+    let mut attached_path_suffixes = vec![false; chars.len()];
+    for index in 0..chars.len() {
+        let serialized_newline = chars[index] == '\\' && chars.get(index + 1) == Some(&'n');
+        if quoted[index]
+            || (!matches!(chars[index], ';' | '|' | ':' | '：' | '；' | '。')
+                && !serialized_newline)
+        {
+            continue;
+        }
+        let item = paths.list_item_content_range(paths.list_item_starts[index], index);
+        attached_path_suffixes[index] = item.0 < item.1
+            && paths.has_slash(item.0, item.1)
+            && PathItemIndex::count(&paths.schemes, item.0, item.1) == 0
+            && paths.has_attached_key(index + 1, paths.list_item_ends[index + 1]);
+    }
+
+    let mut open_brackets = Vec::new();
+    let mut matched_brackets = Vec::new();
+    let mut depth_deltas = vec![0i32; chars.len() + 1];
+    let mut path_deltas = vec![0i32; chars.len() + 1];
+    let mut path_item_until = 0;
+    let mut path_item_is_path = false;
+    let mut rejected_path_item = None;
+    for (index, c) in chars.iter().enumerate() {
+        if quoted[index] {
+            continue;
+        }
+        match c {
+            '[' => open_brackets.push((index, false)),
+            ']' => {
+                if let Some((open, has_nested)) = open_brackets.pop() {
+                    matched_brackets.push((open, index, !has_nested));
+                    if let Some(parent) = open_brackets.last_mut() {
+                        parent.1 = true;
+                    }
+                    depth_deltas[open + 1] += 1;
+                    depth_deltas[index] -= 1;
+                    let follows_attached_path_boundary = open > 0
+                        && (matches!(chars[open - 1], ';' | '|' | '；' | '。')
+                            || (open > 1 && chars[open - 2..open] == ['\\', 'n']))
+                        && paths.has_list_separator(open)
+                        && chars.get(index + 1).is_none_or(|c| {
+                            c.is_whitespace()
+                                || STRUCTURAL_SEPARATORS.contains(c)
+                                || is_list_wrapper_decoration(*c)
+                        });
+                    let path_owned = if index < path_item_until {
+                        path_item_is_path
+                    } else {
+                        let item_start = path_item_start(&paths, open);
+                        let item_end = path_item_end(&paths, item_start, index);
+                        let cacheable = open != item_start;
+                        let item = (item_start, item_end);
+                        let path_owned = if follows_attached_path_boundary
+                            || (cacheable && rejected_path_item == Some(item))
+                        {
+                            false
+                        } else {
+                            bracket_belongs_to_path(&chars, open, index, &paths, true)
+                        };
+                        rejected_path_item = (cacheable && !path_owned).then_some(item);
+                        path_item_until = if path_owned { item_end } else { index + 1 };
+                        path_item_is_path = path_owned;
+                        path_owned
+                    };
+                    if path_owned {
+                        path_deltas[open + 1] += 1;
+                        path_deltas[index] -= 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let reference_definitions: std::collections::HashSet<Vec<char>> = matched_brackets
+        .iter()
+        .filter(|(open, close, innermost)| {
+            *innermost && is_reference_definition(&chars, *open, *close)
+        })
+        .map(|(open, close, _)| normalize_markdown_reference_label(&chars[open + 1..*close]))
+        .collect();
+    let mut label_deltas = vec![0i32; chars.len() + 1];
+    for (open, close, innermost) in matched_brackets {
+        let link_follower = chars.get(close + 1).is_some_and(|c| matches!(c, '(' | '['));
+        let shortcut_reference = innermost
+            && reference_definitions
+                .contains(&normalize_markdown_reference_label(&chars[open + 1..close]));
+        if (link_follower || shortcut_reference) && open + 1 < close {
+            label_deltas[open + 1] += 1;
+            label_deltas[close] -= 1;
+        }
+    }
+
+    let mut label_grouping_whitespace = vec![false; chars.len()];
+    for index in 1..chars.len() {
+        if !matches!(chars[index], ',' | '，') || !chars[index - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut end = index + 1;
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+        if end > index + 1 && end < chars.len() && chars[end].is_ascii_digit() {
+            label_grouping_whitespace[index + 1..end].fill(true);
+        }
+    }
+
+    // Difference ranges make matched nesting linear-time; an unmatched '[' does
+    // not change the meaning of later unbracketed thousands separators.
+    let mut bracket_depth = 0;
+    let mut path_depth = 0;
+    let mut label_depth = 0;
+    chars
+        .iter()
+        .enumerate()
+        .filter_map(|(index, c)| {
+            bracket_depth += depth_deltas[index];
+            path_depth += path_deltas[index];
+            label_depth += label_deltas[index];
+            // An earlier unmatched prose quote must not turn a later valid JSON
+            // string into list syntax; removing its commas makes replay impossible.
+            if serialized_json[paths.byte_offsets[index]] {
+                return Some(*c);
+            }
+            if label_depth > 0 && label_grouping_whitespace[index] {
+                return None;
+            }
+            if bracket_depth > 0
+                && path_depth == 0
+                && label_depth == 0
+                && attached_path_suffixes[index]
+            {
+                return Some(' ');
+            }
+            Some(
+                if bracket_depth > 0
+                    && path_depth == 0
+                    && label_depth == 0
+                    && matches!(c, ',' | '，')
+                    && !literal_commas[index]
+                    && comma_separates_list_items(&paths, index)
+                {
+                    ' '
+                } else {
+                    *c
+                },
+            )
+        })
+        .collect()
+}
+
 /// Split serialized structure without consuming URLs or the brackets and commas
 /// that belong to a path. URL terminators delimit the URL, so fields after a
 /// quoted URL remain visible to the suffix scan.
@@ -1522,6 +1739,35 @@ fn embedded_json_string_prefix(value: &str) -> Option<(usize, serde_json::Value)
         }
     }
     None
+}
+
+fn serialized_json_container_bytes(text: &str) -> Vec<bool> {
+    let mut protected = vec![false; text.len()];
+    let mut cursor = 0;
+    let mut backslashes = 0usize;
+    while cursor < text.len() {
+        let Some(c) = text[cursor..].chars().next() else {
+            break;
+        };
+        if c == '"'
+            && backslashes % 2 == 0
+            && let Some((end, serde_json::Value::String(decoded))) =
+                embedded_json_string_prefix(&text[cursor..])
+            && parse_serialized_json_container(&decoded).is_some()
+        {
+            protected[cursor..cursor + end].fill(true);
+            cursor += end;
+            backslashes = 0;
+            continue;
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+        cursor += c.len_utf8();
+    }
+    protected
 }
 
 enum SerializedJsonNode {
@@ -1898,7 +2144,8 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
     let mut claims = Vec::new();
     claims.extend(extract_urls(text));
     claims.extend(extract_quoted(text));
-    for json_word in text.split_whitespace() {
+    let normalized = separate_bracketed_comma_lists(text);
+    for json_word in normalized.split_whitespace() {
         let attached_after_residue =
             if root_json.is_none() && split_attached_value(json_word).is_none() {
                 attached_field_after_closing_bracket(json_word)
