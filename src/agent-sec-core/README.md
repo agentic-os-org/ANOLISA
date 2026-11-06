@@ -73,6 +73,8 @@ The shared model configuration also accepts an explicitly selected `anthropic-co
 
 The runtime installer requires host Python 3.10 or newer. Activation and scoring require access to the local system Docker socket. To include business dependencies in the work image, set `ANOLISA_SKILL_SCORE_BASE_IMAGE` to the immutable base image reference and optionally set `ANOLISA_SKILL_SCORE_BASE_RECIPE` to its JSON recipe path. The build receipt records the selected base.
 
+Image builders without Docker can stage worker files with `ANOLISA_SKILL_SCORE_STAGE_ONLY=1` and embed an exported, release-bound image archive. After Docker starts, `agent-sec-cli skillsec score install-runtime` activates the preloaded runtime offline. See the guide for the raw/RPM preload directories and build-stage commands; default installation stays lightweight.
+
 ## V2 SkillSec and Policy CLI
 
 Use `agent-sec-cli skillsec status` or `agent-sec-cli skillsec --help`. The previous

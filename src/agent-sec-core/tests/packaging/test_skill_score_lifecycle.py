@@ -87,6 +87,54 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(list((self.root / "requests").iterdir()), [])
         LIFECYCLE.uninstall(self.root)
 
+    def test_uninstall_recovers_only_registered_candidates_after_interruption(
+        self,
+    ) -> None:
+        for layout in (
+            "lib/anolisa/sec-core-skill-score",
+            "lib/agent-sec-core/skill-score",
+        ):
+            with self.subTest(layout=layout):
+                self.root = self.parent / layout
+                self.initialize()
+                current = self.environment()
+                empty = LIFECYCLE.reserve_candidate(self.root)
+                missing = LIFECYCLE.reserve_candidate(self.root)
+                missing.rmdir()
+                populated = LIFECYCLE.reserve_candidate(self.root)
+                (populated / "partial").write_text("unfinished install")
+                unknown = current.parent / (".candidate-" + "0" * 32)
+                unknown.mkdir(mode=0o700)
+                with self.assertRaisesRegex(ValueError, "unknown generated"):
+                    LIFECYCLE.uninstall(self.root)
+                self.assertTrue(populated.is_dir() and empty.is_dir())
+                unknown.rmdir()
+                recovery = self.root / "recovery"
+                recovery.mkdir()
+                pending = recovery / "pending"
+                pending.touch()
+                with self.assertRaisesRegex(RuntimeError, "unconfirmed"):
+                    LIFECYCLE.uninstall(self.root)
+                self.assertTrue(pending.exists() and populated.is_dir())
+                pending.unlink()
+                LIFECYCLE.uninstall(self.root)
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_candidate_recovery_requires_intact_marker_and_private_directory(
+        self,
+    ) -> None:
+        current = self.environment()
+        path = LIFECYCLE.reserve_candidate(self.root)
+        marker = self.root / path.name
+        marker.write_text("unrecognized state")
+        with self.assertRaisesRegex(ValueError, "unproven candidate"):
+            LIFECYCLE.uninstall(self.root)
+        marker.write_bytes(b"")
+        path.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "unsafe candidate"):
+            LIFECYCLE.uninstall(self.root)
+        self.assertTrue(current.exists() and marker.exists() and path.exists())
+
     def test_pre_receipt_environment_requires_intact_manifest_and_ready_proof(
         self,
     ) -> None:

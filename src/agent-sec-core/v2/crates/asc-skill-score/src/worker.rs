@@ -31,6 +31,7 @@ pub(crate) struct Runtime {
     python: PathBuf,
     entry: PathBuf,
     image_ids: Value,
+    inventory: Option<Value>,
     pub cleanup_status: String,
     pub resources: Vec<Value>,
 }
@@ -61,21 +62,12 @@ impl Runtime {
             )));
         }
         let lease = Lease::acquire(&root)?;
-        let bytes = std::fs::read(&manifest_path)
-            .map_err(|e| Error::at_path("runtime.manifest.read", &manifest_path, e))?;
-        if bytes.len() > 1_048_576 {
-            return Err(Error::Runtime("runtime manifest exceeds limit".into()));
-        }
-        let manifest: Value = serde_json::from_slice(&bytes)?;
-        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let (recipe, manifest, digest) = installed_manifest(&root)?;
         let environment = root.join("environments").join(&digest);
         let ready_path = environment.join("ready.json");
-        let ready=read_json(&ready_path,1_048_576).map_err(|error|Error::Runtime(format!("stage=runtime.ready.read path={ready_path:?}: {error}; scoring runtime is not ready; use sudo agent-sec-cli skillsec score install-runtime or repair the installed component")))?;
+        let ready=read_json(&ready_path,1_048_576).map_err(|error|Error::Runtime(format!("stage=runtime.ready.read path={ready_path:?}: {error}; scoring runtime is not ready; use sudo agent-sec-cli skillsec score install-runtime")))?;
         let base_version = base_version(prefix)?;
-        if text(&manifest, "schema") != "agent-sec-skill-score/runtime-v2"
-            || text(&manifest, "component") != "sec-core-skill-score"
-            || text(&manifest, "protocol_version") != PROTOCOL
-            || text(&manifest, "version") != base_version
+        if text(&recipe, "version") != base_version
             || text(&ready, "schema") != "agent-sec-skill-score/ready-v1"
             || text(&ready, "manifest_sha256") != digest
         {
@@ -90,7 +82,7 @@ impl Runtime {
         ] {
             if ready[field] != manifest[field] {
                 return Err(Error::Runtime(format!(
-                    "scoring ready state mismatch: {field}; repair sec-core-skill-score"
+                    "scoring ready state mismatch: {field}; run sudo agent-sec-cli skillsec score install-runtime"
                 )));
             }
         }
@@ -112,7 +104,7 @@ impl Runtime {
         if !python.is_file() || !entry.is_file() {
             let missing = if python.is_file() { &entry } else { &python };
             return Err(Error::Runtime(format!(
-                "stage=runtime.worker.inspect path={missing:?}: installed scoring worker is missing; repair sec-core-skill-score"
+                "stage=runtime.worker.inspect path={missing:?}: installed scoring worker is missing; run sudo agent-sec-cli skillsec score install-runtime"
             )));
         }
         require_system_docker()?;
@@ -124,6 +116,7 @@ impl Runtime {
             lease,
             python,
             entry,
+            inventory: ready.get("environment").cloned(),
             image_ids,
             cleanup_status: "complete".into(),
             resources: Vec::new(),
@@ -131,6 +124,24 @@ impl Runtime {
     }
 
     pub fn invoke(&mut self, call: Invocation<'_>) -> Result<Value> {
+        // Activation measured the immutable work image locally, including for preloaded archives.
+        if call.operation == "environment"
+            && let Some(inventory) = &self.inventory
+            && inventory["docker_image"]
+                .as_str()
+                .is_some_and(|id| self.image_ids["work"] == id)
+        {
+            if call.cancelled.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            if Instant::now() >= call.deadline {
+                return Err(Error::Deadline);
+            }
+            let mut result = inventory.clone();
+            crate::redaction::redact_value(&mut result, call.model)?;
+            EvidenceBudget::default().account_output(&serde_json::to_vec(&result)?, call.model)?;
+            return Ok(result);
+        }
         let request = self.prepare_request(&call)?;
         let mut command = self.command(call.model)?;
         command.arg(&request.input).arg(&request.output);
@@ -258,6 +269,79 @@ impl Runtime {
     }
 }
 
+// A new recipe may be present while its environment is still being prepared.
+// Only the marker published by the successful preparation selects a previous release.
+fn installed_manifest(root: &Path) -> Result<(Value, Value, String)> {
+    let recipe_path = root.join("runtime-manifest.json");
+    let recipe_bytes = manifest_bytes(&recipe_path)
+        .map_err(|e| Error::at_path("runtime.manifest.read", &recipe_path, e))?;
+    let recipe: Value = serde_json::from_slice(&recipe_bytes)?;
+    if text(&recipe, "schema") != "agent-sec-skill-score/runtime-v2"
+        || text(&recipe, "component") != "sec-core-skill-score"
+        || text(&recipe, "protocol_version") != PROTOCOL
+    {
+        return Err(Error::Runtime(
+            "installed recipe is incompatible with this scoring CLI".into(),
+        ));
+    }
+    let active_path = root.join("active-manifest.json");
+    let bytes = match manifest_bytes(&active_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::Runtime(format!(
+                "stage=runtime.active-manifest.read path={}: {e}; run sudo agent-sec-cli skillsec score install-runtime",
+                active_path.display()
+            )));
+        }
+        Err(e) => {
+            return Err(Error::at_path(
+                "runtime.active-manifest.read",
+                &active_path,
+                e,
+            ));
+        }
+    };
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let active: Value = serde_json::from_slice(&bytes)?;
+    if ["schema", "component", "protocol_version", "worker_version"]
+        .iter()
+        .any(|key| active[*key] != recipe[*key])
+    {
+        return Err(Error::Runtime(
+            "activated worker is incompatible with the installed recipe; run sudo agent-sec-cli skillsec score install-runtime".into()
+        ));
+    }
+    Ok((recipe, active, digest))
+}
+
+fn manifest_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind};
+    let reader = OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                .bits()
+                .cast_signed(),
+        )
+        .open(path)?;
+    let metadata = reader.metadata()?;
+    if !metadata.is_file() || metadata.len() > 1_048_576 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "expected a bounded regular runtime manifest",
+        ));
+    }
+    let mut bytes = Vec::new();
+    reader.take(1_048_577).read_to_end(&mut bytes)?;
+    if bytes.len() > 1_048_576 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "runtime manifest exceeds limit",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn base_version(prefix: &Path) -> Result<String> {
     if prefix == Path::new("/usr") {
         return Ok(env!("CARGO_PKG_VERSION").to_owned());
@@ -304,7 +388,7 @@ fn verify_image_build(
         || text(ready, "image_build_sha256") != format!("{:x}", Sha256::digest(bytes))
     {
         return Err(Error::Runtime(
-            "image build receipt checksum mismatch; repair sec-core-skill-score".into(),
+            "image build receipt checksum mismatch; run sudo agent-sec-cli skillsec score install-runtime".into(),
         ));
     }
     let receipt: Value = serde_json::from_slice(bytes)?;
@@ -377,7 +461,7 @@ fn resolve_image_ids(
         }
         if actual.get(role).is_none() {
             return Err(Error::Runtime(format!(
-                "required local {role} image is unavailable; repair sec-core-skill-score from its verified build sources"
+                "required local {role} image is unavailable; run sudo agent-sec-cli skillsec score install-runtime from its verified build sources"
             )));
         }
     }
@@ -1014,6 +1098,46 @@ mod tests {
     }
 
     #[test]
+    fn activation_selects_only_the_prepared_compatible_release() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let recipe_path = root.join("runtime-manifest.json");
+        let active_path = root.join("active-manifest.json");
+        let mut recipe = json!({"schema":"agent-sec-skill-score/runtime-v2", "component":"sec-core-skill-score",
+            "protocol_version":PROTOCOL, "worker_version":"0.10.0", "version":"1.0"});
+        let old = serde_json::to_vec(&recipe)?;
+        let old_digest = format!("{:x}", Sha256::digest(&old));
+        std::fs::write(&recipe_path, &old)?;
+        let error = installed_manifest(root).unwrap_err().to_string();
+        assert!(error.contains("stage=runtime.active-manifest.read"));
+        assert!(error.contains("sudo agent-sec-cli skillsec score install-runtime"));
+        std::fs::write(&active_path, &old)?;
+        assert_eq!(installed_manifest(root)?.2, old_digest);
+        recipe["version"] = json!("1.1");
+        let new = serde_json::to_vec(&recipe)?;
+        std::fs::write(&recipe_path, &new)?;
+        let (candidate, active, digest) = installed_manifest(root)?;
+        assert_eq!(candidate["version"], "1.1");
+        assert_eq!(active["version"], "1.0");
+        assert_eq!(digest, old_digest);
+        recipe["worker_version"] = json!("0.11.0");
+        std::fs::write(&recipe_path, serde_json::to_vec(&recipe)?)?;
+        assert!(installed_manifest(root).is_err());
+        std::fs::write(&recipe_path, &new)?;
+        std::fs::write(&active_path, b"{}")?;
+        assert!(installed_manifest(root).is_err());
+        std::fs::write(&active_path, &new)?;
+        assert_eq!(
+            installed_manifest(root)?.2,
+            format!("{:x}", Sha256::digest(new))
+        );
+        std::fs::remove_file(&active_path)?;
+        std::os::unix::fs::symlink(&recipe_path, &active_path)?;
+        assert!(installed_manifest(root).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn incomplete_installation_identifies_the_exact_missing_file() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let prefix = directory.path().join("usr/local");
@@ -1024,6 +1148,7 @@ mod tests {
             "version":"fixture-version"});
         let bytes = serde_json::to_vec(&manifest)?;
         std::fs::write(root.join("runtime-manifest.json"), &bytes)?;
+        std::fs::write(root.join("active-manifest.json"), &bytes)?;
         drop(Lease::fixture(&root)?);
         std::fs::remove_dir(root.join("requests"))?;
         let assert_missing = |stage: &str, path: &Path| {
@@ -1088,28 +1213,53 @@ mod tests {
             python: python.clone(),
             entry: directory.path().join("worker-entry.py"),
             image_ids: json!({"work":"unused", "egress":"unused"}),
+            inventory: None,
             cleanup_status: "complete".into(),
             resources: Vec::new(),
         };
         let model = model()?;
-        let error = runtime
-            .invoke(Invocation {
-                operation: "environment",
-                snapshot: directory.path(),
-                probe: None,
-                root: &directory.path().join("environment"),
-                model: &model,
-                deadline: Instant::now() + Duration::from_secs(5),
-                cancelled: &AtomicBool::new(false),
-            })
-            .unwrap_err();
+        let root = directory.path().join("environment");
+        let command = runtime.command(&model)?;
         assert!(
-            matches!(&error, Error::File { stage: "worker.spawn", source, .. }
-            if source.raw_os_error() == Some(2)),
-            "{error}"
+            command
+                .get_args()
+                .all(|arg| !model.contains_secret(arg.as_encoded_bytes()))
         );
-        assert!(error.to_string().contains(&format!("path={python:?}")));
-        assert!(!error.to_string().contains("worker-test-key-value"));
+        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+            assert!(command.get_envs().any(|(name, value)| name == key
+                && value == Some(std::ffi::OsStr::new("worker-test-key-value"))));
+        }
+        let cancelled = AtomicBool::new(false);
+        let invocation = || Invocation {
+            operation: "environment",
+            snapshot: directory.path(),
+            probe: None,
+            root: &root,
+            model: &model,
+            deadline: Instant::now() + Duration::from_secs(5),
+            cancelled: &cancelled,
+        };
+        runtime.inventory = Some(
+            json!({"docker_image":"unused","executables":{"python":"/bin/python"},
+            "python_packages":{"test":"worker-test-key-value","token":"baked-credential"}}),
+        );
+        let cached = runtime.invoke(invocation())?;
+        assert_eq!(cached["executables"]["python"], "/bin/python");
+        assert!(!cached.to_string().contains("worker-test-key-value"));
+        assert_eq!(cached["python_packages"]["token"], "[REDACTED]");
+        assert!(runtime.resources.is_empty());
+        assert!(!root.exists());
+        for inventory in [None, Some(json!({"docker_image":"previous-image"}))] {
+            runtime.inventory = inventory;
+            let error = runtime.invoke(invocation()).unwrap_err();
+            assert!(
+                matches!(&error, Error::File { stage: "worker.spawn", source, .. }
+                if source.raw_os_error() == Some(2)),
+                "{error}"
+            );
+            assert!(error.to_string().contains(&format!("path={python:?}")));
+            assert!(!error.to_string().contains("worker-test-key-value"));
+        }
         assert_eq!(
             std::fs::read_dir(directory.path().join("requests"))?.count(),
             0
@@ -1502,6 +1652,7 @@ mod tests {
             python: PathBuf::new(),
             entry: PathBuf::new(),
             image_ids: json!({}),
+            inventory: None,
             cleanup_status: "complete".into(),
             resources: vec![
                 json!({"request_id":"first"}),
@@ -1703,21 +1854,27 @@ mod tests {
             python: PathBuf::new(),
             entry: PathBuf::new(),
             image_ids: image_ids.clone(),
+            inventory: None,
             cleanup_status: "complete".into(),
             resources: Vec::new(),
         };
         let model = model()?;
         let cancelled = AtomicBool::new(false);
         let request = runtime.prepare_request(&Invocation {
-            operation: "environment",
+            operation: "run",
             snapshot: root.path(),
-            probe: None,
+            probe: Some(&json!({"id":"baseline","entry_path":"SKILL.md"})),
             root: root.path(),
             model: &model,
             deadline: Instant::now() + Duration::from_secs(30),
             cancelled: &cancelled,
         })?;
-        let body = read_json(&request.input, 65_536)?;
+        let bytes = std::fs::read(&request.input)?;
+        assert!(!model.contains_secret(&bytes));
+        let body: Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(body["operation"], "run");
+        assert_eq!(body["probe"]["id"], "baseline");
+        assert!(body.get("audit").is_none() && body.get("findings").is_none());
         assert_eq!(body["image_ids"], image_ids);
         assert_eq!(body["config"]["docker_image"], image_ids["work"]);
         assert_eq!(manifest, original);
