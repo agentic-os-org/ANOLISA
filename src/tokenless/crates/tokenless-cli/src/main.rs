@@ -779,7 +779,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         "TOKENLESS_SEARCH_PATH_SHARING_ENABLED",
                         true,
                     ),
-                    diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", false),
+                    diff_compression_enabled: env_flag("TOKENLESS_DIFF_COMPRESSION_ENABLED", true),
                     html_extraction_enabled: env_flag("TOKENLESS_HTML_EXTRACTION_ENABLED", true),
                     stash_enabled: true,
                     rtk_launcher,

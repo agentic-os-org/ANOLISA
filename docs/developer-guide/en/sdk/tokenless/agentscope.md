@@ -138,9 +138,10 @@ The integration includes explicit contracts for known AgentScope shell, file, an
 registration in AgentScope 1.x and at the model boundary in AgentScope 2.x; output text is never
 used to guess origin.
 
-`TokenlessConfig` contains only `data_dir`, `retrieve_tool_name`, and `rtk_enabled`. Compression
-thresholds, content detection, TOON selection, error diagnosis, marker authorization, and Stash
-policy are owned by Rust Core.
+`TokenlessConfig` includes `data_dir`, `retrieve_tool_name`, `rtk_enabled`, and the
+[shared compression switches](index.md#configuration). Environment defaults also apply to
+AgentScope; explicit configuration wins. Compression thresholds, content detection, TOON selection,
+error diagnosis, marker authorization, and Stash policy are owned by Rust Core.
 
 The integration passes intermediate streaming chunks through unchanged, preserves framework
 objects, and transforms only copied call arguments and final model-visible text. Tokenless keeps

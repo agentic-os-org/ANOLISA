@@ -464,7 +464,7 @@ class TestSchemaHookNoToolsWarning(unittest.TestCase):
         # the blocked worker cannot reach its read until the first write has
         # landed, the barrier breaks, and both keys survive.
         spec = importlib.util.spec_from_file_location(
-            "compress_schema_hook_under_test", _hook_path()
+            "schema_runtime_under_test", os.path.join(os.path.dirname(_hook_path()), "schema_runtime.py")
         )
         hook = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hook)

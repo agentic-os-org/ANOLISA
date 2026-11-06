@@ -10,15 +10,15 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh-ng | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
+| cosh-ng | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Passthrough; no static recovery tool |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces single-text tool results before model consumption | Core-selected for replaceable text | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
 | QwenWorkCN (macOS) | `qwenwork` | — | Replaces native Bash and workspace Shell input | Replaces eligible full results; telemetry-only MCP wrappers pass through | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
-| DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
-| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
+| DeepSeek Harness | `dsh` | — | Blocks the first call and suggests Core's rewrite | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
+| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | Passthrough in the V1 plugin |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
 
@@ -26,7 +26,33 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 Cosh-NG uses the adapter value `cosh` and the existing `.copilot-shell` extension directory.
 
-Schema compression reaches the model path differently per host: cosh and Cosh-NG fire the `BeforeModel` hook; OpenCode compresses each tool definition through its `tool.definition` plugin hook (MCP tools do not pass through that hook); Qwen Code's manifest declares a `BeforeModel` hook, but current Qwen Code releases skip that unknown event name at registration, so the schema hook does not run there and the matrix marks it unavailable. The entry stays registered, so a future Qwen Code release that implements the event picks it up automatically.
+Schema compression is active in QwenPaw and the AgentScope SDK integration, which supply a static recovery tool and current model-call marker authorization. Cosh-NG's `BeforeModel` hook and OpenCode's V1 `tool.definition` hook call the Common Hook without that recovery capability, so Core preserves their schemas. Qwen Code skips the declared, unsupported `BeforeModel` event at registration.
+
+### Compression coverage and protocol limits
+
+Every replaceable text result reaches the same Core candidates: JSON/TOON, build logs, CSV/TSV,
+search paths, HTML, and Diff cropping. Content origin, lossless recovery, and savings gates
+still apply; this does not mean every result is compressed. QwenPaw and AgentScope inherit
+`TOKENLESS_COMPRESSION_ENABLED`, `TOKENLESS_SEARCH_PATH_SHARING_ENABLED`,
+`TOKENLESS_HTML_EXTRACTION_ENABLED`, and `TOKENLESS_DIFF_COMPRESSION_ENABLED` when their SDK
+configuration is constructed. Explicit SDK arguments override environment defaults. Diff is
+on by default; the global compression switch selects dry-run and does not disable RTK rewriting.
+
+| Host or integration | Remaining boundary |
+|---------------------|--------------------|
+| Codex, Qwen Code | Current PostTool hooks cannot replace the original result. JSON/TOON, logs, tables, search, HTML, and Diff cannot reduce model input there; RTK command rewriting remains available. Neither integration has a usable model-tool-schema replacement event. |
+| Claude Code | Response replacement requires 2.1.121 or later. Structured outputs retain their types; only text slots can use TOON, table/search views, HTML, or Diff. No model-tool-schema replacement hook is registered. |
+| OpenClaw | Static `tokenless_retrieve` enables recoverable PostTool compression when the tool factory receives a conversation UUID. Keep this tool allowed by the host tool policy. Without the tool API or UUID, only lossless candidates apply. Prompt hooks expose messages but cannot replace tool schemas. Multi-block and multimodal results pass through. |
+| Cosh-NG / legacy Copilot Shell | Cosh-NG can replace supported results, but the Common BeforeModel hook cannot publish an executable static recovery tool. Legacy Copilot Shell cannot replace PostTool results. |
+| OpenCode V1 plugin | `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions; Schema stays unchanged. OpenCode's V2 plugin API is a separate migration, not supported by this V1 adapter. This is not a claim that V2 cannot support Schema compression. |
+| Qoder, QwenWork, Hermes, DSH | Their current integration seams do not expose a mutable model-tool-schema list with static retrieval authorization. Hermes and DSH use block-and-suggest for RTK; DSH freezes and audits arguments before its pre-execute hook, so direct argument mutation is prohibited. |
+| QwenWork workspace Shell or plugin-private CLI | On macOS, a complete private recovery bridge rewrites Marker commands to the plugin binary with matching state and attribution. Without that bridge, including Windows private runtimes, only lossless candidates are eligible. |
+| QwenPaw / AgentScope | All current Core domains are connected, including Schema and static retrieval. Intermediate stream chunks and non-text blocks remain unchanged. Custom AgentScope tools require an explicit content-origin contract. |
+
+OpenClaw recovery is authorized by markers in the current history and newly delivered results,
+isolated by conversation UUID. History refresh removes compacted-away markers; `/new`, `/reset`,
+and session end do not authorize another conversation's originals. Retrieved content bypasses
+compression. Stash expiry still applies.
 
 Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool failure attribution is independent.
 
@@ -39,10 +65,11 @@ PostTool leaves the entire JSON response unchanged when its parser cannot preser
 
 ## Adapter processing rules
 
-The shared Cosh-NG, Qoder, QwenWork, Claude Code, and OpenCode PostTool hook sends one
+The Cosh-NG, Qoder, QwenWork, Claude Code, and OpenCode adapters each send one
 `post_tool` request to `tokenless compress`. When the host can replace the result and bare
 `tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
-with the existing shell tool. Otherwise Core accepts only lossless candidates. Every non-`applied`
+with the existing shell tool. QwenWork can also use its verified macOS private recovery bridge.
+Otherwise Core accepts only lossless candidates. Every non-`applied`
 disposition keeps the original. The hook currently routes:
 
 | Content | Current shared-hook behavior |
@@ -52,7 +79,7 @@ disposition keeps the original. The hook currently routes:
 | Build/test/package logs from command output | Terminal cleanup and routine-progress reduction; every omitted run carries an in-place retrieval marker |
 | CSV/TSV tables when the host can replace output with text | Complete cell-preserving compaction only when characters and estimated tokens decrease; otherwise passthrough. No Stash writes or recovery requirement |
 | Numbered API search records, recognized native shell searches, or pure path lists from non-file command/API results, when path sharing is enabled and the host can replace output with text | Lossless sharing of consecutive paths or a directory prefix; every received record is retained, without Stash or retrieval |
-| Git diffs from command output when `TOKENLESS_DIFF_COMPRESSION_ENABLED` opts in (default off) and the host can replace output with text | Unchanged-context cropping with per-hunk selection; every changed line is kept, the complete original stays retrievable through Stash, and marginal candidates are rejected |
+| Git diffs from command output when the host can replace output with text (enabled by default; `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` disables it) | Unchanged-context cropping with per-hunk selection; every changed line is kept, the complete original stays retrievable through Stash, and marginal candidates are rejected |
 | Complete HTML documents from command output or API responses (not file reads) when the host can replace output with text and Stash-backed recovery is available; enabled by default, `TOKENLESS_HTML_EXTRACTION_ENABLED=0` disables it | Main-content rendering as Markdown with removal counts in the view header; the complete original stays retrievable through Stash, and marginal candidates are rejected |
 | Long plain text, stack trace, source code, unknown | Passthrough until a matching domain compressor is connected |
 
@@ -60,9 +87,16 @@ Content detection, the 200-character PostTool gate, tool-origin thresholds, diag
 selection, and final acceptance are Core policy. The hook maps host objects to v2 fields and may
 skip obvious non-JSON skill files only to avoid an unnecessary subprocess.
 
+Native shell envelopes expose their dominant `stdout` or `stderr` text from 200 characters
+onward, so short logs reach the same domain compressors as plain text. Qoder's native Bash
+always selects `stdout`, including short or empty values. Other fields stay unchanged.
+Qoder's native Bash stdout, Claude Code, and QwenWork keep object replacements. Cosh-NG unwraps
+shell JSON carried in `llmContent` and serializes the updated envelope into its required string
+replacement; OpenCode keeps its string output contract.
+
 The Common BeforeModel hook likewise has no marker-authorized recovery path. Current schema
-transformations are lossy, so Core passes the tools through unchanged. OpenCode's separate per-tool
-definition path and the direct `compress-schema` command are unchanged.
+transformations are lossy, so Core passes the tools through unchanged, including OpenCode's V1
+per-tool definition path. The direct `compress-schema` command remains available.
 
 OpenClaw, Hermes, and DeepSeek Harness delegate their PostTool decisions to Core. The standalone
 `compress-response` command remains the explicit JSON cleanup interface.
@@ -185,9 +219,10 @@ change sandbox permissions or transfer records across that boundary.
 
 If a standalone installation includes `bin/` inside the plugin, the adapter uses
 those binaries.
-Workspace Shell and plugin-private binaries do not advertise bare
-`tokenless retrieve` recovery, since the model shell does not inherit the hook
-environment. Their PostTool compression therefore requires a lossless result.
+On macOS, a complete PreTool bridge rewrites standalone `tokenless retrieve` commands
+to the private binary with the same state directory, Stash selection, session and call
+attribution. Exact recovery results bypass compression. If the bridge is unavailable,
+these private runtime paths accept only lossless compression.
 
 Install Tokenless with `anolisa install tokenless` first. This adapter needs Bash,
 Python 3.9+, and the Tokenless binary. RTK is required for command rewriting but
@@ -266,6 +301,12 @@ selected profiles and their resolved DSH home in the adapter receipt, so later
 status, disable, and re-enable operations continue to address the same profile
 tree.
 
+The plugin uses `tools/pre-execute` to deny a supported shell command with an RTK retry suggestion,
+preserving the arguments already recorded by DSH. Only an otherwise allowed root call is eligible;
+existing denials, cancellations, and approvals remain unchanged. The exact suggested command is
+allowed on retry and its output retains RTK ownership to avoid repeated compression. This costs
+one extra tool round trip. Set `rtkEnabled: false` to disable suggestions.
+
 The plugin runs on DSH's `tools/post-execute` waterfall and sends replaceable
 root results containing one text block to `tokenless compress`. Core owns
 content detection, JSON and Build Log compression, TOON selection, size gates,
@@ -293,6 +334,7 @@ Add an override for the installed row to
 ```yaml
 - id: anolisa-tokenless
   config:
+    rtkEnabled: true
     responseCompressionEnabled: true
     timeoutMs: 5000
     maxBuffer: 4194304
@@ -475,6 +517,13 @@ Extensions are discovered at startup. Restart Cosh-NG, run a shell-tool task, an
 ### OpenClaw
 
 The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. OpenClaw 2026.6.6 or later is required. Explicitly enable the Tokenless plugin so its declared tool-result middleware can replace text before the same-turn model request. Response compression and RTK rewriting default to enabled; Core selects eligible lossless TOON candidates. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+
+The plugin declares `tokenless_retrieve` in its manifest; the host tool policy must
+allow it for recovery to be usable. Prompt submission rebuilds authorization from
+the current history. Automatic compaction revokes all previous Marker grants
+because the event supplies counts rather than retained messages. Markers that
+survive compaction become usable again at the next prompt submission; newly
+compressed results can be recovered immediately.
 
 Tokenless processes only the result delivered by OpenClaw. On legacy hosts such as
 2026.8.2, registering any applicable result middleware causes the host to cap each

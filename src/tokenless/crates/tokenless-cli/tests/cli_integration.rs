@@ -2242,7 +2242,7 @@ fn build_log_request(content: &str, status: &str, session_id: &str) -> String {
 }
 
 #[test]
-fn diff_opt_in_round_trips_git_patch_and_original() {
+fn diff_defaults_on_and_round_trips_git_patch_and_original() {
     for (ending, quote_path) in [
         ("\n", "true"),
         ("\n", "false"),
@@ -2330,7 +2330,15 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
         git(&["update-index", "--refresh"]);
 
         let state = temp.path().join("data");
-        for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+        for enabled in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+        ] {
             let mut command = tokenless_bin();
             command
                 .env("TOKENLESS_DATA_DIR", &state)
@@ -2355,7 +2363,7 @@ fn diff_opt_in_round_trips_git_patch_and_original() {
             );
             let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             let result = &response["result"];
-            if enabled.is_none() || enabled == Some("0") {
+            if matches!(enabled, Some("0" | "false")) {
                 assert_eq!(result["disposition"], "passthrough");
                 assert_eq!(result["output"], diff);
                 assert_eq!(result["stash_keys"], serde_json::json!([]));

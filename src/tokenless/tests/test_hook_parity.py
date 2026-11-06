@@ -65,6 +65,79 @@ class HookParity(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(json.loads(proc.stdout), {})
 
+    def test_domain_compressors_receive_native_shell_content(self) -> None:
+        cases = {
+            "toon": json.dumps({"items": [{"id": i, "name": "repeated record"} for i in range(60)]}, indent=4),
+            "build_log_reduction": "".join(
+                f"tests/test_module_{i:03}.py ........................................ [ 75%]\n"
+                for i in range(12)
+            ) + "===================== 480 passed in 2.00s =====================\n",
+            "tabular_compaction": "id,name,description\n" + "".join(
+                f'{i},record-{i},"description without embedded delimiters number {i}"\n'
+                for i in range(40)
+            ),
+            "search_path_sharing": "".join(
+                f"/workspace/long_project_name/data/records/partition-{i}/record.json\n"
+                for i in range(60)
+            ),
+            "html_extraction": '<!DOCTYPE html><html><head><title>Report</title></head><body><nav>'
+            + '<a href="/menu">menu</a>' * 100
+            + '</nav><main><h1>Results</h1><p>' + 'Relevant report content. ' * 20
+            + '</p></main></body></html>',
+            "diff_reduction": "diff --git a/f b/f\nindex 123..456 100644\n--- a/f\n+++ b/f\n"
+            + "@@ -1,12 +1,12 @@\n" + (" " + "unchanged context " * 20 + "\n") * 10
+            + "-old\n+new\n tail\n",
+        }
+        agents = {**corpus.RESPONSE_AGENTS, "qwenwork": {"TOKENLESS_AGENT_ID": "qwenwork"},
+                  "codex": {"TOKENLESS_AGENT_ID": "codex"}}
+        with tempfile.TemporaryDirectory() as data:
+            env = {**os.environ, "TOKENLESS_DATA_DIR": data, "TOKENLESS_COMPRESSION_ENABLED": "1",
+                   "TOKENLESS_STATS_ENABLED": "0", "TOKENLESS_SLS_ENABLED": "0",
+                   "TOKENLESS_DIFF_COMPRESSION_ENABLED": "", "TOKENLESS_HTML_EXTRACTION_ENABLED": "1",
+                   "TOKENLESS_SEARCH_PATH_SHARING_ENABLED": "1"}
+            env.pop("TOKENLESS_STASH_DB", None)
+            env.pop("TOKENLESS_STATS_DB", None)
+            for operation, content in cases.items():
+                request = {
+                    "protocol_version": 2, "operation": "post_tool",
+                    "attribution": {"agent_id": "coverage", "session_id": "coverage", "tool_use_id": operation},
+                    "input": {"result_kind": "tool", "tool_name": "Bash", "content": content,
+                              "status": "success", "content_origin": "command_output", "output_optimization": "none",
+                              "capabilities": {"replace_output": True, "replace_with_text": True, "recovery": {"kind": "shell"}}},
+                }
+                proc = subprocess.run([corpus.DEBUG_TOKENLESS_BIN, "compress"], input=json.dumps(request),
+                                      capture_output=True, text=True, env=env, check=True)
+                expected = json.loads(proc.stdout)["result"]
+                self.assertEqual(expected["applied_operations"], [operation])
+                shell = {"stdout": content, "stderr": "", "exit_code": 0, "duration_ms": 123}
+                for agent, agent_env in agents.items():
+                    with self.subTest(operation=operation, agent=agent):
+                        response = shell
+                        if agent == "cosh-ng":
+                            response = {"llmContent": json.dumps(shell), "returnDisplay": "display-only"}
+                        elif agent == "opencode":
+                            response = content
+                        payload = {"tool_name": "Bash", "tool_response": response,
+                                   "session_id": "coverage", "tool_use_id": operation}
+                        actual = corpus.run_hook(corpus.RESPONSE_HOOK, json.dumps(payload), agent_env,
+                                                 extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1"})
+                        self.assertEqual(actual.returncode, 0, actual.stderr)
+                        envelope = json.loads(actual.stdout)
+                        if agent in {"codex", "qwencode"}:
+                            self.assertEqual(envelope, {})
+                            continue
+                        fields = envelope["hookSpecificOutput"]
+                        self.assertNotIn("additionalContext", fields)
+                        if agent == "cosh-ng":
+                            self.assertIsInstance(fields["updatedToolResponse"], str)
+                            replaced = json.loads(fields["updatedToolResponse"])
+                        else:
+                            replaced = fields["updatedToolOutput"]
+                        if agent == "opencode":
+                            self.assertEqual(replaced, expected["output"])
+                        else:
+                            self.assertEqual(replaced, {**shell, "stdout": expected["output"]})
+
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")
 class PathListHooks(unittest.TestCase):

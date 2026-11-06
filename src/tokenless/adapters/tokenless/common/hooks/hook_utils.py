@@ -165,43 +165,13 @@ _TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
 
 def tokenless_retrieve_command_available() -> bool:
     """Return whether a Marker command can invoke bare ``tokenless``."""
-    return _QWENWORK_RECOVERY is not None or (
-        not _QWENWORK_PRIVATE_RUNTIME and shutil.which("tokenless") is not None
-    )
+    return shutil.which("tokenless") is not None
 
 
 def _bare_retrieve_hash(command: str) -> str | None:
     if not _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command):
         return None
     return re.search(r"[0-9a-fA-F]{24}", shlex.split(command)[2]).group().lower()
-
-
-def _qwenwork_retrieve_command(key: str) -> str | None:
-    if _QWENWORK_RECOVERY is None:
-        return None
-    runtime = _QWENWORK_RECOVERY
-    arguments = ["/usr/bin/env"]
-    for name in (
-        "TOKENLESS_AGENT_ID",
-        "TOKENLESS_SESSION_ID",
-        "TOKENLESS_TOOL_USE_ID",
-        "TOKENLESS_DATA_DIR",
-        "TOKENLESS_STASH_DB",
-        "DSH_TOKENLESS_STASH_DB",
-    ):
-        arguments.append(f"{name}={runtime[name]}")
-    arguments.extend((runtime["binary"], "retrieve", key))
-    return " ".join(shlex.quote(argument) for argument in arguments)
-
-
-def rewrite_qwenwork_retrieve(tool_name: str, arguments: dict) -> dict | None:
-    """Anchor a standalone recovery command to the same private runtime as its Hook."""
-    command = arguments.get("command")
-    if tool_name not in SHELL_TOOLS or not isinstance(command, str):
-        return None
-    key = _bare_retrieve_hash(command)
-    rewritten = _qwenwork_retrieve_command(key) if key is not None else None
-    return {**arguments, "command": rewritten} if rewritten is not None else None
 
 
 def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
@@ -211,19 +181,7 @@ def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
     command = arguments.get("command")
     if not isinstance(command, str):
         return False
-    if _bare_retrieve_hash(command) is not None:
-        return True
-    if _QWENWORK_RECOVERY is None:
-        return False
-    try:
-        arguments = shlex.split(command)
-    except ValueError:
-        return False
-    if not arguments or not re.fullmatch(r"[0-9a-f]{24}", arguments[-1]):
-        return False
-    # Only our exact command is recovery; pipelines and user-supplied wrappers
-    # must not inherit the exemption from response compression.
-    return command == _qwenwork_retrieve_command(arguments[-1])
+    return _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command) is not None
 
 
 # Layer 3: API tools (zero-truncation).
@@ -388,61 +346,6 @@ _OPTIMIZATION_STATE_MAX_FILES = 1024
 
 _resolved_cache: dict[tuple, str | None] = {}
 
-_QWENWORK_WORKSPACE_SHELLS = frozenset(
-    {
-        "mcp__workspace__bash",
-        "mcp__qw-builtin__mcp_workspace_bash",
-        "mcp__qw-builtin__mcp__workspace__bash",
-    }
-)
-_QWENWORK_PRIVATE_RUNTIME = False
-_QWENWORK_RECOVERY: dict[str, str] | None = None
-
-
-def _prepare_qwenwork_recovery(plugin_root: str, payload: dict) -> dict[str, str] | None:
-    if sys.platform != "darwin" or not os.path.isabs(plugin_root):
-        return None
-    root = Path(plugin_root)
-    binary = root / "bin/tokenless"
-    if not binary.is_file() or not os.access(binary, os.X_OK):
-        return None
-    required = (root / "hooks/run-hook.sh", root / "hooks/shared/rewrite_hook.py")
-    if not all(path.is_file() and os.access(path, os.R_OK) for path in required):
-        return None
-    session_id = payload.get("session_id")
-    call_id = resolve_tool_call_id("qwenwork", payload)
-    if not isinstance(session_id, str) or not session_id or not call_id:
-        return None
-    try:
-        data_dir = resolve_data_directory()
-        hooks = json.loads((root / "hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
-        covered = set()
-        for group in hooks:
-            if any(
-                hook.get("type") == "command"
-                and "rewrite_hook.py" in shlex.split(hook.get("command", ""))
-                for hook in group.get("hooks", [])
-            ):
-                covered.update(
-                    tool
-                    for tool in {"Bash", *_QWENWORK_WORKSPACE_SHELLS}
-                    if re.fullmatch(group.get("matcher", ".*"), tool)
-                )
-        if covered != {"Bash", *_QWENWORK_WORKSPACE_SHELLS}:
-            return None
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, re.error):
-        return None
-    return {
-        "binary": str(binary),
-        "TOKENLESS_AGENT_ID": "qwenwork",
-        "TOKENLESS_SESSION_ID": session_id,
-        "TOKENLESS_TOOL_USE_ID": call_id,
-        "TOKENLESS_DATA_DIR": data_dir,
-        # Empty values also override any different defaults in the model shell.
-        "TOKENLESS_STASH_DB": os.environ.get("TOKENLESS_STASH_DB", ""),
-        "DSH_TOKENLESS_STASH_DB": os.environ.get("DSH_TOKENLESS_STASH_DB", ""),
-    }
-
 
 def _windows_profile_directory() -> str:
     """Resolve the process token's profile, as tokenless-stats/home.rs does."""
@@ -485,7 +388,7 @@ def _windows_profile_directory() -> str:
 
 
 def resolve_data_directory() -> str:
-    """Resolve QwenWork state without writes or environment-based home fallbacks.
+    """Resolve runtime state without writes or environment-based home fallbacks.
 
     Keep the default and validation aligned with tokenless-stats/home.rs and
     path_policy.rs, which the CLI and patched RTK also share.
@@ -532,58 +435,6 @@ def resolve_data_directory() -> str:
     if normalized == normalized.parent:
         raise ValueError("TOKENLESS_DATA_DIR must not be the filesystem root")
     return str(normalized)
-
-
-def prepare_hook_input(input_data: dict, agent_id: str) -> dict:
-    """Map QwenWork workspace shell events to the shared Bash contract."""
-    global _OPTIMIZATION_STATE_DIR, _QWENWORK_PRIVATE_RUNTIME, _QWENWORK_RECOVERY
-    _QWENWORK_RECOVERY = None
-    if agent_id != "qwenwork":
-        return input_data
-
-    plugin_root = os.environ.get("QODER_PLUGIN_ROOT", "")
-    private_bin = os.path.join(plugin_root, "bin")
-    if os.path.isabs(plugin_root) and os.path.isdir(private_bin):
-        os.environ["PATH"] = private_bin + os.pathsep + os.environ.get("PATH", "")
-        _resolved_cache.clear()
-        # The hook's private PATH is not the model's shell PATH.
-        _QWENWORK_PRIVATE_RUNTIME = True
-
-    _QWENWORK_RECOVERY = _prepare_qwenwork_recovery(plugin_root, input_data)
-
-    tool_name = input_data.get("tool_name")
-    if not isinstance(tool_name, str) or tool_name not in _QWENWORK_WORKSPACE_SHELLS:
-        return input_data
-
-    cwd = input_data.get("cwd")
-    if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd):
-        warn("workspace shell hook has no valid cwd. Passing through unchanged.")
-        skip()
-    # Let Tokenless resolve its default database directory and carry it into
-    # RTK commands. Hook state must not default to the workspace either.
-    try:
-        data_dir = resolve_data_directory()
-    except (OSError, ValueError, RuntimeError) as error:
-        warn(f"{error}. Passing through unchanged.")
-        skip()
-    _OPTIMIZATION_STATE_DIR = os.path.join(data_dir, "hook-state")
-    # Bare retrieval commands do not inherit the hook's runtime environment.
-    _QWENWORK_PRIVATE_RUNTIME = True
-
-    normalized = {**input_data, "tool_name": "Bash"}
-    response = input_data.get("tool_response")
-    if isinstance(response, list):
-        if not (
-            len(response) == 1
-            and isinstance(response[0], dict)
-            and set(response[0]) == {"type", "text"}
-            and response[0]["type"] == "text"
-            and isinstance(response[0]["text"], str)
-        ):
-            # Preserve multimodal blocks and metadata we cannot round-trip.
-            skip()
-        normalized["tool_response"] = response[0]["text"]
-    return normalized
 
 
 def resolve_binary(name: str, *fallback_paths: str) -> str | None:
@@ -660,26 +511,6 @@ def is_skill_file(text: str) -> bool:
         if line.startswith("name:") or line.startswith("description:"):
             return True
     return False
-
-
-def resolve_tool_call_id(agent_id: str, input_data: dict) -> str:
-    """Resolve the tool call identifier to record for a hook invocation.
-
-    Qwen Code's serialized hook input carries two identifiers: the internal
-    ``tool_use_id`` (``toolu_<ts>_<rand>``, always present) and
-    ``tool_call_id`` (the LLM provider's original call ID, e.g. ``call_xxx``,
-    snake_case — Qwen Code's TS uses camelCase ``toolCallId`` internally but
-    normalizes to ``tool_call_id`` on the wire). For the qwencode agent,
-    prefer the provider call ID and fall back to the internal one; for other
-    agents, keep the existing priority (``tool_use_id`` first).
-    """
-    if agent_id == "qwencode":
-        return (
-            input_data.get("tool_call_id")
-            or input_data.get("toolCallId")
-            or input_data.get("tool_use_id", "")
-        )
-    return input_data.get("tool_use_id") or input_data.get("toolCallId", "")
 
 
 def secure_write_text(path: str, content: str) -> None:
@@ -938,88 +769,6 @@ def run_compress(
         warn("tokenless compress returned a malformed operation result")
         return None
     return result
-
-
-def detect_cosh_ng_runtime() -> tuple | None:
-    """Detect if we are running under Cosh-NG and return its version.
-
-    Returns:
-        A (major, minor, patch) version tuple if Cosh-NG is detected,
-        or (0, 0, 0) if Cosh-NG is detected but version is unknown
-        (unsupported), or None if not running under Cosh-NG.
-
-    Detection checks (in order):
-      1. ``COSH_NG_VERSION`` environment variable — set by Cosh-NG when
-         launching hook processes.
-      2. ``COSH_RUNTIME`` environment variable set to ``cosh-ng``.
-
-    The ``(0, 0, 0)`` sentinel means "Cosh-NG detected but version unknown" —
-    callers should treat this as "unsupported version" and fail open (disable
-    compression) rather than falling back to duplicate injection.
-    """
-    version_str = os.environ.get("COSH_NG_VERSION", "")
-    if version_str:
-        ver = parse_version(version_str)
-        if ver:
-            return ver
-        # Detected Cosh-NG but can't parse version — unsupported
-        return (0, 0, 0)
-
-    runtime = os.environ.get("COSH_RUNTIME", "")
-    if runtime == "cosh-ng":
-        # Cosh-NG detected via runtime env var but no version available
-        return (0, 0, 0)
-
-    return None
-
-
-def _agent_id_from_argv(argv: list[str] | None) -> str | None:
-    """Return an explicit ``--agent-id`` value from hook command arguments.
-
-    Adapters declare the agent id in ``hooks.json``. The host always honours
-    the hook ``command`` string, but does not reliably propagate the declared
-    ``env`` map to every hook execution context — PreToolUse rewrite and
-    sub-agent task runs have been observed dropping it, collapsing attribution
-    to the fallback. An id passed as a command argument is therefore the robust
-    channel. Accepts both ``--agent-id VALUE`` and ``--agent-id=VALUE``;
-    unrelated arguments are ignored so hooks that take no other options are
-    unaffected.
-    """
-    args = sys.argv[1:] if argv is None else argv
-    for index, arg in enumerate(args):
-        if arg == "--agent-id":
-            following = args[index + 1] if index + 1 < len(args) else ""
-            return following or None
-        if arg.startswith("--agent-id="):
-            return arg[len("--agent-id=") :] or None
-    return None
-
-
-def resolve_agent_id(default: str = "unknown", argv: list[str] | None = None) -> str:
-    """Resolve the agent ID used for stats attribution.
-
-    Precedence, highest first:
-
-    1. **Cosh-NG runtime detection.** The shared extension manifest sets
-       ``TOKENLESS_AGENT_ID=copilot-shell``, and since Cosh-NG honours hook
-       ``env`` (#1617) an unconditional read would attribute Cosh-NG sessions
-       to copilot-shell. ``COSH_RUNTIME`` / ``COSH_NG_VERSION`` are injected by
-       the host after the manifest env, so they win.
-    2. **``--agent-id`` command argument** — the robust declared channel, since
-       the host always honours the hook ``command`` string.
-    3. **``TOKENLESS_AGENT_ID`` environment variable** — the legacy declared
-       channel, kept for backward compatibility but not always propagated.
-    4. **``default``** — a visible ``"unknown"`` sentinel rather than the tool's
-       own name, so an attribution gap is observable in stats instead of
-       masquerading as a real ``tokenless`` agent.
-
-    This is attribution only. The signal is cooperative — a manifest controls
-    its own ``command`` and env and could reassign these — so it must never
-    gate anything security-relevant.
-    """
-    if detect_cosh_ng_runtime() is not None:
-        return "cosh-ng"
-    return _agent_id_from_argv(argv) or os.environ.get("TOKENLESS_AGENT_ID") or default
 
 
 def parse_version(version_str: str) -> tuple | None:

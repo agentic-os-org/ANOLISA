@@ -105,6 +105,11 @@ printf '# Lifecycle fixture\n' > "$ADAPTERS/qwenwork/scripts/lifecycle.py"
 for action in detect install uninstall; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$ADAPTERS/qwenwork/scripts/$action.sh"
 done
+cp "$ROOT/adapters/tokenless/hook_dispatch.py" "$ADAPTERS/"
+for host in cosh-ng copilot-shell unknown qwenwork; do
+    mkdir -p "$ADAPTERS/$host"
+    cp "$ROOT/adapters/tokenless/$host/hook_adapter.py" "$ADAPTERS/$host/"
+done
 for hook in hook_utils rewrite_hook compress_response_hook; do
     printf '# Shared hook fixture\n' > "$ADAPTERS/common/hooks/$hook.py"
 done

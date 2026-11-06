@@ -446,7 +446,7 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 2. Read/Glob/LSP/NotebookRead 等文件内容工具及别名保留原文。Claude Code 原生 `Grep` 的无上下文 content 模式结果可以使用无损搜索路径共享。非文件来源的命令和 API 结果也可按内容共享纯路径列表，不扩大文件读取的适用范围（见[控制搜索路径共享](#控制搜索路径共享)）。
 3. 响应长度达到最小阈值。Core 在共享响应 Hook、OpenClaw 和 Hermes 路径上跳过短于 200 字符的响应。长度按字符数而非字节数计算。
 4. 内容命中受支持的压缩域。按阈值截断的响应压缩只处理 JSON 对象和数组；纯文本只有命中匹配的文本压缩器才会被压缩，且各路径可触发的压缩器不同：
-   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 记录、已识别 Shell 搜索及非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及需显式开启的 Git Diff 上下文裁剪），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。Qoder 原生 Bash 始终选择字符串 `stdout`，包括较短或为空的值；`stderr` 及其他字段保持不变。独立的 `stderr` 字段不压缩，也不生成检索标记。真实 Qoder 1.1.78 Bash 探针中，进程 stderr 合并进入 `stdout`；失败命令保留错误文本且未调用 PostToolUse。空 Hook 响应表示不替换，不表示工具结果为空。
+   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 记录、已识别 Shell 搜索及非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及恢复通道可用时默认开启的 Git Diff 上下文裁剪），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 200 字符，Cosh-NG 结构化对象信封仍为 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。Qoder 原生 Bash 始终选择字符串 `stdout`，包括较短或为空的值；`stderr` 及其他字段保持不变。独立的 `stderr` 字段不压缩，也不生成检索标记。真实 Qoder 1.1.78 Bash 探针中，进程 stderr 合并进入 `stdout`；失败命令保留错误文本且未调用 PostToolUse。空 Hook 响应表示不替换，不表示工具结果为空。
    - **4b. OpenClaw**：纯字符串、或内容恰好是单个合法文本块的 `toolResult` 消息走可替换的文本路径。其余 `toolResult`（多个文本块、图片块、空或无效 content）原样跳过——Plugin 直接返回、不调用 Core，这类结果既不压缩也不产生统计。非 `toolResult` 的对象和数组——包括 `{"stdout": ...}` 这类 Shell 信封——整体作为结构化 JSON 传给 Core 且禁用文本替换，信封保持顶层结构，只适用 JSON 域压缩。
    - **4c. Hermes**：对 Shell 工具，Hermes 会拆出信封中的 `output` 字段，把该文本送入 Core 并允许替换，压缩后再回填到同一信封；其他工具的结果直接传递。
 
@@ -469,7 +469,7 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 - Codex 和 Qwen Code 在当前 PostToolUse 契约下无法替换模型可见的原始输出，因此不运行响应压缩和 TOON：Codex 保留原文，只对被归类的环境失败附加上下文；Qwen Code 原样透传。各集成的实际能力详见下方适配器表格。
 - OpenClaw Plugin 读取同一份 `tool_categories.json` 分类，把工具映射为内容来源（文件内容、命令输出或 API 响应），该文件缺失或无效时回退到内置列表，再由 Core 套用对应阈值；它原有的 `skip_tools`、`shell_tools` 覆盖项已删除，不再控制 Adapter。当前选项见[配置与数据隐私](configuration-and-privacy.md)。
 - TOON 编码是独立的触发判断：只对至少 500 字符的负载、且宿主槽位接受文本时运行，并且只有编码结果比当前内容更小时才会采用。
-- Git Diff 上下文裁剪是独立的可选判断，默认关闭：在 Agent 进程环境设置 `TOKENLESS_DIFF_COMPRESSION_ENABLED=1`（或 SDK 的 `diff_compression_enabled` 选项）后，槽位接受文本时 Core 才会裁剪命令输出中 Git Diff 的未变更上下文；每条变更行都保留，完整原始输出写入 Stash 并附取回提示，计入该包装文本后净节省不足 16 个估算 Token 的候选会被拒绝。
+- Git Diff 上下文裁剪默认开启：可在 Agent 进程环境设置 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0`（或 SDK `diff_compression_enabled=False`）关闭。槽位接受文本且恢复能力可用时，Core 会裁剪命令输出中 Git Diff 的未变更上下文；每条变更行都保留，完整原始输出写入 Stash 并附取回提示，计入该包装文本后净节省不足 16 个估算 Token 的候选会被拒绝。
 - Python SDK 与 AgentScope 层不通过 Python 配置设置上述阈值：压缩阈值、内容检测和 TOON 选择都是 Core 行为；直接调用 `TokenlessRuntime.compress_response` 时仍可按次覆盖截断参数。详见 [Python SDK](../../../developer-guide/zh/sdk/tokenless/index.md) 与 [AgentScope 集成](../../../developer-guide/zh/sdk/tokenless/agentscope.md)文档。
 
 ### 控制搜索路径共享

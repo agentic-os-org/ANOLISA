@@ -22,6 +22,18 @@ Tool Ready is product-wide hard-disabled and is not part of this API.
 
 ## Contracts and state
 
+Python hook integrations keep host protocol rules in
+`adapters/tokenless/<host>/hook_adapter.py`: payload parsing, capability checks,
+and replacement envelopes belong to that host. For example, Cosh-NG serializes
+shell replacements as text, while Claude Code and QwenWork preserve structured
+slots; Qoder preserves its native Bash stdout object. `common/hooks` contains
+Protocol v2 transport, normalized result transformations, and lifecycle state.
+Its historical command files remain bootstrap entrypoints; host selection lives
+in `adapters/tokenless/hook_dispatch.py`. Cosh extensions bundle their adapters,
+and a detached QwenWork plugin loads its own adapter beside the shared runtime.
+OpenClaw, DSH, Hermes, and the Python SDK integrations retain their existing
+host-specific entrypoints. Compression selection and acceptance remain in Core.
+
 Adapters translate framework objects into four immutable request/response pairs:
 `BeforeModelRequest`, `PreToolRequest`, `PostToolRequest`, and `RetrieveRequest`. `Attribution`
 requires agent and session identifiers; PreTool and ordinary PostTool requests also require a
@@ -88,9 +100,11 @@ before either lifecycle request. It unwraps only an exact single plain text bloc
 unknown block arrays pass through without compression. The workspace event's
 absolute `cwd` anchors `.tokenless` state for both hooks and the RTK command.
 Native Bash keeps the existing state location and structured response handling.
-Plugin-private binaries are resolved by the adapter. Neither that private PATH
-nor workspace state implies model-visible recovery access, so these paths declare
-`recovery.kind = none`.
+Plugin-private binaries are resolved by the adapter. On macOS, a verified PreTool
+bridge anchors standalone recovery commands to that binary and the same state,
+Stash selection and attribution. Without that bridge, private runtime paths declare
+`recovery.kind = none`. The bridge and exact recovery recognition belong to the
+QwenWork adapter, independently of other hosts.
 
 Invalid inputs, a missing packaged `tokenless` executable, lifecycle operation failures, attachment failures, and
 tool-name collisions fail fast. Normal Core dispositions such as passthrough, no savings, and
@@ -99,7 +113,14 @@ smaller; schema and response truncation must also remain retrievable.
 
 OpenClaw 2026.6.6 or later uses declared, explicitly enabled tool-result middleware to call
 PostTool before model consumption. The adapter preserves the result envelope and handles only
-single-text results, declares `recovery.kind = none`, and retains per-call RTK attribution.
+single-text results and retains per-call RTK attribution. A static `tokenless_retrieve` tool
+declares tool recovery only after its factory receives a conversation UUID. The adapter rebuilds
+visible markers at prompt submission through `llm_input`, skips Core when the history has no
+recovery instructions, and adds newly emitted Stash keys. `after_compaction` revokes previous
+grants until the next prompt supplies retained history; this event has no message contents.
+Session end clears state. Tool execution supplies that conversation's marker set to Core Retrieve; recovered
+payloads bypass PostTool. Missing tool APIs or UUIDs retain lossless-only compression. RTK output
+still declares `recovery.kind = none` before receipt lookup.
 No separate persistence hook reprocesses the result. Adapter failures retain the received
 host result; the adapter catches them because the host treats thrown middleware errors as
 tool failures. Legacy middleware preprocessing can already have clipped text or metadata.
@@ -121,6 +142,12 @@ CSV and 150,000-character plain/JSON results, failure passthrough, first consump
 persistence and statistics. Legacy truncation is an expected limitation; the normalized policy
 requires full native input at middleware entry and lossless JSON candidate delivery. This
 checks transport behavior, not model answer quality or billing savings.
+
+The Python lifecycle configuration reads the global, search, HTML, and Diff environment switches
+at construction time. Explicit `TokenlessConfig` arguments win over environment defaults, and
+the resolved flags are passed to the in-process Runtime. This also covers QwenPaw and AgentScope;
+the direct Runtime constructor remains explicit. Diff is enabled by default, and disabling global
+compression selects dry-run without disabling PreTool RTK.
 
 ## Search path sharing
 

@@ -110,6 +110,12 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
 
     if behavior == "compress":
         script = prologue + textwrap.dedent("""\
+            if operation_input["capabilities"].get("replace_with_text"):
+                try:
+                    json.loads(content)
+                except json.JSONDecodeError:
+                    respond(content[:20], "applied")
+                    sys.exit(0)
             data = json.loads(content)
             if isinstance(data, str):
                 data = json.loads(data)
@@ -1114,7 +1120,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         with open(os.path.join(self.tmpdir, "request.json")) as captured:
             self.assertEqual(json.load(captured)["content"], diff)
 
-    def test_small_non_diff_and_stderr_keep_json_route(self) -> None:
+    def test_small_shell_streams_reach_core_without_domain_guessing(self) -> None:
         binary = _create_mock_tokenless(self.tmpdir, "passthrough")
         for stdout, stderr in [
             ("ordinary output\n" * 30, ""),
@@ -1131,7 +1137,7 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
                 )
                 self.assertEqual(result, {})
                 with open(os.path.join(self.tmpdir, "request.json")) as captured:
-                    self.assertEqual(json.loads(json.load(captured)["content"]), envelope)
+                    self.assertEqual(json.load(captured)["content"], stdout or stderr)
 
     def test_largest_field_wins_and_the_other_stays_verbatim(self):
         stdout = "info: routine progress line\n" * 100

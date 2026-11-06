@@ -311,6 +311,21 @@ containing dots, colons, or spaces must be renamed before upgrading.
 content detection, TOON selection, diagnostics, authorization, and Stash policy are Core behavior
 and are not Python configuration.
 
+The lifecycle SDK reads these environment defaults when constructing `TokenlessConfig`:
+
+| SDK field | Environment variable | Default |
+|-----------|----------------------|---------|
+| `compression_enabled` | `TOKENLESS_COMPRESSION_ENABLED` | `True` |
+| `search_path_sharing_enabled` | `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | `True` |
+| `html_extraction_enabled` | `TOKENLESS_HTML_EXTRACTION_ENABLED` | `True` |
+| `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
+
+Explicit constructor arguments override the environment. Unset or empty values use the default;
+`1`, `true`, and `yes` enable the flag case-insensitively, and other values disable it.
+`compression_enabled=False` retains original output while recording eligible compression
+candidates (dry-run); it does not disable RTK. AgentScope and QwenPaw use these same defaults.
+The direct `TokenlessRuntime` API retains its explicit constructor configuration.
+
 ### Direct Runtime examples
 
 Use `TokenlessRuntime` when the caller does not need `TokenlessSdk` to coordinate an Agent lifecycle

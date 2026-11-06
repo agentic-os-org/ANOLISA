@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_is_opt_in_and_requires_recovery_and_command_text() {
+    fn diff_respects_disable_and_requires_recovery_and_command_text() {
         let input = diff_input(100);
         for mode in 0..11 {
             let mut req = request(&input);

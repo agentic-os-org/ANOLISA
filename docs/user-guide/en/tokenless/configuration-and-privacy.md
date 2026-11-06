@@ -64,17 +64,18 @@ An environment override still wins after these commands. For example, `TOKENLESS
 
 ## Optional Git Diff context cropping
 
-Git Diff cropping is disabled by default. Set `TOKENLESS_DIFF_COMPRESSION_ENABLED=1`
-in the environment inherited by Tokenless or its host agent to enable it; unset the
-variable or set it to `0` to disable it. `1`, `true`, and `yes` enable it
-(case-insensitively). This option is independent of the general compression switch
+Git Diff cropping is enabled by default. Set `TOKENLESS_DIFF_COMPRESSION_ENABLED=0`
+in the environment inherited by Tokenless or its host agent to disable it. Unset or empty
+values retain the enabled default; `1`, `true`, and `yes` enable it case-insensitively,
+and other non-empty values disable it. This option is independent of the general compression switch
 and is not a `config.json` field. With cropping enabled,
 `TOKENLESS_COMPRESSION_ENABLED=0` measures candidates but returns the original.
 
 Rust callers use `RuntimeConfig.diff_compression_enabled`; Python callers use
-`TokenlessConfig(diff_compression_enabled=True)` or the native `TokenlessRuntime`
-keyword of the same name. SDK options default to false and are explicit; this CLI
-environment variable does not override them.
+`TokenlessConfig(diff_compression_enabled=False)` or the native `TokenlessRuntime`
+keyword of the same name to disable it. Both default to true. `TokenlessConfig` inherits
+the environment default, including in QwenPaw and AgentScope; explicit arguments take
+precedence. The direct native Runtime uses its explicit constructor configuration.
 
 The compressor handles complete ordinary Git diffs received as successful command
 output. It requires a text replacement slot, an available Stash, and a supported
@@ -171,7 +172,7 @@ Local rendering and original recovery have been verified on finite samples.
 | `TOKENLESS_STATS_DB` | Override the statistics database | Must be under the real user home or selected data directory |
 | `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
-| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
+| `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | On by default; `0` disables; explicit SDK options take precedence |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 
 ### Adapter and diagnostic variables

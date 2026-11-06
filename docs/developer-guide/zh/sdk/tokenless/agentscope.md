@@ -133,8 +133,9 @@ Middleware 发布 Tool 和持久化 Middleware 状态的能力。
 契约才设置 `command_field`。未知自定义工具在 AgentScope 1.x 注册时或 AgentScope 2.x
 Model 边界快速失败，绝不通过输出文本猜测 Origin。
 
-`TokenlessConfig` 只包含 `data_dir`、`retrieve_tool_name` 和 `rtk_enabled`。压缩阈值、
-内容检测、TOON 选择、错误诊断、Marker 授权和 Stash 策略都由 Rust Core 持有。
+`TokenlessConfig` 包含 `data_dir`、`retrieve_tool_name`、`rtk_enabled` 和
+[共享压缩开关](index.md#配置)。AgentScope 同样继承环境默认值，显式配置优先。
+压缩阈值、内容检测、TOON 选择、错误诊断、Marker 授权和 Stash 策略都由 Rust Core 持有。
 
 集成会原样转发中间流式 Chunk 并保留框架对象，只转换复制后的调用参数和最终模型可见
 文本。Tokenless 优化失败或 UTF-8 结果没有严格变小时保留原文，`DataBlock` 永不修改。

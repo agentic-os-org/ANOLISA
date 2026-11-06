@@ -39,6 +39,12 @@ tokenless_copy_extension() {
         cp -pr "$source/common/commands/." "$destination/commands/"
     fi
     install -p -m 0644 "$source/common/cosh-extension.json" "$destination/"
+    install -d -m 0755 "$destination/hooks/adapters"
+    install -p -m 0644 "$source/hook_dispatch.py" "$destination/hooks/adapters/"
+    for host in cosh-ng copilot-shell unknown; do
+        install -d -m 0755 "$destination/hooks/adapters/$host"
+        install -p -m 0644 "$source/$host/hook_adapter.py" "$destination/hooks/adapters/$host/"
+    done
     if [ "$channel" != legacy ]; then
         install -p -m 0644 "$source/common/tool-ready-spec.json" "$destination/"
         install -p -m 0755 "$source/common/tokenless-env-fix.sh" "$destination/"

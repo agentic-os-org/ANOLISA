@@ -266,6 +266,28 @@ class PluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sdk.config.retrieve_tool_name, "tokenless_retrieve")
         self.assertTrue(sdk.config.rtk_enabled)
 
+    def test_sdk_inherits_compression_switches_from_the_host_environment(self) -> None:
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "TOKENLESS_DIFF_COMPRESSION_ENABLED": "1",
+                    "TOKENLESS_HTML_EXTRACTION_ENABLED": "false",
+                    "TOKENLESS_SEARCH_PATH_SHARING_ENABLED": "0",
+                    "TOKENLESS_COMPRESSION_ENABLED": "0",
+                },
+            ),
+            mock.patch.object(
+                core, "TokenlessSdk",
+                side_effect=lambda config: types.SimpleNamespace(config=config),
+            ),
+        ):
+            sdk = plugin._sdk_for("/tmp/tokenless-qwenpaw-test-switches")
+        self.assertTrue(sdk.config.diff_compression_enabled)
+        self.assertFalse(sdk.config.html_extraction_enabled)
+        self.assertFalse(sdk.config.search_path_sharing_enabled)
+        self.assertFalse(sdk.config.compression_enabled)
+
     def test_register_refuses_a_wheel_without_the_required_sdk_surface(self) -> None:
         api = _FakeApi()
         with mock.patch.dict(core.__dict__):

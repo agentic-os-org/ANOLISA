@@ -241,8 +241,46 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "search_path_sharing_enabled",
                 "diff_compression_enabled",
                 "html_extraction_enabled",
+                "compression_enabled",
             },
         )
+
+    async def test_environment_controls_sdk_candidates_and_explicit_overrides(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENLESS_COMPRESSION_ENABLED": "0",
+                "TOKENLESS_SEARCH_PATH_SHARING_ENABLED": "false",
+                "TOKENLESS_DIFF_COMPRESSION_ENABLED": "yes",
+                "TOKENLESS_HTML_EXTRACTION_ENABLED": "0",
+            },
+        ):
+            sdk = self.sdk(rtk_enabled=False)
+            active = self.sdk(rtk_enabled=False, compression_enabled=True)
+        self.assertFalse(sdk.config.search_path_sharing_enabled)
+        self.assertTrue(sdk.config.diff_compression_enabled)
+        self.assertFalse(sdk.config.html_extraction_enabled)
+        content = json.dumps([{"id": i, "name": "record " * 20} for i in range(10)], indent=4)
+        request = PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="api_call",
+            content=content,
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.API_RESPONSE,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(
+                replace_output=True,
+                replace_with_text=True,
+                recovery=RecoveryMethod(),
+            ),
+            attribution=Attribution("test-agent", "env-session", "env-tool-call"),
+        )
+        dry_run = await sdk.post_tool(request)
+        self.assertEqual(dry_run.disposition.value, "dry_run")
+        self.assertEqual(dry_run.output, content)
+        applied = await active.post_tool(request)
+        self.assertEqual(applied.disposition.value, "applied")
+        self.assertLess(len(applied.output), len(content))
 
     def test_config_identifies_invalid_retrieve_tool_names(self) -> None:
         for name in ("", "x" * 65, "tool.name", "tool:name", "tool name", "工具"):
@@ -633,19 +671,25 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.applied_operations, ())
         self.assertEqual(result.stash_keys, ())
 
-    async def test_diff_opt_in_recovers_original_and_respects_rtk_ownership(self) -> None:
+    async def test_diff_defaults_on_recovers_original_and_respects_rtk_ownership(self) -> None:
         original = (
             "diff --git a/f b/f\nindex 123..456 100644\n--- a/f\n+++ b/f\n"
             "@@ -1,12 +1,12 @@\n"
             + (" " + "context" * 20 + "\n") * 10
             + "-old\n+new\n tail\n"
         )
-        default_sdk = self.sdk(rtk_enabled=False)
-        self.assertFalse(default_sdk.config.diff_compression_enabled)
+        with patch.dict(os.environ, {"TOKENLESS_DIFF_COMPRESSION_ENABLED": ""}):
+            default_sdk = self.sdk(rtk_enabled=False)
+        self.assertTrue(default_sdk.config.diff_compression_enabled)
         self.assertTrue(default_sdk.config.html_extraction_enabled)
-        enabled_sdk = self.sdk(rtk_enabled=False, diff_compression_enabled=True)
+        disabled_sdk = self.sdk(rtk_enabled=False, diff_compression_enabled=False)
+        with patch.dict(os.environ, {"TOKENLESS_DIFF_COMPRESSION_ENABLED": "0"}):
+            env_disabled_sdk = self.sdk(rtk_enabled=False)
+            enabled_sdk = self.sdk(rtk_enabled=False, diff_compression_enabled=True)
         for sdk, optimization, applied in (
-            (default_sdk, OutputOptimization.NONE, False),
+            (default_sdk, OutputOptimization.NONE, True),
+            (disabled_sdk, OutputOptimization.NONE, False),
+            (env_disabled_sdk, OutputOptimization.NONE, False),
             (enabled_sdk, OutputOptimization.NONE, True),
             (enabled_sdk, OutputOptimization.RTK, False),
         ):

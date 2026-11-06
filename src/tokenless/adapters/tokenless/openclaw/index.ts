@@ -14,6 +14,9 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const OPERATION_TIMEOUT_MS = 8_000;
 const OPTIMIZATION_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 const OPTIMIZATION_STATE_MAX_ENTRIES = 1_024;
+const RETRIEVE_TOOL = "tokenless_retrieve";
+// Candidate prefixes only; Core's tokenless-ccr/src/recovery.rs validates references.
+const RECOVERY_REFERENCE_PREFIXES = ["<<tokenless:", "tokenless retrieve", "hash_or_marker="];
 
 let tokenlessAvailable: boolean | null = null;
 let tokenlessCheckedAt: number | null = null;
@@ -204,7 +207,7 @@ function loadToolCategories(): ToolCategories {
 }
 
 function runOperation(
-  operation: "pre_tool" | "post_tool",
+  operation: "before_model" | "pre_tool" | "post_tool" | "retrieve",
   input: Record<string, unknown>,
   context: CallContext,
 ): Record<string, unknown> | null {
@@ -216,6 +219,8 @@ function runOperation(
     const stdout = execFileSync(tokenlessPath, ["compress"], {
       encoding: "utf-8",
       timeout: OPERATION_TIMEOUT_MS,
+      // A recovered original can be much larger than its compressed view.
+      maxBuffer: 64 * 1024 * 1024,
       input: JSON.stringify({
         protocol_version: 2,
         operation,
@@ -373,6 +378,8 @@ export default {
 
     const sessionMap = new Map<string, string>();
     const callStates = new Map<string, CallState>();
+    const visibleMarkers = new Map<string, Set<string>>();
+    const recoverySessions = new Set<string>();
     const categories = loadToolCategories();
     const fileTools = new Set(
       categories.layer_1_skip.tools.map((tool) => tool.toLowerCase()),
@@ -427,6 +434,83 @@ export default {
       return state;
     };
 
+    if (postToolActive && typeof api.registerTool === "function") {
+      api.registerTool(
+        (ctx: HookContext) => {
+          // sessionKey survives /new and /reset; only the conversation UUID
+          // can authorize recovery without sharing another conversation's data.
+          if (!ctx.sessionId) return null;
+          const sessionId = sessionIdFor(ctx);
+          recoverySessions.add(sessionId);
+          if (!visibleMarkers.has(sessionId)) visibleMarkers.set(sessionId, new Set());
+          return {
+            name: RETRIEVE_TOOL,
+            label: "Retrieve Tokenless original",
+            description: "Recover original content using the hash from a visible Tokenless recovery instruction.",
+            parameters: {
+              type: "object",
+              properties: { hash_or_marker: { type: "string" } },
+              required: ["hash_or_marker"],
+              additionalProperties: false,
+            },
+            execute: async (toolCallId: string, args: { hash_or_marker: string }) => {
+              const result = runOperation("retrieve", {
+                hash_or_marker: args.hash_or_marker,
+                visible_markers: [...(visibleMarkers.get(sessionId) ?? [])],
+              }, { sessionId, toolCallId });
+              if (typeof result?.payload !== "string") {
+                throw new Error("Tokenless recovery failed: the hash must be visible in this conversation and its original must still be in Stash.");
+              }
+              return { content: [{ type: "text", text: result.payload }] };
+            },
+          };
+        },
+        { name: RETRIEVE_TOOL },
+      );
+      const refreshVisibleMarkers = (visibleContext: unknown, ctx: HookContext): void => {
+        const sessionId = sessionIdFor(ctx);
+        if (!ctx.sessionId && !(ctx.sessionKey && sessionMap.has(ctx.sessionKey))) return;
+        // Sessions without recovery instructions need no Core subprocess.
+        // Scan the current history even after a restart, when local state is empty.
+        let text: string;
+        try {
+          text = JSON.stringify(visibleContext);
+        } catch {
+          visibleMarkers.get(sessionId)?.clear();
+          return;
+        }
+        if (!RECOVERY_REFERENCE_PREFIXES.some((prefix) => text.includes(prefix))) {
+          visibleMarkers.get(sessionId)?.clear();
+          return;
+        }
+        // Core parses recovery instructions, not arbitrary hashes.
+        const result = runOperation("before_model", {
+          tools: [],
+          visible_context: visibleContext,
+          capabilities: {
+            replace_tools: false,
+            recovery: { kind: "tool", name: RETRIEVE_TOOL },
+          },
+        }, { sessionId, toolCallId: "" });
+        visibleMarkers.set(sessionId, new Set(
+          Array.isArray(result?.visible_markers) ? result.visible_markers : [],
+        ));
+      };
+      // OpenClaw emits this at prompt submission, not each in-run model call.
+      api.on("llm_input", (event: {
+        historyMessages: unknown[];
+        prompt: string;
+        systemPrompt?: string;
+      }, ctx: HookContext) => {
+        refreshVisibleMarkers([event.historyMessages, event.prompt, event.systemPrompt], ctx);
+      });
+      api.on("after_compaction", (_event: unknown, ctx: HookContext) => {
+        // The host provides counts, not the retained messages. Revoke old grants
+        // until the next prompt submission supplies the current visible history.
+        visibleMarkers.get(sessionIdFor(ctx))?.clear();
+      });
+    }
+
     api.on(
       "session_start",
       (event: { sessionId: string; sessionKey?: string }) => {
@@ -443,7 +527,11 @@ export default {
           (event.sessionKey && sessionMap.get(event.sessionKey)) ||
           event.sessionKey ||
           "";
-        if (event.sessionKey) sessionMap.delete(event.sessionKey);
+        if (event.sessionKey && sessionMap.get(event.sessionKey) === sessionId) {
+          sessionMap.delete(event.sessionKey);
+        }
+        visibleMarkers.delete(sessionId);
+        recoverySessions.delete(sessionId);
         for (const key of callStates.keys()) {
           if (key.startsWith(`${sessionId}\0`)) callStates.delete(key);
         }
@@ -560,7 +648,7 @@ export default {
                   ? "command_output"
                   : "api_response";
               const input: Record<string, unknown> = {
-                result_kind: "tool",
+                result_kind: toolName === RETRIEVE_TOOL ? "retrieve" : "tool",
                 tool_name: toolName,
                 content: block.text,
                 status: toolFailed(event) ? "error" : "success",
@@ -568,8 +656,9 @@ export default {
                 output_optimization: state?.optimization ?? "none",
                 capabilities: {
                   replace_output: true,
-                  // Operator retrieval does not enforce Agent Marker visibility.
-                  recovery: { kind: "none" },
+                  recovery: state?.optimization !== "rtk" && recoverySessions.has(context.sessionId)
+                    ? { kind: "tool", name: RETRIEVE_TOOL }
+                    : { kind: "none" },
                   replace_with_text: true,
                 },
               };
@@ -603,6 +692,10 @@ export default {
                 typeof result.output !== "string"
               )
                 return;
+              if (Array.isArray(result.stash_keys)) {
+                const markers = visibleMarkers.get(context.sessionId);
+                for (const hash of result.stash_keys) markers?.add(hash);
+              }
               if (verbose)
                 console.log(`[tokenless:post-tool] optimized ${toolName}`);
               return {
