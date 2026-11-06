@@ -32,9 +32,9 @@ middleware 列表。可信参数注入应先于追加的 AW middleware。readine
 
 before 等待并可在工具副作用前阻断；after 等待一次 final `ToolResponse`，保留
 success/error/interrupted，不重复中间 stream chunk。`on_acting` 之前的原生
-参数/权限拒绝、直接 Toolkit 调用和外部执行请求需要另接。launcher 支持单个
-前台 worker；fork 型 Gunicorn supervisor、多 worker 和远端部署不在此合同内。
-工具调用记录在每次调用后回收；启用输入检查时，轮次结束还会释放该轮 Scope。
+参数/权限拒绝、直接 Toolkit 调用和外部执行请求需要另接。每条 `aw run` 管理一个
+前台 worker；多个 worker 分别启动，共用 daemon。fork 型 Gunicorn supervisor
+与子 worker 自动接线仍需独立工厂接入。工具调用记录按调用回收，轮次结束释放 Scope。
 
 接入 PreTool 重试建议和最终 PostTool 压缩时，复制
 [SDK 生命周期示例](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml)，
@@ -153,3 +153,26 @@ aw status --config current.yaml
 子 Scope 已确认关闭但请求占用释放未确认时，下一次回复前重试释放。
 原生 evidence 采集仍不在常驻策略 Scope 范围内。可修改字段与版本选择见
 [策略更新](../deployment/policy-updates.md)。
+
+## 启动多个 OS worker
+
+每个 worker 独立运行一条 `aw run`，共用配置、运行用户与 daemon。各 worker
+通过 `AwBridge.create_agent()` 构造 Agent，分别拥有实例身份、就绪回执和启动目录。
+
+在各 worker 的终端执行：
+
+```bash
+aw run --config current.yaml --agent agentscope
+```
+
+查看就绪实例，暂停目标 worker 的任务派发后更新其策略。将 `INSTANCE` 换为
+status 中该 worker 的 `instance_id`：
+
+```bash
+aw status --config current.yaml
+aw update --config current.yaml --instance INSTANCE --policy next.yaml
+```
+
+停止一个 launcher 会终止并排空对应 worker，其余 worker 保留自己的身份、策略和
+会话。全部 worker 退出后再停止共用 daemon。业务自管的 prefork/Gunicorn worker
+需要独立登记与工厂接入；跨 OS 进程继承同一个 `AwBridge` 仍不支持。

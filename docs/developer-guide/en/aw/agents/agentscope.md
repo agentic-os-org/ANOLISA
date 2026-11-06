@@ -38,8 +38,9 @@ Before waits and can block before a tool side effect. After awaits one final
 `ToolResponse`, preserving success, error or interruption without repeating
 stream chunks. Native parameter/permission rejections before `on_acting`, direct
 Toolkit calls and external execution requests need separate integration. The
-launcher supports one foreground worker; forking Gunicorn supervisors and
-multi-worker/remote deployment are outside this contract. Tool invocation records are retired after each call; each factory reply releases its Scope at turn completion.
+launcher owns one foreground worker per `aw run`; multiple workers use separate
+launches on the same daemon. Forking Gunicorn supervisors and automatic child
+attachment remain outside this factory contract. Tool invocation records are retired after each call; each factory reply releases its Scope at turn completion.
 
 For PreTool retry suggestions and final PostTool compression, copy the
 [SDK lifecycle example](https://github.com/agentic-os-org/ANOLISA/blob/main/src/aw/crates/aw-service/examples/aw.agentscope-lifecycle.yaml),
@@ -178,3 +179,28 @@ confirmed child close with an unconfirmed reservation release is retried before
 the next reply. Native evidence capture remains outside resident policy scopes.
 See [policy updates](../deployment/policy-updates.md) for eligible configuration
 fields and revision selection.
+
+## Run multiple OS workers
+
+Start each worker with its own `aw run`, using the same configuration and runtime
+user. Each worker constructs its Agent through `AwBridge.create_agent()` and has
+its own instance identity, readiness receipt and launch directory.
+
+Run this command in each worker's terminal:
+
+```bash
+aw run --config current.yaml --agent agentscope
+```
+
+List the ready instances and update one selected worker after pausing its task
+dispatch. Replace `INSTANCE` with that worker's `instance_id` from status:
+
+```bash
+aw status --config current.yaml
+aw update --config current.yaml --instance INSTANCE --policy next.yaml
+```
+
+Stopping one launcher terminates and drains its worker; other workers retain their
+identity, policy and sessions. Stop the shared daemon after every worker exits.
+Business-owned prefork/Gunicorn workers need independent registration and factory
+adoption; inheriting one `AwBridge` across OS processes is unsupported.
