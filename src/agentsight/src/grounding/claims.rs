@@ -165,6 +165,110 @@ pub fn numbers_agree(claim: f64, evidence: f64) -> bool {
     (claim - evidence).abs() / scale <= 0.02
 }
 
+fn is_decoration(c: char) -> bool {
+    matches!(
+        c,
+        '(' | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | ','
+            | ':'
+            | ';'
+            | '\\'
+            | '`'
+            | '*'
+            | '"'
+            | '\''
+            | '<'
+            | '>'
+            | '.'
+            | '!'
+            | '?'
+            | '。'
+            | '，'
+            | '、'
+            | '：'
+            | '；'
+            | '「'
+            | '」'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+            | '（'
+            | '）'
+            | '【'
+            | '】'
+    )
+}
+
+fn trim_decoration(word: &str) -> &str {
+    word.trim_matches(is_decoration)
+}
+
+fn is_url_terminator(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>' | '[' | ']')
+}
+
+fn is_url_trailing_punctuation(c: char) -> bool {
+    matches!(c, '.' | ',' | ')' | ']' | '。' | '，')
+}
+
+fn decorated_url_end(text: &str, start: usize) -> usize {
+    let rest = &text[start..];
+    let bold = text[..start].ends_with("**");
+    let parenthesized = text[..start].ends_with('(');
+    let mut paren_depth = usize::from(parenthesized);
+    for (offset, c) in rest.char_indices() {
+        if is_url_terminator(c) {
+            return offset;
+        }
+        if bold && c == '*' && rest[offset..].starts_with("**") {
+            return offset;
+        }
+        if parenthesized {
+            match c {
+                '(' => paren_depth += 1,
+                ')' => {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        return offset;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    rest.len()
+}
+
+fn trim_url_trailing_punctuation(url: &str) -> &str {
+    let mut matched_closes = vec![false; url.len()];
+    let mut open_parens = Vec::new();
+    for (index, c) in url.char_indices() {
+        match c {
+            '(' => open_parens.push(index),
+            ')' => {
+                if open_parens.pop().is_some() {
+                    matched_closes[index] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut end = url.len();
+    while let Some((index, c)) = url[..end].char_indices().next_back() {
+        if (c == ')' && matched_closes[index]) || !is_url_trailing_punctuation(c) {
+            break;
+        }
+        end = index;
+    }
+    &url[..end]
+}
+
 /// Extract every verifiable claim from a message.
 pub fn extract_claims(text: &str) -> Vec<Claim> {
     let mut claims = Vec::new();
@@ -175,39 +279,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // identifiers in markdown (`/var/log`, **error**), and a claim carrying
         // those marks would never match the plain form sitting in the evidence —
         // a path the user typed themselves would be reported as sourceless.
-        let word = word.trim_matches(|c: char| {
-            matches!(
-                c,
-                '(' | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | ','
-                    | ':'
-                    | ';'
-                    | '`'
-                    | '*'
-                    | '"'
-                    | '\''
-                    | '<'
-                    | '>'
-                    | '.'
-                    | '!'
-                    | '?'
-                    | '。'
-                    | '，'
-                    | '、'
-                    | '：'
-                    | '；'
-                    | '「'
-                    | '」'
-                    | '“'
-                    | '”'
-                    | '‘'
-                    | '’'
-            )
-        });
+        let word = trim_decoration(word);
         if word.is_empty() {
             continue;
         }
@@ -440,17 +512,8 @@ fn extract_urls(text: &str) -> Vec<Claim> {
         while let Some(rel) = text[cursor..].find(scheme) {
             let start = cursor + rel;
             let rest = &text[start..];
-            let end = rest
-                .find(|c: char| {
-                    // `[` and `]` cannot appear unencoded in a URL, so they mark
-                    // markdown link syntax. Without them `[title](target)`
-                    // scanned into one glued pseudo-URL that matched no evidence
-                    // and was reported as fabricated. Parentheses are excluded:
-                    // they occur inside real URLs and are trimmed below.
-                    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>' | '[' | ']')
-                })
-                .unwrap_or(rest.len());
-            let url = rest[..end].trim_end_matches(['.', ',', ')', ']', '。', '，']);
+            let end = decorated_url_end(text, start);
+            let url = trim_url_trailing_punctuation(&rest[..end]);
             if url.len() > scheme.len() {
                 out.push(Claim {
                     text: url.to_string(),
