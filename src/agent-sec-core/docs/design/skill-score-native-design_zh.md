@@ -72,7 +72,7 @@ FC 隔离的是整个评测实例；内层容器继续隔离不可信的被测�
 
 ```bash
 sudo anolisa --install-mode system install sec-core
-sudo anolisa --install-mode system install sec-core-skill-score
+sudo agent-sec-cli skillsec score install-runtime
 
 agent-sec-cli skillsec score plan /absolute/path/to/skill \
   --output-file /absolute/path/to/task.json
@@ -84,7 +84,7 @@ agent-sec-cli skillsec score run /absolute/path/to/task.json \
 
 保留 `run -` 标准输入方式、stdout 单个 JSON、stderr 进度，以及拒绝意外覆盖输出文件的行为。输出目录必须位于被测输入之外。`plan` 使用基础包中的 Rust 核心和模型配置，不要求可选执行组件或 Docker/Harbor。`run` 需要完整执行环境；未安装可选组件时非零退出，提示显式安装；已安装但损坏时提示修复。两种情况都不自动下载。
 
-这是一个 ASC 产品的可选安装单元，不是第二套公共 CLI 或新的服务。复用 `anolisa install <component>` 的现有形式，不新增 `--with`、`score install` 或 `prepare` 命令。当前安装器没有已落实的组件依赖自动求解能力，因此首版明确先装基础包，可选组件安装 helper 校验基础版本，不能依赖声明一个 dependency 就假定会自动安装。
+这是 ASC 产品内的可选安装单元。统一的 `install-runtime` 命令通过 ANOLISA 记录的仓库和基础包精确版本处理 raw 安装，或使用现有 RPM 内的安装配方，并拒绝混装。可选 helper 要求已安装匹配的基础包，不依赖自动依赖求解；无需公共 `prepare` 命令或单独 RPM。
 
 这里的轻量保证针对 `anolisa install sec-core`。现有 `anolisa install --all` 枚举全部组件，新可选组件注册后也会包含在内；将它作为显式安装全部组件的行为说明，不能把 `--all` 宣传成同样轻量。
 
@@ -230,11 +230,13 @@ Compose project 名与所有权标签由 request ID 预先确定，创建前写�
 
 Ubuntu 首选标准 raw 路径，不要求把 RPM 强装到 Ubuntu。RPM 继续是另一种发行格式；如发布包含评分的 RPM，其依赖安装、脚本和失败语义必须单独验证，不能照搬 raw hook 的保证。
 
-完成评分准备需要可用 Docker daemon 才能构建并检查内层镜像。FC 模板最终化阶段由平台启动 Docker，再显式安装基础包及可选组件并验收。只有 Dockerfile 构建、没有 daemon 的阶段可以预置下载缓存，但不能标记评分 ready；最终必须经过镜像构建和检查。FC 模板是平台运行环境及配置的版本化定义，不等同于内层某个工作容器。
+完成评分准备需要可用 Docker daemon 才能构建或加载、检查内层镜像。没有 daemon 的镜像构建器在显式安装时使用 `ANOLISA_SKILL_SCORE_STAGE_ONLY=1`，预置 Python/Harbor/worker 文件并写入 `staged.json`，不写 `ready.json`。可运行 Docker 的构建机通过内部 `prepare.sh --export-preload` helper 导出已验证的安装；部署方将压缩归档及清单放入 raw 或 RPM 运行时根目录下的 `preload/`。该制品不进入公共源码 bundle。
 
-安装与执行必须使用同一 Docker daemon。首版验收默认本地系统 daemon 及对应用户权限，不自动切换到 rootless、远程 `DOCKER_HOST` 或其他 context；未覆盖的配置明确报不支持。FC 模板还需验证 Docker data-root 与镜像确实随模板恢复，不能仅凭安装记录判断镜像存在。
+平台启动 Docker 后，仍调用公共 `install-runtime` 命令：校验预置文件哈希、版本及源码身份、归档大小及校验和、预期镜像身份；仅在镜像缺失时直接加载压缩归档，复用现有网络及环境探针，全部成功后原子写入就绪记录。已有匹配镜像跳过加载，Docker 数据丢失后也无需重建镜像。预置材料缺失或损坏不会回退联网。该拆分适用于普通 Dockerfile 和既有镜像/模板发布流程，无需准备实例或新增云平台专用 ASC API。
 
-Python/uv 与 wheel 可以本地交付。`ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` 禁止这部分依赖回落网络，镜像构建仍需可联网的构建机；`ANOLISA_SKILL_SCORE_OFFLINE=1` 拒绝全新镜像构建。本版不宣称支持断网首次安装。已准备模板保留 worker 环境、构建回执和 Docker data-root，恢复后的任务不安装、不重建。
+激活与执行使用同一本地系统 Docker daemon 及对应用户权限，不自动切换到 rootless、远程 `DOCKER_HOST` 或其他 context。预置部署需要 worker 文件和归档随镜像/模板恢复；Docker data-root 可以在激活前重新创建。安装记录不代表镜像实际存在，平台负责启动 daemon，并在就绪后才派发任务。
+
+Python/uv 与 wheel 可以本地交付。`ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` 禁止这部分依赖回落网络，源码镜像构建仍需可联网构建机。`ANOLISA_SKILL_SCORE_OFFLINE=1` 拒绝全新镜像构建，但允许从已验证文件和归档激活。预置、导出、激活均受生命周期锁和未完成清理检查约束；保留 raw 归属/版本与 RPM 归属检查。卸载删除自身生成的环境，保留部署方提供的 preload 目录，由镜像所有者负责替换和回收。
 
 ## 7. SkillEval 接入与正式版迁移
 

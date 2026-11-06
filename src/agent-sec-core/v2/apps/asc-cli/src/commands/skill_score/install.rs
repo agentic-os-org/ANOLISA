@@ -43,6 +43,7 @@ fn command(program: &Path) -> Command {
         "ANOLISA_SKILL_SCORE_BASE_IMAGE",
         "ANOLISA_SKILL_SCORE_BASE_RECIPE",
         "ANOLISA_SKILL_SCORE_BUILD_NETWORK",
+        "ANOLISA_SKILL_SCORE_STAGE_ONLY",
     ] {
         if let Some(value) = std::env::var_os(key) {
             cmd.env(key, value);
@@ -132,7 +133,20 @@ fn raw_install(manager: &Path, optional_root: &Path) -> io::Result<Command> {
             ));
         }
         let mut cmd = command(&optional_root.join("prepare.sh"));
-        cmd.args(["--check", "--prefix", "/usr/local"]);
+        // Only deployment-preloaded or explicitly staged files may progress beyond
+        // verification here. Python validates their release binding before activation.
+        if optional_root.join("preload").symlink_metadata().is_ok()
+            || std::env::var("ANOLISA_SKILL_SCORE_STAGE_ONLY").as_deref() == Ok("1")
+        {
+            cmd.args([
+                "--prefix",
+                "/usr/local",
+                "--cache-dir",
+                "/var/cache/anolisa",
+            ]);
+        } else {
+            cmd.args(["--check", "--prefix", "/usr/local"]);
+        }
         return Ok(cmd);
     }
     if optional_root.join("runtime-manifest.json").try_exists()? {
@@ -215,8 +229,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn executable(path: &Path, contents: &str) {
-        std::fs::write(path, contents).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Replacing a recently executed shell stub in place can race Linux's executable lease.
+        let replacement = path.with_extension("new");
+        std::fs::write(&replacement, contents).unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(replacement, path).unwrap();
     }
 
     #[test]
@@ -281,6 +298,18 @@ mod tests {
         assert_eq!(
             cmd.get_args().collect::<Vec<_>>(),
             ["--check", "--prefix", "/usr/local"]
+        );
+        std::fs::create_dir(root.join("preload")).unwrap();
+        let cmd = raw_install(&manager, &root).unwrap();
+        assert_eq!(cmd.get_program(), root.join("prepare.sh"));
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [
+                "--prefix",
+                "/usr/local",
+                "--cache-dir",
+                "/var/cache/anolisa"
+            ]
         );
         optional["version"] = json!("1.0.0");
         status(vec![base.clone(), optional]);

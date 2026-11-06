@@ -122,6 +122,38 @@ Skill 的业务依赖必须位于 ASC 工作镜像内。仅在外层 FC 模板�
 
 能力合入主线并通过相同验收后，把可信 release/index 来源从 fork 切到正式发布渠道，保留 CLI、组件名称、模型配置与 task/report 契约。OCI 分发是未来优化，不是首版或正式发布前置条件。
 
+### 在普通 Dockerfile 中预置镜像
+
+没有 Docker daemon 的镜像构建器可以先安装 worker 文件，等执行环境启动后再激活。基础包与可选包必须来自同一版本。预置归档属于部署制品，不增加公共 Release bundle。
+
+在可运行 Docker 的 Linux 构建机上，使用目标业务基础镜像完成正常的显式运行时安装。然后向一个新目录导出已验证的镜像和绑定版本的清单：
+
+```sh
+sudo /usr/local/lib/anolisa/sec-core-skill-score/prepare.sh \
+  --prefix /usr/local --export-preload /absolute/build-context/preload
+```
+
+输出包含 `manifest.json` 和 `skill-score-images.tar.gz`，二者通过平台可信构建上下文一起传递。RPM 安装改用 `/usr/lib/agent-sec-core/skill-score/prepare.sh --prefix /usr`。导出拒绝覆盖已有目录，并在保存镜像前检查已安装运行时、网络能力和执行环境。
+
+最终 Dockerfile 按正常 raw 路径安装基础包和版本匹配的 ANOLISA 安装器，提供可访问的可选包仓库，然后执行：
+
+```dockerfile
+RUN ANOLISA_SKILL_SCORE_STAGE_ONLY=1 agent-sec-cli skillsec score install-runtime
+COPY --chown=0:0 preload/ /usr/local/lib/anolisa/sec-core-skill-score/preload/
+```
+
+`ANOLISA_SKILL_SCORE_STAGE_ONLY=1` 是供镜像构建使用的输入：安装、校验 Python、Harbor 和 worker 文件，不访问 Docker，也不写入 `ready.json`。它也可以随固定仓库和版本的显式 ANOLISA raw 可选包安装命令传入。RPM 在安装现有基础 RPM 后使用相同环境变量和 CLI，默认预置目录为 `/usr/lib/agent-sec-core/skill-score/preload/`，不新增 RPM。不要把该变量设为镜像全局 `ENV`。
+
+平台启动本地 Docker daemon 后，在实例接收评分任务前激活：
+
+```sh
+sudo agent-sec-cli skillsec score install-runtime
+```
+
+激活检查预置文件、版本和源码绑定、归档校验和及镜像身份。缺失镜像直接从本地压缩归档加载，不落地临时未压缩 tar，不构建镜像、不下载依赖；已有匹配镜像则复用。网络及执行环境检查通过后才记录就绪。Docker data-root 丢失后也可以从相同归档恢复。预置文件缺失或损坏会明确报错，不回退在线构建。
+
+预置文件应归 root 所有，其他用户不可写。生命周期锁阻止评分期间激活。卸载会删除 ASC 生成的运行环境，但保留平台提供的归档，由镜像所有者删除或通过替换整个镜像回收。回滚时一起恢复匹配的基础包、可选文件和预置归档。该流程不启动 Docker、不修改内核，也不要求新增云端发布流程。
+
 ## 构建与验证
 
 在 Linux 上使用固定 Rust toolchain 与 Docker/Compose 开发。`packaging/skill-score/build-preview.sh` 构建原生基础包、可选源码组件、配套安装器及 release-v4 元数据，再输出两个独立归档，绑定源码和制品身份。旧 `RAW_SKILL_SCORE_PAYLOAD` 路径被拒绝，不再包含评分 Python 3.11 环境；保留的 Python 评分器仅用作差分测试 oracle。

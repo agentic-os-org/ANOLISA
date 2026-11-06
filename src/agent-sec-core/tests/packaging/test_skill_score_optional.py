@@ -1,5 +1,6 @@
 """Deterministic optional preparation integrity and failure-recovery contracts."""
 
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -10,7 +11,9 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -25,6 +28,25 @@ try:
     SPEC.loader.exec_module(INSTALL)
 finally:
     sys.path.pop(0)
+
+# Packaging CI uses only stdlib; load the real worker readers without Pydantic models.
+CONTRACTS = types.ModuleType("agent_sec_cli.skill_score.contracts")
+CONTRACTS.ContractError = ValueError
+WORKER_MODULES = {}
+with patch.dict(sys.modules, {CONTRACTS.__name__: CONTRACTS}):
+    for name in ("files", "images"):
+        worker_spec = importlib.util.spec_from_file_location(
+            "agent_sec_skill_score_runtime." + name,
+            ROOT
+            / "skill-score-runtime/src/agent_sec_skill_score_runtime"
+            / (name + ".py"),
+        )
+        assert worker_spec and worker_spec.loader
+        worker_module = importlib.util.module_from_spec(worker_spec)
+        sys.modules[worker_spec.name] = worker_module
+        worker_spec.loader.exec_module(worker_module)
+        WORKER_MODULES[name] = worker_module
+WORKER_IMAGES = WORKER_MODULES["images"]
 
 
 class OptionalInstallTests(unittest.TestCase):
@@ -72,6 +94,435 @@ class OptionalInstallTests(unittest.TestCase):
         receipt["manifest_sha256"] = identity
         (candidate / "image-build.json").write_text(json.dumps(receipt))
         return receipt
+
+    def validate_worker_receipt(self, environment, _manifest, _recovery, images):
+        with patch.object(
+            WORKER_IMAGES.sys, "argv", [str(environment / "worker-entry.py")]
+        ):
+            WORKER_IMAGES.validate_prepared_images(images)
+
+    def preload_fixture(self) -> tuple[Path, Path, Path, dict, str, dict]:
+        prefix = self.root / "usr/local"
+        payload = INSTALL.runtime_root(prefix)
+        contract = (
+            self.root / "var/lib/anolisa/component-manifests/sec-core/component.toml"
+        )
+        contract.parent.mkdir(parents=True)
+        contract.write_bytes((ROOT / "packaging/anolisa/component.toml").read_bytes())
+        version = tomllib.loads(contract.read_text())["component"]["version"]
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "packaging/skill-score/package-optional.py"),
+                str(payload),
+                "--rpm-stage",
+                "--version",
+                version,
+                "--source-commit",
+                "a" * 40,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        manifest = json.loads((payload / "runtime-manifest.json").read_text())
+        identity = INSTALL.digest(payload / "runtime-manifest.json")
+        stack = self.enterContext(ExitStack())
+        stack.enter_context(
+            patch.object(INSTALL.platform, "system", return_value="Linux")
+        )
+        stack.enter_context(
+            patch.object(INSTALL.platform, "machine", return_value="x86_64")
+        )
+        stack.enter_context(patch.object(INSTALL, "python_check"))
+        stack.enter_context(
+            patch.dict(os.environ, {"ANOLISA_SKILL_SCORE_STAGE_ONLY": "0"})
+        )
+        self.dependencies = stack.enter_context(
+            patch.object(
+                INSTALL,
+                "build_environment",
+                side_effect=lambda candidate, *_: (
+                    candidate / "worker-entry.py"
+                ).write_text("worker"),
+            )
+        )
+        self.builder = stack.enter_context(
+            patch.object(
+                INSTALL.image_build,
+                "build",
+                side_effect=AssertionError("must not build images"),
+            )
+        )
+        self.docker = stack.enter_context(
+            patch.object(INSTALL, "require_local_docker", return_value=os.getgid())
+        )
+        self.network = stack.enter_context(patch.object(INSTALL, "network_check"))
+        self.environment_probe = stack.enter_context(
+            patch.object(
+                INSTALL, "environment_check", side_effect=self.validate_worker_receipt
+            )
+        )
+        with patch.dict(os.environ, {"ANOLISA_SKILL_SCORE_STAGE_ONLY": "1"}):
+            environment = INSTALL.prepare(payload, prefix, self.cache)
+            self.assertEqual(INSTALL.prepare(payload, prefix, self.cache), environment)
+        self.docker.assert_not_called()
+        self.network.assert_not_called()
+        self.environment_probe.assert_not_called()
+        self.dependencies.assert_called_once()
+        self.assertFalse((environment / "ready.json").exists())
+        self.assertTrue(INSTALL.staged_matches(environment, identity, manifest))
+        staged = payload / "preload"
+        staged.mkdir()
+        archive = staged / INSTALL.preload.ARCHIVE
+        archive.write_bytes(gzip.compress(b"synthetic docker archive"))
+        receipt = dict(self.built_receipt(), version=version, manifest_sha256=identity)
+        metadata = {
+            "schema": INSTALL.preload.SCHEMA,
+            "image_build": receipt,
+            "archive": {
+                "file": archive.name,
+                "bytes": archive.stat().st_size,
+                "sha256": INSTALL.digest(archive),
+            },
+        }
+        (staged / "manifest.json").write_text(json.dumps(metadata))
+        return prefix, payload, environment, manifest, identity, metadata
+
+    def test_static_staging_then_offline_activation_and_daemon_reset(self) -> None:
+        prefix, payload, environment, manifest, identity, _ = self.preload_fixture()
+        images = {"work": "sha256:" + "a" * 64, "egress": "sha256:" + "b" * 64}
+        with (
+            patch.dict(os.environ, {"ANOLISA_SKILL_SCORE_OFFLINE": "1"}),
+            patch.object(
+                INSTALL,
+                "images_ready",
+                side_effect=[None, images, images, None, images],
+            ),
+            patch.object(INSTALL.preload, "load") as load,
+        ):
+            saved = None
+            for _ in range(3):
+                self.assertEqual(
+                    INSTALL.prepare(payload, prefix, self.cache), environment
+                )
+                self.assertTrue(INSTALL.ready_matches(environment, identity, manifest))
+                current = tuple(
+                    (environment / name).read_bytes()
+                    for name in ("ready.json", "image-build.json")
+                )
+                if saved is not None:
+                    self.assertEqual(current, saved)
+                saved = current
+                metadata = payload / "preload/manifest.json"
+                value = json.loads(metadata.read_text())
+                value["image_build"] = dict(
+                    reversed(list(value["image_build"].items()))
+                )
+                metadata.write_text(json.dumps(value))
+            self.assertEqual(load.call_count, 2)
+            self.assertEqual(
+                load.call_args.args[0], payload / "preload" / INSTALL.preload.ARCHIVE
+            )
+        self.dependencies.assert_called_once()
+        self.builder.assert_not_called()
+        self.assertEqual(self.environment_probe.call_count, 3)
+        subprocess.run([sys.executable, str(payload / "uninstall.py")], check=True)
+        self.assertFalse(environment.exists())
+        self.assertTrue((payload / "preload" / INSTALL.preload.ARCHIVE).exists())
+
+    def test_preload_receipt_reaches_worker_before_first_ready_marker(self) -> None:
+        prefix, payload, environment, _, _, metadata = self.preload_fixture()
+        images = {
+            item["role"]: item["id"] for item in metadata["image_build"]["images"]
+        }
+        self.assertFalse((environment / "image-build.json").exists())
+
+        def check_worker(*arguments):
+            self.validate_worker_receipt(*arguments)
+            self.assertEqual(
+                json.loads((environment / "image-build.json").read_text()),
+                metadata["image_build"],
+            )
+            self.assertFalse((environment / "ready.json").exists())
+
+        self.environment_probe.side_effect = check_worker
+        with patch.object(INSTALL, "images_ready", return_value=images):
+            INSTALL.prepare(payload, prefix, self.cache)
+        self.environment_probe.assert_called_once()
+        self.assertTrue((environment / "ready.json").is_file())
+
+    def test_preload_damage_fails_before_docker_or_download(self) -> None:
+        prefix, payload, environment, _, _, metadata = self.preload_fixture()
+        archive = payload / "preload" / INSTALL.preload.ARCHIVE
+        original = archive.read_bytes()
+        for damage in (
+            "bytes",
+            "source",
+            "version",
+            "path",
+            "platform",
+            "writable",
+            "symlink",
+        ):
+            with self.subTest(damage=damage):
+                value = json.loads(json.dumps(metadata))
+                if damage == "bytes":
+                    archive.write_bytes(b"corrupt")
+                elif damage in {"source", "version"}:
+                    value["image_build"][
+                        "source_commit" if damage == "source" else "version"
+                    ] = "wrong"
+                elif damage == "path":
+                    value["archive"]["file"] = "../escape"
+                elif damage == "platform":
+                    value["image_build"]["images"][0]["platform"] = "linux/arm64"
+                elif damage == "writable":
+                    archive.chmod(0o666)
+                else:
+                    archive.unlink()
+                    archive.symlink_to(self.root / "missing")
+                (payload / "preload/manifest.json").write_text(json.dumps(value))
+                with self.assertRaises((ValueError, FileNotFoundError)):
+                    INSTALL.prepare(payload, prefix, self.cache)
+                self.assertFalse((environment / "ready.json").exists())
+                archive.unlink()
+                archive.write_bytes(original)
+        self.docker.assert_not_called()
+        self.builder.assert_not_called()
+        self.dependencies.assert_called_once()
+
+    def test_missing_preload_or_modified_staged_files_cannot_rebuild_online(
+        self,
+    ) -> None:
+        prefix, payload, environment, _, _, _ = self.preload_fixture()
+        (environment / "worker-entry.py").write_text("changed")
+        with self.assertRaisesRegex(ValueError, "intact staged files"):
+            INSTALL.prepare(payload, prefix, self.cache)
+        (payload / "preload").rename(payload / "saved-preload")
+        with self.assertRaisesRegex(ValueError, "missing its preload"):
+            INSTALL.prepare(payload, prefix, self.cache)
+        self.docker.assert_not_called()
+        self.builder.assert_not_called()
+
+    def test_failed_preload_checks_never_mark_ready_and_retry_is_safe(self) -> None:
+        prefix, payload, environment, manifest, identity, metadata = (
+            self.preload_fixture()
+        )
+        with (
+            patch.object(INSTALL, "images_ready", return_value=None),
+            patch.object(INSTALL.preload, "load"),
+        ):
+            with self.assertRaisesRegex(ValueError, "loaded images differ"):
+                INSTALL.prepare(payload, prefix, self.cache)
+        self.assertFalse((environment / "ready.json").exists())
+        images = {
+            item["role"]: item["id"] for item in metadata["image_build"]["images"]
+        }
+        with patch.object(INSTALL, "images_ready", return_value=images):
+            self.network.side_effect = RuntimeError("network failed")
+            with self.assertRaisesRegex(RuntimeError, "network failed"):
+                INSTALL.prepare(payload, prefix, self.cache)
+            self.assertFalse((environment / "ready.json").exists())
+            self.network.side_effect = None
+            for failure in (
+                RuntimeError("worker failed"),
+                KeyboardInterrupt("cancelled"),
+            ):
+
+                def failed_worker(*arguments):
+                    self.validate_worker_receipt(*arguments)
+                    raise failure
+
+                self.environment_probe.side_effect = failed_worker
+                with self.assertRaises(type(failure)) as raised:
+                    INSTALL.prepare(payload, prefix, self.cache)
+                self.assertIs(raised.exception, failure)
+                self.assertFalse((environment / "ready.json").exists())
+                self.assertTrue(INSTALL.staged_matches(environment, identity, manifest))
+            self.environment_probe.side_effect = self.validate_worker_receipt
+            INSTALL.prepare(payload, prefix, self.cache)
+        self.assertTrue((environment / "ready.json").exists())
+        self.dependencies.assert_called_once()
+
+    def test_ready_preload_mismatch_cannot_replace_validated_receipt(self) -> None:
+        prefix, payload, environment, _, _, metadata = self.preload_fixture()
+        images = {
+            item["role"]: item["id"] for item in metadata["image_build"]["images"]
+        }
+        with patch.object(INSTALL, "images_ready", return_value=images) as inspect:
+            INSTALL.prepare(payload, prefix, self.cache)
+            saved = [
+                (environment / name).read_bytes()
+                for name in ("ready.json", "image-build.json")
+            ]
+            metadata["image_build"]["images"][0]["id"] = "sha256:" + "e" * 64
+            (payload / "preload/manifest.json").write_text(json.dumps(metadata))
+            inspect.reset_mock()
+            self.environment_probe.reset_mock()
+            with self.assertRaisesRegex(ValueError, "preload images differ"):
+                INSTALL.prepare(payload, prefix, self.cache)
+            inspect.assert_not_called()
+            self.environment_probe.assert_not_called()
+            self.assertEqual(
+                saved,
+                [
+                    (environment / name).read_bytes()
+                    for name in ("ready.json", "image-build.json")
+                ],
+            )
+
+    def test_receipt_repair_cannot_revive_ready_before_worker_succeeds(self) -> None:
+        prefix, payload, environment, manifest, identity, metadata = (
+            self.preload_fixture()
+        )
+        images = {
+            item["role"]: item["id"] for item in metadata["image_build"]["images"]
+        }
+
+        def failed_worker(*arguments):
+            self.validate_worker_receipt(*arguments)
+            self.assertFalse((environment / "ready.json").exists())
+            raise RuntimeError("worker failed")
+
+        with patch.object(INSTALL, "images_ready", return_value=images):
+            INSTALL.prepare(payload, prefix, self.cache)
+            (environment / "image-build.json").unlink()
+            self.environment_probe.side_effect = failed_worker
+            with self.assertRaisesRegex(RuntimeError, "worker failed"):
+                INSTALL.prepare(payload, prefix, self.cache)
+            self.assertFalse((environment / "ready.json").exists())
+            self.assertTrue(INSTALL.staged_matches(environment, identity, manifest))
+            self.environment_probe.side_effect = self.validate_worker_receipt
+            INSTALL.prepare(payload, prefix, self.cache)
+        self.assertTrue(INSTALL.ready_matches(environment, identity, manifest))
+
+    def test_failed_receipt_publication_preserves_previous_bytes_and_retries(
+        self,
+    ) -> None:
+        prefix, payload, environment, _, _, metadata = self.preload_fixture()
+        images = {
+            item["role"]: item["id"] for item in metadata["image_build"]["images"]
+        }
+
+        def failed_worker(*arguments):
+            self.validate_worker_receipt(*arguments)
+            raise RuntimeError("worker failed")
+
+        self.environment_probe.side_effect = failed_worker
+        with patch.object(INSTALL, "images_ready", return_value=images):
+            with self.assertRaisesRegex(RuntimeError, "worker failed"):
+                INSTALL.prepare(payload, prefix, self.cache)
+            receipt_path = environment / "image-build.json"
+            previous = receipt_path.read_bytes()
+            metadata["image_build"]["images"][0]["id"] = "sha256:" + "e" * 64
+            images["work"] = "sha256:" + "e" * 64
+            (payload / "preload/manifest.json").write_text(json.dumps(metadata))
+            self.environment_probe.reset_mock()
+            with patch.object(Path, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    INSTALL.prepare(payload, prefix, self.cache)
+            self.environment_probe.assert_not_called()
+            self.assertEqual(receipt_path.read_bytes(), previous)
+            self.assertFalse((environment / "ready.json").exists())
+            self.assertFalse(list(environment.glob(".image-build-*.tmp")))
+            self.environment_probe.side_effect = self.validate_worker_receipt
+            INSTALL.prepare(payload, prefix, self.cache)
+        self.assertEqual(json.loads(receipt_path.read_text()), metadata["image_build"])
+        self.assertTrue((environment / "ready.json").is_file())
+
+    def test_internal_export_entry_requires_a_healthy_installed_runtime(self) -> None:
+        prefix, payload, _, _, _, metadata = self.preload_fixture()
+        with (
+            patch.object(
+                INSTALL,
+                "images_ready",
+                return_value={
+                    item["role"]: item["id"]
+                    for item in metadata["image_build"]["images"]
+                },
+            ),
+            patch.object(INSTALL, "__file__", str(payload / "install.py")),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "install.py",
+                    "--prefix",
+                    str(prefix),
+                    "--export-preload",
+                    str(self.root / "export"),
+                ],
+            ),
+            patch.object(INSTALL.preload, "export") as export,
+            patch("builtins.print") as output,
+        ):
+            with self.assertRaises(SystemExit):
+                INSTALL.main()
+            export.assert_not_called()
+            INSTALL.prepare(payload, prefix, self.cache)
+            INSTALL.main()
+            export.assert_called_once()
+            self.assertEqual(json.loads(output.call_args.args[0])["status"], "exported")
+            self.environment_probe.side_effect = RuntimeError("environment unavailable")
+            with self.assertRaisesRegex(SystemExit, "environment unavailable"):
+                INSTALL.main()
+            export.assert_called_once()
+
+    def test_preload_export_streams_compressed_data_and_loads_it_directly(self) -> None:
+        script = self.root / "docker"
+        script.write_text(
+            '#!/bin/sh\ncase "$1" in\nsave) printf \'docker save content\';;\nload) test "$2" = --input && test -f "$3";;\n*) exit 1;;\nesac\n'
+        )
+        script.chmod(0o755)
+        receipt = self.built_receipt()
+        output = self.root / "export"
+        with patch.dict(
+            os.environ, {"PATH": str(self.root) + os.pathsep + os.environ["PATH"]}
+        ):
+            INSTALL.preload.export(
+                output, receipt, {"work": "work", "egress": "egress"}, lambda: None
+            )
+            _, archive = INSTALL.preload.read(
+                output, {"version": "test", "source_commit": "a" * 40}, "c" * 64
+            )
+            self.assertEqual(
+                gzip.decompress(archive.read_bytes()), b"docker save content"
+            )
+            INSTALL.preload.load(archive, lambda: None, self.cache)
+        self.assertEqual(
+            {p.name for p in output.iterdir()},
+            {"manifest.json", INSTALL.preload.ARCHIVE},
+        )
+        self.assertFalse(list(self.cache.iterdir()))
+        with self.assertRaisesRegex(ValueError, "must not exist"):
+            INSTALL.preload.export(output, receipt, {}, lambda: None)
+
+    def test_preload_load_cancel_and_timeout_stop_only_owned_process(self) -> None:
+        process = Mock()
+        process.pid = 12345
+        process.poll.return_value = None
+        for failure in ("cancel", "timeout", "exit"):
+            with (
+                self.subTest(failure=failure),
+                patch.object(INSTALL.preload.subprocess, "Popen", return_value=process),
+                patch.object(INSTALL.preload.os, "killpg") as terminate,
+                patch.object(INSTALL.preload.time, "monotonic", side_effect=[0, 901]),
+            ):
+                process.poll.return_value = 1 if failure == "exit" else None
+                process.returncode = 1
+                cancelled = Mock(
+                    side_effect=(
+                        InterruptedError("cancelled") if failure == "cancel" else None
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "private image build log"):
+                    INSTALL.preload.load(
+                        self.root / "archive.tar.gz", cancelled, self.cache
+                    )
+                if failure == "exit":
+                    terminate.assert_not_called()
+                else:
+                    terminate.assert_called_once_with(12345, INSTALL.signal.SIGTERM)
 
     def test_rpm_recipe_is_lightweight_and_repeated_prepare_reuses_the_environment(
         self,

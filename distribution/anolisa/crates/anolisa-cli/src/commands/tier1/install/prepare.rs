@@ -145,6 +145,7 @@ pub(super) fn run_candidate_prepare(
         "ANOLISA_SKILL_SCORE_BASE_IMAGE",
         "ANOLISA_SKILL_SCORE_BASE_RECIPE",
         "ANOLISA_SKILL_SCORE_BUILD_NETWORK",
+        "ANOLISA_SKILL_SCORE_STAGE_ONLY",
     ] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
