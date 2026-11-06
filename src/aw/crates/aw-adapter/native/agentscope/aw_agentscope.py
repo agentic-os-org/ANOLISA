@@ -78,7 +78,9 @@ class AwInvocationMiddleware(MiddlewareBase):
         """
         try:
             _encode_payload({"input": raw_input})
-            effective = _json_loads_with_repair(raw_input)
+            from aw_execution import public_value
+
+            effective = public_value(_json_loads_with_repair(raw_input))
             # Bound the decoded object exactly like the hook payload: a
             # registration must stay inside the wire domain its invoke uses.
             _encode_payload({"input": effective})
@@ -186,7 +188,7 @@ class AwInvocationMiddleware(MiddlewareBase):
                 _invocation_scope.reset(scope_token)
                 _invocation_id.reset(token)
         if final_response is not None:
-            if self._strict_output:
+            if self._strict_output or (owner is not None and owner.execution is not None):
                 yield ToolChunk(**final_response.model_dump(), is_last=True)
             yield final_response
 
@@ -504,6 +506,10 @@ class AwPolicyMiddleware(MiddlewareBase):
             AwToolMiddleware(config, hook, last_before=hook is last_before)
             for hook in config["hooks"] if hook["event"] != "input.submit"
         ]]
+        if scope.execution is not None:
+            from aw_execution import AwPrivateMiddleware
+
+            chain.append(AwPrivateMiddleware())
         for middleware in reversed(chain):
             next_handler = partial(middleware.on_acting, agent, input_kwargs, next_handler)
         async with aclosing(next_handler()) as stream:
@@ -528,7 +534,8 @@ class AwBridge:
         self._ready = False
 
     def create_agent(
-        self, *args: Any, middlewares: list[MiddlewareBase] | None = None, **kwargs: Any
+        self, *args: Any, middlewares: list[MiddlewareBase] | None = None,
+        execution_factory=None, **kwargs: Any
     ) -> Any:
         """Use this entry in every new/resumed Agent factory, before serving turns."""
         from agentscope.agent import Agent
@@ -543,15 +550,16 @@ class AwBridge:
         ]
         factory = Agent
         extra = {}
-        if self.config.get("resident_policy_reload") or any(
+        if execution_factory is not None or self.config.get("resident_policy_reload") or any(
                 hook["event"] == "input.submit" for hook in self.config["hooks"]):
             from aw_submission import AwSubmissionAgent, AwSubmissionMiddleware
 
             factory = AwSubmissionAgent
             extra["aw_config"] = self.config
+            extra["aw_execution_factory"] = execution_factory
             additions.insert(0, AwSubmissionMiddleware(self.config))
         hooks = [AwInvocationMiddleware(self.config), *additions]
-        if self.config.get("resident_policy_reload"):
+        if execution_factory is not None or self.config.get("resident_policy_reload"):
             hooks = [AwSubmissionMiddleware(self.config), AwPolicyMiddleware()]
         agent = factory(
             *args,

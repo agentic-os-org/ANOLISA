@@ -96,6 +96,47 @@ except SubmissionDenied as error:
 发布受检最终内容。`reply_stream` 消费者和模型收到相同的采用文本或拦截占位结果。
 未配置严格 after 路由的目标保持原生中间 chunk。
 
+## 任务私有工具凭据
+
+在 `AwBridge.create_agent` 中传入 `execution_factory`，每次回复申请一份应用租约，
+未配置 `input.submit` 时同样生效。复用 `aw_private.PrivateExecution` 合同；工具创建
+子进程或客户端时，须显式消费 `execution_environment()`。
+
+```python
+import asyncio
+from contextlib import asynccontextmanager
+from aw_private import PrivateExecution, execution_environment
+
+@asynccontextmanager
+async def execution_factory():
+    credentials = await credential_service.acquire()
+    try:
+        yield PrivateExecution(
+            environment=credentials.environment,
+            hook_environment=credentials.public_environment,
+            secrets=credentials.secrets,
+            redact=credentials.redact,
+        )
+    finally:
+        await credentials.revoke()
+
+agent = bridge.create_agent(
+    name="worker", model=model, toolkit=toolkit,
+    execution_factory=execution_factory,
+)
+# Inside an application tool:
+process = await asyncio.create_subprocess_exec(command, env=execution_environment())
+```
+
+`credential_service`、`model`、`toolkit` 和 `command` 由应用提供。
+同步脱敏函数须覆盖完整结果内容与 metadata，且重复调用保持幂等。AW 暂存工具分片，
+对最终 `ToolResponse` 脱敏后再交给公开 Hook 和模型。全部 Hook 和调用退休完成后，
+流消费者收到一个最终分片。原生参数与 worker 的全局环境保持原样，Hook 只接收 `hook_environment`。
+
+AW 在申请凭据前保留回复占用，等待原生工具排空、子 Scope 关闭、凭据确认撤销后释放。
+申请和撤销各限时 60 秒。撤销失败或超时会保留占用并拒绝后续回复，需要重启 worker；
+晚到操作仍由原任务清理，不会进入新的任务执行。详见[租约合同](../../../../../src/aw/docs/design/zh/adapters/private-execution.md#agentscope-回复工厂)。
+
 ## 更新常驻 worker
 
 普通 `aw run` 在全部 `reply` / `reply_stream` 及清理结束后支持策略更新。

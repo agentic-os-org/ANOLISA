@@ -66,7 +66,8 @@ module = types.ModuleType("aw_agentscope")
 module.AwToolMiddleware = Diagnostic
 module._encode_payload = json.dumps
 sys.modules["aw_agentscope"] = module
-sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "crates/aw-adapter/native/agentscope"))
+NATIVE = Path(__file__).resolve().parents[5] / "crates/aw-adapter/native"
+sys.path[:0] = [str(NATIVE / "agentscope"), str(NATIVE / "qwenpaw")]
 import aw_submission as bridge
 from aw_scope_ledger import AwTaskScope, CallbackFailure
 import aw_scope_ledger as ledger
@@ -75,6 +76,9 @@ import aw_scope_ledger as ledger
 class Scope:
     def __init__(self):
         self.closed = False
+        self.execution = None
+        self.cleanup_task = None
+        self.tasks = set()
         self.reservation = None
         self.calls = []
         self.mode = "allow"
@@ -98,7 +102,7 @@ class Scope:
 class Tests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.scopes = []
-        async def open_scope(config):
+        async def open_scope(config, execution_factory=None):
             scope = Scope()
             scope.mode = self.mode
             scope.config = config

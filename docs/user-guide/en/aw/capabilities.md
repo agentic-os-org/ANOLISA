@@ -87,6 +87,15 @@ Hermes local chat supports directory-based `skill_view` through the same
 `tool.before` check. See [Hermes Skill sources](../../../developer-guide/en/aw/agents/hermes.md#skill-trust)
 for native selection and source limits.
 
+## Task-private credentials
+
+AgentScope SDK 2.0.6 factory replies support application-owned private leases.
+Tools explicitly consume their execution environment; public Hooks and model
+results receive the redacted view. Acquisition, tool drain and revocation keep
+policy updates busy. See [factory setup and cleanup limits](../../../developer-guide/en/aw/agents/agentscope.md#task-private-tool-credentials).
+Native acceptance is registered as `private-lease` and `private-native` in the
+[native matrix](../../../../src/aw/tests/native-matrix.json).
+
 ## MCP and policy updates
 
 | Entrypoint | Managed MCP | Idle policy updates |

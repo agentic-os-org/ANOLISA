@@ -11,9 +11,10 @@
 | Adapter | 租约边界 | 显式消费接点 |
 | --- | --- | --- |
 | Qoder SDK 1.0.56 / Worker 1.1.78 | 每次受管 MCP handler 调用一个租约，由所属 Query 管理 | 创建客户端或子进程时调用 `bridge.executionEnvironment()` |
+| AgentScope SDK 2.0.6 | 每次工厂回复一个租约，由该回复的工具共享 | 应用工具显式调用 `execution_environment()` |
 | QwenPaw 2.2.2.post1 / AgentScope 2.0.10 | 每次受管 Agent reply 一个租约，由该 reply 的工具共享 | 已安装的原生环境扩展调用 `execution_environment()` |
 
-两者使用 `aw.private-execution/v1` 合同。执行 helper 返回已准入环境与声明的秘密值的
+这些 Adapter 使用 `aw.private-execution/v1` 合同。执行 helper 返回已准入环境与声明的秘密值的
 副本，Hook helper 返回独立公开视图，均不修改进程环境。应用须在 `secrets` 中声明敏感值，
 并从 Hook 视图中排除其键名和值。凭据不得放入模型可见工具参数。脱敏函数须覆盖返回值
 的全部字段，包括结构化 MCP 数据与错误内容，并保留原生结果结构和错误状态。
@@ -87,6 +88,26 @@ reply 调用一次；`aw_environment_version: 1` 声明已安装原生执行扩�
 生成器和回调终结器结束后才进入清理。QwenPaw 先尝试关闭任务 scope，再退出凭据
 工厂；reply 清理等待该 finalizer 完成。租约失败会在进程范围封锁新请求。offload
 工具及其完成回调也在此所有权范围内。
+
+## AgentScope 回复工厂
+
+独立 AgentScope 2.0.6 支持 `AwBridge.create_agent(execution_factory=...)`，复用
+QwenPaw 的 `PrivateExecution` 类。工厂为每次公共 `reply` / `reply_stream` 提供一个
+租约，原生工具显式消费 `execution_environment()`。接线示例见
+[AgentScope 指南](../../../../../../docs/developer-guide/zh/aw/agents/agentscope.md#任务私有工具凭据)。
+
+Scope 持有租约，回复 ContextVar 仅负责执行上下文。先保留根占用，再申请凭据，最后
+使用 Hook 环境打开子 Scope。回复在同一 task 中设置与恢复 ContextVar；清理可在受保护
+的独立 task 中运行。不同 Agent 的上下文与 Scope 相互独立。
+
+原生执行保留原参数，登记摘要与公开 Hook payload 使用同一幂等脱敏函数。AW 最内层
+工具中间件暂存分片，在完整结果形成后连同 metadata 脱敏，再交给外层 Post Hook 和
+原生模型。应用中间件保持可信；直接 Toolkit 调用与未显式消费环境的工具需要应用接线。
+
+清理依次排空原生工具、关闭子 Scope、确认凭据撤销、释放根占用。申请与撤销各有
+60 秒预算。超时保留原任务与占用；晚到申请只撤销一次，不进入原生执行。
+撤销失败或超时后拒绝新回复，需要重启 worker，即使原 finalizer 随后成功也保持拒绝。
+取消在此期限内等待所属操作完成；申请失败前的局部资源由应用工厂自行清理。
 
 ## 故障与生命周期
 

@@ -165,9 +165,10 @@ async def _owned_stream(stream: AsyncGenerator, scope: Any) -> AsyncGenerator:
 class AwSubmissionAgent(Agent):
     """Keep public reply lifetime around the SDK's nested async generators."""
 
-    def __init__(self, *args: Any, aw_config: dict[str, Any], **kwargs: Any) -> None:
+    def __init__(self, *args: Any, aw_config: dict[str, Any], aw_execution_factory=None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._aw_config = aw_config
+        self._aw_execution_factory = aw_execution_factory
         self._aw_busy = False
         self._aw_pid = os.getpid()
 
@@ -186,9 +187,12 @@ class AwSubmissionAgent(Agent):
             raise ValueError("AW reply requires a bounded session_id")
         self._aw_busy = True
         scope = None
-        token = scope_token = None
+        from aw_private import current_execution
+
+        token = scope_token = execution_token = None
         try:
-            scope = await open_turn_scope(self._aw_config)
+            scope = await open_turn_scope(self._aw_config, self._aw_execution_factory)
+            execution_token = current_execution.set(scope.execution.lease if scope.execution else None)
             scope_token = turn_scope.set(scope)
             token = _turn.set({"agent": self, "scope": scope, "session": session, "id": uuid4().hex})
             yield
@@ -208,6 +212,8 @@ class AwSubmissionAgent(Agent):
 
                         AwToolMiddleware._diagnostic(b"AW reply scope cleanup failed\n")
             finally:
+                if execution_token is not None:
+                    current_execution.reset(execution_token)
                 if token is not None:
                     _turn.reset(token)
                 if scope_token is not None:

@@ -73,6 +73,14 @@ QwenPaw 的 `skill-objects` 另覆盖实际同名选择、来源固定与取消�
 Hermes 本地 chat 通过同一 `tool.before` 检查支持目录型 `skill_view`。
 原生选择与来源范围见 [Hermes Skill 接入](../../../developer-guide/zh/aw/agents/hermes.md#skill-信任检查)。
 
+## 任务私有凭据
+
+AgentScope SDK 2.0.6 工厂回复支持应用自有私有租约。工具显式消费执行环境，公开 Hook
+和模型结果接收脱敏视图。申请、工具排空及撤销期间保持策略更新 busy。
+见[工厂接入与清理限制](../../../developer-guide/zh/aw/agents/agentscope.md#任务私有工具凭据)。
+原生验收在[原生矩阵](../../../../src/aw/tests/native-matrix.json)登记为
+`private-lease` 和 `private-native`。
+
 ## MCP 与策略更新
 
 | 入口 | 受管 MCP | 空闲策略更新 |

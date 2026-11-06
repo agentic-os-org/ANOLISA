@@ -17,7 +17,7 @@ _BRIDGE = ROOT / "crates/aw-adapter/native/agentscope"
 # aw_agentscope imports its sibling ledger module by absolute name; the direct
 # unittest entrypoint must place that directory on the module search path the
 # same way the launcher does for aw run.
-sys.path.insert(0, str(_BRIDGE))
+sys.path[:0] = [str(_BRIDGE), str(_BRIDGE.parent / "qwenpaw")]
 SPEC = importlib.util.spec_from_file_location(
     "aw_agentscope", _BRIDGE / "aw_agentscope.py"
 )

@@ -11,7 +11,7 @@
       "requirements": [
         "agentscope==2.0.6"
       ],
-      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model. Strict tool.after withholding replaces an unchecked native result with an error-state placeholder at the end of the middleware chain on timeout, hook error and invalid reply, keeping the original payload correlated for outer after hooks, and requires SDK 2.0.6+. Long histories recycle correlation capacity through the invocation ledger: 600 sequential tool calls in one worker complete past the legacy 512-call limit, and replayed registrations are rejected. Factory input.submit checks native user text before model HTTP requests on reply and reply_stream, with independent per-reply scopes and explicit stream close. Controlled Provider faults and the real sec-core Provider with a controlled scanner CLI exercise prompt/PII routing and failure policies. Early closure cancels active tool tasks before scope release; deployed security backend acceptance remains separate. Ordinary resident policy updates use a snapshot per reply and retain occupancy through model execution, tool drain and confirmed scope release; native acceptance covers policy addition/removal in one Agent and busy rejection.",
+      "boundary": "Public Agent.reply, middleware, arguments, cancellation and AW/Tokenless lifecycle; deterministic tools, no hosted model. Strict tool.after withholding replaces an unchecked native result with an error-state placeholder at the end of the middleware chain on timeout, hook error and invalid reply, keeping the original payload correlated for outer after hooks, and requires SDK 2.0.6+. Long histories recycle correlation capacity through the invocation ledger: 600 sequential tool calls in one worker complete past the legacy 512-call limit, and replayed registrations are rejected. Factory input.submit checks native user text before model HTTP requests on reply and reply_stream, with independent per-reply scopes and explicit stream close. Controlled Provider faults and the real sec-core Provider with a controlled scanner CLI exercise prompt/PII routing and failure policies. Early closure cancels active tool tasks before scope release; deployed security backend acceptance remains separate. Ordinary resident policy updates use a snapshot per reply and retain occupancy through model execution, tool drain and confirmed scope release; native acceptance covers policy addition/removal in one Agent and busy rejection. Application-owned private-execution/v1 leases retain root occupancy through acquisition, native drain and revocation. Explicit tool subprocess environments, whole-result redaction before Hooks/model HTTP, cancellation, late lease cleanup, timeouts and failed-revocation fencing are covered.",
       "cases": [
         {
           "name": "middleware",
@@ -269,6 +269,45 @@
                 "busy_rejections": 2,
                 "executed": 5,
                 "same_worker": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "private-lease",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/native_private.py"
+          ],
+          "timeout_seconds": 120,
+          "report": "unittest",
+          "tests": 16
+        },
+        {
+          "name": "private-native",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/agentscope/private.py",
+            "--aw",
+            "{bin}/aw",
+            "--output",
+            "{output}/private-native"
+          ],
+          "timeout_seconds": 300,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/private-native/result.json",
+              "values": {
+                "passed": true,
+                "sdk_version": "2.0.6",
+                "model_requests": 10,
+                "tool_subprocesses": 5,
+                "public_hooks": 10,
+                "busy_rejections": 3,
+                "failed_revoke_fenced": true,
+                "bindings": 0,
+                "events": 0
               }
             }
           ]
