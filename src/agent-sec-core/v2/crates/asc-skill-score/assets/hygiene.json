@@ -1,0 +1,209 @@
+{
+  "LP001": {
+    "category": "least_privilege",
+    "weight": 3,
+    "topic": "PE1",
+    "control": "Unnecessary broad privilege",
+    "gap_example": "A read-only inventory requests root and all-host write access.",
+    "safe_example": "A narrowly scoped read-only account suffices.",
+    "not_applicable": "No privileged action."
+  },
+  "LP002": {
+    "category": "least_privilege",
+    "weight": 3,
+    "topic": "R1",
+    "control": "Unconstrained code evaluation",
+    "gap_example": "An operator-configurable environment/config value is evaluated as command text without an execution bound. Operator authorization alone is not a bound; this is a control gap, not proof of an attacker-controlled exploit.",
+    "safe_example": "A fixed command with bounded arguments replaces evaluation.",
+    "not_applicable": "Quoted eval examples are never executed."
+  },
+  "UI001": {
+    "category": "untrusted_input_boundary",
+    "weight": 3,
+    "topic": "R1",
+    "control": "Command/data separation",
+    "gap_example": "A value supplied as DATA (filename, text, config or query parameter) is interpolated into shell, Python, SQL or other interpreter SOURCE without enforcing data-only syntax. Inspect every interpreter invocation, including fallbacks. Operator permission to supply a filename is not permission to execute code through that filename. Shell quoting does not protect a second interpreter's syntax.",
+    "safe_example": "Fixed source consumes data through argv/stdin or bound parameters. A safe invocation in another branch does not protect an interpolating invocation.",
+    "not_applicable": "Only a fixed literal command executes."
+  },
+  "UI002": {
+    "category": "untrusted_input_boundary",
+    "weight": 2,
+    "topic": "R1",
+    "control": "Path containment",
+    "gap_example": "A file operation (including chmod/chown metadata changes) accepts input/config paths without checking its permitted root. Joining root + relative path does not contain '..' or symlinks. Inspect each actual mutation, not only reads or shell injection.",
+    "safe_example": "Resolved paths are checked under an explicit allowed root.",
+    "not_applicable": "Only a fixed bundled file is accessed."
+  },
+  "UI003": {
+    "category": "untrusted_input_boundary",
+    "weight": 2,
+    "topic": "P1",
+    "control": "External text trust boundary",
+    "gap_example": "Fetched instructions are explicitly delegated task authority without a trust check.",
+    "safe_example": "Retrieved instructions stay quoted data and cannot change the task.",
+    "not_applicable": "No external text is consumed."
+  },
+  "SD001": {
+    "category": "sensitive_data_handling",
+    "weight": 3,
+    "topic": "PE3",
+    "control": "Sensitive output redaction",
+    "gap_example": "An active credential diagnostic prints secret-bearing configuration without redaction.",
+    "safe_example": "Only redacted credential metadata is printed.",
+    "not_applicable": "A placeholder token or in-memory authentication is not output."
+  },
+  "SD002": {
+    "category": "sensitive_data_handling",
+    "weight": 2,
+    "topic": "E2",
+    "control": "Credential environment scope",
+    "gap_example": "A helper forwards the complete credential-bearing environment to child tools.",
+    "safe_example": "Only named credentials needed by the child are passed.",
+    "not_applicable": "No credentials are accessed or forwarded."
+  },
+  "DI001": {
+    "category": "dependency_integrity",
+    "weight": 3,
+    "topic": "SC2",
+    "control": "Remote executable verification",
+    "gap_example": "An installer pipes a downloaded script directly to an interpreter.",
+    "safe_example": "A trusted signature is checked before executing the pinned artifact.",
+    "not_applicable": "Downloaded content is only parsed as data."
+  },
+  "DI002": {
+    "category": "dependency_integrity",
+    "weight": 2,
+    "topic": "SC1",
+    "control": "Dependency pinning and integrity",
+    "gap_example": "Executable dependencies resolve mutable releases without a pin or integrity check.",
+    "safe_example": "A trusted lockfile and verified digests constrain resolution.",
+    "not_applicable": "A fixed bundled dependency is used without downloading code."
+  },
+  "DA001": {
+    "category": "destructive_action_safety",
+    "weight": 3,
+    "topic": "R1",
+    "control": "Destructive action authorization",
+    "gap_example": "A material deletion runs without explicit target scope, preview or approval.",
+    "safe_example": "The user approves the exact previewed destructive target.",
+    "not_applicable": "Disposable temporary cleanup is already explicitly authorized."
+  },
+  "DA002": {
+    "category": "destructive_action_safety",
+    "weight": 3,
+    "topic": "R1",
+    "control": "Destructive target bounds",
+    "gap_example": "Recursive mutation accepts broad roots or wildcard expansion without limits.",
+    "safe_example": "Exact resolved targets reject broad roots and preserve recovery.",
+    "not_applicable": "A fixed disposable test artifact is removed."
+  },
+  "DA003": {
+    "category": "destructive_action_safety",
+    "weight": 1,
+    "topic": "R2",
+    "control": "Mutation recovery",
+    "gap_example": "A material configuration change offers no dry-run, backup, transaction or rollback.",
+    "safe_example": "A tested transaction or backup restores the changed resource.",
+    "not_applicable": "Only read-only or trivial disposable work occurs."
+  },
+  "EG001": {
+    "category": "egress_destination_control",
+    "weight": 3,
+    "topic": "E1",
+    "control": "Destination authorization",
+    "gap_example": "An externally supplied endpoint is used without a destination policy or approval.",
+    "safe_example": "An approved allowlist bounds destinations.",
+    "not_applicable": "No outbound request occurs."
+  },
+  "EG002": {
+    "category": "egress_destination_control",
+    "weight": 3,
+    "topic": "E1",
+    "control": "Outbound payload minimization",
+    "gap_example": "A private diagnostic upload sends unrestricted fields without a purpose/data boundary.",
+    "safe_example": "Only approved, minimized and redacted fields are transmitted.",
+    "not_applicable": "The payload contains only designated public data."
+  },
+  "EG003": {
+    "category": "egress_destination_control",
+    "weight": 2,
+    "topic": "E1",
+    "control": "External transport encryption",
+    "gap_example": "An active external HTTP endpoint has no authenticated encrypted transport.",
+    "safe_example": "The external service uses authenticated TLS.",
+    "not_applicable": "Loopback-only mock HTTP is used."
+  },
+  "UI004": {
+    "category": "untrusted_input_boundary",
+    "weight": 2,
+    "topic": "R3",
+    "control": "Untrusted processing bounds",
+    "gap_example": "External archives, recursive or buffered data have no relevant size/count/depth/time bound.",
+    "safe_example": "Input and processing limits are enforced at the consuming path.",
+    "not_applicable": "Only bounded constants or platform-limited inputs are processed."
+  },
+  "SD003": {
+    "category": "sensitive_data_handling",
+    "weight": 3,
+    "topic": "PE3",
+    "control": "Secret storage lifecycle",
+    "gap_example": "Persisted credentials have neither protected storage nor restricted access and retention.",
+    "safe_example": "A managed secret store or access-restricted, expiring storage protects credentials.",
+    "not_applicable": "Named environment or in-memory use does not persist credentials."
+  },
+  "DA004": {
+    "category": "destructive_action_safety",
+    "weight": 2,
+    "topic": "R2",
+    "control": "Retry duplicate suppression",
+    "gap_example": "A retryable non-idempotent write lacks an idempotency key or completion check.",
+    "safe_example": "A stable idempotency key or atomic completion check prevents duplicate effects.",
+    "not_applicable": "The action is read-only or naturally idempotent."
+  },
+  "EG004": {
+    "category": "egress_destination_control",
+    "weight": 2,
+    "topic": "E1",
+    "control": "TLS and SSH peer validation",
+    "gap_example": "External TLS/SSH explicitly disables certificate, hostname or host-key validation.",
+    "safe_example": "Effective certificate or host-key validation/pinning is enabled.",
+    "not_applicable": "An inactive example or loopback-only fixture does not contact an external peer."
+  },
+  "LP003": {
+    "category": "least_privilege",
+    "weight": 3,
+    "topic": "PE1",
+    "control": "External execution isolation",
+    "gap_example": "External repository code or hooks execute without bounded filesystem, network and credential scope.",
+    "safe_example": "An effective sandbox isolates externally supplied code.",
+    "not_applicable": "Fixed code shipped in the Skill or data-only parsing is used."
+  },
+  "LP004": {
+    "category": "least_privilege",
+    "weight": 2,
+    "topic": "PE1",
+    "control": "Write identity and context",
+    "gap_example": "An external account/cluster/repository write trusts unverified default identity/context.",
+    "safe_example": "The intended account and resource context are checked before writing.",
+    "not_applicable": "Only local disposable work or read-only queries occur."
+  },
+  "UI005": {
+    "category": "untrusted_input_boundary",
+    "weight": 2,
+    "topic": "R4",
+    "control": "Shared temporary path safety",
+    "gap_example": "Predictable shared temporary paths carry secrets, scripts, locks or privileged handoffs.",
+    "safe_example": "Private directories and exclusive unpredictable creation protect the handoff.",
+    "not_applicable": "Public disposable output carries no sensitive handoff."
+  },
+  "FS001": {
+    "category": "failure_safety",
+    "weight": 3,
+    "topic": "R2",
+    "control": "Security failures stop unsafe work",
+    "gap_example": "A failed/unknown security check or isolation setup continues privileged mutation or egress.",
+    "safe_example": "Failure stops mutation, becomes read-only, or uses an equally safe fallback.",
+    "not_applicable": "Best-effort telemetry does not decide security authority."
+  }
+}

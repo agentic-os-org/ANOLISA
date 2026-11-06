@@ -81,6 +81,9 @@ pub struct InstallArgs {
     /// Install a specific version instead of the latest in the channel
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
+    /// Use the exact raw version and repository recorded for this installed system component.
+    #[arg(long, value_name = "COMPONENT", conflicts_with_all = ["all", "repo", "version", "backend", "package"])]
+    pub match_installed: Option<String>,
     /// Backend override (raw | rpm | npm); defaults to repo.toml default_backend
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
@@ -97,6 +100,7 @@ mod types;
 // and for tests accessing via `super::*`.
 pub(crate) use types::*;
 
+mod prepare;
 mod provision;
 
 pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
@@ -118,7 +122,10 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     handle_one(component, args, ctx)
 }
 
-fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+fn handle_one(component: String, mut args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+    if let Some(base) = args.match_installed.take() {
+        pin_to_system_component(&mut args, &base, &component, ctx)?;
+    }
     let outcome = application::run(
         application::InstallRequest {
             component: &component,
@@ -128,6 +135,96 @@ fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<
         ctx,
     )?;
     render_outcome(ctx, outcome, args.no_deps)
+}
+
+fn pin_to_system_component(
+    args: &mut InstallArgs,
+    base: &str,
+    target: &str,
+    ctx: &CliContext,
+) -> Result<(), CliError> {
+    use anolisa_core::domain::{InstallationScope, LifecycleStatus, ProviderBinding};
+    use anolisa_core::state::ObjectKind;
+    use anolisa_core::state_store::StateStore;
+
+    let invalid = |reason: &str| CliError::InvalidArgument {
+        command: COMMAND.to_string(),
+        reason: reason.to_owned(),
+    };
+    if ctx.install_mode != crate::context::InstallMode::System {
+        return Err(invalid("--match-installed requires system mode"));
+    }
+    let layout = crate::commands::common::resolve_layout(ctx);
+    let store = StateStore::load_for_layout(
+        &layout.state_dir.join("installed.toml"),
+        anolisa_platform::privilege::effective_uid(),
+        &layout,
+    )
+    .map_err(|_| invalid("cannot read the authoritative system install record"))?;
+    let installed = store
+        .find(ObjectKind::Component, base)
+        .ok_or_else(|| invalid("base component is not installed"))?;
+    let ProviderBinding::Owned { artifact } = &installed.binding else {
+        return Err(invalid("base component is not raw-managed"));
+    };
+    let repository = artifact.repository_url(&layout.state_dir).map_err(|_| invalid("cannot verify the original private raw repository"))?.filter(|url| !url.is_empty())
+        .ok_or_else(|| invalid("original repository is unknown; supply its trusted --repo and --version explicitly"))?;
+    if installed.scope != InstallationScope::System
+        || installed.status != LifecycleStatus::Installed
+    {
+        return Err(invalid(
+            "base component is not an installed system component",
+        ));
+    }
+    if let Some(other) = store.find(ObjectKind::Component, target)
+        && !(matches!(&other.binding, ProviderBinding::Owned { artifact: matching }
+            if matching.repository_sha256() == artifact.repository_sha256() && matching.version == artifact.version)
+            && other.status == LifecycleStatus::Installed)
+    {
+        return Err(invalid(
+            "installed companion has a different owner, version or repository; reconcile it first",
+        ));
+    }
+    args.match_installed = Some(base.to_owned());
+    args.backend = Some("raw".to_string());
+    args.version = Some(artifact.version.clone());
+    args.repo = Some(repository);
+    Ok(())
+}
+
+fn verify_matched_install(
+    store: &anolisa_core::state_store::StateStore,
+    args: &InstallArgs,
+    target: &str,
+    require_target: bool,
+) -> Result<(), CliError> {
+    use anolisa_core::domain::{InstallationScope, LifecycleStatus, ProviderBinding};
+    use anolisa_core::state::ObjectKind;
+    let Some(base) = args.match_installed.as_deref() else {
+        return Ok(());
+    };
+    let expected = args.repo.as_deref().map(raw::repository_fingerprint);
+    for name in [base, target] {
+        if let Some(record) = store.find(ObjectKind::Component, name) {
+            if record.scope == InstallationScope::System
+                && record.status == LifecycleStatus::Installed
+                && let ProviderBinding::Owned { artifact } = &record.binding
+                && Some(&artifact.version) == args.version.as_ref()
+                && artifact.repository_sha256() == expected
+            {
+                continue;
+            }
+        } else if name != base && !require_target && !quarantined(store, name) {
+            continue;
+        }
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.into(),
+            reason: format!(
+                "matched component '{name}' changed ownership, version or repository; retry against current installation records"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn execution_intent(ctx: &CliContext) -> ExecutionIntent {
@@ -295,10 +392,10 @@ struct InstallResultPayload {
     /// Resolved EVR for delegated installs or distribution version for raw.
     #[serde(skip_serializing_if = "Option::is_none")]
     resolved_version: Option<String>,
-    /// DNF repository id or raw repository base URL that supplied the pin.
+    /// DNF repository ID or public raw repository label/fingerprint.
     #[serde(skip_serializing_if = "Option::is_none")]
     source_repo: Option<String>,
-    /// Resolved NEVRA for delegated installs or artifact URL for raw.
+    /// Resolved NEVRA for delegated installs or public raw artifact label/fingerprint.
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact: Option<String>,
     dry_run: bool,

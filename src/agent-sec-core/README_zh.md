@@ -4,7 +4,7 @@
 
 **面向 AI Agent 的 OS 级安全内核。** 为 Agent 负载提供纵深防御：提示词注入检测、
 代码扫描、PII 检测、Skill 完整性追踪、沙箱隔离，以及本地安全事件
-存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
+存储。本地扫描器不消耗模型 Token。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders/agentseccore-anolisa)
@@ -44,6 +44,16 @@ Rust V2 支持 `agent-sec-cli sandbox run --permissions permissions.json -- comm
 V2 源码构建会将 `agent-sec-daemon` 作为 host-level
 `agent-sec-core.service` systemd unit 安装。V2 迁移会通过 Rust 实现保留 hook 使用的
 CLI 命令与集成 capability surface。
+
+## 可选 Skill 安全评测
+
+`agent-sec-cli skillsec score plan/run` 提供 Rust 原生规划和评分。基础 `sec-core` 安装保持轻量，需要 Harbor 动态执行时显式安装匹配的 `sec-core-skill-score` 组件；小型可选构建包不含预构建镜像；显式安装时构建两个镜像、记录其身份，并获取锁定的第三方依赖。单机 Linux 与 SkillEval FC 复用同一 CLI、worker 和 ASC 网络侧车。共享模型服务通过密钥引用配置，已有本地扫描器默认行为保持不变。详见[安装、接口与验证指南](../../docs/user-guide/zh/agent-sec-core/skill-score.md)。
+
+共享模型配置也支持显式选择 `anthropic-compatible` 代理。ASC 在评分和 Agent 执行时使用代理地址及不透明凭据；身份归属和计量由调用平台与代理负责，已有百炼配置仍可使用。
+
+维护者可用 `ASC_WORK_BASE_IMAGE` 与 `ASC_WORK_BASE_RECIPE`，在预装业务依赖的基础镜像上构建可选工作镜像；自定义预览包以独立版本绑定配方来源与镜像身份。即使评测部署在 FC，业务依赖也应放在这个内层工作镜像中。
+
+镜像构建器没有 Docker 时，可通过 `ANOLISA_SKILL_SCORE_STAGE_ONLY=1` 预置 worker 文件，并放入导出的、与版本绑定的镜像归档。Docker 启动后，仍由 `agent-sec-cli skillsec score install-runtime` 离线激活。raw/RPM 预置目录和构建命令见上述指南；默认安装继续保持轻量。
 
 ## V2 SkillSec 与 Policy CLI
 

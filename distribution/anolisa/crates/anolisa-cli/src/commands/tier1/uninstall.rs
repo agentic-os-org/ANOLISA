@@ -3094,6 +3094,7 @@ mod tests {
                 .expect("record");
             record.binding = ProviderBinding::Owned {
                 artifact: anolisa_core::domain::OwnedArtifact {
+                    repository: None,
                     version: "3.0.0".to_string(),
                     distribution_source: None,
                     raw_package: Some("copilot-shell".to_string()),

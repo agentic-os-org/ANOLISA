@@ -133,6 +133,7 @@ class RpmSplitTests(unittest.TestCase):
         parsed = sections(SPEC.read_text())
         inventory = {
             "/usr/bin/agent-sec-cli": "agent-sec-core",
+            "/usr/lib/agent-sec-core/skill-score/prepare.sh": "agent-sec-core",
             "/usr/bin/agent-sec-daemon": "agent-sec-core",
             "/usr/bin/agent-sec-daemon-health": "agent-sec-core",
             "/usr/bin/linux-sandbox": "agent-sec-core",

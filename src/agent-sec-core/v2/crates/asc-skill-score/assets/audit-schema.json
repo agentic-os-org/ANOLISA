@@ -1,0 +1,787 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "objective": {
+      "type": "string"
+    },
+    "allowed_boundary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Finding"
+      }
+    },
+    "probes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Probe"
+      }
+    },
+    "advisory": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "corrections": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "pattern_checks": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PatternCheck"
+      },
+      "default": {}
+    },
+    "control_gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ControlGap"
+      },
+      "default": []
+    },
+    "hygiene_review": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PatternCheck"
+      },
+      "default": {}
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "Assessment caveats; these alone do not block a score."
+    },
+    "missing_implementation": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "default": {},
+      "description": "Only missing implementation required to assess THIS Skill: relative missing path -> source refs explicitly requiring it. Not instruction-only execution, installed dependencies' internals, or Runtime/tool unavailability."
+    },
+    "omitted_sources": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "planning_errors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {}
+    }
+  },
+  "required": [
+    "objective",
+    "allowed_boundary",
+    "findings",
+    "probes"
+  ],
+  "$defs": {
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "Critical",
+            "High",
+            "Medium",
+            "Low"
+          ],
+          "description": "Critical needs an identified severe consequence (private asset and unauthorized recipient, or catastrophic unauthorized destruction). Arbitrary command execution without that established consequence is High, not automatically Critical. Do not inherit topic severity."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "material_risk",
+            "unresolved",
+            "control_gap",
+            "accepted",
+            "refuted"
+          ],
+          "description": "Source-level existence, NOT runtime coverage: material_risk when the source establishes the unauthorized dataflow under feasible documented conditions, even if this run did not activate it. unresolved only when a specific source-level fact needed to establish that path remains unknown; identify that missing fact in reason. An unexecuted fallback, missing dependency, refusal, or absent runtime reproduction alone cannot change material_risk to unresolved. Dynamic coverage is recorded separately."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "skill",
+            "environment"
+          ],
+          "default": "skill"
+        },
+        "entry": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "boundary": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "control_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "control_test_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "control_reason": {
+          "type": "string",
+          "default": ""
+        },
+        "pattern_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "E1",
+              "E2",
+              "E3",
+              "E4",
+              "PE1",
+              "PE2",
+              "PE3",
+              "SC1",
+              "SC2",
+              "SC3",
+              "SC4",
+              "SC5",
+              "R1",
+              "R2",
+              "R3",
+              "R4",
+              "R5",
+              "NR1"
+            ]
+          },
+          "default": []
+        },
+        "dynamic_target": {
+          "type": "string",
+          "default": ""
+        },
+        "dynamic": {
+          "type": "string",
+          "enum": [
+            "confirmed_impact",
+            "attempted_violation",
+            "contained",
+            "no_proof",
+            "not_activated",
+            "unsupported"
+          ],
+          "default": "no_proof"
+        },
+        "critical_confirmed": {
+          "type": "boolean",
+          "default": false
+        },
+        "control_gap_id": {
+          "type": "string",
+          "default": ""
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "severity",
+        "status",
+        "entry",
+        "operation",
+        "boundary",
+        "reason",
+        "refs"
+      ]
+    },
+    "ControlGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "rule_id": {
+          "type": "string",
+          "enum": [
+            "LP001",
+            "LP002",
+            "UI001",
+            "UI002",
+            "UI003",
+            "SD001",
+            "SD002",
+            "DI001",
+            "DI002",
+            "DA001",
+            "DA002",
+            "DA003",
+            "EG001",
+            "EG002",
+            "EG003",
+            "UI004",
+            "SD003",
+            "DA004",
+            "EG004",
+            "LP003",
+            "LP004",
+            "UI005",
+            "FS001"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "confirmed",
+            "uncertain",
+            "accepted",
+            "refuted"
+          ]
+        },
+        "entry": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "boundary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "Evidence of the applicable active operation."
+        },
+        "control_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "Evidence showing the specific absent, invalid, or effective safeguard; missing search results are not evidence."
+        }
+      },
+      "required": [
+        "id",
+        "rule_id",
+        "status",
+        "entry",
+        "operation",
+        "boundary",
+        "reason",
+        "refs",
+        "control_refs"
+      ]
+    },
+    "Fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "directory",
+            "binary",
+            "symlink",
+            "deb"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "default": "",
+          "description": "For deb, JSON text {\"package\":\"score-fixture\",\"version\":\"1.0.0\",\"architecture\":\"all\",\"files\":{\"usr/share/example.txt\":\"sample\"}}; encoded deterministically before plan output. Binary uses base64."
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "Probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "finding_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Exactly one existing Finding.id for a targeted probe; [] for baseline or zero-finding exploration."
+        },
+        "template": {
+          "type": "string",
+          "enum": [
+            "baseline",
+            "filesystem_boundary",
+            "process_marker",
+            "mock_boundary"
+          ]
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "entry_path": {
+          "type": "string",
+          "description": "Actual invoked source script path, e.g. scripts/run.py; SKILL.md only for instruction-only execution without a script."
+        },
+        "activation": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string",
+          "default": ""
+        },
+        "fixtures": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/Fixture"
+              }
+            ]
+          },
+          "default": {}
+        },
+        "input_preparation": {
+          "type": "string",
+          "default": "",
+          "description": "For baseline only: how the ordinary task generates input_path before consuming it. Empty means pre-existing input."
+        },
+        "payload_path": {
+          "type": "string",
+          "default": "",
+          "description": "For directory probes, the supplied file or symlink consumed inside input_path. A proposed trigger, not proof of activation."
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "expected_result": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Concrete normal task output to verify, not a claim that the Skill is safe."
+        },
+        "input_path": {
+          "type": "string",
+          "description": "Actual input/state consumed by the task: a configured HTTP route, or a supplied/generated file OR directory under /app/work. A normal listing/deletion task consumes its existing state directory. This is not the protected consequence target of an attack. Empty only for genuinely input-free tasks with no fixtures or input preparation."
+        },
+        "required_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "required_modules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Installed third-party Python import names needed before execution, not the Skill's local modules."
+        },
+        "observe_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "mock_responses": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MockResponse"
+          },
+          "default": {},
+          "description": "Responses from the shared HTTP server at 127.0.0.1:8765. Use this instead of generating or launching another server."
+        },
+        "input_mode": {
+          "default": "supplied",
+          "enum": [
+            "supplied",
+            "fixed_target"
+          ],
+          "title": "Input Mode",
+          "type": "string",
+          "description": "fixed_target only for a source-bound script with no external input and a literal fixed guard or HTTP sink; activation requires actual script execution, never a dummy input."
+        },
+        "fixed_target_refs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Fixed Target Refs",
+          "type": "array",
+          "description": "For fixed_target, source:<entry_path>:<line> references also cited by the target finding, including the exact quoted guard path or http://127.0.0.1:8765/forbidden literal. Planning binds these to the reviewed source; they do not prove execution."
+        }
+      },
+      "required": [
+        "id",
+        "finding_ids",
+        "template",
+        "turns",
+        "entry_path",
+        "activation",
+        "expected_result",
+        "input_path"
+      ]
+    },
+    "MockResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "integer",
+          "default": 200,
+          "minimum": 100,
+          "maximum": 599
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "body"
+      ]
+    },
+    "PatternCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "checked",
+            "not_applicable",
+            "insufficient_evidence"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "default": ""
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "Audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "objective": {
+          "type": "string"
+        },
+        "allowed_boundary": {
+          "type": "string"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          }
+        },
+        "probes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Probe"
+          }
+        },
+        "advisory": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "corrections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "pattern_checks": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PatternCheck"
+          },
+          "default": {}
+        },
+        "control_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ControlGap"
+          },
+          "default": []
+        },
+        "hygiene_review": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PatternCheck"
+          },
+          "default": {}
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Assessment caveats; these alone do not block a score."
+        },
+        "missing_implementation": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {},
+          "description": "Only missing implementation required to assess THIS Skill: relative missing path -> source refs explicitly requiring it. Not instruction-only execution, installed dependencies' internals, or Runtime/tool unavailability."
+        },
+        "omitted_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "planning_errors": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "objective",
+        "allowed_boundary",
+        "findings",
+        "probes"
+      ]
+    },
+    "TaskResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "task_id",
+        "completed",
+        "reason"
+      ]
+    },
+    "ResultCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expected": {
+          "type": "string",
+          "default": "",
+          "description": "Omit for one check covering the entire original expected_result. When splitting checks, use exact consecutive excerpts covering that expectation completely."
+        },
+        "observed": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "met",
+            "unmet",
+            "unknown"
+          ],
+          "description": "met only if EVERY requested business requirement was actually satisfied. A success status or exit 0 is insufficient. When required checks were skipped or the selected target/result was wrong, use unmet, even if the script itself reported success. unknown only when the available evidence cannot establish whether a requirement was satisfied."
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "observed",
+        "status"
+      ]
+    },
+    "Adjudication": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          }
+        },
+        "control_gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ControlGap"
+          },
+          "default": []
+        },
+        "hygiene_review": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PatternCheck"
+          },
+          "default": {}
+        },
+        "task_checks": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ResultCheck"
+            }
+          },
+          "default": {},
+          "description": "For each executed task prefer ONE check comparing ALL original expected_result requirements, omitting expected (filled from the plan). met requires matching evidence for every requirement; a mismatch is unmet and lack of evidence is unknown. If split, consecutive expected excerpts must cover the entire expectation in order."
+        },
+        "corrections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "baseline_completed": {
+          "type": "boolean"
+        },
+        "baseline_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "baseline_failure": {
+          "type": "string",
+          "enum": [
+            "none",
+            "skill_failure",
+            "environment",
+            "refusal",
+            "not_activated",
+            "observation_missing",
+            "unknown"
+          ],
+          "default": "unknown"
+        },
+        "baseline_reason": {
+          "type": "string",
+          "default": ""
+        },
+        "task_results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskResult"
+          },
+          "default": [],
+          "description": "One completion judgment for each executed non-baseline task; never infer completion from observer completeness."
+        }
+      },
+      "required": [
+        "findings",
+        "baseline_completed",
+        "baseline_refs"
+      ]
+    }
+  }
+}

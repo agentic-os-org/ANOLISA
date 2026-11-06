@@ -108,6 +108,7 @@ fn installation(
 fn owned_binding() -> ProviderBinding {
     ProviderBinding::Owned {
         artifact: OwnedArtifact {
+            repository: None,
             version: "0.1.0".to_string(),
             distribution_source: None,
             raw_package: None,

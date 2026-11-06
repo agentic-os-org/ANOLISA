@@ -1,0 +1,290 @@
+name: CI / Skill score raw preview
+
+on:
+  push:
+    branches: [codex/skill-score-public-compose]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/agent-sec-core/agent-sec-cli/**'
+      - 'src/agent-sec-core/v2/**'
+      - 'src/agent-sec-core/skill-score-runtime/**'
+      - 'src/agent-sec-core/packaging/skill-score/**'
+      - 'src/agent-sec-core/packaging/raw/**'
+      - 'src/agent-sec-core/tests/packaging/**'
+      - 'src/agent-sec-core/tests/unit-test/skill-score/**'
+      - 'src/agent-sec-core/tests/integration-test/skill-score/**'
+      - '.github/workflows/sec-core-skill-score.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skill-score-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  assessment:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+          components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: '3.11.6'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+      - name: Select the pinned packaging interpreter
+        run: |
+          uv python install 3.11.6
+          score_python="$(uv python find 3.11.6)"
+          echo "$(dirname "$score_python")" >> "$GITHUB_PATH"
+      - name: Install package tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev clang llvm \
+            libseccomp-dev bubblewrap gnupg jq systemd
+          test "$(python3 -c 'import platform; print(platform.python_version())')" = 3.11.6
+          docker version
+          docker compose version
+      - uses: actions/cache/restore@v4
+        id: rust-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/agent-sec-core/agent-sec-cli/target
+            src/agent-sec-core/v2/target
+            src/agent-sec-core/linux-sandbox/target
+          key: score-ubuntu22-rust1931-${{ hashFiles('src/agent-sec-core/**/Cargo.lock') }}
+      - name: Check packaging contracts
+        run: |
+          bash src/agent-sec-core/tests/packaging/test-package-raw.sh
+          python3 src/agent-sec-core/tests/packaging/test_skill_score_optional.py
+          python3 src/agent-sec-core/tests/packaging/test_skill_score_lifecycle.py
+          python3 src/agent-sec-core/tests/packaging/test_skill_score_image_archive.py
+          python3 src/agent-sec-core/tests/packaging/test_skill_score_preview.py
+      - name: Check installer preparation lifecycle
+        working-directory: distribution/anolisa
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked -- --test-threads=1
+          cargo doc --workspace --no-deps --locked
+      - name: Check Rust formatting and lints
+        working-directory: src/agent-sec-core/v2
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify local CLI dispatch with production features
+        working-directory: src/agent-sec-core/v2
+        run: cargo test --locked -p asc-cli --test skill_score --test commands
+      - name: Run standard V2 workspace tests and server identity check
+        working-directory: src/agent-sec-core
+        run: make test-rust-v2
+      - name: Check Rust API documentation
+        working-directory: src/agent-sec-core/v2
+        run: cargo doc --workspace --no-deps --locked
+      - name: Run handoff and scoring contracts
+        working-directory: src/agent-sec-core
+        run: |
+          PYTHONPATH="$PWD/skill-score-runtime/src" uv run --project agent-sec-cli --frozen \
+            --extra skill-score pytest tests/unit-test/skill-score -q
+      - name: Run collector regressions with the locked Harbor runtime
+        working-directory: src/agent-sec-core
+        run: |
+          mkdir -p "$RUNNER_TEMP/score-evidence"
+          PYTHONPATH="$PWD/agent-sec-cli/src:$PWD/skill-score-runtime/src:$PWD/skill-score-runtime/image" \
+            uv run --project skill-score-runtime --python 3.12.11 --frozen --with pytest==9.0.3 \
+            pytest tests/integration-test/skill-score/test_runtime_observations.py \
+            tests/integration-test/skill-score/test_worker_protocol.py \
+            tests/unit-test/skill-score/test_worker_files.py \
+            tests/unit-test/skill-score/test_worker_subject.py -q \
+            --junitxml="$RUNNER_TEMP/score-evidence/collector-tests.xml"
+          python3 - "$RUNNER_TEMP/score-evidence/collector-tests.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          suites = ET.parse(sys.argv[1]).getroot().findall("testsuite")
+          assert sum(int(suite.get("tests", "0")) for suite in suites) >= 40
+          for field in ("skipped", "failures", "errors"):
+              assert all(int(suite.get(field, "0")) == 0 for suite in suites), field
+          PY
+      - name: Build the standard raw preview and independent delivery bundles
+        run: |
+          bash src/agent-sec-core/packaging/skill-score/build-preview.sh "$RUNNER_TEMP/score-release"
+          mkdir -p "$RUNNER_TEMP/score-evidence"
+          cp "$RUNNER_TEMP/score-release/release-manifest.json" "$RUNNER_TEMP/score-evidence/"
+          du -h "$RUNNER_TEMP/score-release/"*
+      - uses: actions/cache/save@v4
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/agent-sec-core/agent-sec-cli/target
+            src/agent-sec-core/v2/target
+            src/agent-sec-core/linux-sandbox/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Install the release-bound preparation-capable ANOLISA installer
+        run: |
+          mkdir -p "$RUNNER_TEMP/anolisa-installer"
+          installer=$(jq -r .installer.file "$RUNNER_TEMP/score-release/release-manifest.json")
+          tar -xzf "$RUNNER_TEMP/score-release/$installer" \
+            -C "$RUNNER_TEMP/anolisa-installer" anolisa
+          sudo install -m 0755 "$RUNNER_TEMP/anolisa-installer/anolisa" /usr/local/bin/anolisa
+          /usr/local/bin/anolisa --version
+      - name: Install base without optional dependencies, then explicitly install and repair worker
+        run: |
+          version="$(jq -r .version "$RUNNER_TEMP/score-release/release-manifest.json")"
+          mkdir -p "$RUNNER_TEMP/score-repo"
+          (cd "$RUNNER_TEMP/score-release/bundles" && sha256sum --check *.sha256)
+          tar -xzf "$RUNNER_TEMP/score-release/bundles/sec-core-bundle-$version-linux-x86_64.tar.gz" \
+            -C "$RUNNER_TEMP/score-repo"
+          sudo mkdir -p /etc/anolisa
+          printf 'schema_version = 1\ndefault_backend = "raw"\n[backends.raw]\nbase_url = "file://%s/score-repo/v1"\n' "$RUNNER_TEMP" | sudo tee /etc/anolisa/repo.toml >/dev/null
+          sudo /usr/local/bin/anolisa --install-mode system install sec-core --backend raw \
+            --repo "file://$RUNNER_TEMP/score-repo/v1" --version "$version"
+          python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-repo/v1" --base-only --output "$RUNNER_TEMP/score-evidence/base-install.json"
+          tar -xzf "$RUNNER_TEMP/score-release/bundles/skill-score-bundle-$version-linux-x86_64.tar.gz" \
+            -C "$RUNNER_TEMP/score-repo"
+          sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
+            /usr/local/bin/agent-sec-cli skillsec score install-runtime
+          # A second invocation validates the ready installation without its build inputs.
+          sudo env ANOLISA_SKILL_SCORE_OFFLINE=1 /usr/local/bin/agent-sec-cli skillsec score install-runtime
+          sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/install.json"
+          digest="$(sha256sum /usr/local/lib/anolisa/sec-core-skill-score/runtime-manifest.json | cut -d' ' -f1)"
+          sudo rm "/usr/local/lib/anolisa/sec-core-skill-score/environments/$digest/worker-entry.py"
+          sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
+            /usr/local/bin/anolisa --install-mode system repair sec-core-skill-score
+          sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/repair.json"
+      - name: Validate installed worker and Compose network controls
+        run: |
+          digest="$(sha256sum /usr/local/lib/anolisa/sec-core-skill-score/runtime-manifest.json | cut -d' ' -f1)"
+          runtime="/usr/local/lib/anolisa/sec-core-skill-score/environments/$digest"
+          export ASC_SKILL_SCORE_EGRESS_IMAGE="$(jq -r '.checks.actual_image_ids.egress' "$RUNNER_TEMP/score-evidence/repair.json")"
+          image="$(jq -r '.checks.actual_image_ids.work' "$RUNNER_TEMP/score-evidence/repair.json")"
+          "$runtime/python/bin/python3.12" -I -c \
+            'import sys,runpy; from pathlib import Path; root=Path(sys.argv.pop(1)); sys.path[:0]=[str(root/p) for p in ("worker","shared","site-packages")]; path=sys.argv.pop(1); runpy.run_path(path,run_name="__main__")' \
+            "$runtime" src/agent-sec-core/tests/integration-test/skill-score/validate_egress.py \
+            --image "$image" --egress-image "$ASC_SKILL_SCORE_EGRESS_IMAGE" \
+            --output "$RUNNER_TEMP/score-evidence/egress"
+      - name: Verify canonical Skill upload through Harbor
+        working-directory: src/agent-sec-core
+        run: |
+          export ASC_SCORE_UPLOAD_TEST_IMAGE="$(jq -r '.checks.actual_image_ids.work' "$RUNNER_TEMP/score-evidence/repair.json")"
+          PYTHONPATH="$PWD/agent-sec-cli/src:$PWD/skill-score-runtime/src" \
+            uv run --project skill-score-runtime --python 3.12.11 --frozen --with pytest==9.0.3 \
+            pytest tests/integration-test/skill-score/test_subject_upload.py -q \
+            --junitxml="$RUNNER_TEMP/score-evidence/subject-upload.xml"
+          python3 - "$RUNNER_TEMP/score-evidence/subject-upload.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          suites = ET.parse(sys.argv[1]).getroot().findall("testsuite")
+          assert sum(int(s.get("tests", 0)) for s in suites) > 0
+          assert sum(int(s.get("skipped", 0)) for s in suites) == 0
+          PY
+      - name: Uninstall generated environments and verify clean reinstall
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version "$RUNNER_TEMP/score-release/release-manifest.json")"
+          test -n "$(find /usr/local/lib/anolisa/sec-core-skill-score/environments -maxdepth 1 -name '*.retained-*' -print -quit)"
+          sudo /usr/local/bin/anolisa --install-mode system uninstall sec-core-skill-score \
+            > "$RUNNER_TEMP/score-evidence/uninstall.log" 2>&1
+          python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --base-only --output "$RUNNER_TEMP/score-evidence/uninstalled.json"
+          sudo env ANOLISA_SKILL_SCORE_SOURCE_DIR="$RUNNER_TEMP/score-release" \
+            /usr/local/bin/agent-sec-cli skillsec score install-runtime
+          sudo "$(command -v python3)" src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --output "$RUNNER_TEMP/score-evidence/clean-reinstall.json"
+          sudo /usr/local/bin/anolisa --install-mode system uninstall sec-core-skill-score \
+            > "$RUNNER_TEMP/score-evidence/clean-reinstall-uninstall.log" 2>&1
+          python3 src/agent-sec-core/packaging/skill-score/verify-preview-install.py \
+            "$RUNNER_TEMP/score-release" --base-only --output "$RUNNER_TEMP/score-evidence/final-base-only.json"
+      - name: Preserve bounded validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-score-validation-${{ github.sha }}
+          path: ${{ runner.temp }}/score-evidence/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Preserve validated release and identity manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-score-linux-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/score-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish-preview:
+    needs: assessment
+    if: github.repository == '1570005763/anolisa' && github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: skill-score-linux-x86_64-${{ github.sha }}
+          path: release
+      - name: Publish the validated fork prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(jq -r .source_commit release/release-manifest.json)" = "$EXPECTED_SHA"
+          (cd release/bundles && sha256sum --check *.sha256)
+          version="$(jq -r .version release/release-manifest.json)"
+          tag="sec-core-v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Refusing to overwrite an existing immutable preview: $tag" >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Fork preview of sec-core with optional skill scoring, built from $EXPECTED_SHA.
+
+          This release has two independent bundles, each with a companion \`.sha256\` file.
+          Download only \`sec-core-bundle-$version-linux-x86_64.tar.gz\` and its checksum
+          for a lightweight installation. Verify with \`sha256sum --check <archive>.sha256\`,
+          then extract into an empty local directory. Its \`v1/\` contains the base raw
+          package, indexes and release-bound ANOLISA installer; no scoring runtime
+          or container images are included. Use that installer with system mode, raw backend,
+          \`--repo file:///absolute/path/to/asc-preview/v1 --version $version\`.
+
+          For dynamic execution, also download and verify
+          \`skill-score-bundle-$version-linux-x86_64.tar.gz\`, then extract it into the same
+          directory. Use that local \`v1/\` repository when
+          explicitly installing \`sec-core-skill-score\` at the same version. The helper
+          builds the work and sidecar images from checksum-bound sources and records their
+          immutable IDs locally. Locked Python/uv/Harbor dependencies
+          still come from upstream or a separately provisioned offline dependency cache.
+          The native Rust score entrypoint is \`agent-sec-cli skillsec score plan/run\`;
+          plan needs only the base component, while run also needs the optional worker.
+
+          Validation: Ubuntu 22.04 separate base/optional raw installation, explicit worker repair,
+          native CLI contracts, dependency, source-build receipt and image identities, worker protocol and Docker network controls. No model-backed scoring or FC template restore is claimed.
+          This is a fork prerelease, not an official AgentSecCore release.
+          EOF
+          gh release create "$tag" release/bundles/* --target "$EXPECTED_SHA" --prerelease \
+            --title "sec-core $version" --notes-file "$RUNNER_TEMP/notes.md"

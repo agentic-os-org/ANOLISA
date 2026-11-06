@@ -565,6 +565,7 @@ pub fn lifecycle_facts_from_snapshot(
         pending_journal,
         active_adapter_claims,
         owned_files_verified: snapshot_owned_files_verified,
+        owned_runtime_prepare: false,
     })
 }
 
@@ -738,6 +739,7 @@ mod tests {
             scope: InstallationScope::System,
             binding: ProviderBinding::Owned {
                 artifact: OwnedArtifact {
+                    repository: None,
                     version: "1.0.0".to_string(),
                     distribution_source: None,
                     raw_package: None,

@@ -25,6 +25,7 @@ from agent_sec_cli.security_middleware.backends.hardening import (
 )
 from agent_sec_cli.security_middleware.lifecycle import _ACTION_CATEGORY
 from agent_sec_cli.skill_ledger.cli import app as skill_ledger_app
+from agent_sec_cli.skill_score.cli import app as skill_score_app
 from agent_sec_cli.utils.timestamp import (
     epoch_to_utc_iso,
     optional_iso_to_utc_iso,
@@ -86,7 +87,7 @@ def _init_trace_context(trace_context: str | None) -> None:
 
 
 def _is_read_only_skill_analyze(argv: list[str]) -> bool:
-    """Return whether argv selects the side-effect-free Skill analysis path."""
+    """Keep source analysis and assessment content out of persistent logs."""
     command_tokens: list[str] = []
     index = 1 if argv else 0
     while index < len(argv) and len(command_tokens) < 2:
@@ -101,7 +102,9 @@ def _is_read_only_skill_analyze(argv: list[str]) -> bool:
             return False
         command_tokens.append(arg)
         index += 1
-    return command_tokens == ["skill-ledger", "analyze"]
+    return command_tokens == ["skill-ledger", "analyze"] or command_tokens[:1] == [
+        "skill-score"
+    ]
 
 
 @app.callback(invoke_without_command=True)
@@ -132,6 +135,7 @@ def main_callback(
 
 # Mount skill-ledger as a subcommand group: agent-sec-cli skill-ledger <cmd>
 app.add_typer(skill_ledger_app, name="skill-ledger")
+app.add_typer(skill_score_app, name="skill-score")
 app.add_typer(observability_app, name="observability")
 app.add_typer(capabilities_app, name="capabilities")
 

@@ -45,6 +45,10 @@ fn main() -> ExitCode {
             };
         }
     };
+    // Exec before starting telemetry threads; the assessment runtime owns its whole lifecycle.
+    if let Plan::SkillScore(command) = cli.plan() {
+        return exec_score(command);
+    }
     let runtime = match asc_observability::init_runtime("agent-sec-cli") {
         Ok(runtime) => runtime,
         Err(reason) => {
@@ -113,6 +117,10 @@ fn main() -> ExitCode {
     }
 }
 
+fn exec_score(command: &asc_cli::SkillScoreCommand) -> ExitCode {
+    ExitCode::from(command.execute())
+}
+
 fn run(cli: &Cli) -> Result<u8, RunError> {
     let socket = match cli.plan() {
         Plan::Sandbox(command) => return command.run().map_err(RunError::Sandbox),
@@ -136,6 +144,8 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             return Ok(0);
         }
         Plan::Daemon { socket } => socket,
+        // main replaces the process before entering this daemon/local-rendering path.
+        Plan::SkillScore(_) => unreachable!("assessment exec is handled before runtime startup"),
     };
     if let Some(result) = run_owned_transport(cli, socket) {
         return result.map_err(RunError::Output);
@@ -207,7 +217,6 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             &mut io::stdout().lock(),
             &mut io::stderr(),
         )
-        .map_err(RunError::Output)
     } else if cli.is_skill_sec() {
         render_skill_sec(
             &response,
@@ -215,17 +224,14 @@ fn run(cli: &Cli) -> Result<u8, RunError> {
             &mut io::stderr(),
             |output| cli.after_success(&request, output),
         )
-        .map_err(RunError::Output)
     } else if cli.is_observability_record() {
         asc_cli::output::render_observability_record(&response, &mut io::stderr())
-            .map_err(RunError::Output)
     } else if cli.is_scan_code() {
         render_scan_code(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
     } else {
         render_policy(&response, &mut io::stdout().lock(), &mut io::stderr())
-            .map_err(RunError::Output)
     }
+    .map_err(RunError::Output)
 }
 
 /// Commands that page, review or exec around their own daemon calls.

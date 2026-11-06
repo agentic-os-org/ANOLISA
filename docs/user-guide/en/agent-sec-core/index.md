@@ -2,7 +2,7 @@
 
 [中文版](../../zh/agent-sec-core/index.md)
 
-AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on the local machine with zero Token consumption, providing defense-in-depth: prompt injection detection, code scanning, skill integrity verification, PII detection, and sandbox isolation.
+AgentSecCore provides local security controls for AI Agents. Its local scanners require no model tokens and provide defense in depth: prompt injection detection, code scanning, skill integrity verification, PII detection, and sandbox isolation.
 
 For the Rust V2 SkillSec core migration, see the [V2 guide](skillsec-v2.md).
 The RPM package selection below describes the V2 Rust CLI and daemon. Agent
@@ -12,6 +12,8 @@ guide for the backend command and service contracts.
 Use `agent-sec-cli sandbox run` to run a command with explicit filesystem and
 network permissions. The [sandbox guide](sandbox.md) covers this local command
 and its runtime requirements.
+
+The optional [Skill safety assessment](skill-score.md) uses the native ASC CLI and shared model configuration for planning and judging. Base installation remains lightweight; explicitly install its runtime with `agent-sec-cli skillsec score install-runtime`. Image builders may stage files without Docker and preload release-bound images for offline activation.
 
 ## Overview
 

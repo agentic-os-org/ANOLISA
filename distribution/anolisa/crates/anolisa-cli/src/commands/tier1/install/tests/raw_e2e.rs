@@ -2198,25 +2198,61 @@ fn install_pinned_version_places_exact_published_version() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
     let repo_url = write_local_repo_component_versions(
-        &tmp.path().join("repo"),
+        &tmp.path().join("private-index-secret"),
         "agentsight",
         &["0.1.0", "0.2.0"],
         &["system"],
     );
 
+    let index = tmp.path().join("private-index-secret/v1/index.toml");
+    let public = tmp.path().join("public-cdn");
+    std::fs::create_dir(&public).unwrap();
+    let mut catalog = std::fs::read_to_string(&index).unwrap();
+    for version in ["0.1.0", "0.2.0"] {
+        let file = format!("agentsight-{version}.tar.gz");
+        std::fs::rename(index.parent().unwrap().join(&file), public.join(&file)).unwrap();
+        catalog = catalog.replace(
+            &format!("url = \"{file}\""),
+            &format!("url = \"file://{}/{file}\"", public.display()),
+        );
+    }
+    std::fs::write(&index, catalog).unwrap();
     let mut a = args("agentsight");
-    a.repo = Some(repo_url);
+    a.repo = Some(repo_url.clone());
     a.version = Some("0.1.0".to_string());
     handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
         .expect("pinned install must succeed");
 
+    let mut companion = args("companion");
+    super::super::pin_to_system_component(
+        &mut companion,
+        "agentsight",
+        "companion",
+        &ctx_with_prefix(false, Some(prefix.clone())),
+    )
+    .expect("companion resolves inside the package manager");
+    assert_eq!(companion.version.as_deref(), Some("0.1.0"));
+    assert_eq!(companion.repo.as_deref(), Some(repo_url.as_str()));
+    assert_eq!(companion.backend.as_deref(), Some("raw"));
     let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !std::fs::read_to_string(layout.state_dir.join("installed.toml"))
+            .unwrap()
+            .contains("private-index-secret")
+    );
     assert!(layout.bin_dir.join("agentsight").exists());
     let store = load_v5_store(&layout);
     let installation = store
         .find(ObjectKind::Component, "agentsight")
         .expect("installed object");
     let artifact = owned_artifact(installation);
+    assert_eq!(
+        artifact
+            .repository_url(&layout.state_dir)
+            .unwrap()
+            .as_deref(),
+        Some(repo_url.as_str())
+    );
     assert_eq!(
         artifact.version, "0.1.0",
         "the pin must beat the higher published 0.2.0"
@@ -2549,6 +2585,7 @@ fn install_all_dry_run_rejects_conflicts_between_planned_components() {
     let batch_args = InstallArgs {
         component: None,
         all: true,
+        match_installed: None,
         fail_fast: false,
         no_deps: false,
         version: None,
@@ -2639,6 +2676,7 @@ package = "agentsight"
     let batch_args = InstallArgs {
         component: None,
         all: true,
+        match_installed: None,
         fail_fast: false,
         no_deps: false,
         version: None,
@@ -3697,4 +3735,57 @@ fn embedded_manifest_failure_does_not_echo_repository_credentials() {
         "got: {reason}"
     );
     assert_no_repository_secret(&reason);
+}
+
+#[test]
+fn matched_install_refuses_a_concurrent_same_version_source_change() {
+    let tmp = tempdir().unwrap();
+    let ctx = ctx_with_prefix(false, Some(tmp.path().join("root")));
+    let layout = crate::commands::common::resolve_layout(&ctx);
+    let r = tmp.path().join("old-repo");
+    let old = write_local_repo_component_versions(&r, "companion", &["1.0.0"], &["system"]);
+    let new_repo = "https://new.example.test/source";
+    let state = layout.state_dir.join("installed.toml");
+    // Install the base from A, then publish the companion from A as well.
+    let saved_index = std::fs::read(r.join("v1/index.toml")).unwrap();
+    write_local_repo_component_versions(&r, "base", &["1.0.0"], &["system"]);
+    let mut a = args("base");
+    a.repo = Some(old.clone());
+    handle_with_fake_rpm(a, &ctx).unwrap();
+    std::fs::write(r.join("v1/index.toml"), saved_index).unwrap();
+    write_component_index_v2(&r.join("v1"), &["base", "companion"]);
+    let mut c = args("companion");
+    super::super::pin_to_system_component(&mut c, "base", "companion", &ctx).unwrap();
+    let mut noop = args("companion");
+    super::super::pin_to_system_component(&mut noop, "base", "companion", &ctx).unwrap();
+    // At the real pre-lock network boundary a second installer replaces the base:
+    // model just the state commit, retaining the same version & files.
+    let mut s = load_v5_store(&layout);
+    let mut base = s.find(ObjectKind::Component, "base").unwrap().clone();
+    let anolisa_core::domain::ProviderBinding::Owned { artifact } = &mut base.binding else {
+        panic!()
+    };
+    artifact.repository = Some(new_repo.to_owned());
+    s.upsert(base);
+    s.save(&state).unwrap();
+    let failure = handle_with_fake_rpm(c, &ctx).expect_err("the base changed during resolution");
+    assert!(
+        failure
+            .reason()
+            .contains("changed ownership, version or repository")
+    );
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "companion")
+            .is_none()
+    );
+    let mut direct = args("companion");
+    direct.repo = Some(old);
+    handle_with_fake_rpm(direct, &ctx).unwrap();
+    let failure = handle_with_fake_rpm(noop, &ctx).expect_err("NoOp also checks the owner");
+    assert!(
+        failure
+            .reason()
+            .contains("changed ownership, version or repository")
+    );
 }

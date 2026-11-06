@@ -21,6 +21,7 @@ stage-raw: stage-gateway ## Stage the V2 raw payload under DESTDIR
 		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
 		TARGET_OS="$(TARGET_OS)" \
 		TARGET_ARCH="$(TARGET_ARCH)" \
+		RAW_PREVIEW_VERSION="$(RAW_PREVIEW_VERSION)" \
 		./packaging/raw/package.sh stage
 
 .PHONY: package-raw
@@ -31,6 +32,7 @@ package-raw: prepare-raw-python ## Build the deterministic V2 raw archive
 		TARGET_OS="$(TARGET_OS)" \
 		TARGET_ARCH="$(TARGET_ARCH)" \
 		SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
+		RAW_PREVIEW_VERSION="$(RAW_PREVIEW_VERSION)" \
 		./packaging/raw/package.sh package
 
 .PHONY: test-package-raw

@@ -354,7 +354,15 @@ impl OwnedOps for RawReplayOps<'_> {
     }
 
     fn provision_runtime_deps(&mut self) -> Result<StepSuccess, OwnedOpError> {
-        Self::not_wired("runtime-dependency provisioning")
+        let prepared = self.prepared()?;
+        let manifest = anolisa_core::ComponentManifest::from_toml_str(&prepared.manifest_toml)
+            .map_err(|err| OwnedOpError(format!("invalid candidate manifest: {err}")))?;
+        super::prepare::run_candidate_prepare(
+            &manifest,
+            self.prepared_files.as_ref(),
+            self.layout,
+        )?;
+        Ok(StepSuccess::clean())
     }
 
     fn run_hook(&mut self, kind: HookKind) -> Result<StepSuccess, OwnedOpError> {
@@ -503,8 +511,13 @@ impl OwnedOps for RawReplayOps<'_> {
             OwnedOpError("internal: record commit ran before files were placed".to_string())
         })?;
         let artifact = OwnedArtifact {
+            repository: Some(prepared.resolution.base_url.clone()),
             version: prepared.resolution.entry.version.clone(),
-            distribution_source: Some(prepared.resolution.artifact_url.clone()),
+            distribution_source: Some(
+                prepared
+                    .resolution
+                    .public_url_label(&prepared.resolution.artifact_url),
+            ),
             raw_package: Some(prepared.resolution.package.clone()),
             // Digest verification of the embedded manifest is future work;
             // recording an unverified digest would overstate what ran.
@@ -1636,6 +1649,7 @@ impl OwnedOps for RawInstallOps<'_> {
             self.layout,
         )
         .map_err(|err| OwnedOpError(err.reason()))?;
+        super::prepare::run_candidate_prepare(manifest, self.prepared_files.as_ref(), self.layout)?;
         Ok(StepSuccess::with_warnings(warnings))
     }
 
@@ -1810,8 +1824,13 @@ impl OwnedOps for RawInstallOps<'_> {
             .map(|run| run.enabled_units.clone())
             .unwrap_or_default();
         let artifact = OwnedArtifact {
+            repository: Some(prepared.resolution.base_url.clone()),
             version: prepared.resolution.entry.version.clone(),
-            distribution_source: Some(prepared.resolution.artifact_url.clone()),
+            distribution_source: Some(
+                prepared
+                    .resolution
+                    .public_url_label(&prepared.resolution.artifact_url),
+            ),
             raw_package: Some(prepared.resolution.package.clone()),
             // Digest verification of the embedded manifest is future work;
             // recording an unverified digest would overstate what ran.

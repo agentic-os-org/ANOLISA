@@ -1,0 +1,345 @@
+{
+  "schema_version": "1.0",
+  "source_url": "https://github.com/1570005763/anolisa/releases/download/skill-score-test-20260915/skill-score-source-alinux3.tgz",
+  "archive_sha256": "ac370810b490b889b0300f805ee668223157add51324fca5ca853323f5b6f731",
+  "baseline_commit": "5351c892f2e89d6be799ebdbeea948c173d3d7c2",
+  "purpose": "Original hashes identify imported files before current-source adaptations; they are not build output hashes.",
+  "files": [
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/__init__.py",
+      "sha256": "a0e0c6a5d8ef17556682da5794e9538081a9bf8a0542b6a5f6b619a08987abd5"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/audit.py",
+      "sha256": "14afedfacb108dcb6acb9cc1ebe8a5bdaa30ce818cf5489dacf60580f6490fb3"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/catalog.py",
+      "sha256": "d66078208039ab0369b582787d3a61c86d459ac982fd1ca37097fa05bbce8aa4"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/cli.py",
+      "sha256": "fe40be109433e35c4c64bb1c43bb9b67f20a4fa7be6973cb4ead17525cbed5c5"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/config.py",
+      "sha256": "2b36310d018a7981c5401f258fdbb10139d26f7b9bf8ff07947d02668078f4ce"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/contracts.py",
+      "sha256": "01bb0b58cbe95f7b0ce3c8e35514e4dd8b11068132bed855773cc22899eb7c9f"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/evidence/__init__.py",
+      "sha256": "ca5bc559582a5e3771328e6a5f2d5a9a59563b8fea1934b3323125c8345ae23f"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/evidence/redact.py",
+      "sha256": "809671a0ec96c03fa1ca16c0cd922e891e4ddcbebf8fae8e5644586af6e55963"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/evidence_rules.py",
+      "sha256": "43d14219a0ccadf61ba0e40b80cf82c5022d3501fa23b8a10312a787c737ee41"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/fixture_formats.py",
+      "sha256": "32023e919dfd37434e09ab77708b448605dde271d199c8917a8fbd31ce01b8d6"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/hygiene.py",
+      "sha256": "7b6f56fe67505443716dab72a69391d7a1837c32f14e19273ea953d9bcbf6bcf"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/io.py",
+      "sha256": "4f2e1a29e720781d866e9d71a9a322b9c3eaf02ca86fd09e70053c7af7829588"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/pipeline.py",
+      "sha256": "7cc8262591978f20946a55bcd3dba476296ae0e585ceda6269aa70ed2eda581e"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/probes.py",
+      "sha256": "601d04f518e9157e4a0f47009c58be27b675bc9f5b3a0f1b8c142f87fea8821c"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/provider/__init__.py",
+      "sha256": "9d54ea937fdb975d11ab578aea66c95025adb6f89b052524b9ff5e7d652eab98"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/provider/bailian.py",
+      "sha256": "bfbd22e2574ff10d7890f9c4414e4ce78c2371230eea07eafbb3495646cbaea6"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/risk_catalog.py",
+      "sha256": "eb6313cd79406531851e1397012b7e3fd5ad8a8508d3c2668d6247d169b12f06"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/runtime.py",
+      "sha256": "f7141ab95aa22552046387a2a1790b94e87e67bab0406d96b846e07ed09a9c58"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/scanners.py",
+      "sha256": "a03c2abbd8abb7a062f519d2381ff6bfc6f96ef26a3264bb5177060afd5b8807"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/score/__init__.py",
+      "sha256": "1892760c8d4145d9d639ea5af59855f299e1529c2c5ae581ffed804633da666b"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/score/engine.py",
+      "sha256": "a59cc875e0ff7b66655b2fff5bfa82465bbcbdd7a959be4a4c120be05a82008a"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/task.py",
+      "sha256": "9453a71a528c86da437bd2f78674bca990c18c8595240d9b9aa5b9ddbca0ceaa"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/tool-inventory.json",
+      "sha256": "02a77404eedb5a0cd413543483910be3d40b8fba4a7d417939db32cc6af517a2"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/__init__.py",
+      "sha256": "d4221f90b4d4122b92d21d6e8f8f9078bbc2540425947f9a43c70e8397fa604e"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/LICENSE",
+      "sha256": "0c3b3d03c55336619c6cb6c86fa536a06fa2717954d98b7b477117de809667df"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/__init__.py",
+      "sha256": "eedd98fb7d920fa60de7f3ee8ac8209c13fc84d36fbc50c909400c394cef28c1"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/config/rules.yaml",
+      "sha256": "b8de944d4cacd531515667f5689ac9be392ebd4f45f3d5ce860bf3c959ce909c"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/config/whitelist.yaml",
+      "sha256": "43ecee094dc53d96602f993bc387cb22e851d313c379fd8c9c14ed81762558eb"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/provenance.json",
+      "sha256": "0cfffa44277d9e09e19b697fff43eb2da2789d9f2af120d23eca612ebcd467f6"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules/__init__.py",
+      "sha256": "94357e1694efe75c0e2e45a9154b00b1d134ee72794d714da19031842b8fe5a9"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules/base.py",
+      "sha256": "5ca82c150ab1fbc7246e0532984d85406bb33102e66dafe456480d40fb22a2b1"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules/command.py",
+      "sha256": "06453bc2946295a64d12386b69ced50d6087335865bb936e2bab3e639a8d4f46"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules/dependencies.py",
+      "sha256": "fab5392b38ef5257c5d0518f07b1fd38bd22aff5718df9aea6df4151c6e56a78"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules/fileops.py",
+      "sha256": "9b919f404187cf90f8e0bbf3fd8feaa3cb894165d9c8b94a7c72da3815bc2e8a"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules/injection.py",
+      "sha256": "f8f7720c298b52c983f50fd6c4a4e2c940044c6a0498cdded23d62e99f4915f9"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules/network.py",
+      "sha256": "2441023ee4c5162924066d30f079d6f4ade473c8bcd49de1695cbf9b265eaa8d"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/rules_factory.py",
+      "sha256": "7bb7c823c1f85d77a15856ef49573ab9029f6d61248fc4593c914fd2de7d95ff"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/scanner/__init__.py",
+      "sha256": "172a8a6391065cfceada4517df8c90c3138e629c696ddae24345f7c193c6c3e4"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/scanner/analyzer.py",
+      "sha256": "5eed0245349c1579d1ed5e4c8256c7a36b9530ba5b9b2fdd0d59fd6625fce6af"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/scanner/detector.py",
+      "sha256": "fdedf9544c46f8e5e56c23422fa440b79c72b9d83e6d643d3ab6f8fe4c1f7a9b"
+    },
+    {
+      "path": "src/agent-sec-core/agent-sec-cli/src/agent_sec_cli/skill_score/vendor/masb/scanner/parser.py",
+      "sha256": "ee5b79742f2a3b2faada1e9e0658bec6efa4e6424a99c9d25239a3ba45a8cfdf"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/image/Dockerfile",
+      "sha256": "9220d237751060a3bbf4dcf11881c5c2de4768905f3b209c69b116d63a87eef9"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/image/build.py",
+      "sha256": "87638ee72ad98a3a8ee565ea360ca8f63883b2fb5b6158cef22bcc011f123496"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/image/claude-observed",
+      "sha256": "070aee139df6d36be42586591fd852348f0b74e831c8540142106c2e098c95ed"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/image/observe.py",
+      "sha256": "0201bf38f93ace2bbcb33870ae338168223a14b7ae47e0fe4079fcc5b945c80c"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/prepare-runtime.sh",
+      "sha256": "071fe8c58e2dd268871503f6b64b1965c631e7c5fd73d40964b7741b5d371268"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/pyproject.toml",
+      "sha256": "a049435f2776cefbf63f42fe312474d9c93388b6db0f9c3d2b78c39981053b6f"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/python-provenance.json",
+      "sha256": "25c837f13a763473d1950f09ff69d2a2f82791790123014a32fd0591d10326a9"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/requirements.txt",
+      "sha256": "63da73e2d4e5e29efb0f6f5f680f827a78542331fcebe11d0bf6e333568ec376"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/src/agent_sec_skill_score_runtime/__init__.py",
+      "sha256": "188422eca43eb3d37525c1018a4755c733d35bc65bb4eb9c16b461b63d0f11ff"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/src/agent_sec_skill_score_runtime/harbor_runtime.py",
+      "sha256": "1e551d5ba64ad62bc5a06378db29760280084242f0203d61045a7ee74852f9f2"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/src/agent_sec_skill_score_runtime/images.py",
+      "sha256": "350199b80f5e59acc8308ee18f2471e8474a35a8f085ab21bdb13c9954d0a7ee"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/src/agent_sec_skill_score_runtime/observations.py",
+      "sha256": "f026dee7a6b059cd0a5e1d2fd3845ccb139c4a0a3792a23c9ba672d096bab708"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/src/agent_sec_skill_score_runtime/worker.py",
+      "sha256": "2b01c31ba96d7529aff847f2fe8276abdb3f37d4297681ff9e0247d0335b6cf8"
+    },
+    {
+      "path": "src/agent-sec-core/skill-score-runtime/uv.lock",
+      "sha256": "f9ead07cc099761d971a3375b80658a30a5c03a04a2a1ded0f0d902029ca9784"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/assess-six.py",
+      "sha256": "bcdb00590d6c24d458a450928a368f7aadb72a43a298f098c0afecf270c6da4c"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/controlled.py",
+      "sha256": "596764b4e7f3169fa18b0ef0ee6585903e89bb674afecaf1017261554e0abcdd"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-cleanup-checked/SKILL.md",
+      "sha256": "848d157387e8dd9a99e8e6846523ac6217576ca3594ac54ee5a3022af59773a0"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-cleanup-checked/scripts/cleanup.py",
+      "sha256": "2775e68af7435141bd4af8d68398a72cbb9104c50307952a42dafadd7509a2c0"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-cleanup-open/SKILL.md",
+      "sha256": "38d58c1207ae5fae6c70a40e99c49c930322d2fdb9d1c25e0028ea1dd1d7cbcc"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-cleanup-open/scripts/cleanup.py",
+      "sha256": "841ae0d799487233502bd49df66eaaa3fa60d9921a61b5aacb22186acf848be4"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-delivery-checked/SKILL.md",
+      "sha256": "7516058e8f8ffc3e7a6199bd244b7b61e37cc3cce07bb7bc90e3b40eaf14d01e"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-delivery-checked/scripts/delivery.py",
+      "sha256": "c920cd1148efff14401d6c89bd58c8dbda1e9de02933dc0886ce22d3076061f5"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-delivery-open/SKILL.md",
+      "sha256": "a7c1106f4276817104444da74e895c57546d991d48ce2496e14bb2f8804843a3"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-delivery-open/scripts/delivery.py",
+      "sha256": "467685de57997429d8c7044922856ec36ba9c7b1cf8bd634c84dc8281ef7db06"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-labels-checked/SKILL.md",
+      "sha256": "56fc27acdf52f4b161d5c07624db10faab82de8130d912988c5d3ec90787e766"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-labels-checked/scripts/labels.py",
+      "sha256": "626b3799cd50cda71918e765b348e8b4b00e97584450d387645012952335d0e7"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-labels-open/SKILL.md",
+      "sha256": "a37ae9499537b28733d8e4802c142d877dc7422205f086dfe840bd33eb44c267"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/fixtures/poc-labels-open/scripts/labels.py",
+      "sha256": "537f74335276ad6bfee02fef0822d2800b0230ef4e097d122edab847c2b708cf"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/plans/poc-cleanup-checked.json",
+      "sha256": "b5a67664dc3d4ea122199ae0a24a2261960f4f2cb7d796da981b53f8afab2721"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/plans/poc-cleanup-open.json",
+      "sha256": "85f8f2b0fd494079289f42d91787c880b38196b40a0ff63675626d17418fa219"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/plans/poc-delivery-checked.json",
+      "sha256": "db2651392345401f1417ffa6660a5dd3156ce6f7ac5779997f0b2e1fac2c25a2"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/plans/poc-delivery-open.json",
+      "sha256": "564708a5b00451b90c90c16c14f6ade8094abf436ddee16ace198b4938f0853d"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/plans/poc-labels-checked.json",
+      "sha256": "454f39be685c58d8a414a77318e0ef10067a7c0caefe7617cb0f108f66b29a18"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/plans/poc-labels-open.json",
+      "sha256": "9b109d83ef0d06aacc759970a53e81192673107b732f08f31695110b1d9345e2"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/test_runtime_observations.py",
+      "sha256": "7e23026a59bf628b18e7c9f41a5094d78ad3b37ad78095853e52025c18ae14ff"
+    },
+    {
+      "path": "src/agent-sec-core/tests/integration-test/skill-score/verify_consumers.py",
+      "sha256": "b81e1397e1f03c07d052f13e5415463542b061cc02180f9fe71123d7e0f6b788"
+    },
+    {
+      "path": "src/agent-sec-core/tests/unit-test/skill-score/test_bailian_provider.py",
+      "sha256": "f0666f2373c29e95d2f5cb34074592c72817b288c67c4700bfdb15987104c8a4"
+    },
+    {
+      "path": "src/agent-sec-core/tests/unit-test/skill-score/test_catalog_score.py",
+      "sha256": "7cfe64a7231b6b65f84e00eaf27720baed58284a98353bb3f49a43453341aca0"
+    },
+    {
+      "path": "src/agent-sec-core/tests/unit-test/skill-score/test_consumer_semantics.py",
+      "sha256": "5dd9ce286b371964f7385fcf02398d42be45d264d232aa11403274bc8fe64fbd"
+    },
+    {
+      "path": "src/agent-sec-core/tests/unit-test/skill-score/test_optimization.py",
+      "sha256": "e5675f92aeedaf019d2c840dba066f3957d352d2399357523f807b3df3d04053"
+    },
+    {
+      "path": "src/agent-sec-core/tests/unit-test/skill-score/test_redact.py",
+      "sha256": "49a765c98969df21f060e304a34f0b33feaf960b30b3cdefa8329539097abf3e"
+    },
+    {
+      "path": "src/agent-sec-core/tests/unit-test/skill-score/test_runtime_boundary.py",
+      "sha256": "584546ebd5045b96a05e35d2026b678c0791c505bd27116097feaf0a9c6f5517"
+    },
+    {
+      "path": "src/agent-sec-core/tests/unit-test/skill-score/test_two_stage.py",
+      "sha256": "772b541222f739a14079d892a0b9184eb153755c48b2ab50e144c21f8ca53937"
+    }
+  ]
+}

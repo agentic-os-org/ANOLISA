@@ -774,16 +774,43 @@ pub struct PreparedFileSet {
     /// `close()` — `close()` consumes the guard and disables `Drop`, so a
     /// removal that fails would leak the whole payload instead of being
     /// retried on scope exit.
-    #[expect(
-        dead_code,
-        reason = "RAII guard: held so Drop removes staged payloads on every exit path"
-    )]
     staging: StagingDir,
     regular: Vec<PreparedRegularFile>,
     links: Vec<PreparedSymlink>,
 }
 
 impl PreparedFileSet {
+    /// Materialize verified candidate bytes beneath a private prefix for preparation.
+    ///
+    /// This never runs an installed helper and never changes installed files. Symlinks
+    /// are excluded; preparation programs must be ordinary mapped payload files.
+    ///
+    /// # Errors
+    /// Rejects destinations outside `prefix` and staged payload integrity failures.
+    pub fn candidate_prefix(&self, prefix: &Path) -> Result<PathBuf, InstallError> {
+        let candidate = self.staging.path().join("candidate");
+        for staged in &self.regular {
+            let relative =
+                staged
+                    .file
+                    .dest
+                    .strip_prefix(prefix)
+                    .map_err(|_| InstallError::ExternalPath {
+                        path: staged.file.dest.clone(),
+                    })?;
+            let mut file = staged.file.clone();
+            file.dest = candidate.join(relative);
+            let candidate_file = PreparedRegularFile {
+                file,
+                staged_path: staged.staged_path.clone(),
+                sha256: staged.sha256.clone(),
+                size: staged.size,
+            };
+            place_staged_file(&candidate_file)?;
+        }
+        Ok(candidate)
+    }
+
     /// Describe the files this set will install without touching disk.
     ///
     /// Reports the digests recorded while the payloads were streamed to

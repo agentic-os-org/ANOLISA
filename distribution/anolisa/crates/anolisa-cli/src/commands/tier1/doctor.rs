@@ -2570,6 +2570,7 @@ mod tests {
             status,
             ProviderBinding::Owned {
                 artifact: OwnedArtifact {
+                    repository: None,
                     version: "1.0.0".to_string(),
                     distribution_source: None,
                     raw_package: None,
@@ -2629,6 +2630,7 @@ mod tests {
             pending_journal: false,
             active_adapter_claims: Vec::new(),
             owned_files_verified: None,
+            owned_runtime_prepare: false,
         }
     }
 

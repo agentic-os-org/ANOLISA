@@ -494,18 +494,10 @@ fn repair_owned_replay(
 
     // Re-resolve the recorded package at the recorded version to recover the
     // artifact URL and its published sha256.
-    let repo_config = common::load_repo_config(ctx, layout, command, RepoPersistPolicy::Require)?;
     let env = anolisa_env::EnvService::detect();
     let inputs = ResolveInputs {
         version: Some(prior.version.as_str()),
-        ..resolve_raw_inputs_for_component(
-            target.to_string(),
-            "raw",
-            prior.raw_package.as_deref(),
-            &env,
-            &repo_config,
-            command,
-        )?
+        ..resolve_raw_inputs_for_component(target.to_string(), &prior, ctx, layout, &env, command)?
     };
     let resolution = resolve_raw(ctx, layout, &env, inputs).map_err(|e| e.with_command(command))?;
     let resolve_warnings = resolution.warnings.clone();
@@ -530,7 +522,11 @@ fn repair_owned_replay(
         .find(ObjectKind::Component, target)
         .map(|record| &record.binding)
     {
-        Some(ProviderBinding::Owned { artifact }) if artifact.version == prior.version => {
+        Some(ProviderBinding::Owned { artifact })
+            if artifact.version == prior.version
+                && artifact.raw_package == prior.raw_package
+                && artifact.repository_sha256() == prior.repository_sha256() =>
+        {
             artifact.clone()
         }
         _ => {
@@ -3327,6 +3323,16 @@ mod tests {
         let mut store = StateStore::load(&state_path, 0).unwrap();
         let record = store.find_mut(ObjectKind::Component, "skillfs").unwrap();
         if let ProviderBinding::Owned { artifact } = &mut record.binding {
+            artifact.repository = Some(format!("file://{}", tmp.path().join("repo/v1").display()));
+            let config = layout.etc_dir.join("repo.toml");
+            fs::write(
+                &config,
+                fs::read_to_string(&config).unwrap().replace(
+                    artifact.repository.as_ref().unwrap(),
+                    "file:///unrelated/unavailable/v1",
+                ),
+            )
+            .unwrap();
             artifact.files.push(anolisa_file(registry.clone()));
         }
         store.save(&state_path).unwrap();
@@ -3350,6 +3356,10 @@ mod tests {
         match &record.binding {
             ProviderBinding::Owned { artifact } => {
                 assert!(!artifact.files.iter().any(|file| file.path == registry));
+                assert_eq!(
+                    artifact.repository_url(&layout.state_dir).unwrap(),
+                    Some(format!("file://{}", tmp.path().join("repo/v1").display()))
+                );
                 assert_eq!(artifact.version, "1.0.0", "replay never upgrades");
                 assert!(artifact.files.iter().any(|f| f.path == binary));
             }

@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::commands::common;
 use crate::context::CliContext;
 use crate::repo_config::{
-    HostVars, RepoConfig, raw_artifact_url, raw_index_url, raw_index_v2_url, raw_relative_root,
+    HostVars, raw_artifact_url, raw_index_url, raw_index_v2_url, raw_relative_root,
 };
 use crate::response::CliError;
 
@@ -29,11 +29,22 @@ use super::COMMAND;
 use super::render::{artifact_ext, artifact_type_wire, repo_config_err};
 use super::types::*;
 
+pub(super) fn repository_fingerprint(url: &str) -> String {
+    format!("{:x}", Sha256::digest(url.as_bytes()))
+}
+
 pub(super) fn index_fetch_error(
     index_url: &str,
     err: DownloadError,
     repository_origin: Option<&RawRepositoryOrigin>,
 ) -> CliError {
+    if matches!(repository_origin, Some(RawRepositoryOrigin::Installed)) {
+        return CliError::Runtime {
+            command: COMMAND.into(),
+            reason: "cannot fetch the recorded raw repository index; verify its availability"
+                .into(),
+        };
+    }
     match err {
         DownloadError::Io {
             ref path,
@@ -51,7 +62,7 @@ pub(super) fn index_fetch_error(
                 Some(RawRepositoryOrigin::CliOverride) =>
                     "the one-off --repo <URL> override selected this repository; pass a reachable URL or omit the override"
                         .to_string(),
-                None => "check the raw repository URL in repo.toml or, if supplied, the one-off --repo <URL> override".to_string(),
+                _ => "check the raw repository URL in repo.toml or, if supplied, the one-off --repo <URL> override".to_string(),
             };
             CliError::Runtime {
                 command: COMMAND.to_string(),
@@ -70,6 +81,17 @@ pub(super) fn index_fetch_error(
             ),
         },
     }
+}
+
+fn download_failure_detail(resolution: &RawResolution, url: &str, error: &DownloadError) -> String {
+    let mut locations = vec![url.to_owned()];
+    if resolution.recorded_repository
+        && let Some(path) = url.strip_prefix("file://")
+    {
+        // Local filesystem errors contain the bare path instead of the file URL.
+        locations.push(path.to_owned());
+    }
+    common::redact_known_urls(&error.to_string(), &locations)
 }
 
 /// Whether a fetch failure means "this file is not published", as opposed to
@@ -133,7 +155,12 @@ pub(crate) fn resolve_raw(
         fetch_raw_index(&cache, &base_url, repository_origin.as_ref())?;
     // Every message below names the repository the user configured; name it by
     // origin so a credential or secret path segment in `base_url` is not echoed.
-    let index_label = common::repository_url_label(&index_url);
+    let recorded_repository = matches!(repository_origin, Some(RawRepositoryOrigin::Installed));
+    let index_label = if recorded_repository {
+        format!("sha256:{}", repository_fingerprint(&base_url))
+    } else {
+        common::repository_url_label(&index_url)
+    };
     // Entry-tolerant parse: a row shaped for a future CLI fails closed for
     // its own component (skipped, surfaced as a warning) instead of taking
     // the whole shared index — and every unrelated component — down with it.
@@ -310,66 +337,64 @@ pub(crate) fn resolve_raw(
         component,
         package,
         artifact_url,
+        recorded_repository,
         entry,
         base_url,
         warnings,
     })
 }
 
-/// Rebuild [`ResolveInputs`] for an already-installed component from its
-/// recorded backend plus repo.toml, for the `update` path (which has no CLI
-/// `--backend` / `--repo` / `--version` to read). Always targets the latest
-/// published version (`version: None`).
-///
-/// `recorded_package` is the package captured at install time
-/// ([`InstalledObject::raw_package`](anolisa_core::state::InstalledObject::raw_package));
-/// when present it takes precedence over repo.toml derivation, so a component
-/// installed with `--package` updates against the same package rather than a
-/// re-derived (possibly different) one.
-///
-/// # Errors
-///
-/// Returns [`CliError`] when `backend_name` is unknown or unconfigured in
-/// repo.toml, when its `base_url` variables cannot be resolved, or — until a
-/// non-raw raw-like executor exists — when the backend is not `raw`.
+/// Replay the recorded package from its original index. Installations predating
+/// source pins retain their configured-repository behavior.
 pub(crate) fn resolve_raw_inputs_for_component(
     component: String,
-    backend_name: &str,
-    recorded_package: Option<&str>,
+    artifact: &anolisa_core::domain::OwnedArtifact,
+    ctx: &CliContext,
+    layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
-    repo_config: &RepoConfig,
     command: &str,
 ) -> Result<ResolveInputs<'static>, CliError> {
-    let (backend_name, backend) = repo_config
-        .select_backend(Some(backend_name))
-        .map_err(|err| repo_config_err(err, true).with_command(command))?;
-    if backend_name != "raw" {
-        return Err(CliError::not_implemented_with_hint(
-            command.to_string(),
-            format!(
-                "the '{backend_name}' backend has no update executor yet — only 'raw' updates today"
-            ),
-        ));
-    }
-    let host = HostVars {
-        os: env.os.clone(),
-        arch: env.arch.clone(),
+    let repository =
+        artifact
+            .repository_url(&layout.state_dir)
+            .map_err(|err| CliError::Runtime {
+                command: command.to_owned(),
+                reason: format!(
+                    "cannot verify the original raw repository for '{component}': {err}"
+                ),
+            })?;
+    let (base_url, package, repository_origin) = match (repository, &artifact.raw_package) {
+        (Some(url), Some(package)) => (url, package.clone(), Some(RawRepositoryOrigin::Installed)),
+        (recorded, package) => {
+            let config =
+                common::load_repo_config(ctx, layout, command, common::RepoPersistPolicy::Require)?;
+            let (name, backend) = config
+                .select_backend(Some("raw"))
+                .map_err(|err| repo_config_err(err, true).with_command(command))?;
+            let package = config.package_name(backend, &component, package.as_deref());
+            if let Some(url) = recorded {
+                (url, package, Some(RawRepositoryOrigin::Installed))
+            } else {
+                let host = HostVars {
+                    os: env.os.clone(),
+                    arch: env.arch.clone(),
+                };
+                let url = config
+                    .resolved_base_url(name, backend, &host)
+                    .map_err(|err| repo_config_err(err, true).with_command(command))?;
+                let origin = config
+                    .source_path()
+                    .map(|path| RawRepositoryOrigin::Config(path.to_path_buf()));
+                (url, package, origin)
+            }
+        }
     };
-    let base_url = repo_config
-        .resolved_base_url(backend_name, backend, &host)
-        .map_err(|err| repo_config_err(err, true).with_command(command))?;
-    // recorded_package wins via package_name's CLI-override slot, so a
-    // `--package` install resolves the same package on update; None falls
-    // through to repo.toml's package_map / component-name derivation.
-    let package = repo_config.package_name(backend, &component, recorded_package);
     Ok(ResolveInputs {
         component,
         package,
-        backend: backend_name.to_string(),
+        backend: "raw".to_string(),
         base_url,
-        repository_origin: repo_config
-            .source_path()
-            .map(|path| RawRepositoryOrigin::Config(path.to_path_buf())),
+        repository_origin,
         version: None,
         warnings: Vec::new(),
     })
@@ -427,8 +452,8 @@ pub(crate) fn load_dry_run_install_contract(
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to fetch sidecar metadata {}: {}",
-                        common::repository_url_label(&meta_url),
-                        common::redact_known_urls(&err.to_string(), &[meta_url.to_string()]),
+                        resolution.public_url_label(&meta_url),
+                        download_failure_detail(resolution, &meta_url, &err),
                     ),
                 });
             }
@@ -446,7 +471,7 @@ pub(crate) fn load_dry_run_install_contract(
                 command: COMMAND.to_string(),
                 reason: format!(
                     "failed to parse sidecar metadata {}: {err}",
-                    common::repository_url_label(&meta_url),
+                    resolution.public_url_label(&meta_url),
                 ),
             })?;
         validate_manifest_contract_header(
@@ -545,11 +570,8 @@ pub(crate) fn prepare_raw_execution(
             command: COMMAND.to_string(),
             reason: format!(
                 "failed to download artifact {}: {}",
-                common::repository_url_label(&resolution.artifact_url),
-                common::redact_known_urls(
-                    &err.to_string(),
-                    std::slice::from_ref(&resolution.artifact_url)
-                ),
+                resolution.public_url_label(&resolution.artifact_url),
+                download_failure_detail(&resolution, &resolution.artifact_url, &err),
             ),
         })?;
 
@@ -583,7 +605,7 @@ fn load_execution_install_contract(
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to read embedded component manifest from {}: {err}",
-                        common::repository_url_label(&resolution.artifact_url)
+                        resolution.public_url_label(&resolution.artifact_url)
                     ),
                 })?
                 .ok_or_else(|| CliError::Runtime {
@@ -598,7 +620,7 @@ fn load_execution_install_contract(
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to parse embedded component manifest from {}: {err}",
-                        common::repository_url_label(&resolution.artifact_url)
+                        resolution.public_url_label(&resolution.artifact_url)
                     ),
                 })?;
             validate_manifest_digest(&toml, resolution)?;
@@ -2063,5 +2085,26 @@ mod tests {
             .expect("the release shipping the capability must pass");
         validate_min_anolisa_version_against(&manifest, "sec-core", source, "0.3.0")
             .expect("later releases must keep passing");
+    }
+
+    #[test]
+    fn min_anolisa_version_gate_protects_candidate_preparation() {
+        let manifest = contract_manifest(Some("0.3.22"));
+        for source in [
+            InstallContractSource::EmbeddedArtifact,
+            InstallContractSource::SidecarMeta,
+        ] {
+            assert!(
+                validate_min_anolisa_version_against(
+                    &manifest,
+                    "sec-core-skill-score",
+                    source,
+                    "0.3.21"
+                )
+                .is_err()
+            );
+            validate_min_anolisa_version(&manifest, "sec-core-skill-score", source)
+                .expect("this manager must support the published optional contract");
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 [English](../../en/agent-sec-core/index.md)
 
-AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测和沙箱隔离。
+AgentSecCore 为 AI Agent 提供本地安全控制。本地扫描器不消耗模型 Token，提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测和沙箱隔离。
 
 Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 下文 RPM 选包说明对应 V2 Rust CLI 和 daemon。Agent 接入资源保留既有宿主接口；
@@ -10,6 +10,8 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 
 使用 `agent-sec-cli sandbox run` 按明确的文件和网络权限执行命令。
 [Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求。
+
+可选的 [Skill 安全评测](skill-score.md) 使用原生 ASC CLI 和共享模型配置生成计划、执行裁决。基础安装保持轻量，运行时通过 `agent-sec-cli skillsec score install-runtime` 显式安装。镜像构建器可在没有 Docker 时预置文件和绑定版本的镜像，供离线激活。
 
 ## 概述
 

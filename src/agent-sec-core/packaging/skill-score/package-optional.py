@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Build the small first-party optional component; dependencies stay external."""
+
+import argparse
+import gzip
+import hashlib
+import json
+import re
+import shutil
+import tarfile
+import tempfile
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+PAYLOAD = Path("lib/anolisa/sec-core-skill-score")
+UV = {
+    "version": "0.8.17",
+    "file": "uv-x86_64-unknown-linux-gnu.tar.gz",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.8.17/uv-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "920cbcaad514cc185634f6f0dcd71df5e8f4ee4456d440a22e0f8c0f142a8203",
+}
+
+
+def file_record(path: Path, name: str | None = None) -> dict:
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {
+        "file": name or path.name,
+        "bytes": path.stat().st_size,
+        "sha256": digest,
+    }
+
+
+def write_archive(stage: Path, output: Path, epoch: int) -> None:
+    with (
+        output.open("wb") as target,
+        gzip.GzipFile(
+            filename="", mode="wb", fileobj=target, mtime=epoch
+        ) as compressed,
+    ):
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            for path in sorted(stage.rglob("*")):
+                if path.is_symlink():
+                    raise ValueError("optional raw payload cannot contain symlinks")
+                member = archive.gettarinfo(path, str(path.relative_to(stage)))
+                member.uid = member.gid = 0
+                member.uname = member.gname = ""
+                member.mtime = epoch
+                if path.is_file():
+                    with path.open("rb") as source:
+                        archive.addfile(member, source)
+                else:
+                    archive.addfile(member)
+
+
+def stage_payload(payload: Path, version: str, commit: str) -> bytes:
+    """Stage the same first-party recipes for raw or RPM without preparing dependencies."""
+    if not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise ValueError("full source commit is required")
+    payload.mkdir(parents=True)
+    for path in (ROOT / "packaging/skill-score/optional").iterdir():
+        if path.is_file():
+            shutil.copyfile(path, payload / path.name)
+    (payload / "prepare.sh").chmod(0o755)
+    (payload / "uninstall.py").chmod(0o755)
+    shutil.copytree(
+        ROOT / "skill-score-runtime/src",
+        payload / "worker",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    shared = payload / "shared/agent_sec_cli/skill_score"
+    (shared / "evidence").mkdir(parents=True)
+    source = ROOT / "agent-sec-cli/src/agent_sec_cli"
+    shutil.copyfile(source / "__init__.py", shared.parent / "__init__.py")
+    for name in (
+        "__init__.py",
+        "contracts.py",
+        "fixture_formats.py",
+        "config.py",
+        "io.py",
+    ):
+        shutil.copyfile(source / "skill_score" / name, shared / name)
+    for name in ("__init__.py", "redact.py"):
+        shutil.copyfile(
+            source / "skill_score/evidence" / name, shared / "evidence" / name
+        )
+    shutil.copyfile(
+        ROOT / "skill-score-runtime/requirements.txt",
+        payload / "requirements.lock",
+    )
+    shutil.copyfile(ROOT / "LICENSE", payload / "LICENSE")
+    python = json.loads(
+        (ROOT / "skill-score-runtime/python-provenance.json").read_text()
+    )
+    python["file"] = "python-3.12.11-20250902.tar.gz"
+    image_source = payload / "image-source"
+    for relative in ("skill-score-runtime/image", "skill-score-runtime/egress"):
+        shutil.copytree(
+            ROOT / relative,
+            image_source / relative,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    scanner = image_source / "agent-sec-cli/src/agent_sec_cli"
+    scanner.mkdir(parents=True)
+    shutil.copyfile(source / "__init__.py", scanner / "__init__.py")
+    for name in ("code_scanner", "model_service"):
+        shutil.copytree(
+            source / name,
+            scanner / name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    worker = tomllib.loads((ROOT / "skill-score-runtime/pyproject.toml").read_text())
+    manifest = {
+        "schema": "agent-sec-skill-score/runtime-v2",
+        "component": "sec-core-skill-score",
+        "version": version,
+        "source_commit": commit,
+        "platform": "linux/amd64",
+        "protocol_version": "agent-sec-skill-score/worker-v1",
+        "worker_version": worker["project"]["version"],
+        "python": python,
+        "uv": UV,
+        "harbor_version": "0.22.0",
+        "pypi_index": "https://pypi.org/simple",
+        "image_build": {
+            "entry": "image-source/skill-score-runtime/image/build.py",
+            "default_base": "ghcr.io/protectskills/claude-skill-sandbox:lite@sha256:"
+            "f6f993df6f9c3f8b608c50548da598f4be862e020f204afa3d653701e95e07bc",
+        },
+        "files": [
+            file_record(path, str(path.relative_to(payload)))
+            for path in sorted(payload.rglob("*"))
+            if path.is_file()
+        ],
+    }
+    manifest_bytes = (json.dumps(manifest, indent=2) + "\n").encode()
+    (payload / "runtime-manifest.json").write_bytes(manifest_bytes)
+    return manifest_bytes
+
+
+def package(output: Path, version: str, commit: str, epoch: int) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise ValueError("full source commit is required")
+    if not re.fullmatch(
+        r"\d+\.\d+\.\d+-skillscore\." + commit[:12] + r"(?:\.base\.[a-f0-9]{12})?",
+        version,
+    ):
+        raise ValueError("preview version must bind the exact source commit")
+    with tempfile.TemporaryDirectory(prefix="asc-optional-package-") as directory:
+        stage = Path(directory)
+        payload = stage / PAYLOAD
+        manifest_bytes = stage_payload(payload, version, commit)
+        (output / "runtime-manifest.json").write_bytes(manifest_bytes)
+        contract = (ROOT / "packaging/anolisa/skill-score.toml").read_text()
+        contract = re.sub(
+            r'(?m)^version = "[^"]+"$', f'version = "{version}"', contract, count=1
+        )
+        (stage / ".anolisa").mkdir()
+        (stage / ".anolisa/component.toml").write_text(contract)
+        target = output / f"sec-core-skill-score-{version}-linux-x86_64.tar.gz"
+        write_archive(stage, target, epoch)
+        return target
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--epoch", type=int)
+    parser.add_argument("--rpm-stage", action="store_true")
+    args = parser.parse_args()
+    if args.rpm_stage:
+        contract = tomllib.loads(
+            (ROOT / "packaging/anolisa/component.toml").read_text()
+        )
+        if args.version != contract["component"]["version"]:
+            parser.error("RPM version must match the installed sec-core contract")
+        stage_payload(args.output, args.version, args.source_commit)
+    elif args.epoch is None:
+        parser.error("--epoch is required for a raw package")
+    else:
+        print(package(args.output, args.version, args.source_commit, args.epoch))
+
+
+if __name__ == "__main__":
+    main()

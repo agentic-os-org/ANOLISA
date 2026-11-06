@@ -306,6 +306,7 @@ fn per_component_args(name: &str, args: &InstallArgs) -> InstallArgs {
     InstallArgs {
         component: Some(name.to_string()),
         all: false,
+        match_installed: None,
         fail_fast: false,
         no_deps: args.no_deps,
         version: None,
@@ -962,6 +963,7 @@ mod tests {
         InstallArgs {
             component: None,
             all: true,
+            match_installed: None,
             fail_fast: false,
             no_deps: false,
             version: None,
