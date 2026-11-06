@@ -25,18 +25,19 @@ pub fn admit(
     providers: &BTreeMap<String, ProviderEvidence>,
 ) -> Result<Vec<AdmittedStep>, AdmissionError> {
     let steps = preflight(config, target, capabilities)?;
-    admit_requirements(config, &steps, providers)?;
+    admit_requirements(config, &steps, &capabilities.adapter, providers)?;
     Ok(steps)
 }
 
 pub(super) fn admit_requirements(
     config: &aw_config::Configuration,
     steps: &[AdmittedStep],
+    adapter: &str,
     providers: &BTreeMap<String, ProviderEvidence>,
 ) -> Result<(), AdmissionError> {
     let spec = &config.as_value()["spec"];
     for step in steps {
-        check_provider(spec, step, providers)?;
+        check_provider(spec, step, adapter, providers)?;
     }
     Ok(())
 }
@@ -242,6 +243,7 @@ fn preflight_step(
 fn check_provider(
     spec: &Value,
     step: &AdmittedStep,
+    adapter: &str,
     providers: &BTreeMap<String, ProviderEvidence>,
 ) -> Result<(), AdmissionError> {
     let StepExecution::Provider {
@@ -274,6 +276,12 @@ fn check_provider(
         contains(&operation["events"], &step.event),
         "Provider operation does not support the requested event",
     )?;
+    if let Some(adapters) = operation["event_adapters"].get(&step.event) {
+        require(
+            contains(adapters, adapter),
+            "Provider operation does not support the target Adapter for this event",
+        )?;
+    }
     for effect in effects {
         require(
             contains(&operation["effects"], effect),

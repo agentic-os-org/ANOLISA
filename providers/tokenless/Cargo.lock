@@ -62,8 +62,10 @@ version = "0.1.0"
 dependencies = [
  "aw-exec",
  "aw-provider",
+ "libc",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

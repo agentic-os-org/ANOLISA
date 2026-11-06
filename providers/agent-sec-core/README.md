@@ -27,6 +27,9 @@ instructions. Hermes uses the same check for native `skill_view`. Enable `config
 `tool.before`; see [Skill checks](../../docs/developer-guide/en/aw/providers/sec-core.md#validate-skills-before-loading)
 for directory authorization, trust states and supported local sources.
 
+Pi Coding Agent resident workers reuse `check_skill` on `input.submit` for local
+Skill commands; see [Pi setup](../../docs/developer-guide/en/aw/agents/pi.md#validate-skill-submissions).
+
 Maintained by @kongche-jbw under [CODEOWNERS](../../.github/CODEOWNERS).
 Bridge code uses [Apache-2.0](../../LICENSE); backend source is
 [agent-sec-core](../../src/agent-sec-core/README.md).

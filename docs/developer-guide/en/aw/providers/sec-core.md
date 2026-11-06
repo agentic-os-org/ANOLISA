@@ -153,7 +153,7 @@ with `on_error: report`.
 | Operation | Event | Result |
 | --- | --- | --- |
 | `scan_code` | `tool.before` | `ok: true, verdict: pass` → `observe/code_pass`; `warn` or `deny` → `observe/code_risk` or `block/code_risk`, according to `mode` |
-| `check_skill` | `tool.before` | Valid signed content → `observe/skill_pass`; other completed trust states observe or block according to `mode` |
+| `check_skill` | `tool.before`, `input.submit` | Valid signed content → `observe/skill_pass`; other completed trust states observe or block according to `mode` |
 | `observe_tool` | `tool.after` | `observe/tool_observed`; no scanner call |
 
 `describe`, private-config validation and after observation do not contact
@@ -303,6 +303,25 @@ The daemon administrator must authorize the actual canonical directories and
 make their files accessible. AW neither expands that authorization nor signs Skills.
 Use the [Skill Ledger guide](../../../../user-guide/en/agent-sec-core/skill-ledger.md)
 to review, scan and sign content separately.
+
+Pi Coding Agent uses the same operation on `input.submit`. Its Adapter supplies
+`native.aw_skill_request` and the resolved `native.aw_skill`; matching names are
+required. Pi also supplies `aw_skill.digest`, the `sha256:<hex>` of the captured raw
+`SKILL.md` bytes. The existing V2 `check` response supplies an authenticated
+`manifestHash`. After `pass`, the Provider reads the local `.skill-meta/latest.json`
+regular file (up to 8 MiB), removes `manifestHash` and `signature`, recursively sorts
+object keys and hashes compact JSON with SHA-256. The computed hash must equal the
+CLI result; the manifest must bind the selected canonical directory, V2 format and
+`pass` status. Its `fileHashes["SKILL.md"]` must then match Pi's captured digest.
+The Provider identity needs read access to that artifact. Missing, unreadable,
+changed or forged artifacts and snapshot mismatches produce `skill_drifted`, which
+blocks under `mode: block` even with `on_error: report`. A missing or invalid CLI
+manifest hash is a Provider error handled by `on_error`; use `block` for required
+trust. This consumes existing Ledger fields and artifacts. Explicit `null` values for both fields mean ordinary text and produce
+`observe/skill_not_requested` without a backend call. Missing metadata is an error.
+The description declares `event_adapters: {"input.submit": ["pi"]}` for this operation.
+Other Adapters are rejected during admission regardless of `on_error`. Use a separate
+Pi configuration; other Agents retain their applicable tool-time checks. See [Pi Skill submissions](../agents/pi.md#validate-skill-submissions).
 
 | Ledger status | Reason code | `mode: block` |
 | --- | --- | --- |

@@ -53,6 +53,7 @@ def structure(metadata: dict, root: Path) -> None:
             "thiserror",
             "libc",
             "jsonschema",
+            "sha2",  # Bind existing Ledger manifests to the authenticated CLI digest.
         },
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {

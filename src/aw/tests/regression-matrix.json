@@ -1058,6 +1058,18 @@
     "pi-strict-fault": {
       "target": "aw-adapter/lib/aw_adapter",
       "test": "callback::strict_tests::pi_withholding_requires_an_audited_provider_fault"
+    },
+    "provider-event-adapter-admission": {
+      "target": "aw-core/test/admission",
+      "test": "engine::event_adapter_constraints_reject_unsupported_targets_before_runtime_failure_policy"
+    },
+    "provider-event-adapter-description": {
+      "target": "aw-provider/test/protocol",
+      "test": "operation_adapter_constraints_are_bounded_and_reference_declared_events"
+    },
+    "pi-skill-manifest-binding": {
+      "target": "aw-provider-sec-core/test/skill",
+      "test": "pi_snapshot_requires_the_exact_manifest_authenticated_by_the_existing_cli"
     }
   },
   "agents": {

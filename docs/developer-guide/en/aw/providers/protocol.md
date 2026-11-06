@@ -61,7 +61,18 @@ effects. Operation names must be nonempty and unique. A declaration is supplied 
 cannot expand the Adapter's trusted capabilities or establish runtime identity.
 The vocabulary recognizes all 16 configuration events, while this admission
 profile permits `input.submit`, `tool.before` and `tool.after`.
-Submission support requires an ordinary resident Qoder SDK or QwenPaw entrypoint.
+Submission support requires a supported resident entrypoint such as Qoder SDK, QwenPaw or Pi.
+
+An operation may restrict an event to specific Adapter IDs with optional
+`event_adapters`, for example `"event_adapters":{"input.submit":["pi"]}`.
+Each key must occur in that operation's `events`; each list has 1–64 unique IDs
+of up to 128 lowercase ASCII letters, digits or hyphens, starting with a letter.
+An omitted event has no Provider-declared Adapter restriction. Admission compares
+the selected target's trusted Adapter ID with the list before native hooks become
+ready. A mismatch rejects preparation regardless of `on_error`; it never silently
+skips the step. This declaration constrains capability, not configuration selection.
+Deploy a Host that understands this field together with such a Provider; older
+Hosts reject the unknown field during discovery.
 
 ### `validate_config`
 

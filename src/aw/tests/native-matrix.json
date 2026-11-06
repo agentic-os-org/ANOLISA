@@ -2015,6 +2015,77 @@
               }
             }
           ]
+        },
+        {
+          "name": "skill-objects",
+          "argv": [
+            "node",
+            "crates/aw-cli/tests/fixtures/pi/skill-objects.mjs",
+            "{npm}",
+            "{output}/skill-objects/result.json"
+          ],
+          "timeout_seconds": 60,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-objects/result.json",
+              "values": {
+                "passed": true,
+                "case_count": 10
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-input",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/pi/skill-smoke.py",
+            "--aw",
+            "{bin}/aw",
+            "--root",
+            "{npm}",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
+            "--output",
+            "{output}/skill-input"
+          ],
+          "timeout_seconds": 180,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-input/results.json",
+              "values": {
+                "passed": true
+              },
+              "cases": {
+                "at": "cases",
+                "key": "case",
+                "names": [
+                  "signed",
+                  "plain",
+                  "unsigned",
+                  "drifted",
+                  "tampered",
+                  "denied",
+                  "error",
+                  "changed",
+                  "directory-swap",
+                  "forged-manifest",
+                  "missing-digest",
+                  "cancel",
+                  "prompt-denied",
+                  "pii-denied"
+                ],
+                "values": {
+                  "passed": true,
+                  "bindings": 0,
+                  "events": 0,
+                  "invocations": 0
+                }
+              }
+            }
+          ]
         }
       ]
     },

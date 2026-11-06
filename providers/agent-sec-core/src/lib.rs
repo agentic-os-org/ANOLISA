@@ -79,7 +79,7 @@ fn dispatch(
         return Ok(serde_json::Map::from_iter([(
             "operations".to_owned(),
             json!([
-                {"name":"check_skill", "events":["tool.before"], "effects":["observe","block"]},
+                {"name":"check_skill", "events":["tool.before","input.submit"], "effects":["observe","block"], "event_adapters":{"input.submit":["pi"]}},
                 {"name":"scan_code", "events":["tool.before"], "effects":["observe","block"]},
                 {"name":"observe_tool", "events":["tool.after"], "effects":["observe"]},
                 {"name":"scan_prompt", "events":["input.submit"], "effects":["observe","block"]},
@@ -149,21 +149,27 @@ fn dispatch(
             }
         }
         (Some("observe_tool"), Some("tool.after")) => ("observe", "tool_observed"),
-        (Some("check_skill"), Some("tool.before")) => {
+        (Some("check_skill"), Some("tool.before" | "input.submit")) => {
             if config.mode == Mode::Block && !admitted(value, "block") {
                 return Err("block_not_admitted");
             }
             if !config.skill {
                 return Err("skill_check_disabled");
             }
-            if event["tool"]["native_name"] != "Skill"
-                && !(event["agent"]["adapter"] == "hermes"
-                    && event["tool"]["native_name"] == "skill_view")
-            {
-                return Err("skill_tool_unmapped");
+            if event["name"] == "tool.before" {
+                if event["tool"]["native_name"] != "Skill"
+                    && !(event["agent"]["adapter"] == "hermes"
+                        && event["tool"]["native_name"] == "skill_view")
+                {
+                    return Err("skill_tool_unmapped");
+                }
+            } else if event["agent"]["adapter"] != "pi" {
+                return Err("skill_source_unmapped");
             }
             let reason = skill::call(cli, socket, event, remaining)?;
-            let effect = if config.mode == Mode::Block && reason != "skill_pass" {
+            let effect = if config.mode == Mode::Block
+                && !matches!(reason, "skill_pass" | "skill_not_requested")
+            {
                 "block"
             } else {
                 "observe"

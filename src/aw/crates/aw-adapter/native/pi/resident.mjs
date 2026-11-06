@@ -4,6 +4,7 @@ import { configuration, installSessionBridge, publishReady } from "./bridge.mjs"
 import { Scope } from "./scope.mjs";
 import { randomUUID } from "node:crypto";
 import { inputBoundary } from "./submission.mjs";
+import { expandsSkill, prepareSkill } from "./skills.mjs";
 
 async function bounded(promise, milliseconds) {
   let timer;
@@ -80,7 +81,9 @@ export async function runWorker(app, sdk, core, args) {
           return stream(...arguments_);
         }, writable: false,
       });
-      const checked = configuration().hooks.some(hook => hook.event === "input.submit");
+      const inputHooks = configuration().hooks.filter(hook => hook.event === "input.submit");
+      const checked = inputHooks.length > 0;
+      const skillChecks = inputHooks.some(hook => hook.skill_check === true);
       const boundary = checked ? inputBoundary(session) : null;
       const record = { scope, bridge, closing: null, pending: null, inputAbort: null,
         abort: session.abort.bind(session), dispose: session.dispose.bind(session) };
@@ -107,14 +110,22 @@ export async function runWorker(app, sdk, core, args) {
         const execute = async () => {
           scope.check();
           if (record.pending) throw new Error("One AW Pi session permits one active prompt");
-          boundary?.validate(...arguments_);
+          const skill = skillChecks && expandsSkill(...arguments_);
+          boundary?.validate(arguments_[0], arguments_[1], skill);
           scope.begin();
           record.inputAbort = new AbortController();
           try {
             if (checked) {
               try {
-                await bridge.submit(arguments_[0], randomUUID(), record.inputAbort.signal);
+                const selected = skillChecks ? await prepareSkill(session, sdk, ...arguments_) : null;
                 scope.checkExecution();
+                await bridge.submit(selected?.text ?? arguments_[0], randomUUID(), record.inputAbort.signal, selected?.metadata);
+                scope.checkExecution();
+                if (selected) {
+                  await selected.verify();
+                  scope.checkExecution();
+                  arguments_ = [selected.text, selected.options];
+                }
                 boundary.validate(...arguments_);
               } catch (error) {
                 arguments_[1]?.preflightResult?.(false);

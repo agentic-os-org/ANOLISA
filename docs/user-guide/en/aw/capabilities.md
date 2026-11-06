@@ -91,6 +91,13 @@ Hermes local chat supports directory-based `skill_view` through the same
 `tool.before` check. See [Hermes Skill sources](../../../developer-guide/en/aw/agents/hermes.md#skill-trust)
 for native selection and source limits.
 
+Pi Coding Agent/Core 0.84.2 resident factories also check local `/skill:name`
+submissions through `input.submit`. The selected directory content is fixed before
+Ledger validation; prompt and PII checks inspect the final expanded text.
+See [Pi setup and limits](../../../developer-guide/en/aw/agents/pi.md#validate-skill-submissions).
+Native `skill-objects` and `skill-input` suites cover selection, source changes,
+trust refusal, cancellation and actual model delivery.
+
 ## Task-private credentials
 
 AgentScope SDK 2.0.6 factory replies support application-owned private leases.

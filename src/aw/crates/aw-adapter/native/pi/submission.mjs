@@ -61,7 +61,7 @@ export function inputBoundary(session) {
       if (options?.onPayload !== session.agent.onPayload) violation("provider payload callback");
       return { ...context, messages: structuredClone(context.messages) };
     },
-    validate(text, options) {
+    validate(text, options, skill = false) {
       if (typeof text !== "string" || (options !== undefined &&
           (!options || typeof options !== "object" || Array.isArray(options)))) reject();
       if (options?.images !== undefined &&
@@ -75,7 +75,7 @@ export function inputBoundary(session) {
         if (session.hasExtensionHandlers(event))
           throw new Error(`AW Pi input.submit does not support ${event} extension handlers`);
       }
-      if ((options?.expandPromptTemplates ?? true) && text.startsWith("/"))
+      if (!skill && (options?.expandPromptTemplates ?? true) && text.startsWith("/"))
         throw new Error("AW Pi input.submit requires literal text; disable prompt expansion for slash text");
     },
     async run(text, body) {

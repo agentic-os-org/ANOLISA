@@ -105,3 +105,19 @@ fn submission_boundary_rejects_changed_messages_and_retains_native_continuations
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+#[test]
+fn skill_submission_pins_source_and_marks_ordinary_input_explicitly() {
+    let fixture = Fixture::new();
+    let mut command = Command::new("node");
+    command
+        .arg("--test")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi/skill-boundary.mjs"));
+    let result = fixture.run(command);
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

@@ -156,6 +156,10 @@ impl PreparedLaunch for Prepared {
             .write("bridge.mjs", include_bytes!("../../native/pi/bridge.mjs"))?;
         for (name, bytes) in [
             (
+                "skills.mjs",
+                include_bytes!("../../native/pi/skills.mjs").as_slice(),
+            ),
+            (
                 "submission.mjs",
                 include_bytes!("../../native/pi/submission.mjs").as_slice(),
             ),
@@ -222,7 +226,13 @@ fn routes(
             return Err("Pi event budget must be 1..55000 ms".into());
         }
         for step in &selected {
-            hooks.push(json!({"event":event,"step":step.step_id,"on_error":step.on_error,"budget_ms":budget}));
+            let mut hook = json!({"event":event,"step":step.step_id,"on_error":step.on_error,"budget_ms":budget});
+            if event == "input.submit"
+                && matches!(&step.execution, aw_core::admission::StepExecution::Provider { operation, .. } if operation == "check_skill")
+            {
+                hook["skill_check"] = json!(true);
+            }
+            hooks.push(hook);
         }
         events.insert(
             event.into(),

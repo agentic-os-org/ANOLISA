@@ -216,3 +216,181 @@ fn missing_or_untrustworthy_resolution_does_not_call_backend() {
     );
     assert!(!fixture.0.join("cli.pid").exists());
 }
+
+#[test]
+fn pi_submission_checks_selected_skills_and_skips_only_explicit_plain_text() {
+    let mut request = invocation();
+    request["event"]["name"] = json!("input.submit");
+    request["event"]["turn_id"] = json!("turn");
+    request["event"]["agent"]["adapter"] = json!("pi");
+    request["event"].as_object_mut().unwrap().remove("tool");
+    request["event"]["input"] = json!({"text":"expanded Skill instructions"});
+    request["event"]["native"]["aw_skill_request"] = json!("test-skill");
+    request["event"]["native"]["aw_skill"]["digest"] = json!(format!("sha256:{}", "a".repeat(64)));
+    for (status, effect) in [("pass", "observe"), ("none", "block")] {
+        let fixture = support::Directory::new(json!({}));
+        let hash = write_manifest(&fixture, &format!("sha256:{}", "a".repeat(64)));
+        std::fs::write(
+            fixture.0.join("case.json"),
+            json!({"stdout":{"status":status,"manifestHash":hash}}).to_string(),
+        )
+        .unwrap();
+        request["event"]["native"]["aw_skill"]["directory"] = json!(fixture.0);
+        assert_eq!(
+            run(request.clone(), &fixture.cli())["effects"][0]["type"],
+            effect
+        );
+        assert_eq!(fixture.argv()[8], json!(fixture.0));
+        fixture.assert_stopped();
+    }
+    for checked in [Value::Null, json!("sha256:invalid")] {
+        let fixture =
+            support::Directory::new(json!({"stdout":{"status":"pass","manifestHash":checked}}));
+        assert_eq!(
+            run(request.clone(), &fixture.cli())["error_code"],
+            "invalid_skill_result"
+        );
+        fixture.assert_stopped();
+    }
+    for digest in [
+        Value::Null,
+        json!("invalid"),
+        json!(format!("sha256:{}", "A".repeat(64))),
+    ] {
+        let fixture = support::Directory::new(json!({"stdout":{"status":"pass"}}));
+        let mut invalid = request.clone();
+        invalid["event"]["native"]["aw_skill"]["digest"] = digest;
+        assert_eq!(
+            run(invalid, &fixture.cli())["error_code"],
+            "skill_resolution_error"
+        );
+        assert!(!fixture.0.join("cli.pid").exists());
+    }
+    let fixture = support::Directory::new(json!({"stdout":{"status":"pass"}}));
+    request["event"]["native"] = json!({"aw_skill":null,"aw_skill_request":null});
+    assert_eq!(
+        run(request.clone(), &fixture.cli())["effects"],
+        json!([{"type":"observe","reason_code":"skill_not_requested"}])
+    );
+    for native in [
+        json!({}),
+        json!({"aw_skill":null}),
+        json!({"aw_skill":null,"aw_skill_request":"test-skill"}),
+        json!({"aw_skill":{"error_code":"skill_resolution_error"},"aw_skill_request":"test-skill"}),
+    ] {
+        request["event"]["native"] = native;
+        assert_eq!(
+            run(request.clone(), &fixture.cli())["error_code"],
+            "skill_resolution_error"
+        );
+    }
+    request["event"]["native"] = json!({"aw_skill":null,"aw_skill_request":null});
+    request["event"]["agent"]["adapter"] = json!("claude-sdk");
+    assert_eq!(
+        run(request, &fixture.cli())["error_code"],
+        "skill_source_unmapped"
+    );
+    assert!(!fixture.0.join("cli.pid").exists());
+}
+
+fn write_manifest(fixture: &support::Directory, digest: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut manifest = json!({
+        "version": 2, "canonicalSkillDir": fixture.0, "scanStatus": "pass",
+        "fileHashes": {"SKILL.md": digest},
+        "scans": [{"details": {"z": "中文", "a": [1.0, true]}}]
+    });
+    manifest.sort_all_objects();
+    let hash = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&manifest).unwrap())
+    );
+    manifest["manifestHash"] = json!(hash);
+    manifest["signature"] = json!({"value":"authenticated-by-cli"});
+    std::fs::create_dir_all(fixture.0.join(".skill-meta")).unwrap();
+    std::fs::write(
+        fixture.0.join(".skill-meta/latest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    hash
+}
+
+#[test]
+fn pi_snapshot_requires_the_exact_manifest_authenticated_by_the_existing_cli() {
+    use std::{fs, os::unix::fs::symlink};
+    for scenario in [
+        "pass",
+        "snapshot-mismatch",
+        "forged-label",
+        "missing",
+        "symlink",
+        "fifo",
+        "oversized",
+    ] {
+        let fixture = support::Directory::new(json!({}));
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let hash = write_manifest(&fixture, &digest);
+        let path = fixture.0.join(".skill-meta/latest.json");
+        let mut request = invocation();
+        request["event"].as_object_mut().unwrap().remove("tool");
+        request["event"]["name"] = json!("input.submit");
+        request["event"]["turn_id"] = json!("turn");
+        request["event"]["input"] = json!({"text":"expanded"});
+        request["event"]["agent"]["adapter"] = json!("pi");
+        request["event"]["native"]["aw_skill_request"] = json!("test-skill");
+        request["event"]["native"]["aw_skill"]["directory"] = json!(fixture.0);
+        request["event"]["native"]["aw_skill"]["digest"] = json!(digest);
+        match scenario {
+            "snapshot-mismatch" => {
+                request["event"]["native"]["aw_skill"]["digest"] =
+                    json!(format!("sha256:{}", "b".repeat(64)))
+            }
+            "forged-label" => {
+                let mut forged: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                forged["fileHashes"]["SKILL.md"] = json!(format!("sha256:{}", "b".repeat(64)));
+                request["event"]["native"]["aw_skill"]["digest"] =
+                    forged["fileHashes"]["SKILL.md"].clone();
+                fs::write(&path, forged.to_string()).unwrap();
+            }
+            "missing" => fs::remove_file(&path).unwrap(),
+            "symlink" => {
+                fs::rename(&path, fixture.0.join("manifest.json")).unwrap();
+                symlink(fixture.0.join("manifest.json"), &path).unwrap();
+            }
+            "fifo" => {
+                fs::remove_file(&path).unwrap();
+                assert!(std::process::Command::new("mkfifo")
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            "oversized" => fs::write(&path, vec![b' '; 8 * 1024 * 1024 + 1]).unwrap(),
+            _ => {}
+        }
+        fs::write(
+            fixture.0.join("case.json"),
+            json!({"stdout":{"status":"pass","manifestHash":hash}}).to_string(),
+        )
+        .unwrap();
+        let result = run(request, &fixture.cli());
+        assert_eq!(
+            result["effects"][0]["reason_code"],
+            if scenario == "pass" {
+                "skill_pass"
+            } else {
+                "skill_drifted"
+            },
+            "{scenario}: {result}"
+        );
+        assert_eq!(
+            result["effects"][0]["type"],
+            if scenario == "pass" {
+                "observe"
+            } else {
+                "block"
+            }
+        );
+    }
+}

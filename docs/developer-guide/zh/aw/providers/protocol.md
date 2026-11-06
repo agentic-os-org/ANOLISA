@@ -49,8 +49,17 @@ JSON 文档。公共信封拒绝未知字段；Provider 私有配置和原生
 
 描述最多声明 64 个操作及其支持的事件和效果，操作名不得为空或重复。声明来自 Provider，不能
 扩大 Adapter 的可信能力或证明运行时身份。词表识别配置中的全部 16 个事件，本阶段
-准入支持 `input.submit`、`tool.before` 和 `tool.after`。提交检查需要普通 resident
-Qoder SDK 或 QwenPaw 入口。
+准入支持 `input.submit`、`tool.before` 和 `tool.after`。提交检查需要受支持的 resident 入口，
+例如 Qoder SDK、QwenPaw 或 Pi。
+
+操作可以通过可选 `event_adapters` 限制某个事件支持的 Adapter，例如
+`"event_adapters":{"input.submit":["pi"]}`。键必须出现在该操作的 `events` 中；
+每个列表包含 1–64 个不重复 ID，ID 最多 128 个 ASCII 小写字母、数字或连字符，
+且以字母开头。未列出的事件没有 Provider 声明的 Adapter 限制。
+准入会在原生 Hook 就绪前，将当前目标的可信 Adapter ID 与列表核对。
+不匹配时准备失败，`on_error` 不会改变该结果，也不会静默跳过步骤。
+此声明约束能力，配置目标选择仍遵循现有规则。此类 Provider 应与支持该字段的
+Host 一起部署；旧 Host 在发现阶段会拒绝未知字段。
 
 ### `validate_config`
 

@@ -21,6 +21,9 @@ Qoder SDK、QwenPaw 和 AgentScope 可在原生 `Skill` 工具加载指令前校
 Hermes 原生 `skill_view` 使用同一检查。设置 `config.skill: true`，在 `tool.before` 选择 `check_skill`；目录授权、
 信任状态与本地来源范围见 [Skill 校验](../../docs/developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
 
+Pi Coding Agent 常驻 worker 在 `input.submit` 复用 `check_skill` 校验本地 Skill 命令，
+配置见 [Pi 接线](../../docs/developer-guide/zh/aw/agents/pi.md#校验-skill-输入)。
+
 维护人按 [CODEOWNERS](../../.github/CODEOWNERS) 由 @kongche-jbw 负责。
 桥接代码使用 [Apache-2.0](../../LICENSE)，后端来源见 [agent-sec-core](../../src/agent-sec-core/README_zh.md)。
 

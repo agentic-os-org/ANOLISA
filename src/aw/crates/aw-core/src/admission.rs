@@ -216,7 +216,7 @@ impl AdmissionEngine {
             capabilities,
             requirements,
         } = candidate;
-        rules::admit_requirements(&config, &requirements, providers)?;
+        rules::admit_requirements(&config, &requirements, &capabilities.adapter, providers)?;
         Ok(AdmittedPolicy {
             config,
             revision,
