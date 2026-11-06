@@ -19,6 +19,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gate = PTHREAD_COND_INITIALIZER;
 static int go, port, calls, length, delay_us, use_ex;
 static SSL_CTX *ctx;
+static unsigned char *shared_payload;
 static uint64_t samples[65536];
 static size_t sample_count;
 static int failures;
@@ -45,10 +46,11 @@ static void *worker(void *unused) {
     if (fd < 0 || !ssl || connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) exit(20);
     SSL_set_fd(ssl, fd);
     if (SSL_connect(ssl) != 1) exit(21);
-    unsigned char *payload = malloc((size_t)length + 1);
+    unsigned char *payload = use_ex == 5 ? shared_payload : malloc((size_t)length + 1);
     if (!payload) exit(22);
-    memset(payload, 'A', (size_t)length);
+    if (use_ex != 5) memset(payload, 'A', (size_t)length);
     for (int i = 0; i < calls; i++) {
+        if (use_ex == 4) memset(payload, i % 2 ? 'B' : 'A', (size_t)length);
         uint64_t before = now_ns();
         size_t written = 0;
         int result;
@@ -64,7 +66,7 @@ static void *worker(void *unused) {
     if (SSL_shutdown(ssl) == 0) SSL_shutdown(ssl);
     SSL_free(ssl);
     close(fd);
-    free(payload);
+    if (use_ex != 5) free(payload);
     return NULL;
 }
 
@@ -94,6 +96,11 @@ int main(int argc, char **argv) {
     if (!ctx) return 4;
     /* Self-signed server and loopback-only synthetic data are scoped to this fixture. */
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    if (use_ex == 5) {
+        shared_payload = malloc((size_t)length + 1);
+        if (!shared_payload) return 22;
+        memset(shared_payload, 'A', (size_t)length);
+    }
     pthread_t ids[16];
     if (!late) for (int i = 0; i < threads; i++) if (pthread_create(&ids[i], NULL, worker, NULL)) return 5;
     printf("{\"kind\":\"fixture_ready\",\"pid\":%d}\n", getpid()); fflush(stdout);
@@ -128,6 +135,7 @@ int main(int argc, char **argv) {
     fflush(stdout);
     /* Keep the identity alive until the importer has correlated and the tracer detached. */
     (void)getchar();
+    free(shared_payload);
     SSL_CTX_free(ctx);
     return failures ? 8 : 0;
 }

@@ -1,106 +1,100 @@
-# Observation Source and AW correlation
+# Transport observation in AW unified Hooks
 
-The default executable refuses observation before target access because forced-death
-isolation remains unproven. Only explicit `unsafe-lab` builds enable collection
-for disposable synthetic targets. This admission gate is the current fail-closed
-mechanism; it does not contain a running lab tracer crash or terminate targets
-as an availability policy. No EXITKILL, global security change or target-side
-SIGTRAP handler is installed.
+[中文版](ARCHITECTURE_NOTES_zh.md)
 
-The experimental Source outputs `aw.transport-observation-poc/v0` JSONL. It has
-no AW dependency, socket, registration credentials or policy controls. Its
-ProcessRef includes PID/start ticks/UID/PID namespace/boot identity/executable
-identity. The permit adds an executable SHA-256, while the running tracer retains
-a pidfd and rechecks process identity at event handling and idle boundaries.
+This package supplies optional process-level transport evidence to AW. The next
+target is read-only observation for pinned versions, a small number of Workers
+and low-rate tasks: identify TLS writes, their lengths/digests and capture
+coverage. BPF uprobes are the candidate collector. The ptrace experiment remains
+disabled by default because killing its tracer can terminate the target.
 
-The Source stops existing threads, resolves exact dynamic OpenSSL symbols, and
-arms per-thread x86 execution breakpoints. TRACECLONE provides a stop before a
-new thread runs; Linux may expose inherited DR7 with empty DR0/DR1, which is
-validated and initialized. Stops already available are drained into a bounded
-queue before resuming threads to avoid low-TID starvation. Pending stops remain
-owned by the Engine so cancellation and error cleanup can detach them. Exec and
-fork cause an explicit unsupported result and bounded detach. Foreign signals
-are forwarded after checking signal provenance. SEIZE group stops use LISTEN
-until SIGCONT, and detach preserves the group stop. Four-wave thread churn and
-busy attachment have dedicated synthetic tests; arbitrary dlclose/reload and
-unconstrained real application behavior remain unverified. Cleanup responsibility
-is registered before the first debug-register write, inherited by tracked
-children and retained until detach or verified loss of ownership. An exiting
-thread returning ESRCH does not abort cleanup of other threads. Each cleanup
-attempt has a three-second deadline; unresolved ownership reports failure.
-An interrupt stop can hide a queued hardware SIGTRAP. Cleanup disables breakpoints,
-uses PTRACE_PEEKSIGINFO to inspect the bounded per-thread queue, then resumes under
-ptrace to consume that signal's delivery stop before detaching. The delivered
-signal is suppressed only with hardware provenance and a matching owned symbol
-address; register-read failure retains cleanup responsibility. This recovery
-requires a live tracer and cannot execute after its SIGKILL.
+## Qoder and Qoder SDK boundaries
 
-TLS writes produce counts, lengths and SHA-256 only. Events use Linux
-CLOCK_MONOTONIC nanoseconds and boot identity, with explicit `unknown` coverage.
-The event means entry to a TLS write API; it cannot prove successful transmission,
-parse a complete request, identify a tool call, or authorize an action. Only the
-controlled receiver validates byte adoption in these tests. A buffer shared with
-concurrently mutating application threads has no atomic-snapshot guarantee.
+The current [Adapter catalog](../../src/aw/crates/aw-adapter/src/adapter/catalog.rs)
+declares `input.submit`, `tool.before` and `tool.after` for both adapters. Qoder
+CLI uses native `UserPromptSubmit`, `PreToolUse` and `PostToolUse` callbacks. The
+SDK Bridge manages daemon/Query lifecycle and uses native callbacks and execution
+boundaries for checks and effect adoption. `model.before_request` remains planned
+in the [capability reference](../../docs/user-guide/en/aw/capabilities.md).
+Mode-specific limits belong to the [Qoder](../../docs/developer-guide/en/aw/agents/qoder.md)
+and [SDK](../../docs/developer-guide/en/aw/agents/qoder-sdk.md) guides.
 
-## Fixture correlation boundary
+| Requirement | Current Source evidence | Requirement without native Hooks |
+| --- | --- | --- |
+| TLS write observation | PID, thread, time, length, digest, loss and Coverage | Confirm the actual sender uses supported dynamic OpenSSL for each version |
+| Instance/Scope correlation | Private importer tested with real AW fixtures | Legal instance lifecycle and read-only identity export; PID discovery cannot establish Ready |
+| `input.submit` observe/block | No submission boundary, input object or synchronous receipt | A new application input boundary with block adoption |
+| `tool.before` observe/block | No tool identity, arguments or pre-execution stop | A semantic execution boundary; local tools may produce no TLS write |
+| `tool.after` observe/replace | No tool result or authorized replacement slot | A result-delivery boundary with adoption confirmation |
+| Model request checks/rewrite | TLS entry metadata with unknown send adoption | Request reassembly, protocol semantics, authorized actions and receiver validation; unimplemented |
 
-`fixtures/aw_owner.py` calls the real `aw instance` CLI as the direct parent.
-It registers the existing Qoder SDK profile with **empty** capabilities/routes,
-acknowledges Ready for that empty route set, opens and acknowledges a real Scope,
-and records CLI replies plus the service's parent/scope status in a private file.
-It then execs the synthetic TLS client, preserving AW PID/start identity.
+Transport observation can run independently of native Hooks. Actual Qoder CLI
+and SDK Worker TLS paths have not been validated here. The resolver recognizes
+dynamic symbols in mapped `libssl.so`; static linking, other TLS libraries,
+other ABIs or a different sender process may be unsupported. Product names or
+the use of Node do not establish compatibility.
 
-`scripts/correlation.py` runs outside the Source. It imports that test-owned file,
-checks owner PID/start identity, service generation/config identity, exact handles,
-scope-parent status and liveness, then pins the client's final executable. It
-correlates events while the process remains live and the capture's 60-second
-window remains valid. An unregistered process stays observed/unassociated.
-Multiple candidate instances for one PID remain ambiguous with null IDs; no
-timestamp heuristic chooses a task. This importer trusts its same-UID fixture
-capture and lacks a live release/revocation feed. It is not a production AW
-attestation format. Descendant worker mapping is future work; the demonstrated
-worker uses the owner's preserved PID.
+The current Source cannot fully replace Qoder unified Hooks. Digests contain no
+tool name, call ID or model-message structure, and TLS fragments do not map
+one-to-one to application events. Lower concurrency simplifies ownership and
+capacity validation; semantic boundaries still need implementation. A future
+fixed-version runtime-instrumentation Adapter could replace native Hooks by
+intercepting actual input/execution/result boundaries, constructing unified
+events, calling AW synchronously and verifying block or replace_result adoption.
+That requires separate development and acceptance; SSL_write hits do not prove it.
 
-## Read-only kernel-link comparison
+## Framework responsibilities
 
-`scripts/uprobe_counter.py` and `fixtures/uprobe_bpf.c` implement a separate
-counting experiment. A `BPF_TRACE_UPROBE_MULTI` link filters the target process in
-the kernel; the program also checks TGID and atomically increments a single
-8-byte map value. Existing and future threads share the same process filter.
-The collector never owns a ptrace stop or application debug-register state.
-Closing the last unpinned link descriptor releases this Source's attachment;
-coexisting independent Sources own separate links.
+The proposed integration path is:
 
-The lab broker opens the map, program and link, transfers the map/link descriptors
-with SCM_RIGHTS, and exits. Program and link lifetimes are managed by kernel
-references. No AW socket or daemon privilege is involved. This broker loads
-operator-built code under existing sudo authorization and needs a separate
-security review before any production distribution.
+```text
+Authorized Qoder / SDK Worker
+  -> independent BPF Source -> bounded private metadata store
+  -> read-only Instance/Scope correlation -> Observation Provider query/projection
+  -> AW context evidence, diagnostics or policy inputs at existing Hooks
+```
 
-The counter has no event queue: collector suspension preserves the total but
-loses individual timing. A count cannot supply a payload digest or native Hook
-semantics. A future Source must add bounded in-kernel capture, drop accounting,
-explicit coverage, and repeated fault tests before reusing the independent AW
-correlation boundary. A BPF read-only Source provides no transport-rewrite path.
+The Source continuously collects; a future `aw-provider-observation` performs
+bounded queries/projections within the existing per-invocation Provider
+lifecycle. Native Hooks may consume this supplementary evidence at their own
+boundaries. Disabling native Hooks leaves no automatic `tool.before` trigger.
+A separate transport event consumer first needs reviewed provenance, admission
+and Coverage contracts; this package's private schema is not a registered Hook.
 
-## Minimum future service integration — proposed, unimplemented
+The Source holds authorized process descriptors, without the full AW control
+socket. A future identity bridge exports generation-bound validity intervals
+and revocation, including the actual sender Worker's relationship to its owner.
+The fixture preserves owner identity through same-PID exec; real SDK child-Worker
+mapping still needs implementation and validation. Multiple instances on one PID
+stay ambiguous; unassociated processes stay Observed. A single Query still
+requires verified identity and validity intervals.
 
-1. Define a read-only, generation-bound identity export for an authorized
-   Observation Source. Include instance/scope validity intervals, process/boot
-   identity, ambiguity and revocation. The Source receives no full AW socket.
-2. Keep a separately supervised Source Worker and a bounded private metadata
-   store. Resolve tracer-death safety before enabling it for user processes.
-   Source lifecycle, privilege and resource ownership stay outside the AW daemon.
-3. Add an independently distributed `aw-provider-observation` query/projection
-   bridge. A normal stdio invocation reads bounded snapshots from that store;
-   aw-host continues to manage only per-invocation Provider execution.
-4. Review provenance, observation intervals, drops and semantic coverage before
-   mapping to formal AW evidence. Context Freeze (#9425) may consume reviewed
-   facts later; semantic Provider evaluation and Directive (#9427) authorization
-   remain distinct work. Transport events never become trusted native callbacks.
+Events retain source, ProcessRef, monotonic clock domain, digest range and loss
+accounting. Entry digests cannot establish receiver adoption. Missing final
+summaries make interval loss unknown. Read-only evidence grants no execution
+authority.
 
-Native Hook/SDK remains the preferred integration. Optional AgentSight resources
-may later supply process discovery, reviewed fingerprint assets or trajectory
-data. AgentSight is not a runtime dependency. The ptrace executable does not require
-eBPF; the separate uProbe comparison requires BPF kernel support. Formal
-protocols, schema registration, packaging and installers require a separate review.
+## Restricted pilot
+
+The first candidate is one host, pinned Qoder/SDK/Worker versions, one managed
+Worker and one active Query, used for diagnostics and supplementary audit.
+Allowed gaps must be visible; this is not a sole security-enforcement or complete
+audit source. Large-scale concurrency and extreme throughput can follow later.
+The first acceptance should establish usefulness on real low-rate tasks.
+
+| Next step | Restricted acceptance |
+| --- | --- |
+| Locate the real boundary | Identify sender PID, TLS library and symbol; confirm hits using authorized synthetic tasks, without production body capture |
+| Verify ownership | Match real AW registration, owner/Worker identity and Query lifecycle; reject stale mappings across exit/restart |
+| Measure the chosen workload | Reconcile hits/loss and measure latency, CPU/RSS under its task rate and bursts; declare the sustainable range |
+| Manage collection lifecycle | Start with windows of at most 30 seconds; persistent use needs bounded rotation, status export and restart-gap handling |
+| Fix the privilege entrypoint | Pin reviewed program/object assets, constrain attachment targets and handle helper/collector exits and permission failures |
+| Connect the query consumer | Implement the read-only identity bridge and independent Provider; test missing/unknown evidence consumption |
+
+Paced TLS fixtures pass, but actual Qoder/SDK attachment and a restricted
+production pilot have not run. The lab helper loads operator-selected shared
+libraries and BPF objects using existing sudo authorization; persistent use must
+restrict this to reviewed assets. README commands launch synthetic fixtures only.
+Completing this restricted acceptance can support a separately approved read-only
+pilot without first meeting extreme concurrency or general production rewrite
+requirements.

@@ -1,230 +1,75 @@
-# AW ptrace Runtime Hook POC — measured results
+# Transport observation validation
 
 [中文版](POC_REPORT_zh.md)
 
-On 2026-11-06, the independent advise Sidecar and real AW lifecycle demo ran on
-Linux x86-64. Default builds refuse observation because forced-death isolation fails. Native acceptance finished with **55 PASS, 5 FAIL, 4 SKIP**. All five
-failures were active tracer SIGKILL cases: the target terminated with SIGTRAP.
-**P0 is not accepted; P1 was not implemented or run. Production observation and
-rewrite are No-Go.** [GO_NO_GO.md](GO_NO_GO.md) records the decision and next work.
+The read-only BPF Source captures synthetic OpenSSL writes and correlates real
+AW fixture identities. Paced fixtures pass, supporting further low-rate pilot
+validation. Actual Qoder/SDK compatibility has not been tested. Pilot scope and
+remaining integration work are in [Hook integration](ARCHITECTURE_NOTES.md).
 
-## Read-only uProbe comparison
+## Tested scope
 
-On 2026-11-07 the same x86-64 lab passed **112/112 functional/fault cases,
-24/24 performance comparisons and 4/4 dual-probe cases** using an independent
-BPF uProbe link counter. [Structured results and source hashes](measurements/20261107-uprobe.json)
-retain individual cases and performance samples. This validates an entry-counting
-mechanism; the ptrace P0 forced-death failure remains and P1 stays disabled.
+Tests ran on 2026-11-07 on Linux x86-64, kernel 6.6.102, OpenSSL 3.0.12,
+Python 3.11.6, Clang 17, GCC 12.3 and libbpf 1.2.2. AW was built from the baseline
+in [SOURCE.md](SOURCE.md). The fixture sends synthetic bytes to a loopback TLS
+receiver and verifies its byte count and SHA-256. No model account or real Agent
+traffic was involved. Existing Yama=0, perf_event_paranoid=2 and
+unprivileged_bpf_disabled=2 remained unchanged.
 
-- Three repetitions at 1/4/8/16 threads cover existing threads, post-attach
-  creation and four creation waves. Normal, resumed and sustained counters match
-  actual calls exactly.
-- Across 24 single-collector kills and four dual-probe kills, all 28 targets
-  complete with receiver-confirmed byte counts and SHA-256. Twelve targets finish
-  while their collector is SIGSTOPped.
-- Twelve active SIGINT exits, target-exit detection, permission rejection and
-  stale-identity rejection pass.
-- A surviving independent probe retains its full count after its peer dies.
-  Another same-UID fixture using the same libssl contributes zero hits to either
-  counter. This is not validation of a live AgentSight probe.
-- Collectors run as the ordinary UID with empty capabilities; sudo helpers exit
-  after transferring descriptors. Existing perf_event_paranoid=2,
-  unprivileged_bpf_disabled=2 and Yama=0 remain unchanged.
+| Coverage | Result |
+| --- | --- |
+| Bounded event matrix | 69/69 pass: two SSL APIs, 1/4/8/16 threads, new threads, four creation waves, size boundaries, count/rate caps and backpressure |
+| Lifecycle | 21/21 pass: same-PID executable change and 20 repeated target exits |
+| Strengthened kill/exit regression | 12/12 pass |
+| Unit checks | 13/13 pass on native x86-64 and local AArch64 |
+| Real AW registration | 200 uniquely associated events; 200 events retain same-PID multi-instance ambiguity; owner exit clears bindings |
+| Collector death | All eight main-matrix SIGKILL targets complete with receiver-confirmed bytes; final loss summary is absent |
+| Buffer handling | Per-thread alternating reuse and shared immutable buffers pass; concurrent mutation remains non-atomic |
+| Comparison backend | Earlier count-only matrix: 112 functional, 24 performance and four coexistence cases pass; shared-broker regressions remain passing |
 
-Each performance case sends 4096 writes per thread, 128 bytes per write, in three
-alternating baseline/observation runs. Percentiles below are medians of per-run
-percentiles; maxima are across the three runs. Throughput includes TLS setup,
-writes and shutdown, including Python SSL receiver and scheduling overhead.
+The AW fixture uses the existing empty-route Qoder SDK lifecycle profile and
+same-PID exec. It establishes registration/correlation behavior, without real SDK
+Hooks or child-Worker adoption. Kernel payload-read failure has unit projection
+coverage only. Live AgentSight coexistence and actual PID reuse remain untested.
 
-| Threads | Baseline p99 µs | Observed p50 / p95 / p99 µs | Observed max µs | Baseline → observed writes/s |
+## Workload envelope
+
+Paced cases write 50 times per thread with 5 ms sleeps, retaining exactly
+50/200/400/800 events for 1/4/8/16 threads. These short synthetic runs do not set a
+sustainable production rate. A stopped collector retains 252 records in the
+1 MiB ring and accounts for subsequent loss while the target completes.
+
+Unpaced load uses 1024 writes per thread, 128 bytes each, with one baseline and
+one observed run per concurrency:
+
+| Threads | Baseline p99 µs | Observed p99 / max µs | Emitted / hits | Ring loss |
 | --- | --- | --- | --- | --- |
-| 1 | 3.341 | 6.704 / 7.303 / 15.958 | 57.836 | 158896 → 56338 |
-| 4 | 5.029 | 9.931 / 11.120 / 20.195 | 75.244 | 56317 → 55168 |
-| 8 | 13.137 | 10.259 / 11.990 / 29.919 | 2984.665 | 56913 → 55008 |
-| 16 | 12.804 | 10.285 / 11.884 / 47.317 | 6072.529 | 58289 → 56634 |
+| 1 | 4.650 | 24.754 / 78.483 | 293 / 1024 | 71.4% |
+| 4 | 9.013 | 23.030 / 53.402 | 300 / 4096 | 92.7% |
+| 8 | 14.860 | 38.118 / 1222.998 | 321 / 8192 | 96.1% |
+| 16 | 12.960 | 34.067 / 3958.296 | 380 / 16384 | 97.7% |
 
-Peak Python collector RSS is 17,888–17,908 KiB. Two-second idle windows consume
-0.03–0.05 CPU seconds, about 1.5%–2.5% of one core. Collector active CPU is
-0–0.04 seconds with 10 ms accounting granularity; kernel probe and receiver costs
-are not charged to that process. These are whole SSL_write call latencies, not
-isolated incremental probe pauses. The 16-thread maximum reaches 6.073 ms despite
-a low p99, and single-thread throughput drops about 65%.
+These are whole SSL_write latencies, not isolated probe pauses. Collector RSS
+is 19,956–19,972 KiB and active CPU increments are 0.04–0.09 seconds, measured at
+10 ms granularity. Payload-Source idle CPU was not measured. Even a single-thread
+burst loses records, so a small pilot must measure its actual bursts as well as
+concurrency. Current loss accounting reconciles hits, ring drops, emitted events,
+output caps and identity discards; passing that check does not imply full capture.
 
-An initial perf-PMU inheritance experiment produced 24 clone-fixture exits with
-code 7 (pthread_create failure) and 12 SIGSTOP timeouts involving a stopped sudo
-waiter. Linux 6.6 [perf_uprobe_event_init](https://github.com/torvalds/linux/blob/v6.6/kernel/events/core.c)
-contains a permission check consistent with the inheritance failure; the vendor
-kernel's internal path was not traced. That backend is retained only as diagnostic
-evidence. Delivered code uses a PID-filtered BPF link and a short-lived broker.
+## Retained failure and next validation
 
-Unverified: bounded payload capture/digests, per-event loss/rate accounting,
-concurrent shared-buffer consistency, busy-process admission coverage, actual PID
-reuse, other kernels/ABIs, live AgentSight coexistence, and real AW end-to-end
-correlation of this new Source. A cumulative counter cannot provide those facts.
-The prior AW fixture result remains separate. **Continue the read-only BPF Source
-experiment; production serviceization and rewrite remain No-Go.** Add bounded
-transport events and Coverage, repeat kill/backpressure/shared-buffer tests, then
-connect the existing read-only AW bridge. These results do not validate ptrace
-rewrite safety.
+The ptrace comparison remains disabled by default: tracer SIGKILL can terminate
+the target with SIGTRAP. The original native acceptance had five such failures.
+This failure applies even to small deployments, and payload rewrite remains
+unavailable. BPF collector-death results apply only to the read-only Source.
 
-## Tested objects and environment
+Next validate pinned Qoder/SDK versions, one managed Worker and one active Query
+at the chosen task rate. Confirm the actual TLS sender, process ownership,
+collection lifecycle and fixed privilege assets before a restricted read-only
+pilot. Extreme-concurrency optimization can follow separately.
 
-The base and reference commits are fixed in [SOURCE.md](SOURCE.md). AW CLI was
-built from that main checkout and used as an ordinary same-user process. No AW
-framework, wire contract, configuration schema, capability matrix or installer
-was changed. The independently locked Rust package lives entirely under
-`providers/observation/`.
-
-Native environment: x86-64, kernel `6.6.102-5.3.1.alnx4.x86_64`, ordinary UID 1000,
-pre-existing Yama `ptrace_scope=0`, OpenSSL 3.0.12, GCC 12.3.0, Python 3.11.6 and
-Rust 1.97.1. Local development host: AArch64. Its CLI rejection was exercised and
-returned `unsupported_architecture` before opening event output. Native ptrace
-acceptance ran on the x86-64 lab only. No global ptrace/security setting changed.
-
-The C client sends synthetic repeated bytes to a loopback TLS receiver. Each
-worker owns a connection and buffer. The receiver verifies total bytes and
-SHA-256 after a complete bidirectional TLS close. These are synthetic OpenSSL
-results; real Agent traffic, model accounts and Native SDK adoption were unused.
-
-## Admission and race recovery
-
-The default `observe` command now returns `observation_disabled` before reading
-a permit, creating output or attaching. This is the current fail-closed boundary.
-Collection requires an explicit `unsafe-lab` build, which labels its hazardous
-experimental status. P1 remains disabled.
-
-Cleanup ownership is recorded before the first debug-register write and inherited
-by tracked clone/fork children. ESRCH from an exiting thread no longer aborts
-cleanup of other threads. Initial readiness compares actual TID sets. Group stops
-use LISTEN until SIGCONT; detach preserves the existing group stop. Register-read
-errors retain cleanup responsibility instead of forwarding an unclassified trap.
-
-Stress diagnostics captured an interrupt stop with a hardware SIGTRAP still in
-the per-thread pending queue. Clearing DR7 and immediately detaching let that
-signal reach the target. Cleanup now uses PTRACE_PEEKSIGINFO after disabling
-breakpoints, consumes the pending signal's delivery stop under ptrace, then
-suppresses the owned signal and detaches. The final 100-run regression exercised
-three actual pending hardware traps.
-
-| Added acceptance | Final result |
-| --- | --- |
-| Default refusal, three runs | 3 PASS; no event file or tracer ownership; receiver verifies bytes |
-| Nine handled-error phases × 1/4/16 threads × three runs | 81 PASS; target continues, receiver verifies bytes, resources reaped |
-| Actual SIGKILL at those phases | 36 PASS, 45 FAIL; every failure is fatal target SIGTRAP |
-| After-continue error, 16 threads, 100 runs | 100 PASS, including pending hardware signal consumption |
-| Thread churn, busy attach, group resume and group-stop detach | 16 PASS across 1/4/8/16 threads; exact hits during fully observed four-wave churn |
-| Original matrix rerun | 55 PASS, 5 FAIL, 4 SKIP; failures remain tracer SIGKILL |
-| Real AW demo rerun | 400 associated and 100 unregistered events; bindings zero after owner exit |
-
-The 45 deterministic deaths cover five phases, nine runs each: all threads armed,
-trap stop, RF set, before CONT and after CONT. In the armed-before-first-write
-case, TracerPid was zero after tracer death but the next write still killed the
-target. Automatic ptrace unlink therefore does not restore this implementation's
-debug state. Partial-installation checkpoints touch only the main thread; their
-passing outcomes do not establish safety for active worker threads.
-
-**Handled-error recovery passes within the stated experiment; actual tracer
-SIGKILL remains unsafe.** Default refusal does not count as P0 acceptance. No
-EXITKILL policy, target SIGTRAP handler or global security change is used. Original
-failures and corrected runs remain in task evidence; current numerical results
-are in [measurements/20261106.json](measurements/20261106.json).
-
-## Acceptance matrix
-
-| Case | Actual result |
-| --- | --- |
-| 1/4/8/16 existing threads, 3 repetitions | Exact 300/1200/2400/4800 write hits per run; server digests verified; clean detach |
-| Threads created after attach | 4/8/16 threads, 400/800/1600 hits; TRACECLONE initialization and cleanup pass |
-| SSL_write_ex | 100 entries; receiver confirms bytes |
-| 0 B / 4096 B / 4097 B | Correct lengths; 4097 B has null digest and explicit coverage gap |
-| Fragmented writes | 500 writes of 7 bytes; reported as writes, no request reconstruction |
-| Event/rate caps | Drops counted; `unknown` coverage and explicit limit reason |
-| Sustained bounded run | 65,536 hits; 10 retained events, 65,526 drops; receiver confirms 8,388,608 bytes |
-| Normal detach / SIGINT / SIGTERM | Target continues; TracerPid becomes zero; receiver verifies payload after early detach |
-| Foreign signal | SIGUSR1 reaches the fixture handler exactly once |
-| Target SIGKILL / owner exit | Observer terminates; AW bindings reach zero after owner exit |
-| Tracer SIGKILL during writes | **5/5 FAIL**: target exits with signal 5 (SIGTRAP); no target-side trap handler hides the failure |
-| Stale start/namespace/boot/exe/fingerprint | Rejected before attachment; UID and executable inode mutation also covered by unit tests |
-| No debug permission / second debugger | Explicit rejection; target and first debugger remain under their original ownership |
-| Unsupported TLS / offsets / enforce | Explicit unsupported diagnostics; no fallback offsets or payload edits |
-| Exec / fork | Observation rejects unsupported transition and detaches; exec target remains alive; fork fixture completes normally |
-| Real AW instance and Scope | CLI register → pending_ready → ready → open_scope → acknowledge; imported live ownership matches |
-| Same PID, two AW instances | Association remains ambiguous; instance/scope IDs stay null |
-| Unregistered process | Observed/unassociated; no Ready, tool ID or Scope authority invented |
-| Existing live uProbe | **SKIP**: no existing authorized AgentSight/uProbe environment available in this lab; entry int3 is rejected by code |
-| Actual kernel PID wraparound | **SKIP**: stale identity mutation is tested; PID reuse was not forced |
-| Other TLS implementations / static ABI | **SKIP**: unsupported; no compatibility claim |
-| P1 equal-length rewrite | **SKIP**: failed crash-safety prerequisite; enforce mode is rejected |
-
-Normal fixture write failures were zero and uncapped observation hit rate was
-100%. Every transport event still has unknown semantic coverage and unknown
-send adoption; the independent synthetic receiver supplies the separate byte
-confirmation. Interrupted observers intentionally cover only their active window.
-
-## Performance
-
-128-byte writes, 300 writes per thread, three baseline and three traced runs for
-each concurrency. Values below are medians of per-run quantiles; maximum is the
-largest maximum across those runs. Throughput includes loopback TLS setup/close,
-so it is a comparative fixture result rather than a general OpenSSL capacity test.
-Raw numerical values and source digests are in [measurements/20261106.json](measurements/20261106.json).
-
-| Threads | Baseline write p99 µs | Traced write p99 µs | Tracer pause p50/p95/p99/max µs | Baseline → traced writes/s | Peak RSS KiB | Tracer CPU seconds |
-| --- | ---: | ---: | --- | --- | ---: | ---: |
-| 1 | 6.21 | 250.63 | 53 / 64 / 75 / 126 | 6582 → 4174 | 3244 | 0.02 |
-| 4 | 8.12 | 426.13 | 97 / 185 / 221 / 466 | 19346 → 13997 | 3244 | 0.07 |
-| 8 | 12.43 | 993.38 | 206 / 417 / 487 / 752 | 31320 → 15454 | 3256 | 0.14 |
-| 16 | 9.48 | 1891.33 | 433 / 860 / 965 / 1353 | 51436 → 15821 | 3256 | 0.29 |
-
-Tracer pause measures receipt of a wait status through PTRACE_CONT, including
-the pending-stop queue. It excludes the initial kernel-to-tracer scheduling
-delay. Client write latency includes the complete synchronous SSL call. The
-rough p99 difference is 0.24–1.88 ms in this fixture, below the proposed 5 ms
-target; percentile differences are not paired latency samples. At 16 threads,
-throughput falls about 69%, which matters for frequent small writes.
-
-The dedicated 2.000-second idle sample consumed 0.06 CPU seconds (about **3% of
-one core**); the current 100 µs polling loop accounts for that cost. CPU counters
-have clock-tick granularity. The sustained 65,536-write run took 3.425 seconds:
-client write p99 **1.644 ms**, maximum **3.818 ms**, tracer pause p99 **821 µs**,
-maximum **1240 µs**. Samples and retained event storage remained bounded.
-
-A preliminary immediate-resume loop produced a 2.46-second client maximum due
-to low-TID starvation. The delivered implementation batches available stops
-before resume. The table and sustained results above are from that corrected
-implementation; the original failed run is retained only as diagnostic evidence.
-
-## Reproduction and validation
-
-Use the build, demo and acceptance commands in [README.md](README.md).
-`scripts/acceptance.py` returns **1** for the five real crash failures; these are
-not expected-pass assertions. Native Rust tests: 6 default and 5 unsafe-lab passed. Correlation Python
-tests: 4 passed. Formatting, Clippy with warnings denied (AArch64 and x86-64
-targets), and metadata identity checks passed. The one-command demo produced
-400 registered events, 100 unregistered events and zero remaining AW bindings.
-
-Per-case `result.json`, private JSONL, receiver confirmations, stderr and
-`results.json` are generated in the chosen output directory. The task's local
-handoff retains the actual native output and command logs. The formal AW gate
-was not run: no existing AW framework/test or declared Provider workspace was
-changed, as scoped by the task book. The new experimental workspace is validated
-independently. Documentation lint/link checks are recorded with the handoff.
-
-## Remaining limits and cleanup
-
-SIGKILL safety is unresolved; removing payload mutation and shared text patches
-does not prevent a pending debug trap from killing a target when the tracer dies.
-There is no watchdog or invented successful recovery claim. The POC does not
-test concurrent mutation of shared payload buffers, unconstrained thread churn
-beyond the finite fixture, dynamic library replacement,
-true PID/namespace recreation, or production workloads. Hashes are metadata,
-not anonymization against guessing known short messages.
-
-All launched tracer/client/server processes were reaped, the private AW daemon
-was stopped, and AW owner cleanup left zero bindings. No persistent service,
-Agent configuration, system ptrace setting or pre-existing AgentSight process
-was modified. Reverting the experiment consists of removing this package/local
-commit and its explicitly chosen test output directories. No default runtime
-entrypoint or package registration requires rollback. The separate
-[architecture notes](ARCHITECTURE_NOTES.md) describe the minimum future identity
-export and query bridge; they are proposals, not implemented service integration.
+Reproduction commands are in [README](README.md). Native C/BPF warning checks,
+Black, Python tests and documentation/link checks pass; unchanged Rust sources
+retain their prior fmt/test/clippy results. Detailed JSONL and measurement files
+are generated in the selected private output directory. They are runtime evidence
+and are not checked into this source package.

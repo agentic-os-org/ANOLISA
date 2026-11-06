@@ -6,6 +6,7 @@ An optional short-lived privileged helper passes fds to the ordinary collector.
 
 import argparse
 import array
+from collections.abc import Callable
 import ctypes
 import hashlib
 import json
@@ -168,7 +169,10 @@ def open_link(options: argparse.Namespace, uid: int) -> tuple[list[int], dict]:
         os.close(pidfd)
 
 
-def broker(options: argparse.Namespace) -> None:
+def broker(
+    options: argparse.Namespace,
+    opener: Callable[[argparse.Namespace, int], tuple[list[int], dict]] = open_link,
+) -> None:
     """A single-request helper; no socket path, persistent service or retained fd."""
     signal.alarm(5)
     with socket.socket(fileno=0) as connection:
@@ -177,7 +181,7 @@ def broker(options: argparse.Namespace) -> None:
             uid = int(os.environ["SUDO_UID"])
             if os.geteuid() != 0 or uid == 0:
                 raise ValueError("nonroot_fixture_owner_required")
-            descriptors, metadata = open_link(options, uid)
+            descriptors, metadata = opener(options, uid)
             connection.sendmsg(
                 [json.dumps(metadata).encode()],
                 [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", descriptors))],
@@ -189,9 +193,15 @@ def broker(options: argparse.Namespace) -> None:
                 os.close(fd)
 
 
-def receive_link(options: argparse.Namespace) -> tuple[list[int], dict]:
+def receive_link(
+    options: argparse.Namespace,
+    opener: Callable[[argparse.Namespace, int], tuple[list[int], dict]] = open_link,
+    program: Path | None = None,
+    extras: tuple = (),
+    fd_count: int = 2,
+) -> tuple[list[int], dict]:
     if not options.privileged_fixture_setup:
-        return open_link(options, os.getuid())
+        return opener(options, os.getuid())
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     descriptors = []
     try:
@@ -201,7 +211,7 @@ def receive_link(options: argparse.Namespace) -> tuple[list[int], dict]:
             "-n",
             "--",
             "/usr/bin/python3",
-            str(Path(__file__).resolve()),
+            str(program or Path(__file__).resolve()),
             "--broker",
             "--permit",
             str(options.permit),
@@ -210,10 +220,11 @@ def receive_link(options: argparse.Namespace) -> tuple[list[int], dict]:
             "--function",
             options.function,
         ]
+        command.extend(extras)
         with subprocess.Popen(command, stdin=child, stdout=subprocess.DEVNULL) as helper:
             child.close()
             data, controls, flags, _ = parent.recvmsg(
-                8192, socket.CMSG_SPACE(8), socket.MSG_CMSG_CLOEXEC
+                8192, socket.CMSG_SPACE(fd_count * 4), socket.MSG_CMSG_CLOEXEC
             )
             for level, kind, value in controls:
                 if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
@@ -227,7 +238,7 @@ def receive_link(options: argparse.Namespace) -> tuple[list[int], dict]:
             if (
                 helper.returncode
                 or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
-                or len(descriptors) != 2
+                or len(descriptors) != fd_count
             ):
                 raise ValueError("invalid_broker_reply")
         return descriptors, metadata

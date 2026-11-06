@@ -42,3 +42,12 @@ PID-filtered attachment is exercised by the Linux 6.6
 [uprobe multi self-test](https://github.com/torvalds/linux/blob/v6.6/tools/testing/selftests/bpf/prog_tests/uprobe_multi_test.c).
 The earlier perf-PMU inheritance experiment is retained only as failed diagnostic
 evidence outside the source package; it is not an available collection backend.
+
+The bounded transport variant is newly written in `src/bpf/transport.bpf.c`,
+`fixtures/transport_loader.c` and the Python projection/fixture modules. It uses
+Clang's BPF target and the host's libbpf shared library (tested Clang 17,
+libbpf 1.2.2); no vendored library is added. The loaded BPF program declares GPL
+for kernel helper compatibility. Host library licensing remains with the system
+package. Its x86-64 uprobe register layout is explicit; there is no kernel BTF
+or guessed instruction-offset dependency. The loader uses Linux UAPI link
+creation because the tested libbpf version lacks the multi-uprobe wrapper.

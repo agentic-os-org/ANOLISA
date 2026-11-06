@@ -1,110 +1,93 @@
-# AW ptrace observation experiment
+# AW transport observation experiment
 
 [中文版](README_zh.md)
 
-This independent Sidecar records bounded TLS write metadata from explicitly authorized Linux x86-64 test processes. It supports dynamic OpenSSL `SSL_write` and `SSL_write_ex` in advise mode. A separate fixture importer correlates live process identities with real AW instances and task scopes. Maintainer: kongche-jbw; source and license attribution: [SOURCE.md](SOURCE.md).
+This independent package collects bounded TLS write metadata from authorized
+Linux x86-64 processes. The read-only BPF Source records timestamps, lengths,
+SHA-256 and capture loss; a separate importer correlates real AW fixture
+identities. The next integration target is small, restricted Qoder/Qoder SDK
+observation. [Hook integration](ARCHITECTURE_NOTES.md) explains capabilities,
+native Hook replacement limits and the proposed pilot.
 
-**Default builds fail closed:** `observe` returns `observation_disabled` before loading the permit, creating output or attaching. Explicit `--features unsafe-lab` builds retain observation solely for disposable synthetic processes. Killing that tracer can terminate its target with SIGTRAP, including after attachment but before the first write. P0 crash isolation remains unresolved and payload rewriting is unavailable. See [measured results](POC_REPORT.md) and [Go/No-Go](GO_NO_GO.md).
+The package is an Observation Source experiment, with no default installation
+or registered Provider protocol. Maintainer: kongche-jbw. Source and license
+attribution: [SOURCE.md](SOURCE.md). Measured results: [POC_REPORT.md](POC_REPORT.md).
 
-## Read-only uProbe isolation comparison
+## Run the BPF fixture
 
-A separate fixture-only BPF counter tests an alternative collection mechanism.
-It uses a PID-filtered uProbe link, retains one counter, and never reads TLS
-payloads. The normal ptrace binary remains disabled. This comparison does not
-implement the transport event/digest contract or replace the AW correlation demo.
+Use an explicitly authorized Linux x86-64 lab with kernel/UAPI support for
+`BPF_TRACE_UPROBE_MULTI`, Python 3.11+, GCC, Clang with the BPF target, libbpf
+headers/runtime, OpenSSL development files and `openssl`. The fixture uses the
+operator's existing non-interactive sudo permission for a short-lived setup
+helper; it never changes global security settings. Collection runs as the ordinary
+user with empty capabilities. Tested library/tool versions are in the report.
 
-On the authorized Linux x86-64 lab, with Linux headers supporting
-`BPF_TRACE_UPROBE_MULTI`, GCC, Python 3.11 and the existing non-interactive sudo
-permission for the test owner:
-
-```bash
-python3 providers/observation/scripts/uprobe_cases.py \
-  --output "$PWD/providers/observation/target/uprobe" --repeat 3
-python3 providers/observation/scripts/uprobe_cases.py \
-  --output "$PWD/providers/observation/target/uprobe-performance" --performance --repeat 3
-python3 providers/observation/scripts/uprobe_coexist.py \
-  --output "$PWD/providers/observation/target/uprobe-coexist"
-```
-
-The scripts create their own authorized TLS processes and compile the small BPF
-loader. A short-lived helper validates the permit, creates a PID-filtered link
-and a read-only userspace map handle, transfers the descriptors over an anonymous
-Unix socket, and exits before collection starts. Collection runs as the test
-owner with no effective/permitted/inheritable/ambient capabilities and with
-`no_new_privs`. No persistent privileged service or security-setting change is
-used. The helper is a lab harness executed with existing sudo authorization; it
-is not a hardened production privilege broker.
-
-Expected results and limits are in [the report](POC_REPORT.md#read-only-uprobe-comparison).
-`aw.uprobe-counter-poc/v0` records only cumulative entry counts and metadata;
-there is no payload digest, per-write length or timestamp, return value, or AW
-instance attestation. Output is bounded to 512 records of at most 8192 bytes and
-10 seconds of active collection; a stopped process or blocked output can delay
-exit. The fixture harness owns deadlines and reaps its processes. Generated
-certificates, binaries and logs belong only to the selected output directory.
-
-## Build and demonstrate
-
-Prerequisites: Linux x86-64, Rust 1.97.1, Python 3.11+, GCC, OpenSSL headers/libraries and `openssl`. The observer and target must share a UID and the existing ptrace policy must permit attachment. The tested lab had `ptrace_scope=0`. Under `ptrace_scope=1`, this sibling-process demo is expected to reject attachment; use a separately authorized isolated lab or a future parent-supervisor launcher. The scripts never alter that setting.
-
-From the repository root, build the default refusal binary and explicitly opt into the hazardous lab binary for these disposable fixtures:
+From the repository root, build the real AW CLI and run the matrix:
 
 ```bash
-(cd providers/observation && cargo build --release --locked --target-dir target/safe)
-(cd providers/observation && cargo build --release --locked --features unsafe-lab)
 (cd src/aw && cargo build --locked -p aw-cli)
-python3 providers/observation/scripts/demo.py \
-  --aw "$PWD/src/aw/target/debug/aw" \
-  --output "$PWD/providers/observation/target/demo"
+AW_FIXTURE="$PWD/src/aw/target/debug/aw"
+python3 providers/observation/scripts/transport_cases.py \
+  --output "$PWD/providers/observation/target/transport" --aw "$AW_FIXTURE"
+python3 providers/observation/scripts/transport_lifecycle.py \
+  --output "$PWD/providers/observation/target/transport-lifecycle"
 ```
 
-Use a new output directory each time. The demo starts its own loopback TLS server, clients and private AW daemon. Expected: 400 registered writes, 100 unregistered writes, verified server byte digests, a unique fixture association, and zero AW bindings after owner exit. `registered/correlated.jsonl` contains instance/scope IDs; raw Sidecar events always carry null AW IDs. The demo uses empty native routes under the existing Qoder SDK registration profile and certifies only the lifecycle contract, not a real SDK.
+Choose new output directories with absolute paths short enough for Unix sockets.
+The matrix builds the BPF object, loader and TLS client, creates a loopback server
+and private AW daemon, checks receiver bytes/digests, and reaps its processes.
+Expected: 69 passing matrix cases, including 200 uniquely correlated events and
+200 ambiguous same-PID events; the lifecycle runner has 21 cases. Output includes
+private JSONL, generated certificates and `results.json`. Remove only that output
+directory after checking cleanup. Without `--aw`, 67 cases run with no instance
+correlation test; `--smoke` selects one basic case.
 
-All generated state stays in the selected directory. Tests reap their own processes and stop the private daemon. The TLS private key is ephemeral synthetic test material. After inspecting results and confirming the scripts have exited, remove only that chosen output directory. No daemon installation or default Provider registration is performed.
+## Source output and limits
 
-## Explicit CLI
+The direct entrypoint `scripts/uprobe_transport.py` requires `--permit`,
+`--library`, `--object` and `--output`. The fixture generates the private process
+permit, `loader.so` and `transport.bpf.o`. A permit pins PID/start ticks, UID, PID
+namespace, boot identity, executable identity and hash. The collector retains a
+pidfd and rechecks identity before event projection. This operator-controlled
+lab loader requires fixed, reviewed assets before persistent deployment.
 
-For a process you created and authorized for this experiment:
-
-```bash
-OBSERVER="$PWD/providers/observation/target/release/aw-observation-ptrace-poc"
-"$OBSERVER" authorize --pid "$FIXTURE_PID" --output "$PRIVATE_DIR/permit.json"
-"$OBSERVER" observe --permit "$PRIVATE_DIR/permit.json" \
-  --output "$PRIVATE_DIR/events.jsonl" --mode advise \
-  --duration 10 --max-events 4096 --rate 10000
-```
-
-`authorize` pins PID, start ticks, UID, PID namespace, boot identity, executable device/inode/path and SHA-256. It asserts operator authorization; a same-UID attacker is outside this POC trust boundary. `observe` verifies the permit and opens a pidfd before attachment. SIGINT/SIGTERM request bounded detach. Existing output files are rejected; files are created with mode 0600. The Sidecar never receives an AW socket or lifecycle handle.
-
-| Limit | Default / hard maximum |
+| Option or resource | Default / limit |
 | --- | --- |
-| Runtime | 10 / 60 seconds |
-| Retained payload | SHA-256 of at most 4096 bytes; no body output |
-| Events | 4096 / 65,536 |
-| Output rate | 10,000 / 100,000 events per second |
-| Encoded record | 8192 bytes |
-| Output data budget | 64 MiB threshold, plus one bounded record and lifecycle records |
-| Traced threads / pause samples | 256 / 65,536 |
-| Attach / detach | 3 seconds each; cleanup failure is reported |
+| `--function` | `SSL_write`; also `SSL_write_ex` |
+| `--duration` | 10 / 30 active seconds |
+| `--max-events` | 4096 / 65536 |
+| `--rate` | 10000 / 100000 events per second |
+| `--privileged-fixture-setup` | Opt-in short-lived sudo helper |
+| Kernel ring / entry | 1 MiB / 4144 bytes |
+| Captured bytes | At most 4096, temporarily in memory; only SHA-256 persisted |
+| JSONL output | Exclusive 0600, 8192 bytes/record, 64 MiB data plus two control records |
 
-Oversize writes have a null digest and `payload_over_limit`; dropped events are counted. `coverage.status` remains `unknown`: a transport entry does not prove success at the peer or identify a model request. `--offsets` is parsed and explicitly returns `unsupported_offsets`; static/stripped binaries and other TLS ABIs are unsupported. An existing entry `int3` returns `unsupported_live_uprobe_or_int3` without replacing it. Live uProbe coexistence has not been validated. `--mode enforce` is rejected.
+Oversize writes have null digests. Saturation drops records and increments
+counters while the target continues. Output caps do not limit the target's write
+rate. Missing final summaries, including collector SIGKILL, leave interval loss
+unknown. Stopped collectors or blocked filesystems can exceed active duration;
+the fixture owns wall-clock deadlines. Shared-memory reads are non-atomic and
+entry hashes do not prove successful send adoption.
 
-## Verification
+The private `aw.transport-observation-poc/v0` schema retains transport-only
+coverage. Raw events have null AW IDs; the independent importer verifies fixture
+ownership before association. Unknown processes stay Observed, and multiple
+instances on one PID stay ambiguous. Real Qoder/SDK TLS paths and child-Worker
+mapping still need verification; see the [restricted pilot](ARCHITECTURE_NOTES.md#restricted-pilot).
+
+## Development checks and comparison backends
 
 ```bash
+python3 -B -m unittest discover -s providers/observation/tests -v
 (cd providers/observation && cargo fmt --all -- --check)
 (cd providers/observation && cargo test --locked)
-(cd providers/observation && cargo test --locked --features unsafe-lab)
 (cd providers/observation && cargo clippy --locked --all-targets -- -D warnings)
-(cd providers/observation && cargo clippy --locked --all-targets --features unsafe-lab -- -D warnings)
-python3 -B -m unittest discover -s providers/observation/tests -v
-python3 providers/observation/scripts/lifecycle.py \
-  --output "$PWD/providers/observation/target/lifecycle" --repeat 3
-python3 providers/observation/scripts/races.py \
-  --output "$PWD/providers/observation/target/races"
-python3 providers/observation/scripts/acceptance.py \
-  --aw "$PWD/src/aw/target/debug/aw" \
-  --output "$PWD/providers/observation/target/acceptance"
 ```
 
-Both lifecycle and acceptance commands return **1** when crash-safety cases fail. The lifecycle runner records deterministic checkpoints and injected-error cleanup separately from actual SIGKILL outcomes. `AW_PTRACE_TEST_PHASE` is honored only by unsafe-lab builds; its stdin rendezvous expires after five seconds. The race suite covers four waves of thread creation, busy attachment, SIGSTOP/SIGCONT and detach during a group stop. Unsupported architectures return **77** with an explicit SKIP record. Unit tests alone do not constitute native acceptance. The independent workspace has no AW dependency and does not join the framework layout gate or installer. The [architecture notes](ARCHITECTURE_NOTES.md) describe the future query bridge separately from this worker.
+`uprobe_cases.py` and `uprobe_coexist.py` retain the count-only baseline. The Rust
+ptrace backend rejects `observe` by default. Only explicit `cargo build --release
+--locked --features unsafe-lab` in this package enables its disposable fixtures;
+tracer SIGKILL can terminate the target with SIGTRAP, including before the first
+write. `acceptance.py`, `lifecycle.py`, `races.py` and `demo.py` retain reproduction
+coverage; `--aw` supplies the private AW fixture where required. Failing crash
+cases return nonzero. Payload rewrite is unavailable.
