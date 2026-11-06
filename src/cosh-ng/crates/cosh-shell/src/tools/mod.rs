@@ -19,6 +19,8 @@ mod readonly_compound_tests;
 pub(crate) mod readonly_interceptor;
 pub(crate) mod readonly_pipeline;
 pub(crate) mod readonly_rules;
+#[cfg(test)]
+mod test_support;
 mod temp_output;
 
 pub(crate) fn strip_ansi(input: &str) -> String {
