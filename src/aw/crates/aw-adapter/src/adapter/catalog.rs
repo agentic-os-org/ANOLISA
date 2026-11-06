@@ -64,7 +64,11 @@ pub(crate) const OPENCLAW: Profile = Profile {
 pub(crate) const HERMES: Profile = Profile {
     name: "hermes",
     adapter: &super::super::adapters::hermes::Hermes,
-    events: TOOL_EVENTS,
+    events: &[
+        ("input.submit", &["observe", "block"]),
+        ("tool.before", &["observe", "block"]),
+        ("tool.after", &["observe", "replace_result"]),
+    ],
 };
 
 pub(crate) const QWENPAW: Profile = Profile {

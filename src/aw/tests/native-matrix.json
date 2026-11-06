@@ -1257,7 +1257,7 @@
         "url": "https://github.com/NousResearch/hermes-agent.git",
         "revision": "952c941e741e922a9be8fc403c8944c6e96318bb"
       },
-      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model. Local directory skill_view selection uses the native registry and locator, pins raw manifest text before rendering, and reuses sec-core check_skill. Controlled Ledger CLI/model cases verify instruction withholding; slash/preload and file references remain separate boundaries.",
+      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model. Local directory skill_view selection uses the native registry and locator, pins raw manifest text before rendering, and reuses sec-core check_skill. Controlled Ledger CLI/model cases verify instruction withholding; slash/preload and file references remain separate boundaries. Quiet single-query text input includes allow, denial with zero model requests, PII blocking and block/report scanner faults through the real sec-core Provider with a controlled CLI scanner.",
       "cases": [
         {
           "name": "dispatcher",
@@ -1271,7 +1271,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 37
+          "tests": 43
         },
         {
           "name": "chat",
@@ -1282,6 +1282,8 @@
             "{bin}/aw",
             "--provider",
             "{bin}/policy",
+            "--sec-core-provider",
+            "{bin}/aw-provider-sec-core",
             "--hermes",
             "{source}/.venv/bin/hermes",
             "--source",
@@ -1305,7 +1307,12 @@
                   "parent-safe",
                   "profile-override",
                   "reload-block",
-                  "rewrite-block"
+                  "rewrite-block",
+                  "input-allow",
+                  "input-block",
+                  "input-error-block",
+                  "input-error-report",
+                  "input-pii"
                 ],
                 "values": {
                   "instance_released": true,
@@ -1339,7 +1346,7 @@
             {
               "file": "fixtures/skill-provider/result.json",
               "values": {
-                "case_count": 7,
+                "case_count": 10,
                 "bindings": 0,
                 "events": 0
               }

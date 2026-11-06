@@ -54,3 +54,16 @@ before 阻断后，其他原生回调仍可运行；after 可观察失败或被�
 支持目录型 `skill_view` 的主 `SKILL.md`。插件限定来源、旧式单文件和 `file_path`
 引用返回解析错误，`on_error: block` 会阻止加载。斜杠命令、预加载、直接读文件与
 Skill 内联命令需要各自的策略接点。
+
+## 检查用户提交
+
+使用[输入配置](../../../../../src/aw/crates/aw-service/examples/aw.hermes-submission.yaml)，填写 Hermes、sec-core Provider、CLI 和 socket 路径，然后在同一 profile 安装插件。`scan_prompt` 和 `scan_user_input` 会在 quiet 单查询 CLI 构造 Agent 前完成：
+
+```bash
+aw run --config /absolute/aw.hermes-submission.yaml --agent hermes \
+  --native-profile /absolute/hermes-profile -- --query 'Summarize the current task.'
+```
+
+配置的 argv 已包含 `chat --oneshot --quiet`。可用 `--query-file /absolute/prompt.txt` 替换 `--query`。策略拒绝以状态码 2 退出 CLI，模型调用为零，受检文本不会进入原生会话。回调故障按 `on_error` 处理，派发或拒绝前关闭待完成的扫描。输入须为非空 UTF-8 文本，编码后的回调数据不超过 256 KiB。
+
+启用 `input.submit` 时要求 quiet 单查询，拒绝交互 chat 和 `--image`。受检对象为原生 query-file 解析后、图片路由前的文本；其后的原生上下文与 Skill 展开沿用各自合同，原生 API request 插件自行负责改写行为。未配置输入步骤时继续保留原有 chat 选项。Python 工厂、gateway 会话和交互 `/steer` 不属于此 CLI 入口。

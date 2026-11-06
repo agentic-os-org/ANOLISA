@@ -26,7 +26,8 @@ if "skill-ledger" in sys.argv:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "sec_core"))
 from runtime import Processes, await_condition, checked, save
 
-CASES = ("signed", "unsigned", "drifted", "tampered", "backend-denied", "unavailable", "timeout")
+CASES = ("signed", "unsigned", "drifted", "tampered", "backend-denied", "unavailable", "timeout",
+         "input-denied", "input-allow-skill-denied", "input-allow-skill-allow")
 
 
 class Model(BaseHTTPRequestHandler):
@@ -34,6 +35,7 @@ class Model(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
+        self.server.posts += 1
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if "messages" not in request:
             self.send_response(200)
@@ -93,12 +95,14 @@ def main(args):
             env = {key: value for key, value in os.environ.items()
                    if not key.startswith(("AW_", "HERMES_", "OPENAI_")) and not key.lower().endswith("_proxy")}
             env.update(HOME=str(root / "home"), HERMES_HOME=str(profile), AW_FIXTURE_KEY="fixture",
-                       OPENAI_API_KEY="fixture", OPENAI_BASE_URL=url, PYTHONDONTWRITEBYTECODE="1")
+                       OPENAI_API_KEY="fixture", OPENAI_BASE_URL=url, PYTHONDONTWRITEBYTECODE="1", FAKE_ROOT=str(root))
             processes = Processes(root, args.output, env)
             reports = []
             try:
                 for case in CASES:
-                    server.case, server.requests = case, []
+                    combined = case.startswith("input-")
+                    skill = "unsigned" if case == "input-allow-skill-denied" else "signed" if combined else case
+                    server.case, server.requests, server.posts = skill, [], 0
                     state = root / ("state-" + case)
                     config = {"apiVersion": "aw/v1alpha1", "kind": "AWConfiguration", "metadata": {"name": "skill"}, "spec": {
                         "daemon": {"startup": "external", "endpoint": "auto", "state_dir": str(state)},
@@ -112,6 +116,18 @@ def main(args):
                             "timeout_ms": 800, "max_output_bytes": 4096, "config": {"version": 1, "mode": "block", "skill": True}}},
                         "events": {"tool.before": {"enabled": True, "required": True, "steps": [{"id": "trust", "provider": "security",
                             "operation": "check_skill", "match": {"tools": ["native:hermes:skill_view"]}, "effects": ["observe", "block"], "on_error": "block"}]}}}}
+                    if combined:
+                        scanner = Path(__file__).resolve().parent.parent / "pi" / "submission-scanner.py"
+                        config["spec"]["providers"]["input"] = {
+                            "protocol": "aw-provider/v1alpha1",
+                            "transport": {"type": "stdio", "location": "agent", "argv": [
+                                str(args.provider), "--cli", str(scanner), "--socket", str(root / "scanner.sock")]},
+                            "timeout_ms": 2000, "max_output_bytes": 4096,
+                            "config": {"version": 1, "mode": "block", "prompt": {"mode": "block", "scan_mode": "fast"}}}
+                        config["spec"]["events"]["input.submit"] = {
+                            "enabled": True, "required": True, "steps": [{"id": "prompt", "provider": "input",
+                                "operation": "scan_prompt", "effects": ["observe", "block"], "on_error": "block"}]}
+                        config["spec"]["agents"]["hermes"]["argv"][-1] = "risk" if case == "input-denied" else "hello"
                     path = root / "aw.json"
                     save(path, config)
                     base = [args.aw, "--config", path, "--agent", "hermes", "--native-profile", profile]
@@ -122,15 +138,23 @@ def main(args):
                     service = processes.start("service-" + case, [args.aw, "serve", "--config", path, "--state-dir", state])
                     await_condition(lambda: (state / "aw.sock").exists(), 10, "AW socket")
                     child = processes.start("native-" + case, [base[0], "run", *base[1:]])
-                    assert processes.wait(child, 120) == 0, case
+                    assert processes.wait(child, 120) == (2 if case == "input-denied" else 0), case
                     save(args.output / (case + "-model.json"), server.requests)
                     save(args.output / (case + "-audit.json"), [json.loads(line) for file in state.rglob("*.jsonl") for line in file.read_text().splitlines()])
-                    assert len(server.requests) == 2, (case, len(server.requests))
-                    delivered = json.dumps(server.requests[-1]["messages"])
-                    assert ("PRIVATE_SKILL_BODY" in delivered) == (case == "signed"), (case, delivered)
+                    denied = case == "input-denied"
+                    assert len(server.requests) == (0 if denied else 2), (case, len(server.requests))
+                    if denied:
+                        assert server.posts == 0, server.posts
+                    if combined:
+                        scans = [json.loads(line) for line in (root / "scanner.jsonl").read_text().splitlines()]
+                        assert scans[-1]["text"] == ("risk" if denied else "hello"), scans
+                    delivered = json.dumps(server.requests[-1]["messages"]) if server.requests else ""
+                    expected_delivery = skill == "signed" and not denied
+                    assert ("PRIVATE_SKILL_BODY" in delivered) == expected_delivery, (case, delivered)
                     status = json.loads(checked([args.aw, "status", "--socket", state / "aw.sock"], env=env).stdout)["result"]
                     assert status["bindings"] == status["events"] == 0, status
-                    reports.append({"case": case, "instructions_delivered": case == "signed"})
+                    reports.append({"case": case, "instructions_delivered": expected_delivery,
+                                    "model_requests": len(server.requests), "http_posts": server.posts})
                     processes.stop(child)
                     processes.stop(service)
                 save(args.output / "result.json", {"case_count": len(reports), "cases": reports, "bindings": 0, "events": 0})
