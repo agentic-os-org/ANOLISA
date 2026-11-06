@@ -73,7 +73,7 @@ index ae2345e..c3ba506 100644
 +    std::fs::copy(&prebuilt_inode, out.join("process-inode-only.bpf.o"))
 +        .unwrap_or_else(|e| panic!("copy {} -> OUT_DIR: {e}", prebuilt_inode.display()));
 diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
-index 450b8c3..0d5a9c6 100644
+index 450b8c3..50745a8 100644
 --- a/bpf/src/lib.rs
 +++ b/bpf/src/lib.rs
 @@ -9 +9 @@
@@ -105,16 +105,16 @@ index 450b8c3..0d5a9c6 100644
 +    }
 @@ -78 +88 @@ const PINNED_FILE_PROFILE_MARKER: &str =
 -    "agentsight_profile_file_v2_a62e5d9d96f91101cda019519053e950d532380a";
-+    "agentsight_profile_file_v4_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_file_v5_a62e5d9d96f91101cda019519053e950d532380a";
 @@ -80 +90 @@ const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
 -    "agentsight_profile_credential_exfiltration_v3_a62e5d9d96f91101cda019519053e950d532380a";
-+    "agentsight_profile_credential_exfiltration_v5_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_credential_exfiltration_v6_a62e5d9d96f91101cda019519053e950d532380a";
 @@ -82 +92 @@ const PINNED_FULL_PROFILE_MARKER: &str =
 -    "agentsight_profile_full_v2_a62e5d9d96f91101cda019519053e950d532380a";
-+    "agentsight_profile_full_v4_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_full_v6_a62e5d9d96f91101cda019519053e950d532380a";
 @@ -84 +94 @@ const PINNED_AGENT_FILE_GUARD_MARKER: &str =
 -    "agentsight_profile_agent_file_guard_v2_a62e5d9d96f91101cda019519053e950d532380a";
-+    "agentsight_profile_agent_file_guard_v4_a62e5d9d96f91101cda019519053e950d532380a";
++    "agentsight_profile_agent_file_guard_v7_a62e5d9d96f91101cda019519053e950d532380a";
 @@ -211 +220,0 @@ pub const INODE_GUARD_WRITE: u32 = 4;
 -/// Value stored in te_inode_guard map: flags + owning domain_id.
 @@ -217,0 +227,16 @@ pub struct InodeGuardVal {
@@ -958,10 +958,10 @@ index 450b8c3..0d5a9c6 100644
 +    fn object_has_capability_mailbox_path() {
 @@ -3965 +4457 @@ mod tests {
 -        assert!(marker.contains("file_v2"));
-+        assert!(marker.contains("file_v4"));
++        assert!(marker.contains("file_v5"));
 @@ -4001 +4493 @@ mod tests {
 -        assert!(marker.contains("agent_file_guard_v2"));
-+        assert!(marker.contains("agent_file_guard_v4"));
++        assert!(marker.contains("agent_file_guard_v7"));
 @@ -4041 +4533,3 @@ mod tests {
 -        assert!(!lsm_link_expected("enforce_file_permission", budget, true));
 +        assert!(lsm_link_expected("enforce_file_permission", budget, true));
@@ -969,7 +969,7 @@ index 450b8c3..0d5a9c6 100644
 +        assert!(lsm_link_expected("enforce_file_mprotect", budget, true));
 @@ -4051 +4545 @@ mod tests {
 -        assert!(marker.contains("credential_exfiltration_v3"));
-+        assert!(marker.contains("credential_exfiltration_v5"));
++        assert!(marker.contains("credential_exfiltration_v6"));
 @@ -4056,97 +4549,0 @@ mod tests {
 -    /// Upgrade residue (an older or aborted install) leaves maps pinned under
 -    /// the root; the self-heal must remove the whole root so the reinstall

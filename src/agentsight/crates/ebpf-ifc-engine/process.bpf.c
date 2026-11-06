@@ -975,6 +975,12 @@ struct {
 	__type(key, __u32);
 	__type(value, struct fd_scratch);
 } ts_fd_scratch SEC(".maps");
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct fileptr_ref);
+} ts_fptr_scratch SEC(".maps");
 
 static __always_inline struct exec_scratch *exec_scratch_buf(void)
 {
@@ -1002,6 +1008,13 @@ static __always_inline struct fd_scratch *fd_scratch_buf(void)
 	__u32 key = 0;
 
 	return bpf_map_lookup_elem(&ts_fd_scratch, &key);
+}
+
+static __always_inline struct fileptr_ref *fileptr_scratch_buf(void)
+{
+	__u32 key = 0;
+
+	return bpf_map_lookup_elem(&ts_fptr_scratch, &key);
 }
 
 static __always_inline struct mmap_ref *mmap_scratch_buf(void)
@@ -1032,16 +1045,20 @@ static __always_inline int te_file_id_equal(const struct file_id *a,
 static __noinline void te_store_fileptr_ref(struct file *file,
 					    const struct fd_ref *ref)
 {
-	struct fileptr_ref fpref = {};
+	struct fileptr_ref *fpref;
 	__u64 key;
 
 	if (!file)
 		return;
-	if (te_resolve_file_id_from_file(file, &fpref.backing) < 0)
+	fpref = fileptr_scratch_buf();
+	if (!fpref)
 		return;
-	fpref.ref = *ref;
+	__builtin_memset(fpref, 0, sizeof(*fpref));
+	if (te_resolve_file_id_from_file(file, &fpref->backing) < 0)
+		return;
+	fpref->ref = *ref;
 	key = (__u64)file;
-	bpf_map_update_elem(&ts_fileptr, &key, &fpref, BPF_ANY);
+	bpf_map_update_elem(&ts_fileptr, &key, fpref, BPF_ANY);
 }
 
 static __always_inline struct fileptr_ref *te_lookup_fileptr_ref(struct file *file)
