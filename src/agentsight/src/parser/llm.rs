@@ -29,6 +29,14 @@ pub fn is_dashscope_native_path(path: &str) -> bool {
     DASHSCOPE_NATIVE_PATHS.iter().any(|p| path.contains(p))
 }
 
+/// Whether the path is a Responses API per-id operation rather than inference.
+///
+/// Retrieval returns the stored response object, including its original usage;
+/// consumers must not count that usage as a second call.
+pub fn is_responses_sub_endpoint(path: &str) -> bool {
+    path.contains("/v1/responses/")
+}
+
 /// Check if the path indicates an LLM API call.
 ///
 /// Shared by the genai row-creation gate and the analyzer audit gate so the
@@ -45,15 +53,7 @@ pub fn is_llm_api_path(path: &str) -> bool {
         || (path.contains("/v1/messages")
             && !path.contains("/v1/messages/count_tokens")
             && !path.contains("/v1/messages/batches"))
-        // The Responses API's per-id sub-endpoints (GET retrieve,
-        // POST cancel, DELETE) share the /v1/responses prefix but are
-        // not inference calls: the retrieval response IS the stored
-        // response object, so admitting a poll re-records the create
-        // call's output and re-counts its usage tokens. Must stay in
-        // lockstep with OpenAIParser::matches_path so a retrieval
-        // neither creates a row (this gate) nor gets deep-parsed
-        // (that gate).
-        || (path.contains("/v1/responses") && !path.contains("/v1/responses/"))
+        || (path.contains("/v1/responses") && !is_responses_sub_endpoint(path))
         || path.contains("/chat/completions")
         || path.contains("/completions")
         || path.contains("/api/v1/copilot/generate_copilot")

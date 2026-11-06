@@ -65,6 +65,10 @@ impl AuditAnalyzer {
         token_record: Option<&TokenRecord>,
         request_json: Option<&serde_json::Value>,
     ) -> Option<AuditRecord> {
+        if crate::parser::llm::is_responses_sub_endpoint(&http_record.path) {
+            return None;
+        }
+
         // Create llm_call audit records for LLM API calls identified by path,
         // and for streaming calls whose parsed events yielded provider/usage
         // evidence. `is_sse` alone must not decide: MCP's legacy HTTP+SSE
@@ -403,6 +407,24 @@ mod tests {
         // Token counting is not an inference call and stays out of the audit.
         let record = make_http_record("/v1/messages/count_tokens", false, None);
         assert!(analyzer.analyze_http(&record, None).is_none());
+    }
+
+    #[test]
+    fn test_responses_sub_endpoints_reject_usage_evidence() {
+        let analyzer = AuditAnalyzer::new();
+        let token = TokenRecord::new(1, "test".into(), "openai".into(), 20, 8);
+        for path in [
+            "/v1/responses/resp_abc123",
+            "/v1/responses/resp_abc123/cancel",
+            "/v1/responses/resp_abc123/input_items",
+            "https://api.openai.com/v1/responses/resp_abc123",
+        ] {
+            let record = make_http_record(path, false, None);
+            assert!(
+                analyzer.analyze_http(&record, Some(&token)).is_none(),
+                "{path} is not an inference call even when its stored response carries usage"
+            );
+        }
     }
 
     #[test]
