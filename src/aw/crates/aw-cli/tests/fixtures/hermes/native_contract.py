@@ -11,9 +11,10 @@ from native_guard import GuardTests
 from native_hooks import HooksTests
 from native_reload import ReloadTests
 from native_support import NativeFixture
+from native_skill import SkillTests
 
 # Export the test classes for unittest discovery through this stable entrypoint.
-__all__ = ["GuardTests", "HooksTests", "ReloadTests"]
+__all__ = ["GuardTests", "HooksTests", "ReloadTests", "SkillTests"]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

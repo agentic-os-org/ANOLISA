@@ -1257,7 +1257,7 @@
         "url": "https://github.com/NousResearch/hermes-agent.git",
         "revision": "952c941e741e922a9be8fc403c8944c6e96318bb"
       },
-      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model.",
+      "boundary": "Pinned official dispatcher and chat CLI, reload, denial and cleanup with a deterministic local model; no hosted model. Local directory skill_view selection uses the native registry and locator, pins raw manifest text before rendering, and reuses sec-core check_skill. Controlled Ledger CLI/model cases verify instruction withholding; slash/preload and file references remain separate boundaries.",
       "cases": [
         {
           "name": "dispatcher",
@@ -1271,7 +1271,7 @@
           ],
           "timeout_seconds": 180,
           "report": "unittest",
-          "tests": 23
+          "tests": 37
         },
         {
           "name": "chat",
@@ -1313,6 +1313,35 @@
                   "profile_retained": true,
                   "native_environment_preserved": true
                 }
+              }
+            }
+          ]
+        },
+        {
+          "name": "skill-provider",
+          "argv": [
+            "{python}",
+            "crates/aw-cli/tests/fixtures/hermes/skill_cli.py",
+            "--aw",
+            "{bin}/aw",
+            "--provider",
+            "{bin}/aw-provider-sec-core",
+            "--hermes",
+            "{source}/.venv/bin/hermes",
+            "--source",
+            "{source}",
+            "--output",
+            "{output}/skill-provider"
+          ],
+          "timeout_seconds": 600,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/skill-provider/result.json",
+              "values": {
+                "case_count": 7,
+                "bindings": 0,
+                "events": 0
               }
             }
           ]

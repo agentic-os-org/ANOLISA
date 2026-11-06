@@ -156,7 +156,10 @@ fn dispatch(
             if !config.skill {
                 return Err("skill_check_disabled");
             }
-            if event["tool"]["native_name"] != "Skill" {
+            if event["tool"]["native_name"] != "Skill"
+                && !(event["agent"]["adapter"] == "hermes"
+                    && event["tool"]["native_name"] == "skill_view")
+            {
                 return Err("skill_tool_unmapped");
             }
             let reason = skill::call(cli, socket, event, remaining)?;

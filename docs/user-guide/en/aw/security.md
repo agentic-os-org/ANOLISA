@@ -171,6 +171,10 @@ instructions enter the model. Resolution errors, missing directory permissions,
 unavailable backend and timeouts also block, with failed checks recorded
 separately from untrusted content. AW does not sign content or grant directories.
 
+For Hermes local chat, select `native:hermes:skill_view` in the same step.
+It checks directory-based main manifests before native rendering; see
+[supported Hermes sources](../../../developer-guide/en/aw/agents/hermes.md#skill-trust).
+
 Use one Skill Ledger check per tool: select AW or the native security Hook to
 avoid duplicate checks. Interactive `ask` is unavailable. Source support and
 troubleshooting are in the [integration reference](../../../developer-guide/en/aw/providers/sec-core.md#validate-skills-before-loading).

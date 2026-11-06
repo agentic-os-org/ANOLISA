@@ -43,3 +43,14 @@ before 阻断后，其他原生回调仍可运行；after 可观察失败或被�
 回退时核对 `backup` 和 `displaced`，恢复所需配置并保留安装后有意修改。AW 没有 Hermes 插件卸载命令。
 退出 Hermes 后停止 AW 服务；配置发布或清理失败按报告路径核对，不覆盖未知文件。
 详细探测、原子发布与冲突处理见[Hermes 合同](../../../../../src/aw/docs/design/zh/adapters/hermes-adapter.md)。
+
+## Skill 信任检查
+
+通过[通用安全 Provider](../providers/sec-core.md#加载前校验-skill)，在 `tool.before`
+为 `native:hermes:skill_view` 启用 `check_skill`。AW 使用原生工具注册项与本地目录
+选择结果，检查规范化的 Skill 目录，再将受检 manifest 交给原生渲染。原生禁用、
+平台限制和隔离决定继续生效。
+
+支持目录型 `skill_view` 的主 `SKILL.md`。插件限定来源、旧式单文件和 `file_path`
+引用返回解析错误，`on_error: block` 会阻止加载。斜杠命令、预加载、直接读文件与
+Skill 内联命令需要各自的策略接点。

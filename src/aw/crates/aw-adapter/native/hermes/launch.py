@@ -2,7 +2,7 @@
 
 from argparse import Namespace
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import math
 import os
@@ -47,6 +47,11 @@ def main() -> None:
 
     original = native._prepare_agent_startup
     launch = json.loads(Path(launch_path).read_text())
+    skills = None
+    skill_restore = None
+    dispatch_restore = None
+    if any(hook.get("skill_check") for hook in launch["hooks"]):
+        import aw_skill as skills
     original_directives = plugins._get_pre_tool_call_directive_details
     original_execution = middleware.run_tool_execution_middleware
     post_restore: tuple[ModuleType, Callable[..., None]] | None = None
@@ -94,7 +99,7 @@ def main() -> None:
 
     def execution(tool_name: str, arguments: dict[str, Any],
                   next_call: Callable[[dict[str, Any]], Any], **context: Any) -> Any:
-        with guarded_hooks():
+        with guarded_hooks(), (skills.invocation(tool_name, arguments) if skills else nullcontext()):
             # Freeze JSON values before middleware, including nested mutations and
             # type changes that Python equality would treat as unchanged.
             inspected = json.dumps(arguments, sort_keys=True) if before else None
@@ -112,7 +117,7 @@ def main() -> None:
             return original_execution(tool_name, arguments, dispatch, **context)
 
     def prepare(args: Namespace) -> None:
-        nonlocal post_restore
+        nonlocal post_restore, skill_restore, dispatch_restore
         if env_var_enabled("HERMES_SAFE_MODE"):
             raise SystemExit("HERMES_SAFE_MODE disables the AW native plugin")
         original(args)
@@ -134,6 +139,16 @@ def main() -> None:
             # Importing model_tools discovers plugins; retain native startup order.
             import model_tools
             original_post = model_tools._emit_post_tool_call_hook
+            if skills is not None:
+                skill_restore = skills.install()
+                dispatch_restore = (model_tools, model_tools.handle_function_call)
+                original_dispatch = model_tools.handle_function_call
+
+                def skill_dispatch(function_name, function_args, *values, **options):
+                    with skills.invocation(function_name, function_args):
+                        return original_dispatch(function_name, function_args, *values, **options)
+
+                model_tools.handle_function_call = skill_dispatch
 
             def post(**context: Any) -> None:
                 # Vetoes skip execution middleware and may have no live listeners.
@@ -169,6 +184,7 @@ def main() -> None:
     # in this launcher's namespace, outside native plugin teardown and environment.
     session = ModuleType("_aw_hermes_session")
     session.launch_path = launch_path
+    session.skills = skills
     sys.modules[session.__name__] = session
     # Keep this guard outside plugin teardown so native rediscovery cannot remove it.
     if launch["hooks"]:
@@ -183,6 +199,10 @@ def main() -> None:
         if post_restore is not None:
             module, callback = post_restore
             module._emit_post_tool_call_hook = callback
+        if dispatch_restore is not None:
+            dispatch_restore[0].handle_function_call = dispatch_restore[1]
+        if skill_restore is not None:
+            skill_restore()
         manager.discover_and_load = original_discovery
         sys.modules.pop(session.__name__, None)
 
