@@ -163,7 +163,7 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 | `TOKENLESS_ENV_FIX_SCRIPT` | 覆盖环境修复脚本路径 |
 | `TOKENLESS_PACKAGE_MANAGER` | 覆盖包管理器探测，主要用于测试 |
 
-当前构建已硬关闭 Tool Ready。依赖规范和修复脚本覆盖仅为休眠的旧版实现保留，运行时不会生效；这些路径会经过信任校验，也不建议普通用户修改。
+当前构建已硬关闭 Tool Ready：`hooks/tool_ready_hook.sh` 在读取这两个覆盖之前就返回，`tokenless env-check` 也在解析这两个覆盖之前就从自己的硬旁路返回。但覆盖并非完全无效——独立的环境修复脚本会在 `fix-tool` 与 `check` 子命令中读取 `TOKENLESS_TOOL_READY_SPEC`，这两个子命令不经过 hook，因此设置它会改变它们读到的内容。对于 `git>=1.0.0` 这类字符串条目，`check` 会把版本约束作为依赖名称与包名的一部分显示，而不将其拆出。与 hook 和 Rust 侧不同，`tokenless-env-fix.sh` 不对该路径做信任校验，而是直接采用设定的值。`TOKENLESS_ENV_FIX_SCRIPT` 在当前构建中没有可达的消费者：hook 在读取它之前就短路，而同样会读取它的 Rust auto-fix 路径位于同一个旁路之后。两者都不建议普通用户修改。
 
 `TOKENLESS_TRACEPARENT` 与标准变量 `TRACEPARENT` 用于为 SLS 记录提供 W3C trace context。注入是启动方的责任：OpenTelemetry 通过进程内 carrier 传播 W3C context，不会把 active span 导出为进程环境变量，因此需要关联能力的宿主或 Adapter 必须在启动 Tokenless 的环境中显式写入这两个变量之一，Tokenless 只负责读取：先看覆盖项，覆盖项为空或无法解析时回退到标准变量，因此一次拼写错误不会让整个会话失去关联能力。两者都是可选的：两个变量都没有可用上下文时，记录结构与之前完全一致，即以未关联形式写出；该标识只写入 SLS JSONL，本地统计数据库不保存。
 
