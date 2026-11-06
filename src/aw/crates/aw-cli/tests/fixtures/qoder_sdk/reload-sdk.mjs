@@ -94,7 +94,10 @@ export function query({ prompt, options }) {
               await turn;
             });
           }
-          if (!denied) await callback("PostToolUse", { tool_response: "native result" });
+          if (!denied) {
+            if (process.env.QODER_FAILURE) await callback("PostToolUseFailure", { error: "tool failed", is_interrupt: false });
+            else await callback("PostToolUse", { tool_response: "native result" });
+          }
           // Real Worker can emit these before turn-finally cleanup is complete.
           emit({ type: "command_lifecycle", command_uuid: message.uuid, state: "completed" });
           emit({ type: "result", denied, reason });

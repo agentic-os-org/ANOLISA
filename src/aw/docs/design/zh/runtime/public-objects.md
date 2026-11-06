@@ -4,7 +4,8 @@
 
 `aw-contracts` 为运行事实生产者和 AgentSight 等消费者定义统一元数据合同。对象包含
 apiVersion、kind、metadata 和 data；配置继续使用既有 spec 合同。库提供离线校验和
-不可变引用校验，运行时生产、公共审计读取及 Sight 摄取由后续集成实现。
+不可变引用校验。aw-service 在原生 Hook 和启动器边界生产这些事实，独立于可选的
+AgentSight 查询；公共审计传输和 Sight 摄取通过各自集成消费已保留的元数据。
 
 ## 已注册结构与 API
 
@@ -63,8 +64,8 @@ objects::reference 校验目标并返回带内容摘要的版本化引用；obje
 工具 ID 在所属绑定、实例及会话上下文内解释。原生 ID 相等不能单独确定公共对象身份。
 
 时间固定为 UTC 的 YYYY-MM-DDTHH:MM:SS.sssZ。原生时间缺失、适用但未知的身份使用
-null，不填空串或虚构 ID。配置版本取原始配置字节摘要。输入/输出摘要标识实际捕获
-的内容字节，不表示语义等价 JSON 或内容已保留。对象摘要复用现有整数域 AW 元数据
+null，不填空串或虚构 ID。配置版本取原始配置字节摘要。输入/输出摘要取捕获时所选
+规范化值的 UTF-8 JSON 序列化字节，不保留原生 JSON 拼写，也不证明正文已保留。对象摘要复用现有整数域 AW 元数据
 规范编码。元数据不包含原始提示词、工具参数/结果、环境或原生回调外壳。
 
 verified 要求非空 verifiedFields 和明确 basis，列出的主体字段必须有值。原生 ID
@@ -86,6 +87,7 @@ unavailable 必须有 gap，已知端点不得逆序。完整声明仅覆盖指�
 
 | 用途 | 原因码 | 含义 |
 | --- | --- | --- |
+| `association.gaps` | `aw.native_identity_unverified` | 可用回调未证实请求身份 |
 | `association.gaps` | `aw.native_turn_unavailable` | 原生轮次身份不可用 |
 | `association.gaps` | `aw.instance_has_no_request` | 实例级事件没有请求身份 |
 | `coverage.gaps` | `aw.coverage_unmeasured` | 尚未测量观测覆盖 |
@@ -95,10 +97,16 @@ unavailable 必须有 gap，已知端点不得逆序。完整声明仅覆盖指�
 | `coverage.gaps` | `aw.history_missing` | 无法定位请求的历史 |
 | `coverage.gaps` | `aw.retention_gap` | 已知保留策略操作删除了部分请求历史 |
 | `coverage.gaps` | `aw.consumer_lag` | 消费者相对来源存在已知积压 |
+| 生命周期 `reasonCode` | `aw.native_adoption_unconfirmed` | Hook 处理结束，但缺少原生效果采用证据 |
+| 生命周期 `reasonCode` | `aw.launch_failed` | 启动器启动或就绪失败 |
+| 生命周期 `reasonCode` | `aw.worker_failed` | Hook 事件 Worker 失败 |
+| 生命周期 `reasonCode` | `aw.expired` / `aw.stopped` | 事件期限或服务停止终止处理 |
 | 生命周期 `reasonCode` | `aw.cancelled` | 轮次被取消 |
 | 生命周期 `reasonCode` | `aw.owner_lost` | 确认终态前失去执行所有者 |
 | 生命周期 `reasonCode` | `aw.cancel_cleanup_pending` | 取消清理尚未完成 |
 | Provider `failureCode` | `aw.provider_timeout` | Provider 未在期限内完成 |
+| Provider `failureCode` | `aw.transport` / `aw.exit` / `aw.incomplete_input` | 传输、进程退出或输入未完整交付失败 |
+| Provider `failureCode` | `aw.native_environment` / `aw.provider` / `aw.protocol` | 原生环境不合法、Provider 结构化错误或协议失败 |
 
 这些原因码规定生产者需要实现的语义。journal/历史和消费滞后原因码供后续公共审计
 与 Sight 集成使用，当前合同库不检测这些状态。新增 AW 原因码须在对应用途的表中
@@ -174,22 +182,55 @@ objects::audit_uid 对下列规范编码数组计算 SHA-256：
 保持 UID，改变对象摘要，
 让消费者识别冲突。去重键使用生产者身份与 UID，再比较摘要；哈希不证明认证或持久化。
 
-后续导出器须保留创建时间与确定性字段，不能按每次读取时间重写历史对象。缺失的
-历史事实需要明确 gap 或后续迁移合同。新代际不能恢复旧运行的写权限。本次 schema
-与引用 API 不读取私有 Journal，也不实现游标、链尾核对、存储或保留策略。
+运行时持久化创建时间与确定性字段，重放保留原生产代际。新服务代际不能恢复旧运行的写权限。
+
+## 运行事实生产与投影
+
+aw-service 将通过校验的 ExecutionEvent 存入现有 Journal 初始预留记录的
+plan.executionEvent，源记录链 key 同时作为对象 UID。Provider 完成和关闭记录在
+持久化前保存创建时间。FileJournal format-1 封套、摘要链和既有私有字段的含义保持。
+投影从已保留的封套计算 sourceDigest，源记录不包含引用自身的摘要。
+
+aw_service::public_projection::execution_event 校验初始公共对象；project_record
+逐条投影已校验封套。没有初始公共对象时明确表示私有或历史记录链；公共对象损坏
+返回错误。步骤派发和原生 Hook 命令完成等中间记录没有公共 AuditRecord 投影。
+重复读取保持 producer、UID、时间、序列和摘要。
+
+审计目录中的私有 .aw-audit-source.json 只包含 apiVersion: audit.aw/v1alpha1、
+kind: AuditSource 和随机的 64 位十六进制 sourceId。该存储描述独立于已注册公共
+Schema。创建时原子发布并同步文件及目录，文件属于服务用户、单硬链接、模式 0600，
+目录保持 0700。producerId 为 aw-service，scopeId 为保留的 sourceId，generation
+为写入服务代际。显式读取拒绝缺失或损坏的描述；服务初始化为尚未初始化的存储创建
+描述，历史记录保持原样。
+
+| 运行边界 | 记录事实与范围 |
+| --- | --- |
+| aw run 子进程启动与等待 | evidence 关闭时仍记录 instance.started/ended；PID 仅为描述信息 |
+| 已配置的输入/工具 Hook | 捕获元数据及 Provider 完成记录；没有原生采用证据的关闭为 incomplete |
+| 无策略步骤的 Qoder SDK/QwenPaw 工具回调 | 默认元数据路由记录 before/after，不启动 Sight 工作线程，不保留正文 |
+| 原生结果 | QwenPaw 使用明确的 ToolResponse state；SDK 使用成功/失败 Hook 类型及明确错误标记；未知状态记录 gap |
+| 受管调用退休 | 既有 invocation ledger 阻断重放后，回收回调去重细节 |
+| 未受管回调保留 | 每实例最多 256 个回调身份；溢出持久记录一次 aw.observation_callback_limit gap，后续新身份被拒绝 |
+
+缺少必要公共元数据时，私有 gap 记录链保留 aw.native_metadata_unavailable。
+既有 Scope 生命周期记录继续保留 parent/owner 信息；Scope ID 不替代原生 turn ID。
+公共工具主体保留实际任务实例及已核实的 session/call 关联，nativeRefs 将原生 ID
+与 AW 规范化 invocation ID 分开保留。缺少明确原生轮次身份时不生产 turn.ended。
+
+覆盖保持 unknown，原因为 aw.coverage_unmeasured。观测链 completed 表示捕获完成，
+Provider 完成记录表示策略输出；两者均不证明原生效果采用。公共元数据不包含输入/
+结果正文、环境、凭据或回调封套。Journal 失败保持现有服务阻断行为，来源读取不重试执行。
 
 ## 兼容与集成
 
-现有配置、Provider 请求/响应、Evidence、Core 合同、FileJournal 的字节与 ID 保持。
-新对象不能作为 v1alpha1 Provider event 或本地服务请求发送，库不会自动迁移旧记录。
-后续导出器显式将私有 status:error 映射为公共 status:failed，区分缺少的判断，并跳过
-尚无映射的私有记录种类。
+现有配置、Provider 请求/响应、Evidence、Core 合同及已注册 Schema 字节/ID 保持。
+新增私有记录包含捕获元数据；旧读取器继续读取 format-1 Journal，旧记录链明确没有
+公共投影。投影将私有 status:error 映射为公共 status:failed，并区分缺少的策略判断。
 
-未知对象版本和字段被拒绝。发布的定义保留资源 ID 与确切字节，结构或语义变化通过
-明确版本决策和转换处理。后续 Evidence 和 Provider profile 在生产/消费接通时复用
-公共值对象。回退本次增量库变更恢复此前 API，无安装状态或数据迁移。
+未知对象版本和字段被拒绝。发布定义保留资源 ID 与确切字节，结构或语义变化需要
+明确版本管理。回退保留已有额外元数据和来源描述，不转换或重放历史记录链。
 
-合同测试覆盖 Qoder SDK/QwenPaw 元数据样例、全部六个事件分支、嵌套未知字段、
-日期/身份/覆盖不变量、引用变更和重放冲突，验收范围为库合同。运行事实生产、真实
-原生采纳、公共读取和 Sight 存储需按[集成规划](../integrations/agentsight/agentsight-integration.md)
-分别完成端到端验证。
+合同测试覆盖六个事件分支与不可变引用。服务测试覆盖 Sight 关闭、原生关联、去重与
+退休、未知结果、持久化失败、来源身份并发初始化和跨服务代际重放。QwenPaw 原生
+验收进一步验证同一 Agent 策略更新后的无策略事实。真实托管 Qoder Worker 采用与
+Sight 存储按[集成验收](../integrations/agentsight/agentsight-integration.md)分别验证。

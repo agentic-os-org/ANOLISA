@@ -123,6 +123,14 @@ fn poisoned_audit_prevents_context_publication() {
     assert!(!runtime.audit.healthy());
     let stored = std::fs::read_dir(directory.path().join("journal"))
         .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
         .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .collect::<String>();
     assert!(!stored.contains("context_frozen"));

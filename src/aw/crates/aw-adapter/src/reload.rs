@@ -32,7 +32,7 @@ pub struct Plan {
     pub groups: Vec<Vec<Step>>,
     /// Whether native normalization must include the result projection.
     pub replacement: bool,
-    /// Retain optional pure observation even when the policy has no steps.
+    /// Capture default metadata and configured observation without policy steps.
     pub observe: bool,
 }
 
@@ -93,7 +93,7 @@ pub fn scope_policy(
     }
     let (events, hooks) = match capabilities.adapter.as_str() {
         "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
-        "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, false)?,
+        "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, true)?,
         "agentscope" => crate::adapters::agentscope::event_routes(document, steps)?,
         _ => return Err("unsupported resident policy adapter".into()),
     };
@@ -171,7 +171,8 @@ pub fn plan(document: &Value, target: &str, steps: &[AdmittedStep], event: &str)
             vec![ordered]
         },
         replacement,
-        observe: adapter::observation_enabled(document, target),
+        observe: matches!(adapter, "qwenpaw" | "qoder-sdk")
+            || adapter::observation_enabled(document, target),
     })
 }
 

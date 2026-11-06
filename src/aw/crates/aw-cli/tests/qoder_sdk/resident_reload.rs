@@ -77,7 +77,7 @@ fn first_query_policy_update_preserves_launch_receipt() {
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         let expected_denial = updated_hooks.unwrap_or(initial_hooks);
         assert_eq!(result["denied"], expected_denial);
-        assert_eq!(result["receipt_hooks"], usize::from(initial_hooks));
+        assert_eq!(result["receipt_hooks"], 2);
         assert_eq!(f.root.join("executed").exists(), !expected_denial);
         assert!(f.root.join("query-closed").exists());
         assert!(f.root.join("daemon-stopped").exists());
@@ -125,4 +125,78 @@ fn ordinary_queries_update_hooks_post_and_mcp_after_cleanup() {
         .env("QODER_POST_CASE", "failure");
     assert_eq!(f.successful(command)["passed"], true);
     service.released(&f);
+}
+
+#[test]
+fn empty_policies_capture_tool_facts_without_sight_in_both_launch_modes() {
+    for reloadable in [false, true] {
+        for failure in [false, true] {
+            let fixture = Fixture::new();
+            let mut document = setup(&fixture);
+            document["spec"]["events"] = json!({});
+            document["spec"]["providers"] = json!({});
+            let service = Service::start(&fixture, &document);
+            let mut command = launch(&fixture);
+            if reloadable {
+                let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qoder_sdk");
+                fs::copy(
+                    source.join("reload-facts.mjs"),
+                    fixture.root.join("app.mjs"),
+                )
+                .unwrap();
+                fs::copy(
+                    source.join("reload-sdk.mjs"),
+                    fixture
+                        .root
+                        .join("node_modules/@qoder-ai/qoder-agent-sdk/dist/index.js"),
+                )
+                .unwrap();
+                command.arg("--reloadable");
+            }
+            if failure {
+                command.env("QODER_FAILURE", "1");
+            }
+            assert_eq!(fixture.successful(command)["denied"], false);
+            if !reloadable {
+                assert!(fixture.root.join("executed").exists());
+            }
+            assert!(fixture.root.join("query-closed").exists());
+            let mut events = Vec::new();
+            for entry in fs::read_dir(fixture.root.join("state/journal")).unwrap() {
+                let path = entry.unwrap().path();
+                if path
+                    .extension()
+                    .is_none_or(|extension| extension != "jsonl")
+                {
+                    continue;
+                }
+                let text = fs::read_to_string(path).unwrap();
+                let initial: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+                let event = &initial["record"]["plan"]["executionEvent"];
+                if matches!(
+                    event["data"]["name"].as_str(),
+                    Some("tool.before" | "tool.after")
+                ) {
+                    events.push(event.clone());
+                }
+            }
+            events.sort_by_key(|event| event["data"]["name"].as_str().unwrap().to_owned());
+            assert_eq!(
+                events.len(),
+                2,
+                "reloadable={reloadable}, failure={failure}: {events:?}"
+            );
+            assert_eq!(events[0]["data"]["name"], "tool.after");
+            assert_eq!(events[1]["data"]["name"], "tool.before");
+            assert_eq!(
+                events[0]["data"]["details"]["resultStatus"],
+                if failure { "error" } else { "success" }
+            );
+            assert_eq!(events[0]["data"]["subject"], events[1]["data"]["subject"]);
+            assert!(events
+                .iter()
+                .all(|event| event["data"]["association"]["status"] == "verified"));
+            service.released(&fixture);
+        }
+    }
 }

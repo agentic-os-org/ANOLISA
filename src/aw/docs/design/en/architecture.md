@@ -141,6 +141,11 @@ the service retains runtime activation and policy revisions. See the
 Native Hook scripts also run through `aw-exec`, preserving raw output and exit
 status without a Provider handshake. AgentSight is a separate optional observation
 source; read-only `aw inspect` views do not participate in Hook admission.
+Service-owned public runtime metadata persists through the same Journal even
+when Sight is disabled. Qoder SDK and QwenPaw keep metadata callbacks when no
+policy steps are configured; only explicit native outcomes become result facts.
+See [public objects](runtime/public-objects.md#runtime-production-and-projection)
+for retained identities, bounded deduplication and projection boundaries.
 
 Skill checks reuse `tool.before` and the existing opaque `event.native` extension.
 The Qoder SDK or QwenPaw Adapter supplies `aw_skill` (requested name, canonical

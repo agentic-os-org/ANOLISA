@@ -234,12 +234,7 @@ impl PreparedLaunch for Prepared {
                 &self.capabilities(),
             )?;
         }
-        event_routes(
-            &self.input.document,
-            steps,
-            adapter::observation_enabled(&self.input.document, &self.input.target),
-        )
-        .map(|_| ())
+        event_routes(&self.input.document, steps, true).map(|_| ())
     }
 
     fn configure(&mut self, context: &LaunchContext<'_>) -> Result<LaunchPlan> {
@@ -315,11 +310,7 @@ impl Prepared {
         let (events, hooks) = if self.input.options.reloadable {
             (crate::reload::routes(), Vec::new())
         } else {
-            event_routes(
-                &self.input.document,
-                context.steps,
-                adapter::observation_enabled(&self.input.document, &self.input.target),
-            )?
+            event_routes(&self.input.document, context.steps, true)?
         };
         let token = fs::read_to_string("/proc/sys/kernel/random/uuid")?
             .trim()
@@ -405,7 +396,7 @@ pub(crate) fn event_routes(
     let mut hooks = Vec::new();
     // After wrappers are outermost, so they also observe an inner before denial.
     for event in ["tool.after", "tool.before", "input.submit"] {
-        let selected = adapter::native_steps(steps, event, observe);
+        let selected = adapter::native_steps(steps, event, observe && event != "input.submit");
         if selected.is_empty() {
             continue;
         }

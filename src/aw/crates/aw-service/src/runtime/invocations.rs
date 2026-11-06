@@ -216,7 +216,7 @@ impl Runtime {
     ) -> Result<Value> {
         self.check_scope_cleanup(id)?;
         let ledger = self.invocation_ledger(id)?;
-        let (hooks, opening) = {
+        let (hooks, opening, facts) = {
             let instances = self
                 .instances
                 .lock()
@@ -225,7 +225,11 @@ impl Runtime {
                 .get(id)
                 .and_then(Option::as_ref)
                 .ok_or_else(|| rejected("unknown_instance"))?;
-            (Arc::clone(&instance.hooks), Arc::clone(&instance.hook_open))
+            (
+                Arc::clone(&instance.hooks),
+                Arc::clone(&instance.hook_open),
+                Arc::clone(&instance.native_facts),
+            )
         };
         // Closing excludes new opens before cancelling and waiting for workers.
         // Do not hold the opening lock while waiting for Provider completion.
@@ -262,6 +266,11 @@ impl Runtime {
                 hooks.remove(&hooks::correlation(phase, &session, call)?);
             }
         }
+        facts
+            .lock()
+            .map_err(|_| rejected("state_poisoned"))?
+            .claims
+            .retain(|(_, candidate, _), _| candidate != call);
         ledger.active.remove(call);
         Ok(json!({"retired":true}))
     }

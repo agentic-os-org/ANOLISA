@@ -182,7 +182,14 @@ fn claude_hook_cli_preserves_deny_success_failure_identity_and_audit() {
     }
     let mut found = BTreeMap::new();
     for entry in fs::read_dir(fixture.root.join("state/journal")).unwrap() {
-        let entries: Vec<Value> = fs::read_to_string(entry.unwrap().path())
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            continue;
+        }
+        let entries: Vec<Value> = fs::read_to_string(path)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())

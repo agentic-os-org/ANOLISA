@@ -179,7 +179,14 @@ print(json.dumps(reply))
             }
         }
         for entry in fs::read_dir(f.root.join("state/journal")).unwrap() {
-            let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "jsonl")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(path).unwrap();
             assert!(!text.contains("Retry with arguments"));
             assert!(!text.contains("rtk candidate"));
         }

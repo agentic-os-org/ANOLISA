@@ -172,7 +172,6 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     let artifacts = Artifacts::create(&service.paths.state_dir)?;
     let binding_path = artifacts.0.join("binding.json");
     let mut instance = None;
-    let mut observing = false;
     let mut started = false;
     let executed: Result<Exit> = (|| {
         let mut plan = prepared.configure(&LaunchContext {
@@ -228,7 +227,6 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
                 Ok(value) => value,
                 Err(error) => return interrupted_error(error.into()),
             };
-            observing = observation["audit_key"].is_string();
             eprintln!(
                 "AW observation {}; query {}; coverage unknown; audit {}",
                 observation["source_state"], observation["query_state"], observation["audit_key"]
@@ -279,7 +277,7 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
                         failed.store(true, std::sync::atomic::Ordering::Release);
                     }
                 }
-                if observing && reported.is_ok() {
+                if reported.is_ok() {
                     reported = service
                         .client
                         .call(
@@ -307,7 +305,6 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
     })();
     let reported = instance
         .as_ref()
-        .filter(|_| observing)
         .map(|instance_id| {
             let outcome = match (&executed, started) {
                 (Ok(Exit::Code(code)), true) => RunOutcome::Exited {

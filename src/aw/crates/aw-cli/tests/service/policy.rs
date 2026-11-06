@@ -506,6 +506,10 @@ fn disconnected_update_cancels_preparation_without_later_activation() {
     assert!(!fs::read_dir(fixture.state().join("journal"))
         .unwrap()
         .filter_map(|entry| entry.ok())
+        .filter(|entry| entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "jsonl"))
         .any(
             |entry| fs::read_to_string(entry.path()).is_ok_and(|text| text
                 .lines()
