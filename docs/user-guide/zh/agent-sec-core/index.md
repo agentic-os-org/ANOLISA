@@ -11,7 +11,7 @@ Rust V2 SkillSec 核心迁移见 [V2 指南](skillsec-v2.md)。
 使用 `agent-sec-cli sandbox run` 按明确的文件和网络权限执行命令。
 [Sandbox 指南](sandbox.md)介绍这一本地命令及其运行要求。
 
-可选的 [Skill 安全评测](skill-score.md) 使用原生 ASC CLI 和共享模型配置生成计划、执行裁决。基础安装保持轻量，Docker/Harbor 动态执行需显式安装 `sec-core-skill-score`。
+可选的 [Skill 安全评测](skill-score.md) 使用原生 ASC CLI 和共享模型配置生成计划、执行裁决。基础安装保持轻量，运行时通过 `agent-sec-cli skillsec score install-runtime` 显式安装。镜像构建器可在没有 Docker 时预置文件和绑定版本的镜像，供离线激活。
 
 ## 概述
 

@@ -53,6 +53,8 @@ CLI 命令与集成 capability surface。
 
 维护者可用 `ASC_WORK_BASE_IMAGE` 与 `ASC_WORK_BASE_RECIPE`，在预装业务依赖的基础镜像上构建可选工作镜像；自定义预览包以独立版本绑定配方来源与镜像身份。即使评测部署在 FC，业务依赖也应放在这个内层工作镜像中。
 
+镜像构建器没有 Docker 时，可通过 `ANOLISA_SKILL_SCORE_STAGE_ONLY=1` 预置 worker 文件，并放入导出的、与版本绑定的镜像归档。Docker 启动后，仍由 `agent-sec-cli skillsec score install-runtime` 离线激活。raw/RPM 预置目录和构建命令见上述指南；默认安装继续保持轻量。
+
 ## V2 SkillSec 与 Policy CLI
 
 使用 `agent-sec-cli skillsec status` 查看状态，或运行 `agent-sec-cli skillsec --help`。

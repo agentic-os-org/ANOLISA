@@ -72,7 +72,7 @@ These commands describe the native Rust core and optional component added on thi
 
 ```bash
 sudo anolisa --install-mode system install sec-core
-sudo anolisa --install-mode system install sec-core-skill-score
+sudo agent-sec-cli skillsec score install-runtime
 
 agent-sec-cli skillsec score plan /absolute/path/to/skill \
   --output-file /absolute/path/to/task.json
@@ -84,7 +84,7 @@ agent-sec-cli skillsec score run /absolute/path/to/task.json \
 
 Retain `run -` for stdin, one JSON object on stdout, progress on stderr, and refusal to overwrite existing output files unexpectedly. Output directories must be outside the evaluated input. `plan` uses the Rust core in the base package and model configuration; it requires neither the optional execution component nor Docker/Harbor. `run` requires the full execution environment. If the optional component is absent, it returns nonzero with explicit installation guidance; if an installed component is damaged, it recommends repair. Neither case triggers downloads.
 
-This is an optional installation unit within ASC, not a second public CLI or a new service. Reuse the existing `anolisa install <component>` form without adding `--with`, `score install`, or `prepare`. The current installer has no implemented automatic component dependency solver. The first release therefore requires installing base ASC first; the optional component's helper checks its version rather than assuming that a dependency declaration installs it automatically.
+This is an optional installation unit within ASC. The single `install-runtime` command routes raw installation through ANOLISA's recorded repository and exact base version, or uses the recipes in the existing RPM. It rejects mixed ownership. The optional helper requires an installed matching base; it does not rely on an automatic dependency solver. No public `prepare` command or separate RPM is needed.
 
 The lightweight guarantee applies to `anolisa install sec-core`. The existing `anolisa install --all` enumerates every component and will include the optional component once registered. Document this as an explicit request to install everything; do not describe `--all` as equally lightweight.
 
@@ -230,11 +230,13 @@ Restoring an old version must also restore its matching manifest and runtime. Th
 
 Use the standard raw path on Ubuntu; do not require forcing RPMs onto Ubuntu. RPM remains an alternative format. A scoring-enabled RPM needs separate validation of dependency installation, scripts, and failure semantics; raw-hook guarantees cannot simply be assumed for it.
 
-Completing scoring preparation requires a working Docker daemon to build and check inner images. During FC template finalization, the platform starts Docker, then explicitly installs both the base package and optional component and runs acceptance checks. A Dockerfile build stage without a daemon may populate download caches but cannot mark scoring ready; image construction and checks must still complete later. An FC template is a versioned definition of the platform runtime and configuration, not an individual inner work container.
+Completing scoring preparation requires a working Docker daemon to build or load and check inner images. An image builder without a daemon uses `ANOLISA_SKILL_SCORE_STAGE_ONLY=1` during explicit installation to populate Python/Harbor/worker files and `staged.json`. This phase writes no `ready.json`. A Docker-capable build host exports its verified installation through the internal `prepare.sh --export-preload` helper. The deployment owner copies the compressed archive and its manifest into `preload/` under the raw or RPM runtime root. This artifact remains outside the public source bundle.
 
-Installation and execution must use the same Docker daemon. First-release acceptance covers the local system daemon and corresponding user permissions. Do not switch automatically to rootless Docker, a remote `DOCKER_HOST`, or another context; explicitly reject configurations outside the validated scope. FC templates must also verify that Docker's data-root and images survive template restoration. An installation record alone does not prove the images are present.
+Once the platform starts Docker, the existing public `install-runtime` command validates staged file hashes, release/source identity, archive size/checksum and expected image identities, then directly loads the compressed archive when images are missing. It reuses the existing network and environment probes and atomically writes readiness only after success. Existing matching images avoid another load; losing Docker data does not require rebuilding images. Missing/corrupt preload materials fail without network fallback. This split works with a regular Dockerfile and the existing image/template publishing pipeline, without a preparation instance or a new cloud-specific ASC API.
 
-Python/uv and wheel inputs can be supplied locally. `ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` disables their network fallback; image construction still requires a network-capable build host. `ANOLISA_SKILL_SCORE_OFFLINE=1` refuses a fresh image build. This source release does not claim air-gapped first installation. A prepared template preserves worker environments, build receipts and Docker data-root so restored tasks perform no installation or rebuilding.
+Activation and execution use the same local system Docker daemon and corresponding user permissions. Do not switch automatically to rootless Docker, a remote `DOCKER_HOST`, or another context. For a preload deployment, the worker files and archive must survive image/template restoration; Docker's data-root can be recreated before activation. An installation record alone does not prove the images are present. The platform owns daemon startup and the readiness barrier before task dispatch.
+
+Python/uv and wheel inputs can be supplied locally. `ANOLISA_SKILL_SCORE_DEPENDENCIES_OFFLINE=1` disables their network fallback; source image construction still requires a network-capable build host. `ANOLISA_SKILL_SCORE_OFFLINE=1` refuses a fresh image build but permits activation from verified staged files and archives. Lifecycle locking and pending-cleanup checks apply to staging, export and activation. The raw owner/version checks and RPM ownership checks remain in force. Uninstall removes owned generated environments, retaining the deployment-owned preload directory; the image owner controls its replacement and removal.
 
 ## 7. SkillEval integration and formal-release migration
 

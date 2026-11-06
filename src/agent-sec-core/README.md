@@ -56,6 +56,8 @@ The shared model configuration also accepts an explicitly selected `anthropic-co
 
 Maintainers can build the optional work image on a prepared business base with `ASC_WORK_BASE_IMAGE` and `ASC_WORK_BASE_RECIPE`; custom-base previews bind their source recipe and image identity under a distinct version. Business dependencies belong inside that work image, including when FC hosts the assessment.
 
+Image builders without Docker can stage worker files with `ANOLISA_SKILL_SCORE_STAGE_ONLY=1` and embed an exported, release-bound image archive. After Docker starts, `agent-sec-cli skillsec score install-runtime` activates the preloaded runtime offline. See the guide for the raw/RPM preload directories and build-stage commands; default installation stays lightweight.
+
 ## V2 SkillSec and Policy CLI
 
 Use `agent-sec-cli skillsec status` or `agent-sec-cli skillsec --help`. The previous

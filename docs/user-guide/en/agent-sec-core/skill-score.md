@@ -113,6 +113,38 @@ Skill dependencies must be available inside the ASC work image. Installing a doc
 
 After the feature joins mainline and passes the same acceptance gates, switch the trusted release/index origin from the fork to the formal release channel. Keep the CLI, component names, model configuration and task/report contracts. OCI distribution is a future optimization, not a prerequisite for the first or formal release.
 
+### Preload images in a regular Dockerfile
+
+Image builders without a Docker daemon can install worker files first and defer activation to the execution host. Base and optional packages must come from the same release. This is a deployment artifact, not an additional public release bundle.
+
+On a Docker-capable Linux host, complete the normal explicit runtime installation with the intended business base. Export the verified images and their release-bound manifest to a new directory:
+
+```sh
+sudo /usr/local/lib/anolisa/sec-core-skill-score/prepare.sh \
+  --prefix /usr/local --export-preload /absolute/build-context/preload
+```
+
+The output contains `manifest.json` and `skill-score-images.tar.gz`. Transfer both through the platform's trusted build context. For RPM installations, use `/usr/lib/agent-sec-core/skill-score/prepare.sh --prefix /usr` instead. The export refuses an existing destination and checks the installed runtime, network capabilities and environment before saving images.
+
+In the final Dockerfile, install the base package and release-matched ANOLISA installer through the normal raw path, make the optional source repository available, then use:
+
+```dockerfile
+RUN ANOLISA_SKILL_SCORE_STAGE_ONLY=1 agent-sec-cli skillsec score install-runtime
+COPY --chown=0:0 preload/ /usr/local/lib/anolisa/sec-core-skill-score/preload/
+```
+
+`ANOLISA_SKILL_SCORE_STAGE_ONLY=1` is an image-builder input. It installs and verifies Python, Harbor and worker files without accessing Docker or writing `ready.json`. It can also accompany the explicit ANOLISA raw optional install with a pinned repository/version. The RPM equivalent uses the same environment variable and CLI after installing the existing base RPM; its default preload directory is `/usr/lib/agent-sec-core/skill-score/preload/`. No extra RPM is introduced. Do not persist this variable as an image-wide `ENV`.
+
+After the platform starts the local Docker daemon, activate before exposing the instance for scoring:
+
+```sh
+sudo agent-sec-cli skillsec score install-runtime
+```
+
+Activation verifies the staged files, release/source binding, archive checksum and image identities. Missing images load directly from the compressed local archive; no temporary uncompressed tar, image build or dependency download is needed. Existing matching images are reused. Network and environment checks must pass before readiness is recorded. A lost Docker data-root can be repopulated from the same archive. A missing or damaged preload for staged files fails with an actionable error, without falling back to an online build.
+
+Keep preload files owned by root and not writable by other users. The lifecycle lock prevents activation during scoring. Uninstall removes ASC-generated environments but retains these deployment-owned archives; the image owner removes them or replaces the complete image. Roll back by deploying the previous matched base, optional files and preload together. This flow does not start Docker, change the kernel, or require a new cloud publishing pipeline.
+
 ## Build and verify
 
 Develop on Linux using the pinned Rust toolchain and Docker/Compose. `packaging/skill-score/build-preview.sh` builds the native base, optional source component, matched installer and release-v4 metadata, then emits two independent bundles. Source and artifact identities bind the release. The former `RAW_SKILL_SCORE_PAYLOAD` mechanism is rejected; scoring Python 3.11 is not included. The retained Python scorer serves as a differential test oracle.
