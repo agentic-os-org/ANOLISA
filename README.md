@@ -354,6 +354,9 @@ the component's commands, package names, and release tags unchanged.
 
 ## 8. Community
 
+For declared component regression reports, use the [required evidence gate](docs/user-guide/en/getting-started/testing.md#3-required-regression-evidence)
+to reject missing or skipped required suites before submitting results.
+
 <div align="center">
 
 <img src="docs/images/readme/dingtalk-qr.png" alt="ANOLISA DingTalk community QR code" width="180"/>
