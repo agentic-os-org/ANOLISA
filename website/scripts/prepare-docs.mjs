@@ -30,7 +30,9 @@ const referencedImages = new Set();
 
 function normalizedTarget(relativePath) {
   const parsed = path.posix.parse(toPosix(relativePath));
-  const basename = parsed.base === 'README.md' ? 'index.md' : parsed.base.toLowerCase();
+  const basename = parsed.base.toLowerCase() === 'readme.md'
+    ? 'index.md'
+    : parsed.base.toLowerCase();
   return path.posix.join(parsed.dir, basename);
 }
 
