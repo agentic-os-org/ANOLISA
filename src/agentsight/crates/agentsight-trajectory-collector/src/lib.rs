@@ -128,6 +128,11 @@ fn process_session(
         .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0);
 
+    let file_size = if session.source == "cline" {
+        cline::scan_fingerprint(&session.path, &session.project, file_size, file_mtime_ns)?
+    } else {
+        file_size
+    };
     let file_path = session.path.to_string_lossy().to_string();
     if retention_days > 0 {
         let now_ns = std::time::SystemTime::now()

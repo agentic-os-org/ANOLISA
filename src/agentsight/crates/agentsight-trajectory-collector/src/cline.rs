@@ -15,7 +15,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 use agentsight_atif::{AtifTrajectory, FinalMetrics};
 
@@ -29,6 +30,43 @@ pub const TASKS_ROOTS: &[&str] = &[LINUX_TASKS_ROOT, MACOS_TASKS_ROOT];
 pub(crate) const STORAGE_DIR: &str = "saoudrizwan.claude-dev";
 /// The Cline file that represents one discoverable task.
 pub const API_HISTORY_FILENAME: &str = "api_conversation_history.json";
+
+/// Cache all inputs to a task, including usage saved after the API history.
+/// The negative fingerprint cannot match a legacy nonnegative byte count.
+pub(crate) fn scan_fingerprint(
+    path: &Path,
+    project: &str,
+    api_size: i64,
+    api_mtime_ns: i64,
+) -> Result<i64> {
+    let mut digest = Sha256::new();
+    digest.update(b"agentsight-cline-files-v1\0");
+    digest.update(api_size.to_le_bytes());
+    digest.update(api_mtime_ns.to_le_bytes());
+    digest.update((project.len() as u64).to_le_bytes());
+    digest.update(project.as_bytes());
+    let ui = path.with_file_name("ui_messages.json");
+    match std::fs::metadata(&ui) {
+        Ok(meta) => {
+            digest.update([1]);
+            digest.update(meta.len().to_le_bytes());
+            let modified = meta
+                .modified()
+                .with_context(|| format!("mtime {}", ui.display()))?;
+            let ns = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+            digest.update(ns.to_le_bytes());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => digest.update([0]),
+        Err(error) => return Err(error).with_context(|| format!("stat {}", ui.display())),
+    }
+    let hash = digest.finalize();
+    let mut bytes = [0; 8];
+    bytes.copy_from_slice(&hash[..8]);
+    Ok(i64::from_le_bytes(bytes) | i64::MIN)
+}
 
 /// Derive the task identity from an API history path.
 pub fn task_session_id(path: &Path) -> Option<String> {
@@ -150,9 +188,8 @@ pub fn normalize_events(events: &mut Vec<serde_json::Value>) {
 
 /// Append the sibling `ui_messages.json` records to the event list.
 ///
-/// The store keys refresh detection on the api file's size/mtime; the ui
-/// stream is re-read on every ingest, and every appended turn also rewrites
-/// the api file, so the pair stays in sync without extra bookkeeping. A
+/// The collector fingerprints both files so late UI-only usage updates trigger
+/// ingestion even when the API history has already finished. A
 /// missing or unparsable sibling leaves the events unchanged.
 pub fn append_ui_records(session_path: &Path, events: &mut Vec<serde_json::Value>) {
     // Guard against ingesting the ui stream twice when the discovered file
