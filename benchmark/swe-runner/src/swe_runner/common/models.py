@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SWEInstance(BaseModel):
@@ -118,6 +118,11 @@ class AgentConfig(BaseModel):
             raise ValueError("use_skill and per_case_prompt are mutually exclusive")
         return self
 
+    @field_validator("skills_dir", "prompts_dir")
+    @classmethod
+    def expand_guidance_home(cls, value: Path | None) -> Path | None:
+        return value.expanduser() if value is not None else None
+
 
 class DatasetConfig(BaseModel):
     """Dataset loading configuration."""
@@ -161,6 +166,11 @@ class OutputConfig(BaseModel):
     """Output configuration."""
 
     output_dir: Path = Field(default=Path("./output"), description="Output directory")
+
+    @field_validator("output_dir")
+    @classmethod
+    def expand_output_home(cls, value: Path) -> Path:
+        return value.expanduser()
 
 
 class Settings(BaseModel):
