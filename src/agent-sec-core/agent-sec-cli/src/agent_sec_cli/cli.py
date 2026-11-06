@@ -592,7 +592,9 @@ def events(
             offset=0,
         )
         time_label = (
-            f"last {summary_hours:.0f} hours"
+            # :g keeps the exact window the query used (1.5 stays 1.5);
+            # :.0f rounded it to a label that over/under-states the data.
+            f"last {summary_hours:g} hours"
             if summary_hours is not None
             else f"{since or '...'} to {until or 'now'}"
         )
