@@ -96,7 +96,11 @@ jobs:
     runs-on: >-
       ${{ github.repository == 'agentic-os-org/ANOLISA' &&
       'anolisa-k8s-general-ci-x64' || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Package transactions require O_TMPFILE; the runner's overlay /tmp
+      # does not support it. Fixtures also execute installed files here.
+      options: --tmpfs /tmp:rw,exec,nosuid,mode=1777,size=2g
     timeout-minutes: 45
     steps:
       - name: Select isolated package output
