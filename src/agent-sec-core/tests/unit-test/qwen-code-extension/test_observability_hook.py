@@ -306,7 +306,19 @@ def test_main_redacts_payload_and_emits_no_decision(monkeypatch, capsys):
     payload_text = json.dumps(payload, ensure_ascii=False)
     assert "alice@example.com" not in payload_text
     assert "a***@example.com" in payload_text
-    assert calls[-1][0] == observability_hook._OBSERVABILITY_COMMAND
+    # Pin the record argv literally: asserting against the product's own
+    # constant is self-referential - any drift (e.g. dropping --stdin, which
+    # makes the real CLI exit non-zero and silently stops recording) keeps
+    # the test green. The sibling scan-pii argv eleven lines below is the
+    # intended literal style.
+    assert calls[-1][0] == [
+        "agent-sec-cli",
+        "observability",
+        "record",
+        "--format",
+        "json",
+        "--stdin",
+    ]
     pii_call = next(call for call in calls if "scan-pii" in call[0])
     assert pii_call[0] == [
         "agent-sec-cli",
