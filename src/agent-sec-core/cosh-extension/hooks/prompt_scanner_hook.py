@@ -91,15 +91,19 @@ def _build_detail_reason(scan_result: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_cosh(scan_result: dict) -> str:
+def _format_cosh(scan_result) -> str:
     """Convert a ScanResult dict into a cosh HookOutput JSON string.
 
     Mapping:
         verdict == "pass"  -> decision "allow"
         verdict == "warn"  -> decision "ask"  (let user decide)
         verdict == "deny"  -> decision "ask"  (let user decide)
-        otherwise           -> fail-open "allow"
+        otherwise           -> fail-open "allow" (including non-dict JSON)
     """
+    if not isinstance(scan_result, dict):
+        # CLI 版本漂移可能输出非对象 JSON：与 pii_checker_hook 的守卫一致
+        # 按 fail-open 放行，不得 AttributeError 裸崩
+        return json.dumps({"decision": "allow"})
     verdict = scan_result.get("verdict", "pass")
 
     if verdict == "pass":
