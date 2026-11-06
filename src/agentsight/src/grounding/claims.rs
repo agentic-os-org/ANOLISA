@@ -146,6 +146,9 @@ pub fn parse_number(raw: &str) -> Option<f64> {
     // Approximation markers lead the number ("约240k", "~1.2m"), so they are
     // stripped up front rather than per magnitude branch.
     let raw = raw.trim_start_matches(['约', '~', '≈', '+']);
+    if let Ok(value) = raw.parse::<f64>() {
+        return Some(value);
+    }
     // `，` is a digit-group separator in Chinese prose exactly as `,` is in
     // English. Parsing through it is what lets `244，618` stand alone as one
     // number, so the separator split cannot break it into a bogus `244`.
@@ -348,7 +351,17 @@ fn closing_escaped_double_quote(chars: &[char], open: usize) -> Option<usize> {
         .find_map(|(index, c)| (*c == '"' && escaped_by_backslash(chars, index)).then_some(index))
 }
 
+fn quoted_at(quoted: &[bool], index: usize) -> bool {
+    quoted.get(index).copied().unwrap_or(false)
+}
+
 fn quoted_chars(chars: &[char]) -> Vec<bool> {
+    if !chars
+        .iter()
+        .any(|c| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '「' | '」'))
+    {
+        return Vec::new();
+    }
     let mut quoted = vec![false; chars.len()];
     let closers = quote_closers(chars);
     let mut index = 0;
@@ -402,18 +415,59 @@ fn literal_commas(chars: &[char], quoted: &[bool]) -> Vec<bool> {
     }
 
     for (index, c) in chars.iter().enumerate() {
-        if quoted[index] && matches!(c, ',' | '，') {
+        if quoted_at(quoted, index) && matches!(c, ',' | '，') {
             literal[index] = true;
         }
     }
     literal
 }
 
+/// Keep the common non-nested bracket inline and allocate only for its ancestors.
+struct OpenBracketStack<T> {
+    top: Option<T>,
+    ancestors: Vec<T>,
+}
+
+impl<T> OpenBracketStack<T> {
+    fn new() -> Self {
+        Self {
+            top: None,
+            ancestors: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: T) {
+        if let Some(previous) = self.top.replace(value) {
+            self.ancestors.push(previous);
+        }
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        let top = self.top.take();
+        if top.is_some() {
+            self.top = self.ancestors.pop();
+        }
+        top
+    }
+
+    fn last(&self) -> Option<&T> {
+        self.top.as_ref()
+    }
+
+    fn last_mut(&mut self) -> Option<&mut T> {
+        self.top.as_mut()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.top.is_none()
+    }
+}
+
 fn matching_bracket_pairs(chars: &[char], quoted: &[bool]) -> Vec<(usize, usize)> {
     let mut matches = Vec::new();
-    let mut open_brackets = Vec::new();
+    let mut open_brackets = OpenBracketStack::new();
     for (index, c) in chars.iter().enumerate() {
-        if quoted[index] {
+        if quoted.get(index).copied().unwrap_or(false) {
             continue;
         }
         match c {
@@ -436,6 +490,30 @@ enum ListItemCompleteness {
     Incomplete,
 }
 
+#[derive(Clone, Copy, Default)]
+struct PrefixCounts {
+    slashes: usize,
+    digits: usize,
+    dashes: usize,
+    schemes: usize,
+    equals: usize,
+    structural_separators: usize,
+    brackets: usize,
+    numeric_group_blockers: usize,
+}
+
+#[derive(Clone, Copy)]
+enum PrefixMetric {
+    Slashes,
+    Digits,
+    Dashes,
+    Schemes,
+    Equals,
+    StructuralSeparators,
+    Brackets,
+    NumericGroupBlockers,
+}
+
 struct PathItemIndex<'a> {
     chars: &'a [char],
     byte_offsets: Vec<usize>,
@@ -444,14 +522,7 @@ struct PathItemIndex<'a> {
     previous_content: Vec<usize>,
     date_ends: Vec<usize>,
     last_slash: Vec<usize>,
-    slashes: Vec<usize>,
-    digits: Vec<usize>,
-    dashes: Vec<usize>,
-    schemes: Vec<usize>,
-    equals: Vec<usize>,
-    structural_separators: Vec<usize>,
-    brackets: Vec<usize>,
-    numeric_group_blockers: Vec<usize>,
+    prefixes: Vec<PrefixCounts>,
     list_separators: Vec<bool>,
     list_item_separators: Vec<bool>,
     path_commas: Vec<bool>,
@@ -462,7 +533,7 @@ struct PathItemIndex<'a> {
 }
 
 impl<'a> PathItemIndex<'a> {
-    fn new(chars: &'a [char]) -> Self {
+    fn new(chars: &'a [char], quoted: &[bool]) -> Self {
         let len = chars.len();
         let mut byte_offsets = vec![0; len + 1];
         let mut attached_equals = vec![false; len];
@@ -471,20 +542,13 @@ impl<'a> PathItemIndex<'a> {
         let mut token_attached = false;
         let mut seen_equals = false;
         let mut last_slash = vec![usize::MAX; len + 1];
-        let mut slashes = vec![0; len + 1];
-        let mut digits = vec![0; len + 1];
-        let mut dashes = vec![0; len + 1];
-        let mut schemes = vec![0; len + 1];
-        let mut equals = vec![0; len + 1];
-        let mut structural_separators = vec![0; len + 1];
-        let mut brackets = vec![0; len + 1];
-        let mut numeric_group_blockers = vec![0; len + 1];
+        let mut prefixes = vec![PrefixCounts::default(); len + 1];
         let list_separators = vec![false; len];
         let list_item_separators = vec![false; len];
         let path_commas = vec![false; len];
         let mut matching_opens = vec![None; len];
         let mut matching_closes = vec![None; len];
-        let mut open_brackets = Vec::new();
+        let mut open_brackets = OpenBracketStack::new();
         for (index, c) in chars.iter().enumerate() {
             byte_offsets[index + 1] = byte_offsets[index] + c.len_utf8();
             if c.is_whitespace() {
@@ -496,11 +560,11 @@ impl<'a> PathItemIndex<'a> {
             match c {
                 '=' => {
                     if !seen_equals {
-                        token_attached = slashes[index] == slashes[token_start];
+                        token_attached = prefixes[index].slashes == prefixes[token_start].slashes;
                         seen_equals = true;
                     }
-                    attached_equals[index] =
-                        token_attached && slashes[index] == slashes[segment_start];
+                    attached_equals[index] = token_attached
+                        && prefixes[index].slashes == prefixes[segment_start].slashes;
                     if attached_equals[index] {
                         segment_start = index + 1;
                     }
@@ -509,20 +573,23 @@ impl<'a> PathItemIndex<'a> {
                 _ => {}
             }
             last_slash[index + 1] = if *c == '/' { index } else { last_slash[index] };
-            slashes[index + 1] = slashes[index] + usize::from(*c == '/');
-            digits[index + 1] = digits[index] + usize::from(c.is_ascii_digit());
-            dashes[index + 1] = dashes[index] + usize::from(*c == '-');
-            schemes[index + 1] =
-                schemes[index] + usize::from(chars[index..].starts_with(&[':', '/', '/']));
-            equals[index + 1] = equals[index] + usize::from(*c == '=');
-            structural_separators[index + 1] =
-                structural_separators[index] + usize::from(STRUCTURAL_SEPARATORS.contains(c));
-            brackets[index + 1] = brackets[index] + usize::from(matches!(c, '[' | ']'));
-            numeric_group_blockers[index + 1] = numeric_group_blockers[index]
-                + usize::from(
-                    !c.is_ascii_digit()
-                        && !matches!(c, ',' | '_' | ' ' | '\u{a0}' | '，' | '\u{3000}'),
-                );
+            let previous = prefixes[index];
+            prefixes[index + 1] = PrefixCounts {
+                slashes: previous.slashes + usize::from(*c == '/'),
+                digits: previous.digits + usize::from(c.is_ascii_digit()),
+                dashes: previous.dashes + usize::from(*c == '-'),
+                schemes: previous.schemes
+                    + usize::from(chars[index..].starts_with(&[':', '/', '/'])),
+                equals: previous.equals + usize::from(*c == '='),
+                structural_separators: previous.structural_separators
+                    + usize::from(STRUCTURAL_SEPARATORS.contains(c)),
+                brackets: previous.brackets + usize::from(matches!(c, '[' | ']')),
+                numeric_group_blockers: previous.numeric_group_blockers
+                    + usize::from(
+                        !c.is_ascii_digit()
+                            && !matches!(c, ',' | '_' | ' ' | '\u{a0}' | '，' | '\u{3000}'),
+                    ),
+            };
             match c {
                 '[' => open_brackets.push(index),
                 ']' => {
@@ -535,41 +602,14 @@ impl<'a> PathItemIndex<'a> {
             }
         }
 
-        let mut item_starts = vec![0; len + 1];
-        for start in 1..=len {
-            let previous = start - 1;
-            item_starts[start] = match chars[previous] {
-                c if c.is_whitespace() || matches!(c, '[' | ',' | '，' | '"' | '\'') => start,
-                '=' if attached_equals[previous] => start,
-                ']' => matching_opens[previous].map_or(start, |open| item_starts[open]),
-                _ => item_starts[previous],
-            };
-        }
-        let mut item_ends = [vec![len; len + 1], vec![len; len + 1]];
-        for end in (0..len).rev() {
-            for attached in [false, true] {
-                let table = usize::from(attached);
-                let c = chars[end];
-                let boundary = c.is_whitespace()
-                    || matches!(c, ']' | ',' | '，' | '"' | '\'')
-                    || (attached && (matches!(c, ';' | '|') || attached_equals[end]));
-                let next = if boundary {
-                    end
-                } else if c == '[' {
-                    matching_closes[end].map_or(end, |close| item_ends[table][close + 1])
-                } else {
-                    item_ends[table][end + 1]
-                };
-                item_ends[table][end] = next;
-            }
-        }
+        let item_starts = vec![0; len + 1];
+        let item_ends = [vec![len; len + 1], vec![len; len + 1]];
 
-        let quoted = quoted_chars(chars);
         let mut list_matching_opens = vec![None; len];
         let mut list_matching_closes = vec![None; len];
-        let mut list_open_brackets = Vec::new();
+        let mut list_open_brackets = OpenBracketStack::new();
         for (index, c) in chars.iter().enumerate() {
-            if quoted[index] {
+            if quoted_at(quoted, index) {
                 continue;
             }
             match c {
@@ -587,8 +627,8 @@ impl<'a> PathItemIndex<'a> {
         for start in 1..=len {
             let previous = start - 1;
             list_item_starts[start] = match chars[previous] {
-                c if !quoted[previous] && matches!(c, '[' | ',' | '，') => start,
-                ']' if !quoted[previous] => {
+                c if !quoted_at(quoted, previous) && matches!(c, '[' | ',' | '，') => start,
+                ']' if !quoted_at(quoted, previous) => {
                     list_matching_opens[previous].map_or(start, |open| list_item_starts[open])
                 }
                 _ => list_item_starts[previous],
@@ -597,8 +637,8 @@ impl<'a> PathItemIndex<'a> {
         let mut list_item_ends = vec![len; len + 1];
         for end in (0..len).rev() {
             list_item_ends[end] = match chars[end] {
-                c if !quoted[end] && matches!(c, ']' | ',' | '，') => end,
-                '[' if !quoted[end] => {
+                c if !quoted_at(quoted, end) && matches!(c, ']' | ',' | '，') => end,
+                '[' if !quoted_at(quoted, end) => {
                     list_matching_closes[end].map_or(end, |close| list_item_ends[close + 1])
                 }
                 _ => list_item_ends[end + 1],
@@ -641,14 +681,7 @@ impl<'a> PathItemIndex<'a> {
             previous_content,
             date_ends,
             last_slash,
-            slashes,
-            digits,
-            dashes,
-            schemes,
-            equals,
-            structural_separators,
-            brackets,
-            numeric_group_blockers,
+            prefixes,
             list_separators,
             list_item_separators,
             path_commas,
@@ -659,9 +692,9 @@ impl<'a> PathItemIndex<'a> {
         };
         let mut completeness_cache = std::collections::HashMap::new();
         let mut detected_item_starts = vec![0; len + 1];
-        let mut open_brackets = Vec::new();
+        let mut open_brackets = OpenBracketStack::new();
         for (index, c) in chars.iter().enumerate() {
-            if !quoted[index] {
+            if !quoted_at(quoted, index) {
                 match c {
                     '[' => open_brackets.push(index),
                     ']' => {
@@ -672,7 +705,7 @@ impl<'a> PathItemIndex<'a> {
                         let right = (index + 1, paths.list_item_ends[index + 1]);
                         let combined = paths.list_item_content_range(left.0, right.1);
                         if combined.0 < combined.1
-                            && paths.classifies_as_path_ref(combined.0, combined.1)
+                            && paths.classifies_as_path(combined.0, combined.1)
                         {
                             let left = list_item_completeness(
                                 &paths,
@@ -694,9 +727,9 @@ impl<'a> PathItemIndex<'a> {
                 }
             }
             detected_item_starts[index + 1] = match c {
-                '[' if !quoted[index] => index + 1,
-                ',' | '，' if !quoted[index] && !paths.path_commas[index] => index + 1,
-                ']' if !quoted[index] => {
+                '[' if !quoted_at(quoted, index) => index + 1,
+                ',' | '，' if !quoted_at(quoted, index) && !paths.path_commas[index] => index + 1,
+                ']' if !quoted_at(quoted, index) => {
                     list_matching_opens[index].map_or(index + 1, |open| detected_item_starts[open])
                 }
                 _ => detected_item_starts[index],
@@ -736,14 +769,14 @@ impl<'a> PathItemIndex<'a> {
         for start in 1..=len {
             let previous = start - 1;
             let next = match chars[previous] {
-                c if !quoted[previous] && c == '[' => start,
-                c if !quoted[previous]
+                c if !quoted_at(quoted, previous) && c == '[' => start,
+                c if !quoted_at(quoted, previous)
                     && matches!(c, ',' | '，')
                     && !paths.path_commas[previous] =>
                 {
                     start
                 }
-                ']' if !quoted[previous] => {
+                ']' if !quoted_at(quoted, previous) => {
                     list_matching_opens[previous].map_or(start, |open| paths.list_item_starts[open])
                 }
                 _ => paths.list_item_starts[previous],
@@ -752,9 +785,14 @@ impl<'a> PathItemIndex<'a> {
         }
         for end in (0..len).rev() {
             let next = match chars[end] {
-                c if !quoted[end] && c == ']' => end,
-                c if !quoted[end] && matches!(c, ',' | '，') && !paths.path_commas[end] => end,
-                '[' if !quoted[end] => {
+                c if !quoted_at(quoted, end) && c == ']' => end,
+                c if !quoted_at(quoted, end)
+                    && matches!(c, ',' | '，')
+                    && !paths.path_commas[end] =>
+                {
+                    end
+                }
+                '[' if !quoted_at(quoted, end) => {
                     list_matching_closes[end].map_or(end, |close| paths.list_item_ends[close + 1])
                 }
                 _ => paths.list_item_ends[end + 1],
@@ -762,9 +800,9 @@ impl<'a> PathItemIndex<'a> {
             paths.list_item_ends[end] = next;
         }
 
-        let mut open_brackets = Vec::new();
+        let mut open_brackets = OpenBracketStack::new();
         for (index, c) in chars.iter().enumerate() {
-            if quoted[index] {
+            if quoted_at(quoted, index) {
                 continue;
             }
             match c {
@@ -806,8 +844,18 @@ impl<'a> PathItemIndex<'a> {
         paths
     }
 
-    fn count(prefix: &[usize], start: usize, end: usize) -> usize {
-        prefix[end] - prefix[start]
+    fn count(&self, metric: PrefixMetric, start: usize, end: usize) -> usize {
+        let value = |counts: &PrefixCounts| match metric {
+            PrefixMetric::Slashes => counts.slashes,
+            PrefixMetric::Digits => counts.digits,
+            PrefixMetric::Dashes => counts.dashes,
+            PrefixMetric::Schemes => counts.schemes,
+            PrefixMetric::Equals => counts.equals,
+            PrefixMetric::StructuralSeparators => counts.structural_separators,
+            PrefixMetric::Brackets => counts.brackets,
+            PrefixMetric::NumericGroupBlockers => counts.numeric_group_blockers,
+        };
+        value(&self.prefixes[end]) - value(&self.prefixes[start])
     }
 
     fn classification_range(&self, start: usize, end: usize) -> (usize, usize) {
@@ -829,11 +877,11 @@ impl<'a> PathItemIndex<'a> {
     }
 
     fn has_equals(&self, start: usize, end: usize) -> bool {
-        Self::count(&self.equals, start, end) > 0
+        self.count(PrefixMetric::Equals, start, end) > 0
     }
 
     fn has_slash(&self, start: usize, end: usize) -> bool {
-        Self::count(&self.slashes, start, end) > 0
+        self.count(PrefixMetric::Slashes, start, end) > 0
     }
 
     fn has_list_separator(&self, open: usize) -> bool {
@@ -844,24 +892,24 @@ impl<'a> PathItemIndex<'a> {
         let equals = self.next_equals[start];
         equals > start
             && equals < end
-            && Self::count(&self.structural_separators, start, equals) == 0
+            && self.count(PrefixMetric::StructuralSeparators, start, equals) == 0
             && !self.has_slash(start, equals)
-            && Self::count(&self.schemes, start, equals) == 0
+            && self.count(PrefixMetric::Schemes, start, equals) == 0
     }
 
-    fn classifies_as_path_ref(&self, start: usize, end: usize) -> bool {
+    fn classifies_as_path(&self, start: usize, end: usize) -> bool {
         let (start, end) = self.classification_range(start, end);
         if start >= end || self.byte_offsets[end] - self.byte_offsets[start] <= 2 {
             return false;
         }
-        let slashes = Self::count(&self.slashes, start, end);
+        let slashes = self.count(PrefixMetric::Slashes, start, end);
         if slashes == 0 || url_scheme_len(self.chars, start).is_some() {
             return false;
         }
 
         let date_end = self.date_ends[end].max(start);
-        let digits = Self::count(&self.digits, start, date_end);
-        let dashes = Self::count(&self.dashes, start, date_end);
+        let digits = self.count(PrefixMetric::Digits, start, date_end);
+        let dashes = self.count(PrefixMetric::Dashes, start, date_end);
         let is_iso = dashes >= 2 && digits >= 6 && self.chars[start].is_ascii_digit();
         let is_marked_year = self.byte_offsets[date_end] - self.byte_offsets[start] == 4
             && digits == 4
@@ -870,7 +918,7 @@ impl<'a> PathItemIndex<'a> {
                 ('1', '9') | ('2', '0') | ('2', '1')
             )
             && date_end != end;
-        if is_iso || is_marked_year || Self::count(&self.schemes, start, end) > 0 {
+        if is_iso || is_marked_year || self.count(PrefixMetric::Schemes, start, end) > 0 {
             return false;
         }
 
@@ -913,7 +961,7 @@ impl<'a> PathItemIndex<'a> {
             }
             value_start += 1;
         }
-        self.classifies_as_path_ref(value_start, end)
+        self.classifies_as_path(value_start, end)
     }
 }
 
@@ -938,29 +986,33 @@ fn trim_attached_decoration(value: &str) -> &str {
     }
     let value = &value[start..];
 
-    let mut matched_closes = vec![false; value.len()];
-    let mut open_brackets = Vec::new();
-    for (index, c) in value.char_indices() {
-        match c {
-            '[' => open_brackets.push(index),
-            ']' => {
-                if let Some(open) = open_brackets.pop() {
-                    matched_closes[index] = open + 1 < index;
+    let mut matched_closes = Vec::new();
+    if value.contains(']') {
+        let mut open_brackets = OpenBracketStack::new();
+        for (index, c) in value.char_indices() {
+            match c {
+                '[' => open_brackets.push(index),
+                ']' => {
+                    if let Some(open) = open_brackets.pop()
+                        && open + 1 < index
+                    {
+                        matched_closes.push(index);
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
     let mut end = value.len();
-    let preserve_path_brackets = looks_like_path(value);
+    let preserve_path_brackets = !matched_closes.is_empty() && looks_like_path(value);
     while let Some((index, c)) = value[..end].char_indices().next_back() {
         if !is_decoration(c) {
             break;
         }
         // Only a non-empty matched bracket inside the path is content; decoration
         // around the whole value trims from both ends.
-        if c == ']' && matched_closes[index] && preserve_path_brackets {
+        if c == ']' && matched_closes.binary_search(&index).is_ok() && preserve_path_brackets {
             break;
         }
         end = index;
@@ -987,13 +1039,49 @@ fn split_attached_value(word: &str) -> Option<(&str, &str)> {
     Some((key, value))
 }
 
+fn contains_quote_or_bracket(value: &str) -> bool {
+    if value.is_ascii() {
+        value
+            .bytes()
+            .any(|byte| matches!(byte, b'"' | b'\'' | b'[' | b']'))
+    } else {
+        value.contains(['"', '\'', '“', '”', '‘', '’', '「', '」', '[', ']'])
+    }
+}
+
+fn attached_field_boundary_len(value: &str, index: usize, c: char) -> Option<usize> {
+    match c {
+        ';' | '|' | '；' | '。' => Some(c.len_utf8()),
+        '\\' if value[index + 1..].starts_with('n') => Some(c.len_utf8() + 1),
+        ',' | '，' | ':' | '：' => {
+            let suffix = &value[index + c.len_utf8()..];
+            (split_attached_value(suffix).is_some() || suffix.starts_with('"'))
+                .then_some(c.len_utf8())
+        }
+        _ => None,
+    }
+}
+
 fn attached_field_boundaries(value: &str) -> Vec<(usize, usize)> {
-    let chars: Vec<char> = value.chars().collect();
-    let quoted = quoted_chars(&chars);
+    let has_quotes = value.contains(['"', '\'', '“', '”', '‘', '’', '「', '」']);
+    if !has_quotes && !value.contains(['[', ']']) {
+        return value
+            .char_indices()
+            .filter_map(|(index, c)| {
+                attached_field_boundary_len(value, index, c).map(|len| (index, len))
+            })
+            .collect();
+    }
+    let quoted = if has_quotes {
+        let chars: Vec<char> = value.chars().collect();
+        quoted_chars(&chars)
+    } else {
+        Vec::new()
+    };
     let mut depth_deltas = vec![0i32; value.len() + 1];
-    let mut open_brackets = Vec::new();
+    let mut open_brackets = OpenBracketStack::new();
     for (char_index, (index, c)) in value.char_indices().enumerate() {
-        if quoted[char_index] {
+        if has_quotes && quoted_at(&quoted, char_index) {
             continue;
         }
         match c {
@@ -1012,51 +1100,55 @@ fn attached_field_boundaries(value: &str) -> Vec<(usize, usize)> {
     let mut bracket_depth = 0;
     for (char_index, (index, c)) in value.char_indices().enumerate() {
         bracket_depth += depth_deltas[index];
-        if quoted[char_index] {
+        if has_quotes && quoted_at(&quoted, char_index) {
             continue;
         }
-        match c {
-            ';' | '|' | '；' | '。' if bracket_depth == 0 => {
-                boundaries.push((index, c.len_utf8()));
-            }
-            '\\' if bracket_depth == 0 && value[index + 1..].starts_with('n') => {
-                boundaries.push((index, c.len_utf8() + 1));
-            }
-            ',' | '，' | ':' | '：' if bracket_depth == 0 => {
-                let suffix = &value[index + c.len_utf8()..];
-                if split_attached_value(suffix).is_some() || suffix.starts_with('"') {
-                    boundaries.push((index, c.len_utf8()));
-                }
-            }
-            _ => {}
+        if bracket_depth == 0
+            && let Some(len) = attached_field_boundary_len(value, index, c)
+        {
+            boundaries.push((index, len));
         }
     }
     boundaries
 }
 
+fn attached_boundary_proves_structure(value: &str, index: usize, len: usize, end: usize) -> bool {
+    if !matches!(value[index..].chars().next(), Some(';' | '|' | '；' | '。')) {
+        return true;
+    }
+    let suffix = trim_embedded_json_separators(&value[index + len..end]);
+    split_attached_value(suffix).is_some()
+        || suffix.starts_with('"')
+        || classify_structural_segment_ref(suffix).is_some_and(|claim| claim.can_anchor_finding())
+}
+
 /// Whether decoration would hide structured content. Separators followed only
 /// by ordinary pathname text remain legal pathname punctuation.
 fn has_following_attached_field(value: &str) -> bool {
+    if !contains_quote_or_bracket(value) {
+        let mut boundaries = value
+            .char_indices()
+            .filter_map(|(index, c)| {
+                attached_field_boundary_len(value, index, c).map(|len| (index, len))
+            })
+            .peekable();
+        while let Some((index, len)) = boundaries.next() {
+            let end = boundaries.peek().map_or(value.len(), |(index, _)| *index);
+            if attached_boundary_proves_structure(value, index, len, end) {
+                return true;
+            }
+        }
+        return false;
+    }
     let boundaries = attached_field_boundaries(value);
     boundaries
         .iter()
         .enumerate()
         .any(|(position, (index, len))| {
-            if !matches!(
-                value[*index..].chars().next(),
-                Some(';' | '|' | '；' | '。')
-            ) {
-                return true;
-            }
-            let start = index + len;
             let end = boundaries
                 .get(position + 1)
                 .map_or(value.len(), |(index, _)| *index);
-            let suffix = trim_embedded_json_separators(&value[start..end]);
-            split_attached_value(suffix).is_some()
-                || suffix.starts_with('"')
-                || classify_structural_segment_ref(suffix)
-                    .is_some_and(|claim| claim.can_anchor_finding())
+            attached_boundary_proves_structure(value, *index, *len, end)
         })
 }
 
@@ -1069,6 +1161,31 @@ fn attached_field_segments(word: &str) -> Option<Vec<&str>> {
     } else {
         None
     };
+    if !contains_quote_or_bracket(word) {
+        let mut segments = Vec::new();
+        let mut start = 0;
+        let mut found_boundary = false;
+        for (index, c) in word.char_indices() {
+            if url_end.is_some_and(|end| index < end) {
+                continue;
+            }
+            let Some(len) = attached_field_boundary_len(word, index, c) else {
+                continue;
+            };
+            found_boundary = true;
+            if start < index {
+                segments.push(&word[start..index]);
+            }
+            start = index + len;
+        }
+        if !found_boundary {
+            return None;
+        }
+        if start < word.len() {
+            segments.push(&word[start..]);
+        }
+        return Some(segments);
+    }
     let boundaries: Vec<_> = attached_field_boundaries(word)
         .into_iter()
         .filter(|(index, _)| url_end.is_none_or(|end| *index >= end))
@@ -1133,7 +1250,12 @@ fn attached_field_after_closing_bracket_at<'a>(
     let mut decorated_prefix = true;
     for (char_index, (index, c)) in value.char_indices().enumerate() {
         let prefix_decoration = decorated_prefix && is_decoration(c);
-        if quoted[value_char_start + char_index] && !prefix_decoration {
+        if quoted
+            .get(value_char_start + char_index)
+            .copied()
+            .unwrap_or(false)
+            && !prefix_decoration
+        {
             decorated_prefix = false;
             continue;
         }
@@ -1161,8 +1283,15 @@ fn attached_field_after_closing_bracket_at<'a>(
 }
 
 fn attached_field_after_closing_bracket(value: &str) -> Option<&str> {
-    let chars: Vec<char> = value.chars().collect();
-    let quoted = quoted_chars(&chars);
+    if !value.contains(']') {
+        return None;
+    }
+    let quoted = if value.contains(['"', '\'', '“', '”', '‘', '’', '「', '」']) {
+        let chars: Vec<char> = value.chars().collect();
+        quoted_chars(&chars)
+    } else {
+        Vec::new()
+    };
     attached_field_after_closing_bracket_at(value, 0, &quoted).map(|(attached, _)| attached)
 }
 
@@ -1186,8 +1315,12 @@ fn attached_value_after_list_residue<'a>(
         return None;
     }
     let quoted = quoted_original.get_or_insert_with(|| {
-        let chars: Vec<char> = original.chars().collect();
-        quoted_chars(&chars)
+        if original.contains(['"', '\'', '“', '”', '‘', '’', '「', '」']) {
+            let chars: Vec<char> = original.chars().collect();
+            quoted_chars(&chars)
+        } else {
+            Vec::new()
+        }
     });
     attached_field_after_closing_bracket_at(value, value_char_start, quoted)
 }
@@ -1229,6 +1362,9 @@ fn classify_attached_value_ref(mut word: &str) -> Option<ClaimRef<'_>> {
             continue;
         }
         let trimmed = trim_attached_decoration(value);
+        if has_following_attached_field(value) {
+            return None;
+        }
         let claim = classify_word_ref(trimmed)?;
         if claim.class == ClaimClass::Date
             && claim
@@ -1245,9 +1381,6 @@ fn classify_attached_value_ref(mut word: &str) -> Option<ClaimRef<'_>> {
                 || has_numeric_colon_suffix(trimmed)
                 || (has_empty_list_prefix(value) && glued_path))
         {
-            return None;
-        }
-        if has_following_attached_field(value) {
             return None;
         }
         return Some(claim);
@@ -1297,7 +1430,7 @@ fn bracket_belongs_to_path(
         let item_end = path_item_end(paths, item_start, close);
         if !paths.has_slash(item_start, item_end)
             || paths.has_list_separator(open)
-            || !paths.classifies_as_path_ref(item_start, item_end)
+            || !paths.classifies_as_path(item_start, item_end)
         {
             return false;
         }
@@ -1319,9 +1452,9 @@ fn bracket_belongs_to_path(
         return false;
     }
     if !paths.has_equals(item_start, item_end) {
-        return paths.classifies_as_path_ref(item_start, item_end);
+        return paths.classifies_as_path(item_start, item_end);
     }
-    if paths.classifies_as_path_ref(item_start, item_end) {
+    if paths.classifies_as_path(item_start, item_end) {
         return true;
     }
     paths.classifies_as_attached_path(item_start, item_end)
@@ -1346,7 +1479,7 @@ fn list_item_completeness(
     if range.0 == range.1 {
         return ListItemCompleteness::Empty;
     }
-    if paths.classifies_as_path_ref(range.0, range.1) {
+    if paths.classifies_as_path(range.0, range.1) {
         return ListItemCompleteness::Complete;
     }
     let has_equals = paths.has_equals(range.0, range.1);
@@ -1356,12 +1489,12 @@ fn list_item_completeness(
     if paths.has_slash(range.0, range.1) && !has_equals {
         return ListItemCompleteness::Incomplete;
     }
-    if !has_equals && PathItemIndex::count(&paths.brackets, range.0, range.1) > 0 {
+    if !has_equals && paths.count(PrefixMetric::Brackets, range.0, range.1) > 0 {
         return ListItemCompleteness::Incomplete;
     }
     if !has_equals
-        && PathItemIndex::count(&paths.numeric_group_blockers, range.0, range.1) == 0
-        && PathItemIndex::count(&paths.digits, range.0, range.1) > 0
+        && paths.count(PrefixMetric::NumericGroupBlockers, range.0, range.1) == 0
+        && paths.count(PrefixMetric::Digits, range.0, range.1) > 0
     {
         return ListItemCompleteness::Complete;
     }
@@ -1421,24 +1554,132 @@ fn normalize_markdown_reference_label(chars: &[char]) -> Vec<char> {
     normalized
 }
 
+/// Handle unambiguous numeric lists without the general path and Markdown index.
+fn separate_simple_numeric_lists(text: &str) -> Option<String> {
+    if text.contains("http://") || text.contains("https://") {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut open = None;
+    let mut item_has_digit = false;
+    let mut has_comma = false;
+    let mut slash_in_token = false;
+    for (index, c) in chars.iter().enumerate() {
+        if matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '「' | '」') {
+            return None;
+        }
+        if open.is_none() {
+            if c.is_whitespace() {
+                slash_in_token = false;
+            } else if *c == '/' {
+                slash_in_token = true;
+            }
+        }
+        match c {
+            '[' => {
+                if open.is_some()
+                    || (slash_in_token && chars.get(index.wrapping_sub(1)) != Some(&';'))
+                {
+                    return None;
+                }
+                open = Some(index);
+                item_has_digit = false;
+                has_comma = false;
+            }
+            ']' => {
+                let open = open.take()?;
+                // A suffix such as `.txt` makes the brackets pathname content.
+                if slash_in_token
+                    && chars.get(open.wrapping_sub(1)) == Some(&';')
+                    && chars.get(index + 1).is_some_and(|c| {
+                        !c.is_whitespace()
+                            && !STRUCTURAL_SEPARATORS.contains(c)
+                            && !is_list_wrapper_decoration(*c)
+                    })
+                {
+                    return None;
+                }
+                if chars
+                    .get(index + 1)
+                    .is_some_and(|c| matches!(c, '(' | '[' | ':'))
+                {
+                    return None;
+                }
+                if has_comma && !item_has_digit {
+                    return None;
+                }
+            }
+            ',' | '，' if open.is_some() => {
+                if !item_has_digit {
+                    return None;
+                }
+                item_has_digit = false;
+                has_comma = true;
+            }
+            c if open.is_some() && c.is_ascii_digit() => item_has_digit = true,
+            c if open.is_some() && !c.is_whitespace() => return None,
+            _ => {}
+        }
+    }
+    if open.is_some() {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(text.len());
+    let mut inside_list = false;
+    for c in chars {
+        match c {
+            '[' => {
+                inside_list = true;
+                normalized.push(c);
+            }
+            ']' => {
+                inside_list = false;
+                normalized.push(c);
+            }
+            ',' | '，' if inside_list => normalized.push(' '),
+            _ => normalized.push(c),
+        }
+    }
+    Some(normalized)
+}
+
 /// Separate commas inside matched square brackets before whitespace tokenization.
 ///
 /// Bracketed commas are list structure when they separate complete numeric
 /// items. Commas inside quotes, URLs, and a path's own nested brackets remain
 /// content, so compact outer lists can mix those values with numbers.
 fn separate_bracketed_comma_lists(text: &str) -> Cow<'_, str> {
-    if !text.contains('[') {
+    if !text.contains('[') || !text.contains([',', '，', ';', '|', ':', '：', '；', '。', '\\'])
+    {
         return Cow::Borrowed(text);
+    }
+    if let Some(normalized) = separate_simple_numeric_lists(text) {
+        return Cow::Owned(normalized);
     }
     let chars: Vec<char> = text.chars().collect();
     let quoted = quoted_chars(&chars);
-    let literal_commas = literal_commas(&chars, &quoted);
-    let paths = PathItemIndex::new(&chars);
+    if chars
+        .iter()
+        .enumerate()
+        .all(|(index, c)| !matches!(c, '[' | ']') || quoted_at(&quoted, index))
+    {
+        return Cow::Borrowed(text);
+    }
     let serialized_json = serialized_json_container_bytes(text);
+    if text
+        .bytes()
+        .enumerate()
+        .all(|(index, byte)| !matches!(byte, b'[' | b']') || serialized_json[index])
+    {
+        return Cow::Borrowed(text);
+    }
+    let literal_commas = literal_commas(&chars, &quoted);
+    let paths = PathItemIndex::new(&chars, &quoted);
     let mut attached_path_suffixes = vec![false; chars.len()];
     for index in 0..chars.len() {
         let serialized_newline = chars[index] == '\\' && chars.get(index + 1) == Some(&'n');
-        if quoted[index]
+        if quoted_at(&quoted, index)
             || (!matches!(chars[index], ';' | '|' | ':' | '：' | '；' | '。')
                 && !serialized_newline)
         {
@@ -1447,11 +1688,11 @@ fn separate_bracketed_comma_lists(text: &str) -> Cow<'_, str> {
         let item = paths.list_item_content_range(paths.list_item_starts[index], index);
         attached_path_suffixes[index] = item.0 < item.1
             && paths.has_slash(item.0, item.1)
-            && PathItemIndex::count(&paths.schemes, item.0, item.1) == 0
+            && paths.count(PrefixMetric::Schemes, item.0, item.1) == 0
             && paths.has_attached_key(index + 1, paths.list_item_ends[index + 1]);
     }
 
-    let mut open_brackets = Vec::new();
+    let mut open_brackets = OpenBracketStack::new();
     let mut matched_brackets = Vec::new();
     let mut depth_deltas = vec![0i32; chars.len() + 1];
     let mut path_deltas = vec![0i32; chars.len() + 1];
@@ -1459,7 +1700,7 @@ fn separate_bracketed_comma_lists(text: &str) -> Cow<'_, str> {
     let mut path_item_is_path = false;
     let mut rejected_path_item = None;
     for (index, c) in chars.iter().enumerate() {
-        if quoted[index] {
+        if quoted_at(&quoted, index) {
             continue;
         }
         match c {
@@ -1521,6 +1762,7 @@ fn separate_bracketed_comma_lists(text: &str) -> Cow<'_, str> {
     for (open, close, innermost) in matched_brackets {
         let link_follower = chars.get(close + 1).is_some_and(|c| matches!(c, '(' | '['));
         let shortcut_reference = innermost
+            && !reference_definitions.is_empty()
             && reference_definitions
                 .contains(&normalize_markdown_reference_label(&chars[open + 1..close]));
         if (link_follower || shortcut_reference) && open + 1 < close {
@@ -1588,53 +1830,180 @@ fn separate_bracketed_comma_lists(text: &str) -> Cow<'_, str> {
         .into()
 }
 
+fn needs_indexed_structural_scan(word: &str) -> bool {
+    let mut open_brackets = OpenBracketStack::new();
+    for (index, c) in word.char_indices() {
+        if matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '「' | '」') {
+            return true;
+        }
+        match c {
+            '[' => open_brackets.push(index),
+            ']' if open_brackets.pop().is_some() => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn push_borrowed_structural_segment<'a>(
+    segments: &mut Vec<Cow<'a, str>>,
+    word: &'a str,
+    start: usize,
+    end: usize,
+    owned: &mut Option<String>,
+) {
+    if let Some(owned) = owned.take() {
+        if !owned.is_empty() {
+            segments.push(Cow::Owned(owned));
+        }
+    } else if start < end {
+        segments.push(Cow::Borrowed(&word[start..end]));
+    }
+}
+
+fn simple_structural_segments(word: &str) -> Vec<Cow<'_, str>> {
+    let mut segments = Vec::new();
+    let mut current_start = 0;
+    let mut current_end = 0;
+    let mut current_owned = None;
+    let mut current_starts_with_digit = None;
+    let mut index = 0;
+    while index < word.len() {
+        if word[index..].starts_with("https://") || word[index..].starts_with("http://") {
+            push_borrowed_structural_segment(
+                &mut segments,
+                word,
+                current_start,
+                current_end,
+                &mut current_owned,
+            );
+            current_starts_with_digit = None;
+            index += decorated_url_end(word, index);
+            current_start = index;
+            current_end = index;
+            continue;
+        }
+        let Some(c) = word[index..].chars().next() else {
+            break;
+        };
+        let c_len = c.len_utf8();
+        let next = word[index + c_len..].chars().next();
+        let previous = word[..index].chars().next_back();
+        let digit_group = matches!(c, ',' | '，')
+            && previous.is_some_and(|c| c.is_ascii_digit())
+            && next.is_some_and(|c| c.is_ascii_digit());
+        let current = current_owned
+            .as_deref()
+            .unwrap_or(&word[current_start..current_end]);
+        let follows_date = digit_group
+            && current_starts_with_digit == Some(true)
+            && current
+                .get(current.len().saturating_sub(10)..)
+                .is_some_and(|suffix| as_date_ref(suffix).is_some());
+        if digit_group && !follows_date {
+            if current_start < current_end && current_owned.is_none() {
+                current_owned = Some(word[current_start..current_end].to_string());
+            }
+            index += c_len;
+            continue;
+        }
+        let identifier_colon =
+            c == ':' && (next == Some(':') || (index > 0 && previous == Some(':')));
+        if !identifier_colon && STRUCTURAL_SEPARATORS.contains(&c) {
+            push_borrowed_structural_segment(
+                &mut segments,
+                word,
+                current_start,
+                current_end,
+                &mut current_owned,
+            );
+            current_starts_with_digit = None;
+            index += c_len;
+            current_start = index;
+            current_end = index;
+            continue;
+        }
+        if current_start == current_end {
+            current_start = index;
+        }
+        if current_starts_with_digit.is_none() && !is_decoration(c) {
+            current_starts_with_digit = Some(c.is_ascii_digit());
+        }
+        if let Some(current) = current_owned.as_mut() {
+            current.push(c);
+        }
+        current_end = index + c_len;
+        index += c_len;
+    }
+    push_borrowed_structural_segment(
+        &mut segments,
+        word,
+        current_start,
+        current_end,
+        &mut current_owned,
+    );
+    segments
+}
+
 /// Split serialized structure without consuming URLs or the brackets and commas
 /// that belong to a path. URL terminators delimit the URL, so fields after a
 /// quoted URL remain visible to the suffix scan.
 fn structural_segments(word: &str) -> Vec<Cow<'_, str>> {
+    if !needs_indexed_structural_scan(word) {
+        return simple_structural_segments(word);
+    }
     let chars: Vec<char> = word.chars().collect();
     let quoted = quoted_chars(&chars);
     let matched_brackets = matching_bracket_pairs(&chars, &quoted);
-    let mut quoted_paths = vec![false; chars.len()];
-    let mut index = 0;
-    while index < chars.len() {
-        if !quoted[index] {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < chars.len() && quoted[index] {
-            index += 1;
-        }
-        let candidate: String = chars[start..index].iter().collect();
-        if classify_word_ref(trim_attached_decoration(&candidate))
-            .is_some_and(|claim| claim.class == ClaimClass::Path)
-        {
-            quoted_paths[start..index].fill(true);
+    let mut quoted_paths = Vec::new();
+    if quoted.iter().any(|quoted| *quoted) {
+        quoted_paths.resize(chars.len(), false);
+        let mut index = 0;
+        while index < chars.len() {
+            if !quoted_at(&quoted, index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < chars.len() && quoted_at(&quoted, index) {
+                index += 1;
+            }
+            let candidate: String = chars[start..index].iter().collect();
+            if classify_word_ref(trim_attached_decoration(&candidate))
+                .is_some_and(|claim| claim.class == ClaimClass::Path)
+            {
+                quoted_paths[start..index].fill(true);
+            }
         }
     }
-    let paths = PathItemIndex::new(&chars);
-    let mut path_deltas = vec![0i32; chars.len() + 1];
+    let mut path_deltas = if matched_brackets.is_empty() {
+        Vec::new()
+    } else {
+        vec![0i32; chars.len() + 1]
+    };
     let mut path_item_until = 0;
     let mut rejected_path_item = None;
-    for (open, close) in matched_brackets {
-        if close < path_item_until {
-            continue;
-        }
-        let item_start = path_item_start(&paths, open);
-        let item_end = path_item_end(&paths, item_start, close);
-        let cacheable = open != item_start;
-        let item = (item_start, item_end);
-        let path_owned = if cacheable && rejected_path_item == Some(item) {
-            false
-        } else {
-            bracket_belongs_to_path(&chars, open, close, &paths, false)
-        };
-        rejected_path_item = (cacheable && !path_owned).then_some(item);
-        path_item_until = if path_owned { item_end } else { close + 1 };
-        if path_owned {
-            path_deltas[open] += 1;
-            path_deltas[path_item_until] -= 1;
+    if !matched_brackets.is_empty() {
+        let paths = PathItemIndex::new(&chars, &quoted);
+        for (open, close) in matched_brackets {
+            if close < path_item_until {
+                continue;
+            }
+            let item_start = path_item_start(&paths, open);
+            let item_end = path_item_end(&paths, item_start, close);
+            let cacheable = open != item_start;
+            let item = (item_start, item_end);
+            let path_owned = if cacheable && rejected_path_item == Some(item) {
+                false
+            } else {
+                bracket_belongs_to_path(&chars, open, close, &paths, false)
+            };
+            rejected_path_item = (cacheable && !path_owned).then_some(item);
+            path_item_until = if path_owned { item_end } else { close + 1 };
+            if path_owned {
+                path_deltas[open] += 1;
+                path_deltas[path_item_until] -= 1;
+            }
         }
     }
 
@@ -1644,8 +2013,10 @@ fn structural_segments(word: &str) -> Vec<Cow<'_, str>> {
     let mut path_depth = 0;
     let mut index = 0;
     while index < chars.len() {
-        path_depth += path_deltas[index];
-        let path_char = path_depth > 0 || quoted_paths[index];
+        if !path_deltas.is_empty() {
+            path_depth += path_deltas[index];
+        }
+        let path_char = path_depth > 0 || (!quoted_paths.is_empty() && quoted_paths[index]);
         if !path_char && let Some(scheme_len) = url_scheme_len(&chars, index) {
             if !current.is_empty() {
                 segments.push(Cow::Owned(std::mem::take(&mut current)));
@@ -2255,6 +2626,9 @@ fn replace_embedded_json_claims(
     start: usize,
     word: &str,
 ) -> EmbeddedJsonReplacement {
+    if !word.contains('"') {
+        return EmbeddedJsonReplacement::NotJson;
+    }
     let mut remainder = word;
     let mut replayed_claims = Vec::new();
     let mut replaced = false;
@@ -2308,21 +2682,54 @@ fn replace_embedded_json_claims(
     EmbeddedJsonReplacement::Complete
 }
 
+fn push_borrowed_claim(claims: &mut Vec<Claim>, claim: ClaimRef<'_>) {
+    claims.push(claim.to_claim());
+}
+
+fn push_structural_claims<'a>(claims: &mut Vec<Claim>, word: &'a str) {
+    if !needs_indexed_structural_scan(word)
+        && !word.contains("http://")
+        && !word.contains("https://")
+        && !word.chars().any(|c| STRUCTURAL_SEPARATORS.contains(&c))
+    {
+        if let Some(claim) = classify_structural_segment_ref(word) {
+            push_borrowed_claim(claims, claim);
+        }
+        return;
+    }
+    for segment in structural_segments(word) {
+        match segment {
+            Cow::Borrowed(segment) => {
+                if let Some(claim) = classify_structural_segment_ref(segment) {
+                    push_borrowed_claim(claims, claim);
+                }
+            }
+            Cow::Owned(segment) => {
+                if let Some(claim) = classify_structural_segment_ref(&segment) {
+                    claims.push(claim.to_claim());
+                }
+            }
+        }
+    }
+}
+
 /// Extract every verifiable claim from a message.
 pub fn extract_claims(text: &str) -> Vec<Claim> {
-    let root_json = if matches!(text.trim_start().as_bytes().first(), Some(b'[' | b'{')) {
-        parse_serialized_json_container(text)
-            .map(|(nodes, root)| RootJson::Serialized { nodes, root })
-    } else {
-        serde_json::from_str::<serde_json::Value>(text)
+    let root_json = match text.trim_start().as_bytes().first() {
+        Some(b'[' | b'{') => parse_serialized_json_container(text)
+            .map(|(nodes, root)| RootJson::Serialized { nodes, root }),
+        Some(b'"') => serde_json::from_str::<serde_json::Value>(text)
             .ok()
             .filter(|value| matches!(value, serde_json::Value::String(_)))
-            .map(RootJson::Value)
+            .map(RootJson::Value),
+        _ => None,
     };
     let mut claims = Vec::new();
     claims.extend(extract_urls(text));
     claims.extend(extract_quoted(text));
     let normalized = separate_bracketed_comma_lists(text);
+    let has_double_quotes = text.contains('"');
+    let embedded_json_possible = root_json.is_none() && has_double_quotes;
     let mut pending_embedded_json: Option<(usize, String)> = None;
     for word in normalized.split_whitespace() {
         let word_claim_start = claims.len();
@@ -2365,7 +2772,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         });
         let word_stands_alone = whole_word_claim.is_some();
         if let Some(claim) = whole_word_claim {
-            claims.push(claim.to_claim());
+            push_borrowed_claim(&mut claims, claim);
         }
         // Tool output is JSON far more often than prose, and its structure glues
         // values to their surroundings: `stargazers_count=242391`, or
@@ -2379,11 +2786,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // can still carry independent serialized fields.
         if word_stands_alone && let Some(attached) = attached_after_residue {
             let prefix = &json_word[..json_word.len() - attached.len()];
-            for segment in structural_segments(prefix) {
-                if let Some(claim) = classify_structural_segment_ref(&segment) {
-                    claims.push(claim.to_claim());
-                }
-            }
+            push_structural_claims(&mut claims, prefix);
         }
         let mut field_json_replay = false;
         if !word_stands_alone {
@@ -2402,15 +2805,11 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                             .filter(|claim| claim.class == ClaimClass::Path)
                     };
                     if let Some(claim) = classify_attached_value_ref(field).or_else(complete_path) {
-                        claims.push(claim.to_claim());
+                        push_borrowed_claim(&mut claims, claim);
                     } else {
-                        for segment in structural_segments(field) {
-                            if let Some(claim) = classify_structural_segment_ref(&segment) {
-                                claims.push(claim.to_claim());
-                            }
-                        }
+                        push_structural_claims(&mut claims, field);
                     }
-                    if root_json.is_none() {
+                    if embedded_json_possible {
                         let replacement =
                             replace_embedded_json_claims(&mut claims, field_claim_start, field);
                         let continues_beyond_field = match &replacement {
@@ -2442,16 +2841,12 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                     }
                 }
             } else {
-                for segment in structural_segments(json_word) {
-                    if let Some(claim) = classify_structural_segment_ref(&segment) {
-                        claims.push(claim.to_claim());
-                    }
-                }
+                push_structural_claims(&mut claims, json_word);
             }
         }
         // Segmented fields already replayed their JSON; a whole-word pass would
         // discard those typed claims and reparse the separators as raw content.
-        if root_json.is_none() && !field_json_replay {
+        if embedded_json_possible && !field_json_replay {
             match replace_embedded_json_claims(&mut claims, word_claim_start, json_word) {
                 EmbeddedJsonReplacement::Complete => pending_embedded_json = None,
                 EmbeddedJsonReplacement::Pending { candidate, start } => {
@@ -2551,6 +2946,9 @@ fn classify_structural_segment_ref(segment: &str) -> Option<ClaimRef<'_>> {
 /// bare `1999` stays a number.
 fn as_date_ref(word: &str) -> Option<ClaimRef<'_>> {
     let trimmed = word.trim_end_matches(['年', '月', '日']);
+    if !trimmed.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
     let digits = trimmed.chars().filter(|c| c.is_ascii_digit()).count();
     let dashes = trimmed.matches('-').count();
 
@@ -2573,12 +2971,15 @@ fn as_date_ref(word: &str) -> Option<ClaimRef<'_>> {
 /// `1.2.3` / `v1.2.3` style versions.
 fn as_version_ref(word: &str) -> Option<ClaimRef<'_>> {
     let body = word.strip_prefix('v').unwrap_or(word);
-    let parts: Vec<&str> = body.split('.').collect();
-    if parts.len() >= 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-    {
+    if !body.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut part_count = 0;
+    let valid = body.split('.').all(|part| {
+        part_count += 1;
+        !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
+    });
+    if part_count >= 3 && valid {
         return Some(ClaimRef {
             text: word,
             class: ClaimClass::Version,
@@ -2642,9 +3043,11 @@ fn as_number_ref(word: &str) -> Option<ClaimRef<'_>> {
     let value = parse_number(candidate)?;
     // A magnitude suffix means the written form is deliberately abbreviated, so
     // its digit count understates the precision — judge those on value instead.
-    let abbreviated = MAGNITUDES
-        .iter()
-        .any(|(s, _)| candidate.to_lowercase().ends_with(s));
+    let abbreviated = MAGNITUDES.iter().any(|(suffix, _)| {
+        candidate
+            .get(candidate.len().saturating_sub(suffix.len())..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+    });
     if significant < MIN_SIGNIFICANT_DIGITS && !abbreviated {
         return None;
     }
