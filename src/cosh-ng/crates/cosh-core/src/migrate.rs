@@ -126,9 +126,23 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
 }
 
 fn escape_toml_migrate(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn upsert_provider_section(content: &mut String, header: &str, section: &str) {
@@ -318,28 +332,49 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
     out.push_str("# Original: ~/.copilot-shell/settings.json\n\n");
 
     out.push_str("[ai]\n");
-    out.push_str(&format!("active_provider = \"{active_provider}\"\n"));
+    out.push_str(&format!(
+        "active_provider = \"{}\"\n",
+        escape_toml_migrate(active_provider)
+    ));
     if !active_model.is_empty() {
-        out.push_str(&format!("active_model = \"{active_model}\"\n"));
+        out.push_str(&format!(
+            "active_model = \"{}\"\n",
+            escape_toml_migrate(active_model)
+        ));
     }
     if let Some(lang) = output_language {
-        out.push_str(&format!("output_language = \"{lang}\"\n"));
+        out.push_str(&format!(
+            "output_language = \"{}\"\n",
+            escape_toml_migrate(lang)
+        ));
     }
     out.push('\n');
 
     out.push_str(&format!("[ai.providers.{provider_id}]\n"));
-    out.push_str(&format!("type = \"{provider_type}\"\n"));
+    out.push_str(&format!(
+        "type = \"{}\"\n",
+        escape_toml_migrate(provider_type)
+    ));
     if let Some(source) = auth_source {
-        out.push_str(&format!("auth_source = \"{source}\"\n"));
+        out.push_str(&format!(
+            "auth_source = \"{}\"\n",
+            escape_toml_migrate(source)
+        ));
     }
     if !base_url.is_empty() {
-        out.push_str(&format!("base_url = \"{base_url}\"\n"));
+        out.push_str(&format!(
+            "base_url = \"{}\"\n",
+            escape_toml_migrate(base_url)
+        ));
     }
     if !api_key.is_empty() {
-        out.push_str(&format!("api_key = \"{api_key}\"\n"));
+        out.push_str(&format!("api_key = \"{}\"\n", escape_toml_migrate(api_key)));
     }
     if !provider_model.is_empty() {
-        out.push_str(&format!("model = \"{provider_model}\"\n"));
+        out.push_str(&format!(
+            "model = \"{}\"\n",
+            escape_toml_migrate(provider_model)
+        ));
     }
     out.push('\n');
 
@@ -349,7 +384,10 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
     if has_agent_section {
         out.push_str("[agent]\n");
         if let Some(mode) = approval_mode {
-            out.push_str(&format!("approval_mode = \"{mode}\"\n"));
+            out.push_str(&format!(
+                "approval_mode = \"{}\"\n",
+                escape_toml_migrate(mode)
+            ));
         }
         if let Some(turns) = max_turns {
             out.push_str(&format!("max_turns = {turns}\n"));
@@ -686,6 +724,95 @@ api_key = "sk-current"
 
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn escape_toml_migrate_escapes_control_characters() {
+        assert_eq!(escape_toml_migrate("sk-plain-Key_123"), "sk-plain-Key_123");
+        assert_eq!(escape_toml_migrate("\\"), "\\\\");
+        assert_eq!(escape_toml_migrate("\""), "\\\"");
+        assert_eq!(escape_toml_migrate("\r"), "\\r");
+        assert_eq!(escape_toml_migrate("\t"), "\\t");
+        assert_eq!(escape_toml_migrate("\u{8}"), "\\b");
+        assert_eq!(escape_toml_migrate("\u{c}"), "\\f");
+        assert_eq!(escape_toml_migrate("\n"), "\\n");
+        assert_eq!(escape_toml_migrate("\u{1}"), "\\u0001");
+        assert_eq!(escape_toml_migrate("\u{1f}"), "\\u001F");
+        assert_eq!(escape_toml_migrate("\u{7f}"), "\\u007F");
+
+        let cases = [
+            "sk-copied\rkey",
+            "tab\tsep",
+            "bell\u{7}del\u{7f}",
+            "mixed \"quote\" and \\backslash\\ and\nnewline",
+            "\u{1f}\u{0}\u{7f}",
+        ];
+        for case in cases {
+            let doc = format!("key = \"{}\"", escape_toml_migrate(case));
+            let parsed: toml::Value =
+                toml::from_str(&doc).unwrap_or_else(|e| panic!("escaped value must parse: {e}"));
+            assert_eq!(
+                parsed["key"].as_str().unwrap(),
+                case,
+                "round-trip: {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_toml_escapes_control_characters_and_quotes() {
+        let toml_str = build_toml(&MigratedFields {
+            active_provider: "default",
+            provider_id: "default",
+            provider_type: "custom\rtype",
+            auth_source: None,
+            base_url: "https://example.com/v1\t",
+            api_key: "sk-copied\rkey\"quoted\"",
+            provider_model: "qwen3-plus",
+            active_model: "qwen3-plus",
+            session_token_limit: None,
+            max_turns: None,
+            approval_mode: None,
+            output_language: Some("zh-CN"),
+        });
+
+        let config: crate::config::CoreConfig =
+            toml::from_str(&toml_str).expect("migrated config must parse");
+        let provider = config.ai.providers.get("default").unwrap();
+        assert_eq!(
+            provider.api_key.as_deref(),
+            Some("sk-copied\rkey\"quoted\"")
+        );
+        assert_eq!(provider.provider_type.as_deref(), Some("custom\rtype"));
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://example.com/v1\t")
+        );
+    }
+
+    #[test]
+    fn migration_survives_control_char_in_api_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        let config_path = tmp.path().join("config.toml");
+
+        std::fs::write(
+            &settings_path,
+            "{\"security\":{\"auth\":{\"selectedType\":\"openai\",\"apiKey\":\"sk-copied\\rkey\",\"openaiModel\":\"qwen-plus\"}},\"model\":{\"name\":\"qwen-plus\"}}",
+        )
+        .unwrap();
+
+        migrate_settings(&settings_path, &config_path, tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !content.contains('\r'),
+            "config.toml must not contain raw CR: {content:?}"
+        );
+        let config: crate::config::CoreConfig =
+            toml::from_str(&content).expect("migrated config.toml must parse");
+        let provider = config.ai.providers.get("default").unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some("sk-copied\rkey"));
     }
 
     fn encrypt_test_credential(plaintext: &str, salt: &[u8; 32]) -> String {
