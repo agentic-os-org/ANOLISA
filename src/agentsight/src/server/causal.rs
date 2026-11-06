@@ -2063,6 +2063,8 @@ fn build_case(
         .filter(|single_turn| !single_turn && attr.outcome.as_deref() == Some("fail"))
         .map(|_| "错误结论直接交付给了用户".to_string());
 
+    let primary_attrib = normalize_attrib(attr.attrib.as_deref());
+
     Ok(CausalCase {
         id: format!(
             "case_{}",
@@ -2088,18 +2090,16 @@ fn build_case(
         outcome: attr.outcome.clone().unwrap_or_else(|| "success".into()),
         outcome_note: attr.outcome_note.clone(),
         turn_issue: turn_issue_str,
-        attrib: normalize_attrib(attr.attrib.as_deref()),
+        attrib: primary_attrib.clone(),
         fix: attr
             .fix
             .clone()
             .filter(|f| !f.is_empty())
             .unwrap_or_else(|| "暂无建议".into()),
-        alternative_attribs: attr
-            .alternative_attribs
-            .iter()
-            .filter(|a| !a.attrib.is_empty())
-            .cloned()
-            .collect(),
+        alternative_attribs: normalize_alternative_attribs(
+            &attr.alternative_attribs,
+            &primary_attrib,
+        ),
         timeline: Some(timeline),
         nodes,
         edges,
@@ -2249,6 +2249,36 @@ fn normalize_attrib(value: Option<&str>) -> String {
         "model" | "skill" | "prompt" | "agent" => lowered,
         _ => "model".to_string(),
     }
+}
+
+fn normalize_alternative_attribs(
+    alternatives: &[AlternativeAttrib],
+    primary: &str,
+) -> Vec<AlternativeAttrib> {
+    let mut kept: Vec<AlternativeAttrib> = alternatives
+        .iter()
+        .filter_map(|candidate| {
+            let attrib = candidate.attrib.trim().to_ascii_lowercase();
+            if attrib.is_empty() {
+                return None;
+            }
+            if !matches!(attrib.as_str(), "model" | "skill" | "prompt" | "agent") {
+                log::warn!(
+                    "causal-attribution: dropping alternative attrib {attrib:?} — not a canonical category"
+                );
+                return None;
+            }
+            if attrib == primary {
+                return None;
+            }
+            let mut normalized = candidate.clone();
+            normalized.attrib = attrib;
+            normalized.confidence = normalized.confidence.clamp(0.0, 1.0);
+            Some(normalized)
+        })
+        .collect();
+    kept.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+    kept
 }
 
 #[cfg(test)]
