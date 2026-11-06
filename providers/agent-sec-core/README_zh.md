@@ -17,7 +17,7 @@
 和 `scan_user_input`。配置 Prompt、PII 阻断与 `on_error: block`，
 在模型请求前阻断注入风险、敏感用户文本及检查故障，见[提交检查配置](../../docs/developer-guide/zh/aw/providers/sec-core.md#用户提交检查)。
 
-Qoder SDK 和 QwenPaw 可在原生 `Skill` 工具加载指令前校验对象。
+Qoder SDK、QwenPaw 和 AgentScope 可在原生 `Skill` 工具加载指令前校验对象。
 Hermes 原生 `skill_view` 使用同一检查。设置 `config.skill: true`，在 `tool.before` 选择 `check_skill`；目录授权、
 信任状态与本地来源范围见 [Skill 校验](../../docs/developer-guide/zh/aw/providers/sec-core.md#加载前校验-skill)。
 

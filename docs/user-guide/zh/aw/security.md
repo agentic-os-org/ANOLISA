@@ -126,7 +126,7 @@ git -c http.sslVerify=false --version
 
 ## 加载前校验 Skill
 
-Qoder SDK 1.0.56 和 QwenPaw 2.2.2.post1 可通过同一 sec-core Provider 校验本地
+Qoder SDK 1.0.56、QwenPaw 2.2.2.post1 和 AgentScope 2.0.6 可通过同一 sec-core Provider 校验本地
 Skill。daemon 管理员须授权实际 Skill 目录（包括符号链接目标），并保证文件可读。
 内容评审和签名通过 [Skill Ledger](../agent-sec-core/skill-ledger.md)单独完成。
 
@@ -138,7 +138,7 @@ Skill。daemon 管理员须授权实际 Skill 目录（包括符号链接目标�
   provider: security
   operation: check_skill
   match:
-    tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill"]
+    tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill", "native:agentscope:Skill"]
   effects: [observe, block]
   on_error: block
 ```

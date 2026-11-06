@@ -204,3 +204,12 @@ Stopping one launcher terminates and drains its worker; other workers retain the
 identity, policy and sessions. Stop the shared daemon after every worker exits.
 Business-owned prefork/Gunicorn workers need independent registration and factory
 adoption; inheriting one `AwBridge` across OS processes is unsupported.
+
+## Skill trust
+
+Enable `check_skill` for `native:agentscope:Skill` through the
+[shared security configuration](../../../../user-guide/en/aw/security.md#check-skills-before-loading).
+AW resolves the actual Toolkit selection, retains its native duplicate precedence,
+and pins the checked object until the invocation finishes. AgentScope 2.0.6
+skips BOM manifests. Direct file reads and automatic context injection require
+separate policy boundaries.

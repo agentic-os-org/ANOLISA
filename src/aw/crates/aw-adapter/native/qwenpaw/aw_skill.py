@@ -96,11 +96,11 @@ def skill_context(handler):
     """Share one selection across nested AW middleware and Coordinator tasks."""
     @wraps(handler)
     async def wrapped(self, agent, input_kwargs, next_handler):
-        call = input_kwargs["tool_call"]
+        call = input_kwargs.get("tool_call")
         token = None
-        hooks = [self.hook] if hasattr(self, "hook") else self.config.get("hooks", [])
+        hooks = [self.hook] if hasattr(self, "hook") else (self.config or {}).get("hooks", [])
         enabled = any(hook.get("skill_check") is True for hook in hooks)
-        if enabled and call.name == "Skill" and _selection.get() is None:
+        if enabled and call is not None and call.name == "Skill" and _selection.get() is None:
             token = _selection.set(await prepare(agent, call))
         stream = handler(self, agent, input_kwargs, next_handler)
         try:

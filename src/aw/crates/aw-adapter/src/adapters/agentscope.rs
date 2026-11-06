@@ -140,6 +140,10 @@ impl PreparedLaunch for Prepared {
             }))?,
         )?;
         context.files.write(
+            "aw_skill.py",
+            include_bytes!("../../native/qwenpaw/aw_skill.py"),
+        )?;
+        context.files.write(
             "aw_agentscope.py",
             include_bytes!("../../native/agentscope/aw_agentscope.py"),
         )?;
@@ -218,7 +222,11 @@ pub(crate) fn event_routes(
             registration.reverse();
         }
         for step in registration {
-            hooks.push(json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget, "replace_result": step.execution.replaces_result()}));
+            let mut hook = json!({"event": event, "step": step.step_id, "on_error": step.on_error, "budget_ms": budget, "replace_result": step.execution.replaces_result()});
+            if super::sdk_tools::checks_skill(step, "agentscope") {
+                hook["skill_check"] = json!(true);
+            }
+            hooks.push(hook);
         }
         events.insert(
             event.into(),
@@ -293,6 +301,31 @@ mod tests {
         assert!(!withholding_supported("1.9.9"));
         assert!(!withholding_supported("2"));
         assert!(!withholding_supported("2.0"));
+    }
+
+    #[test]
+    fn skill_routes_select_only_the_admitted_native_operation() {
+        let mut step = AdmittedStep {
+            event: "tool.before".into(),
+            step_id: "skill".into(),
+            provider: "security".into(),
+            event_tools: vec!["*".into()],
+            step_tools: vec!["native:agentscope:Skill".into()],
+            on_error: "block".into(),
+            execution: StepExecution::Provider {
+                operation: "check_skill".into(),
+                effects: vec!["observe".into(), "block".into()],
+            },
+        };
+        let document = json!({"spec":{"events":{},"execution":{"default_event_budget_ms":5000}}});
+        assert_eq!(
+            event_routes(&document, &[step.clone()]).unwrap().1[0]["skill_check"],
+            true
+        );
+        step.step_tools = vec!["native:qwenpaw:Skill".into()];
+        assert!(event_routes(&document, &[step]).unwrap().1[0]
+            .get("skill_check")
+            .is_none());
     }
 
     #[test]

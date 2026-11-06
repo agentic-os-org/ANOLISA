@@ -70,6 +70,9 @@ Qoder SDK 1.0.56 / Worker 1.1.78 与 QwenPaw 2.2.2.post1 / AgentScope 2.0.10
 两端均在[原生矩阵](../../../../src/aw/tests/native-matrix.json)注册 `skill-ledger`，
 QwenPaw 的 `skill-objects` 另覆盖实际同名选择、来源固定与取消。
 
+独立 AgentScope 2.0.6 复用相同的 Toolkit 解析器。原生 `skill-objects`
+与 `skill-provider` 验收选择、对象固定、取消，以及受控 Ledger CLI/模型端点下的指令阻断。
+
 Hermes 本地 chat 通过同一 `tool.before` 检查支持目录型 `skill_view`。
 原生选择与来源范围见 [Hermes Skill 接入](../../../developer-guide/zh/aw/agents/hermes.md#skill-信任检查)。
 

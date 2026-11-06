@@ -149,7 +149,7 @@ To scan other tools, update both the [step selector](configuration.md#select-too
 
 ## Check Skills before loading
 
-Qoder SDK 1.0.56 and QwenPaw 2.2.2.post1 can validate locally resolved Skills
+Qoder SDK 1.0.56, QwenPaw 2.2.2.post1 and AgentScope 2.0.6 can validate locally resolved Skills
 through the same sec-core Provider. The daemon administrator must authorize the
 actual Skill directories, including symlink targets, and allow the daemon to
 read their files. Review and sign content separately using
@@ -163,7 +163,7 @@ Keep `mode: block`, then append this step to `spec.events.tool.before.steps`:
   provider: security
   operation: check_skill
   match:
-    tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill"]
+    tools: ["native:qoder-sdk:Skill", "native:qwenpaw:Skill", "native:agentscope:Skill"]
   effects: [observe, block]
   on_error: block
 ```

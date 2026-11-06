@@ -228,10 +228,10 @@ Qoder SDK 普通常驻 Query 返回原生 `updatedToolOutput` 替换指令；受
 
 ## 加载前校验 Skill
 
-[SDK 策略示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)
-为 Qoder SDK 和 QwenPaw 使用同一 Provider。设置 `config.skill: true`，
+Qoder SDK、QwenPaw 和 AgentScope 可复用
+[SDK 策略示例](../../../../../src/aw/crates/aw-service/examples/aw.sdk-security.yaml)中的 Provider。设置 `config.skill: true`，
 在 `tool.before` 增加 `operation: check_skill`、`effects: [observe, block]`、
-`on_error: block`，选择 `native:qoder-sdk:Skill` 和 `native:qwenpaw:Skill`。
+`on_error: block`，选择 `native:qoder-sdk:Skill`、`native:qwenpaw:Skill` 和 `native:agentscope:Skill`。
 共用的 `mode: block` 只允许 `pass`。`tools` 继续映射代码输入，Skill 检查无需
 输入指针；只检查 Skill 时可在启用 `skill: true` 后省略 `tools`。
 
@@ -256,8 +256,8 @@ AW 审计分别记录风险判定与检查失败。`mode: observe` 只记录信�
 `ask` 尚未支持。同一项检查选择 AW 或原生 Skill Ledger Hook，避免重复执行；
 原生权限拒绝继续有效。
 
-Skill 校验使用普通常驻 `aw run`，`--reloadable` 接入会拒绝该配置。普通常驻
-策略的空闲更新沿用既有任务快照边界。仅选中 Skill 校验时执行解析与对象固定，
+Skill 校验使用已支持的普通 `aw run` 工厂；Qoder SDK 和 QwenPaw 的
+`--reloadable` 接入会拒绝该配置。策略空闲更新沿用各 Adapter 已有支持范围与任务快照边界。仅选中 Skill 校验时执行解析与对象固定，
 其他策略保留原生 Skill 行为。
 
 Qoder SDK 1.0.56 / Worker 1.1.78 从 Query 的 `settingSources` 所启用的目录中
@@ -281,12 +281,17 @@ JavaScript 元数据可引入竞争 Skill，公共接口无法证明最终选中
 目录的来源返回解析错误；带插件命名空间的名称和内置 Skill 尚未支持。
 后续原生改参沿 Adapter 已有的公开 Hook 输入快照合同处理。
 
-QwenPaw 2.2.2.post1 / AgentScope 2.0.10 使用实际 SkillViewer 与已激活的 Toolkit
+独立 AgentScope 2.0.6 与 QwenPaw 2.2.2.post1 / AgentScope 2.0.10
+复用同一实际 SkillViewer 解析器与已激活的 Toolkit
 分组，按原生同名优先级选取对象。AW 核对内存中的 markdown 与 `SKILL.md` 一致，
 校验规范化目录，并为本次调用固定该对象。校验期间修改源文件会阻断加载。
 不可访问或仅存在于内存的来源返回解析错误；并发调用各自保留快照。
 AW 对已提供的文件沿用 AgentScope 的 UTF-8-SIG 解码，支持 BOM。原版 QwenPaw
 2.2.2.post1 App 的运行时缓存会在 AW 执行前跳过 BOM 资产，这条原生加载路径仍不支持。
+独立 AgentScope 2.0.6 的原生加载器同样跳过 BOM 文件。其 `skill-objects`
+验收实际 Toolkit；`skill-provider` 使用真实 AW、sec-core Provider、受控 Ledger CLI
+与模型 HTTP 端点，覆盖信任状态、后端失败、超时和后续模型请求中的指令阻断。
+真实签名与 daemon 目录授权沿用 Qoder SDK/QwenPaw 的 Ledger 验收。
 通过读文件加载、自动注入上下文和 Skill 内部命令的执行需要各自配置策略。
 
 Hermes 本地 chat 使用同一 Provider 与 `check_skill` 步骤，选择

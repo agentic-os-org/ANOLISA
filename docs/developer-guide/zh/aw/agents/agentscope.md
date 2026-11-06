@@ -176,3 +176,10 @@ aw update --config current.yaml --instance INSTANCE --policy next.yaml
 停止一个 launcher 会终止并排空对应 worker，其余 worker 保留自己的身份、策略和
 会话。全部 worker 退出后再停止共用 daemon。业务自管的 prefork/Gunicorn worker
 需要独立登记与工厂接入；跨 OS 进程继承同一个 `AwBridge` 仍不支持。
+
+## Skill 信任检查
+
+通过[通用安全配置](../../../../user-guide/zh/aw/security.md#加载前校验-skill)
+为 `native:agentscope:Skill` 启用 `check_skill`。AW 解析 Toolkit 实际选择的
+对象，保留原生重名优先级，并固定受检对象直到本次调用结束。AgentScope 2.0.6
+会跳过 BOM manifest；直接读文件与自动注入上下文需要独立的策略接点。
