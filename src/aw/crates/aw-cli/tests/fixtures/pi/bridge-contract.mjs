@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { installSessionBridge } from "../../../../aw-adapter/native/pi/bridge.mjs";
+import { Scope } from "../../../../aw-adapter/native/shared/scope.mjs";
 
 const output = fileURLToPath(
   new URL("../../../../../target/pi-bridge-contract/", import.meta.url),
@@ -159,4 +160,37 @@ test("managed callbacks cannot be replaced and are restored on disposal", (t) =>
   f.agent.afterToolCall = replacement;
   assert.strictEqual(f.agent.beforeToolCall, replacement);
   assert.strictEqual(f.agent.afterToolCall, replacement);
+});
+
+test("unconfirmed input retirement fences the next prompt after drain", async (t) => {
+  const directory = mkdtempSync(join(output, "retirement-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const config = { executable: "fixture", binding: "fixture", ready_path: "fixture",
+    ready_token: "fixture", hooks: [{ event: "input.submit", step: "scan",
+      on_error: "report", budget_ms: 1000 }] };
+  process.env.AW_NATIVE_CONFIG = join(directory, "config.json");
+  writeFileSync(process.env.AW_NATIVE_CONFIG, JSON.stringify(config));
+  for (const mode of ["timeout", "spawn", "exit", "invalid"]) {
+    const scope = new Scope(config);
+    scope.handle = { fixture: true };
+    scope.command = async (_action, _value, _timeout, hook) => {
+      if (hook?.close_event) {
+        if (mode === "timeout" || mode === "spawn") throw new Error(mode);
+        return { code: mode === "exit" ? 1 : 0,
+          stdout: Buffer.from(mode === "invalid" ? "unexpected" : "") };
+      }
+      return { code: 0, stdout: Buffer.alloc(0) };
+    };
+    scope.invoke = async () => ({ code: 0, stdout: Buffer.from("{}") });
+    const bridge = installSessionBridge({ agent: { subscribe: () => () => {}, abort() {} },
+      sessionManager: { getSessionId: () => "session" } }, scope);
+    try {
+      scope.begin();
+      await assert.rejects(bridge.submit("input", "turn", new AbortController().signal));
+      await bridge.drain();
+      assert.equal(scope.failed, true, mode);
+      assert.throws(() => scope.begin(), /AW/, mode);
+      assert.equal(scope.submissionSequence, 1);
+    } finally { bridge.dispose(); }
+  }
 });

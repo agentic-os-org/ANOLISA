@@ -237,6 +237,11 @@ pub enum Operation {
         /// Owned binding whose adapter supplies stable producer identities.
         instance_id: String,
     },
+    /// Enable sequenced input turns before the binding's first submission.
+    EnableSubmissions {
+        /// Owned binding whose input producer supplies monotonic turn IDs.
+        instance_id: String,
+    },
     /// Reserve one invocation before forwarding it to native dispatch.
     RegisterInvocation {
         /// Binding generation is carried by the outer request identity.
@@ -349,7 +354,8 @@ pub enum Operation {
     /// its pinned completion view supplies native metadata without renewing claims.
     /// Sequenced bindings require a producer registration and reclaim both phases
     /// after FinishInvocation drains them. Unknown or retired identities fail closed.
-    /// Legacy bindings and submissions retain at most 1024 claims until unbind; exhaustion is explicit.
+    /// Sequenced inputs reclaim details after CloseInputEvent, retaining a high-water mark.
+    /// Legacy bindings retain at most 1024 claims until unbind; exhaustion is explicit.
     OpenHookEvent {
         /// Prepared service instance.
         instance_id: String,

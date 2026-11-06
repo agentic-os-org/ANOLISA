@@ -43,12 +43,14 @@ durable journal remain until explicitly stopped/removed.
 
 Configured `input.submit` requires `runWorker`; a legacy `run` application fails
 before its factory executes. The resident wrapper begins one execution, assigns a
-fresh AW turn UUID and reads the native session ID. `submission::normalize` emits
+monotonic AW turn sequence and reads the native session ID. `submission::normalize` emits
 `input.text`, `session_id` and `turn_id` without a synthetic tool call. All input
 steps reuse the admitted task routes and shared event budget; the tool invocation
 ledger is unchanged. A denied or failed blocking check drains the execution and
 allows another prompt. Report faults continue with the original text. Input events
-retain the Service's existing bounded correlation history.
+use the Service's sequenced submission ledger. Every check acknowledges input
+closure before dispatch or recovery, reclaiming its details without allowing replay.
+The 1,024-entry bound applies to active inputs, not lifetime submissions.
 
 The supported boundary is literal interactive text passed to `session.prompt`.
 `input`, `context` and `before_provider_request` extension handlers, media,

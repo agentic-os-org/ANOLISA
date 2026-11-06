@@ -14,6 +14,8 @@ use std::{
 pub(super) struct State {
     pub(super) ledger: Option<Ledger>,
     pub(super) legacy_used: bool,
+    pub(super) submissions: Option<super::submissions::Ledger>,
+    pub(super) legacy_submissions: bool,
 }
 
 #[derive(Default)]

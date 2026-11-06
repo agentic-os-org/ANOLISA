@@ -30,6 +30,7 @@ mod policy;
 pub(crate) mod process;
 mod registration;
 mod scopes;
+mod submissions;
 
 const MAX_STEPS: usize = 64;
 

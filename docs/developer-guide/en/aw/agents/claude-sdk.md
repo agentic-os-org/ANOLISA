@@ -171,7 +171,8 @@ input admission is running. Concurrent disconnect cancels and joins admission.
 Native `connect(str)` with `can_use_tool` retains the SDK restriction; connect first
 without a prompt and then call `query`, or supply the supported async message.
 
-The Service retains bounded replay-prevention records until client/binding release.
-A resident client can admit at most 1,024 checked submissions; create a fresh client
-before that limit. Foreground bindings share this capacity with legacy tool events.
-Completed input events and active scanner calls are released after each check.
+Resident clients retire input records after each acknowledged check and retain a
+monotonic sequence to reject replay. They can continue beyond 1,024 submissions
+without recreating the client. Foreground bindings retain a cumulative 1,024-claim
+limit shared with legacy tool events; create a fresh binding before that limit.
+Active input events and scanner calls are released after each check.

@@ -49,17 +49,10 @@ daemon 独立于前台 Agent。服务执行记录不能认证 Agent 已采用响
 | `unbind` | `instance_id` | 在全部事件关闭后释放绑定 |
 | `release_instance` | `instance_id` | 取消并等待本实例清理，再释放绑定，不停止共享服务 |
 | `open_event` | `instance_id`、归一化 `event` | 事件 ID、实例 ID 和已准入步骤 ID |
+| `enable_submissions` | `instance_id`，首个输入声明之前 | 启用递增输入轮次，关闭后回收明细 |
+| `close_input_event` | `instance_id`、`session_id`、`turn_id` | 取消并排空输入事件；顺序协议绑定回收关联明细 |
 | `open_hook_event` | `instance_id`、归一化 `event`、原始 `native_input` 字节 | 共享原生事件句柄，后续回调沿用原截止时间 |
-| 提交事件在实例内按 `(input.submit, session_id, turn_id)` 关联，与工具调用账本独立。
-事件包含 `input.text`，不带 `tool`。同轮步骤回调保留首次输入、原生字节和截止时间；
-文本或身份变化会被拒绝。完成、关闭及打开失败的声明保留到实例释放，上限为 1,024。
-普通 QwenPaw scope 随 reply 结束，Qoder scope 随 Query 关闭释放。
-
-`close_input_event` 接收 `instance_id`、`session_id`、`turn_id`，复用工具事件的取消与
-清理链路；取消可先于打开生效，并阻止同轮重开。实例释放会取消未完成提交，等待
-Provider 进程退出。元数据审计保存会话、轮次和处置，不保存用户文本。
-
-`close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
+| `close_hook_event` | `instance_id`、事件名 `event`、`session_id`、归一化 `call_id` | 取消关联并等待其活跃事件清理后返回 `{"closed": true}`，阻止后续打开 |
 | `invoke_step` | `event_id`、`instance_id`、`step_id`、可选 `native_environment` | 结构化候选效果、显式原生字节/状态或执行失败，以及调用元数据 |
 | `close_event` | `event_id`、`instance_id` | 取消未完成工作、等待子进程回收并确认关闭 |
 | `start_observation` | `instance_id` | 启动一个可选实例观测，进行有界来源兼容探测 |
@@ -68,6 +61,28 @@ Provider 进程退出。元数据审计保存会话、轮次和处置，不保�
 | `freeze_context` | `event_id`、`instance_id`、原始 `candidate_revision` | 一个不可变有界证据上下文，不执行步骤 |
 | `audit` | 准备阶段或事件的 `key` | 已验证的持久记录信封和 `terminal` 标志 |
 | `stop` | 无 | 确认收到停止请求；进程退出才表示清理完成 |
+
+提交事件在实例内按 `(input.submit, session_id, turn_id)` 关联，与工具调用账本独立。
+事件包含 `input.text`，不带 `tool`。同轮步骤回调保留首次输入、原生字节和截止时间；
+文本或身份变化会被拒绝。完成、关闭及打开失败的声明保留到实例释放，上限为 1,024。
+普通 QwenPaw scope 随 reply 结束，Qoder scope 随 Query 关闭释放。
+
+`close_input_event` 接收 `instance_id`、`session_id`、`turn_id`，复用工具事件的取消与
+清理链路；取消可先于打开生效，并阻止同轮重开。实例释放会取消未完成提交，等待
+Provider 进程退出。元数据审计保存会话、轮次和处置，不保存用户文本。
+
+常驻 Claude SDK 和 Pi 在首个输入声明前显式调用 `enable_submissions`，启用独立的
+输入高水位；工具调用序号保持独立。此时 `turn_id` 为从 `1` 开始、每次加一的规范
+十进制字符串，在同一绑定的所有会话间连续分配。Producer 完成本地投影和编码校验后
+才分配序号，并在拒绝、Provider 故障和取消时同样确认 `close_input_event`。
+关闭先取消并排空事件，再删除 lease 和活动身份，仅保留高水位。
+
+同时活动输入上限为 1,024，已完成输入不占累计配额。不同活动轮次可乱序关闭；
+同轮多个步骤复用原始会话、字节和截止时间。关闭先于打开时会领取下一个序号并阻止
+迟到回调。已退休序号、会话变化、跳号和从旧输入声明切换协议都会被拒绝。
+容量不足会消耗序号，但不准入事件。已有 UUID 消费者（包括前台 Claude SDK）继续
+遵守旧上限，直到采用显式协议。后续输入 Adapter 可直接复用这些服务操作，无需
+引入工具注册或新增 scope。
 
 事件句柄包含原始 `candidate_revision`。显式 `freeze_context` 只使用配置来源和
 经原生回调核对的身份，保留原始 deadline，Journal 只写元数据。详见

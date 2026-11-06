@@ -17,6 +17,7 @@ impl Runtime {
             | Operation::WatchScope { instance_id, .. }
             | Operation::CheckScope { instance_id, .. }
             | Operation::EnableInvocations { instance_id }
+            | Operation::EnableSubmissions { instance_id }
             | Operation::RegisterInvocation { instance_id, .. }
             | Operation::FinishInvocation { instance_id, .. }
             | Operation::EnableReload { instance_id }

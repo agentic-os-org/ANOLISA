@@ -15,6 +15,7 @@ export class Scope {
     this.environment = undefined;
     this.releaseError = null;
     this.sequence = 0;
+    this.submissionSequence = null;
     this.invocations = new Map();
     this.issuing = Promise.resolve();
     this.invocationLimit = 0;
@@ -28,6 +29,7 @@ export class Scope {
   async command(action, value, timeout, hook, signal) {
     const args = ["scope", "--adapter", this.adapter, "--binding", this.config.binding, "--action", action];
     if (hook) args.push("--event", hook.event, "--step", hook.step, "--on-error", hook.on_error);
+    if (hook?.close_event) args.push("--close-event", "true");
     return await run(this.config.executable, args, Buffer.from(JSON.stringify(value)), timeout, signal, this.environment);
   }
 
@@ -155,6 +157,18 @@ export class Scope {
       if (!this.closed) this.invalidate(error);
       throw error;
     }
+  }
+
+  async nextSubmission() {
+    this.checkExecution();
+    if (this.submissionSequence === null) {
+      const reply = await this.command("enable-input", this.handle, 6000);
+      if (reply.code !== 0) throw new Error("AW submission protocol admission failed");
+      this.submissionSequence = 0;
+    }
+    if (this.submissionSequence >= Number.MAX_SAFE_INTEGER)
+      throw new Error("AW submission sequence exhausted");
+    return String(++this.submissionSequence);
   }
 
   async invoke(hook, payload, signal) {

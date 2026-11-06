@@ -176,3 +176,173 @@ fn submission_close_claims_are_bounded_with_a_managed_tool_ledger() {
         .release_instance(&fixture.id, deadline())
         .unwrap();
 }
+
+#[test]
+fn sequenced_submissions_retire_more_than_the_legacy_lifetime_limit() {
+    let fixture = fixture();
+    fixture.runtime.enable_submissions(&fixture.id).unwrap();
+    let hooks = Arc::clone(
+        &fixture.runtime.instances.lock().unwrap()[&fixture.id]
+            .as_ref()
+            .unwrap()
+            .hooks,
+    );
+    for sequence in 1..=MAX_HOOK_EVENTS + 1 {
+        let turn = sequence.to_string();
+        let value = event(&fixture, "session", &turn);
+        let opened = fixture
+            .runtime
+            .open_hook(
+                fixture.id.clone(),
+                value.clone(),
+                b"input".to_vec(),
+                deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .runtime
+                .open_hook(
+                    fixture.id.clone(),
+                    value.clone(),
+                    b"input".to_vec(),
+                    deadline()
+                )
+                .unwrap(),
+            opened
+        );
+        fixture
+            .runtime
+            .close_hook(&fixture.id, "input.submit", "session", &turn, deadline())
+            .unwrap();
+        assert!(hooks.lock().unwrap().is_empty());
+        assert!(fixture
+            .runtime
+            .open_hook(fixture.id.clone(), value, b"input".to_vec(), deadline())
+            .is_err());
+    }
+    assert!(fixture
+        .runtime
+        .close_hook(&fixture.id, "input.submit", "session", "1", deadline())
+        .is_err());
+}
+
+#[test]
+fn sequenced_submission_close_before_open_fences_late_callbacks() {
+    let fixture = fixture();
+    fixture.runtime.enable_submissions(&fixture.id).unwrap();
+    fixture
+        .runtime
+        .close_hook(&fixture.id, "input.submit", "session", "1", deadline())
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .open_hook(
+            fixture.id.clone(),
+            event(&fixture, "session", "1"),
+            vec![],
+            deadline()
+        )
+        .is_err());
+    for turn in ["0", "02", "3", "uuid"] {
+        assert!(fixture
+            .runtime
+            .close_hook(&fixture.id, "input.submit", "session", turn, deadline())
+            .is_err());
+    }
+    let active = fixture
+        .runtime
+        .open_hook(
+            fixture.id.clone(),
+            event(&fixture, "session", "2"),
+            vec![],
+            deadline(),
+        )
+        .unwrap();
+    assert!(fixture
+        .runtime
+        .close_hook(&fixture.id, "input.submit", "wrong", "2", deadline())
+        .is_err());
+    assert!(fixture
+        .runtime
+        .event_sender(active["event_id"].as_str().unwrap(), &fixture.id)
+        .is_ok());
+    fixture
+        .runtime
+        .close_hook(&fixture.id, "input.submit", "session", "2", deadline())
+        .unwrap();
+}
+
+#[test]
+fn legacy_submissions_cannot_switch_protocol_after_claiming_identity() {
+    let fixture = fixture();
+    fixture
+        .runtime
+        .close_hook(&fixture.id, "input.submit", "session", "legacy", deadline())
+        .unwrap();
+    assert!(fixture.runtime.enable_submissions(&fixture.id).is_err());
+}
+
+#[test]
+fn failed_submission_open_is_retired_without_renewing_its_budget() {
+    let fixture = fixture();
+    fixture.runtime.enable_submissions(&fixture.id).unwrap();
+    let mut invalid = event(&fixture, "session", "1");
+    invalid["agent"]["instance_id"] = json!("wrong");
+    assert!(fixture
+        .runtime
+        .open_hook(fixture.id.clone(), invalid, vec![], deadline())
+        .is_err());
+    assert!(fixture
+        .runtime
+        .open_hook(
+            fixture.id.clone(),
+            event(&fixture, "session", "1"),
+            vec![],
+            deadline()
+        )
+        .is_err());
+    fixture
+        .runtime
+        .close_hook(&fixture.id, "input.submit", "session", "1", deadline())
+        .unwrap();
+    fixture
+        .runtime
+        .open_hook(
+            fixture.id.clone(),
+            event(&fixture, "session", "2"),
+            vec![],
+            deadline(),
+        )
+        .unwrap();
+    fixture
+        .runtime
+        .close_hook(&fixture.id, "input.submit", "session", "2", deadline())
+        .unwrap();
+    fixture
+        .runtime
+        .release_instance(&fixture.id, deadline())
+        .unwrap();
+    assert!(fixture.runtime.events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn legacy_submission_1025_exceeds_the_retained_claim_limit() {
+    let fixture = fixture();
+    for sequence in 1..=MAX_HOOK_EVENTS {
+        fixture
+            .runtime
+            .close_hook(
+                &fixture.id,
+                "input.submit",
+                "session",
+                &sequence.to_string(),
+                deadline(),
+            )
+            .unwrap();
+    }
+    assert!(
+        matches!(fixture.runtime.close_hook(&fixture.id, "input.submit", "session", "1025", deadline()),
+        Err(crate::Error::Rejected(code)) if code == "native_event_limit")
+    );
+}

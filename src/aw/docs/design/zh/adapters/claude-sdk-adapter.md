@@ -26,8 +26,9 @@ Preflight 实际执行 bundled binary 的版本探测。工厂固定该 binary�
 ## 输入准入与恢复
 
 配置 `input.submit` 后，工厂在调用 SDK 前检查 `query` 和常驻 `connect(prompt)`。
-`aw_submission` 冻结受支持的文本消息，为本次输入生成一个 UUID turn，并复用
-`submission::normalize`。事件 session 身份来自 SDK 输入信封的 `session_id`，
+`aw_submission` 冻结受支持的文本消息，为本次输入生成一个 turn，并复用
+`submission::normalize`。前台客户端使用 UUID turn；常驻客户端启用 Service 输入账本，
+使用递增十进制 turn。输入关闭确认后回收常驻关联明细，并保留防重放能力。事件 session 身份来自 SDK 输入信封的 `session_id`，
 缺省使用 `query` 参数，其原生默认值为 `default`。这是提交标签；CLI 随后生成自身
 的会话 UUID。AW binding instance 与唯一 turn 隔离客户端和连续输入。
 工具 Hook 继续使用 CLI 原生 session 和 tool-use ID。

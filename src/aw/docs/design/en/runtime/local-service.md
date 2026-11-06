@@ -55,6 +55,8 @@ running service.
 | `unbind` | `instance_id` | Release after events close; reloadable instances also require complete native request/tool idle |
 | `release_instance` | `instance_id` | Cancel and drain this instance, then release its binding without stopping the shared service |
 | `open_event` | `instance_id`, normalized `event` | Event ID, instance ID and admitted step IDs |
+| `enable_submissions` | `instance_id`, before any input claim | Enable monotonic input turns and reclaim details after closure |
+| `close_input_event` | `instance_id`, `session_id`, `turn_id` | Cancel and drain a submission; retire details for sequenced bindings |
 | `open_hook_event` | `instance_id`, normalized `event`, exact `native_input` bytes | Shared native event handle; repeated callbacks retain the original deadline |
 | `close_hook_event` | `instance_id`, event name `event`, `session_id`, normalized `call_id` | `{"closed": true}` after cancelling the correlation and draining its active event; later opens are fenced |
 | `invoke_step` | `event_id`, `instance_id`, `step_id`, optional `native_environment` | Structured candidate effects, explicit native bytes/status, or execution failure with call metadata |
@@ -240,6 +242,25 @@ native bytes and deadline; changed text or identities are rejected. Completed,
 closed and failed-open submission claims remain until instance release, with
 an explicit 1,024-claim bound. Ordinary QwenPaw scopes end with each reply;
 Qoder releases its scope when the Query closes.
+
+Resident Claude SDK and Pi explicitly call `enable_submissions` before the first
+input claim. This selects a separate input high-water mark; tool invocation
+sequences remain independent. `turn_id` is then a canonical decimal sequence
+starting at `1`, increasing by one for each submitted input across all sessions
+in the binding. The producer allocates it only after local projection/encoding
+validation and always acknowledges `close_input_event`, including denial,
+Provider failure and cancellation. Closing cancels and drains the event before
+removing its lease and active identity. Only the high-water mark remains.
+
+Up to 1,024 inputs may be active concurrently; completed inputs do not consume a
+lifetime quota. Different active turns may close out of order. Multiple steps
+reuse the original turn, session, bytes and deadline. A close arriving before
+its open claims the next sequence and fences late callbacks. A retired sequence,
+a changed session, a skipped sequence and switching from legacy input claims
+are rejected. Capacity failures consume their sequence without admitting an
+event. Existing UUID-based consumers, including foreground Claude SDK, keep the
+legacy limit until adopting this explicit protocol. New input Adapters can use
+the same service operations without introducing a tool registration or new scope.
 
 `close_input_event` takes `instance_id`, `session_id` and `turn_id` and uses the
 same cancellation/drain path as tool events. It can cancel before the open wins
