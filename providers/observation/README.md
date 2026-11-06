@@ -6,6 +6,43 @@ This independent Sidecar records bounded TLS write metadata from explicitly auth
 
 **Default builds fail closed:** `observe` returns `observation_disabled` before loading the permit, creating output or attaching. Explicit `--features unsafe-lab` builds retain observation solely for disposable synthetic processes. Killing that tracer can terminate its target with SIGTRAP, including after attachment but before the first write. P0 crash isolation remains unresolved and payload rewriting is unavailable. See [measured results](POC_REPORT.md) and [Go/No-Go](GO_NO_GO.md).
 
+## Read-only uProbe isolation comparison
+
+A separate fixture-only BPF counter tests an alternative collection mechanism.
+It uses a PID-filtered uProbe link, retains one counter, and never reads TLS
+payloads. The normal ptrace binary remains disabled. This comparison does not
+implement the transport event/digest contract or replace the AW correlation demo.
+
+On the authorized Linux x86-64 lab, with Linux headers supporting
+`BPF_TRACE_UPROBE_MULTI`, GCC, Python 3.11 and the existing non-interactive sudo
+permission for the test owner:
+
+```bash
+python3 providers/observation/scripts/uprobe_cases.py \
+  --output "$PWD/providers/observation/target/uprobe" --repeat 3
+python3 providers/observation/scripts/uprobe_cases.py \
+  --output "$PWD/providers/observation/target/uprobe-performance" --performance --repeat 3
+python3 providers/observation/scripts/uprobe_coexist.py \
+  --output "$PWD/providers/observation/target/uprobe-coexist"
+```
+
+The scripts create their own authorized TLS processes and compile the small BPF
+loader. A short-lived helper validates the permit, creates a PID-filtered link
+and a read-only userspace map handle, transfers the descriptors over an anonymous
+Unix socket, and exits before collection starts. Collection runs as the test
+owner with no effective/permitted/inheritable/ambient capabilities and with
+`no_new_privs`. No persistent privileged service or security-setting change is
+used. The helper is a lab harness executed with existing sudo authorization; it
+is not a hardened production privilege broker.
+
+Expected results and limits are in [the report](POC_REPORT.md#read-only-uprobe-comparison).
+`aw.uprobe-counter-poc/v0` records only cumulative entry counts and metadata;
+there is no payload digest, per-write length or timestamp, return value, or AW
+instance attestation. Output is bounded to 512 records of at most 8192 bytes and
+10 seconds of active collection; a stopped process or blocked output can delay
+exit. The fixture harness owns deadlines and reaps its processes. Generated
+certificates, binaries and logs belong only to the selected output directory.
+
 ## Build and demonstrate
 
 Prerequisites: Linux x86-64, Rust 1.97.1, Python 3.11+, GCC, OpenSSL headers/libraries and `openssl`. The observer and target must share a UID and the existing ptrace policy must permit attachment. The tested lab had `ptrace_scope=0`. Under `ptrace_scope=1`, this sibling-process demo is expected to reject attachment; use a separately authorized isolated lab or a future parent-supervisor launcher. The scripts never alter that setting.

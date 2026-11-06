@@ -6,6 +6,36 @@
 
 **普通构建默认拒绝观测：** `observe` 在读取 permit、创建输出及附着之前返回 `observation_disabled`。只有显式使用 `--features unsafe-lab` 构建，才可对可丢弃的合成进程运行观测。强杀该实验 tracer 可能导致目标 SIGTRAP 退出，附着完成但尚未发生首次写入时也存在风险。P0 崩溃隔离未解决，payload 改写保持关闭。[实测报告](POC_REPORT_zh.md)与 [Go/No-Go](GO_NO_GO.md)记录结果。
 
+## 只读 uProbe 故障隔离对照
+
+独立的 BPF 计数实验使用按 PID 过滤的 uProbe link，保留一个计数器，不读取 TLS 正文。
+原 ptrace 二进制仍默认禁用。该实验尚未实现带摘要的传输事件合同，也未替代真实 AW
+关联演示。
+
+在已授权的 Linux x86-64 实验机上，准备支持 `BPF_TRACE_UPROBE_MULTI` 的 Linux
+头文件、GCC、Python 3.11，以及实验用户已有的非交互 sudo 权限，然后运行：
+
+```bash
+python3 providers/observation/scripts/uprobe_cases.py \
+  --output "$PWD/providers/observation/target/uprobe" --repeat 3
+python3 providers/observation/scripts/uprobe_cases.py \
+  --output "$PWD/providers/observation/target/uprobe-performance" --performance --repeat 3
+python3 providers/observation/scripts/uprobe_coexist.py \
+  --output "$PWD/providers/observation/target/uprobe-coexist"
+```
+
+脚本创建自己的 TLS 实验进程并编译小型 BPF 加载器。短命 helper 核验 permit，创建
+PID 过滤 link 和用户态只读 map 句柄，通过匿名 Unix Socket 传出描述符，在采集开始前
+退出。采集器以实验用户身份运行，effective/permitted/inheritable/ambient capabilities
+均为空，并设置 `no_new_privs`。实验不创建长期特权服务，也不修改安全设置。该 helper
+依赖实验机已有的 sudo 授权，尚未按生产权限代理要求加固。
+
+预期结果及范围见[实测报告](POC_REPORT_zh.md#只读-uprobe-对照实验)。
+`aw.uprobe-counter-poc/v0` 仅输出累计入口计数和元数据；没有 payload 摘要、逐次写入
+长度和时间戳、返回值或 AW 实例证明。输出最多 512 条，每条最多 8192 字节，活跃采集
+最长 10 秒；进程被暂停或输出阻塞时退出可能延后。Fixture 脚本负责期限及进程回收。
+生成的证书、二进制和日志全部归属于指定输出目录。
+
 ## 构建与演示
 
 需要 Linux x86-64、Rust 1.97.1、Python 3.11+、GCC、OpenSSL 开发库及 `openssl`。Sidecar 与目标必须同 UID，现有 ptrace 策略须允许附着。实测机器原有 `ptrace_scope=0`。在 `ptrace_scope=1` 下，此演示的兄弟进程附着预计会被拒绝；应使用另外授权的隔离实验环境，或后续开发的父进程监督入口。脚本不会修改该设置。

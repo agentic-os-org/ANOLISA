@@ -33,3 +33,12 @@ suggested software-int3 extraction. It removes the shared instruction race and
 allows newly cloned threads to stop before enabling their own debug state. It
 does not satisfy forced-tracer-death safety. The proof applies only to the
 declared dynamic OpenSSL fixtures, with no claimed compatibility for real Agents.
+
+The uProbe comparison is newly written, with no AgentSight BPF source copied.
+Its small instruction sequence declares the kernel BPF program license as GPL,
+following the repository's existing BPF loaders. Syscall layouts come from the
+installed Linux UAPI headers. The experiment uses `BPF_TRACE_UPROBE_MULTI`, whose
+PID-filtered attachment is exercised by the Linux 6.6
+[uprobe multi self-test](https://github.com/torvalds/linux/blob/v6.6/tools/testing/selftests/bpf/prog_tests/uprobe_multi_test.c).
+The earlier perf-PMU inheritance experiment is retained only as failed diagnostic
+evidence outside the source package; it is not an available collection backend.

@@ -23,16 +23,25 @@ target; payload immutability does not establish fault isolation.
 | Privilege / integration | Conditional | Same-user experimental permit and pidfd; existing kernel policy unchanged; sibling demo requires policy permitting attachment |
 | Existing uProbe / other ABI | Unverified | Existing int3 is rejected; no live AgentSight probe environment exercised; static/other TLS unsupported |
 
-The next decision should compare a read-only eBPF Source, an explicit TLS/proxy
-endpoint and Native Hook/SDK on the same fixture. Native Hook/SDK offers the
-clearest application semantics. eBPF avoids this ptrace-stop failure mode but
-requires separate privilege and coverage validation; a proxy requires explicit
-network/TLS integration. A supervisor alone does not prove that killing the
-actual ptrace owner is safe.
+## Read-only uProbe follow-up
 
-Minimum follow-up: choose the fault-isolated Source mechanism and repeat forced
-death, existing-probe tests and broaden busy-thread coverage; define the read-only AW
-identity/revocation export; add the bounded query/projection Provider. Only after
-P0 safety passes should equal-length rewrite be implemented and checked against
-receiver-confirmed bytes. There is no serviceization or production-enable step
-authorized by these results.
+**Conditional Go for further BPF Source development.** The count-only
+`BPF_TRACE_UPROBE_MULTI` experiment passes 112 functional/fault cases, 24
+performance cases and four independent-probe coexistence cases. All 28 collector
+SIGKILL cases preserve target completion and receiver bytes. Existing and future
+threads count exactly in the tested fixtures; another unauthorized same-UID
+fixture contributes zero hits. Details and performance costs are in the
+[report](POC_REPORT.md#read-only-uprobe-comparison).
+
+Production deployment remains No-Go: bounded payload events, drops, concurrent
+buffer consistency, busy-process coverage, actual PID reuse, live AgentSight
+coexistence and AW correlation for this Source remain unverified. The privileged
+helper is an operator-run lab harness, not a production broker. Count-only
+performance does not predict full capture costs. The original ptrace forced-death
+failure remains unchanged; this read-only mechanism cannot justify enabling P1.
+
+Minimum next work: implement bounded transport metadata/capture with explicit
+loss and unknown coverage; repeat fault isolation and shared-buffer tests;
+reuse the real AW fixture importer; then review the read-only identity/revocation
+export and query/projection Provider. Keep Native Hook/SDK preferred for semantic
+boundaries. No production-enable or serviceization step follows from these results.

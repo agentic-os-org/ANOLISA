@@ -8,6 +8,65 @@ failures were active tracer SIGKILL cases: the target terminated with SIGTRAP.
 **P0 is not accepted; P1 was not implemented or run. Production observation and
 rewrite are No-Go.** [GO_NO_GO.md](GO_NO_GO.md) records the decision and next work.
 
+## Read-only uProbe comparison
+
+On 2026-11-07 the same x86-64 lab passed **112/112 functional/fault cases,
+24/24 performance comparisons and 4/4 dual-probe cases** using an independent
+BPF uProbe link counter. [Structured results and source hashes](measurements/20261107-uprobe.json)
+retain individual cases and performance samples. This validates an entry-counting
+mechanism; the ptrace P0 forced-death failure remains and P1 stays disabled.
+
+- Three repetitions at 1/4/8/16 threads cover existing threads, post-attach
+  creation and four creation waves. Normal, resumed and sustained counters match
+  actual calls exactly.
+- Across 24 single-collector kills and four dual-probe kills, all 28 targets
+  complete with receiver-confirmed byte counts and SHA-256. Twelve targets finish
+  while their collector is SIGSTOPped.
+- Twelve active SIGINT exits, target-exit detection, permission rejection and
+  stale-identity rejection pass.
+- A surviving independent probe retains its full count after its peer dies.
+  Another same-UID fixture using the same libssl contributes zero hits to either
+  counter. This is not validation of a live AgentSight probe.
+- Collectors run as the ordinary UID with empty capabilities; sudo helpers exit
+  after transferring descriptors. Existing perf_event_paranoid=2,
+  unprivileged_bpf_disabled=2 and Yama=0 remain unchanged.
+
+Each performance case sends 4096 writes per thread, 128 bytes per write, in three
+alternating baseline/observation runs. Percentiles below are medians of per-run
+percentiles; maxima are across the three runs. Throughput includes TLS setup,
+writes and shutdown, including Python SSL receiver and scheduling overhead.
+
+| Threads | Baseline p99 µs | Observed p50 / p95 / p99 µs | Observed max µs | Baseline → observed writes/s |
+| --- | --- | --- | --- | --- |
+| 1 | 3.341 | 6.704 / 7.303 / 15.958 | 57.836 | 158896 → 56338 |
+| 4 | 5.029 | 9.931 / 11.120 / 20.195 | 75.244 | 56317 → 55168 |
+| 8 | 13.137 | 10.259 / 11.990 / 29.919 | 2984.665 | 56913 → 55008 |
+| 16 | 12.804 | 10.285 / 11.884 / 47.317 | 6072.529 | 58289 → 56634 |
+
+Peak Python collector RSS is 17,888–17,908 KiB. Two-second idle windows consume
+0.03–0.05 CPU seconds, about 1.5%–2.5% of one core. Collector active CPU is
+0–0.04 seconds with 10 ms accounting granularity; kernel probe and receiver costs
+are not charged to that process. These are whole SSL_write call latencies, not
+isolated incremental probe pauses. The 16-thread maximum reaches 6.073 ms despite
+a low p99, and single-thread throughput drops about 65%.
+
+An initial perf-PMU inheritance experiment produced 24 clone-fixture exits with
+code 7 (pthread_create failure) and 12 SIGSTOP timeouts involving a stopped sudo
+waiter. Linux 6.6 [perf_uprobe_event_init](https://github.com/torvalds/linux/blob/v6.6/kernel/events/core.c)
+contains a permission check consistent with the inheritance failure; the vendor
+kernel's internal path was not traced. That backend is retained only as diagnostic
+evidence. Delivered code uses a PID-filtered BPF link and a short-lived broker.
+
+Unverified: bounded payload capture/digests, per-event loss/rate accounting,
+concurrent shared-buffer consistency, busy-process admission coverage, actual PID
+reuse, other kernels/ABIs, live AgentSight coexistence, and real AW end-to-end
+correlation of this new Source. A cumulative counter cannot provide those facts.
+The prior AW fixture result remains separate. **Continue the read-only BPF Source
+experiment; production serviceization and rewrite remain No-Go.** Add bounded
+transport events and Coverage, repeat kill/backpressure/shared-buffer tests, then
+connect the existing read-only AW bridge. These results do not validate ptrace
+rewrite safety.
+
 ## Tested objects and environment
 
 The base and reference commits are fixed in [SOURCE.md](SOURCE.md). AW CLI was

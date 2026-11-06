@@ -61,6 +61,28 @@ capture and lacks a live release/revocation feed. It is not a production AW
 attestation format. Descendant worker mapping is future work; the demonstrated
 worker uses the owner's preserved PID.
 
+## Read-only kernel-link comparison
+
+`scripts/uprobe_counter.py` and `fixtures/uprobe_bpf.c` implement a separate
+counting experiment. A `BPF_TRACE_UPROBE_MULTI` link filters the target process in
+the kernel; the program also checks TGID and atomically increments a single
+8-byte map value. Existing and future threads share the same process filter.
+The collector never owns a ptrace stop or application debug-register state.
+Closing the last unpinned link descriptor releases this Source's attachment;
+coexisting independent Sources own separate links.
+
+The lab broker opens the map, program and link, transfers the map/link descriptors
+with SCM_RIGHTS, and exits. Program and link lifetimes are managed by kernel
+references. No AW socket or daemon privilege is involved. This broker loads
+operator-built code under existing sudo authorization and needs a separate
+security review before any production distribution.
+
+The counter has no event queue: collector suspension preserves the total but
+loses individual timing. A count cannot supply a payload digest or native Hook
+semantics. A future Source must add bounded in-kernel capture, drop accounting,
+explicit coverage, and repeated fault tests before reusing the independent AW
+correlation boundary. A BPF read-only Source provides no transport-rewrite path.
+
 ## Minimum future service integration — proposed, unimplemented
 
 1. Define a read-only, generation-bound identity export for an authorized
@@ -79,5 +101,6 @@ worker uses the owner's preserved PID.
 
 Native Hook/SDK remains the preferred integration. Optional AgentSight resources
 may later supply process discovery, reviewed fingerprint assets or trajectory
-data. Neither AgentSight nor eBPF is a runtime dependency of this POC. Formal
+data. AgentSight is not a runtime dependency. The ptrace executable does not require
+eBPF; the separate uProbe comparison requires BPF kernel support. Formal
 protocols, schema registration, packaging and installers require a separate review.
