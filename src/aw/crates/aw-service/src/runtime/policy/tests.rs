@@ -63,6 +63,7 @@ impl Fixture {
         let (version, entrypoint) = match adapter {
             "qoder-sdk" => ("1.0.56", "sdk-worker"),
             "qwenpaw" => ("2.2.2.post1", "app"),
+            "agentscope" => ("2.0.6", "factory"),
             _ => unreachable!(),
         };
         let root = serde_json::from_value(
@@ -182,7 +183,7 @@ fn rejects(result: Result<Value>, expected: &str) {
 
 #[test]
 fn resident_claim_covers_preparation_unacknowledged_scope_and_final_cleanup() {
-    for adapter in ["qoder-sdk", "qwenpaw"] {
+    for adapter in ["qoder-sdk", "qwenpaw", "agentscope"] {
         let f = Fixture::new(adapter);
         let original = f.revision();
         let mut candidate = f.document.clone();

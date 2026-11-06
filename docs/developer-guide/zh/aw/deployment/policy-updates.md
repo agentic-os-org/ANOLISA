@@ -9,6 +9,7 @@
 | 模式 | 就绪条件 | 更新前等待 |
 | --- | --- | --- |
 | 普通 Qoder SDK 1.0.56 / Worker 1.1.78 | 受管 `startDaemon()`；无显式 daemon 时须在 30 秒内初始化 `createQuery()` | 全部 Query 完整关闭，回调和租约清理结束 |
+| 普通 AgentScope 2.0.6 工厂 | 首次 `AwBridge.create_agent()` | 全部 reply、工具任务与 Scope 清理结束 |
 | 普通 QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App | 受管 App startup | 全部 reply 和清理结束 |
 | Qoder 1.1.73 TUI、上述 SDK / App 的 `--reloadable` 模式 | 原生稳定桥接；SDK 另需显式 daemon 和初始化的 Query | 所有原生请求及后台清理结束 |
 | 外部启动的 Qoder TUI / QwenPaw App | [首请求前 attach](process-attach.md) | 同受限桥接 |

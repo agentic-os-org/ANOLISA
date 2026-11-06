@@ -51,8 +51,11 @@ pub fn supported(capabilities: &AdapterCapabilities) -> Result<()> {
 
 /// Check the ordinary resident adapters with immutable task policy snapshots.
 pub fn resident_supported(capabilities: &AdapterCapabilities) -> Result<()> {
+    if capabilities.adapter == "agentscope" && capabilities.entrypoint == "factory" {
+        return Ok(());
+    }
     if !matches!(capabilities.adapter.as_str(), "qoder-sdk" | "qwenpaw") {
-        return Err("resident policy updates require Qoder SDK or QwenPaw".into());
+        return Err("resident policy updates require Qoder SDK, QwenPaw or AgentScope".into());
     }
     supported(capabilities)
 }
@@ -91,6 +94,7 @@ pub fn scope_policy(
     let (events, hooks) = match capabilities.adapter.as_str() {
         "qoder-sdk" => crate::adapters::sdk_tools::routes(document, steps, "qoder-sdk")?,
         "qwenpaw" => crate::adapters::qwenpaw::event_routes(document, steps, false)?,
+        "agentscope" => crate::adapters::agentscope::event_routes(document, steps)?,
         _ => return Err("unsupported resident policy adapter".into()),
     };
     Ok(json!({"events": events, "hooks": hooks}))

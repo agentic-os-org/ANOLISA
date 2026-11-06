@@ -95,7 +95,8 @@ for native selection and source limits.
 | QwenPaw App | Explicitly wrapped MCP client calls | Ordinary resident mode, after all replies drain |
 | Claude SDK resident | In-process handlers; single-text result compression, `report` faults keep the original result | Restart required |
 | Pi SDK | MCP clients exposed as managed custom tools | Restart required |
-| Qoder CLI, OpenClaw, Hermes, AgentScope SDK | Exposed native tool callbacks | Ordinary mode requires restart |
+| AgentScope SDK | Exposed native tool callbacks | Ordinary factory replies support updates after Scope cleanup |
+| Qoder CLI, OpenClaw, Hermes | Exposed native tool callbacks | Ordinary mode requires restart |
 
 Qoder TUI, Qoder SDK and QwenPaw also offer restricted update modes. See [policy updates](../../../developer-guide/en/aw/deployment/policy-updates.md) for versions and deployment.
 Configure MCP security checks for actual input semantics; see [Qoder SDK / QwenPaw MCP wiring](../../../../src/aw/docs/design/en/adapters/structured-mcp.md) and [Claude SDK MCP wiring](../../../../src/aw/docs/design/en/adapters/claude-mcp.md).

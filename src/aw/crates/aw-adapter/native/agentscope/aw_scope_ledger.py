@@ -9,6 +9,7 @@ import os
 import signal
 from contextvars import ContextVar
 from typing import Any
+from uuid import uuid4
 
 
 class CallbackFailure(RuntimeError):
@@ -31,7 +32,7 @@ turn_scope: ContextVar["AwTaskScope | None"] = ContextVar("aw_agentscope_turn_sc
 
 def _drop_closed_scopes() -> None:
     """Forget scopes that cannot hold a child binding."""
-    for scope in [s for s in _unclosed_scopes if s.closed or s.handle is None]:
+    for scope in [s for s in _unclosed_scopes if (s.closed or s.handle is None) and s.reservation is None]:
         _unclosed_scopes.discard(scope)
         scope.invocations.clear()
 
@@ -59,7 +60,7 @@ async def _retry_unclosed_scopes() -> None:
         if scope.pid != pid:
             _unclosed_scopes.discard(scope)
             continue
-        if scope.handle is None or scope.closed:
+        if (scope.handle is None or scope.closed) and scope.reservation is None:
             _drop_closed_scopes()
             continue
         if any(not task.done() for task in scope.tasks):
@@ -67,10 +68,18 @@ async def _retry_unclosed_scopes() -> None:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             break
-        await scope._close_binding(remaining)
+        if scope.reservation is not None:
+            try:
+                async with asyncio.timeout(remaining):
+                    await close_turn_scope(scope)
+            except TimeoutError:
+                break
+        else:
+            await scope._close_binding(remaining)
     _drop_closed_scopes()
     if any(
-        scope.pid == pid and scope.handle is not None and not scope.closed
+        scope.pid == pid and ((scope.handle is not None and not scope.closed)
+                             or scope.reservation is not None)
         for scope in _unclosed_scopes
     ):
         raise CallbackFailure("aw_scope_cleanup_failed")
@@ -82,12 +91,11 @@ def _exit_cleanup() -> None:
         if (
             scope is None
             or scope.pid != os.getpid()
-            or scope.closed
-            or scope.handle is None
+            or ((scope.closed or scope.handle is None) and scope.reservation is None)
         ):
             continue
         try:
-            asyncio.run(scope.close())
+            asyncio.run(close_turn_scope(scope))
         except Exception:
             # The service reclaims the binding after the worker exits; a
             # failed best-effort close must not crash interpreter teardown.
@@ -146,6 +154,12 @@ async def wait_owned(task: asyncio.Task) -> asyncio.CancelledError | None:
     return interrupted
 
 
+async def close_turn_scope(scope: "AwTaskScope") -> None:
+    """Release root occupancy only after the native child is drained."""
+    await scope.close()
+    await scope.release()
+
+
 async def open_turn_scope(config: dict[str, Any]) -> "AwTaskScope":
     """Allocate a reply scope through the existing Service lifecycle."""
     global _atexit_registered
@@ -162,13 +176,17 @@ async def open_turn_scope(config: dict[str, Any]) -> "AwTaskScope":
         if interrupted is not None:
             if not opening.cancelled():
                 opening.exception()
-            cleanup = asyncio.create_task(scope.close())
+            cleanup = asyncio.create_task(close_turn_scope(scope))
             await wait_owned(cleanup)
             cleanup.result()
             raise interrupted
         opening.result()
     except BaseException:
-        if scope.handle is not None and not scope.closed:
+        if scope.reservation is not None:
+            cleanup = asyncio.create_task(close_turn_scope(scope))
+            await wait_owned(cleanup)
+            cleanup.result()
+        if (scope.handle is not None and not scope.closed) or scope.reservation is not None:
             _unclosed_scopes.add(scope)
         raise
     scope.owner_task = asyncio.current_task()
@@ -185,6 +203,8 @@ class AwTaskScope:
         self.closed = False
         self.failed = False
         self.sequence = 0
+        self.reservation: str | None = None
+        self.opening_unknown = False
         self.invocations: dict[str, int] = {}
         self.invocation_limit = 0
         self.owner_task: asyncio.Task | None = None
@@ -246,27 +266,52 @@ class AwTaskScope:
             raise
         return proc.returncode, stdout, stderr
 
+    async def reserve(self) -> None:
+        if not self.config.get("resident_policy_reload"):
+            return
+        if self.reservation is not None or self.closed or self.pid != os.getpid():
+            raise CallbackFailure("aw_task_reservation_unavailable")
+        self.reservation = uuid4().hex
+        code, _, _ = await self._command(
+            "reserve", {"pid": self.pid, "key": self.reservation}, 6,
+        )
+        if code:
+            raise CallbackFailure("aw_task_reservation_failed")
+
     async def open(self) -> None:
         """Open, acknowledge and enable before the first hook event."""
         if self.handle is not None or self.closed or self.failed:
             return
+        if self.config.get("resident_policy_reload") and self.reservation is None:
+            await self.reserve()
         # Providers spawned by this scope inherit the admitted launch
         # environment (without bridge import paths), matching root-binding
         # Provider semantics.
         environment = self.config.get("provider_environment")
         if not isinstance(environment, dict):
             environment = dict(os.environ)
+        self.opening_unknown = True
         code, stdout, stderr = await self._command(
             "open",
             {"pid": os.getpid(), "cwd": os.getcwd(), "environment": environment},
             33,
         )
+        self.opening_unknown = False
         if code != 0:
             raise CallbackFailure(
                 "aw_scope_open_failed: " + stderr.decode(errors="replace")[-300:]
             )
         self.handle = json.loads(stdout)
         try:
+            if self.reservation is not None:
+                code, policy, _ = await self._command("policy", self.handle, 6)
+                if code:
+                    raise CallbackFailure("aw_task_policy_failed")
+                from aw_agentscope import validate_hooks
+
+                hooks = json.loads(policy)["hooks"]
+                validate_hooks(hooks)
+                self.config = {**self.config, "hooks": hooks}
             code, _, _ = await self._command("acknowledge", self.handle, 6)
             if code != 0:
                 self.failed = True
@@ -436,7 +481,8 @@ class AwTaskScope:
             self.closed = True
             # A confirmed close releases the pending-cleanup registration and
             # the last references to this scope's local records.
-            _unclosed_scopes.discard(self)
+            if self.reservation is None:
+                _unclosed_scopes.discard(self)
             self.invocations.clear()
 
     async def invoke(
@@ -455,12 +501,29 @@ class AwTaskScope:
             close_event,
         )
 
-    async def close(self) -> None:
-        """Retire outstanding invocations and close the scope best-effort."""
-        if self.handle is None or self.closed:
+    async def release(self) -> None:
+        if self.reservation is None:
             return
-        # The SDK can leave concurrent tool tasks running when a consumer
-        # closes a suspended reply stream. Retire those tasks before the ledger.
+        _unclosed_scopes.add(self)
+        if (
+            not self.closed or self.pid != os.getpid()
+            or any(not task.done() for task in self.tasks)
+        ):
+            return
+        try:
+            code, _, _ = await self._command(
+                "release", {"pid": self.pid, "key": self.reservation}, 6,
+            )
+        except (OSError, TimeoutError, CallbackFailure):
+            return
+        if code == 0:
+            self.reservation = None
+            _unclosed_scopes.discard(self)
+
+    async def close(self) -> None:
+        """Retire native work before releasing its task reservation."""
+        # A failed retirement can close the child while concurrent SDK tools
+        # still run; drain their cleanup before trusting the closed state.
         tasks = [task for task in self.tasks if not task.done()]
         for task in tasks:
             # A stream owner may already be awaiting asynchronous tool teardown.
@@ -473,6 +536,10 @@ class AwTaskScope:
                 self.failed = True
                 _unclosed_scopes.add(self)
                 return
+        if self.handle is None:
+            self.closed = not self.opening_unknown
+        if self.handle is None or self.closed:
+            return
         # Exit teardown runs on a fresh event loop after the runtime loop is
         # gone; a lock bound to that dead loop would refuse every finish.
         self.lock = asyncio.Lock()

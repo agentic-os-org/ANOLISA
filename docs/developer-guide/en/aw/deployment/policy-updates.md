@@ -9,6 +9,7 @@ The deployer pauses and resumes task dispatch; AW activates a complete policy af
 | Mode | Readiness | Wait before updating |
 | --- | --- | --- |
 | Ordinary Qoder SDK 1.0.56 / Worker 1.1.78 | Managed `startDaemon()`; without an explicit daemon, initialize `createQuery()` within 30 seconds | All Queries fully closed, callbacks and leases cleaned up |
+| Ordinary AgentScope 2.0.6 factory | First `AwBridge.create_agent()` | All replies, tool tasks and Scope cleanup completed |
 | Ordinary QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App | Managed App startup | All replies and cleanup completed |
 | Qoder 1.1.73 TUI and the SDK / App versions above in `--reloadable` mode | Native stable bridge; SDK also needs an explicit daemon and initialized Query | All native requests and background cleanup completed |
 | Externally started Qoder TUI / QwenPaw App | [Attach before the first request](process-attach.md) | Same restricted bridge boundary |

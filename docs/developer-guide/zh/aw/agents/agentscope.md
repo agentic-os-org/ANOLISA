@@ -68,7 +68,7 @@ sec-core。带 RTK 归属的重试即使使用新 call ID 也不会重复压缩�
 历史消息保留在 Agent state；再次显式传入的用户消息会作为新提交检查。
 启用检查时不支持直接调用私有 `_reply` 或嵌套派发子 Agent。同一 Agent 并发回复会
 抛出 `CallbackFailure`；单个前台 worker 内的不同 Agent 可以并发，分别拥有轮次 Scope。
-未配置输入路由时保留原有原生输入模式与进程级 Scope 行为。
+未配置输入路由时保留原生输入语义，每次回复仍使用独立 Scope。
 
 策略拒绝抛出 `aw_submission.SubmissionDenied`，模型请求和输入 memory 写入均为零。
 Provider 故障遵循 `on_error: block` 或 `report`；不支持的输入形状始终在执行前拒绝。
@@ -95,3 +95,20 @@ except SubmissionDenied as error:
 `on_error: withhold_result` 后抑制中间工具 chunk，全部检查和调用清理完成后
 发布受检最终内容。`reply_stream` 消费者和模型收到相同的采用文本或拦截占位结果。
 未配置严格 after 路由的目标保持原生中间 chunk。
+
+## 更新常驻 worker
+
+普通 `aw run` 在全部 `reply` / `reply_stream` 及清理结束后支持策略更新。
+Agent 和原生状态继续保留；下一次回复先取得不可变策略快照，再检查输入和派发工具。
+业务 middleware 保留原有顺序，输入与工具路由的增删整体生效。
+
+```bash
+aw update --config current.yaml --agent agentscope --policy next.yaml
+aw status --config current.yaml
+```
+
+更新前暂停派发。模型执行、活跃工具任务和未确认的清理都会保持 busy；
+部分消费的回复流须显式关闭。Scope 打开响应丢失时需重启 worker 后继续；
+子 Scope 已确认关闭但请求占用释放未确认时，下一次回复前重试释放。
+原生 evidence 采集仍不在常驻策略 Scope 范围内。可修改字段与版本选择见
+[策略更新](../deployment/policy-updates.md)。

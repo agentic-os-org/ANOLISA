@@ -9,9 +9,12 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 from contextvars import ContextVar
+from contextlib import aclosing
+from functools import partial
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
 from uuid import uuid4
@@ -467,6 +470,47 @@ class AwToolMiddleware(MiddlewareBase):
             yield item
 
 
+def validate_hooks(hooks: Any) -> None:
+    if not isinstance(hooks, list):
+        raise ValueError("AW bridge configuration requires hooks")
+    for hook in hooks:
+        if hook.get("event") not in {"input.submit", "tool.before", "tool.after"}:
+            raise ValueError("Unsupported AW native event")
+        if not isinstance(hook.get("step"), str) or not hook["step"]:
+            raise ValueError("AW step must be a nonempty string")
+        if hook.get("on_error") not in {"report", "block", "withhold_result"}:
+            raise ValueError("Invalid AW failure policy")
+        if hook["on_error"] == "withhold_result" and hook["event"] != "tool.after":
+            raise ValueError("AW result withholding requires tool.after")
+        if type(hook.get("replace_result")) is not bool:
+            raise ValueError("AW result replacement capability must be a boolean")
+        if hook["replace_result"] and hook["event"] != "tool.after":
+            raise ValueError("AW result replacement requires tool.after")
+        if type(hook.get("budget_ms")) is not int or not 1 <= hook["budget_ms"] <= 55000:
+            raise ValueError("AW native budget must be 1..55000 ms")
+
+
+class AwPolicyMiddleware(MiddlewareBase):
+    """Build the existing hook chain from this reply's immutable policy."""
+
+    async def on_acting(self, agent: Any, input_kwargs: dict[str, Any], next_handler: Any):
+        scope = turn_scope.get()
+        if scope is None:
+            raise CallbackFailure("aw_reply_requires_factory_entrypoint")
+        config = scope.config
+        last_before = next((hook for hook in reversed(config["hooks"])
+                            if hook["event"] == "tool.before"), None)
+        chain = [AwInvocationMiddleware(config), *[
+            AwToolMiddleware(config, hook, last_before=hook is last_before)
+            for hook in config["hooks"] if hook["event"] != "input.submit"
+        ]]
+        for middleware in reversed(chain):
+            next_handler = partial(middleware.on_acting, agent, input_kwargs, next_handler)
+        async with aclosing(next_handler()) as stream:
+            async for item in stream:
+                yield item
+
+
 class AwBridge:
     """Construct public Agent objects with explicit AW middleware composition.
 
@@ -480,24 +524,7 @@ class AwBridge:
         for key in ("executable", "binding", "ready_path", "ready_token"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
                 raise ValueError(f"AW bridge configuration requires {key}")
-        hooks = self.config.get("hooks")
-        if not isinstance(hooks, list):
-            raise ValueError("AW bridge configuration requires hooks")
-        for hook in hooks:
-            if hook.get("event") not in {"input.submit", "tool.before", "tool.after"}:
-                raise ValueError("Unsupported AW native event")
-            if not isinstance(hook.get("step"), str) or not hook["step"]:
-                raise ValueError("AW step must be a nonempty string")
-            if hook.get("on_error") not in {"report", "block", "withhold_result"}:
-                raise ValueError("Invalid AW failure policy")
-            if hook["on_error"] == "withhold_result" and hook["event"] != "tool.after":
-                raise ValueError("AW result withholding requires tool.after")
-            if type(hook.get("replace_result")) is not bool:
-                raise ValueError("AW result replacement capability must be a boolean")
-            if hook["replace_result"] and hook["event"] != "tool.after":
-                raise ValueError("AW result replacement requires tool.after")
-            if type(hook.get("budget_ms")) is not int or not 1 <= hook["budget_ms"] <= 55000:
-                raise ValueError("AW native budget must be 1..55000 ms")
+        validate_hooks(self.config.get("hooks"))
         self._ready = False
 
     def create_agent(
@@ -516,15 +543,19 @@ class AwBridge:
         ]
         factory = Agent
         extra = {}
-        if any(hook["event"] == "input.submit" for hook in self.config["hooks"]):
+        if self.config.get("resident_policy_reload") or any(
+                hook["event"] == "input.submit" for hook in self.config["hooks"]):
             from aw_submission import AwSubmissionAgent, AwSubmissionMiddleware
 
             factory = AwSubmissionAgent
             extra["aw_config"] = self.config
             additions.insert(0, AwSubmissionMiddleware(self.config))
+        hooks = [AwInvocationMiddleware(self.config), *additions]
+        if self.config.get("resident_policy_reload"):
+            hooks = [AwSubmissionMiddleware(self.config), AwPolicyMiddleware()]
         agent = factory(
             *args,
-            middlewares=[*(middlewares or []), AwInvocationMiddleware(self.config), *additions],
+            middlewares=[*(middlewares or []), *hooks],
             **extra,
             **kwargs,
         )
@@ -534,6 +565,15 @@ class AwBridge:
         return agent
 
     def _publish_ready(self) -> None:
+        if self.config.get("resident_policy_reload"):
+            result = subprocess.run(
+                [self.config["executable"], "scope", "--adapter", "agentscope",
+                 "--binding", self.config["binding"], "--action", "ready"],
+                input=json.dumps({"pid": os.getpid()}).encode(), capture_output=True,
+                timeout=6, check=False,
+            )
+            if result.returncode:
+                raise CallbackFailure("aw_worker_ready_failed")
         path = Path(self.config["ready_path"])
         temporary = None
         try:

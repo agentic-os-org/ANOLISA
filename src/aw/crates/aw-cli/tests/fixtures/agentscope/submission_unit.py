@@ -75,6 +75,7 @@ import aw_scope_ledger as ledger
 class Scope:
     def __init__(self):
         self.closed = False
+        self.reservation = None
         self.calls = []
         self.mode = "allow"
         self.entered = asyncio.Event()
@@ -87,6 +88,8 @@ class Scope:
             raise TimeoutError()
         return {"allow": (0, b"", b""), "deny": (2, b"", b""),
                 "error": (1, b"", b""), "invalid": (0, b"{}", b"")}[self.mode]
+    async def release(self):
+        pass
     async def close(self):
         await asyncio.sleep(.001)
         self.closed = True
@@ -98,6 +101,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         async def open_scope(config):
             scope = Scope()
             scope.mode = self.mode
+            scope.config = config
             self.scopes.append(scope)
             return scope
         self.mode = "allow"

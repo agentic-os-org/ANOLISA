@@ -136,6 +136,7 @@ impl PreparedLaunch for Prepared {
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "hooks": hooks,
                 "provider_environment": provider_environment,
+                "resident_policy_reload": true,
             }))?,
         )?;
         context.files.write(
@@ -182,7 +183,7 @@ impl PreparedLaunch for Prepared {
     }
 }
 
-fn event_routes(
+pub(crate) fn event_routes(
     document: &Value,
     steps: &[AdmittedStep],
 ) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
