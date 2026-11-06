@@ -1513,15 +1513,8 @@ impl OpenAIParser {
             || path.contains("/completions")
             || path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
-            // The Responses API's per-id sub-endpoints (GET retrieve, POST
-            // cancel, DELETE) share the /v1/responses prefix but are not
-            // inference calls: the retrieval response IS the stored
-            // response object (object=="response" + output[] + usage), so
-            // deep-parsing a poll would re-record the create call's output
-            // and re-count its usage tokens as a second llm_call. Must
-            // stay in lockstep with parser::llm::is_llm_api_path.
             || (path.contains("/v1/responses")
-                && !path.contains("/v1/responses/"))
+                && !crate::parser::llm::is_responses_sub_endpoint(path))
     }
 }
 

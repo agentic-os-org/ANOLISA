@@ -470,6 +470,90 @@ fn test_openai_non_streaming_pipeline() {
     assert_eq!(usage.output_tokens, 4, "output tokens from JSON usage");
 }
 
+fn make_responses_json_response_bytes() -> Vec<u8> {
+    let body = serde_json::json!({
+        "id": "resp_abc123",
+        "object": "response",
+        "model": "gpt-4o",
+        "output": [],
+        "usage": {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "total_tokens": 28,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0}
+        }
+    });
+    let body = body.to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .into_bytes()
+}
+
+#[test]
+fn responses_retrieval_usage_does_not_create_token_or_audit_records() {
+    let results = run_analysis(vec![
+        (
+            5003,
+            0xB100,
+            1,
+            b"GET /v1/responses/resp_abc123 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n".to_vec(),
+            "python3",
+        ),
+        (
+            5003,
+            0xB100,
+            0,
+            make_responses_json_response_bytes(),
+            "python3",
+        ),
+    ]);
+
+    assert!(
+        results
+            .iter()
+            .all(|result| !matches!(result, AnalysisResult::Token(_) | AnalysisResult::Audit(_))),
+        "retrieving a stored response must not count its usage as a new call: {results:?}"
+    );
+    assert!(results.iter().any(|result| matches!(
+        result,
+        AnalysisResult::Http(record) if record.path == "/v1/responses/resp_abc123"
+    )));
+}
+
+#[test]
+fn responses_create_usage_still_creates_token_and_audit_records() {
+    let request_body = serde_json::json!({"model": "gpt-4o", "input": "hello"}).to_string();
+    let request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        request_body.len(),
+        request_body
+    )
+    .into_bytes();
+    let results = run_analysis(vec![
+        (5004, 0xB200, 1, request, "python3"),
+        (
+            5004,
+            0xB200,
+            0,
+            make_responses_json_response_bytes(),
+            "python3",
+        ),
+    ]);
+
+    let token = expect_token_record(&results);
+    assert_eq!(token.input_tokens, 20);
+    assert_eq!(token.output_tokens, 8);
+    assert!(
+        results
+            .iter()
+            .any(|result| matches!(result, AnalysisResult::Audit(_)))
+    );
+}
+
 #[test]
 fn test_anthropic_sse_pipeline() {
     let pid = 5002u32;
