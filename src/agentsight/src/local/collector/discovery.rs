@@ -547,7 +547,7 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
 }
 
 /// Extract the human-readable text of a user message event, with
-/// `<system-reminder>` blocks stripped.
+/// system-injected context stripped.
 ///
 /// Session schemas reaching the listing: Claude-style `user` events carry
 /// `message.content` (a string, or an array whose `text` blocks hold the
@@ -630,39 +630,53 @@ fn is_injected_user_text(text: &str) -> bool {
     text.is_empty() || text.starts_with("<session_context>") || text.starts_with("<hook_context>")
 }
 
-/// Strip `<system-reminder>...</system-reminder>` blocks from text.
-///
-/// A reminder may open and close on the same line, and a line may carry text
-/// outside the tags; only the block itself is removed. Lines that hold
-/// nothing but reminder content are dropped whole, so a multi-line reminder
-/// leaves no blank gap behind.
-fn strip_system_context(text: &str) -> String {
-    const OPEN: &str = "<system-reminder>";
-    const CLOSE: &str = "</system-reminder>";
+// Keep in sync with the trajectory collector's SYSTEM_TAG_PAIRS contract.
+const SYSTEM_TAG_PAIRS: &[(&str, &str)] = &[
+    ("<system-reminder>", "</system-reminder>"),
+    ("<current_notes_content>", "</current_notes_content>"),
+    ("<command-message>", "</command-message>"),
+    ("<command-name>", "</command-name>"),
+    ("<command-args>", "</command-args>"),
+    ("<local-command-caveat>", "</local-command-caveat>"),
+    ("<local-command-stdout>", "</local-command-stdout>"),
+    ("<local-command-stderr>", "</local-command-stderr>"),
+];
 
+/// Strip injected context while dropping lines that contain nothing else.
+fn strip_system_context(text: &str) -> String {
+    let mut current = text.to_string();
+    for &(open, close) in SYSTEM_TAG_PAIRS {
+        if current.contains(open) {
+            current = strip_tag_pair(&current, open, close);
+        }
+    }
+    current.trim().to_string()
+}
+
+fn strip_tag_pair(text: &str, open: &str, close: &str) -> String {
     let mut result = String::new();
-    let mut in_reminder = false;
+    let mut in_block = false;
     for line in text.lines() {
         let mut rest = line;
         let mut kept = String::new();
-        let mut saw_reminder = in_reminder;
+        let mut saw_block = in_block;
         while !rest.is_empty() {
-            if in_reminder {
-                saw_reminder = true;
-                match rest.find(CLOSE) {
+            if in_block {
+                saw_block = true;
+                match rest.find(close) {
                     Some(idx) => {
-                        in_reminder = false;
-                        rest = &rest[idx + CLOSE.len()..];
+                        in_block = false;
+                        rest = &rest[idx + close.len()..];
                     }
                     None => break,
                 }
             } else {
-                match rest.find(OPEN) {
+                match rest.find(open) {
                     Some(idx) => {
                         kept.push_str(&rest[..idx]);
-                        saw_reminder = true;
-                        in_reminder = true;
-                        rest = &rest[idx + OPEN.len()..];
+                        saw_block = true;
+                        in_block = true;
+                        rest = &rest[idx + open.len()..];
                     }
                     None => {
                         kept.push_str(rest);
@@ -671,7 +685,7 @@ fn strip_system_context(text: &str) -> String {
                 }
             }
         }
-        if saw_reminder && kept.is_empty() {
+        if saw_block && kept.is_empty() {
             continue;
         }
         if !result.is_empty() {
@@ -679,7 +693,7 @@ fn strip_system_context(text: &str) -> String {
         }
         result.push_str(&kept);
     }
-    result.trim().to_string()
+    result
 }
 
 /// UTF-8 safe string truncation
@@ -760,6 +774,27 @@ mod tests {
             strip_system_context("<system-reminder>note</system-reminder>after"),
             "after"
         );
+    }
+
+    #[test]
+    fn test_strip_system_context_all_injected_tag_pairs() {
+        let transcripts = [
+            "<system-reminder>injected</system-reminder>",
+            "<current_notes_content>injected</current_notes_content>",
+            "<command-message>injected</command-message>",
+            "<command-name>injected</command-name>",
+            "<command-args>injected</command-args>",
+            "<local-command-caveat>injected</local-command-caveat>",
+            "<local-command-stdout>injected</local-command-stdout>",
+            "<local-command-stderr>injected</local-command-stderr>",
+        ];
+        for transcript in transcripts {
+            assert_eq!(
+                strip_system_context(transcript),
+                "",
+                "{transcript} must not count as human text"
+            );
+        }
     }
 
     #[test]
@@ -935,6 +970,37 @@ mod tests {
         assert_eq!(session.first_message, "hello there");
         assert_eq!(session.message_count, 1);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn parse_session_file_excludes_command_only_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-only.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"sessionId\":\"sess-cmd\",\"message\":{\"role\":\"user\",\"content\":\"<command-message>clear</command-message><command-args></command-args>\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Cleared.\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        assert!(parse_session_file(&path, &SESSION_SOURCES[0], "test").is_none());
+    }
+
+    #[test]
+    fn parse_session_file_strips_command_transcripts_from_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed-command.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"user","sessionId":"sess-mix","message":{"role":"user","content":"<command-message>compact</command-message>please summarize<local-command-stdout>done</local-command-stdout>"}}"#,
+        )
+        .unwrap();
+
+        let session = parse_session_file(&path, &SESSION_SOURCES[0], "test")
+            .expect("genuine text keeps the session listed");
+        assert_eq!(session.first_message, "please summarize");
     }
 
     #[test]
