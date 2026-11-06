@@ -155,6 +155,45 @@ fn hermes_category_dir_readdir() {
 // -----------------------------------------------------------------------
 
 #[test]
+fn hermes_normal_root_listing_has_no_unreachable_plain_files() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::normal_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        create_skill_dir(dir, "alpha");
+        std::fs::write(dir.join("README.md"), "readme\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "*.tmp\n").unwrap();
+    });
+
+    let root = fix.mountpoint().join("skills");
+    let entries = list_dir_names(&root);
+    for name in ["README.md", ".gitignore"] {
+        assert!(!entries.iter().any(|entry| entry == name), "{entries:?}");
+    }
+    for name in [
+        ".hub",
+        ".bundled_manifest",
+        ".no-bundled-skills",
+        "apple",
+        "alpha",
+    ] {
+        assert!(entries.iter().any(|entry| entry == name), "{entries:?}");
+    }
+    for name in &entries {
+        std::fs::metadata(root.join(name)).expect("listed entries must be reachable");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join(".bundled_manifest")).unwrap(),
+        "manifest-content"
+    );
+    assert!(
+        std::fs::read_to_string(root.join("apple/apple-notes/SKILL.md"))
+            .unwrap()
+            .contains("Apple Notes skill body")
+    );
+}
+
+#[test]
 fn hermes_root_listing_hides_a_hidden_skill_dir() {
     skip_if_no_fuse!();
 
