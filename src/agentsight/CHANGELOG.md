@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.16.0
+
+### Breaking changes
+- Model aliases that resolve to the same tokenizer share one cache slot; automatic aliases no longer appear as separate low-level registrations.
+
+### Features
+- Add secret-file read protection: an enforce-only template stops a selected agent process tree from reading explicitly configured secret files, exposed through a dedicated HTTP route.
+- Observe Qoder CLI gateway calls and record prompts, tools, session IDs and token usage; the schema 6 default configuration adds Qoder discovery and gateway rules for new installations (upgrades need a manual step, see Upgrade notes).
+- Add a Cline session parser to the trajectory collector.
+- Sort token savings sessions by the displayed metrics; CSV export follows the visible order.
+
+### Fixes
+- Keep Codex shell calls in requests, answers and streams, retain Codex result ownership, and include last-only Codex usage tails.
+- Open listed Gemini sessions, isolate Gemini tool responses, count Gemini reasoning tokens, read the generation config, classify the remaining stop reasons, and clear rewound Gemini snapshots.
+- Read null Anthropic usage, SysOM response envelopes and tool_use snapshots, DeepSeek resource stops, and skip Responses sub-endpoint usage while labelling Responses and native operations.
+- Flatten null tool outputs and results to empty, decode block arrays encoded as strings, and preserve string assistant replies, native stop strings and unknown risk reason text.
+- Retain unmatched batch results, batch tool completion times, recorded identity in batch exports, and local session usage.
+- Isolate concurrent storage writes and write agent configuration atomically.
+- Bound LLM HTTP request attempts with per-attempt timeouts, gate the LLM preferences query, guard optimize endpoint retargeting, and serve non-object trajectories intact.
+- Merge overlapping inference windows, measure structured triage messages, require complete RSS evidence, correct signed RSS trend claims, reject nonfinite capture timings, and guard the token-limit ratio against a zero cap.
+- Report process termination status, replay interrupted recovery phases, canonicalize exported result IDs, and share tool-failure precedence.
+- Keep a tool result the provider declared successful instead of re-judging it from the result text.
+- Keep the parsed file path in the post-edit format hook when the payload carries non-list `edits`, so formatting is no longer silently skipped.
+- Reduce the `recvfrom` SCM_RIGHTS eBPF stack usage below the verifier's 512-byte limit in the x86_64 and aarch64 enforcer objects.
+- Make the endpoint match-nothing sentinel unreachable in the policy compiler.
+- Reset the causal panel when the identity changes.
+- Harden benchmark campaigns: tolerate partial artifacts, count only usable checks, skip recovery records that cannot be grouped, treat a null evaluation block as a failed gate, stop tracer and server process groups, and make `test.sh` exit non-zero on failures.
+
+### Docs
+- Document LLM query authentication in the dashboard guide.
+
+### Upgrade notes
+- Configuration moves from schema 5 to 6. The upgrade merges top-level sections only: sections already present, such as `cmdline` and `https`, are kept as they are and do not receive new default entries. A configuration carried over from 0.15.3 therefore lacks the Qoder CLI rules; to observe Qoder CLI, add `cmdline.allow` entries with `agent_name` `QoderCLI` for `qodercli*`, `*/qodercli*` and `*qodercli*`, and add `*.qoder.sh` to the `https` rules, as in the shipped default `src/agentsight/agentsight.json`.
+- The pre-upgrade file is saved beside the active configuration as `<file>.bak.<timestamp>`, for example `/etc/agentsight/config.json.bak.<timestamp>` for RPM installations.
+- The enforcer map layout changed, so stale pinned engines are reinstalled on upgrade rather than reusing incompatible pins.
+
 ## 0.15.3
 
 ### Fixes
