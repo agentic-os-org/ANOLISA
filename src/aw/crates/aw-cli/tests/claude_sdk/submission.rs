@@ -35,12 +35,14 @@ fn submission_provider_faults_and_rejection_close_before_recovery() {
             "adapter":"claude-sdk","argv":["python3","worker.py"]}});
         fixture.provider(&mut document);
         document["spec"]["events"] = json!({"input.submit": {
-            "enabled":true,"required":true,"budget_ms":1000,
+            "enabled":true,"required":true,"budget_ms":5000,
             "steps":[{"id":"check","provider":"policy","operation":"check",
                 "effects":["observe","block"],"on_error":action},
                 {"id":"later","provider":"policy","operation":"check",
                 "effects":["observe","block"],"on_error":action}]}});
-        document["spec"]["providers"]["policy"]["timeout_ms"] = json!(100);
+        // Preparation also uses this timeout. Allow Python startup on CI while
+        // expiring the fixture's 2s invocation before the event close deadline.
+        document["spec"]["providers"]["policy"]["timeout_ms"] = json!(1000);
         let service = Service::start(&fixture, &document);
         let binding: Binding = serde_json::from_value(
             service
@@ -75,7 +77,7 @@ fn submission_provider_faults_and_rejection_close_before_recovery() {
             &path,
             json!({"adapter":"claude-sdk","binding":binding,
             "socket":fixture.root.join("state/aw.sock"),"cwd":fixture.root,"events":{
-                "input.submit":{"budget_ms":1000,"steps":{"check":action,"later":action}}
+                "input.submit":{"budget_ms":5000,"steps":{"check":action,"later":action}}
             }})
             .to_string(),
         )
