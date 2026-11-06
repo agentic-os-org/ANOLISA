@@ -80,9 +80,10 @@ pub fn rows_from_atif_json(
                 rows.push(PreferenceEventRow {
                     id,
                     session_id: Some(session_id.to_string()),
-                    // One trajectory is one conversation, so the session id
-                    // doubles as the cross-turn grouping key.
-                    conversation_id: Some(session_id.to_string()),
+                    // Deduplication identifies a user turn, while cross-turn
+                    // rules group by session_id. Repeated human instructions
+                    // at different steps are separate observations.
+                    conversation_id: Some(format!("{session_id}:step:{}", step.step_id)),
                     timestamp_ns: step.timestamp.as_deref().and_then(parse_step_timestamp_ns),
                     user_text: (!cleaned.is_empty()).then_some(cleaned),
                     tool_names: Vec::new(),
@@ -165,7 +166,7 @@ mod tests {
         let oldest = &rows[1];
         assert_eq!(oldest.id, 1);
         assert_eq!(oldest.session_id.as_deref(), Some("traj-1"));
-        assert_eq!(oldest.conversation_id.as_deref(), Some("traj-1"));
+        assert_eq!(oldest.conversation_id.as_deref(), Some("traj-1:step:1"));
         assert_eq!(oldest.user_text.as_deref(), Some("先出方案再写代码"));
         // Both agent steps of the turn contribute; empty names are dropped.
         // Tool attachment runs in steps order, before the newest-first flip.
