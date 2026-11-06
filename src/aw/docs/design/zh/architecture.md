@@ -182,7 +182,7 @@ Hook 事件执行保持 `aw-service → aw-host → aw-exec`，详见
 | Provider 消息与 View 协议 | `aw-provider/schemas/` |
 | Provider 私有配置与后端数据 | 对应的具体 Provider 目录 |
 
-`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 23 份。
+`aw-contracts/schemas/` 只保存已注册、受测试覆盖的合同，目前共 28 份。
 计划、证据等 v1 合同仍在使用；四类能力的输入、输出使用 v2。
 此前八份未注册的能力 v1 草案没有仓库内调用方，已删除，历史内容可从 Git 查阅。
 
@@ -220,3 +220,8 @@ loopback HTTP 传输复用 workspace 已有的 `reqwest`。CLI 与服务共享�
 原生回调确认就绪后，调用者才派发输入。后续 `aw update` 使用已有空闲激活门控。
 `install --remove` 通过 Unbind 原子关闭完整请求和工具准入，再清理所属原生注册与
 私有产物。这条路径不启动外部进程，也不向其发送信号；普通 `aw run` 继续监督子进程。
+
+公共审计消费者通过 `aw audit-export` → `aw-service::audit_export` →
+`aw-core::journal::reader` 读取。读取器固定所属用户的存储并验证有界源链，
+Service 投影保留的公共对象；此路径不使用控制 RPC。
+游标与缺口语义见[审计增量读取](runtime/audit-export.md)。

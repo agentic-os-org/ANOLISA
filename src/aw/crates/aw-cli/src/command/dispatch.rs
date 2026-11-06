@@ -129,6 +129,9 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 ("json", value.json.then(|| "true".into())),
             ]),
         ),
+        Command::AuditExport(value) => {
+            crate::audit_export::run(value.state_dir, value.request, value.timeout_ms)
+        }
         Command::Request(value) => crate::runtime(
             "request",
             &options([

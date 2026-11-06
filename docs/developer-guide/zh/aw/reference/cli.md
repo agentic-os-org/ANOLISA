@@ -59,3 +59,38 @@ aw doctor --prefix "$AW_PREFIX" --json
 ## 独立实例 JSON
 
 `aw instance` 使用 `aw-instance/v1` 信封，区分 `result.state`、操作错误和准备审计键。完整字段、确认期限与重复请求规则见[独立实例接入](../deployment/independent-instances.md)。
+
+## 公共审计导出
+
+`aw audit-export` 从已有的同用户服务状态目录读取一页，服务可以已经停止。
+使用服务配置的状态路径，勿另建空目录替代。Journal 目录须属于有效用户且权限为 0700，
+源描述符和链文件权限为 0600。请求文件须为普通文件，最多 16 KiB。
+此命令不接受控制操作。
+
+```bash
+AW_STATE=/absolute/private/state
+AW_QUERY="$HOME/aw-audit-query.json"
+cat > "$AW_QUERY" <<'JSON'
+{"api_version":"audit-export.aw/v1alpha1","operation":{"type":"enumerate","cursor":null,"limit":64}}
+JSON
+aw audit-export --state-dir "$AW_STATE" --request "$AW_QUERY"
+```
+
+成功响应包含 `error: null`、持久 `source_id` 与 `result.keys`。
+将 `result.next_cursor` 放入下次枚举请求，直到它为 null。
+`result.changed` 报告键集合变化，续页仍向后推进。游标保留首轮的 `through` 上限；
+下一轮收集更晚及新插入的前部键。保留单链进度，并限制消费者循环。
+对每个键，以 `{"type":"read","chain_id":"KEY","cursor":null,"limit":64}`
+作为 `operation`，保留同样的 `api_version` 外层。用返回的键替换 `KEY`。
+后续单链请求使用响应中的 `result.cursor`。
+
+单链响应包含 ExecutionEvent、公共 AuditRecord、捕获的链尾、`caught_up`、`terminal`
+及固定限制。页面按源位置计数，因此没有公共记录的页面也可能推进游标。
+仅 `caught_up && terminal` 表示该链读完；开放链须重访，键枚举须定期从头开始。
+记录和游标一起原子保存，以生产者身份和 UID 去重，重放时比较对象摘要。
+历史生产者代际保持不变，响应不包含私有 Journal 记录。Schema、界限、损坏及历史缺失处理
+见[导出合同](../../../../../src/aw/docs/design/zh/runtime/audit-export.md)。
+
+协议失败返回 `result: null`、稳定 `error` 错误码，退出码为 1。
+命令语法及请求文件 I/O 错误使用 stderr。取消没有写入副作用。
+单次命令退出后无需停止资源；请求文件不再需要时删除 `"$AW_QUERY"`。

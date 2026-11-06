@@ -51,6 +51,7 @@ aw config init --help
 | `aw commands` | Enumerate public commands; optionally include machine-readable argument metadata |
 | `aw completion` | Print a shell completion script |
 | `aw instance` | Register, confirm, query and release application-owned instances through JSON |
+| `aw audit-export` | Read one retained public audit page without a control connection |
 | `aw request` | Send a service operation from stdin JSON; for integration and diagnostics |
 | `aw policy` | Run AW's command Provider protocol; for custom rule integration |
 
@@ -300,3 +301,16 @@ aw instance --socket "$AW_SOCKET" --connect
 ```
 
 Successful discovery returns `result.connected: true` and the service identity. The application retains its process lifecycle; releasing an instance preserves sibling instances and the daemon. See [independent instances](../../../developer-guide/en/aw/deployment/independent-instances.md) for request fields, native Ready, task scopes and recovery.
+
+## `aw audit-export`
+
+Read retained audit metadata as the service owner. Requires `--state-dir ABS_DIR`
+(the existing service state directory containing `journal/`) and `--request ABS_FILE`
+(a regular JSON request file). Optional `--timeout-ms` accepts 1–60000, default 5000.
+Output is always JSON; a reported error exits 1. The command works after service
+shutdown and does not start or stop background processes.
+
+Use the state directory configured for the service or supplied to `aw service serve`.
+Old journals without a retained source descriptor return `source_missing`; legacy
+chains return `unsupported_history`. For a bounded enumeration example and
+consumer checkpoint rules, see [CLI automation](../../../developer-guide/en/aw/reference/cli.md#public-audit-export).

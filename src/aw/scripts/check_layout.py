@@ -58,6 +58,7 @@ def structure(metadata: dict, root: Path) -> None:
         "aw-contracts": {"jsonschema", "serde", "serde_json", "sha2", "thiserror"},
         "aw-core": {
             "aw-config", "aw-contracts", "aw-provider", "serde_json", "sha2", "thiserror",
+            "libc",  # Read-only Journal open flags; Core still forbids unsafe code.
         },
         "aw-config": {"jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"},
         "aw-provider": {"aw-config", "jsonschema", "serde", "serde_json", "sha2", "thiserror"},
