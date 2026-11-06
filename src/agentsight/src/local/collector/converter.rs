@@ -12,8 +12,8 @@
 //! - `user` content: `text` (human input), `tool_result` (tool output)
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Metrics, Observation,
-    ObservationResult, Step, StepSource, ToolCall,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall, declared_tool_failure, is_error_extra,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -510,27 +510,23 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
         let observation = step.observation.get_or_insert_with(|| Observation {
             results: Vec::new(),
         });
-        let content = Some(Value::String(
-            block
-                .get("content")
-                .map(flatten_tool_result_content)
-                .unwrap_or_default(),
-        ));
-        let extra = if block
-            .get("is_error")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            Some(HashMap::from([(
-                EXTRA_IS_ERROR.to_string(),
-                Value::Bool(true),
-            )]))
-        } else {
-            None
-        };
+        let content = block
+            .get("content")
+            .map(flatten_tool_result_content)
+            .unwrap_or_default();
+        // An outer declaration wins; only otherwise look through the JSON
+        // envelope MCP tools commonly serialize into the content string.
+        let extra = declared_tool_failure(block)
+            .or_else(|| {
+                serde_json::from_str::<Value>(content.trim())
+                    .ok()
+                    .filter(Value::is_object)
+                    .and_then(|envelope| declared_tool_failure(&envelope))
+            })
+            .map(is_error_extra);
         observation.results.push(ObservationResult {
             source_call_id,
-            content,
+            content: Some(Value::String(content)),
             subagent_trajectory_ref: None,
             extra,
         });
@@ -757,6 +753,53 @@ mod tests {
                 .and_then(|extra| extra.get(agentsight_atif::EXTRA_IS_ERROR)),
             Some(&Value::Bool(true)),
             "is_error must be carried in the result extra"
+        );
+    }
+
+    #[test]
+    fn test_tool_result_preserves_declared_outcomes() {
+        let calls: Vec<Value> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "tool_use",
+                    "id": format!("tc{index}"),
+                    "name": "tool",
+                    "input": null
+                })
+            })
+            .collect();
+        let results = serde_json::json!([
+            {"type":"tool_result","tool_use_id":"tc0","is_error":false,"content":"No such file or directory"},
+            {"type":"tool_result","tool_use_id":"tc1","isError":true,"content":"boom"},
+            {"type":"tool_result","tool_use_id":"tc2","success":false,"content":"boom"},
+            {"type":"tool_result","tool_use_id":"tc3","success":true,"status":"error","content":"boom"},
+            {"type":"tool_result","tool_use_id":"tc4","content":serde_json::json!({"isError":false,"content":"ok"}).to_string()},
+            {"type":"tool_result","tool_use_id":"tc5","content":serde_json::json!({"success":false,"content":"boom"}).to_string()},
+            {"type":"tool_result","tool_use_id":"tc6","is_error":false,"content":serde_json::json!({"success":false}).to_string()},
+            {"type":"tool_result","tool_use_id":"tc7","content":"error text without a declaration"}
+        ]);
+        let content = format!(
+            "{}\n{}",
+            serde_json::json!({"type":"assistant","message":{"model":"m","content":calls}}),
+            serde_json::json!({"type":"user","message":{"content":results}}),
+        );
+
+        let traj = convert_jsonl_content_to_atif(&content).unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        let outcomes: Vec<Option<bool>> =
+            obs.results.iter().map(|result| result.is_error()).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                None,
+            ]
         );
     }
 
