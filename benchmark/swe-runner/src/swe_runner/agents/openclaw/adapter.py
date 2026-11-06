@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import logging
 import shutil
+import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 from swe_runner.agents import AgentAdapter, PreparedAgentRun, register_agent
@@ -120,10 +122,19 @@ class OpenClawAdapter(AgentAdapter):
         return self._agent_id
 
     def prepare(self, instance: SWEInstance, settings: Settings) -> PreparedAgentRun:
+        attempt_id = uuid.uuid4().hex
+        workspace_root = Path(tempfile.mkdtemp(prefix=f"{default_workspace_root(instance.instance_id).name}-"))
+        try:
+            return self._prepare_attempt(instance, settings, workspace_root, attempt_id)
+        except BaseException:
+            clean_openclaw_workspace_root(workspace_root)
+            raise
+
+    def _prepare_attempt(
+        self, instance: SWEInstance, settings: Settings, workspace_root: Path, attempt_id: str
+    ) -> PreparedAgentRun:
         image_name = get_docker_image_name(instance)
-        workspace_root = default_workspace_root(instance.instance_id)
         openclaw_workspace_root = workspace_root / "openclaw-workspace"
-        clean_openclaw_workspace_root(workspace_root)
         work_dir = prepare_workspace_from_image(
             image_name,
             instance_id=instance.instance_id,
@@ -143,8 +154,8 @@ class OpenClawAdapter(AgentAdapter):
             base_config_path=self._base_config_path,
             profile_link_root=self._profile_link_root,
         )
-        profile = profile_manager.prepare(instance.instance_id)
-        runtime_agent_id = build_openclaw_agent_id(instance.instance_id)
+        profile = profile_manager.prepare(instance.instance_id, attempt_id=attempt_id)
+        runtime_agent_id = f"{build_openclaw_agent_id(instance.instance_id)[:30]}-{attempt_id}"
 
         sandbox_manager = OpenClawSandboxManager(
             config_path=profile.config_path,
@@ -152,16 +163,24 @@ class OpenClawAdapter(AgentAdapter):
             cli_path=self._cli_path,
             tokenless=settings.agent.tokenless,
         )
-        sandbox_manager.configure(
-            OpenClawSandboxSpec(
-                agent_id=runtime_agent_id,
-                image_name=image_name,
-                workspace_root=openclaw_workspace_root,
-                testbed_dir=work_dir,
-                agents_text=agents_text,
+        try:
+            sandbox_manager.configure(
+                OpenClawSandboxSpec(
+                    agent_id=runtime_agent_id,
+                    image_name=image_name,
+                    workspace_root=openclaw_workspace_root,
+                    testbed_dir=work_dir,
+                    agents_text=agents_text,
+                )
             )
-        )
-        session_id = build_openclaw_session_id(instance.instance_id)
+        except BaseException:
+            try:
+                sandbox_manager.remove_agent_containers(runtime_agent_id)
+            except Exception:
+                logger.exception("OPENCLAW_PREPARE_SANDBOX_CLEANUP_FAILED instance=%s", instance.instance_id)
+            profile_manager.cleanup_link(profile)
+            raise
+        session_id = f"{safe_session_component(instance.instance_id)}-{attempt_id}"
 
         def remove_profile_link() -> None:
             profile_manager.cleanup_link(profile)
