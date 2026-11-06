@@ -75,3 +75,14 @@ class ErrNoTrustedKeys(SkillVerifyError):
 
     def __init__(self, path: str) -> None:
         super().__init__(f"ERR_NO_TRUSTED_KEYS: No public keys found in '{path}'")
+
+
+
+class ErrManifestInvalid(SkillVerifyError):
+    code = 15
+
+    def __init__(self, skill_name: str, detail: str = "") -> None:
+        super().__init__(
+            f"ERR_MANIFEST_INVALID: Invalid manifest for '{skill_name}'. {detail}".rstrip()
+            + ("." if detail and not detail.endswith(".") else "")
+        )

@@ -22,6 +22,7 @@ from agent_sec_cli.asset_verify.errors import (
     ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
+    ErrManifestInvalid,
     ErrManifestMissing,
     ErrNoTrustedKeys,
     ErrSigInvalid,
@@ -294,11 +295,30 @@ def verify_signature(
 
 def verify_manifest_hashes(skill_dir: str, manifest: dict, skill_name: str) -> None:
     """Verify manifest hashes and reject unsigned files."""
+    if not isinstance(manifest, dict):
+        raise ErrManifestInvalid(skill_name, "manifest must be a JSON object")
+
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise ErrManifestInvalid(skill_name, "'files' must be a list")
+
     manifest_paths: set[str] = set()
 
-    for file_entry in manifest.get("files", []):
+    for idx, file_entry in enumerate(files):
+        if not isinstance(file_entry, dict):
+            raise ErrManifestInvalid(
+                skill_name, f"files[{idx}] must be a JSON object"
+            )
+        if "path" not in file_entry or "hash" not in file_entry:
+            raise ErrManifestInvalid(
+                skill_name, f"files[{idx}] missing 'path' or 'hash'"
+            )
         rel_path = file_entry["path"]
         expected_hash = file_entry["hash"]
+        if not isinstance(rel_path, str) or not isinstance(expected_hash, str):
+            raise ErrManifestInvalid(
+                skill_name, f"files[{idx}].path and .hash must be strings"
+            )
         manifest_paths.add(rel_path)
 
         full_path = os.path.join(skill_dir, rel_path)
@@ -328,8 +348,11 @@ def verify_skill(skill_dir: str, trusted_keys: list) -> tuple[bool, str]:
 
     verify_signature(manifest_path, sig_path, trusted_keys, skill_name)
 
-    with open(manifest_path, "r") as f:
-        manifest = json.load(f)
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ErrManifestInvalid(skill_name, str(exc)) from exc
 
     verify_manifest_hashes(skill_dir, manifest, skill_name)
 
