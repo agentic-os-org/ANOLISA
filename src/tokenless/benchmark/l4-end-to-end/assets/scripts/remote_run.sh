@@ -177,7 +177,11 @@ arm_spec() {
         a) CFGNAME=arm-a-baseline.json;              RFLAGS=();            PORT=;     PFLAGS=() ;;
         b) CFGNAME=arm-b-tokenless.json;             RFLAGS=(--tokenless); PORT=;     PFLAGS=() ;;
         c) CFGNAME=arm-c-headroom-default.json;      RFLAGS=(--headroom);  PORT=8801; PFLAGS=() ;;
-        d) CFGNAME=arm-d-headroom-tool-results.json; RFLAGS=(--headroom);  PORT=8802
+        d) case "${HEADROOM_ROLLOUT_CHANNEL:-stable}" in
+               canary|dev) ;;
+               *) die "Headroom tool-result interception requires an explicit canary/dev rollout; refusing a silently inactive arm" ;;
+           esac
+           CFGNAME=arm-d-headroom-tool-results.json; RFLAGS=(--headroom); PORT=8802
            PFLAGS=(--intercept-tool-results) ;;
         e) CFGNAME=arm-e-headroom-code-aware.json;   RFLAGS=(--headroom);  PORT=8803; PFLAGS=(--code-aware) ;;
         f) CFGNAME=arm-f-headroom-cache.json;        RFLAGS=(--headroom);  PORT=8804; PFLAGS=(--mode cache) ;;
@@ -192,20 +196,19 @@ arm_spec() {
 # were disabled; arm D is now gated by arm_expect_tool_cache instead.
 arm_expect_present() {
     case "$1" in
-        c) printf '%s\n' 'Mode:[[:space:]]+token' 'Code-Aware:[[:space:]]+DISABLED' ;;
-        d) printf '%s\n' 'Mode:[[:space:]]+token' ;;
+        c) printf '%s\n' 'Mode:[[:space:]]+cache' 'Code-Aware:[[:space:]]+ENABLED' ;;
+        d) printf '%s\n' 'Mode:[[:space:]]+cache' ;;
         e) printf '%s\n' 'Code-Aware:[[:space:]]+ENABLED' ;;
         f) printf '%s\n' 'Mode:[[:space:]]+cache' ;;
     esac
 }
 
-# Patterns that would mean a sibling arm's flag leaked in.
+# Patterns that would mean a sibling arm's flag leaked in. The refreshed proxy
+# defaults to cache mode with code-aware compression on, so the only foreign
+# states left to detect are the old token mode and a disabled code-aware path.
 arm_expect_absent() {
     case "$1" in
-        c) printf '%s\n' 'Mode:[[:space:]]+cache' ;;
-        d) printf '%s\n' 'Code-Aware:[[:space:]]+ENABLED' 'Mode:[[:space:]]+cache' ;;
-        e) printf '%s\n' 'Mode:[[:space:]]+cache' ;;
-        f) printf '%s\n' 'Code-Aware:[[:space:]]+ENABLED' ;;
+        c|d|e|f) printf '%s\n' 'Mode:[[:space:]]+token' 'Code-Aware:[[:space:]]+DISABLED' ;;
     esac
 }
 
@@ -220,11 +223,11 @@ arm_expect_tool_cache() {
 }
 
 # ---------------------------------------------------------------------------
-# Drift sentinel. qwen3-coder-plus is a rolling alias, chosen so that prompt
-# caching keeps working; the cost is that the weights behind it can change
-# mid-sweep. Recording the alias's `created` timestamp on both sides of the run
-# does not prevent that, but it makes an undetected swap impossible to mistake
-# for an effect of the arms.
+# Drift sentinel. The arms pin a dated snapshot, and its catalogue metadata is
+# still recorded on both sides of the sweep for traceability; an unchanged
+# `created` is not proof of unchanged weights. Whether usage and cache fields are
+# reported for this snapshot is verified by the billed pilot, not carried over
+# from observations of the earlier rolling alias.
 # ---------------------------------------------------------------------------
 record_model_created() {
     # Two `local` assignments, not one: bash expands every word of a `local`

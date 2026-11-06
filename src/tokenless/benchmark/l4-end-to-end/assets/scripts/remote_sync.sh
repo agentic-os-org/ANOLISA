@@ -62,22 +62,14 @@ if [ ! -d "$PROMPTS_DIR" ]; then
     exit 1
 fi
 
-# Throwaway benchmark host: skip host-key pinning so reprovisioned machines do
-# not break the pipeline.
-SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-
-# Key first, sshpass only to bootstrap a host that does not have the key yet.
-# sshpass allocates a pty per connection and that setup races when several run
-# concurrently in the background, which appears as ssh failing with "Bad file
-# descriptor" -- indistinguishable from a network fault, and not one. Put in
-# SSH_OPTS so rsync's `-e "ssh ${SSH_OPTS[*]}"` inherits it as well.
-L4_SSH_KEY=${L4_SSH_KEY:-$HOME/.ssh/l4_eval_ed25519}
-if [ -f "$L4_SSH_KEY" ]; then
+# Reuse the verified default SSH identity; rsync inherits the same host-key check
+# and identity selection through `-e`.
+SSH_OPTS=(-o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=30 -o LogLevel=ERROR)
+L4_SSH_KEY=${L4_SSH_KEY:-}
+SSH_PW=()
+if [ -n "$L4_SSH_KEY" ]; then
+    [ -f "$L4_SSH_KEY" ] || { printf 'explicit SSH key missing: %s\n' "$L4_SSH_KEY" >&2; exit 1; }
     SSH_OPTS+=(-i "$L4_SSH_KEY" -o IdentitiesOnly=yes)
-    SSH_PW=()
-else
-    : "${L4_SSH_PASS:?L4_SSH_PASS is required when $L4_SSH_KEY does not exist}"
-    SSH_PW=(sshpass -p "$L4_SSH_PASS")
 fi
 
 # src/tokenless/third_party/rtk is excluded on purpose: it is a gitignored pinned

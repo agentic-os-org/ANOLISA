@@ -101,29 +101,14 @@ require_keys() {
     }
 }
 
-SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o ConnectTimeout=30 -o LogLevel=ERROR)
-
-# Authentication: key first, sshpass only as a bootstrap fallback.
-#
-# sshpass allocates a pty for every connection, and that setup races when several
-# run in the background at once. It surfaced as ssh dying with "Bad file
-# descriptor" on two of four parallel hosts while the other two transferred
-# normally -- a failure that looks like a network fault and is not one. A key
-# removes the race outright and keeps the password off every command line.
-#
-# The key options go into SSH_OPTS rather than a separate array so that rsync's
-# `-e "ssh ${SSH_OPTS[*]}"` inherits them too. Note that password pinning has to
-# move into the fallback branch: PubkeyAuthentication=no would otherwise disable
-# the very key being supplied.
-L4_SSH_KEY=${L4_SSH_KEY:-$HOME/.ssh/l4_eval_ed25519}
-if [ -f "$L4_SSH_KEY" ]; then
+# Use the caller's already-verified SSH configuration; a changed host key still
+# fails hard.
+SSH_OPTS=(-o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=30 -o LogLevel=ERROR)
+L4_SSH_KEY=${L4_SSH_KEY:-}
+SSH_PW=()
+if [ -n "$L4_SSH_KEY" ]; then
+    [ -f "$L4_SSH_KEY" ] || { printf 'explicit SSH key missing: %s\n' "$L4_SSH_KEY" >&2; exit 1; }
     SSH_OPTS+=(-i "$L4_SSH_KEY" -o IdentitiesOnly=yes)
-    SSH_PW=()
-else
-    SSH_OPTS+=(-o PreferredAuthentications=password -o PubkeyAuthentication=no)
-    : "${L4_SSH_PASS:?L4_SSH_PASS is required when $L4_SSH_KEY does not exist}"
-    SSH_PW=(sshpass -p "$L4_SSH_PASS")
 fi
 
 say() { echo "[fleet] $*"; }
