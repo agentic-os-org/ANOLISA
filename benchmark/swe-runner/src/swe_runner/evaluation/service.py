@@ -55,15 +55,21 @@ def _get_instance_ids(preds_path: Path) -> list[str]:
     if not preds_path.exists():
         raise FileNotFoundError(f"Predictions file not found: {preds_path}")
 
-    with open(preds_path) as f:
-        data = json.load(f)
+    data = json.loads(preds_path.read_text(encoding="utf-8"))
 
+    if not isinstance(data, dict):
+        raise ValueError(f"Predictions file must be a JSON object: {preds_path}")
     if not data:
         return []
 
     instance_ids: list[str] = []
     for iid, pred in data.items():
-        if not pred.get("model_patch", ""):
+        # A prediction is rewritten by every finished instance, so a merged or
+        # hand-edited file can hold a bare string or null under one key. That
+        # entry must skip like an empty patch; raising here aborts evaluation
+        # for every other instance in the file.
+        patch = pred.get("model_patch", "") if isinstance(pred, dict) else ""
+        if not patch:
             logger.warning("EVAL_SKIP_EMPTY_PATCH instance=%s", iid)
             continue
         instance_ids.append(iid)
