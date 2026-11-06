@@ -580,6 +580,19 @@ fn root_serialized_json_uses_typed_numeric_replay() {
 }
 
 #[test]
+fn embedded_serialized_json_uses_typed_numeric_replay() {
+    let text = r#"result "{\"counts\":[200,404]}""#;
+    assert_eq!(number_values(text), vec![200.0, 404.0]);
+}
+
+#[test]
+fn decorated_embedded_serialized_json_uses_typed_numeric_replay() {
+    for text in [r#""{\"a\":[200,404]}","#, r#"x="{\"a\":[200,404]}""#] {
+        assert_eq!(number_values(text), vec![200.0, 404.0], "{text}");
+    }
+}
+
+#[test]
 fn quoted_closing_brackets_do_not_close_the_outer_list() {
     assert_eq!(number_values(r#"result ["]",200,404]"#), vec![200.0, 404.0]);
 }
@@ -686,6 +699,25 @@ fn attached_bracketed_paths_keep_their_commas_when_fields_follow() {
 }
 
 #[test]
+fn embedded_urls_do_not_hide_following_serialized_fields() {
+    for text in [
+        r#""u":"https://x","n":500"#,
+        r#"\"u\":\"https://x\",\"n\":500"#,
+    ] {
+        assert_eq!(number_values(text), vec![500.0], "{text}");
+    }
+}
+
+#[test]
+fn escaped_numeric_strings_in_embedded_arrays_stay_visible() {
+    assert_eq!(number_values(r#"result [\"200\",404]"#), vec![200.0, 404.0]);
+    assert_eq!(
+        number_values(r#"result [\"244,781\",500]"#),
+        vec![244_781.0, 500.0]
+    );
+}
+
+#[test]
 fn attached_dates_do_not_swallow_following_fields() {
     for separator in [',', ';', '|'] {
         let text = format!("date=2024-01-01{separator}count=500");
@@ -738,6 +770,17 @@ fn attached_field_boundaries_do_not_depend_on_claim_values() {
 }
 
 #[test]
+fn markdown_decorated_embedded_json_uses_typed_numeric_replay() {
+    for text in [
+        r#"`"[200,404]"`"#,
+        r#"**"{\"a\":[200,404]}"**"#,
+        r#"("{\"a\":[200,404]}")"#,
+    ] {
+        assert_eq!(number_values(text), vec![200.0, 404.0], "{text}");
+    }
+}
+
+#[test]
 fn standalone_relative_paths_keep_field_like_punctuation() {
     for path in [
         "a,b/c=d.txt",
@@ -770,6 +813,14 @@ fn standalone_bracketed_paths_keep_semicolons_and_pipes() {
             "{path}"
         );
         assert!(number_values(&path).is_empty(), "{path}: {claims:?}");
+    }
+}
+
+#[test]
+fn markdown_decorated_embedded_json_tolerates_sentence_punctuation() {
+    for punctuation in ['.', '!', '?', '。', '，', '；'] {
+        let text = format!("`\"[200,404]\"`{punctuation}");
+        assert_eq!(number_values(&text), vec![200.0, 404.0], "{text}");
     }
 }
 
@@ -835,6 +886,169 @@ fn empty_list_decoration_preserves_relative_path_equals() {
 fn explicit_path_keys_drop_the_prefix_before_bare_relative_paths() {
     let claims = extract_claims("path=a/b=c.txt");
     assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["a/b=c.txt"]);
+}
+
+#[test]
+fn serialized_json_suffix_preserves_raw_fields_and_unclosed_paths() {
+    let text = r#""{\"a\":[200,404]}",count=500,"/tmp/z.txt"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/z.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0, 500.0], "{claims:?}");
+}
+
+#[test]
+fn serialized_json_suffix_keeps_pipe_inside_path() {
+    let text = r#""[200,404]":/tmp/a|b"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a|b"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn glued_raw_prefixes_expose_serialized_json() {
+    for text in [
+        r#"result:"[200,404]""#,
+        r#"result;"[200,404]""#,
+        r#"result,"[200,404]""#,
+    ] {
+        let claims = extract_claims(text);
+        assert_eq!(
+            number_values(text),
+            vec![200.0, 404.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn numeric_prefix_before_embedded_json_is_preserved() {
+    let text = r#"500:"[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(number_values(text), vec![500.0, 200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn path_prefix_before_embedded_json_is_preserved() {
+    let text = r#"/tmp/a.txt:"[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn relative_path_prefix_before_embedded_json_is_preserved() {
+    for prefix in ["./a.txt", "../a.txt"] {
+        let text = format!(r#"{prefix}:"[200,404]""#);
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![prefix.to_string()],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            number_values(&text),
+            vec![200.0, 404.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn relative_path_after_embedded_json_is_preserved() {
+    for suffix in ["./a.txt", "../a.txt"] {
+        let text = format!(r#""[200,404]"\n{suffix}"#);
+        let claims = extract_claims(&text);
+        assert_eq!(
+            texts_of(&claims, ClaimClass::Path),
+            vec![suffix.to_string()],
+            "{text}: {claims:?}"
+        );
+        assert_eq!(
+            number_values(&text),
+            vec![200.0, 404.0],
+            "{text}: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn pipe_before_embedded_json_is_not_path_content() {
+    let text = r#"/tmp/a.txt|"[200,404]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn pipe_between_json_payloads_is_not_path_content() {
+    let text = r#""[200,404]"|/tmp/a.txt|"[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn serialized_newline_before_a_raw_path_is_consumed() {
+    let text = r#""[200,404]"\n/tmp/a.txt"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0], "{claims:?}");
+}
+
+#[test]
+fn serialized_newline_between_json_payloads_preserves_a_raw_path() {
+    let text = r#""[200,404]"\n/tmp/a.txt\n"[600,700]""#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/a.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(
+        number_values(text),
+        vec![200.0, 404.0, 600.0, 700.0],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn serialized_newline_suffix_preserves_an_unclosed_path() {
+    let text = r#"x="{\"a\":[200,404]}"\ncount=500\n"/tmp/z.txt"#;
+    let claims = extract_claims(text);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Path),
+        vec!["/tmp/z.txt"],
+        "{claims:?}"
+    );
+    assert_eq!(number_values(text), vec![200.0, 404.0, 500.0], "{claims:?}");
 }
 
 #[test]

@@ -1071,7 +1071,7 @@ fn has_following_attached_field(value: &str) -> bool {
             let end = boundaries
                 .get(position + 1)
                 .map_or(value.len(), |(index, _)| *index);
-            let suffix = trim_decoration(&value[start..end]);
+            let suffix = trim_embedded_json_separators(&value[start..end]);
             split_attached_value(suffix).is_some()
                 || suffix.starts_with('"')
                 || classify_structural_segment(suffix)
@@ -1723,6 +1723,108 @@ fn classify_structural_segment(segment: &str) -> Option<Claim> {
     classify_word(trimmed).or(claim)
 }
 
+fn is_embedded_json_decoration(c: char) -> bool {
+    matches!(
+        c,
+        '(' | ')'
+            | '`'
+            | '*'
+            | ','
+            | ';'
+            | '|'
+            | '.'
+            | '!'
+            | '?'
+            | '。'
+            | '！'
+            | '？'
+            | '，'
+            | '；'
+            | '（'
+            | '）'
+            | '【'
+            | '】'
+            | '「'
+            | '」'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+    )
+}
+
+fn trim_embedded_json_separators(mut value: &str) -> &str {
+    loop {
+        let mut start = 0;
+        for (index, c) in value.char_indices() {
+            let relative_path =
+                c == '.' && (value[index..].starts_with("./") || value[index..].starts_with("../"));
+            if relative_path || !is_embedded_json_decoration(c) {
+                break;
+            }
+            start = index + c.len_utf8();
+        }
+        let trimmed = &value[start..];
+        if let Some(rest) = trimmed.strip_prefix("\\n") {
+            value = rest;
+        } else {
+            return trimmed;
+        }
+    }
+}
+
+fn embedded_json_candidate(word: &str) -> &str {
+    let candidate = split_attached_value(word).map_or(word, |(_, value)| value);
+    let candidate = trim_embedded_json_separators(candidate);
+    if candidate.starts_with('"') {
+        return candidate;
+    }
+    let mut field_start = 0;
+    let mut backslashes = 0usize;
+    for (index, c) in candidate.char_indices() {
+        if c == '"' && backslashes % 2 == 0 {
+            let prefix = &candidate[field_start..index];
+            let value = split_attached_value(prefix).map_or(prefix, |(_, value)| value);
+            if value
+                .trim_start_matches(is_embedded_json_decoration)
+                .is_empty()
+            {
+                return &candidate[index..];
+            }
+            return candidate;
+        }
+        if c == '\\' && candidate[index + 1..].starts_with('n') {
+            field_start = index + 2;
+            backslashes = 0;
+            continue;
+        }
+        if is_embedded_json_decoration(c) || matches!(c, ':' | '：') {
+            field_start = index + c.len_utf8();
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    candidate
+}
+
+fn has_unescaped_double_quote(value: &str) -> bool {
+    let mut backslashes = 0usize;
+    for c in value.chars() {
+        if c == '"' && backslashes % 2 == 0 {
+            return true;
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    false
+}
+
 fn embedded_json_string_prefix(value: &str) -> Option<(usize, serde_json::Value)> {
     let rest = value.strip_prefix('"')?;
     let mut backslashes = 0usize;
@@ -2132,6 +2234,104 @@ fn json_typed_claims_from(
     claims
 }
 
+enum EmbeddedJsonReplacement {
+    NotJson,
+    Complete,
+}
+
+fn raw_json_gap_claims(value: &str, json_follows: bool) -> Vec<Claim> {
+    let value = trim_embedded_json_separators(value);
+    let trailing_boundary = if json_follows {
+        let mut terminated = String::with_capacity(value.len() + 1);
+        terminated.push_str(value);
+        terminated.push('"');
+        attached_field_boundaries(&terminated)
+            .into_iter()
+            .rev()
+            .find_map(|(index, len)| (index + len == value.len()).then_some(index))
+    } else {
+        None
+    };
+    let value = &value[..trailing_boundary.unwrap_or(value.len())];
+    let boundaries = attached_field_boundaries(value);
+    let has_serialized_newline = boundaries
+        .iter()
+        .any(|(index, _)| value[*index..].starts_with("\\n"));
+    if !has_serialized_newline {
+        return extract_claims(value)
+            .into_iter()
+            .filter(|claim| matches!(claim.class, ClaimClass::Number | ClaimClass::Path))
+            .collect();
+    }
+    let mut normalized = String::with_capacity(value.len());
+    let mut start = 0;
+    for (index, len) in boundaries {
+        if !value[index..].starts_with("\\n") {
+            continue;
+        }
+        normalized.push_str(&value[start..index]);
+        normalized.push(' ');
+        start = index + len;
+    }
+    normalized.push_str(&value[start..]);
+    extract_claims(&normalized)
+        .into_iter()
+        .filter(|claim| matches!(claim.class, ClaimClass::Number | ClaimClass::Path))
+        .collect()
+}
+
+fn replace_embedded_json_claims(
+    claims: &mut Vec<Claim>,
+    start: usize,
+    word: &str,
+) -> EmbeddedJsonReplacement {
+    let mut remainder = word;
+    let mut replayed_claims = Vec::new();
+    let mut replaced = false;
+    let mut pending = None;
+    loop {
+        let direct = trim_embedded_json_separators(remainder);
+        let candidate = if direct.starts_with('"') {
+            direct
+        } else {
+            embedded_json_candidate(direct)
+        };
+        let Some((end, value)) = embedded_json_string_prefix(candidate) else {
+            if replaced
+                && candidate
+                    .strip_prefix('"')
+                    .is_some_and(|rest| !has_unescaped_double_quote(rest))
+            {
+                let prefix_len = direct.len() - candidate.len();
+                replayed_claims.extend(raw_json_gap_claims(&direct[..prefix_len], true));
+                pending = Some(candidate.to_string());
+            }
+            break;
+        };
+        let prefix_len = direct.len() - candidate.len();
+        replayed_claims.extend(raw_json_gap_claims(&direct[..prefix_len], true));
+        replaced = true;
+        replayed_claims.extend(json_typed_claims(value));
+        remainder = &candidate[end..];
+    }
+    if !replaced {
+        return EmbeddedJsonReplacement::NotJson;
+    }
+    let mut word_claims = claims.split_off(start);
+    word_claims.retain(|claim| !matches!(claim.class, ClaimClass::Number | ClaimClass::Path));
+    word_claims.extend(replayed_claims);
+    if let Some(candidate) = pending {
+        word_claims.extend(
+            extract_claims(&candidate)
+                .into_iter()
+                .filter(|claim| matches!(claim.class, ClaimClass::Number | ClaimClass::Path)),
+        );
+    }
+    word_claims.extend(raw_json_gap_claims(remainder, false));
+    claims.append(&mut word_claims);
+    EmbeddedJsonReplacement::Complete
+}
+
 /// Extract every verifiable claim from a message.
 pub fn extract_claims(text: &str) -> Vec<Claim> {
     let root_json = if matches!(text.trim_start().as_bytes().first(), Some(b'[' | b'{')) {
@@ -2148,6 +2348,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
     claims.extend(extract_quoted(text));
     let normalized = separate_bracketed_comma_lists(text);
     for json_word in normalized.split_whitespace() {
+        let word_claim_start = claims.len();
         let attached_after_residue =
             if root_json.is_none() && split_attached_value(json_word).is_none() {
                 attached_field_after_closing_bracket(json_word)
@@ -2211,6 +2412,7 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // a bare `http`-prefixed word that is not a URL (`http_code=242391`,
         // curl -w style) is a key=value fact token, and sparing it hid its
         // value from the grounding check entirely.
+        let mut field_json_replay = false;
         if !word_stands_alone {
             let fields = if root_json.is_some() {
                 None
@@ -2218,7 +2420,9 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                 attached_field_segments(json_word)
             };
             if let Some(fields) = fields {
+                field_json_replay = true;
                 for field in fields {
+                    let field_claim_start = claims.len();
                     let complete_path = || {
                         classify_complete_word(trim_attached_decoration(field))
                             .filter(|claim| claim.class == ClaimClass::Path)
@@ -2232,17 +2436,20 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
                             }
                         }
                     }
+                    if root_json.is_none() {
+                        let _ = replace_embedded_json_claims(&mut claims, field_claim_start, field);
+                    }
                 }
-            } else if !json_word.starts_with("http://")
-                && !json_word.starts_with("https://")
-                && json_word.contains(STRUCTURAL_SEPARATORS)
-            {
+            } else {
                 for segment in structural_segments(json_word) {
                     if let Some(claim) = classify_structural_segment(&segment) {
                         claims.push(claim);
                     }
                 }
             }
+        }
+        if root_json.is_none() && !field_json_replay {
+            let _ = replace_embedded_json_claims(&mut claims, word_claim_start, json_word);
         }
     }
     // In valid JSON, a comma separates values rather than grouping digits.
