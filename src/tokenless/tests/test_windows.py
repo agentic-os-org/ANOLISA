@@ -151,7 +151,7 @@ class WindowsHookTests(unittest.TestCase):
         }
         rewritten = self.hook("PreToolUse", payload)["hookSpecificOutput"]["updatedInput"]
         self.assertEqual(rewritten["timeout"], 30)
-        self.assertRegex(rewritten["command"], r"& '[^']*tokenless\.exe' rtk git status")
+        self.assertRegex(rewritten["command"], r"& '[^']*(?i:tokenless\.exe)' rtk git status")
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", rewritten["command"]],
             cwd=workspace, capture_output=True, text=True, encoding="utf-8", timeout=20,
