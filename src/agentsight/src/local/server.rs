@@ -743,8 +743,10 @@ mod tests {
             "agentsight-local-maintenance-{}",
             std::process::id()
         ));
-        let mut config = StorageConfig::default();
-        config.base_path = base.clone();
+        let config = StorageConfig {
+            base_path: base.clone(),
+            ..StorageConfig::default()
+        };
         std::fs::create_dir_all(&base).unwrap();
         let manager =
             DatabaseManager::new(DatabaseRole::LocalServer, local_database_specs(&config)).unwrap();
@@ -797,8 +799,10 @@ mod tests {
             "agentsight-local-maintenance-zero-{}",
             std::process::id()
         ));
-        let mut config = StorageConfig::default();
-        config.base_path = base.clone();
+        let mut config = StorageConfig {
+            base_path: base.clone(),
+            ..StorageConfig::default()
+        };
         config.optimization.check_interval_secs = 0;
         config.reuse.check_interval_secs = 0;
         let manager =

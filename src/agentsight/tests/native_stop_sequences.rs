@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Native request parameters through the in-memory capture-to-semantic pipeline.
 
 use agentsight::aggregator::{AggregatedResult, Aggregator};

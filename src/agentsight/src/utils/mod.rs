@@ -56,6 +56,7 @@ mod tests {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) mod retained;
 #[cfg(target_os = "linux")]
 pub(crate) mod stream_decode;

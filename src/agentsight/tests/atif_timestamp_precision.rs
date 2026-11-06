@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Captured fractional durations must survive the actual ATIF export pipeline.
 
 use agentsight::atif::converter::convert_trace_to_atif;

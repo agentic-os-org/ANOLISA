@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Memory-policy regressions across capture, aggregation, analysis and semantic output.
 
 mod common;
