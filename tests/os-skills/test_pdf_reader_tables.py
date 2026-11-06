@@ -16,6 +16,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+try:
+    import pymupdf  # noqa: F401
+except ImportError:
+    pymupdf = None
+
 SCRIPT = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -96,6 +101,7 @@ class PdfReaderTablesTestCase(unittest.TestCase):
         return json.loads(proc.stdout[proc.stdout.index("{") :])
 
 
+@unittest.skipUnless(pymupdf is not None, "pymupdf is not installed")
 class TestTableExtraction(PdfReaderTablesTestCase):
     def test_exact_grid_cells_and_bbox(self):
         out = self.json_ok(self.run_cli("-p", "1", "--tables", "--format", "json"))
@@ -129,6 +135,7 @@ class TestTableExtraction(PdfReaderTablesTestCase):
         self.assertIn("No tables here", out["pages"][0]["text"])
 
 
+@unittest.skipUnless(pymupdf is not None, "pymupdf is not installed")
 class TestDefaultContract(PdfReaderTablesTestCase):
     def test_tables_requires_json_format(self):
         proc = self.run_cli("-p", "1", "--tables", "--format", "text")

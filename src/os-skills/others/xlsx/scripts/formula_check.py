@@ -120,6 +120,42 @@ def extract_sheet_refs(formula: str) -> list[str]:
     return refs
 
 
+# Sheet-name tokens for the reference strips in extract_name_refs. The
+# quoted form is escape-aware ('It''s' is the sheet It's) and bounded to
+# Excel's 31-character sheet-name limit: without the bound, the ambiguous
+# ('' as escape or as close+reopen) quantifier degrades to quadratic
+# backtracking on an unclosed apostrophe run — that {0,31} is the
+# load-bearing bound. A quoted reference may also carry an external
+# workbook prefix, as in '[Budget 2026.xlsx]Data'!A1 or the full path
+# form 'C:\Dir\[Book.xlsx]Sheet1'!A1: the prefix is any run of non-quote,
+# non-"]" characters ending in "]" (the workbook name bracket). The
+# prefix needs no length bound of its own: because the class excludes
+# the quote, the scan regions between adjacent quotes cannot overlap,
+# so scanning stays linear (each region is walked forward once and
+# fails backward once). Excluding the quote also keeps the prefix from
+# crossing the reference's closing quote and swallowing real names. The
+# plain form matches the unquoted token used by extract_sheet_refs, CJK
+# and the middle dot included, so both functions agree on what a sheet
+# name is.
+_QUOTED_SHEET = r"'(?:[^'\]]*\])?(?:[^']|''){0,31}'"
+_PLAIN_SHEET = r"[A-Za-z_\u4e00-\u9fff][A-Za-z0-9_.·\u4e00-\u9fff]{0,30}"
+# What the "!" of a reference introduces: an A1 cell (B7), a range (A1:B2)
+# or a sheet-scoped name (myrate). Structured references such as
+# Sheet1!Table1[Amount] are a known limitation — the class has no "[".
+_REF_TAIL = r"[A-Za-z0-9_$.:]+"
+# The 3D operands carry (?<!!) so they cannot start right after another
+# reference's "!": in Sheet1!A1:Sheet1!B2 the pattern would otherwise eat
+# "A1:Sheet1" and leave a "Sheet1!" tail that no later strip can remove,
+# reporting the sheet itself as an unknown name. group(1) captures the
+# range's first endpoint for extract_3d_start_sheets.
+_RE_3D = re.compile(
+    rf"(?<!!)({_QUOTED_SHEET}|{_PLAIN_SHEET}):"
+    rf"(?<!!)(?:{_QUOTED_SHEET}|{_PLAIN_SHEET})!{_REF_TAIL}"
+)
+_RE_QREF = re.compile(rf"{_QUOTED_SHEET}!{_REF_TAIL}")
+_RE_PREF = re.compile(rf"{_PLAIN_SHEET}!{_REF_TAIL}")
+
+
 def extract_name_refs(formula: str) -> list[str]:
     """
     Extract identifiers in a formula that could be named range references.
@@ -130,15 +166,21 @@ def extract_name_refs(formula: str) -> list[str]:
     - Match the pattern of a name (letters/underscore start, alphanumeric/underscore body)
     - Are not single-letter column references or row references
 
-    This is approximate. False positives are possible; false negatives are rare.
+    This is approximate: false positives are possible, and sheet-scoped
+    names are a known false negative — the strips remove a reference like
+    Sheet1!typo_name together with its prefix, so an undefined
+    sheet-level name is not reported here.
     """
     names = []
-    # Remove quoted sheet references first to avoid false matches; the
-    # apostrophe-escaping form matches extract_sheet_refs above, otherwise
-    # "'Company''s Data'!A1" leaves "'Company" behind and the
-    # identifier scan reports the sheet name as an unknown name.
-    formula_clean = re.sub(r"'(?:[^']|'')*'![A-Z$0-9:]+", "", formula)
-    formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
+    # Remove sheet references before scanning for name candidates. A sheet
+    # name only ever appears in a formula followed by "!", so strip the full
+    # reference — 3D ranges (Sheet1:Sheet2!A1), quoted names ('Q1 Data'!A1,
+    # with '' escaping an apostrophe) and plain prefixes (Sheet1!A1,
+    # 销售表!A1) — along with the A1 cell, range or sheet-scoped name the
+    # "!" introduces.
+    formula_clean = _RE_3D.sub("", formula)
+    formula_clean = _RE_QREF.sub("", formula_clean)
+    formula_clean = _RE_PREF.sub("", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):
         candidate = m.group(1)
@@ -150,6 +192,43 @@ def extract_name_refs(formula: str) -> list[str]:
             continue
         names.append(candidate)
     return names
+
+
+# A token shaped like a local cell reference (A1, $B$2, C99) is never
+# treated as a sheet name. The shape is deliberately a bit wider than
+# Excel's real grid (last column XFD, last row 1048576): XFE1 or
+# A1048577 cannot be a real cell, and Excel would in principle allow
+# them as sheet names — the cost of that width is that a handful of
+# oddly-named sheets go unreported here. Keeping the regex simple is
+# worth more than catching those.
+_CELL_REF_RE = re.compile(r"\$?[A-Za-z]{1,3}\$?[0-9]{1,7}")
+
+
+def extract_3d_start_sheets(formula: str) -> list[str]:
+    """
+    Return the first endpoint's sheet name of every 3D range in a formula.
+
+    Sheet1:Sheet2!A1 references every sheet from Sheet1 to Sheet2, but the
+    first endpoint is followed by ":" rather than "!", so extract_sheet_refs
+    never sees it. External ranges are skipped: their sheets live in another
+    workbook — Excel forbids "[" and "]" in sheet names, so a quoted
+    endpoint containing "]" (the '[Book.xlsx]Sheet' bracket, with or
+    without a leading path) always points elsewhere. A local cell
+    reference (SUM(A1:Sheet1!A1)) is likewise not a sheet.
+    """
+    refs = []
+    for m in _RE_3D.finditer(formula):
+        token = m.group(1)
+        if token.startswith("'"):
+            inner = token[1:-1].replace("''", "'")
+            if "]" in inner:
+                continue
+            refs.append(inner)
+        else:
+            if _CELL_REF_RE.fullmatch(token):
+                continue
+            refs.append(token)
+    return refs
 
 
 def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
@@ -265,8 +344,10 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
                     results["formula_count"] += 1
 
                     # Check 2: cross-sheet references
+                    reported_here = set()
                     for ref_sheet in extract_sheet_refs(formula):
                         if ref_sheet not in valid_sheet_names:
+                            reported_here.add(ref_sheet)
                             results["errors"].append(
                                 {
                                     "type": "broken_sheet_ref",
@@ -275,6 +356,35 @@ def check(xlsx_path: str, sheet_filter: str | None = None) -> dict:
                                     "formula": formula,
                                     "missing_sheet": ref_sheet,
                                     "valid_sheets": sorted(valid_sheet_names),
+                                }
+                            )
+                            results["error_count"] += 1
+
+                    # Check 2b: 3D range first endpoints. The first endpoint
+                    # of Sheet1:Sheet2!A1 is followed by ":" rather than "!",
+                    # so Check 2 never sees it; without this a broken 3D
+                    # reference loses its only diagnostic. A sheet Check 2
+                    # already reported for this cell (both endpoints of
+                    # Missing:Missing!A1 are the same defect) is skipped so
+                    # one broken reference does not count twice; two
+                    # distinct missing endpoints still report separately.
+                    # reported_here is local to this cell, so a report on
+                    # another sheet's same-named cell never suppresses one
+                    # here, and no rescan of the accumulated errors happens.
+                    for start_sheet in extract_3d_start_sheets(formula):
+                        if (
+                            start_sheet not in valid_sheet_names
+                            and start_sheet not in reported_here
+                        ):
+                            results["errors"].append(
+                                {
+                                    "type": "broken_sheet_ref",
+                                    "sheet": sheet_name,
+                                    "cell": cell_ref,
+                                    "formula": formula,
+                                    "missing_sheet": start_sheet,
+                                    "valid_sheets": sorted(valid_sheet_names),
+                                    "note": "Heuristic check — verify manually if this is a false positive",
                                 }
                             )
                             results["error_count"] += 1
@@ -391,6 +501,8 @@ def main() -> None:
                 )
                 print(f"         Formula: {e['formula']}")
                 print(f"         Valid sheets: {e.get('valid_sheets', [])}")
+                if e.get("note"):
+                    print(f"         Note: {e['note']}")
             elif e["type"] == "unknown_name_ref":
                 print(
                     f"  [WARN] [{e['sheet']}!{e['cell']}] uses unknown name "

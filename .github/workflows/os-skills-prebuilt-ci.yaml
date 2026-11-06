@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'src/os-skills/**'
+      - 'tests/os-skills/**'
       - '.github/actions/build-os-skills-prebuilt/**'
       - '.github/actions/prebuilt-rust-common/**'
       - '.github/workflows/os-skills-prebuilt-ci.yaml'
@@ -29,5 +30,6 @@ jobs:
       - name: Verify raw package and action
         run: |
           python3 -m unittest discover -s src/os-skills/tests
+          python3 -m unittest discover -s tests/os-skills -p 'test_*.py'
           python3 .github/actions/prebuilt-rust-common/test_plan_matrix.py
           bash .github/actions/build-os-skills-prebuilt/test.sh
