@@ -311,6 +311,12 @@ fn attached_path_suffixes_after_numeric_brackets_stay_whole() {
 }
 
 #[test]
+fn root_serialized_json_uses_typed_numeric_replay() {
+    let text = r#""{\"counts\":[200,404]}""#;
+    assert_eq!(number_values(text), vec![200.0, 404.0]);
+}
+
+#[test]
 fn key_prefixed_short_paths_own_their_brackets() {
     let text = "path=/a[200,404]";
     let claims = extract_claims(text);
@@ -473,6 +479,49 @@ fn empty_list_decoration_preserves_relative_path_equals() {
 fn explicit_path_keys_drop_the_prefix_before_bare_relative_paths() {
     let claims = extract_claims("path=a/b=c.txt");
     assert_eq!(texts_of(&claims, ClaimClass::Path), vec!["a/b=c.txt"]);
+}
+
+#[test]
+fn root_json_string_preserves_identifier_claims() {
+    let claims = extract_claims(r#""Foo::bar""#);
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Identifier),
+        vec!["Foo::bar"],
+        "{claims:?}"
+    );
+}
+
+#[test]
+fn root_deep_containers_complete_on_a_small_stack() {
+    let text = format!("{}200,404{}", "[".repeat(64), "]".repeat(64));
+    std::thread::Builder::new()
+        .stack_size(32 * 1024)
+        .spawn(move || {
+            let claims = extract_claims(&text);
+            let numbers: Vec<_> = claims
+                .iter()
+                .filter(|claim| claim.class == ClaimClass::Number)
+                .filter_map(|claim| claim.value)
+                .collect();
+            assert_eq!(numbers, vec![200.0, 404.0], "{claims:?}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn serialized_containers_match_value_replay() {
+    for text in [
+        r#"{"404":[200,{"500":"119,120","path":"/tmp/a.txt"}],"active":true}"#,
+        r#"{"404":200,"404":600,"next":"[700,800]"}"#,
+        r#"[[200],{"path":"/tmp/a,b.txt","number":1.2e3},null]"#,
+    ] {
+        let value = serde_json::from_str(text).unwrap();
+        let expected = json_typed_claims(value);
+        let actual = json_typed_claims(serde_json::Value::String(text.to_string()));
+        assert_eq!(actual, expected, "{text}");
+    }
 }
 
 #[test]

@@ -1504,25 +1504,420 @@ fn classify_structural_segment(segment: &str) -> Option<Claim> {
     classify_word(trimmed).or(claim)
 }
 
+fn embedded_json_string_prefix(value: &str) -> Option<(usize, serde_json::Value)> {
+    let rest = value.strip_prefix('"')?;
+    let mut backslashes = 0usize;
+    for (offset, c) in rest.char_indices() {
+        if c == '"' && backslashes % 2 == 0 {
+            let end = offset + 2;
+            return serde_json::from_str::<serde_json::Value>(&value[..end])
+                .ok()
+                .filter(|value| matches!(value, serde_json::Value::String(_)))
+                .map(|value| (end, value));
+        }
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    None
+}
+
+enum SerializedJsonNode {
+    Number(serde_json::Number),
+    String(String),
+    Array(Vec<usize>),
+    Object(Vec<(String, usize)>),
+    Other,
+}
+
+enum SerializedJsonFrame {
+    Array(usize),
+    Object {
+        node: usize,
+        key: Option<String>,
+        positions: std::collections::HashMap<String, usize>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum SerializedJsonState {
+    Value,
+    ArrayValueOrEnd,
+    ArrayCommaOrEnd,
+    ObjectKeyOrEnd,
+    ObjectKey,
+    ObjectColon,
+    ObjectCommaOrEnd,
+    End,
+}
+
+fn serialized_json_after_value(frames: &[SerializedJsonFrame]) -> SerializedJsonState {
+    match frames.last() {
+        Some(SerializedJsonFrame::Array(_)) => SerializedJsonState::ArrayCommaOrEnd,
+        Some(SerializedJsonFrame::Object { .. }) => SerializedJsonState::ObjectCommaOrEnd,
+        None => SerializedJsonState::End,
+    }
+}
+
+// `serde_json::Value` descends containers recursively. Decoded strings can be
+// adversarially deep, so container parsing and replay both use explicit stacks.
+fn parse_serialized_json_container(text: &str) -> Option<(Vec<SerializedJsonNode>, usize)> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    let mut nodes = Vec::new();
+    let mut frames = Vec::new();
+    let mut root = None;
+    let mut state = SerializedJsonState::Value;
+    loop {
+        while bytes
+            .get(cursor)
+            .is_some_and(|c| matches!(c, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            cursor += 1;
+        }
+        match state {
+            SerializedJsonState::End => {
+                if cursor != bytes.len() {
+                    return None;
+                }
+                let root = root?;
+                return matches!(
+                    nodes.get(root),
+                    Some(SerializedJsonNode::Array(_) | SerializedJsonNode::Object(_))
+                )
+                .then_some((nodes, root));
+            }
+            SerializedJsonState::ArrayValueOrEnd => {
+                if bytes.get(cursor) == Some(&b']') {
+                    cursor += 1;
+                    if !matches!(frames.pop(), Some(SerializedJsonFrame::Array(_))) {
+                        return None;
+                    }
+                    state = serialized_json_after_value(&frames);
+                } else {
+                    state = SerializedJsonState::Value;
+                }
+            }
+            SerializedJsonState::ArrayCommaOrEnd => match bytes.get(cursor)? {
+                b',' => {
+                    cursor += 1;
+                    state = SerializedJsonState::Value;
+                }
+                b']' => {
+                    cursor += 1;
+                    if !matches!(frames.pop(), Some(SerializedJsonFrame::Array(_))) {
+                        return None;
+                    }
+                    state = serialized_json_after_value(&frames);
+                }
+                _ => return None,
+            },
+            SerializedJsonState::ObjectKeyOrEnd | SerializedJsonState::ObjectKey => {
+                if matches!(state, SerializedJsonState::ObjectKeyOrEnd)
+                    && bytes.get(cursor) == Some(&b'}')
+                {
+                    cursor += 1;
+                    if !matches!(frames.pop(), Some(SerializedJsonFrame::Object { .. })) {
+                        return None;
+                    }
+                    state = serialized_json_after_value(&frames);
+                    continue;
+                }
+                let Some((end, serde_json::Value::String(key))) =
+                    embedded_json_string_prefix(&text[cursor..])
+                else {
+                    return None;
+                };
+                cursor += end;
+                let Some(SerializedJsonFrame::Object { key: slot, .. }) = frames.last_mut() else {
+                    return None;
+                };
+                if slot.replace(key).is_some() {
+                    return None;
+                }
+                state = SerializedJsonState::ObjectColon;
+            }
+            SerializedJsonState::ObjectColon => {
+                if bytes.get(cursor) != Some(&b':') {
+                    return None;
+                }
+                cursor += 1;
+                state = SerializedJsonState::Value;
+            }
+            SerializedJsonState::ObjectCommaOrEnd => match bytes.get(cursor)? {
+                b',' => {
+                    cursor += 1;
+                    state = SerializedJsonState::ObjectKey;
+                }
+                b'}' => {
+                    cursor += 1;
+                    if !matches!(frames.pop(), Some(SerializedJsonFrame::Object { .. })) {
+                        return None;
+                    }
+                    state = serialized_json_after_value(&frames);
+                }
+                _ => return None,
+            },
+            SerializedJsonState::Value => {
+                let (node, container) = match *bytes.get(cursor)? {
+                    b'[' => {
+                        cursor += 1;
+                        let node = nodes.len();
+                        nodes.push(SerializedJsonNode::Array(Vec::new()));
+                        (node, Some(SerializedJsonFrame::Array(node)))
+                    }
+                    b'{' => {
+                        cursor += 1;
+                        let node = nodes.len();
+                        nodes.push(SerializedJsonNode::Object(Vec::new()));
+                        (
+                            node,
+                            Some(SerializedJsonFrame::Object {
+                                node,
+                                key: None,
+                                positions: std::collections::HashMap::new(),
+                            }),
+                        )
+                    }
+                    b'"' => {
+                        let Some((end, serde_json::Value::String(text))) =
+                            embedded_json_string_prefix(&text[cursor..])
+                        else {
+                            return None;
+                        };
+                        cursor += end;
+                        let node = nodes.len();
+                        nodes.push(SerializedJsonNode::String(text));
+                        (node, None)
+                    }
+                    b't' if text[cursor..].starts_with("true") => {
+                        cursor += 4;
+                        let node = nodes.len();
+                        nodes.push(SerializedJsonNode::Other);
+                        (node, None)
+                    }
+                    b'f' if text[cursor..].starts_with("false") => {
+                        cursor += 5;
+                        let node = nodes.len();
+                        nodes.push(SerializedJsonNode::Other);
+                        (node, None)
+                    }
+                    b'n' if text[cursor..].starts_with("null") => {
+                        cursor += 4;
+                        let node = nodes.len();
+                        nodes.push(SerializedJsonNode::Other);
+                        (node, None)
+                    }
+                    b'0'..=b'9' | b'-' => {
+                        let start = cursor;
+                        while bytes.get(cursor).is_some_and(|c| {
+                            !matches!(c, b' ' | b'\n' | b'\r' | b'\t' | b',' | b']' | b'}')
+                        }) {
+                            cursor += 1;
+                        }
+                        let number =
+                            serde_json::from_str::<serde_json::Number>(&text[start..cursor])
+                                .ok()?;
+                        let node = nodes.len();
+                        nodes.push(SerializedJsonNode::Number(number));
+                        (node, None)
+                    }
+                    _ => return None,
+                };
+                match frames.last_mut() {
+                    Some(SerializedJsonFrame::Array(parent)) => {
+                        let SerializedJsonNode::Array(values) = &mut nodes[*parent] else {
+                            return None;
+                        };
+                        values.push(node);
+                    }
+                    Some(SerializedJsonFrame::Object {
+                        node: parent,
+                        key,
+                        positions,
+                    }) => {
+                        let key = key.take()?;
+                        let SerializedJsonNode::Object(values) = &mut nodes[*parent] else {
+                            return None;
+                        };
+                        if let Some(position) = positions.get(&key) {
+                            values[*position].1 = node;
+                        } else {
+                            positions.insert(key.clone(), values.len());
+                            values.push((key, node));
+                        }
+                    }
+                    None => {
+                        if root.replace(node).is_some() {
+                            return None;
+                        }
+                    }
+                }
+                match container {
+                    Some(frame @ SerializedJsonFrame::Array(_)) => {
+                        frames.push(frame);
+                        state = SerializedJsonState::ArrayValueOrEnd;
+                    }
+                    Some(frame @ SerializedJsonFrame::Object { .. }) => {
+                        frames.push(frame);
+                        state = SerializedJsonState::ObjectKeyOrEnd;
+                    }
+                    None => state = serialized_json_after_value(&frames),
+                }
+            }
+        }
+    }
+}
+
+enum JsonTypedInput {
+    Value(serde_json::Value),
+    Text(String),
+    Serialized { tree: usize, node: usize },
+}
+
+enum RootJson {
+    Value(serde_json::Value),
+    Serialized {
+        nodes: Vec<SerializedJsonNode>,
+        root: usize,
+    },
+}
+
+fn json_typed_claims(value: serde_json::Value) -> Vec<Claim> {
+    json_typed_claims_from(JsonTypedInput::Value(value), Vec::new())
+}
+
+fn serialized_json_typed_claims(nodes: Vec<SerializedJsonNode>, root: usize) -> Vec<Claim> {
+    json_typed_claims_from(
+        JsonTypedInput::Serialized {
+            tree: 0,
+            node: root,
+        },
+        vec![nodes],
+    )
+}
+
+fn json_typed_claims_from(
+    input: JsonTypedInput,
+    mut trees: Vec<Vec<SerializedJsonNode>>,
+) -> Vec<Claim> {
+    let mut claims = Vec::new();
+    let mut pending = vec![input];
+    while let Some(input) = pending.pop() {
+        match input {
+            JsonTypedInput::Value(serde_json::Value::Number(number)) => {
+                if let Some(claim) = as_number(&number.to_string()) {
+                    claims.push(claim);
+                }
+            }
+            JsonTypedInput::Value(serde_json::Value::String(text)) => {
+                pending.push(JsonTypedInput::Text(text));
+            }
+            JsonTypedInput::Value(serde_json::Value::Array(values)) => {
+                pending.extend(values.into_iter().rev().map(JsonTypedInput::Value));
+            }
+            JsonTypedInput::Value(serde_json::Value::Object(values)) => {
+                let keys: Vec<String> = values.keys().cloned().collect();
+                pending.extend(values.into_values().rev().map(JsonTypedInput::Value));
+                pending.extend(keys.into_iter().rev().map(JsonTypedInput::Text));
+            }
+            JsonTypedInput::Value(_) => {}
+            JsonTypedInput::Text(text) => {
+                let trimmed = text.trim_start();
+                if trimmed.starts_with('"') {
+                    if let Ok(decoded) = serde_json::from_str::<String>(&text) {
+                        pending.push(JsonTypedInput::Text(decoded));
+                        continue;
+                    }
+                } else if matches!(trimmed.as_bytes().first(), Some(b'[' | b'{')) {
+                    if let Some((nodes, root)) = parse_serialized_json_container(&text) {
+                        let tree = trees.len();
+                        trees.push(nodes);
+                        pending.push(JsonTypedInput::Serialized { tree, node: root });
+                        continue;
+                    }
+                }
+                claims.extend(
+                    extract_claims(&text).into_iter().filter(|claim| {
+                        matches!(claim.class, ClaimClass::Number | ClaimClass::Path)
+                    }),
+                );
+            }
+            JsonTypedInput::Serialized { tree, node } => match &trees[tree][node] {
+                SerializedJsonNode::Number(number) => {
+                    if let Some(claim) = as_number(&number.to_string()) {
+                        claims.push(claim);
+                    }
+                }
+                SerializedJsonNode::String(text) => {
+                    pending.push(JsonTypedInput::Text(text.clone()));
+                }
+                SerializedJsonNode::Array(values) => {
+                    pending.extend(
+                        values
+                            .iter()
+                            .rev()
+                            .map(|node| JsonTypedInput::Serialized { tree, node: *node }),
+                    );
+                }
+                SerializedJsonNode::Object(values) => {
+                    pending.extend(
+                        values
+                            .iter()
+                            .rev()
+                            .map(|(_, node)| JsonTypedInput::Serialized { tree, node: *node }),
+                    );
+                    pending.extend(
+                        values
+                            .iter()
+                            .rev()
+                            .map(|(key, _)| key.clone())
+                            .map(JsonTypedInput::Text),
+                    );
+                }
+                SerializedJsonNode::Other => {}
+            },
+        }
+    }
+    claims
+}
+
 /// Extract every verifiable claim from a message.
 pub fn extract_claims(text: &str) -> Vec<Claim> {
+    let root_json = if matches!(text.trim_start().as_bytes().first(), Some(b'[' | b'{')) {
+        parse_serialized_json_container(text)
+            .map(|(nodes, root)| RootJson::Serialized { nodes, root })
+    } else {
+        serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .filter(|value| matches!(value, serde_json::Value::String(_)))
+            .map(RootJson::Value)
+    };
     let mut claims = Vec::new();
     claims.extend(extract_urls(text));
     claims.extend(extract_quoted(text));
     for json_word in text.split_whitespace() {
-        let attached_after_residue = if split_attached_value(json_word).is_none() {
-            attached_field_after_closing_bracket(json_word)
-        } else {
+        let attached_after_residue =
+            if root_json.is_none() && split_attached_value(json_word).is_none() {
+                attached_field_after_closing_bracket(json_word)
+            } else {
+                None
+            };
+        let attached_value_claim = if root_json.is_some() {
             None
+        } else {
+            classify_attached_value(attached_after_residue.unwrap_or(json_word))
         };
-        let attached_value_claim =
-            classify_attached_value(attached_after_residue.unwrap_or(json_word));
         // Strip decoration, not content. Agents habitually wrap paths and
         // identifiers in markdown (`/var/log`, **error**), and a claim carrying
         // those marks would never match the plain form sitting in the evidence —
         // a path the user typed themselves would be reported as sourceless.
         let undecorated = trim_decoration(json_word);
-        let word = if looks_like_path(undecorated) {
+        let word = if root_json.is_some() {
+            json_word
+        } else if looks_like_path(undecorated) {
             trim_attached_decoration(json_word)
         } else {
             undecorated
@@ -1530,7 +1925,11 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         if word.is_empty() {
             continue;
         }
-        let whole_word_claim = attached_value_claim.or_else(|| classify_complete_word(word));
+        let whole_word_claim = if root_json.is_some() {
+            None
+        } else {
+            attached_value_claim.or_else(|| classify_complete_word(word))
+        };
         let whole_word_claim = whole_word_claim.filter(|claim| {
             claim.class != ClaimClass::Path
                 || json_word == word
@@ -1564,7 +1963,12 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // curl -w style) is a key=value fact token, and sparing it hid its
         // value from the grounding check entirely.
         if !word_stands_alone {
-            if let Some(fields) = attached_field_segments(json_word) {
+            let fields = if root_json.is_some() {
+                None
+            } else {
+                attached_field_segments(json_word)
+            };
+            if let Some(fields) = fields {
                 for field in fields {
                     let complete_path = || {
                         classify_complete_word(trim_attached_decoration(field))
@@ -1595,41 +1999,16 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
     // In valid JSON, a comma separates values rather than grouping digits.
     // Replace only numeric claims so the existing literal/quote extraction
     // remains intact; string values still use the human-text numeric rules.
-    if let Ok(value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) =
-        serde_json::from_str::<serde_json::Value>(text)
-    {
-        claims.retain(|claim| claim.class != ClaimClass::Number);
-        let mut pending = vec![&value];
-        while let Some(value) = pending.pop() {
-            match value {
-                serde_json::Value::Number(number) => {
-                    if let Some(claim) = as_number(&number.to_string()) {
-                        claims.push(claim);
-                    }
-                }
-                serde_json::Value::String(text) => {
-                    claims.extend(
-                        extract_claims(text)
-                            .into_iter()
-                            .filter(|claim| claim.class == ClaimClass::Number),
-                    );
-                }
-                serde_json::Value::Array(values) => pending.extend(values.iter().rev()),
-                serde_json::Value::Object(values) => {
-                    // Keys are payload too: a histogram keyed by status code
-                    // carries its codes in the keys, and dropping them loses
-                    // facts the text pass this walk replaces did read.
-                    claims.extend(
-                        values
-                            .keys()
-                            .flat_map(|key| extract_claims(key))
-                            .filter(|claim| claim.class == ClaimClass::Number),
-                    );
-                    pending.extend(values.values().rev());
-                }
-                _ => {}
-            }
+    match root_json {
+        Some(RootJson::Value(value)) => {
+            claims.retain(|claim| !matches!(claim.class, ClaimClass::Number | ClaimClass::Path));
+            claims.extend(json_typed_claims(value));
         }
+        Some(RootJson::Serialized { nodes, root }) => {
+            claims.retain(|claim| !matches!(claim.class, ClaimClass::Number | ClaimClass::Path));
+            claims.extend(serialized_json_typed_claims(nodes, root));
+        }
+        None => {}
     }
     dedup(claims)
 }
