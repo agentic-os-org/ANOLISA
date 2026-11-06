@@ -16,6 +16,7 @@ pub(super) fn fallback_bash_execution_path(command: &str) -> ApprovedBashExecuti
         run_id: "validation".to_string(),
         request_id: None,
         tool_use_id: None,
+        timeout_ms: None,
     })
     .is_err()
     {
@@ -58,6 +59,7 @@ pub(crate) fn queue_approved_shell_handoff(
         run_id: request.run_id.clone(),
         request_id,
         tool_use_id: request.tool_use_id.clone(),
+        timeout_ms: shell_handoff_timeout_ms_from_request(request),
     }) else {
         return;
     };
@@ -122,6 +124,7 @@ pub(crate) fn queue_interactive_shell_handoff<W: Write>(
         run_id: handoff.run_id.clone(),
         request_id: None,
         tool_use_id: Some(handoff.tool_id.clone()),
+        timeout_ms: None,
     }) {
         Ok(request) => request,
         Err(message) => {
@@ -210,6 +213,20 @@ pub(crate) fn shell_handoff_command_from_request(
     Err("provider shell tool input has no command field".to_string())
 }
 
+/// The explicit execution budget the provider shell tool declared for this
+/// call, in milliseconds. `None` when the input carries no parseable
+/// `timeout_ms` — the handoff then falls back to the configured global
+/// timeout instead of inventing a budget the caller never asked for.
+pub(crate) fn shell_handoff_timeout_ms_from_request(
+    request: &RuntimeApprovalRequest,
+) -> Option<u64> {
+    request
+        .tool_input
+        .as_ref()?
+        .get("timeout_ms")
+        .and_then(|value| value.as_u64())
+}
+
 /// The command a session trust key authorizes: the text a handoff executes, never
 /// the card's display preview. The two differ for any input shape whose preview
 /// falls back to the serialized tool input — a `{"cmd": ...}` request displays
@@ -241,6 +258,7 @@ pub(super) struct ShellHandoffBuildInput<'a> {
     pub(super) run_id: String,
     pub(super) request_id: Option<String>,
     pub(super) tool_use_id: Option<String>,
+    pub(super) timeout_ms: Option<u64>,
 }
 
 pub(super) fn build_shell_handoff_request(
@@ -257,6 +275,7 @@ pub(super) fn build_shell_handoff_request(
     )?;
     request.request_id = input.request_id;
     request.tool_use_id = input.tool_use_id;
+    request.timeout_ms = input.timeout_ms;
     // Every handoff carries an agent-proposed command, so the pager decision is
     // made here rather than at the transport: user-typed commands never build a
     // handoff request and keep their own pager configuration untouched.
