@@ -8,6 +8,7 @@
 use serde_json::Value;
 use structopt::StructOpt;
 
+use crate::analyzer::message::ResponsesReasoningReplay;
 use crate::chrome_trace::ChromeTraceEvent;
 use crate::tokenizer::{LlmTokenizer, get_global_tokenizer};
 
@@ -385,12 +386,12 @@ impl AnalyzeChatmlCommand {
         // text: a capture that attached after the deltas has them as its only
         // copy, while a complete capture must not count the answer twice.
         let mut saw_responses_text_delta = false;
-        let mut saw_responses_reasoning_delta = false;
         let mut responses_closing_content: Option<String> = None;
-        // Reasoning items carry different thinking rather than a repeat of
-        // one another (an agentic response interleaves one with each call it
-        // precedes), so they accumulate in arrival order instead of replacing.
-        let mut responses_closing_reasoning = String::new();
+        let responses_reasoning_replay =
+            ResponsesReasoningReplay::new(sse_events.iter().filter_map(|event| {
+                let data = event.get("data")?.as_str()?;
+                serde_json::from_str::<serde_json::Value>(data).ok()
+            }));
 
         /// Answer text of a closing `message` output item, or `None`.
         ///
@@ -413,21 +414,6 @@ impl AnalyzeChatmlCommand {
                         .or_else(|| part.get("refusal"))
                         .and_then(|t| t.as_str())
                 })
-                .collect();
-            (!text.is_empty()).then_some(text)
-        }
-
-        /// Thinking text of a closing `reasoning` output item, or `None`.
-        fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
-            let item = chunk.get("item")?;
-            if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
-                return None;
-            }
-            let text: String = ["content", "summary"]
-                .iter()
-                .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
-                .flatten()
-                .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
                 .collect();
             (!text.is_empty()).then_some(text)
         }
@@ -697,7 +683,6 @@ impl AnalyzeChatmlCommand {
                         | Some("response.reasoning_summary_text.delta") => {
                             if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
                                 if !delta.is_empty() {
-                                    saw_responses_reasoning_delta = true;
                                     reasoning_parts.push(delta.to_string());
                                 }
                             }
@@ -712,10 +697,10 @@ impl AnalyzeChatmlCommand {
                                     responses_closing_content = Some(text);
                                 }
                             }
-                            if !saw_responses_reasoning_delta {
-                                if let Some(text) = closing_reasoning_item_text(&data_json) {
-                                    responses_closing_reasoning.push_str(&text);
-                                }
+                            if let Some(text) =
+                                responses_reasoning_replay.closing_item_text(&data_json)
+                            {
+                                reasoning_parts.push(text);
                             }
                         }
                         // The shared aggregator also treats `output_item.done`
@@ -1065,9 +1050,6 @@ impl AnalyzeChatmlCommand {
                     content_parts.push(text);
                 }
             }
-        }
-        if !saw_responses_reasoning_delta && !responses_closing_reasoning.is_empty() {
-            reasoning_parts.push(responses_closing_reasoning);
         }
 
         let mut tool_calls: Vec<String> = {
@@ -2249,6 +2231,28 @@ mod tests {
             resp.reasoning_content.as_deref(),
             Some("Check the logs. Then retry."),
             "delivered deltas supersede every closing reasoning item"
+        );
+    }
+
+    #[test]
+    fn sse_responses_scopes_reasoning_replay_to_the_item() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_0","summary":[{"type":"summary_text","text":"Inspect logs. "}]}}"#,
+            ),
+            sse(
+                r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":1,"summary_index":0,"delta":"Then retry."}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Then retry."}]}}"#,
+            ),
+            sse(r#"{"type":"response.completed","response":{"id":"resp_mixed"}}"#),
+        ];
+
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("Inspect logs. Then retry.")
         );
     }
 

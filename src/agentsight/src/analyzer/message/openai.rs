@@ -26,6 +26,7 @@
 //! }
 //! ```
 
+use super::ResponsesReasoningReplay;
 use super::types::{
     MessageRole, OpenAIChatMessage, OpenAIChoice, OpenAIContent, OpenAIRequest, OpenAIResponse,
     OpenAiSseChunk,
@@ -850,7 +851,7 @@ impl OpenAIParser {
     /// answer in its `content[]` parts, the shape the token extractor's
     /// `read_output_item` reads. Reasoning items also carry text, but it is
     /// the thinking rather than the answer: they are skipped here and read
-    /// by `closing_reasoning_item_text` into the reasoning buffer, the way
+    /// through `ResponsesReasoningReplay` into the reasoning buffer, the way
     /// `read_output_item` routes them to its thinking half.
     fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
         let item = chunk.get("item")?;
@@ -887,40 +888,13 @@ impl OpenAIParser {
         (!refusal.is_empty()).then_some(refusal)
     }
 
-    /// Thinking text of a finished `reasoning` output item, or `None`.
-    ///
-    /// The closing item carries the thinking in its `content[]` parts
-    /// (dashscope `reasoning_text`) and/or `summary[]` (the o-series default),
-    /// the same two fields the token extractor's `read_output_item` routes to
-    /// its thinking half. Reading them in that order keeps this fallback
-    /// identical to the drain path.
-    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
-        let item = chunk.get("item")?;
-        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
-            return None;
-        }
-        let text: String = ["content", "summary"]
-            .iter()
-            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
-            .flatten()
-            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
-            .collect();
-        (!text.is_empty()).then_some(text)
-    }
-
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
         let mut saw_text_delta = false;
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
-        // Reasoning items are kept aside on the same delta-wins rule as the
-        // answer, but unlike it they are not repeats of one another: an
-        // agentic response interleaves a reasoning item with each call it
-        // precedes, and every item carries different thinking. The buffer
-        // therefore accumulates them in arrival order.
-        let mut closing_reasoning_text = String::new();
-        let mut saw_reasoning_delta = false;
+        let reasoning_replay = ResponsesReasoningReplay::new(chunks);
         let mut reasoning_buf = String::new();
         let mut saw_refusal_delta = false;
         // The refusal carried by the closing message item, kept aside on the
@@ -973,10 +947,8 @@ impl OpenAIParser {
                             closing_text = Some(text);
                         }
                     }
-                    if !saw_reasoning_delta {
-                        if let Some(text) = Self::closing_reasoning_item_text(chunk) {
-                            closing_reasoning_text.push_str(&text);
-                        }
+                    if let Some(text) = reasoning_replay.closing_item_text(chunk) {
+                        reasoning_buf.push_str(&text);
                     }
                     if !saw_refusal_delta {
                         if let Some(refusal) = Self::closing_message_item_refusal(chunk) {
@@ -991,9 +963,6 @@ impl OpenAIParser {
                 // reasoning_content delta.
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
-                        if !delta.is_empty() {
-                            saw_reasoning_delta = true;
-                        }
                         reasoning_buf.push_str(delta);
                     }
                 }
@@ -1091,9 +1060,6 @@ impl OpenAIParser {
             if let Some(text) = closing_text {
                 content_buf = text;
             }
-        }
-        if reasoning_buf.is_empty() {
-            reasoning_buf = closing_reasoning_text;
         }
         if refusal_buf.is_empty() {
             if let Some(refusal) = closing_refusal {
@@ -3469,6 +3435,23 @@ mod tests {
             resp.choices[0].message.reasoning_content.as_deref(),
             Some("Check the logs. Then retry."),
             "delivered deltas supersede every closing reasoning item"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_scopes_reasoning_replay_to_the_item() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "reasoning", "id": "rs_0", "summary": [{"type": "summary_text", "text": "Inspect logs. "}]}}),
+            serde_json::json!({"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 1, "summary_index": 0, "delta": "Then retry."}),
+            serde_json::json!({"type": "response.output_item.done", "output_index": 1, "item": {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Then retry."}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_mixed", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("mixed closing and delta reasoning must aggregate");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Inspect logs. Then retry.")
         );
     }
 

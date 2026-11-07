@@ -2,6 +2,7 @@
 
 use super::super::data::{MessageTokenData, ResponseTokenData, TokenData};
 use super::utils::extract_model_from_json;
+use crate::analyzer::message::ResponsesReasoningReplay;
 use serde_json::Value;
 
 /// Extract token data from OpenAI format JSON
@@ -603,13 +604,7 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
         })
     };
     let saw_text_delta = saw_delta("response.output_text.delta");
-    // A reasoning item repeats the thinking, not the answer, and the two
-    // deltas are separate events: a capture cut after the reasoning item but
-    // before the first answer delta has a reasoning delta and no text delta,
-    // so the text rule alone let the item's thinking land in the answer buffer
-    // while the deltas had already counted it as reasoning.
-    let saw_reasoning_delta = saw_delta("response.reasoning_text.delta")
-        || saw_delta("response.reasoning_summary_text.delta");
+    let reasoning_replay = ResponsesReasoningReplay::new(chunks);
     // A refusal is the call's answer too, and it repeats the same way: the
     // `response.refusal.done` event closes the deltas, so it is read only
     // when no refusal delta was captured.
@@ -620,7 +615,7 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
             Some("response.refusal.done") => saw_refusal_delta,
             Some("response.output_item.done") => {
                 if chunk.get("item").is_some_and(is_reasoning_item) {
-                    saw_reasoning_delta
+                    false
                 } else {
                     // A message item repeats its refusal part too.
                     saw_text_delta || saw_refusal_delta
@@ -671,6 +666,11 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
                     content.push_str(&chunk_content);
                 }
             }
+            let chunk_reasoning = if closing_reasoning {
+                reasoning_replay.closing_item_text(chunk)
+            } else {
+                chunk_reasoning
+            };
             if let Some(reasoning_chunk) = chunk_reasoning {
                 if !reasoning_chunk.is_empty() {
                     if closing && !closing_reasoning {
@@ -1540,9 +1540,9 @@ mod tests {
             "every closing reasoning item carries different thinking and must be kept"
         );
 
-        // Accumulating the closing items must not weaken the delta-wins rule:
-        // when the thinking arrived as deltas, `repeats_delivered_text` drops
-        // every closing reasoning item whatever their number.
+        // Accumulating closing items must not weaken legacy identity-less
+        // suppression: when the thinking arrived as deltas, replay filtering
+        // drops every closing reasoning item whatever their number.
         let with_deltas = vec![
             serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Check the logs. "}),
             serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Then retry."}),
@@ -1554,8 +1554,22 @@ mod tests {
         let (_content, reasoning, _tool_calls) = merge_response_output_text(&with_deltas);
         assert_eq!(
             reasoning, "Check the logs. Then retry.",
-            "delivered deltas supersede every closing reasoning item"
+            "delivered identity-less deltas supersede every closing reasoning item"
         );
+    }
+
+    #[test]
+    fn test_merge_response_output_text_scopes_reasoning_replay_to_the_item() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs_0", "summary": [{"type": "summary_text", "text": "Inspect logs. "}]}}),
+            serde_json::json!({"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 1, "summary_index": 0, "delta": "Then retry."}),
+            serde_json::json!({"type": "response.output_item.done", "output_index": 1,
+                "item": {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Then retry."}]}}),
+        ];
+
+        let (_content, reasoning, _tool_calls) = merge_response_output_text(&chunks);
+        assert_eq!(reasoning, "Inspect logs. Then retry.");
     }
 
     /// Reasoning and tool fragments pass through the same merge unchanged.

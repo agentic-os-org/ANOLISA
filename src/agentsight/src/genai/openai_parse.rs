@@ -8,8 +8,8 @@
 
 use super::GenAIBuilder;
 use super::semantic::{InputMessage, LLMRequest, MessagePart, OutputMessage};
-use crate::analyzer::message::ResponsesToolCalls;
 use crate::analyzer::message::types::OpenAIChatMessage;
+use crate::analyzer::message::{ResponsesReasoningReplay, ResponsesToolCalls};
 use crate::analyzer::{HttpRecord, ParsedApiMessage};
 use std::collections::HashMap;
 
@@ -1245,29 +1245,6 @@ impl GenAIBuilder {
         (!refusal.is_empty()).then_some(refusal)
     }
 
-    /// Thinking text of a finished `reasoning` output item, or `None`.
-    ///
-    /// The closing item carries its thinking in `content[]` parts (dashscope
-    /// `reasoning_text`) and/or `summary[]` (the o-series default), the same
-    /// two fields the token extractor's `read_output_item` routes to its
-    /// thinking half. Unlike the answer, reasoning items do not repeat one
-    /// another: an agentic response interleaves one before each call it makes
-    /// and every item carries different thinking, so callers accumulate the
-    /// results in arrival order instead of replacing.
-    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
-        let item = chunk.get("item")?;
-        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
-            return None;
-        }
-        let text: String = ["content", "summary"]
-            .iter()
-            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
-            .flatten()
-            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
-            .collect();
-        (!text.is_empty()).then_some(text)
-    }
-
     /// Aggregate OpenAI **Responses** API SSE chunks into parts.
     ///
     /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
@@ -1301,12 +1278,7 @@ impl GenAIBuilder {
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
-        // Whether a non-empty reasoning delta arrived, and the thinking a
-        // finished `reasoning` item carries. Same delta-wins rule as the text
-        // above, but the items accumulate rather than replace: each one holds
-        // different thinking.
-        let mut saw_reasoning_delta = false;
-        let mut closing_reasoning_text = String::new();
+        let reasoning_replay = ResponsesReasoningReplay::new(chunks);
         let mut reasoning_buf = String::new();
         // Whether a non-empty refusal delta arrived, and the refusal a closing
         // message item carries, on the same delta-wins rule as the text above.
@@ -1370,9 +1342,6 @@ impl GenAIBuilder {
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
-                        if !delta.is_empty() {
-                            saw_reasoning_delta = true;
-                        }
                         reasoning_buf.push_str(delta);
                     }
                 }
@@ -1450,10 +1419,8 @@ impl GenAIBuilder {
                     // A `reasoning` item carries the thinking the deltas
                     // streamed; a capture that attached after them has the
                     // item as its only copy. Every item is kept, in order.
-                    if !saw_reasoning_delta
-                        && let Some(text) = Self::closing_reasoning_item_text(chunk)
-                    {
-                        closing_reasoning_text.push_str(&text);
+                    if let Some(text) = reasoning_replay.closing_item_text(chunk) {
+                        reasoning_buf.push_str(&text);
                         saw_responses_event = true;
                     }
                     // The answer a model declines to give rides a `refusal`
@@ -1524,9 +1491,6 @@ impl GenAIBuilder {
         // non-empty delta was captured.
         if !saw_text_delta && let Some(text) = closing_text {
             text_buf = text;
-        }
-        if !saw_reasoning_delta && !closing_reasoning_text.is_empty() {
-            reasoning_buf = closing_reasoning_text;
         }
         if !saw_refusal_delta && let Some(refusal) = closing_refusal {
             refusal_buf = refusal;
@@ -2970,10 +2934,9 @@ mod tests {
     }
 
     /// A capture that attached after the reasoning deltas has only the
-    /// finished `reasoning` items. Both the live parser
-    /// (`closing_reasoning_item_text`) and the token extractor's
-    /// `read_output_item` read them; the drain merger read only the deltas and
-    /// dropped the thinking entirely.
+    /// finished `reasoning` items. The live parser and token extractor read
+    /// them through `ResponsesReasoningReplay`; the drain merger read only
+    /// the deltas and dropped the thinking entirely.
     ///
     /// An agentic turn interleaves one reasoning item per call, and each item
     /// holds different thinking, so every item must be kept in arrival order —
@@ -3015,6 +2978,27 @@ mod tests {
         assert!(
             matches!(&parts[0], MessagePart::Reasoning { content } if content == "think"),
             "deltas must win over their closing copies, got {parts:?}"
+        );
+    }
+
+    #[test]
+    fn test_responses_sse_scopes_reasoning_replay_to_the_item() {
+        let body = r#"[
+            {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_0","summary":[
+                {"type":"summary_text","text":"Inspect logs. "}
+            ]}},
+            {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":1,"summary_index":0,"delta":"Then retry."},
+            {"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[
+                {"type":"summary_text","text":"Then retry."}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_mixed","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("mixed closing and delta reasoning must yield output");
+        assert!(
+            matches!(&parts[0], MessagePart::Reasoning { content }
+                if content == "Inspect logs. Then retry."),
+            "got {parts:?}"
         );
     }
 

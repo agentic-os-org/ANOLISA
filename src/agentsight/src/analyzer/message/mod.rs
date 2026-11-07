@@ -42,6 +42,7 @@ mod anthropic;
 pub mod gemini;
 mod openai;
 mod qoder;
+mod responses_reasoning;
 pub mod sysom;
 pub mod types;
 
@@ -50,6 +51,7 @@ pub use gemini::GeminiParser;
 pub use openai::OpenAIParser;
 pub(crate) use openai::ResponsesToolCalls;
 pub(crate) use qoder::QoderCliParser;
+pub(crate) use responses_reasoning::ResponsesReasoningReplay;
 pub use sysom::SysomParser;
 pub use types::*;
 
