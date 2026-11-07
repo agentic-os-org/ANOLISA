@@ -61,6 +61,38 @@ def _write_tree(tree: ET.ElementTree, path: str) -> None:
         pass
 
 
+def _insert_row_sorted(sheet_data: ET.Element, row_num: int) -> ET.Element:
+    """Create a row element and insert it so sheetData stays ascending by r.
+
+    SpreadsheetML requires sheetData rows in ascending order. Appending new
+    rows at the tail corrupts the worksheet when later rows already exist
+    (e.g. rows 1 and 5 present while adding formulas to rows 2:3).
+    """
+    row_el = ET.Element(_tag("row"))
+    row_el.set("r", str(row_num))
+    # Fast path: tail-append is sound because sheetData is kept ascending,
+    # so the last row is the max and `last_r < row_num` means row_num
+    # belongs after every existing row. Callers usually create rows in
+    # ascending order, which is why this hits almost always — but the
+    # invariant is the sheet's order, not the caller's. The head scan
+    # below stays the fallback for out-of-order single inserts (e.g. a
+    # total row above the formula span).
+    n = len(sheet_data)
+    if n:
+        last_r = sheet_data[n - 1].get("r")
+        if last_r is not None and int(last_r) < row_num:
+            sheet_data.insert(n, row_el)
+            return row_el
+    insert_at = n
+    for i, existing in enumerate(sheet_data):
+        r = existing.get("r")
+        if r is not None and int(r) > row_num:
+            insert_at = i
+            break
+    sheet_data.insert(insert_at, row_el)
+    return row_el
+
+
 def col_number(s: str) -> int:
     n = 0
     for c in s.upper():
@@ -320,9 +352,7 @@ def main() -> None:
         start, end = map(int, args.formula_rows.split(":"))
         for row_num in range(start, end + 1):
             if row_num not in row_map:
-                row_el = ET.SubElement(sheet_data, _tag("row"))
-                row_el.set("r", str(row_num))
-                row_map[row_num] = row_el
+                row_map[row_num] = _insert_row_sorted(sheet_data, row_num)
 
             formula_text = args.formula.replace("{row}", str(row_num))
             formula_text = formula_text.lstrip("=")
@@ -339,9 +369,8 @@ def main() -> None:
     # Add total formula
     if args.total_row and args.total_formula:
         if args.total_row not in row_map:
-            row_el = ET.SubElement(sheet_data, _tag("row"))
-            row_el.set("r", str(args.total_row))
-            row_map[args.total_row] = row_el
+            row_map[args.total_row] = _insert_row_sorted(sheet_data,
+                                                         args.total_row)
 
         total_f = args.total_formula.lstrip("=")
         cell = ET.SubElement(row_map[args.total_row], _tag("c"))
