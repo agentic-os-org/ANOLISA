@@ -250,12 +250,26 @@ impl SessionLogService {
     /// what it has done most recently. A most-recent entry that alone
     /// exceeds the cap degrades to its final `cap` bytes (a partial
     /// line the jsonl parser tolerates), never to an empty string.
+    ///
+    /// A trailing fragment that was never newline-terminated is dropped, so
+    /// a writer killed mid-append cannot make the records it already
+    /// completed unreadable — nor fail the UTF-8 decode for the whole
+    /// window. A log whose only bytes are such a fragment reads back empty:
+    /// no record was ever completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Io`] when the log cannot be read, and
+    /// [`MemoryError::Other`] when the bytes between two record boundaries
+    /// are not valid UTF-8.
     pub fn read_log(&self) -> Result<String> {
         // Hold the write-side lock while reading so we get a consistent
         // snapshot (no half-written lines) — not to prevent concurrent
-        // corruption, which O_APPEND already guarantees. The held log_file
-        // handle is opened append/write-only, so the actual reads go through
-        // a fresh read-only view of the same anchored path.
+        // corruption, which O_APPEND already guarantees. The lock cannot
+        // cover a writer that died mid-append, which is what
+        // `drop_torn_tail` below is for. The held log_file handle is opened
+        // append/write-only, so the actual reads go through a fresh
+        // read-only view of the same anchored path.
         let _g = self.log_file.lock().unwrap_or_else(|e| e.into_inner());
         let cap = Self::MAX_SESSION_LOG_BYTES;
         let mut f = std::fs::File::open(&self.log_path)?;
@@ -267,7 +281,9 @@ impl SessionLogService {
             // between the metadata call and this read.
             let mut raw = Vec::new();
             (&mut f).take(cap).read_to_end(&mut raw)?;
-            return String::from_utf8(raw).map_err(|e| MemoryError::Other(e.to_string()));
+            let whole = Self::drop_torn_tail(&raw);
+            return String::from_utf8(whole.to_vec())
+                .map_err(|e| MemoryError::Other(e.to_string()));
         }
 
         // Read only the last `cap` bytes instead of the whole file first:
@@ -291,19 +307,44 @@ impl SessionLogService {
         // start may have split mid-character, which would otherwise make
         // the tail fail `from_utf8` instead of degrading to a shorter
         // (partial-line) string.
-        let start = window
+        let boundary = window
             .iter()
             .position(|&b| b == b'\n')
             .map(|p| p + 1)
-            .filter(|&s| s < window.len())
-            .unwrap_or_else(|| {
-                let mut s = 0;
-                while s < window.len() && (window[s] & 0xC0) == 0x80 {
-                    s += 1;
-                }
-                s
-            });
-        String::from_utf8(window[start..].to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
+            .filter(|&s| s < window.len());
+        let start = boundary.unwrap_or_else(|| {
+            let mut s = 0;
+            while s < window.len() && (window[s] & 0xC0) == 0x80 {
+                s += 1;
+            }
+            s
+        });
+        let tail = &window[start..];
+        // Drop a torn tail only when the window opened on a record boundary.
+        // Without one, these bytes are the tail of a single oversized entry
+        // and must degrade to a partial line rather than to an empty read.
+        let tail = if boundary.is_some() {
+            Self::drop_torn_tail(tail)
+        } else {
+            tail
+        };
+        String::from_utf8(tail.to_vec()).map_err(|e| MemoryError::Other(e.to_string()))
+    }
+
+    /// Cut a log window at its last `\n`, dropping any trailing fragment.
+    ///
+    /// [`Self::append_log`] writes every record as one line ending in `\n`,
+    /// so bytes after the final newline are a record that was never
+    /// completed — the state a crash or SIGKILL mid-append leaves behind.
+    /// Such a fragment can stop inside a multi-byte UTF-8 character, which
+    /// would fail the decode for the whole window; an unterminated line is
+    /// not a record any reader could have parsed, so dropping it loses
+    /// nothing that was ever durable. Empty when no line was completed.
+    fn drop_torn_tail(window: &[u8]) -> &[u8] {
+        match window.iter().rposition(|&b| b == b'\n') {
+            Some(newline) => &window[..=newline],
+            None => &[],
+        }
     }
 
     /// Copy a file from `<scratch>/<src_in_scratch>` to `<mount.root>/<dst_in_store>`.
