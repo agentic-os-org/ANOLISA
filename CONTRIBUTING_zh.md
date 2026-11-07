@@ -213,17 +213,10 @@ PR title 使用 `type(scope): description`。prelint workflow 会把标题、分
 
 ## 文档同步
 
-文档变更必须遵循 [`specs/documentation-standard.md`](specs/documentation-standard.md)，并保持中英文页面语义等价。两种语言中的命令示例必须完全相同。根指南只做跨组件总览，完整用法和架构内容放在以下规范位置。
+按[文档规范 §5 的 PR 文档更新规则](specs/documentation-standard.md#5-pr-documentation-update-rules)
+确定同一 PR 中需要更新的页面。保持中英文页面语义等价，两种语言的命令示例完全相同。
 
-| 变更 | 同一 PR 中需要更新 |
-| --- | --- |
-| CLI 命令或 flag | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
-| 配置选项 | 组件 `README.md` 和对应的 `docs/user-guide/` 页面。 |
-| 安装方式 | 涉及的共享安装/快速开始页面、组件手册和组件 README。 |
-| 架构或协议 | `src/<component>/docs/design/`。 |
-| 新增组件 | 根 README，必要时更新 `NOTICE`。 |
-
-日常功能和修复 PR 更新 README 与 user-guide 页面。发布版本 bump PR 再把面向用户的变更汇总到 `CHANGELOG*.md`。
+发布版本升级 PR 将用户可感知的变更汇总到 `CHANGELOG*.md`。
 
 ## 许可证
 
