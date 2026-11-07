@@ -21,6 +21,10 @@ ANOLISA/
     ├── README.md                # Documentation organization and maintenance
     ├── README_zh.md
     ├── navigation.yaml          # Website navigation, labels and descriptions
+    ├── adr/
+    │   ├── README.md            # Index of all architecture decision records
+    │   ├── README_zh.md         # Chinese index
+    │   └── assets/<number>/     # Assets for the corresponding ADR
     ├── user-guide/
     │   └── {en,zh}/
     │       ├── index.md
@@ -75,9 +79,11 @@ separate documentation sources.
 General contribution instructions live in the repository's
 [contribution guide](../CONTRIBUTING.md), with component development chapters in
 [`contribute/`](../contribute/en/). SDK and integration documentation is collected
-in [`developer-guide/`](developer-guide/en/index.md). Component technical designs
-stay with their source under `src/<component>/docs/` or the component's
-registered source root.
+in [`developer-guide/`](developer-guide/en/index.md). All architecture decision
+records, including system-wide, cross-component, and component-specific decisions,
+live in [`adr/`](adr/README.md). Detailed implementation designs and protocol
+specifications stay with their source under `src/<component>/docs/` or the
+component's registered source root and link to the corresponding ADR.
 
 The same navigation YAML defines the SDK and AW integration dropdown and the
 contribution sidebar. The website renders the existing root and component

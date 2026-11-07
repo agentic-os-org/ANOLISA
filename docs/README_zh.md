@@ -21,6 +21,10 @@ ANOLISA/
     ├── README.md                # 文档目录的组织与维护说明
     ├── README_zh.md
     ├── navigation.yaml          # 网站导航、中英文标签和简介
+    ├── adr/
+    │   ├── README.md            # 所有架构决策记录的索引
+    │   ├── README_zh.md         # 中文索引
+    │   └── assets/<number>/     # 对应 ADR 引用的资源
     ├── user-guide/
     │   └── {en,zh}/
     │       ├── index.md
@@ -65,8 +69,10 @@ node website/scripts/navigation.mjs --write-indexes
 
 通用贡献流程放在仓库根目录的[贡献指南](../CONTRIBUTING_zh.md)中，组件开发章节
 放在根目录 [`contribute/`](../contribute/zh/)。SDK 和集成文档集中在
-[`developer-guide/`](developer-guide/zh/index.md)。组件技术设计
-随源码放在 `src/<component>/docs/` 或组件登记的源码目录中。
+[`developer-guide/`](developer-guide/zh/index.md)。所有架构决策记录，
+包括系统级、跨组件和单组件决策，统一放在 [`adr/`](adr/README_zh.md) 中。详细实现设计
+和协议说明随源码放在 `src/<component>/docs/` 或组件登记的源码目录中，并链接到
+对应的 ADR。
 
 同一份导航 YAML 也定义 SDK、AW 接入下拉菜单和贡献者指南侧栏。网站将现有根目录及
 组件内的 `CONTRIBUTING*.md` 与 `contribute/` 章节一起展示，不另写重复的贡献总览。
