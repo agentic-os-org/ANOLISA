@@ -129,6 +129,7 @@ pub(crate) enum HealthFactSource {
     ProcUptime,
     ProcLoadavg,
     ProcMeminfo,
+    ProcSysKernel,
     DfP,
     JournalctlK,
     Dmesg,
@@ -288,6 +289,9 @@ pub(crate) enum HealthMessageId {
     HealthTryReasonServiceState,
     HealthTryReasonHighLoad,
     HealthTryReasonMissingCoreCheck,
+    HealthFindingWorkspaceConfinementUnsupported,
+    HealthInsightWorkspaceConfinementUnsupported,
+    HealthRemediationWorkspaceConfinement,
 }
 
 impl HealthMessageId {
@@ -407,6 +411,15 @@ impl HealthMessageId {
             Self::HealthTryReasonHighLoad => crate::MessageId::HealthTryReasonHighLoad,
             Self::HealthTryReasonMissingCoreCheck => {
                 crate::MessageId::HealthTryReasonMissingCoreCheck
+            }
+            Self::HealthFindingWorkspaceConfinementUnsupported => {
+                crate::MessageId::HealthFindingWorkspaceConfinementUnsupported
+            }
+            Self::HealthInsightWorkspaceConfinementUnsupported => {
+                crate::MessageId::HealthInsightWorkspaceConfinementUnsupported
+            }
+            Self::HealthRemediationWorkspaceConfinement => {
+                crate::MessageId::HealthRemediationWorkspaceConfinement
             }
         }
     }

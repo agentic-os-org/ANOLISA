@@ -151,6 +151,15 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthTryReasonServiceState => "配置服务状态异常",
         MessageId::HealthTryReasonHighLoad => "最近负载持续偏高",
         MessageId::HealthTryReasonMissingCoreCheck => "核心健康检查缺失",
+        MessageId::HealthFindingWorkspaceConfinementUnsupported => {
+            "Agent 文件工具需要 Linux {required}+（openat2）"
+        }
+        MessageId::HealthInsightWorkspaceConfinementUnsupported => {
+            "内核 {kernel} 不提供 openat2（需 Linux {required}+），cosh-core 会在 Agent 文件工具运行前退出"
+        }
+        MessageId::HealthRemediationWorkspaceConfinement => {
+            "请在 Linux {required} 或更新内核的主机上运行 cosh（当前内核：{kernel}）；openat2(2) 是把 Agent 文件访问限定在工作区内的前提，缺失时 cosh-core 拒绝启动工作区受限的读写工具"
+        }
         _ => return None,
     })
 }
