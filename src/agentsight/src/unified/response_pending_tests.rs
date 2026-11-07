@@ -934,6 +934,45 @@ fn drain_fallback_counts_dashscope_native_parameter_tools() {
         "the native tool definitions must reach the template: {counted} vs {baseline}"
     );
 }
+
+/// A dead PID must retain provider usage from an SSE event split across reads.
+#[test]
+fn drain_recovers_split_event_usage() {
+    let mut aggregator = Aggregator::with_limits(
+        4,
+        &RuntimeLimits {
+            connection_idle_timeout_secs: 0,
+            ..Default::default()
+        },
+    );
+    let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert!(feed(&mut aggregator, 1, request.as_bytes()).is_empty());
+
+    let head = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+    );
+    assert!(feed(&mut aggregator, 0, head.as_bytes()).is_empty());
+    assert!(feed(&mut aggregator, 0, b"data: {\"usage\":{\"input_tokens\":57").is_empty());
+    assert!(feed(&mut aggregator, 0, b",\"output_tokens\":7}}\n\n").is_empty());
+
+    assert!(!crate::utils::procfs::proc_pid(PID).exists());
+    let drained = aggregator.drain_dead_pid_connections();
+    assert_eq!(drained.len(), 1, "the dead-PID drain keeps the call");
+    let removed = drained.into_iter().next().unwrap();
+    let sse_events = match &removed.state {
+        ConnectionState::SseActive { sse_events, .. } => sse_events,
+        _ => panic!("expected an active SSE stream to drain"),
+    };
+    let enrichment = GenAIBuilder::extract_sse_enrichment(sse_events).expect("enrichment");
+    assert_eq!(enrichment.input_tokens, Some(57));
+    assert_eq!(enrichment.output_tokens, Some(7));
+}
+
 /// The #7553 clean-exit completion path: a headers-only response that the
 /// application never reads must land as a usable `complete` row through
 /// `complete_pid_partial_responses` + `persist_drained_pending`.
