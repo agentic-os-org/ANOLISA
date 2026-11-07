@@ -46,6 +46,27 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## 技能退场计划
+
+OS Skills 计划将下列九个技能移出默认技能包，并逐步结束对内置副本的常规维护。
+当前技能包仍包含这些技能。调整后，OS Skills 将更聚焦于系统运维，用户可按下表使用
+各工作流程对应的官方工具、上游技能或发行版文档。
+
+| 技能 | 迁移方式 |
+|------|----------|
+| `github` | 直接使用 `gh` 处理 issue、PR 和 CI。参见 [GitHub CLI 手册](https://cli.github.com/manual/)。 |
+| `clawhub-skill-mng` | 使用官方 CLI 搜索、安装和更新技能。如果曾依赖内置技能的 cosh 配置，请核对注册表地址和安装路径。参见 [ClawHub CLI 指南](https://github.com/openclaw/clawhub/blob/main/docs/cli.md)。 |
+| `humanizer` | 按需单独安装上游技能。参见 [Humanizer](https://github.com/blader/humanizer)。 |
+| `image-gen` | 计划将百炼集成交由使用它的产品维护。直接调用 API 时，参见[阿里云百炼文生图指南](https://help.aliyun.com/zh/model-studio/text-to-image)。 |
+| `pdf-reader` | 使用 Agent 自带的 PDF 工具或 PyMuPDF 集成。切换自动化流程前，验证页码选择、表格提取和 JSON 输出。参见 [PyMuPDF 文档](https://pymupdf.readthedocs.io/en/latest/)。 |
+| `xlsx` | 通用表格任务可使用同源的上游技能。切换前，用实际样本验证编辑后的工作簿是否完整，以及能否在所用应用中打开和使用。参见 [MiniMax XLSX](https://github.com/MiniMax-AI/skills/blob/main/skills/minimax-xlsx/SKILL.md)。 |
+| `regex-mastery` | 查阅所用工具或语言的正则表达式文档。`grep` 用法可参见 [GNU grep 参考](https://www.gnu.org/s/grep/manual/html_node/Regular-Expressions.html)。 |
+| `shell-scripting` | 通用脚本编写可参见 [Bash 手册](https://www.gnu.org/s/bash/manual/bash.html)或 [Zsh 手册](https://zsh.sourceforge.io/Doc/Release/index.html)。ALinux 4 运维脚本可参见 [Bash 脚本编写指南](system-admin/alinux-admin/references/shell-scripting.md)。 |
+| `upgrade-alinux-kernel` | 按当前安装版本查阅发行版的内核升级与恢复指引。参见 [Alibaba Cloud Linux 文档](https://help.aliyun.com/zh/alinux/)。 |
+
+如果内置技能导致数据丢失或阻塞关键流程，请在 [GitHub issue](https://github.com/agentic-os-org/ANOLISA/issues)
+中注明 OS Skills 版本和实际影响。安全漏洞请按[安全政策](../../SECURITY.md)报告。
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
