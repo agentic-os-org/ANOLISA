@@ -29,6 +29,55 @@ enum RawVerdict {
     Detour(DetourVerdict),
 }
 
+struct Arbitrated {
+    save_tokens: usize,
+    evidence_note: Option<String>,
+    below_noise_line: bool,
+}
+
+/// Discount context edits on cache-warm trajectories and dismiss noise-level net savings.
+fn arbitrate_cache_priority(
+    cand_id: &str,
+    save_tokens: usize,
+    cache_hit: Option<f64>,
+    total_billed: usize,
+) -> Arbitrated {
+    let Some(m3) = cache_hit else {
+        return Arbitrated {
+            save_tokens,
+            evidence_note: None,
+            below_noise_line: false,
+        };
+    };
+    // Prompt compression also edits replayed context and invalidates the cached prefix.
+    if m3 > 0.5 && matches!(cand_id, "history" | "tool_output" | "user_prompt") {
+        let factor = 1.0 - m3 * (1.0 - CACHED_PRICE_RATIO);
+        let adjusted = (save_tokens as f64 * factor).round() as usize;
+        tracing::info!(
+            "Cost: 缓存优先仲裁 '{cand_id}' — M3={:.0}%，净收益 {save_tokens} → {adjusted} tok",
+            m3 * 100.0
+        );
+        if (adjusted as f64 / total_billed.max(1) as f64) < NOISE_LINE {
+            tracing::info!("Cost: strategy '{cand_id}' ✗ 缓存折算后低于噪声线，不报");
+            return Arbitrated {
+                save_tokens: adjusted,
+                evidence_note: None,
+                below_noise_line: true,
+            };
+        }
+        return Arbitrated {
+            save_tokens: adjusted,
+            evidence_note: Some(format!("（已按 M3={:.0}% 缓存命中折算净收益）", m3 * 100.0)),
+            below_noise_line: false,
+        };
+    }
+    Arbitrated {
+        save_tokens,
+        evidence_note: None,
+        below_noise_line: false,
+    }
+}
+
 /// Run full cost-waste identification: Rust candidate extraction → parallel per-candidate LLM eval → merge.
 /// Parses events only once and reuses them for both cost computation and candidate extraction.
 pub async fn identify_waste(
@@ -152,35 +201,15 @@ pub async fn identify_waste(
             v.evidence.clone()
         };
 
-        // 仲裁——缓存优先原则 (playbook 规则 1): when the cache hit rate is high,
-        // history-editing strategies invalidate the KV cache from the edit point
-        // on, so their net benefit is the full-price share of the saved tokens.
-        // Below the noise line after discounting → dismissed deterministically.
-        // (主手段去重——playbook 规则 2——needs no code: candidate sources are
-        // disjoint by construction: assistant history vs tool results vs inputs.)
-        if let Some(m3) = cache_hit {
-            if m3 > 0.5 && matches!(cand.id.as_str(), "history" | "tool_output") {
-                let factor = 1.0 - m3 * (1.0 - CACHED_PRICE_RATIO);
-                let adjusted = (save_tokens as f64 * factor).round() as usize;
-                tracing::info!(
-                    "Cost: 缓存优先仲裁 '{}' — M3={:.0}%，净收益 {} → {} tok",
-                    cand.id,
-                    m3 * 100.0,
-                    save_tokens,
-                    adjusted
-                );
-                if (adjusted as f64 / total_billed as f64) < NOISE_LINE {
-                    tracing::info!("Cost: strategy '{}' ✗ 缓存折算后低于噪声线，不报", cand.id);
-                    dismissed += 1;
-                    continue;
-                }
-                save_tokens = adjusted;
-                evidence = format!(
-                    "{}（已按 M3={:.0}% 缓存命中折算净收益）",
-                    evidence,
-                    m3 * 100.0
-                );
-            }
+        // Candidate sources are disjoint, so primary-strategy deduplication needs no code.
+        let arbitrated = arbitrate_cache_priority(&cand.id, save_tokens, cache_hit, total_billed);
+        if arbitrated.below_noise_line {
+            dismissed += 1;
+            continue;
+        }
+        save_tokens = arbitrated.save_tokens;
+        if let Some(note) = arbitrated.evidence_note {
+            evidence = format!("{evidence}{note}");
         }
 
         items.push(WasteItem {
@@ -520,5 +549,57 @@ mod tests {
             report.is_err(),
             "all judgments failed against a dead endpoint; expected Err, got {report:?}"
         );
+    }
+
+    #[test]
+    fn history_arbitration_follows_the_playbook_formula() {
+        let arbitrated = arbitrate_cache_priority("history", 100_000, Some(0.8), 1_000_000);
+        assert_eq!(arbitrated.save_tokens, 40_000);
+        assert!(!arbitrated.below_noise_line);
+        assert!(arbitrated.evidence_note.is_some());
+    }
+
+    #[test]
+    fn prompt_compression_is_discounted_like_other_history_edits() {
+        let history = arbitrate_cache_priority("history", 100_000, Some(0.8), 1_000_000);
+        let prompt = arbitrate_cache_priority("user_prompt", 100_000, Some(0.8), 1_000_000);
+        assert_eq!(prompt.save_tokens, history.save_tokens);
+        assert!(!prompt.below_noise_line);
+        assert!(prompt.evidence_note.is_some());
+    }
+
+    #[test]
+    fn prompt_compression_below_the_noise_line_is_dismissed() {
+        let prompt = arbitrate_cache_priority("user_prompt", 2_000, Some(0.9), 200_000);
+        assert_eq!(prompt.save_tokens, 650);
+        assert!(prompt.below_noise_line);
+        assert!(prompt.evidence_note.is_none());
+    }
+
+    #[test]
+    fn cold_cache_and_non_history_candidates_keep_full_savings() {
+        for id in ["user_prompt", "history", "tool_output"] {
+            let cold = arbitrate_cache_priority(id, 10_000, Some(0.2), 1_000_000);
+            assert_eq!(
+                cold.save_tokens, 10_000,
+                "{id} cold cache keeps full savings"
+            );
+            assert!(cold.evidence_note.is_none());
+            assert!(!cold.below_noise_line);
+
+            let no_usage = arbitrate_cache_priority(id, 10_000, None, 1_000_000);
+            assert_eq!(
+                no_usage.save_tokens, 10_000,
+                "{id} without usage keeps full savings"
+            );
+            assert!(no_usage.evidence_note.is_none());
+            assert!(!no_usage.below_noise_line);
+        }
+        for id in ["fixed_overhead", "detour"] {
+            let warm = arbitrate_cache_priority(id, 10_000, Some(0.9), 1_000_000);
+            assert_eq!(warm.save_tokens, 10_000, "{id} is not a history edit");
+            assert!(warm.evidence_note.is_none());
+            assert!(!warm.below_noise_line);
+        }
     }
 }
