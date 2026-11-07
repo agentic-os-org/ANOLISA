@@ -849,6 +849,56 @@ async fn mem_export_returns_ama_json() {
 }
 
 #[tokio::test]
+async fn task_save_clamps_out_of_range_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
+    handshake(&mut reader, &mut stdin).await;
+
+    // Issue #3746: the MCP boundary narrowed `progress` with `as u8` before the
+    // domain clamp ran, so 300 was persisted as 44% and 256 as 0%.
+    let mut saved = Vec::new();
+    for (id, progress) in [(300u64, 300u64), (301, 256), (302, 44)] {
+        let resp = call_tool(
+            &mut reader,
+            &mut stdin,
+            id,
+            "memory_task_save",
+            json!({"title": format!("clamp probe {progress}"), "progress": progress}),
+        )
+        .await;
+        let text = extract_text(&resp);
+        let expected = progress.min(100);
+        assert!(
+            text.contains(&format!("progress={expected}%")),
+            "progress {progress} must report {expected}% over MCP, got: {text}"
+        );
+        let task_id = text
+            .strip_prefix("task saved: ")
+            .and_then(|rest| rest.split(' ').next())
+            .unwrap_or_default()
+            .to_string();
+        assert!(!task_id.is_empty(), "no task id in reply: {text}");
+        saved.push((progress, task_id));
+    }
+
+    // The clamped value must also be what the persisted task reports.
+    let resp = call_tool(&mut reader, &mut stdin, 310, "memory_task_list", json!({})).await;
+    let listed: Value = serde_json::from_str(&extract_text(&resp)).expect("task list JSON");
+    for (progress, task_id) in &saved {
+        let expected = (*progress).min(100);
+        let got = listed
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|t| t["id"] == task_id.as_str()))
+            .and_then(|task| task["progress"].as_u64())
+            .unwrap_or_else(|| panic!("task {task_id} missing from list: {listed}"));
+        assert_eq!(got, expected, "persisted progress for input {progress}");
+    }
+
+    drop(stdin);
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
 async fn auto_capture_consent_changes_apply_to_the_same_mcp_connection() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut child, mut reader, mut stdin) = spawn_with_dir(tmp.path()).await;
