@@ -103,6 +103,8 @@ python3 SKILL_DIR/scripts/xlsx_pack.py /tmp/xlsx_work/ output.xlsx
 
 **Row lookup rule**: When the task says "after row N (Label)", always find the row by searching for "Label" in the worksheet XML (`grep -n "Label" /tmp/xlsx_work/xl/worksheets/sheet*.xml` or check sharedStrings.xml). Use the actual row number + 1 for `--at`. Do NOT call `xlsx_shift_rows.py` separately — `xlsx_insert_row.py` calls it internally.
 
+`--copy-style-from` only styles the cells this command creates. Supplying it without `--text`, `--values`, or `--formula` inserts a blank row and copies no cell styles.
+
 **Apply row-wide borders** (e.g. accounting line on a TOTAL row):
 After running helper scripts, apply borders to ALL cells in the target row, not just newly added cells.
 In `xl/styles.xml`, append a new `<border>` with the desired style, then append a new `<xf>` in `<cellXfs>` that clones each cell's existing `<xf>` but sets the new `borderId`.
