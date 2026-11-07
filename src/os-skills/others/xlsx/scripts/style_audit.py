@@ -310,9 +310,11 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
 
             font = fonts[font_id]
 
-            # Check C2: color-role violation — formula cell with blue font
+            # Check C2: color-role violation — formula cell with blue font.
+            # Cell classification (formula/input) happens once, at the end of this
+            # loop body; this branch only records the violation so a blue-font
+            # formula cell is not counted twice in the summary.
             if has_formula and _is_blue_font(font):
-                formula_cells += 1
                 f_elem = cell.find(f"{NSP}f")
                 formula_text = f_elem.text if f_elem is not None else ""
                 v.append({
@@ -380,6 +382,7 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
                 except (ValueError, TypeError):
                     pass
 
+            # Single classification point for the summary counters
             if has_formula:
                 formula_cells += 1
             elif value_text is not None:
