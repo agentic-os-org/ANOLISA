@@ -16,59 +16,109 @@ import json
 from contextlib import suppress
 from pathlib import Path
 
+import pytest
 from pytest_mock import MockerFixture
 
 from swe_runner.common.dataset_registry import get_dataset_name as _get_dataset_name
 from swe_runner.evaluation import (
     EvalInstanceResult,
     EvalReport,
-    _get_instance_ids,
+    _load_normalized_predictions,
     generate_report_text,
     run_evaluation,
     save_report_json,
 )
 
+_PRED_I1 = {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff --git"}
+_PRED_I2 = {"instance_id": "i2", "model_name_or_path": "cosh", "model_patch": "diff --git b"}
 
-def test_get_instance_ids_valid(tmp_path: Path) -> None:
+
+def test_load_normalized_predictions_valid(tmp_path: Path) -> None:
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(json.dumps({"i1": _PRED_I1, "i2": _PRED_I2}))
+    result = _load_normalized_predictions(preds_file)
+    assert result == {"i1": _PRED_I1, "i2": _PRED_I2}
+
+
+def test_load_normalized_predictions_empty_patch_skipped(tmp_path: Path) -> None:
     preds_file = tmp_path / "preds.json"
     preds_file.write_text(
         json.dumps(
             {
-                "i1": {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff --git"},
-                "i2": {"instance_id": "i2", "model_name_or_path": "cosh", "model_patch": "diff --git b"},
-            }
-        )
-    )
-    result = _get_instance_ids(preds_file)
-    assert result == ["i1", "i2"]
-
-
-def test_get_instance_ids_empty_patch_skipped(tmp_path: Path) -> None:
-    preds_file = tmp_path / "preds.json"
-    preds_file.write_text(
-        json.dumps(
-            {
-                "i1": {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff --git"},
+                "i1": _PRED_I1,
                 "i2": {"instance_id": "i2", "model_name_or_path": "cosh", "model_patch": ""},
             }
         )
     )
-    result = _get_instance_ids(preds_file)
-    assert result == ["i1"]
+    result = _load_normalized_predictions(preds_file)
+    assert result == {"i1": _PRED_I1}
 
 
-def test_get_instance_ids_missing_file(tmp_path: Path) -> None:
-    import pytest
+def test_load_normalized_predictions_list_format(tmp_path: Path) -> None:
+    """swebench 上游明确接受 list[record] 形态的 predictions 文件
+    （get_predictions_from_file 同时支持 list 与 dict）——此前对 list 直接
+    data.items() 裸崩 AttributeError。
+    """
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(
+        json.dumps(
+            [
+                _PRED_I1,
+                {"instance_id": "i2", "model_name_or_path": "cosh", "model_patch": ""},
+            ]
+        )
+    )
+    result = _load_normalized_predictions(preds_file)
+    assert result == {"i1": _PRED_I1}
 
+
+def test_load_normalized_predictions_skips_null_prediction(tmp_path: Path) -> None:
+    """dict 形态里值为 null 的条目按既有空补丁语义跳过，不裸崩。"""
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(json.dumps({"i1": None, "i2": _PRED_I2}))
+    result = _load_normalized_predictions(preds_file)
+    assert result == {"i2": _PRED_I2}
+
+
+def test_load_normalized_predictions_diagnoses_malformed_list_entries(tmp_path: Path) -> None:
+    """list 形态里的非 dict / 缺 instance_id 条目被逐一诊断后跳过。"""
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(json.dumps([_PRED_I1, None, 42, {"model_patch": "diff"}]))
+    result = _load_normalized_predictions(preds_file)
+    assert result == {"i1": _PRED_I1}
+
+
+def test_load_normalized_predictions_rejects_wrong_top_level_type(tmp_path: Path) -> None:
+    """既非 dict 也非 list 的顶层形态显式报错，而不是假装跳过成功。"""
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(json.dumps("not a mapping"))
+    with pytest.raises(ValueError, match="Predictions must be"):
+        _load_normalized_predictions(preds_file)
+
+
+def test_load_normalized_predictions_jsonl_format(tmp_path: Path) -> None:
+    """swebench 的 parser 同样接受 .jsonl（每行一条记录）——标题声称的
+    全部形态里这是唯一还缺的。
+    """
+    preds_file = tmp_path / "preds.jsonl"
+    preds_file.write_text(
+        json.dumps(_PRED_I1) + "\n"
+        + json.dumps({"instance_id": "i2", "model_name_or_path": "cosh", "model_patch": ""}) + "\n"
+    )
+    result = _load_normalized_predictions(preds_file)
+    assert result == {"i1": _PRED_I1}
+
+
+def test_load_normalized_predictions_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
-        _get_instance_ids(tmp_path / "nonexistent.json")
+        _load_normalized_predictions(tmp_path / "nonexistent.json")
 
 
-def test_get_instance_ids_empty_file(tmp_path: Path) -> None:
+def test_load_normalized_predictions_empty_file(tmp_path: Path) -> None:
     preds_file = tmp_path / "preds.json"
     preds_file.write_text("{}")
-    result = _get_instance_ids(preds_file)
-    assert result == []
+    result = _load_normalized_predictions(preds_file)
+    assert result == {}
 
 
 def test_get_dataset_name() -> None:
@@ -161,11 +211,14 @@ def test_run_evaluation_empty_predictions(tmp_path: Path, mocker: MockerFixture)
     mock_swebench.assert_called_once()
     call_kwargs = mock_swebench.call_args[1]
     assert call_kwargs["instance_ids"] == []
-    assert call_kwargs["predictions_path"] == str(preds_file)
+    # The harness sees the normalized (here: empty) file, not the original
+    normalized = (tmp_path / "output").resolve() / "predictions.normalized.json"
+    assert call_kwargs["predictions_path"] == str(normalized)
+    assert json.loads(Path(call_kwargs["predictions_path"]).read_text()) == {}
 
 
 def test_run_evaluation_calls_swebench(tmp_path: Path, mocker: MockerFixture) -> None:
-    """Verify run_evaluation passes the JSON path directly to swebench."""
+    """run_evaluation hands swebench the normalized JSON subset."""
     preds_file = tmp_path / "preds.json"
     preds_file.write_text(
         json.dumps(
@@ -183,14 +236,65 @@ def test_run_evaluation_calls_swebench(tmp_path: Path, mocker: MockerFixture) ->
     mock_swebench.assert_called_once()
     call_kwargs = mock_swebench.call_args[1]
     assert call_kwargs["dataset_name"] == "princeton-nlp/SWE-bench_Lite"
-    # Verify the original JSON path is passed directly (no JSONL conversion)
-    assert call_kwargs["predictions_path"] == str(preds_file)
+    # The normalized file is still JSON and carries exactly the counted data
     assert call_kwargs["predictions_path"].endswith(".json")
+    assert json.loads(Path(call_kwargs["predictions_path"]).read_text()) == {
+        "i1": {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff"},
+    }
     assert call_kwargs["instance_ids"] == ["i1"]
     assert call_kwargs["max_workers"] == 2
     assert call_kwargs["timeout"] == 600
     assert call_kwargs["namespace"] == "swebench"
     assert call_kwargs["modal"] is False
+
+
+def test_run_evaluation_gives_harness_the_processed_data(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """The skip contract must reach the harness input (#4636 P1).
+
+    swebench's parser validates every prediction before applying the
+    instance_ids filter, so handing it the original file after skipping a
+    null entry makes the harness reject input the wrapper just claimed to
+    skip successfully. The harness must receive exactly the processed
+    subset, and the user's file must stay untouched.
+    """
+    original = {"i1": None, "i2": _PRED_I2}
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(json.dumps(original))
+    output_dir = tmp_path / "output"
+
+    mock_swebench = mocker.patch("swebench.run_evaluation", return_value=None)
+
+    run_evaluation(preds_file, output_dir, run_id="skip-test")
+
+    mock_swebench.assert_called_once()
+    call_kwargs = mock_swebench.call_args[1]
+    assert call_kwargs["instance_ids"] == ["i2"]
+    harness_data = json.loads(Path(call_kwargs["predictions_path"]).read_text())
+    assert harness_data == {"i2": _PRED_I2}
+    # the user's file is preserved exactly as written
+    assert json.loads(preds_file.read_text()) == original
+
+
+def test_run_evaluation_accepts_custom_dataset_name(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """run/dataset.py passes custom subsets straight through; evaluation
+    must resolve the same way instead of raising Unknown subset.
+    """
+    preds_file = tmp_path / "preds.json"
+    preds_file.write_text(json.dumps({"i1": _PRED_I1}))
+    output_dir = tmp_path / "output"
+
+    mock_swebench = mocker.patch("swebench.run_evaluation", return_value=None)
+
+    run_evaluation(
+        preds_file, output_dir, subset="my-org/my-swe-dataset", run_id="custom-test"
+    )
+
+    call_kwargs = mock_swebench.call_args[1]
+    assert call_kwargs["dataset_name"] == "my-org/my-swe-dataset"
 
 
 def test_run_evaluation_accepts_multilingual_subset(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -237,6 +341,11 @@ def test_run_evaluation_skips_empty_patches(tmp_path: Path, mocker: MockerFixtur
 
     call_kwargs = mock_swebench.call_args[1]
     assert call_kwargs["instance_ids"] == ["i1"]
+    # the skipped entry never reaches the harness input either
+    harness_data = json.loads(Path(call_kwargs["predictions_path"]).read_text())
+    assert harness_data == {
+        "i1": {"instance_id": "i1", "model_name_or_path": "cosh", "model_patch": "diff"},
+    }
 
 
 def test_run_evaluation_handles_swebench_error(tmp_path: Path, mocker: MockerFixture) -> None:

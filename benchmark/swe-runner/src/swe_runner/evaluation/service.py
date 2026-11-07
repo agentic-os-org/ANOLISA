@@ -29,7 +29,7 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
-from swe_runner.common.dataset_registry import get_dataset_name
+from swe_runner.common.dataset_registry import DATASET_MAPPING, get_dataset_name
 from swe_runner.evaluation.models import EvalReport
 
 logger = logging.getLogger(__name__)
@@ -47,27 +47,67 @@ def _pushd(path: Path) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# Instance-id helpers
+# Prediction loading
 # ---------------------------------------------------------------------------
 
-def _get_instance_ids(preds_path: Path) -> list[str]:
-    """Read a predictions JSON file and return instance IDs with non-empty patches."""
+def _load_normalized_predictions(preds_path: Path) -> dict[str, dict]:
+    """Load predictions and return the instance_id-keyed entries worth evaluating.
+
+    swebench's own parser accepts both an instance_id-keyed mapping and a
+    list of prediction records, and it validates every entry before the
+    instance_ids filter applies — so the wrapper must hand the harness the
+    same data it counted, or an entry the wrapper skipped (a null
+    prediction, an empty patch) still crashes the harness that just
+    reported a successful skip. Normalize the shapes, diagnose every
+    skipped entry once, and evaluate the survivors; the caller writes the
+    result out and keeps the user's file untouched.
+    """
     if not preds_path.exists():
         raise FileNotFoundError(f"Predictions file not found: {preds_path}")
 
-    with open(preds_path) as f:
-        data = json.load(f)
+    if preds_path.suffix == ".jsonl":
+        # swebench's parser accepts .jsonl records the same way; one
+        # JSON object per line.
+        with open(preds_path) as f:
+            data = [json.loads(line) for line in f if line.strip()]
+    else:
+        with open(preds_path) as f:
+            data = json.load(f)
 
     if not data:
-        return []
+        return {}
 
-    instance_ids: list[str] = []
+    if isinstance(data, list):
+        keyed: dict[str, dict] = {}
+        for pred in data:
+            if not isinstance(pred, dict):
+                logger.warning(
+                    "EVAL_SKIP_MALFORMED_PREDICTION type=%s", type(pred).__name__
+                )
+                continue
+            iid = pred.get("instance_id")
+            if not iid:
+                logger.warning(
+                    "EVAL_SKIP_PREDICTION_MISSING_ID keys=%s", sorted(pred)
+                )
+                continue
+            keyed[iid] = pred
+        data = keyed
+    elif not isinstance(data, dict):
+        raise ValueError(
+            "Predictions must be a JSON object keyed by instance_id or a "
+            f"list of prediction records, got {type(data).__name__}"
+        )
+
+    normalized: dict[str, dict] = {}
     for iid, pred in data.items():
-        if not pred.get("model_patch", ""):
+        # A null/None entry follows the empty-patch skip path instead of
+        # crashing on .get — swebench would reject it just the same.
+        if not isinstance(pred, dict) or not pred.get("model_patch", ""):
             logger.warning("EVAL_SKIP_EMPTY_PATCH instance=%s", iid)
             continue
-        instance_ids.append(iid)
-    return instance_ids
+        normalized[iid] = pred
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -157,20 +197,37 @@ def run_evaluation(
     _install_swebench_rootless_copy_patch()
     _ensure_docker_host_for_rootless_context()
 
-    instance_ids = _get_instance_ids(preds_path)
+    output_dir = output_dir.resolve()
+    preds_path = preds_path.resolve()
+
+    # The harness must see exactly the predictions counted here: entries
+    # the wrapper skipped (null, empty patch, malformed records) never
+    # reach it, or its parser rejects input the wrapper just claimed to
+    # skip successfully. The user's file stays untouched; the normalized
+    # subset is materialized next to the reports as an audit artifact of
+    # what was actually evaluated.
+    predictions = _load_normalized_predictions(preds_path)
+    instance_ids = list(predictions)
     if not instance_ids:
         logger.warning("EVAL_NO_VALID_PREDICTIONS preds_path=%s", preds_path)
 
-    dataset_name = get_dataset_name(subset)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    normalized_path = output_dir / "predictions.normalized.json"
+    normalized_path.write_text(
+        json.dumps(predictions, indent=2), encoding="utf-8"
+    )
 
-    output_dir = output_dir.resolve()
-    preds_path = preds_path.resolve()
+    # run/dataset.py passes custom subset paths straight through; the
+    # evaluator must resolve the same way so a dataset the run command
+    # accepts can also be evaluated.
+    dataset_name = get_dataset_name(subset) if subset in DATASET_MAPPING else subset
+
     with _pushd(output_dir):
         swebench_run_evaluation(
             dataset_name=dataset_name,
             split=split,
             instance_ids=instance_ids,
-            predictions_path=str(preds_path),
+            predictions_path=str(normalized_path),
             max_workers=workers,
             run_id=run_id,
             timeout=timeout,
