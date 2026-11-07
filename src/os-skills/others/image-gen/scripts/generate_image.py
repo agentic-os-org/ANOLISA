@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """DashScope image generation (wanx models)."""
-import argparse, base64, json, os, sys, time, urllib.request, urllib.error
+import argparse
+import base64
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+_FALLBACK_STATUS = frozenset({404, 405, 501})
+_ERROR_DETAIL_LIMIT = 4096
+
 
 def _key():
     # 1. 环境变量
@@ -47,17 +59,54 @@ def _wanx(prompt, model, size, key):
             print(f"ERROR: {st['output'].get('message','')}",file=sys.stderr); sys.exit(1)
     print("ERROR: Timeout",file=sys.stderr); sys.exit(1)
 
+
+def _http_error_detail(error, key):
+    """Keep remote diagnostics bounded, printable and free of known credentials."""
+    try:
+        raw = error.read(_ERROR_DETAIL_LIMIT + 1)
+    except Exception:
+        # Diagnostics are best effort and must not change the retry decision.
+        raw = b""
+    if not isinstance(raw, (bytes, bytearray)):
+        raw = b""
+    truncated = len(raw) > _ERROR_DETAIL_LIMIT
+    detail = raw[:_ERROR_DETAIL_LIMIT].decode("utf-8", errors="replace").strip()
+    if not detail:
+        reason = error.reason
+        if isinstance(reason, bytes):
+            reason = reason.decode("utf-8", errors="replace")
+        reason = str(reason or "empty response")
+        truncated = truncated or len(reason) > _ERROR_DETAIL_LIMIT
+        detail = reason[:_ERROR_DETAIL_LIMIT]
+    detail = re.sub(r"\s+", " ", re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", detail)).strip()
+    if key and len(key) >= 8:
+        detail = detail.replace(key, "<redacted>")
+    detail = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", detail)
+    detail = re.sub(r"(?i)\bsk-[A-Za-z0-9_-]+", "sk-<redacted>", detail)
+    return (detail or "empty response") + (" [truncated]" if truncated else "")
+
+
 def _compat(prompt, model, size, key, base):
     h = {"Authorization":f"Bearer {key}","Content-Type":"application/json"}
     body = {"model":model,"prompt":prompt,"size":size,"n":1,"response_format":"url"}
     req = urllib.request.Request(f"{base}/images/generations",json.dumps(body).encode(),h,method="POST")
     try:
         with urllib.request.urlopen(req,timeout=120) as r: res = json.loads(r.read())
-    except urllib.error.HTTPError:
-        return _wanx(prompt, model, size, key)
+    except urllib.error.HTTPError as error:
+        detail = _http_error_detail(error, key)
+        if error.code in _FALLBACK_STATUS:
+            print(
+                f"WARN: HTTP {error.code} from compatible image endpoint: {detail}; "
+                "falling back to Wanx",
+                file=sys.stderr,
+            )
+            return _wanx(prompt, model, size, key)
+        print(f"ERROR: HTTP {error.code} {detail}", file=sys.stderr)
+        sys.exit(1)
     d = res.get("data",[])
     if d: return d[0].get("url") or ("b64:"+d[0].get("b64_json",""))
     print("ERROR: No image",file=sys.stderr); sys.exit(1)
+
 
 def _save(src, path):
     if src.startswith("b64:"):
