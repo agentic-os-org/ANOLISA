@@ -259,29 +259,35 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 /// the main process. We must skip them to avoid counting the same memory multiple times.
 /// On macOS, sysinfo doesn't enumerate threads as separate processes, so this is a no-op.
 fn is_thread(pid: u32) -> bool {
-    if let Ok(status) = std::fs::read_to_string(crate::utils::procfs::proc_pid_entry(pid, "status"))
-    {
-        let mut tgid = None;
-        let mut pid_val = None;
-        for line in status.lines() {
-            if line.starts_with("Tgid:") {
-                tgid = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse::<u32>().ok());
-            } else if line.starts_with("Pid:") {
-                pid_val = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse::<u32>().ok());
-            }
-            if tgid.is_some() && pid_val.is_some() {
-                break;
-            }
+    let Ok(status) = std::fs::read(crate::utils::procfs::proc_pid_entry(pid, "status")) else {
+        return false;
+    };
+    status_indicates_thread(&status)
+}
+
+fn status_indicates_thread(status: &[u8]) -> bool {
+    // The Name line can contain non-UTF-8 bytes, while Tgid and Pid remain ASCII.
+    let status = String::from_utf8_lossy(status);
+    let mut tgid = None;
+    let mut pid_val = None;
+    for line in status.lines() {
+        if line.starts_with("Tgid:") {
+            tgid = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<u32>().ok());
+        } else if line.starts_with("Pid:") {
+            pid_val = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<u32>().ok());
         }
-        if let (Some(tgid), Some(pid_val)) = (tgid, pid_val) {
-            return tgid != pid_val;
+        if tgid.is_some() && pid_val.is_some() {
+            break;
         }
+    }
+    if let (Some(tgid), Some(pid_val)) = (tgid, pid_val) {
+        return tgid != pid_val;
     }
     false
 }
@@ -561,6 +567,16 @@ mod tests {
     fn contains_word_no_match() {
         assert!(!contains_word("vim", "claude"));
         assert!(!contains_word("", "claude"));
+    }
+
+    #[test]
+    fn status_indicates_thread_ignores_non_utf8_name() {
+        assert!(status_indicates_thread(
+            b"Name:\tcla\xffude\nTgid:\t100\nPid:\t101\n"
+        ));
+        assert!(!status_indicates_thread(
+            b"Name:\tcla\xffude\nTgid:\t100\nPid:\t100\n"
+        ));
     }
 
     // ── match_agents ───────────────────────────────────────────────────────
