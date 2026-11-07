@@ -313,12 +313,15 @@ impl HttpConnection {
                         let message: Value = serde_json::from_str(&data).map_err(|error| {
                             format!("MCP SSE response to '{method}' is invalid JSON: {error}")
                         })?;
-                        if message.get("id").and_then(Value::as_u64) == Some(id) {
-                            return extract_result(message, id, method);
-                        }
+                        // Each direction has its own request IDs, so a server
+                        // request can share the ID of the awaited response.
                         if message.get("method").is_some() && message.get("id").is_some() {
                             self.respond_to_server_request(protocol_version, message)
                                 .await?;
+                            continue;
+                        }
+                        if message.get("id").and_then(Value::as_u64) == Some(id) {
+                            return extract_result(message, id, method);
                         }
                         continue;
                     }
@@ -518,11 +521,12 @@ impl LegacyHttpConnection {
             }
             let message: Value = serde_json::from_str(&data)
                 .map_err(|error| format!("legacy MCP SSE message is invalid JSON: {error}"))?;
-            if message.get("id").and_then(Value::as_u64) == Some(id) {
-                return extract_result(message, id, method);
-            }
             if message.get("method").is_some() && message.get("id").is_some() {
                 self.respond_to_server_request(message).await?;
+                continue;
+            }
+            if message.get("id").and_then(Value::as_u64) == Some(id) {
+                return extract_result(message, id, method);
             }
         }
     }
@@ -1031,6 +1035,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn answers_ping_with_matching_id_during_http_initialization() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
+            let (_, _, message) = read_request(&mut reader).await;
+            let message = message.unwrap();
+            assert_eq!(message["method"], "initialize");
+            assert_eq!(message["id"], 1);
+            let events = concat!(
+                "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n\n",
+                "data: {\"jsonrpc\":\"2.0\",\"id\":\"server-ping\",\"method\":\"ping\"}\n\n",
+                "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n\n"
+            );
+            write_response(
+                &mut write_half,
+                "200 OK",
+                Some("text/event-stream"),
+                Some("test-session"),
+                events,
+            )
+            .await;
+
+            for id in [json!(1), json!("server-ping")] {
+                let (method, headers, message) = read_request(&mut reader).await;
+                assert_eq!(method, "POST");
+                assert_eq!(headers["mcp-session-id"], "test-session");
+                assert_eq!(
+                    message.unwrap(),
+                    json!({"jsonrpc": "2.0", "id": id, "result": {}})
+                );
+                write_response(&mut write_half, "202 Accepted", None, None, "").await;
+            }
+
+            let (_, _, message) = read_request(&mut reader).await;
+            assert_eq!(message.unwrap()["method"], "notifications/initialized");
+            write_response(&mut write_half, "202 Accepted", None, None, "").await;
+
+            let (_, _, message) = read_request(&mut reader).await;
+            assert_eq!(message.unwrap()["method"], "tools/list");
+            write_response(
+                &mut write_half,
+                "200 OK",
+                Some("application/json"),
+                None,
+                r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}"#,
+            )
+            .await;
+        });
+
+        let config = McpServerConfig {
+            command: String::new(),
+            url: Some(format!("http://{address}/mcp")),
+            args: Vec::new(),
+            env: HashMap::new(),
+            bearer_token: Some("test-token".to_string()),
+            oauth: Default::default(),
+            timeout_ms: 1_000,
+            startup_timeout_ms: 1_000,
+            allowed_tools: None,
+        };
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let (_, tools) = McpClient::connect("test", &config, &workspace)
+            .await
+            .unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn answers_ping_and_resumes_sse_by_event_id() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1059,7 +1137,7 @@ mod tests {
             let event = concat!(
                 "id: stream-1\n",
                 "retry: 0\n",
-                "data: {\"jsonrpc\":\"2.0\",\"id\":\"server-ping\",\"method\":\"ping\",\"params\":{}}\n\n"
+                "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"params\":{}}\n\n"
             );
             write_response(
                 &mut write_half,
@@ -1072,7 +1150,7 @@ mod tests {
 
             let (_, _, message) = read_request(&mut reader).await;
             let message = message.unwrap();
-            assert_eq!(message["id"], "server-ping");
+            assert_eq!(message["id"], 2);
             assert_eq!(message["result"], json!({}));
             write_response(&mut write_half, "202 Accepted", None, None, "").await;
 
@@ -1218,6 +1296,19 @@ mod tests {
 
             let (_, _, message) = read_request(&mut post_reader).await;
             assert_eq!(message.unwrap()["method"], "tools/list");
+            write_response(&mut post_writer, "202 Accepted", None, None, "").await;
+            write_sse_chunk(
+                &mut sse_writer,
+                "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n\n",
+            )
+            .await;
+
+            let (method, _, message) = read_request(&mut post_reader).await;
+            assert_eq!(method, "POST");
+            assert_eq!(
+                message.unwrap(),
+                json!({"jsonrpc": "2.0", "id": 2, "result": {}})
+            );
             write_response(&mut post_writer, "202 Accepted", None, None, "").await;
             write_sse_chunk(
                 &mut sse_writer,
