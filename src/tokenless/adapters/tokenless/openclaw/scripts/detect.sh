@@ -9,12 +9,21 @@ set -euo pipefail
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 AGENT="${ANOLISA_TARGET:-openclaw}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this detector with exit 1 -- the same status it otherwise reports for "not
+# installed but installable", so the crash would reach the caller as a verdict
+# instead of as an error. Resolve HOME once and derive every user-scope path
+# from it; an empty value skips those probes rather than guessing a path
+# under /.
+HOME_DIR="${HOME:-}"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME_DIR:+$HOME_DIR/.openclaw}}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
 OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
-export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
+export PATH="${USER_LOCAL_BIN}${OPENCLAW_STATE_DIR:+${OPENCLAW_STATE_DIR%/}/bin:}/usr/local/bin:$PATH"
 
 PLUGIN_ID="tokenless"
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
@@ -42,7 +51,7 @@ fi
 if [ -d "$OPENCLAW_STATE_DIR" ]; then
     field "openclaw home" "present (${OPENCLAW_STATE_DIR})"
 else
-    field "openclaw home" "not installed (${OPENCLAW_STATE_DIR})"
+    field "openclaw home" "not installed (${OPENCLAW_STATE_DIR:-HOME is unset})"
     note_install_missing "openclaw home"
 fi
 
@@ -57,7 +66,8 @@ if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
         plugin_detail="$PLUGIN_ID (openclaw plugins list)"
     fi
 fi
-if [ "$plugin_state" = "missing" ] && [ -d "${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}" ]; then
+if [ "$plugin_state" = "missing" ] && [ -n "$OPENCLAW_STATE_DIR" ] \
+   && [ -d "${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}" ]; then
     plugin_state="installed"
     plugin_detail="${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}"
 fi
