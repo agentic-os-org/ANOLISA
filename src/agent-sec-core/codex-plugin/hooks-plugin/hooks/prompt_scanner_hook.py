@@ -36,7 +36,8 @@ from trace_context import with_trace_context
 # -- config ----------------------------------------------------------------
 
 _HOOK_ENABLED = env_flag_enabled("PROMPT_SCANNER_HOOK_ENABLED", True)
-MODE = os.environ.get("PROMPT_SCANNER_MODE", "observe").lower()
+MODE = os.environ.get("PROMPT_SCANNER_MODE", "observe").strip().lower()
+_VALID_MODES = {"observe", "deny"}
 try:
     TIMEOUT = int(os.environ.get("PROMPT_SCANNER_TIMEOUT", "10"))
 except (ValueError, TypeError):
@@ -49,6 +50,22 @@ _DEFAULT_SOURCE = "user_input"
 
 
 # -- output helpers --------------------------------------------------------
+
+
+def _warn_invalid_mode() -> None:
+    """Report a PROMPT_SCANNER_MODE value that silently fell back.
+
+    Mirrors _warn_invalid_scan_mode and the pii-checker hook: a mistyped mode
+    must be surfaced. Without the warning, an operator who configured deny
+    gets observe behavior (no blocking) with no diagnostic at all.
+    """
+    if "PROMPT_SCANNER_MODE" in os.environ and MODE not in _VALID_MODES:
+        print(
+            f"[prompt-scanner] invalid PROMPT_SCANNER_MODE "
+            f"{os.environ['PROMPT_SCANNER_MODE']!r}; "
+            "expected 'observe' or 'deny', using 'observe'",
+            file=sys.stderr,
+        )
 
 
 def _warn_invalid_scan_mode() -> None:
@@ -97,6 +114,7 @@ def main() -> None:
     if not _HOOK_ENABLED:
         return
 
+    _warn_invalid_mode()
     _warn_invalid_scan_mode()
 
     # 1. Read stdin JSON (fail-open: empty stdout = allow in Codex)
