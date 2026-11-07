@@ -64,9 +64,34 @@ def _signal_group(process: subprocess.Popen[bytes], number: int) -> None:
         pass
 
 
-def run(command: list[str], cwd: Path, cancel: Cancellation, seconds: int = 1200) -> bytes:
+DEFAULT_COMMAND_TIMEOUT = 1200
+
+
+def command_timeout() -> int:
+    """Return the per-command timeout, honouring ``AW_BUILD_TIMEOUT``."""
+    raw = os.environ.get("AW_BUILD_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_COMMAND_TIMEOUT
+    try:
+        seconds = int(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"AW_BUILD_TIMEOUT must be a whole number of seconds, got {raw!r}"
+        ) from None
+    if seconds <= 0:
+        raise RuntimeError(
+            f"AW_BUILD_TIMEOUT must be a positive number of seconds, got {raw!r}"
+        )
+    return seconds
+
+
+def run(
+    command: list[str], cwd: Path, cancel: Cancellation, seconds: int | None = None
+) -> bytes:
     """Capture bounded output and terminate the command's entire process group."""
     cancel.check()
+    if seconds is None:
+        seconds = command_timeout()
     print("+ " + " ".join(command), file=sys.stderr, flush=True)
     deadline = time.monotonic() + seconds
     limit = 64 * 1024 * 1024
@@ -83,7 +108,10 @@ def run(command: list[str], cwd: Path, cancel: Cancellation, seconds: int = 1200
             while process.poll() is None:
                 cancel.check()
                 if time.monotonic() >= deadline:
-                    raise RuntimeError(f"command exceeded {seconds}s: {command[0]}")
+                    raise RuntimeError(
+                        f"command exceeded {seconds}s: {command[0]}"
+                        " (set AW_BUILD_TIMEOUT to allow a slower build)"
+                    )
                 if (
                     os.fstat(stdout.fileno()).st_size > limit
                     or os.fstat(stderr.fileno()).st_size > limit
