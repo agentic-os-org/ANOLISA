@@ -1,5 +1,5 @@
 diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
-index 50745a8..27edb57 100644
+index 14ed2e0..5a9cf0f 100644
 --- a/bpf/src/lib.rs
 +++ b/bpf/src/lib.rs
 @@ -88 +88 @@ const PINNED_FILE_PROFILE_MARKER: &str =
@@ -14,7 +14,36 @@ index 50745a8..27edb57 100644
 @@ -94 +94 @@ const PINNED_AGENT_FILE_GUARD_MARKER: &str =
 -    "agentsight_profile_agent_file_guard_v7_a62e5d9d96f91101cda019519053e950d532380a";
 +    "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a";
-@@ -648,3 +648,14 @@ fn dup_pinned_map_fd(paths: &PinnedEnginePaths, name: &str) -> io::Result<OwnedF
+@@ -544 +544 @@ const TRACEPOINT_HOLDER_PREFIX: &str = "tp_holder_";
+-fn proc_start_time(pid: u32) -> Option<u64> {
++fn proc_start_time(pid: i32) -> Option<u64> {
+@@ -559 +559,4 @@ fn pin_tracepoint_holder(
+-    let pid = std::process::id();
++    let cap_pending_fd = dup_array_map_fd(bpf, "cap_pending_submitter")?;
++    // A host-wide marker cannot use a namespace-local process ID.
++    let pid =
++        capture_current_thread_identity_fd(cap_req_map_fd(bpf)?, cap_pending_fd.as_raw_fd())?.pid;
+@@ -588,2 +590,0 @@ fn tracepoint_holder_owned_by_current_process(
+-    let current_pid = std::process::id();
+-    let current_start = proc_start_time(current_pid);
+@@ -601 +602 @@ fn tracepoint_holder_owned_by_current_process(
+-        let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else {
++        let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
+@@ -607,2 +608,11 @@ fn tracepoint_holder_owned_by_current_process(
+-        if pid == current_pid && current_start == Some(start) && allow_current {
+-            return Ok(true);
++        if allow_current {
++            let cap_req_fd = dup_pinned_map_fd(paths, "cap_req")?;
++            let cap_pending_fd = dup_pinned_map_fd(paths, "cap_pending_submitter")?;
++            let current_pid = capture_current_thread_identity_fd(
++                cap_req_fd.as_raw_fd(),
++                cap_pending_fd.as_raw_fd(),
++            )?
++            .pid;
++            if pid == current_pid && proc_start_time(current_pid) == Some(start) {
++                return Ok(true);
++            }
+@@ -648,3 +658,14 @@ fn dup_pinned_map_fd(paths: &PinnedEnginePaths, name: &str) -> io::Result<OwnedF
 -/// Declare to the BPF drain gate that this thread is about to submit to
 -/// `cap_req`. The gate refuses to drain in any other thread's context.
 -fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
@@ -32,39 +61,39 @@ index 50745a8..27edb57 100644
 +}
 +
 +fn write_drain_intent_fd(fd: RawFd, pending: &CapPendingSubmitter) -> io::Result<()> {
-@@ -652 +662,0 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+@@ -652 +672,0 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
 -    let tid = unsafe { libc::syscall(libc::SYS_gettid) as i32 };
-@@ -657,2 +667 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+@@ -657 +677 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+-            &tid as *const i32 as *const std::ffi::c_void,
++            pending as *const CapPendingSubmitter as *const std::ffi::c_void,
+@@ -667 +687 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+-fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
++fn read_drain_intent_fd(fd: RawFd) -> io::Result<CapPendingSubmitter> {
+@@ -669 +689 @@ fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
+-    let tid: i32 = 0;
++    let mut pending = CapPendingSubmitter::default();
+@@ -671 +691 @@ fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
+-        libbpf_sys::bpf_map_update_elem(
++        libbpf_sys::bpf_map_lookup_elem(
+@@ -674,2 +694 @@ fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
 -            &tid as *const i32 as *const std::ffi::c_void,
 -            BPF_ANY,
 +            &mut pending as *mut CapPendingSubmitter as *mut std::ffi::c_void,
-@@ -667 +676 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
--fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
-+fn read_drain_intent_fd(fd: RawFd) -> io::Result<CapPendingSubmitter> {
-@@ -669 +678 @@ fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
--    let tid: i32 = 0;
-+    let mut pending = CapPendingSubmitter::default();
-@@ -674 +683 @@ fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
--            &tid as *const i32 as *const std::ffi::c_void,
-+            pending as *const CapPendingSubmitter as *const std::ffi::c_void,
-@@ -700 +709 @@ fn write_cap_req_mailbox(fd: RawFd, slot: &CapReqSlot) -> io::Result<()> {
--        libbpf_sys::bpf_map_update_elem(
-+        libbpf_sys::bpf_map_lookup_elem(
-@@ -754,4 +763,2 @@ fn submit_cap_req(cap_req_fd: RawFd, cap_pending_fd: RawFd, data: &[u8]) -> io::
--    // Check the trigger before publishing. This prevents a known seccomp or
--    // ENOSYS failure from leaving an already-committed record behind.
--    trigger_cap_req_drain()?;
--    declare_drain_intent_fd(cap_pending_fd)?;
-+    let identity = capture_current_thread_identity_fd(cap_req_fd, cap_pending_fd)?;
-+    write_drain_intent_fd(cap_pending_fd, &identity)?;
-@@ -807 +814,5 @@ fn trigger_cap_req_drain() -> io::Result<()> {
+@@ -681 +700,5 @@ fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
 -    Ok(())
 +    Ok(pending)
 +}
 +
 +fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
 +    write_drain_intent_fd(fd, &CapPendingSubmitter::default())
-@@ -926,0 +938,94 @@ fn pinned_engine_present_inner(
+@@ -754,4 +777,2 @@ fn submit_cap_req(cap_req_fd: RawFd, cap_pending_fd: RawFd, data: &[u8]) -> io::
+-    // Check the trigger before publishing. This prevents a known seccomp or
+-    // ENOSYS failure from leaving an already-committed record behind.
+-    trigger_cap_req_drain()?;
+-    declare_drain_intent_fd(cap_pending_fd)?;
++    let identity = capture_current_thread_identity_fd(cap_req_fd, cap_pending_fd)?;
++    write_drain_intent_fd(cap_pending_fd, &identity)?;
+@@ -809,0 +831,94 @@ fn trigger_cap_req_drain() -> io::Result<()> {
 +fn drain_declaration_token() -> io::Result<u32> {
 +    let mut token = 0u32;
 +    loop {
@@ -159,9 +188,9 @@ index 50745a8..27edb57 100644
 +    result
 +}
 +
-@@ -3973,0 +4079 @@ impl ReloadHandle {
+@@ -3718,0 +3834 @@ const _: () = assert!(
 +        && std::mem::size_of::<CapPendingSubmitter>() == 16
-@@ -4015,0 +4122,18 @@ impl ReloadHandle {
+@@ -3760,0 +3877,18 @@ impl ReloadHandle {
 +    /// Resolve the current process's init-namespace PID through the BPF hook.
 +    ///
 +    /// This works inside a PID namespace, where procfs does not expose the
@@ -180,38 +209,20 @@ index 50745a8..27edb57 100644
 +        .map(|identity| identity.pid)
 +    }
 +
-@@ -4457 +4581 @@ mod tests {
+@@ -4468 +4602 @@ mod tests {
 -        assert!(marker.contains("file_v5"));
 +        assert!(marker.contains("file_v6"));
-@@ -4493 +4617 @@ mod tests {
+@@ -4504 +4638 @@ mod tests {
 -        assert!(marker.contains("agent_file_guard_v7"));
 +        assert!(marker.contains("agent_file_guard_v8"));
-@@ -4545 +4669 @@ mod tests {
+@@ -4556 +4690 @@ mod tests {
 -        assert!(marker.contains("credential_exfiltration_v6"));
 +        assert!(marker.contains("credential_exfiltration_v7"));
-@@ -5358 +5482,2 @@ os.execv({hit:?}, [{hit:?}])
+@@ -5509 +5643,2 @@ os.execv({hit:?}, [{hit:?}])
 -        let my_pid = std::process::id() as i32;
 +        let handle = loader.reload_handle().expect("reload handle");
 +        let my_pid = handle.current_process_kernel_pid().expect("kernel pid");
-@@ -5466 +5591,2 @@ os.execv({hit:?}, [{hit:?}])
--        let my_pid = std::process::id() as i32;
-+        let handle = loader.reload_handle().expect("reload handle");
-+        let my_pid = handle.current_process_kernel_pid().expect("kernel pid");
-@@ -5491,2 +5617,2 @@ os.execv({hit:?}, [{hit:?}])
--        // Declare ourselves as the pending submitter (production submits do
--        // this right before publishing to cap_req).
-+        // Recreate the confirmed declaration that production writes right
-+        // before publishing to cap_req.
-@@ -5502 +5628,7 @@ os.execv({hit:?}, [{hit:?}])
--        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd()).expect("declare intent");
-+        let pending_fd = pending_data.fd().as_fd().as_raw_fd();
-+        let identity = capture_current_thread_identity_fd(
-+            cap_req_map_fd(&loader.bpf).expect("cap_req fd"),
-+            pending_fd,
-+        )
-+        .expect("capture identity");
-+        write_drain_intent_fd(pending_fd, &identity).expect("declare intent");
-@@ -5876,0 +6009,73 @@ os.execv({hit:?}, [{hit:?}])
+@@ -5607,0 +5743,122 @@ os.execv({hit:?}, [{hit:?}])
 +    /// Run the complete declaration and admission path where procfs cannot
 +    /// reveal the enforcer's outer PID.
 +    #[test]
@@ -285,3 +296,70 @@ index 50745a8..27edb57 100644
 +        assert_eq!(cap_stat(0) - accept0, 1);
 +    }
 +
++    /// Keep host procfs mounted so the pre-5.15 holder path must use kernel identity.
++    #[test]
++    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN, BPF LSM and --test-threads=1; private pins only"]
++    fn pinned_engine_holder_uses_kernel_pid_in_nested_pid_namespace() {
++        const CHILD_ENV: &str = "ACTPLANE_TEST_NESTED_HOST_PROCFS";
++        if std::env::var_os(CHILD_ENV).is_none() {
++            let _fixture = file_protection_delete_tests::Fixture::new("pidns-host-procfs");
++            let test_binary = std::env::current_exe().expect("current test binary");
++            let status = std::process::Command::new("unshare")
++                .args(["--pid", "--fork"])
++                .arg(test_binary)
++                .args([
++                    "tests::pinned_engine_holder_uses_kernel_pid_in_nested_pid_namespace",
++                    "--exact",
++                    "--ignored",
++                    "--nocapture",
++                    "--test-threads=1",
++                ])
++                .env(CHILD_ENV, "1")
++                .status()
++                .expect("spawn PID-namespaced test with host procfs");
++            assert!(status.success(), "nested PID namespace holder probe failed");
++            return;
++        }
++
++        let engine = PinnedEngine::open_or_install_singleton().expect("load private engine");
++        let reload = engine.reload_handle().expect("reload handle");
++        let kernel_pid = reload.current_process_kernel_pid().expect("kernel pid");
++        assert_ne!(kernel_pid, std::process::id() as i32);
++        assert!(
++            proc_start_time(kernel_pid).is_some(),
++            "the test requires an init-namespace procfs view"
++        );
++        if let Some(holder) = &engine._tracepoint_holder {
++            let marker = holder
++                ._marker
++                .0
++                .file_name()
++                .and_then(|name| name.to_str())
++                .expect("holder marker name");
++            let pid = marker
++                .strip_prefix(TRACEPOINT_HOLDER_PREFIX)
++                .and_then(|owner| owner.split_once('_'))
++                .map(|(pid, _)| pid)
++                .expect("holder marker owner");
++            assert_eq!(pid.parse::<i32>(), Ok(kernel_pid));
++        }
++    }
++
+@@ -5617 +5874,2 @@ os.execv({hit:?}, [{hit:?}])
+-        let my_pid = std::process::id() as i32;
++        let handle = loader.reload_handle().expect("reload handle");
++        let my_pid = handle.current_process_kernel_pid().expect("kernel pid");
+@@ -5642,2 +5900,2 @@ os.execv({hit:?}, [{hit:?}])
+-        // Declare ourselves as the pending submitter (production submits do
+-        // this right before publishing to cap_req).
++        // Recreate the confirmed declaration that production writes right
++        // before publishing to cap_req.
+@@ -5653 +5911,7 @@ os.execv({hit:?}, [{hit:?}])
+-        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd()).expect("declare intent");
++        let pending_fd = pending_data.fd().as_fd().as_raw_fd();
++        let identity = capture_current_thread_identity_fd(
++            cap_req_map_fd(&loader.bpf).expect("cap_req fd"),
++            pending_fd,
++        )
++        .expect("capture identity");
++        write_drain_intent_fd(pending_fd, &identity).expect("declare intent");
