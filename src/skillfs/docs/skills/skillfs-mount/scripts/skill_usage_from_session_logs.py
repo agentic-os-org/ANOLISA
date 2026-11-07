@@ -15,12 +15,12 @@ default is ~/.openclaw, matching openclaw's out-of-the-box location.
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
-import argparse
 from collections import defaultdict
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 
 def load_config_workspaces(config_file: Path) -> dict:
@@ -56,23 +56,26 @@ def get_workspace_from_session(session_file: Path) -> str | None:
     return None
 
 
-def get_skill_paths(workspace: str) -> dict:
-    """Return {skill_name: absolute_path} discovered under <workspace>/skills."""
+def get_skill_paths(workspace: str) -> dict | None:
+    """Return discovered skill paths, or ``None`` when discovery is unavailable.
+
+    An empty dict means the skills directory was successfully inspected and
+    contained no directories; missing or unreadable paths remain unknown.
+    """
     try:
         skill_paths = {}
         ws_path = Path(workspace)
         skills_dir = ws_path / "skills"
 
-        if skills_dir.exists():
-            for skill_dir in skills_dir.iterdir():
-                if skill_dir.is_dir():
-                    skill_paths[skill_dir.name] = str(skill_dir)
+        for skill_dir in skills_dir.iterdir():
+            if skill_dir.is_dir():
+                skill_paths[skill_dir.name] = str(skill_dir)
 
         return skill_paths
     except OSError:
         # Session headers can point at expired or inaccessible workspaces.
-        # Keep the direct /skills/<name>/ parser useful for the rest of the log.
-        return {}
+        # Preserve the unknown state so bare-directory fallbacks still work.
+        return None
 
 
 #: Characters that end a shell word in the commands this script parses.
@@ -85,6 +88,62 @@ def get_skill_paths(workspace: str) -> dict:
 #: ``ls /ws/skills/web>listing.txt``), so they are word boundaries on
 #: either side exactly like whitespace.
 _SHELL_WORD_DELIMITERS = " \t\n\r&|;()<>'\"`"
+
+#: The two fallback patterns differ only in how tightly they anchor ``skills/``
+#: at the start of the match; ``find_skill_in_command`` has always accepted a
+#: bare ``skills/``, ``extract_skill_from_command_direct`` has always required
+#: the leading slash, and neither should drift while this is edited.
+_NAVIGATION = (".", "..")
+_GLOB_CHARS = "*?[]{}"
+
+_FALLBACK_SKILL = re.compile(r'skills/([^/\s&|;()<>"\x27`]+)')
+_DIRECT_SKILL = re.compile(r'/skills/([^/\s&|;()<>"\x27`]+)')
+
+
+def _is_named_skill(name: str, known: dict | None) -> bool:
+    """Whether a bare ``skills/<name>`` names a skill directory.
+
+    A component followed by ``/`` needs no check: naming a *file* with a
+    trailing slash is not something a shell command does, and the base
+    extractor required exactly that.  A component at the end of a shell word is
+    ambiguous -- ``ls /ws/skills/web`` names a directory, ``cat
+    /ws/skills/LICENSE`` names a file -- so it is accepted only when the answer
+    is known: ``known`` holds every directory discovery found under ``skills/``,
+    and a name missing from it is a file -- an empty dict means discovery
+    answered and found none, which is different from ``None``, where the
+    workspace was unusable and nothing was learned.  Only the ``None`` case
+    falls back to the weaker test this function can still make on its own.
+    """
+    if name in _NAVIGATION:
+        return False
+    if any(char in name for char in _GLOB_CHARS):
+        return False
+    if known is not None:
+        return name in known
+    return "." not in name
+
+
+def _first_skill_dir_name(pattern: re.Pattern, command: str,
+                          skill_paths: dict | None = None) -> str | None:
+    """First ``skills/``-relative component in ``command`` that names a skill.
+
+    Directory references win over bare ones, in command order.  ``cat
+    /ws/skills/LICENSE && python /ws/skills/web/run.py`` therefore attributes to
+    ``web`` whatever discovery found, because ``skills/web/`` carries the
+    trailing slash that made it unambiguous -- the same reading the extractor
+    had before bare references were supported.  A rejected component never ends
+    the scan, so a real skill later in the command still counts.
+    """
+    bare = None
+    for match in pattern.finditer(command):
+        name = match.group(1)
+        if name in _NAVIGATION or any(char in name for char in _GLOB_CHARS):
+            continue
+        if command[match.end():match.end() + 1] == "/":
+            return name
+        if bare is None and _is_named_skill(name, skill_paths):
+            bare = name
+    return bare
 
 
 def _references_path(command: str, skill_path: str) -> bool:
@@ -122,7 +181,8 @@ def _references_path(command: str, skill_path: str) -> bool:
         start = idx + 1
 
 
-def find_skill_in_command(command: str, skill_paths: dict) -> str | None:
+def find_skill_in_command(command: str,
+                          skill_paths: dict | None = None) -> str | None:
     """Identify which skill (if any) is referenced by a shell command."""
     if not command:
         return None
@@ -133,31 +193,21 @@ def find_skill_in_command(command: str, skill_paths: dict) -> str | None:
     # most specific path wins so the attribution stays deterministic
     # across readdir orders.
     for skill_name, skill_path in sorted(
-        skill_paths.items(), key=lambda item: (-len(item[1]), item[0])
+        (skill_paths or {}).items(), key=lambda item: (-len(item[1]), item[0])
     ):
         if _references_path(command, skill_path):
             return skill_name
 
-    match = re.search(r'skills/([^/\s&|;]+)/', command)
-    if match:
-        skill_name = match.group(1)
-        if skill_name in skill_paths:
-            return skill_name
-        return skill_name
-
-    return None
+    return _first_skill_dir_name(_FALLBACK_SKILL, command, skill_paths)
 
 
-def extract_skill_from_command_direct(command: str) -> str | None:
+def extract_skill_from_command_direct(command: str,
+                                      skill_paths: dict | None = None) -> str | None:
     """Fallback: extract skill name purely from /skills/<name>/ in the command."""
     if not command:
         return None
 
-    match = re.search(r'/skills/([^/\s&|;]+)/', command)
-    if match:
-        return match.group(1)
-
-    return None
+    return _first_skill_dir_name(_DIRECT_SKILL, command, skill_paths)
 
 
 def parse_timestamp(ts) -> str:
@@ -179,14 +229,16 @@ def analyze_session_file(session_file: Path) -> tuple[str, dict, dict]:
     session_date = "unknown"
 
     workspace = get_workspace_from_session(session_file)
+    # ``None`` means "discovery could not answer"; an empty dict means it
+    # answered and there are no skill directories.  The difference decides
+    # whether a bare ``skills/<name>`` may be taken on shape alone.
+    skill_paths = None
     if workspace:
         try:
             skill_paths = get_skill_paths(workspace)
         except (OSError, RuntimeError, ValueError):
             # A stale or malformed workspace must not discard the rest of a session.
-            skill_paths = {}
-    else:
-        skill_paths = {}
+            skill_paths = None
 
     try:
         with open(session_file) as f:
@@ -231,7 +283,9 @@ def analyze_session_file(session_file: Path) -> tuple[str, dict, dict]:
 
                             skill_name = find_skill_in_command(command, skill_paths)
                             if not skill_name:
-                                skill_name = extract_skill_from_command_direct(command)
+                                skill_name = extract_skill_from_command_direct(
+                                    command, skill_paths
+                                )
 
                             if skill_name:
                                 by_skill[skill_name] += 1
@@ -391,3 +445,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

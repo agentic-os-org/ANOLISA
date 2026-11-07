@@ -334,6 +334,251 @@ class TestPrefixedSkillAttribution(SessionLogsTestCase):
         # never to its longer neighbour.
         self.assertNotIn("web-search:", proc.stdout)
 
+    def test_fallback_ignores_metadata_globs_and_navigation(self):
+        skill_usage = self.import_script()
+        try:
+            # Discovery found nothing, so every one of these goes through the
+            # text fallback -- which is where main counted them as skills.
+            for command in (
+                "cat /ws/skills/skillfs-views.toml",
+                "ls /ws/skills/*",
+                "ls /ws/skills/..",
+                "ls /ws/skills/.",
+                "grep -r web /ws/skills/[a-z]*",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNone(skill_usage.find_skill_in_command(command, None))
+                    self.assertIsNone(
+                        skill_usage.extract_skill_from_command_direct(command)
+                    )
+        finally:
+            self.release_script()
+
+    def test_fallback_still_counts_a_bare_skill_directory(self):
+        skill_usage = self.import_script()
+        try:
+            # The case this branch exists for: no trailing slash, nothing after
+            # the directory name.
+            for command in ("ls /ws/skills/web", "cd /ws/skills/web"):
+                with self.subTest(command=command):
+                    self.assertEqual(
+                        skill_usage.find_skill_in_command(command, None), "web"
+                    )
+                    self.assertEqual(
+                        skill_usage.extract_skill_from_command_direct(command), "web"
+                    )
+        finally:
+            self.release_script()
+
+    def test_fallback_keeps_scanning_past_a_rejected_component(self):
+        skill_usage = self.import_script()
+        try:
+            # Rejecting a component must not abandon the rest of the command: the
+            # first match here is a glob, the real skill is behind it.
+            self.assertEqual(
+                skill_usage.find_skill_in_command(
+                    "cat /ws/skills/*.toml && ls /ws/skills/web", None
+                ),
+                "web",
+            )
+        finally:
+            self.release_script()
+
+    def test_cli_does_not_invent_skills_for_inspection_commands(self):
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills" / "web").mkdir(parents=True)
+        (workspace / "skills" / "skillfs-views.toml").write_text("{}", encoding="utf-8")
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"cat {workspace}/skills/skillfs-views.toml"),
+                tool_call(f"ls {workspace}/skills/*"),
+                tool_call(f"ls {workspace}/skills/.."),
+                tool_call(f"python {workspace}/skills/web/run.py"),
+            ]
+        )
+        proc = self.run_cli("--mode", "summary")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertIn("web: 1", proc.stdout)
+        self.assertIn("Total skill calls: 1", proc.stdout)
+        self.assertNotIn("skillfs-views", proc.stdout)
+
+    def test_fallback_does_not_count_extensionless_files(self):
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills" / "web").mkdir(parents=True)
+        (workspace / "skills" / "LICENSE").write_text("x", encoding="utf-8")
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"cat {workspace}/skills/LICENSE"),
+                tool_call(f"python {workspace}/skills/web/run.py"),
+            ]
+        )
+        proc = self.run_cli("--mode", "summary")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertIn("web: 1", proc.stdout)
+        self.assertIn("Total skill calls: 1", proc.stdout)
+        self.assertNotIn("LICENSE", proc.stdout)
+
+    def test_fallback_keeps_dotted_skill_directories(self):
+        # A relative reference never matches the absolute path discovery
+        # returns, so it always reaches the fallback -- and a dot is not proof
+        # that the component is a file.
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills" / "web.v2").mkdir(parents=True)
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call("python skills/web.v2/run.py"),
+            ]
+        )
+        proc = self.run_cli("--mode", "summary")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertIn("web.v2: 1", proc.stdout)
+
+        skill_usage = self.import_script()
+        try:
+            paths = {"web.v2": str(workspace / "skills" / "web.v2")}
+            # The absolute form still counts with discovery ...
+            self.assertEqual(
+                skill_usage.find_skill_in_command(
+                    "python /ws/skills/web.v2/run.py", paths
+                ),
+                "web.v2",
+            )
+            # ... and with the workspace gone, when discovery returns nothing.
+            self.assertEqual(
+                skill_usage.extract_skill_from_command_direct(
+                    "python /ws/skills/web.v2/run.py"
+                ),
+                "web.v2",
+            )
+        finally:
+            self.release_script()
+
+    def test_directory_reference_wins_over_a_bare_file_reference(self):
+        skill_usage = self.import_script()
+        try:
+            # Discovery unavailable: the trailing slash is the only signal left,
+            # and the base extractor attributed this command to web.
+            self.assertEqual(
+                skill_usage.find_skill_in_command(
+                    "cat /ws/skills/LICENSE && python /ws/skills/web/run.py", None
+                ),
+                "web",
+            )
+            # With discovery the bare file is recognised as a file.
+            self.assertIsNone(
+                skill_usage.find_skill_in_command(
+                    "cat /ws/skills/LICENSE", {"web": "/ws/skills/web"}
+                )
+            )
+        finally:
+            self.release_script()
+    def test_files_only_workspace_does_not_invent_a_skill(self):
+        # Discovery answers, and the answer is "no skill directories".  That is
+        # not the same as "discovery failed": the degraded shape test must not
+        # run, or every ordinary file read under a skills/ tree becomes a call.
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills").mkdir(parents=True)
+        (workspace / "skills" / "LICENSE").write_text("x", encoding="utf-8")
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"cat {workspace}/skills/LICENSE"),
+            ]
+        )
+        proc = self.run_cli("--mode", "summary")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertIn("Total skill calls: 0", proc.stdout)
+        self.assertNotIn("LICENSE", proc.stdout)
+
+        skill_usage = self.import_script()
+        try:
+            # Answered-and-empty rejects the bare name ...
+            self.assertIsNone(
+                skill_usage.find_skill_in_command("cat /ws/skills/LICENSE", {})
+            )
+            # ... while an unusable workspace still gets the bare-directory
+            # support this branch exists for.
+            self.assertEqual(
+                skill_usage.find_skill_in_command("ls /ws/skills/web", None), "web"
+            )
+        finally:
+            self.release_script()
+
+    def test_cli_counts_bare_references_when_discovery_is_unavailable(self) -> None:
+        workspace = self.logs_dir / "ws"
+        commands = (
+            f"ls {workspace}/skills/web",
+            f"cd {workspace}/skills/web",
+            f"(cd {workspace}/skills/web)",
+            f"ls {workspace}/skills/web>listing.txt",
+        )
+        self.write_log([json.dumps({"cwd": str(workspace)}), *(tool_call(cmd) for cmd in commands)])
+        output = self.logs_dir / "report.json"
+        for state in ("missing workspace", "missing skills", "skills is a file"):
+            with self.subTest(state=state):
+                if state == "missing skills":
+                    workspace.mkdir()
+                elif state == "skills is a file":
+                    (workspace / "skills").write_text("not a directory", encoding="utf-8")
+                proc = self.run_cli("--mode", "all", "--output", str(output))
+                self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+                self.assertIn("web: 4", proc.stdout)
+                self.assertIn("Total skill calls: 4", proc.stdout)
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(report["by_agent"], {"agent-1": {"web": 4}})
+                self.assertEqual(report["by_date"], {"2026-01-01": {"web": 4}})
+                self.assertEqual(report["by_session"][0]["skills"], {"web": 4})
+
+    def test_discovery_errors_preserve_bare_references(self) -> None:
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills" / "web").mkdir(parents=True)
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"ls {workspace}/skills/web"),
+                tool_call(f"cd {workspace}/skills/web"),
+                tool_call(f"(cd {workspace}/skills/web)"),
+                tool_call(f"ls {workspace}/skills/web>listing.txt"),
+            ]
+        )
+        skill_usage = self.import_script()
+        try:
+            # Mock the filesystem operation, not discovery's return value, so
+            # the real discovery-to-parser contract is exercised even as root.
+            for operation in ("iterdir", "is_dir"):
+                with self.subTest(operation=operation), mock.patch.object(
+                    Path, operation, side_effect=PermissionError("unreadable skills")
+                ):
+                    self.assertIsNone(skill_usage.get_skill_paths(str(workspace)))
+                    found_workspace, by_skill, by_date = skill_usage.analyze_session_file(self.log)
+                    self.assertEqual(found_workspace, str(workspace))
+                    self.assertEqual(by_skill, {"web": 4})
+                    self.assertEqual(by_date, {"2026-01-01": {"web": 4}})
+        finally:
+            self.release_script()
+
+    def test_readable_empty_skills_directory_rejects_bare_references(self) -> None:
+        workspace = self.logs_dir / "ws"
+        (workspace / "skills").mkdir(parents=True)
+        self.write_log(
+            [
+                json.dumps({"cwd": str(workspace)}),
+                tool_call(f"ls {workspace}/skills/web"),
+            ]
+        )
+        skill_usage = self.import_script()
+        try:
+            self.assertEqual(skill_usage.get_skill_paths(str(workspace)), {})
+        finally:
+            self.release_script()
+        proc = self.run_cli("--mode", "summary")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+        self.assertIn("Total skill calls: 0", proc.stdout)
+        self.assertNotIn("web:", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
