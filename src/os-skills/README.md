@@ -49,6 +49,22 @@ A curated collection of operational skills for AI Agents, covering system admini
 ### Other
 - **cosh-guide** - Copilot Shell user guide
 
+## Planned Skill Retirement
+
+To focus on OS operations, OS Skills plans to remove the following eight skills
+from its default bundle and wind down routine maintenance of the bundled copies.
+Users who need these capabilities can use upstream skills, tools, or official
+documentation. The current bundle still includes all eight skills.
+
+- `github` — [GitHub CLI](https://github.com/cli/cli/blob/trunk/skills/gh/SKILL.md)
+- `humanizer` — [Humanizer](https://github.com/blader/humanizer)
+- `image-gen`
+- `pdf-reader`
+- `xlsx` — [MiniMax XLSX](https://github.com/MiniMax-AI/skills/blob/main/skills/minimax-xlsx/SKILL.md)
+- `regex-mastery`
+- `shell-scripting`
+- `upgrade-alinux-kernel`
+
 ## Skill Format
 
 Each skill lives in its own directory with at least a `SKILL.md` file:

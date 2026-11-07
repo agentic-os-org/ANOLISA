@@ -46,6 +46,20 @@
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
 
+## 技能退场计划
+
+为聚焦系统运维，OS Skills 计划将下列八个技能移出默认技能包，并逐步结束对内置副本的常规维护。
+仍需这些能力的用户可按需使用上游技能、工具或官方文档。当前技能包仍包含全部八个技能。
+
+- `github` — [GitHub CLI](https://github.com/cli/cli/blob/trunk/skills/gh/SKILL.md)
+- `humanizer` — [Humanizer](https://github.com/blader/humanizer)
+- `image-gen`
+- `pdf-reader`
+- `xlsx` — [MiniMax XLSX](https://github.com/MiniMax-AI/skills/blob/main/skills/minimax-xlsx/SKILL.md)
+- `regex-mastery`
+- `shell-scripting`
+- `upgrade-alinux-kernel`
+
 ## 技能格式
 
 每个技能由独立目录组织，至少包含一个 `SKILL.md` 文件：
