@@ -658,7 +658,7 @@ fn pin_profile_marker(
 /// gone the pinned layout is stale and gets rebuilt.
 const TRACEPOINT_HOLDER_PREFIX: &str = "tp_holder_";
 
-fn proc_start_time(pid: u32) -> Option<u64> {
+fn proc_start_time(pid: i32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(") ")?
         .1
@@ -673,7 +673,10 @@ fn pin_tracepoint_holder(
     paths: &PinnedEnginePaths,
     created: &mut Vec<PathBuf>,
 ) -> io::Result<PathBuf> {
-    let pid = std::process::id();
+    let cap_pending_fd = dup_array_map_fd(bpf, "cap_pending_submitter")?;
+    // A host-wide marker cannot use a namespace-local process ID.
+    let pid =
+        capture_current_thread_identity_fd(cap_req_map_fd(bpf)?, cap_pending_fd.as_raw_fd())?.pid;
     let start = proc_start_time(pid).ok_or_else(|| {
         err(format!(
             "read /proc/{pid}/stat start time for tracepoint holder"
@@ -702,8 +705,6 @@ fn tracepoint_holder_owned_by_current_process(
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),
     };
-    let current_pid = std::process::id();
-    let current_start = proc_start_time(current_pid);
     for entry in entries {
         let name = entry?.file_name();
         let Some(owner) = name
@@ -715,14 +716,23 @@ fn tracepoint_holder_owned_by_current_process(
         let Some((pid, start)) = owner.split_once('_') else {
             continue;
         };
-        let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else {
+        let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
             continue;
         };
         if proc_start_time(pid) != Some(start) {
             continue;
         }
-        if pid == current_pid && current_start == Some(start) && allow_current {
-            return Ok(true);
+        if allow_current {
+            let cap_req_fd = dup_pinned_map_fd(paths, "cap_req")?;
+            let cap_pending_fd = dup_pinned_map_fd(paths, "cap_pending_submitter")?;
+            let current_pid = capture_current_thread_identity_fd(
+                cap_req_fd.as_raw_fd(),
+                cap_pending_fd.as_raw_fd(),
+            )?
+            .pid;
+            if pid == current_pid && proc_start_time(current_pid) == Some(start) {
+                return Ok(true);
+            }
         }
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -6221,6 +6231,55 @@ os.execv({hit:?}, [{hit:?}])
             .expect("submit_delta in nested PID namespace");
         assert_eq!(cap_stat(3) - drop0, 0);
         assert_eq!(cap_stat(0) - accept0, 1);
+    }
+
+    /// Keep host procfs mounted so the pre-5.15 holder path must use kernel identity.
+    #[test]
+    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN, BPF LSM and --test-threads=1; private pins only"]
+    fn pinned_engine_holder_uses_kernel_pid_in_nested_pid_namespace() {
+        const CHILD_ENV: &str = "ACTPLANE_TEST_NESTED_HOST_PROCFS";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let _fixture = file_protection_delete_tests::Fixture::new("pidns-host-procfs");
+            let test_binary = std::env::current_exe().expect("current test binary");
+            let status = std::process::Command::new("unshare")
+                .args(["--pid", "--fork"])
+                .arg(test_binary)
+                .args([
+                    "tests::pinned_engine_holder_uses_kernel_pid_in_nested_pid_namespace",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn PID-namespaced test with host procfs");
+            assert!(status.success(), "nested PID namespace holder probe failed");
+            return;
+        }
+
+        let engine = PinnedEngine::open_or_install_singleton().expect("load private engine");
+        let reload = engine.reload_handle().expect("reload handle");
+        let kernel_pid = reload.current_process_kernel_pid().expect("kernel pid");
+        assert_ne!(kernel_pid, std::process::id() as i32);
+        assert!(
+            proc_start_time(kernel_pid).is_some(),
+            "the test requires an init-namespace procfs view"
+        );
+        if let Some(holder) = &engine._tracepoint_holder {
+            let marker = holder
+                ._marker
+                .0
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("holder marker name");
+            let pid = marker
+                .strip_prefix(TRACEPOINT_HOLDER_PREFIX)
+                .and_then(|owner| owner.split_once('_'))
+                .map(|(pid, _)| pid)
+                .expect("holder marker owner");
+            assert_eq!(pid.parse::<i32>(), Ok(kernel_pid));
+        }
     }
 
     /// The drain gate itself (#3021 follow-up 3): while this thread is the declared
