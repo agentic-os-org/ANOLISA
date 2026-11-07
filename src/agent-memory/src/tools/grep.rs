@@ -113,19 +113,48 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
             Ok(f) => f,
             Err(_) => continue,
         };
-        let reader = BufReader::new(f);
-        for (idx, line_result) in reader.lines().enumerate() {
-            let mut line = match line_result {
-                Ok(l) => l,
+        // Split lines ourselves instead of using `BufRead::lines()`: that
+        // iterator turns a non-UTF-8 line into an `Err`, and breaking out
+        // on it would silently drop every match after the first stray byte
+        // in an otherwise text file. `read_until` has already consumed the
+        // offending line by then, so skipping it cannot spin.
+        let mut reader = BufReader::new(f);
+        let mut raw: Vec<u8> = Vec::new();
+        let mut idx = 0;
+        loop {
+            raw.clear();
+            let n = match reader.read_until(b'\n', &mut raw) {
+                Ok(n) => n,
                 Err(_) => break,
             };
+            if n == 0 {
+                break;
+            }
+            idx += 1;
+            let mut line = match String::from_utf8(std::mem::take(&mut raw)) {
+                Ok(line) => line,
+                // Reclaim the bytes as the next line's buffer and skip this
+                // one, per the documented "non-UTF8 lines are skipped".
+                Err(e) => {
+                    raw = e.into_bytes();
+                    continue;
+                }
+            };
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
             if line.len() > MAX_LINE_LEN {
                 // String::truncate panics when the cut lands inside a
                 // multi-byte UTF-8 sequence, so walk back to the nearest
                 // char boundary: a single long CJK line would otherwise
-                // panic the worker on an ordinary grep call.
+                // panic the worker on an ordinary grep call. `cut > 0` is
+                // belt-and-braces — index 0 is always a char boundary, so
+                // the walk terminates there on its own.
                 let mut cut = MAX_LINE_LEN;
-                while !line.is_char_boundary(cut) {
+                while cut > 0 && !line.is_char_boundary(cut) {
                     cut -= 1;
                 }
                 line.truncate(cut);
@@ -133,7 +162,7 @@ pub fn grep(svc: &MemoryService, pattern: &str, opts: GrepOptions) -> Result<Vec
             if re.is_match(&line) {
                 hits.push(GrepHit {
                     path: rel_path.clone(),
-                    line: idx + 1,
+                    line: idx,
                     text: line,
                 });
                 if hits.len() >= max {
