@@ -59,11 +59,22 @@ BLACK_RGB = "00000000"
 GREEN_RGB = "00008000"
 RED_RGB   = "00ff0000"
 
-# numFmtIds that represent percentage formats (built-in + common custom)
-PERCENT_FMT_IDS = {9, 10, 165, 170}
+# Only built-in IDs have fixed meanings; custom IDs are workbook-specific.
+PERCENT_FMT_IDS = {9, 10}
 
-# numFmtIds that use comma separator (would corrupt year display)
-COMMA_FMT_IDS = {3, 4, 167, 168}  # #,##0 style — 4-digit years would show as 2,024
+# ECMA-376 reserves 0-163 for built-in formats; 164+ must be declared in
+# <numFmts>. A <cellXfs> reference to an undeclared custom ID is invalid.
+CUSTOM_NUM_FMT_MIN = 164
+
+# Built-in comma-grouped formats. Unlike custom IDs, built-ins never appear in
+# <numFmts>, so the formatCode fallback cannot recognise them; enumerate them.
+COMMA_FMT_IDS = {3, 4, 37, 38, 39, 40, 41, 42, 43, 44}
+
+
+def _declared_count(elem) -> int | None:
+    """Return an element's OOXML @count, or None when the optional attribute is absent."""
+    raw = elem.get("count")
+    return int(raw) if raw is not None else None
 
 
 def _parse_styles(styles_xml: bytes) -> dict:
@@ -77,21 +88,21 @@ def _parse_styles(styles_xml: bytes) -> dict:
     num_fmts = {}  # id -> formatCode
     nf_elem = find("numFmts")
     if nf_elem is not None:
-        declared_count = int(nf_elem.get("count", "0"))
+        declared_count = _declared_count(nf_elem)
         actual_count = len(nf_elem)
         for nf in nf_elem:
             fid = int(nf.get("numFmtId", "0"))
             num_fmts[fid] = nf.get("formatCode", "")
     else:
-        declared_count = 0
+        declared_count = None
         actual_count = 0
 
     # fonts — extract color and bold flag
     fonts = []
     fonts_elem = find("fonts")
-    fonts_declared = 0
+    fonts_declared = None
     if fonts_elem is not None:
-        fonts_declared = int(fonts_elem.get("count", "0"))
+        fonts_declared = _declared_count(fonts_elem)
         for font in fonts_elem:
             color_elem = font.find(f"{NSP}color")
             bold_elem = font.find(f"{NSP}b")
@@ -110,9 +121,9 @@ def _parse_styles(styles_xml: bytes) -> dict:
     # fills
     fills = []
     fills_elem = find("fills")
-    fills_declared = 0
+    fills_declared = None
     if fills_elem is not None:
-        fills_declared = int(fills_elem.get("count", "0"))
+        fills_declared = _declared_count(fills_elem)
         for fill in fills_elem:
             pf = fill.find(f"{NSP}patternFill")
             pattern_type = pf.get("patternType", "") if pf is not None else ""
@@ -121,9 +132,9 @@ def _parse_styles(styles_xml: bytes) -> dict:
     # cellXfs
     xfs = []
     xfs_elem = find("cellXfs")
-    xfs_declared = 0
+    xfs_declared = None
     if xfs_elem is not None:
-        xfs_declared = int(xfs_elem.get("count", "0"))
+        xfs_declared = _declared_count(xfs_elem)
         for xf in xfs_elem:
             xfs.append({
                 "numFmtId": int(xf.get("numFmtId", "0")),
@@ -209,7 +220,17 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
     num_fmts = styles["num_fmts"]
 
     # ── Check A: count attribute integrity ──────────────────────────────────
-    if styles["fonts_declared"] != styles["fonts_actual"]:
+    if (styles["num_fmts_declared"] is not None
+            and styles["num_fmts_declared"] != styles["num_fmts_actual"]):
+        v.append({
+            "type": "count_mismatch",
+            "element": "numFmts",
+            "declared": styles["num_fmts_declared"],
+            "actual": styles["num_fmts_actual"],
+            "fix": f"Update <numFmts count=\"{styles['num_fmts_actual']}\">",
+        })
+    if (styles["fonts_declared"] is not None
+            and styles["fonts_declared"] != styles["fonts_actual"]):
         v.append({
             "type": "count_mismatch",
             "element": "fonts",
@@ -217,7 +238,8 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             "actual": styles["fonts_actual"],
             "fix": f"Update <fonts count=\"{styles['fonts_actual']}\">",
         })
-    if styles["fills_declared"] != styles["fills_actual"]:
+    if (styles["fills_declared"] is not None
+            and styles["fills_declared"] != styles["fills_actual"]):
         v.append({
             "type": "count_mismatch",
             "element": "fills",
@@ -225,13 +247,30 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
             "actual": styles["fills_actual"],
             "fix": f"Update <fills count=\"{styles['fills_actual']}\">",
         })
-    if styles["xfs_declared"] != styles["xfs_actual"]:
+    if (styles["xfs_declared"] is not None
+            and styles["xfs_declared"] != styles["xfs_actual"]):
         v.append({
             "type": "count_mismatch",
             "element": "cellXfs",
             "declared": styles["xfs_declared"],
             "actual": styles["xfs_actual"],
             "fix": f"Update <cellXfs count=\"{styles['xfs_actual']}\">",
+        })
+
+    # Check A2: a cellXfs reference to an undeclared custom numFmtId is invalid.
+    # Built-in IDs (< 164) need no declaration; custom IDs must have one.
+    undefined_ids = sorted({
+        xf["numFmtId"] for xf in xfs
+        if xf["numFmtId"] >= CUSTOM_NUM_FMT_MIN and xf["numFmtId"] not in num_fmts
+    })
+    for num_fmt_id in undefined_ids:
+        v.append({
+            "type": "undefined_num_fmt",
+            "element": "cellXfs",
+            "numFmtId": num_fmt_id,
+            "fix": f"numFmtId={num_fmt_id} is a custom ID (>= {CUSTOM_NUM_FMT_MIN}) but no "
+                   f"<numFmt numFmtId=\"{num_fmt_id}\"/> is declared in <numFmts>; declare it "
+                   f"(and update count) or switch to a built-in ID",
         })
 
     # ── Check B: fills[0] and fills[1] presence ──────────────────────────────
@@ -544,6 +583,9 @@ def main() -> None:
                 elif t == "font_index_out_of_range":
                     print(f"  [FAIL] [{item['sheet']}!{item['cell']}] fontId={item['fontId']} but "
                           f"fonts count={item['fonts_count']}")
+                    print(f"         Fix: {item['fix']}")
+                elif t == "undefined_num_fmt":
+                    print(f"  [FAIL] cellXfs references undeclared custom numFmtId={item['numFmtId']}")
                     print(f"         Fix: {item['fix']}")
                 elif t == "year_with_comma_format":
                     print(f"  [FAIL] [{item['sheet']}!{item['cell']}] year value {item['value']} "
