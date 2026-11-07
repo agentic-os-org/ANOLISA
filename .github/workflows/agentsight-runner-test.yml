@@ -4,9 +4,15 @@ on:
   push:
     branches:
       - chore/test_sight
+      - main
     paths:
       - 'src/agentsight/**'
       - '.github/workflows/agentsight-runner-test.yml'
+  # Kernel jobs execute PR code with sudo. Fork PRs must stay behind the
+  # repository's maintainer-approval requirement on disposable, isolated runners.
+  # Every PR must report the matrix checks so unrelated changes cannot deadlock
+  # a required eBPF load (6.6) check through top-level path filtering.
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -21,8 +27,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect AgentSight Changes
+    runs-on: anolisa-k8s-general-ci-x64
+    outputs:
+      run_ebpf: ${{ steps.changes.outputs.run_ebpf }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+
+      - name: Select AgentSight validation
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run_ebpf=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed_paths="$RUNNER_TEMP/agentsight-changed-paths"
+          git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" -- > "$changed_paths"
+          run_ebpf=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/agentsight/*|.github/workflows/agentsight-runner-test.yml)
+                run_ebpf=true
+                break
+                ;;
+            esac
+          done < "$changed_paths"
+          echo "run_ebpf=$run_ebpf" >> "$GITHUB_OUTPUT"
+          if [ "$run_ebpf" = true ]; then
+            echo "AgentSight paths changed; kernel validation is required."
+          else
+            echo "No AgentSight paths changed; privileged kernel steps will be skipped."
+          fi
+
   standard:
     name: Standard CI
+    needs: changes
+    if: needs.changes.outputs.run_ebpf == 'true'
     runs-on: anolisa-agentsight-ci-x64
     timeout-minutes: 45
     steps:
@@ -78,7 +129,11 @@ jobs:
 
       - name: Lint
         working-directory: src/agentsight
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Mirror ci.yaml's agentsight clippy invocation: the vendored
+        # ActPlane crates are excluded (pre-existing lint debt tracked
+        # separately); ActPlane runtime tests are linted by the kernel-runner
+        # jobs with --no-deps.
+        run: cargo clippy --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --all-targets -- -D warnings
 
       - name: Test raw packaging
         working-directory: src/agentsight
@@ -86,9 +141,16 @@ jobs:
 
       - name: Run tests with coverage
         working-directory: src/agentsight
+        # Mirror ci.yaml's agentsight coverage invocation exactly: excluding
+        # the vendored ActPlane crates from instrumentation and capping
+        # parallelism is load-bearing — full-core instrumented builds of the
+        # whole workspace OOM-kill this self-hosted runner mid-step (the
+        # runner then reports "lost communication with the server").
         run: |
-          cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/)'
+          JOBS=$(( ($(nproc) + 1) / 2 ))
+          cargo llvm-cov --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/|crates/ebpf-ifc-engine/|crates/actplane-ifc-compiler/)' \
+            -j "$JOBS" -- --test-threads="$JOBS"
 
       - name: Upload coverage artifact
         if: always()
@@ -100,22 +162,43 @@ jobs:
 
   ebpf:
     name: eBPF load (${{ matrix.kernel }})
+    needs: changes
+    if: always()
     strategy:
       fail-fast: false
       matrix:
         include:
+          # 5.10/5.15 runners have no BPF-LSM, so only 6.6 runs the
+          # enforcement-effectiveness test as a required gate.
           - kernel: '5.10'
             runner: anolisa-agentsight-kernel510-x64
+            enforcement: optional
           - kernel: '5.15'
             runner: anolisa-agentsight-kernel515-x64
+            enforcement: optional
           - kernel: '6.6'
             runner: anolisa-agentsight-kernel66-x64
-    runs-on: ${{ matrix.runner }}
+            enforcement: required
+    # Preserve the exact matrix check names on unrelated PRs without allocating
+    # privileged runners; those checks succeed before any kernel steps.
+    runs-on: ${{ needs.changes.result == 'success' && needs.changes.outputs.run_ebpf == 'true' && matrix.runner || 'anolisa-k8s-general-ci-x64' }}
     timeout-minutes: 60
     steps:
+      - name: Validate change detection
+        if: needs.changes.result != 'success' || (needs.changes.outputs.run_ebpf != 'true' && needs.changes.outputs.run_ebpf != 'false')
+        run: |
+          echo "AgentSight change detection did not return a valid result; refusing to skip kernel validation." >&2
+          exit 1
+
+      - name: Skip unrelated changes
+        if: needs.changes.result == 'success' && needs.changes.outputs.run_ebpf == 'false'
+        run: echo "No AgentSight paths changed; skipping kernel validation."
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.run_ebpf == 'true'
 
       - name: Verify kernel runner
+        if: needs.changes.outputs.run_ebpf == 'true'
         shell: bash
         env:
           EXPECTED_KERNEL: ${{ matrix.kernel }}
@@ -148,22 +231,25 @@ jobs:
           if [ -r /sys/kernel/security/lsm ]; then
             cat /sys/kernel/security/lsm
             grep -q bpf /sys/kernel/security/lsm || \
-              echo "::warning::BPF-LSM is not active on this runner; enforcement e2e tests will be skipped"
+              echo "::warning::BPF-LSM is not active on this runner"
           else
             echo "::warning::securityfs not available; cannot determine LSM status"
           fi
 
       - uses: dtolnay/rust-toolchain@stable
+        if: needs.changes.outputs.run_ebpf == 'true'
         with:
           toolchain: '1.89.0'
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.run_ebpf == 'true'
         with:
           workspaces: src/agentsight
           shared-key: agentsight-bpf-${{ matrix.kernel }}
 
       - name: Install eBPF build dependencies
+        if: needs.changes.outputs.run_ebpf == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -172,6 +258,7 @@ jobs:
           echo "/usr/lib/llvm-15/bin" >> "$GITHUB_PATH"
 
       - name: Load all eBPF probes
+        if: needs.changes.outputs.run_ebpf == 'true'
         shell: bash
         env:
           RUST_BACKTRACE: '1'
@@ -179,6 +266,31 @@ jobs:
         run: |
           set -euo pipefail
           cd src/agentsight
+          # The default clippy pass does not enable actplane, so lint the live
+          # runtime test here. --no-deps keeps pre-existing vendored-crate lint
+          # debt out of scope; the test target itself is fully denied.
+          cargo clippy -p agentsight-enforcer --test inode_runtime \
+            --features actplane --no-deps -- -D warnings
+          # aya resolves tracepoints through /sys/kernel/tracing (or
+          # /sys/kernel/debug/tracing) and requires a non-empty directory:
+          # container runners may have neither mounted, which fails the
+          # engine's tracepoint attach with "tracefs not found".
+          sudo mkdir -p /sys/kernel/tracing 2>/dev/null || true
+          mountpoint -q /sys/kernel/tracing 2>/dev/null || \
+            sudo mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
+          # Fresh, job-private bpffs mount as the pin root (BPF_OBJ_PIN
+          # requires bpffs, and /sys/fs/bpf may not be bpffs in container
+          # runners): a reused self-hosted runner must not silently accept
+          # a stale /sys/fs/bpf/actplane/v1 pin — the current build's
+          # objects have to be installed and verified every run.
+          pin_root="/tmp/actplane-e2e-pin-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.kernel }}"
+          sudo mkdir -p "$pin_root"
+          sudo mount -t bpf bpf "$pin_root"
+          cleanup_pin_root() {
+            sudo umount "$pin_root" || true
+            sudo rm -rf "$pin_root"
+          }
+          trap cleanup_pin_root EXIT
           cargo_bin=$(command -v cargo)
           sudo env \
             HOME="$HOME" \
@@ -187,9 +299,23 @@ jobs:
             PATH="$PATH" \
             RUST_BACKTRACE="$RUST_BACKTRACE" \
             RUST_LOG="$RUST_LOG" \
+            ACTPLANE_BPF_PIN_ROOT="$pin_root" \
+            ACTPLANE_PINNED_PROFILE=agent-file-guard \
             CARGO_BIN="$cargo_bin" \
             bash -c '
+              set -euo pipefail
               ulimit -l unlimited
-              exec "$CARGO_BIN" test --test bpf_load -- \
+              "$CARGO_BIN" test --test bpf_load -- \
                 --ignored --nocapture --test-threads=1
+              if [ "${{ matrix.enforcement }}" = "required" ]; then
+                enforcement_log=$(mktemp)
+                trap '\''rm -f "$enforcement_log"'\'' EXIT
+                "$CARGO_BIN" test -p agentsight-enforcer --features actplane \
+                  --test inode_runtime -- file_guard_on_live_kernel --exact \
+                  --ignored --nocapture --test-threads=1 2>&1 | tee "$enforcement_log"
+                # A renamed test must not turn this gate into a zero-test success.
+                grep -Fqx "test file_guard_on_live_kernel ... ok" "$enforcement_log"
+              else
+                echo "Skipping enforcement effectiveness on kernel ${{ matrix.kernel }}: no BPF-LSM"
+              fi
             '
