@@ -118,9 +118,47 @@ impl FactWriter {
             let md_rel = Path::new("facts")
                 .join(fact.category.to_string())
                 .join(format!("{}.md", fact.id));
-            crate::safe_fs::write(fd.as_fd(), &md_rel, fact.to_markdown().as_bytes())?;
+            // A failed write must keep the committed fact instead of
+            // truncating it, so a destination that already exists is staged
+            // and renamed. Fact ids are ULIDs, not content hashes, so in
+            // production a new fact always lands on a new path and this arm is
+            // defence in depth rather than the normal route.
+            match crate::safe_fs::write_create_new(
+                fd.as_fd(),
+                &md_rel,
+                fact.to_markdown().as_bytes(),
+            ) {
+                Ok(_) => {}
+                Err(crate::error::MemoryError::AlreadyExists(_)) => crate::safe_fs::write_atomic(
+                    fd.as_fd(),
+                    Path::new(crate::ns::RESERVED_FIRST_SEGMENTS[0]),
+                    &md_rel,
+                    fact.to_markdown().as_bytes(),
+                )
+                .map(|_| ())?,
+                Err(e) => return Err(e),
+            }
         } else {
-            std::fs::write(&md_path, fact.to_markdown())?;
+            // Same guarantee without the sandbox anchor: stage beside the
+            // destination, flush it, then rename over it. The staging name is
+            // process-unique and opened with create_new, so a planted symlink
+            // at a predictable name cannot redirect the write, and a failed
+            // write removes its own partial file — nothing in reclaim or export
+            // looks for one, and git_repo's add_all would commit it.
+            let staging = md_path.with_extension(format!("md.memory-write-{}", std::process::id()));
+            let staged = || -> std::io::Result<()> {
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staging)?;
+                file.write_all(fact.to_markdown().as_bytes())?;
+                file.sync_all()?;
+                std::fs::rename(&staging, &md_path)
+            };
+            if let Err(e) = staged() {
+                let _ = std::fs::remove_file(&staging);
+                return Err(e.into());
+            }
         }
 
         // Append JSONL line.

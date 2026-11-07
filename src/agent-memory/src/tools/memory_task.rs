@@ -336,11 +336,25 @@ fn save_task(svc: &MemoryService, task: &Task) -> Result<()> {
         std::path::Path::new(TASKS_DIR),
     )?;
     std::fs::create_dir_all(svc.mount.root.join(TASKS_DIR))?;
-    crate::safe_fs::write(
+    // `save_task` is an upsert: saving an existing id replaces its file. A
+    // truncating write would lose the stored task when the replacement fails
+    // part-way, so the existing file is staged and renamed; a new task keeps
+    // the parent's default ACL/group through `write_create_new`.
+    match crate::safe_fs::write_create_new(
         svc.mount.root_fd.as_fd(),
         &rel,
         task.to_markdown().as_bytes(),
-    )?;
+    ) {
+        Ok(_) => {}
+        Err(crate::error::MemoryError::AlreadyExists(_)) => crate::safe_fs::write_atomic(
+            svc.mount.root_fd.as_fd(),
+            std::path::Path::new(svc.mount.meta_dir_name()),
+            &rel,
+            task.to_markdown().as_bytes(),
+        )
+        .map(|_| ())?,
+        Err(e) => return Err(e),
+    }
     Ok(())
 }
 
