@@ -411,3 +411,147 @@ fn inbox_loser_rmdir_keeps_the_categorized_owner() {
         "the retained owner's manifest is untouched and keeps the key"
     );
 }
+
+/// A dot-prefixed top-level directory is a hidden working copy under the
+/// loaders' contract: `SkillStore::load_from_directory` skips dot-prefixed
+/// top-level directories on every scan, and the nested write-path send
+/// sites apply the same rule through `hermes_nested_sync_eligible`. The
+/// flat slot has no such gate: `mkdir /skills/.draft` inserted a store
+/// placeholder for the hidden name, which made the hidden directory
+/// resolvable and writable through the mount and surfaced it in the
+/// `/skills` listing, while a fresh scan of the same tree keeps excluding
+/// it — the live store diverged from what a remount would serve.
+#[test]
+fn hidden_top_level_dirs_stay_out_of_the_store() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    std::fs::create_dir_all(source.path().join("web")).expect("served skill dir");
+    std::fs::write(
+        source.path().join("web/SKILL.md"),
+        "---\nname: web\ndescription: served\n---\nbody\n",
+    )
+    .expect("seed SKILL.md");
+
+    let mut initial_store = SkillStore::new();
+    initial_store.load_from_directory(source.path(), &ParseConfig::default());
+    let store: SharedSkillStore = Arc::new(RwLock::new(initial_store));
+    assert!(store.read().get("web").is_some());
+    assert!(store.read().get(".draft").is_none());
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        store.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount flat source");
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(mountpoint.path().join("skills/web/SKILL.md")).is_ok()
+        }),
+        "flat mount never served the seeded skill"
+    );
+
+    // The hidden working copy enters only through the mount: the mkdir
+    // placeholder and the manifest re-parse must both stay out of the
+    // live store, exactly like every discovery scan of the same tree.
+    std::fs::create_dir(mountpoint.path().join("skills/.draft"))
+        .expect("mkdir hidden dir through the mount");
+
+    assert!(
+        store.read().get(".draft").is_none(),
+        "mkdir of a hidden top-level directory must not insert a store placeholder"
+    );
+
+    std::fs::write(
+        mountpoint.path().join("skills/.draft/SKILL.md"),
+        "---\nname: leaked\ndescription: hidden\n---\nhidden body\n",
+    )
+    .expect("write hidden SKILL.md through the mount");
+
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        store.read().get(".draft").is_none(),
+        "a manifest written into a hidden top-level directory must not enter the store"
+    );
+
+    // A fresh scan of the same source agrees: the hidden name is not a
+    // managed skill.
+    let mut fresh = SkillStore::new();
+    fresh.load_from_directory(source.path(), &ParseConfig::default());
+    assert!(fresh.get(".draft").is_none());
+    assert!(fresh.get("web").is_some());
+
+    assert!(
+        store.read().get("web").is_some(),
+        "the visible control stays managed"
+    );
+    handle.unmount().expect("unmount flat source");
+}
+
+/// The rename twin of the hidden-copy rule: renaming a managed skill onto
+/// a dot-prefixed top-level name must withdraw the store entry entirely —
+/// a fresh scan of the renamed tree serves neither the old name (its
+/// directory is gone) nor the hidden one (the loader skips dot-prefixed
+/// top-level directories), and the live store must agree with both.
+#[test]
+fn renaming_onto_a_hidden_top_level_name_withdraws_the_entry() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    std::fs::create_dir_all(source.path().join("web")).expect("served skill dir");
+    std::fs::write(
+        source.path().join("web/SKILL.md"),
+        "---\nname: web\ndescription: served\n---\nbody\n",
+    )
+    .expect("seed SKILL.md");
+
+    let mut initial_store = SkillStore::new();
+    initial_store.load_from_directory(source.path(), &ParseConfig::default());
+    let store: SharedSkillStore = Arc::new(RwLock::new(initial_store));
+    assert!(store.read().get("web").is_some());
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        store.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount flat source");
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(mountpoint.path().join("skills/web/SKILL.md")).is_ok()
+        }),
+        "flat mount never served the seeded skill"
+    );
+
+    std::fs::rename(
+        mountpoint.path().join("skills/web"),
+        mountpoint.path().join("skills/.draft"),
+    )
+    .expect("rename onto a hidden top-level name");
+
+    assert!(
+        store.read().get("web").is_none(),
+        "the old name's directory is gone, so its entry must be withdrawn"
+    );
+    assert!(
+        store.read().get(".draft").is_none(),
+        "the hidden top-level name must not gain a store entry"
+    );
+
+    // A fresh scan of the renamed tree agrees on both counts.
+    let mut fresh = SkillStore::new();
+    fresh.load_from_directory(source.path(), &ParseConfig::default());
+    assert!(fresh.get("web").is_none());
+    assert!(fresh.get(".draft").is_none());
+
+    handle.unmount().expect("unmount flat source");
+}

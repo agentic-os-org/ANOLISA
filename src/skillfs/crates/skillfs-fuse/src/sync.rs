@@ -109,6 +109,21 @@ pub(crate) fn spawn_sync_worker(
                         ref source_path,
                         max_skill_size,
                     } => {
+                        // A dot-prefixed name is a hidden working copy:
+                        // discovery skips dot-prefixed top-level
+                        // directories on every scan, so inserting one here
+                        // would diverge the live store from a fresh scan of
+                        // the same tree. The nested send sites filter their
+                        // events through `hermes_nested_sync_eligible`
+                        // before enqueueing; this gate covers the top-level
+                        // (`SkillMd`) send sites the same way.
+                        if skill_name.starts_with('.') {
+                            info!(
+                                name = %skill_name,
+                                "sync: re-parse of a hidden top-level name skipped"
+                            );
+                            continue;
+                        }
                         let limit = usize::try_from(max_skill_size).unwrap_or(usize::MAX);
                         match parser::parse_skill_file_with_limit(source_path, limit) {
                             Ok(mut entry) => {
