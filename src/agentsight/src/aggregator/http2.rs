@@ -45,6 +45,21 @@ const HPACK_TABLE_SIZE_CAP: usize = 64 * 1024;
 /// connection before it has seen any SETTINGS.
 const HPACK_DEFAULT_TABLE_SIZE: usize = 4096;
 
+/// Hard cap on the decoded bytes one HPACK header block may contribute.
+///
+/// The decoded list — not the wire fragment — is what `decode_header_block`
+/// retains per stream, and the two are only loosely related: a one-byte
+/// indexed field line emits the full dynamic-table entry it references, so a
+/// block of repeated references amplifies its own size by up to the per-entry
+/// table cap (a 64 KiB CONTINUATION-capped fragment of references to a ~4 KiB
+/// entry decodes to ~256 MiB, and a split HEADERS frame can carry up to the
+/// parser's 8 MiB reassembly cap). Real header blocks decode to a few KiB —
+/// this budget is 4x the reassembled fragment cap — so keeping only the
+/// prefix that fits bounds the bomb while leaving every observable header of
+/// legitimate traffic in place, the same degrade-instead-of-drop discipline
+/// the table cap above uses.
+const MAX_DECODED_HEADER_BLOCK_BYTES: usize = 256 * 1024;
+
 /// Default per-stream payload cap (8 MiB), mirroring the HTTP/1 connection cap.
 const DEFAULT_MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
@@ -1154,17 +1169,44 @@ impl Http2StreamAggregator {
             StreamDirection::Response => &mut state.resp_decoder,
         };
 
-        match decoder.decode(fragment) {
-            Ok(headers) => {
-                let result: Vec<(String, String)> = headers
-                    .into_iter()
-                    .map(|(name, value)| {
-                        (
-                            String::from_utf8_lossy(&name).into_owned(),
-                            String::from_utf8_lossy(&value).into_owned(),
-                        )
-                    })
-                    .collect();
+        // The decoded list is what gets retained, so it — not the fragment —
+        // needs the budget: a block of one-byte indexed references emits the
+        // referenced entry per byte (see `MAX_DECODED_HEADER_BLOCK_BYTES`).
+        // Accumulate through the callback so the walk continues past the
+        // budget without allocating, and the decoded prefix is still kept.
+        let mut result: Vec<(String, String)> = Vec::new();
+        let mut decoded_bytes = 0usize;
+        let mut block_addition = 0usize;
+        let mut over_budget = false;
+        let outcome = decoder.decode_with_cb(fragment, |name, value| {
+            // The callback runs before incremental indexing updates the table,
+            // including for fields whose retained output is clipped.
+            let pair = name.len().saturating_add(value.len()).saturating_add(32);
+            block_addition = block_addition.saturating_add(pair);
+            if over_budget {
+                return;
+            }
+            // The +32 mirrors the HPACK entry accounting the table-size
+            // estimate below uses, so a flood of near-empty pairs cannot
+            // smuggle unbounded Vec overhead past the budget.
+            if decoded_bytes.saturating_add(pair) > MAX_DECODED_HEADER_BLOCK_BYTES {
+                over_budget = true;
+                return;
+            }
+            decoded_bytes += pair;
+            result.push((
+                String::from_utf8_lossy(&name).into_owned(),
+                String::from_utf8_lossy(&value).into_owned(),
+            ));
+        });
+        match outcome {
+            Ok(()) => {
+                if over_budget {
+                    log::warn!(
+                        "HPACK block for conn={conn_id:?} dir={direction:?} decodes past \
+                         {MAX_DECODED_HEADER_BLOCK_BYTES} retained bytes; keeping the prefix"
+                    );
+                }
                 // A block may carry a dynamic-table size update, which the
                 // hpack 0.3 decoder applies verbatim with no ceiling of its
                 // own — re-assert the clamped cap after every block.
@@ -1174,10 +1216,6 @@ impl Http2StreamAggregator {
                 // over-advertised update as a decode error; degrading to
                 // the clamp instead keeps the connection observable.)
                 decoder.set_max_table_size(cap);
-                let block_addition: usize = result
-                    .iter()
-                    .map(|(name, value)| name.len() + value.len() + 32)
-                    .fold(0usize, usize::saturating_add);
                 let state = self.hpack_state(conn_id);
                 match direction {
                     StreamDirection::Request => {
@@ -3549,5 +3587,199 @@ mod tests {
         );
         let bytes = aggregator.metrics().connection_cache_bytes;
         assert!(bytes > 0 && bytes <= 64 * 1024);
+    }
+
+    // --- decoded-block budget tests ---
+
+    /// Seed one dynamic-table entry sized near the default cap: a literal
+    /// with incremental indexing, new name, 4000-byte value. The HPACK entry
+    /// size is 5 + 4000 + 32 = 4037 <= 4096, so the table retains it, and
+    /// index 62 (byte 0xBE) references it once it is the newest entry.
+    fn amplified_block_seed() -> Vec<u8> {
+        let mut seed = vec![0x40, 0x05];
+        seed.extend_from_slice(b"x-amp");
+        // String length 4000 on a 7-bit prefix: 127 + 128 * 30 + 33.
+        seed.extend_from_slice(&[0x7F, 0xA1, 0x1E]);
+        seed.extend_from_slice(&[b'A'; 4000]);
+        seed
+    }
+
+    #[test]
+    fn amplified_indexed_references_decode_to_a_bounded_prefix() {
+        // A hostile block of one-byte indexed field lines: every reference
+        // emits the full dynamic-table entry it points at, so the decoded
+        // list is not bounded by the fragment the way literal blocks are.
+        // A 4 KiB block of references to a ~4 KiB entry decodes to ~16 MiB
+        // here, and a split HEADERS frame can carry up to the parser's
+        // 8 MiB reassembly cap. The decode must keep only the prefix that
+        // fits the decoded-block budget instead of materializing the whole
+        // amplification into the retained `decoded_headers_store`.
+        let mut aggregator = Http2StreamAggregator::new();
+        let conn_id = ConnectionId {
+            pid: 5150,
+            ssl_ptr: 0xD000,
+        };
+
+        let seed = amplified_block_seed();
+        let seeded = aggregator.decode_header_block(conn_id, StreamDirection::Response, &seed);
+        assert_eq!(seeded.unwrap()[0], ("x-amp".to_string(), "A".repeat(4000)));
+
+        // 4096 one-byte references to the seeded entry: without a budget the
+        // decoded list holds 4096 x ~4 KiB pairs (~16 MiB); under the budget
+        // it stops after roughly a quarter-megabyte of decoded entries.
+        let amplified = vec![0xBE; 4096];
+        let decoded =
+            aggregator.decode_header_block(conn_id, StreamDirection::Response, &amplified);
+        let pairs = decoded.expect("an over-budget block still decodes to a prefix");
+        assert!(
+            !pairs.is_empty(),
+            "the decoded prefix must survive for observability"
+        );
+        assert!(
+            pairs.len() <= 70,
+            "the decoded prefix must be bounded by the block budget, got {}",
+            pairs.len()
+        );
+        assert_eq!(pairs[0], ("x-amp".to_string(), "A".repeat(4000)));
+    }
+
+    #[test]
+    fn an_amplified_block_retains_bounded_bytes_per_stream() {
+        // The same amplification through the frame path: the
+        // `decoded_headers_store` entry retained for the stream must respect
+        // the decoded-block budget, so `connection_cache_bytes` stays bounded
+        // no matter how large the referenced table entries are.
+        let mut aggregator = Http2StreamAggregator::new();
+        let conn_id = ConnectionId {
+            pid: 5151,
+            ssl_ptr: 0xD100,
+        };
+
+        // Response-direction HEADERS rides a read event (rw = 0). Seed the
+        // connection's response table first, on stream 1.
+        let seed = amplified_block_seed();
+        let seed_frame = create_test_frame(
+            1,
+            0x01,
+            0x04,
+            seed,
+            create_test_event(conn_id.pid, conn_id.ssl_ptr, 0, 7100),
+        );
+        assert!(aggregator.process_frames(vec![seed_frame]).is_empty());
+
+        let amplified = vec![0xBE; 4096];
+        let bomb = create_test_frame(
+            3,
+            0x01,
+            0x04,
+            amplified,
+            create_test_event(conn_id.pid, conn_id.ssl_ptr, 0, 7200),
+        );
+        assert!(aggregator.process_frames(vec![bomb]).is_empty());
+
+        let bytes = aggregator.metrics().connection_cache_bytes;
+        assert!(
+            bytes > 200 * 1024,
+            "the retained prefix should sit near the budget, got {bytes}"
+        );
+        assert!(
+            bytes <= 320 * 1024,
+            "retention must be bounded by the decoded-block budget, got {bytes}"
+        );
+    }
+
+    #[test]
+    fn ordinary_blocks_are_never_clipped_by_the_budget() {
+        // Control: the budget exists for hostile amplification, not for real
+        // traffic. A few hundred references to a small entry — already
+        // unusual for legitimate traffic — decode in full.
+        let mut aggregator = Http2StreamAggregator::new();
+        let conn_id = ConnectionId {
+            pid: 5152,
+            ssl_ptr: 0xD200,
+        };
+
+        let mut seed = vec![0x40, 0x05];
+        seed.extend_from_slice(b"x-req");
+        seed.push(0x05);
+        seed.extend_from_slice(b"sess1");
+        let seeded = aggregator.decode_header_block(conn_id, StreamDirection::Request, &seed);
+        assert_eq!(
+            seeded.unwrap()[0],
+            ("x-req".to_string(), "sess1".to_string())
+        );
+
+        // 500 references to the 5-byte entry: 500 * (5 + 5 + 32) bytes sits
+        // far under the budget, so nothing may be clipped.
+        let refs = vec![0xBE; 500];
+        let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Request, &refs);
+        let pairs = decoded.unwrap();
+        assert_eq!(pairs.len(), 500);
+        assert!(pairs.iter().all(|(n, v)| n == "x-req" && v == "sess1"));
+    }
+
+    #[test]
+    fn over_budget_insertions_stay_indexable_and_fully_gauged() {
+        let mut aggregator = Http2StreamAggregator::new();
+        let conn_id = ConnectionId {
+            pid: 5153,
+            ssl_ptr: 0xD300,
+        };
+        let mut settings = vec![0x00, 0x01];
+        settings.extend_from_slice(&(HPACK_TABLE_SIZE_CAP as u32).to_be_bytes());
+        aggregator.process_frames(vec![create_test_frame(
+            0,
+            0x04,
+            0x00,
+            settings,
+            create_test_event(conn_id.pid, conn_id.ssl_ptr, 0, 100),
+        )]);
+
+        let mut block = vec![0x40, 0x05];
+        block.extend_from_slice(b"x-req");
+        block.push(0x05);
+        block.extend_from_slice(b"sess1");
+        // The 256 KiB value trips the budget and evicts the first insertion.
+        block.extend_from_slice(&[0x40, 0x01, b'h', 0x7F, 0x81, 0xFF, 0x0F]);
+        let huge_value_end = block.len() + MAX_DECODED_HEADER_BLOCK_BYTES;
+        block.resize(huge_value_end, b'H');
+        // Each later literal occupies 36 bytes, retaining 62,280 table bytes.
+        for i in 0..1730usize {
+            let value = [
+                b'A' + ((i >> 8) & 0x0F) as u8,
+                b'A' + ((i >> 4) & 0x0F) as u8,
+                b'A' + (i & 0x0F) as u8,
+            ];
+            block.extend_from_slice(&[0x40, 0x01, b'x', 0x03]);
+            block.extend_from_slice(&value);
+        }
+
+        let decoded = aggregator.decode_header_block(conn_id, StreamDirection::Request, &block);
+        assert_eq!(
+            decoded,
+            Some(vec![("x-req".to_string(), "sess1".to_string())])
+        );
+        assert_eq!(
+            aggregator.metrics().connection_cache_bytes,
+            HPACK_TABLE_SIZE_CAP,
+            "post-budget dynamic-table insertions must remain charged"
+        );
+
+        // Dynamic indices 62 and 1791 reference the newest and oldest entries.
+        let newest_and_oldest = [0xBE, 0xFF, 0x80, 0x0D];
+        let decoded =
+            aggregator.decode_header_block(conn_id, StreamDirection::Request, &newest_and_oldest);
+        assert_eq!(
+            decoded,
+            Some(vec![
+                ("x".to_string(), "GMB".to_string()),
+                ("x".to_string(), "AAA".to_string()),
+            ]),
+            "the newest and oldest post-budget insertions must remain indexable"
+        );
+        assert_eq!(
+            aggregator.metrics().connection_cache_bytes,
+            HPACK_TABLE_SIZE_CAP
+        );
     }
 }
