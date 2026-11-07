@@ -703,6 +703,7 @@ fn remote_backend_error(error: BackendError) -> RemoteError {
         BackendError::KernelFailure(_) => "kernel_failure",
         BackendError::PreexistingWritableMap { .. } => "preexisting_writable_map",
         BackendError::PreexistingWritableFd { .. } => "preexisting_writable_fd",
+        BackendError::UnsupportedEnvironment(_) => "unsupported_environment",
     };
     RemoteError {
         code: code.into(),
@@ -1223,5 +1224,14 @@ mod tests {
                 "mock backend does not enforce kernel operations; security event delivery loss: dropped_events=5"
             )
         );
+    }
+
+    #[test]
+    fn remote_backend_error_maps_unsupported_environment_code() {
+        let remote = remote_backend_error(BackendError::UnsupportedEnvironment(
+            "pid-ns container".into(),
+        ));
+        assert_eq!(remote.code, "unsupported_environment");
+        assert!(remote.message.contains("pid-ns container"));
     }
 }

@@ -644,6 +644,7 @@ impl ActPlaneBackend {
     ) -> Result<Binding, BackendError> {
         let _ = normalize_actplane_policy_payload(&request)?;
         let _lifecycle = self.lifecycle();
+        require_init_pid_ns(self.in_init_pidns)?;
         let mut bindings = self.state.bindings();
         if let Some(existing) = bindings
             .values()
@@ -1700,25 +1701,38 @@ fn proc_start_time(pid: i32) -> Result<u64, ()> {
         .ok_or(())
 }
 
-/// Check whether the current process runs in the init PID namespace by
-/// comparing its pid-namespace inode with that of PID 1.
+/// Kernel-assigned inode of the initial PID namespace (`PROC_PID_INIT_INO`).
+const PROC_PID_INIT_INO: u64 = 0xEFFF_FFFC;
+
+/// Returns whether the current process runs in the initial PID namespace.
 fn is_init_pid_namespace() -> bool {
-    let Ok(self_ns) = fs::read_link("/proc/self/ns/pid") else {
+    let Ok(self_ns) = fs::metadata("/proc/self/ns/pid") else {
         return false; // can't read → assume not init, fail-closed
     };
-    let Ok(init_ns) = fs::read_link("/proc/1/ns/pid") else {
-        return false;
-    };
-    let result = self_ns == init_ns;
+    // PID 1 may be container-local; the kernel assigns a fixed inode to the init namespace.
+    let result = self_ns.ino() == PROC_PID_INIT_INO;
     if !result {
         eprintln!(
             "agentsight-enforcer: not in init PID namespace \
-             (self={}, pid1={}); file_delete_guard will be disabled",
-            self_ns.display(),
-            init_ns.display(),
+             (pidns_ino={}); policy application will be refused",
+            self_ns.ino(),
         );
     }
     result
+}
+
+/// Rejects PID namespaces that cannot satisfy ActPlane's kernel PID admission checks.
+fn require_init_pid_ns(in_init_pidns: bool) -> Result<(), BackendError> {
+    if in_init_pidns {
+        return Ok(());
+    }
+    Err(BackendError::UnsupportedEnvironment(
+        "ActPlane enforcement requires the init PID namespace: policy admission \
+         compares init-namespace pids that a PID-namespaced enforcer cannot \
+         supply. Run the enforcer on the host or with host PID visibility \
+         (hostPID: true / --pid=host)."
+            .into(),
+    ))
 }
 
 #[cfg(test)]
@@ -2698,5 +2712,27 @@ mod tests {
         );
 
         assert_eq!(event.occurred_at_ns, observed_at_ns);
+    }
+
+    #[test]
+    fn apply_outside_init_pidns_is_refused_loudly() {
+        let error = require_init_pid_ns(false).expect_err("pid-ns enforcer must be refused");
+        assert!(
+            matches!(error, BackendError::UnsupportedEnvironment(_)),
+            "expected UnsupportedEnvironment, got: {error}"
+        );
+        assert!(
+            error.to_string().contains("init PID namespace"),
+            "message should name the requirement: {error}"
+        );
+        assert!(require_init_pid_ns(true).is_ok());
+    }
+
+    #[test]
+    fn pid_namespace_detection_uses_nsfs_inode() {
+        let expected = fs::metadata("/proc/self/ns/pid")
+            .map(|metadata| metadata.ino() == PROC_PID_INIT_INO)
+            .unwrap_or(false);
+        assert_eq!(is_init_pid_namespace(), expected);
     }
 }
