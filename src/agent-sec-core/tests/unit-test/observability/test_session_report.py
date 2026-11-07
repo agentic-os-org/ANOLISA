@@ -78,18 +78,12 @@ class TestBuildSessionReport:
         reader.list_runs.return_value = [_fake_run()]
         reader.list_events.return_value = []
 
-        def _fake_candidate(category, result="succeeded"):
-            c = MagicMock()
-            c.event = _fake_sec_event(category, result)
-            return c
-
         sec_reader = MagicMock()
-        sec_reader.query_correlation_candidates.return_value = [
-            _fake_candidate("code_scan", "succeeded"),
-            _fake_candidate("code_scan", "succeeded"),
-            _fake_candidate("code_scan", "failed"),
-            _fake_candidate("prompt_scan", "succeeded"),
-        ]
+        counts = {
+            "code_scan": {"succeeded": 2, "failed": 1},
+            "prompt_scan": {"succeeded": 1},
+        }
+        sec_reader.count_session_results.return_value = counts
         rpt = build_session_report("sess-1", reader, sec_reader)
         assert rpt.security_verdicts["code_scan"] == {
             "succeeded": 2,
@@ -97,6 +91,9 @@ class TestBuildSessionReport:
         }
         assert rpt.security_verdicts["prompt_scan"] == {"succeeded": 1}
         assert rpt.security_hint == ""
+        sec_reader.query_correlation_candidates.assert_not_called()
+        sec_reader.count_session_results.assert_called_once()
+        assert sec_reader.count_session_results.call_args.args[0] == "sess-1"
 
     def test_security_empty_returns_hint(self):
         reader = MagicMock()
@@ -105,7 +102,7 @@ class TestBuildSessionReport:
         reader.list_events.return_value = []
 
         sec_reader = MagicMock()
-        sec_reader.query_correlation_candidates.return_value = []
+        sec_reader.count_session_results.return_value = {}
         rpt = build_session_report("sess-1", reader, sec_reader)
         assert rpt.security_verdicts == {}
         assert "session_id" in rpt.security_hint
