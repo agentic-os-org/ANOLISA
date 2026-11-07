@@ -1125,6 +1125,202 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sse_enrichment_keeps_provider_tool_calls() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_srv","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"rust\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":0}"#),
+            make_sse_event(
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"mcp_tool_use","id":"mcptoolu_1","name":"github_search","input":{}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"drain\"}"}}"#,
+            ),
+            make_sse_event(r#"{"type":"content_block_stop","index":1}"#),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("provider tool calls must be persisted");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("output_messages must round-trip");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].finish_reason.as_deref(), Some("end_turn"));
+        assert_eq!(parsed[0].parts.len(), 2);
+        assert!(matches!(
+            &parsed[0].parts[0],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && name == "web_search"
+                    && arguments == &Some(serde_json::json!({"query": "rust"}))
+        ));
+        assert!(matches!(
+            &parsed[0].parts[1],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("mcptoolu_1")
+                    && name == "github_search"
+                    && arguments == &Some(serde_json::json!({"q": "drain"}))
+        ));
+        assert_eq!(
+            crate::genai::semantic::tool_call_ids_json(&parsed).as_deref(),
+            Some(r#"["srvtoolu_1","mcptoolu_1"]"#)
+        );
+    }
+
+    #[test]
+    fn test_parse_request_body_keeps_provider_tool_blocks() {
+        let result_types = [
+            "tool_result",
+            "web_search_tool_result",
+            "web_fetch_tool_result",
+            "code_execution_tool_result",
+            "bash_code_execution_tool_result",
+            "text_editor_code_execution_tool_result",
+            "tool_search_tool_result",
+            "mcp_tool_result",
+        ];
+        let results: Vec<_> = result_types
+            .iter()
+            .map(|kind| serde_json::json!({"type": kind, "tool_use_id": kind, "content": "ok"}))
+            .collect();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                     "input": {"query": "rust"}},
+                    {"type": "mcp_tool_use", "id": "mcptoolu_1", "name": "github_search",
+                     "input": {"q": "drain"}}
+                ]},
+                {"role": "user", "content": results}
+            ]
+        });
+        let req = GenAIBuilder::parse_request_body(&body.to_string()).expect("body parses");
+        assert_eq!(req.messages[0].parts.len(), 2);
+        assert!(matches!(
+            &req.messages[0].parts[0],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && name == "web_search"
+                    && arguments == &Some(serde_json::json!({"query": "rust"}))
+        ));
+        assert!(matches!(
+            &req.messages[0].parts[1],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("mcptoolu_1")
+                    && name == "github_search"
+                    && arguments == &Some(serde_json::json!({"q": "drain"}))
+        ));
+        assert_eq!(req.messages[1].parts.len(), result_types.len());
+        for (part, kind) in req.messages[1].parts.iter().zip(result_types.iter()) {
+            assert!(matches!(
+                part,
+                MessagePart::ToolCallResponse { id, response }
+                    if id.as_deref() == Some(*kind)
+                        && response == &serde_json::json!("ok")
+            ));
+        }
+    }
+
+    #[test]
+    fn test_anthropic_provider_tool_results_match_live_and_drain() {
+        let chunks = serde_json::json!([
+            {"type":"message_start","message":{"id":"msg_results","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":0}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}},
+            {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"rust\"}"}},
+            {"type":"content_block_stop","index":0},
+            {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com/rust"}]}},
+            {"type":"content_block_stop","index":1},
+            {"type":"content_block_start","index":2,"content_block":{"type":"mcp_tool_result","tool_use_id":"mcptoolu_err","content":"rate limited","is_error":true}},
+            {"type":"content_block_stop","index":2},
+            {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}},
+            {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Done."}},
+            {"type":"content_block_stop","index":3},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+        ]);
+        let live = crate::analyzer::message::AnthropicParser::parse_response(&chunks)
+            .expect("the live parser must keep the complete turn");
+        assert_eq!(live.content.len(), 4);
+        assert!(matches!(
+            &live.content[0],
+            crate::analyzer::message::AnthropicContentBlock::ToolUse { id, .. }
+                if id == "srvtoolu_1"
+        ));
+        assert!(matches!(
+            &live.content[1],
+            crate::analyzer::message::AnthropicContentBlock::ToolResult { tool_use_id, .. }
+                if tool_use_id == "srvtoolu_1"
+        ));
+        assert!(matches!(
+            &live.content[2],
+            crate::analyzer::message::AnthropicContentBlock::ToolResult { is_error, .. }
+                if *is_error == Some(true)
+        ));
+        assert!(matches!(
+            &live.content[3],
+            crate::analyzer::message::AnthropicContentBlock::Text { text, .. }
+                if text == "Done."
+        ));
+
+        let events: Vec<_> = chunks
+            .as_array()
+            .expect("chunks are an array")
+            .iter()
+            .map(|chunk| make_sse_event(&chunk.to_string()))
+            .collect();
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let json = enrichment
+            .output_messages
+            .expect("the drain must keep the complete turn");
+        let parsed: Vec<OutputMessage> =
+            serde_json::from_str(&json).expect("output_messages must round-trip");
+        let parts = &parsed[0].parts;
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::ToolCall { id, name, arguments }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && name == "web_search"
+                    && arguments == &Some(serde_json::json!({"query": "rust"}))
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::ToolCallResponse { id, response }
+                if id.as_deref() == Some("srvtoolu_1")
+                    && response == &serde_json::json!([
+                        {"type":"web_search_result","url":"https://example.com/rust"}
+                    ])
+        ));
+        assert!(matches!(
+            &parts[2],
+            MessagePart::ToolCallResponse { id, response }
+                if id.as_deref() == Some("mcptoolu_err")
+                    && response == &serde_json::json!({
+                        "content": "rate limited",
+                        "is_error": true
+                    })
+        ));
+        assert!(matches!(
+            &parts[3],
+            MessagePart::Text { content } if content == "Done."
+        ));
+    }
+
+    #[test]
     fn test_extract_sse_enrichment_captures_streamed_tool_calls() {
         // A pure tool-calling turn: the old walker only read delta.content,
         // so output_messages was None; the shared merger now keeps the

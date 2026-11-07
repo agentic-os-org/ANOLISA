@@ -928,8 +928,8 @@ impl GenAIBuilder {
     /// Mirrors the analyzer's aggregation: text deltas → one Text part per
     /// block, thinking deltas → Reasoning, tool_use blocks (including the
     /// provider-side `server_tool_use` / `mcp_tool_use` spellings) → ToolCall
-    /// with the concatenated `input_json_delta` fragments, all in block-index
-    /// order.
+    /// with the concatenated `input_json_delta` fragments, and tool result
+    /// blocks → ToolCallResponse, all in block-index order.
     /// Block indices are capped like `MAX_TOOL_CALL_SLOTS` so a hostile index
     /// cannot turn one JSON field into an unbounded map. Returns `None` when
     /// no Anthropic event shape is present (caller falls back).
@@ -943,6 +943,10 @@ impl GenAIBuilder {
                 id: String,
                 name: String,
                 args_json: String,
+            },
+            ToolResult {
+                id: String,
+                response: serde_json::Value,
             },
         }
 
@@ -1005,6 +1009,39 @@ impl GenAIBuilder {
                                 .unwrap_or_default()
                                 .to_string(),
                         ),
+                        Some(
+                            "tool_result"
+                            | "web_search_tool_result"
+                            | "web_fetch_tool_result"
+                            | "code_execution_tool_result"
+                            | "bash_code_execution_tool_result"
+                            | "text_editor_code_execution_tool_result"
+                            | "tool_search_tool_result"
+                            | "mcp_tool_result",
+                        ) => {
+                            let response = match (
+                                content_block.get("content").cloned(),
+                                content_block.get("is_error").and_then(|v| v.as_bool()),
+                            ) {
+                                (Some(value), Some(is_error)) => serde_json::json!({
+                                    "content": value,
+                                    "is_error": is_error,
+                                }),
+                                (Some(value), None) => value,
+                                (None, Some(is_error)) => {
+                                    serde_json::json!({ "is_error": is_error })
+                                }
+                                (None, None) => serde_json::Value::Null,
+                            };
+                            Block::ToolResult {
+                                id: content_block
+                                    .get("tool_use_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                response,
+                            }
+                        }
                         // Text and any future block kind default to a text
                         // accumulator, seeded from the start block so a gateway
                         // that sends the finished text there and no deltas keeps
@@ -1113,6 +1150,12 @@ impl GenAIBuilder {
                         id: if id.is_empty() { None } else { Some(id) },
                         name,
                         arguments,
+                    });
+                }
+                Block::ToolResult { id, response } => {
+                    parts.push(MessagePart::ToolCallResponse {
+                        id: if id.is_empty() { None } else { Some(id) },
+                        response,
                     });
                 }
                 _ => {}

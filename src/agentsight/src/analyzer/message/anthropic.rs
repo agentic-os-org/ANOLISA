@@ -163,6 +163,7 @@ impl AnthropicParser {
                 name: String,
                 input_json: String,
             },
+            ToolResult(AnthropicContentBlock),
         }
         let mut current_block: Option<CurrentBlock> = None;
         // Finish a streamed block, pushing it when it carries content. Called
@@ -202,6 +203,7 @@ impl AnthropicParser {
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 out.push(AnthropicContentBlock::ToolUse { id, name, input });
             }
+            CurrentBlock::ToolResult(block) => out.push(block),
         };
 
         for event_value in events {
@@ -250,6 +252,9 @@ impl AnthropicParser {
                             }),
                             AnthropicContentBlock::Text { text, .. } => {
                                 Some(CurrentBlock::Text { text: text.clone() })
+                            }
+                            AnthropicContentBlock::ToolResult { .. } => {
+                                Some(CurrentBlock::ToolResult(content_block.clone()))
                             }
                             _ => {
                                 // Any other block type
