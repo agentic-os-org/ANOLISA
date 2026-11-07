@@ -37,6 +37,7 @@ use cosh_platform::checkpoint::{CkptClient, CkptRequestEffect};
 use cosh_types::checkpoint::{
     ChangeType, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2, WorkspaceGenerationTokenV2,
 };
+use cosh_types::error::{CoshError, ErrorCode};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
@@ -312,6 +313,72 @@ fn checkpoint_error(code: &str, retryable: bool) -> ContractError {
         "The governed checkpoint operation could not be completed safely",
     )
     .unwrap_or_else(|_| unreachable!("static checkpoint errors are bounded"))
+}
+
+// Codes come only from this static table or the locally produced
+// `guarded_rollback_rejection` detail name, never from remote text; the
+// message reuses the already-redacted `CoshError` text.
+fn task_snapshot_failure(fallback_code: &str, failure: &CoshError) -> ContractError {
+    let (code, category) = match failure.code {
+        ErrorCode::CheckpointDaemonUnavailable => (
+            "checkpoint_daemon_unavailable".to_owned(),
+            ErrorCategory::RuntimeUnavailable,
+        ),
+        ErrorCode::Timeout => (
+            "checkpoint_daemon_timeout".to_owned(),
+            ErrorCategory::Transport,
+        ),
+        ErrorCode::CheckpointProtocolError => (
+            "checkpoint_daemon_protocol_mismatch".to_owned(),
+            ErrorCategory::Transport,
+        ),
+        ErrorCode::PermissionDenied => (
+            "checkpoint_caller_denied".to_owned(),
+            ErrorCategory::PolicyDenied,
+        ),
+        ErrorCode::InvalidInput => (
+            "checkpoint_invalid_input".to_owned(),
+            ErrorCategory::InvalidRequest,
+        ),
+        ErrorCode::CheckpointNotFound => (
+            "checkpoint_target_not_found".to_owned(),
+            ErrorCategory::NotFound,
+        ),
+        ErrorCode::CheckpointRestoreFailed => {
+            (rollback_rejection_code(failure), ErrorCategory::Conflict)
+        }
+        _ => return checkpoint_error(fallback_code, false),
+    };
+    let mut message = failure.message.clone();
+    if failure.code == ErrorCode::CheckpointProtocolError {
+        message.push_str(
+            "; the ws-ckpt daemon may be older than the guarded snapshot protocol; upgrade ws-ckpt and retry",
+        );
+    } else if let Some(hint) = &failure.hint {
+        message.push_str("; ");
+        message.push_str(hint);
+    }
+    // A protocol mismatch is not worth retrying against the same daemon.
+    let retryable = failure.recoverable && failure.code != ErrorCode::CheckpointProtocolError;
+    ContractError::new(code, category, retryable, message)
+        .unwrap_or_else(|_| checkpoint_error(fallback_code, false))
+}
+
+fn rollback_rejection_code(failure: &CoshError) -> String {
+    let Some(name) = failure
+        .details
+        .as_ref()
+        .and_then(|details| details.get("guarded_rollback_rejection"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return "checkpoint_switch_rejected".to_owned();
+    };
+    let code = format!("checkpoint_switch_rejected_{name}");
+    if cosh_gateway_contracts::error::ErrorCode::parse(&code).is_ok() {
+        code
+    } else {
+        "checkpoint_switch_rejected".to_owned()
+    }
 }
 
 fn pre_runtime_checkpoint_error(
