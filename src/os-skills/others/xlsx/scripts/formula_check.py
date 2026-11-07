@@ -110,12 +110,28 @@ def extract_sheet_refs(formula: str) -> list[str]:
     sheet is referenced multiple times in one formula).
     """
     refs = []
-    # Quoted sheet names: 'Sheet Name'! — an apostrophe inside the name is
-    # escaped by doubling it, so the sheet It's is referenced as 'It''s'!A1.
-    for m in re.finditer(r"'((?:[^']|'')*)'!", formula):
+    # Collect quoted sheet names FIRST and REMOVE their spans from the
+    # text the literal stripper will see: a sheet name may itself contain
+    # a double quote ('My "Data"''!A1), and one such name is enough
+    # to shift every later quote pairing and break literal stripping for
+    # the rest of the formula.
+    def _collect_and_remove(m):
         refs.append(m.group(1).replace("''", "'"))
-    # Unquoted sheet names: SheetName! (not preceded by a single quote)
-    for m in re.finditer(r"(?<!')([A-Za-z_\u4e00-\u9fff][A-Za-z0-9_.·\u4e00-\u9fff]*)!", formula):
+        return " "
+    formula = re.sub(r"'((?:[^']|'')*)'!", _collect_and_remove, formula)
+    # Strip double-quoted string literals: "Over budget!" is text, not
+    # a reference (Excel escapes a literal quote by doubling it: "say ""hi""").
+    # Without this, the word before a bang inside a literal is reported as a
+    # missing sheet and the validator fails valid formulas.
+    formula = re.sub(r'\"(?:[^\"]|\"")*\"', '\""', formula)
+    # Unquoted sheet names: SheetName! (not preceded by a single quote).
+    # An optional [book] prefix marks an external workbook reference
+    # ([1]Prices!A1) whose sheet lives in another workbook — consuming it
+    # into the match keeps the engine from restarting inside (a bare
+    # lookbehind just shifts the match to "rices!").
+    for m in re.finditer(r"(?<!')(?:\[[^\]]*\])?([A-Za-z_\u4e00-\u9fff][A-Za-z0-9_.·\u4e00-\u9fff]*)!", formula):
+        if m.group(0).startswith("["):
+            continue
         refs.append(m.group(1))
     return refs
 
@@ -137,7 +153,11 @@ def extract_name_refs(formula: str) -> list[str]:
     # apostrophe-escaping form matches extract_sheet_refs above, otherwise
     # "'Company''s Data'!A1" leaves "'Company" behind and the
     # identifier scan reports the sheet name as an unknown name.
-    formula_clean = re.sub(r"'(?:[^']|'')*'![A-Z$0-9:]+", "", formula)
+    formula_clean = re.sub(r"'(?:[^']|'')*'![A-Z$0-9:]+", " ", formula)
+    # Strip double-quoted string literals: identifiers inside "..."
+    # are display text, not named ranges ("Over budget!" used to leak fake
+    # name candidates). Excel escapes a literal quote by doubling it.
+    formula_clean = re.sub(r'\"(?:[^\"]|\"")*\"', '\""', formula_clean)
     formula_clean = re.sub(r"[A-Za-z_][A-Za-z0-9_.]*![A-Z$0-9:]+", "", formula_clean)
     # Find identifiers not followed by "(" (not function calls)
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b(?!\s*\()", formula_clean):
