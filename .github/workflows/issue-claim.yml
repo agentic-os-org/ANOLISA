@@ -19,10 +19,16 @@ permissions:
 concurrency:
   group: issue-claim-${{ github.event.issue.number }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   claim:
     name: Handle claim command
+    # Preserve the per-issue lock while serializing an author's quota decisions.
+    concurrency:
+      group: issue-claim-author-${{ github.event.comment.user.login }}
+      cancel-in-progress: false
+      queue: max
     if: >-
       github.event.issue.pull_request == null &&
       github.event.comment.user.type != 'Bot' &&
@@ -35,6 +41,7 @@ jobs:
     runs-on: anolisa-k8s-general-ci-x64
     env:
       AUTOMATION_MODE: ${{ vars.COMMUNITY_AUTOMATION_MODE || 'apply' }}
+      SIGHT_MAX_ACTIVE_CLAIMS: ${{ vars.SIGHT_MAX_ACTIVE_CLAIMS }}
 
     steps:
       - name: Check out claim implementation

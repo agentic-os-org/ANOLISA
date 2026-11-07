@@ -1,0 +1,41 @@
+name: CI / AgentSight submission policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, closed, edited, ready_for_review, converted_to_draft, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: sight-submission-policy
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  policy:
+    name: Refresh AgentSight policies
+    # Commit statuses are shared across authors, so publication uses a repository lock.
+    runs-on: anolisa-k8s-general-ci-x64
+    env:
+      SIGHT_MAX_READY_PRS: ${{ vars.SIGHT_MAX_READY_PRS }}
+    steps:
+      # Both the entrypoint and scripts come from the trusted default branch.
+      # Never check out a PR head, merge ref, or contributor-controlled artifact.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/sight-pr-policy.js
+            .github/scripts/sight-work-limits.js
+            .github/maintainers.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const policyPath = `${process.env.GITHUB_WORKSPACE}/.github/scripts/sight-pr-policy.js`;
+            const policy = require(policyPath);
+            await policy.run({ github, context, core });

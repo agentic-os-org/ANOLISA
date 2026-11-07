@@ -4,6 +4,8 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const claim = require('./issue-claim');
+const sightMaintainer = require('../maintainers.json').scopes
+  .find(entry => entry.label === 'component:sight').maintainers[0].github;
 
 const trustedUser = { login: 'github-actions[bot]', type: 'Bot' };
 
@@ -22,6 +24,9 @@ function makeHarness({
   comments = [],
   failCreateComment = false,
   state = 'open',
+  sightIssues = [],
+  commentsByIssue = {},
+  permission = 'read',
 } = {}) {
   const calls = [];
   const issue = {
@@ -30,8 +35,10 @@ function makeHarness({
     assignees: [],
   };
   const github = {
-    paginate: async () => comments,
+    paginate: async (method, args) => method === github.rest.issues.listForRepo
+      ? sightIssues : args.issue_number === 2262 ? comments : commentsByIssue[args.issue_number] || [],
     rest: {
+      repos: { getCollaboratorPermissionLevel: async () => ({ data: { permission } }) },
       issues: {
         get: async () => ({ data: issue }),
         getLabel: async () => ({ data: {} }),
@@ -46,6 +53,7 @@ function makeHarness({
           return { data: { id: 100 } };
         },
         listComments: async () => ({ data: comments }),
+        listForRepo: async () => ({ data: sightIssues }),
       },
     },
   };
@@ -282,4 +290,95 @@ test('release preserves workflow status and reports the issue unavailable', asyn
       false
     );
   }
+});
+
+function sightIssue(number, extra = {}) {
+  return { number, state: 'open', comments: 1, labels: [{ name: 'component:sight' }], ...extra };
+}
+
+test('sixth ordinary sight claim is rejected using bot ownership without assignees', async () => {
+  const issues = [10, 11, 12, 13, 14].map(number => sightIssue(number));
+  const harness = makeHarness({
+    actor: 'Contributor', labels: ['component:sight', 'status:accepted'],
+    sightIssues: issues,
+    commentsByIssue: {
+      10: [claimComment('contributor', 'claimed')],
+      11: [claimComment('contributor', 'claimed')],
+      12: [claimComment('contributor', 'claimed')],
+      13: [claimComment('contributor', 'claimed')],
+      14: [claimComment('contributor', 'claimed')],
+    },
+  });
+  await claim.run(harness);
+  assert.deepEqual(harness.calls.map(([name]) => name), ['createComment']);
+  assert.match(harness.calls[0][1].body, /limit is 5.*#10, #11, #12, #13, #14/);
+  assert.doesNotMatch(harness.calls[0][1].body, /state=claimed/);
+  issues.pop();
+  harness.calls.length = 0;
+  await claim.run(harness);
+  assert.match(harness.calls[0][1].body, /state=claimed/);
+  assert.ok(harness.calls.some(([name]) => name === 'addAssignees'));
+});
+
+test('maintainers bypass claim quotas while external claim limits are configurable', async () => {
+  for (const options of [{ actor: sightMaintainer }, { permission: 'write' }]) {
+    const h = makeHarness({ ...options, labels: ['component:sight', 'status:accepted'] });
+    const paginate = h.github.paginate;
+    h.github.paginate = async (method, args) => {
+      assert.notEqual(method, h.github.rest.issues.listForRepo);
+      return paginate(method, args);
+    };
+    await claim.run(h);
+    assert.ok(h.calls.some(([name]) => name === 'addAssignees'));
+  }
+  const external = makeHarness({ labels: ['component:sight', 'status:accepted'],
+    sightIssues: [sightIssue(10)], commentsByIssue: { 10: [claimComment('contributor', 'claimed')] } });
+  external.env.SIGHT_MAX_ACTIVE_CLAIMS = '1';
+  await claim.run(external);
+  assert.match(external.calls[0][1].body, /limit is 1/);
+  assert.equal(external.calls.some(([name]) => name === 'addAssignees'), false);
+});
+
+test('released, forged, closed, urgent and non-sight claims do not consume quota', async () => {
+  const harness = makeHarness({
+    labels: ['component:sight', 'status:accepted'],
+    sightIssues: [sightIssue(1), sightIssue(2), sightIssue(3, { state: 'closed' }),
+      sightIssue(4, { labels: [{ name: 'component:sight' }, { name: 'priority:p1' }] }),
+      sightIssue(5, { labels: [{ name: 'component:memory' }] }),
+      sightIssue(6, { pull_request: {} }), sightIssue(7)],
+    commentsByIssue: {
+      1: [claimComment('contributor', 'claimed'), claimComment('contributor', 'released')],
+      2: [{ user: { login: 'contributor' }, body: claimComment('contributor', 'claimed').body }],
+      3: [claimComment('contributor', 'claimed')],
+      4: [claimComment('contributor', 'claimed')],
+      5: [claimComment('contributor', 'claimed')],
+      6: [claimComment('contributor', 'claimed')],
+      7: [claimComment('contributor', 'claimed')],
+    },
+  });
+  await claim.run(harness);
+  assert.match(harness.calls[0][1].body, /state=claimed/);
+  assert.ok(harness.calls.some(([name]) => name === 'addAssignees'));
+});
+
+test('urgent and recovering claims remain available at the ordinary limit', async () => {
+  for (const options of [
+    { labels: ['component:sight', 'status:accepted', 'priority:p0'] },
+    { labels: ['component:sight', 'status:in-progress'], comments: [claimComment('contributor', 'claimed')] },
+  ]) {
+    const harness = makeHarness(options);
+    harness.github.rest.issues.listForRepo = () => { throw new Error('must not scan'); };
+    await claim.run(harness);
+    assert.ok(harness.calls.some(([name]) => name === 'addAssignees'));
+  }
+});
+
+test('quota lookup failure cannot admit a new claim', async () => {
+  const harness = makeHarness({ labels: ['component:sight', 'status:accepted'] });
+  harness.github.paginate = async (method) => {
+    if (method === harness.github.rest.issues.listForRepo) throw new Error('rate limited');
+    return [];
+  };
+  await assert.rejects(claim.run(harness), /rate limited/);
+  assert.deepEqual(harness.calls, []);
 });
