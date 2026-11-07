@@ -56,6 +56,17 @@ mod application;
 
 /// CLI arguments for the `adapter` sub-surface.
 #[derive(Parser)]
+#[command(
+    after_help = "Install a component first, then use scan to find its integrations.
+
+Examples (with Tokenless and OpenCode already installed):
+  anolisa adapter scan
+  anolisa adapter enable tokenless opencode
+  anolisa adapter status tokenless
+
+Use the component and framework names from scan to choose an integration.
+After enabling, follow any framework-specific instructions and verify the integration in your agent."
+)]
 pub struct AdapterArgs {
     /// Adapter subcommand.
     #[command(subcommand)]
@@ -65,9 +76,9 @@ pub struct AdapterArgs {
 /// Subcommands under `anolisa adapter`.
 #[derive(Subcommand)]
 pub enum AdapterCommands {
-    /// Discover installed adapter declarations and local resource/receipt state.
+    /// Find integrations for installed components and detect local frameworks.
     Scan,
-    /// Enable a component's adapter for a framework.
+    /// Connect a component to a framework.
     Enable {
         /// Component name (e.g. `tokenless`).
         component: String,
@@ -105,7 +116,7 @@ pub enum AdapterCommands {
         /// enabled adapter.
         framework: Option<String>,
     },
-    /// Report adapter receipt status.
+    /// Check the setup of enabled adapters.
     Status {
         /// Limit to one component; omit for all receipts.
         component: Option<String>,

@@ -109,7 +109,7 @@ pub enum ComponentCommands {
     Forget(tier1::forget::ForgetArgs),
     /// Record an already-installed system RPM as adopted (system scope)
     Adopt(tier1::adopt::AdoptArgs),
-    /// Manage component-to-framework adapters
+    /// Connect installed components to agent frameworks
     Adapter(adapter::AdapterArgs),
 }
 
@@ -190,6 +190,14 @@ fn render_grouped_help(cap: &[(String, String)], mgmt: &[(String, String)]) -> S
         out,
         "  {:<longest$}  Print this message or the help of the given subcommand(s)",
         "help"
+    );
+    out.push_str(
+        "
+Quick start:
+  anolisa list                   Find available components
+  anolisa install tokenless      Install a component
+  anolisa adapter --help         Connect it to your agent framework
+",
     );
     out
 }
