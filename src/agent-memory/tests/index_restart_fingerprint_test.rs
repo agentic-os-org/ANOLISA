@@ -97,7 +97,7 @@ impl EmbeddingProvider for ContentEmbedding {
 
 fn note_score(index: &IndexHandle, vector: &[f32]) -> f64 {
     index
-        .search_vec(vector, 10)
+        .search_vec(vector, 10, None)
         .unwrap()
         .into_iter()
         .find(|hit| hit.path == NOTE)

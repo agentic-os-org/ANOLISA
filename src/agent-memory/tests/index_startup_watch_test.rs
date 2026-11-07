@@ -77,7 +77,7 @@ async fn startup_backfill_does_not_lose_file_changes() {
         old.extend(index.search("oldheliotrope", 10).unwrap());
         let changed = index.search("newcobalt", 10).unwrap();
         let created = index.search("newheliotrope", 10).unwrap();
-        let vectors = index.search_vec(&[0.0, 1.0], 10).unwrap();
+        let vectors = index.search_vec(&[0.0, 1.0], 10, None).unwrap();
         if old.is_empty()
             && changed.iter().any(|hit| hit.path == "changed.md")
             && created.iter().any(|hit| hit.path == "incoming/created.md")
