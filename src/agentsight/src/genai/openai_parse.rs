@@ -3137,6 +3137,27 @@ mod tests {
         assert_eq!(finish.as_deref(), Some("content_filter"));
     }
 
+    #[test]
+    fn test_responses_sse_content_filter_outranks_tool_call() {
+        let body = r#"[
+            {"type":"response.output_text.delta","delta":"partial"},
+            {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_cf","name":"read_file"}},
+            {"type":"response.function_call_arguments.delta","delta":"{\"path\":"},
+            {"type":"response.incomplete","response":{"id":"resp_cf","status":"incomplete","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":100,"output_tokens":4,"total_tokens":104}}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "partial"
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::ToolCall { name, .. } if name == "read_file"
+        ));
+        assert_eq!(finish.as_deref(), Some("content_filter"));
+    }
+
     /// OpenAI documents `max_messages` and `steered` as `response.incomplete`
     /// reasons too. They are terminal like the cap/filter reasons, but they
     /// set neither flag; because the arm never set `completed`, the finish
