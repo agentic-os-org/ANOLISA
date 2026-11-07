@@ -59,6 +59,9 @@ pub enum BackendError {
         /// (canonical, and suffixed " (deleted)" for unlinked files).
         path: String,
     },
+    /// The runtime environment cannot satisfy enforcement prerequisites.
+    #[error("unsupported enforcement environment: {0}")]
+    UnsupportedEnvironment(String),
 }
 
 pub(crate) fn validate_apply_policy_payload(request: &ApplyPolicy) -> Result<(), BackendError> {
@@ -76,7 +79,9 @@ pub(crate) fn backend_failure_code(error: &BackendError) -> ReplaceFailureCode {
         }
         BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
         BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
-        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
+        BackendError::KernelFailure(_) | BackendError::UnsupportedEnvironment(_) => {
+            ReplaceFailureCode::KernelFailure
+        }
         // Pre-attach preflight rejections are policy admission failures.
         BackendError::PreexistingWritableMap { .. } => ReplaceFailureCode::CompileFailure,
         BackendError::PreexistingWritableFd { .. } => ReplaceFailureCode::CompileFailure,
@@ -201,6 +206,10 @@ mod tests {
         );
         assert_eq!(
             backend_failure_code(&BackendError::KernelFailure("attach".into())),
+            ReplaceFailureCode::KernelFailure
+        );
+        assert_eq!(
+            backend_failure_code(&BackendError::UnsupportedEnvironment("pidns".into())),
             ReplaceFailureCode::KernelFailure
         );
         assert_eq!(

@@ -158,6 +158,14 @@ profile. Even when `ready=true`, check `capabilities.file_delete_guard`; the def
 [Enable system-level file deletion protection](deployment.md#enable-system-level-file-deletion-protection)
 for prerequisites, the mutually exclusive capability, maintenance window, and re-apply steps.
 
+PID namespaces have a narrower support boundary. The enforcer uses a kernel-captured
+init-namespace PID for its own map operations, but this does not translate a target
+`root_pid` from the same container's procfs. Target resolution still requires a `/proc`
+view that exposes the init-namespace `NSpid` chain; a container procfs that reports only
+namespace-local IDs is rejected before target binding with `unsupported_environment`.
+Capture and analysis are unaffected. `file_delete_guard` also remains restricted to the
+init PID namespace.
+
 Blocking also depends on the engine's hook budget: a `block` rule can only deny an operation when
 the matching BPF LSM hook was reserved at engine start and BPF LSM is active on the kernel
 (`bpf` listed in `/sys/kernel/security/lsm`). When a `block` rule matches on a backend that cannot

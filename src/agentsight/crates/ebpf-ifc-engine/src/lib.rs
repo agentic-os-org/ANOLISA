@@ -105,13 +105,13 @@ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
 // the marker check loudly instead of being silently reused with mismatched
 // links.
 const PINNED_FILE_PROFILE_MARKER: &str =
-    "agentsight_profile_file_v5_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_file_v6_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
-    "agentsight_profile_credential_exfiltration_v6_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_credential_exfiltration_v7_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_FULL_PROFILE_MARKER: &str =
-    "agentsight_profile_full_v6_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_full_v7_a62e5d9d96f91101cda019519053e950d532380a";
 const PINNED_AGENT_FILE_GUARD_MARKER: &str =
-    "agentsight_profile_agent_file_guard_v7_a62e5d9d96f91101cda019519053e950d532380a";
+    "agentsight_profile_agent_file_guard_v8_a62e5d9d96f91101cda019519053e950d532380a";
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PinnedEnginePaths {
     root: PathBuf,
@@ -762,16 +762,26 @@ fn dup_pinned_map_fd(paths: &PinnedEnginePaths, name: &str) -> io::Result<OwnedF
     dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
 }
 
-/// Declare to the BPF drain gate that this thread is about to submit to
-/// `cap_req`. The gate refuses to drain in any other thread's context.
-fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+const CAP_DRAIN_DECLARE_TID: i32 = -1;
+const CAP_DRAIN_DECLARE_FLAGS: u32 = 0x4143_5052;
+
+/// Drain declaration and kernel-captured identity shared with `capability.bpf.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CapPendingSubmitter {
+    tid: i32,
+    pid: i32,
+    token: u32,
+    _pad: u32,
+}
+
+fn write_drain_intent_fd(fd: RawFd, pending: &CapPendingSubmitter) -> io::Result<()> {
     let slot: u32 = 0;
-    let tid = unsafe { libc::syscall(libc::SYS_gettid) as i32 };
     let rc = unsafe {
         libbpf_sys::bpf_map_update_elem(
             fd,
             &slot as *const u32 as *const std::ffi::c_void,
-            &tid as *const i32 as *const std::ffi::c_void,
+            pending as *const CapPendingSubmitter as *const std::ffi::c_void,
             BPF_ANY,
         )
     };
@@ -781,21 +791,24 @@ fn declare_drain_intent_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
+fn read_drain_intent_fd(fd: RawFd) -> io::Result<CapPendingSubmitter> {
     let slot: u32 = 0;
-    let tid: i32 = 0;
+    let mut pending = CapPendingSubmitter::default();
     let rc = unsafe {
-        libbpf_sys::bpf_map_update_elem(
+        libbpf_sys::bpf_map_lookup_elem(
             fd,
             &slot as *const u32 as *const std::ffi::c_void,
-            &tid as *const i32 as *const std::ffi::c_void,
-            BPF_ANY,
+            &mut pending as *mut CapPendingSubmitter as *mut std::ffi::c_void,
         )
     };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(())
+    Ok(pending)
+}
+
+fn clear_drain_intent_fd(fd: RawFd) -> io::Result<()> {
+    write_drain_intent_fd(fd, &CapPendingSubmitter::default())
 }
 
 /// Capacity of the `cap_req` mailbox slot; must match `CAP_REQ_MAILBOX_BYTES`
@@ -868,10 +881,8 @@ fn submit_cap_req(cap_req_fd: RawFd, cap_pending_fd: RawFd, data: &[u8]) -> io::
     };
     slot.data[..data.len()].copy_from_slice(data);
 
-    // Check the trigger before publishing. This prevents a known seccomp or
-    // ENOSYS failure from leaving an already-committed record behind.
-    trigger_cap_req_drain()?;
-    declare_drain_intent_fd(cap_pending_fd)?;
+    let identity = capture_current_thread_identity_fd(cap_req_fd, cap_pending_fd)?;
+    write_drain_intent_fd(cap_pending_fd, &identity)?;
     if let Err(e) = write_cap_req_mailbox(cap_req_fd, &slot) {
         let _ = clear_drain_intent_fd(cap_pending_fd);
         return Err(e);
@@ -922,6 +933,100 @@ fn trigger_cap_req_drain() -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+fn drain_declaration_token() -> io::Result<u32> {
+    let mut token = 0u32;
+    loop {
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_getrandom,
+                &mut token as *mut u32 as *mut std::ffi::c_void,
+                std::mem::size_of::<u32>(),
+                0,
+            )
+        };
+        if rc == std::mem::size_of::<u32>() as libc::c_long {
+            return Ok(token);
+        }
+        if rc < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err(format!("generate drain declaration token: {error}")));
+        }
+        return Err(err(format!(
+            "generate drain declaration token: short getrandom result {rc}"
+        )));
+    }
+}
+
+fn trigger_cap_identity_capture(token: u32) {
+    // QUERY rejects nonzero flags, but its sys_enter tracepoint still observes
+    // the declaration. The captured map value, not the syscall result, decides
+    // whether the current thread was registered.
+    unsafe {
+        libc::syscall(
+            libc::SYS_membarrier,
+            libc::MEMBARRIER_CMD_QUERY,
+            CAP_DRAIN_DECLARE_FLAGS,
+            token as libc::c_int,
+        )
+    };
+}
+
+/// Capture and confirm the current thread's init-namespace PID/TID.
+///
+/// The caller must hold the mailbox lock. An empty-mailbox drain proves that
+/// the captured TID belongs to this thread before any policy record is exposed
+/// to the drain hook.
+fn capture_current_thread_identity_fd(
+    cap_req_fd: RawFd,
+    cap_pending_fd: RawFd,
+) -> io::Result<CapPendingSubmitter> {
+    clear_cap_req_mailbox(cap_req_fd)?;
+    clear_drain_intent_fd(cap_pending_fd)?;
+    let result = (|| {
+        // Reject a known seccomp or ENOSYS failure before declaring intent.
+        trigger_cap_req_drain()?;
+        let token = drain_declaration_token()?;
+        write_drain_intent_fd(
+            cap_pending_fd,
+            &CapPendingSubmitter {
+                tid: CAP_DRAIN_DECLARE_TID,
+                pid: 0,
+                token,
+                _pad: 0,
+            },
+        )?;
+        trigger_cap_identity_capture(token);
+        let identity = read_drain_intent_fd(cap_pending_fd)
+            .map_err(|error| err(format!("read captured drain identity: {error}")))?;
+        if identity.tid <= 0 || identity.pid <= 0 || identity.token != token {
+            return Err(err(
+                "membarrier did not capture a valid identity for the submitting thread",
+            ));
+        }
+
+        // The tracepoint can run even when the syscall returns an error; the
+        // cleared declaration confirms ownership independently of that result.
+        let confirmation_error = trigger_cap_req_drain().err();
+        let pending = read_drain_intent_fd(cap_pending_fd)
+            .map_err(|error| err(format!("verify captured drain identity: {error}")))?;
+        if pending != CapPendingSubmitter::default() {
+            let detail = confirmation_error.map_or_else(String::new, |error| format!(": {error}"));
+            return Err(err(format!(
+                "another thread captured the drain declaration{detail}"
+            )));
+        }
+        Ok(identity)
+    })();
+    if result.is_err() {
+        let _ = clear_cap_req_mailbox(cap_req_fd);
+        let _ = clear_drain_intent_fd(cap_pending_fd);
+    }
+    result
 }
 
 fn cap_req_map_fd(bpf: &Ebpf) -> io::Result<RawFd> {
@@ -3971,6 +4076,7 @@ const _: () = assert!(
         && std::mem::size_of::<AppendRule>() <= CAP_REQ_MAILBOX_BYTES
         && std::mem::size_of::<DeltaRequest>() <= CAP_REQ_MAILBOX_BYTES
         && std::mem::size_of::<CapReqSlot>() == 8 + CAP_REQ_MAILBOX_BYTES
+        && std::mem::size_of::<CapPendingSubmitter>() == 16
 );
 
 /// A handle for appending runtime policy deltas into a running eBPF engine.
@@ -4011,6 +4117,24 @@ impl ReloadHandle {
             return Err(io::Error::last_os_error());
         }
         Ok(Some(FileLockGuard(file.as_raw_fd())))
+    }
+
+    /// Resolve the current process's init-namespace PID through the BPF hook.
+    ///
+    /// This works inside a PID namespace, where procfs does not expose the
+    /// process's outer PID. The result identifies the whole process and can be
+    /// reused by other threads for direct map operations.
+    pub fn current_process_kernel_pid(&self) -> io::Result<i32> {
+        let _guard = self
+            .append_lock
+            .lock()
+            .map_err(|e| err(format!("append lock poisoned: {e}")))?;
+        let _file_guard = self.lock_append_file()?;
+        capture_current_thread_identity_fd(
+            self.cap_req_fd.as_raw_fd(),
+            self.cap_pending_fd.as_raw_fd(),
+        )
+        .map(|identity| identity.pid)
     }
 
     fn submit_raw(&self, data: &[u8]) -> io::Result<()> {
@@ -4882,7 +5006,7 @@ mod tests {
     #[test]
     fn pinned_profile_marker_captures_revision_profile_and_schema() {
         let marker = HookReserve::file_enforcement().profile_marker();
-        assert!(marker.contains("file_v5"));
+        assert!(marker.contains("file_v6"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -4918,7 +5042,7 @@ mod tests {
     #[test]
     fn agent_file_guard_profile_marker_is_distinct() {
         let marker = HookReserve::agent_file_guard().profile_marker();
-        assert!(marker.contains("agent_file_guard_v7"));
+        assert!(marker.contains("agent_file_guard_v8"));
         assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
@@ -4970,7 +5094,7 @@ mod tests {
             .expect("credential exfiltration profile");
         let marker = reserve.profile_marker();
 
-        assert!(marker.contains("credential_exfiltration_v6"));
+        assert!(marker.contains("credential_exfiltration_v7"));
         assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
         assert_ne!(marker, HookReserve::full_profile().profile_marker());
     }
@@ -5775,7 +5899,8 @@ os.execv({hit:?}, [{hit:?}])
         // which keeps this test loadable even where heavyweight programs such
         // as trace_openat_exit hit verifier limits.
         let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
-        let my_pid = std::process::id() as i32;
+        let handle = loader.reload_handle().expect("reload handle");
+        let my_pid = handle.current_process_kernel_pid().expect("kernel pid");
         let domain: u32 = 0x5eed;
         loader
             .bind_state(
@@ -5874,6 +5999,79 @@ os.execv({hit:?}, [{hit:?}])
         );
     }
 
+    /// Run the complete declaration and admission path where procfs cannot
+    /// reveal the enforcer's outer PID.
+    #[test]
+    #[ignore = "requires root/CAP_BPF/CAP_SYS_ADMIN and loads live eBPF programs"]
+    fn kernel_identity_admits_delta_in_nested_pid_namespace() {
+        const CHILD_ENV: &str = "ACTPLANE_TEST_NESTED_PIDNS";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let test_binary = std::env::current_exe().expect("current test binary");
+            let status = std::process::Command::new("unshare")
+                .args(["--pid", "--fork", "--mount-proc"])
+                .arg(test_binary)
+                .args([
+                    "tests::kernel_identity_admits_delta_in_nested_pid_namespace",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn PID-namespaced test");
+            assert!(status.success(), "nested PID namespace probe failed");
+            return;
+        }
+
+        let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
+        let handle = loader.reload_handle().expect("reload handle");
+        let kernel_pid = handle.current_process_kernel_pid().expect("kernel pid");
+        assert_ne!(
+            kernel_pid,
+            std::process::id() as i32,
+            "the probe must distinguish kernel and namespace-local pids"
+        );
+        let domain: u32 = 0x5eed;
+        loader
+            .bind_state(
+                kernel_pid,
+                domain,
+                CapState {
+                    parent: 0,
+                    scope_id: 0,
+                    labels: 0,
+                    authority_mask: u64::MAX,
+                    target_mask: u64::MAX,
+                    restrict_mask: 0,
+                    gate_mask: u64::MAX,
+                    label_mask: u64::MAX,
+                },
+            )
+            .expect("bind_state");
+        let cap_stat = |slot: u32| -> u64 {
+            let m: Array<_, u64> =
+                Array::try_from(loader.bpf.map("cap_stats").expect("cap_stats map"))
+                    .expect("open cap_stats");
+            m.get(&slot, 0).expect("read cap_stats slot")
+        };
+        let accept0 = cap_stat(0);
+        let drop0 = cap_stat(3);
+        loader
+            .submit_delta(DeltaRequest {
+                caller_pid: kernel_pid,
+                target_id: domain,
+                new_scope_id: 0,
+                required_mask: 0,
+                add_restrict_mask: 1,
+                add_label_mask: 0,
+                add_gate_mask: 0,
+            })
+            .expect("submit_delta in nested PID namespace");
+        assert_eq!(cap_stat(3) - drop0, 0);
+        assert_eq!(cap_stat(0) - accept0, 1);
+    }
+
     /// The drain gate itself (#3021 follow-up 3): while this thread is the declared
     /// pending submitter, foreign processes and sibling threads must not enter
     /// the drain body (DRAIN stat frozen), and our own trigger must still drain
@@ -5883,7 +6081,8 @@ os.execv({hit:?}, [{hit:?}])
     #[ignore = "requires root/CAP_BPF and loads live eBPF programs"]
     fn drain_gate_ignores_foreign_triggers() {
         let mut loader = Loader::load(&empty_config_blob()).expect("load minimal engine");
-        let my_pid = std::process::id() as i32;
+        let handle = loader.reload_handle().expect("reload handle");
+        let my_pid = handle.current_process_kernel_pid().expect("kernel pid");
         loader
             .bind_state(
                 my_pid,
@@ -5908,8 +6107,8 @@ os.execv({hit:?}, [{hit:?}])
             m.get(&slot, 0).expect("read cap_stats slot")
         };
 
-        // Declare ourselves as the pending submitter (production submits do
-        // this right before publishing to cap_req).
+        // Recreate the confirmed declaration that production writes right
+        // before publishing to cap_req.
         let pending = loader
             .bpf
             .map("cap_pending_submitter")
@@ -5919,7 +6118,13 @@ os.execv({hit:?}, [{hit:?}])
             Map::Unsupported(data) => data,
             _ => panic!("cap_pending_submitter is not an array map"),
         };
-        declare_drain_intent_fd(pending_data.fd().as_fd().as_raw_fd()).expect("declare intent");
+        let pending_fd = pending_data.fd().as_fd().as_raw_fd();
+        let identity = capture_current_thread_identity_fd(
+            cap_req_map_fd(&loader.bpf).expect("cap_req fd"),
+            pending_fd,
+        )
+        .expect("capture identity");
+        write_drain_intent_fd(pending_fd, &identity).expect("declare intent");
 
         struct Spinners(Vec<std::process::Child>);
         impl Drop for Spinners {
