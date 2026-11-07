@@ -199,6 +199,32 @@ retrieve <hash>]` 的一行开头，其后是 Markdown。按该指令可取回�
 统计数据可区分嵌入片段（`json`）与转写页面（`html`）。上述规则已用合成片段和文档验证；
 它们是防护手段，不能证明每个片段对模型都保持原意。
 
+## 可选混合内容区域压缩
+
+混合内容区域压缩默认关闭。在 Tokenless 或宿主 Agent 继承的环境中设置
+`TOKENLESS_MIXED_CONTENT_ENABLED=1` 开启；取消该变量或设为 `0` 关闭。`1`、`true`、
+`yes`（不区分大小写）表示开启。此开关独立于总压缩开关，不是 `config.json` 字段。
+开启时，设置 `TOKENLESS_COMPRESSION_ENABLED=0` 会测量候选，但仍返回原文。
+
+Python `TokenlessConfig` 默认读取该环境变量，显式传入的 `mixed_content_enabled` 参数
+优先。Rust 与直接使用原生绑定的调用方将 `RuntimeConfig.mixed_content_enabled` 设为
+`true`，或传入原生 `TokenlessRuntime(mixed_content_enabled=True)` 参数。
+
+该路由处理既不是完整结构化文档、也不归其他领域处理的工具输出。它识别边界显式可验证
+的类型化区域——info string 标注 `json`、`csv` 或 `tsv` 的围栏代码块（缩进不超过
+3 个空格，由同标记且长度不小于开 fence 的闭合 fence 终结），以及在首 3 列内以 `{` 或
+`[` 开始且括号平衡的裸 JSON 文档——并让每个区域走与独立路由完全相同的压缩器和策略。
+区域周围的散文、日志和分隔符逐字节保留；压缩器拒绝的区域保持原样；选择 TOON 的
+fenced JSON 区域其 fence label 改写为 `toon`（仅改写 info word，其余属性保留原文与顺序）；未闭合的 fence 或不平衡的文档保护其余输出。区域只在与其他领域相同的
+64 KiB / 200 行检测窗口内识别；开在窗口之外的区域逐字节保留。仅当输出既不来自 Grep
+工具、也不来自已识别的 Shell `grep`/`rg` 命令，且宿主可以用文本替换输出时，区域才会
+运行。关闭搜索路径共享也不会让搜索输出进入该路由。整个候选仍需通过 Pipeline 的字符与
+token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 Stash 错误时直接透传；
+携带暂存写入的未变化候选按 `no_savings` 处置并回滚写入。任一区域写入 Stash 失败时，
+会回滚本次请求的全部暂存写入，包括其他区域成功的写入，再由 Runtime 报告存储错误。
+
+有限样本已验证区域压缩及原文恢复。
+
 ## 环境变量
 
 ### 用户常用变量
@@ -214,6 +240,7 @@ retrieve <hash>]` 的一行开头，其后是 Markdown。按该指令可取回�
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认开启；`0` 关闭；显式 SDK 参数优先 |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关，包括 JSON 值中的 HTML | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
+| `TOKENLESS_MIXED_CONTENT_ENABLED` | 混合内容区域压缩开关 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
 
 ### Adapter 和诊断变量
 

@@ -2,7 +2,9 @@
 
 ## 一、功能概述
 
-PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给六个领域之一：JSON、Build Log、Tabular、Search Results 路径共享与 HTML 页面转写默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功的 `command_output` 或 `file_read`，沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略。这两个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给六个领域之一：JSON、Build Log、Tabular、Search Results 路径共享与 HTML 页面转写默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功的 `command_output` 或 `file_read`，沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略。这两个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
+候选全部未命中时，按显式定界的 typed region 逐段压缩混合输出（见「三、递归处理顺序」
+之后的「Mixed Content 领域」一节）。
 
 ## 二、压缩规则与保留约定
 
@@ -115,6 +117,36 @@ HTML 等文件来源保护；命令匹配可防止重试失效操作失败时误
 宿主 PostTool 替换与恢复能力，因此这项命令所有权选择对所有宿主一致；无法应用 Build Log
 缩减的宿主可能暂时原样接收这些命令的输出。`pnpm install` 不在本轮新增原生命令豁免范围，
 仍可能被 RTK 改写；pnpm 能力只处理按既有归属规则实际进入 PostTool 的原始内容。
+
+### Mixed Content 领域（默认关闭）
+
+通过 `TOKENLESS_MIXED_CONTENT_ENABLED` 显式开启。开启后，当一段工具输出既不是完整的
+结构化文档、也不是任何整内容候选（JSON、Build Log、Tabular、Search Results、Diff、HTML）
+能处理时，Pipeline 把它按 **typed region** 拆分处理：识别输出中显式定界的结构化片段并逐段
+压缩，周围的 prose、日志与分隔符逐字节保留。该路由只做结构性识别，不需要宿主提供任何
+语义提示，也不会从受保护的代码块中提取内容。
+
+识别的 region 类型（边界必须显式可验证）：
+
+- **Fenced code block**（``` 或 ~~~，缩进不超过 3 个空格，闭合 fence 同标记且长度不小于
+  开 fence）：info string 首词决定领域——`json` 走 JSON 压缩器，`csv`/`tsv` 走 Tabular
+  压缩器。未闭合的 fence 保护其余全部输出；info string 含反引号的反引号 fence 不构成
+  fence；未知标签（`python`、`rust` 等）的块整体受保护，其中的内容不参与识别。
+- **裸 JSON 文档**：行首（缩进不超过 3 空格）以 `{` 或 `[` 开始且括号平衡（字符串内的
+  括号、转义引号均正确处理）的完整文档。裸 CSV/TSV 没有可验证边界，不识别。
+
+每个 region 独立交给对应领域的压缩器，使用与整内容路由完全相同的配置和策略：
+压缩失败、区域无节省或压缩器拒绝时，该区域逐字节保留；某个 fenced JSON 区域选择了 TOON
+时，仅其 info word 改写为 `toon`，其余属性保留原文与顺序，保持表示元数据与实际变换
+一致。整个候选仍需通过 Pipeline 的全局字符/Token 仲裁与 savings 门禁；没有任何区域
+发生变化、未产生暂存 Stash 写入且没有 Stash 错误时直接透传；携带暂存写入的未变化候选
+进入 NoSavings 处置，让 ledger 回滚暂存行。任一区域写入 Stash 失败时，整个候选被拒绝，
+ledger 回滚本次请求的全部暂存写入，包括其他区域成功的写入，再由 Runtime 报告存储错误。
+区域识别只覆盖与
+其他领域相同的 64 KiB / 200 行检测窗口，开在窗口之外的区域逐字节保留。区域压缩产生的
+Stash 写入与可恢复性按各区域结果合并，取最弱可恢复性。
+`protect_search_output` 为真的请求（Grep 工具输出与已识别的 Shell `grep`/`rg` 命令输出）
+不进入该路由，关闭搜索路径共享也不例外；`replace_with_text` 为假的请求同样不进入。
 
 ## 四、集成路径
 
@@ -534,6 +566,7 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 | Search Results 领域压缩器（SearchResultsCompressor） | `crates/tokenless-compressors/src/search_results.rs` |
 | HTML 领域转写器（HtmlExtractor） | `crates/tokenless-compressors/src/html.rs` |
 | Diff 上下文裁剪 | `crates/tokenless-runtime/src/post_tool/diff.rs` |
+| Mixed Content typed-region 识别与重建 | `crates/tokenless-runtime/src/post_tool/mixed.rs` |
 | PostTool Pipeline 与最终仲裁 | `crates/tokenless-runtime/src/post_tool/` |
 | Schema 压缩器（SchemaCompressor） | `crates/tokenless-schema/src/schema_compressor.rs` |
 | 内容压缩公开 API | `crates/tokenless-compressors/src/lib.rs` |

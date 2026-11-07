@@ -68,6 +68,9 @@ pub struct RuntimeConfig {
     /// Whether complete HTML documents, and HTML inside JSON string values, are rendered as
     /// Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
+    /// Whether structured regions inside mixed tool outputs may be compressed
+    /// individually. Disabled by default.
+    pub mixed_content_enabled: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -80,6 +83,7 @@ impl Default for RuntimeConfig {
             search_path_sharing_enabled: true,
             diff_compression_enabled: true,
             html_extraction_enabled: true,
+            mixed_content_enabled: false,
         }
     }
 }
@@ -390,6 +394,7 @@ impl TokenlessRuntime {
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
+            mixed_content_enabled: self.config.mixed_content_enabled,
             stash_enabled: true,
             rtk_launcher: None,
             rtk_data_dir: None,
@@ -423,6 +428,7 @@ impl TokenlessRuntime {
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
+            mixed_content_enabled: self.config.mixed_content_enabled,
             stash_enabled: true,
             rtk_launcher: None,
             rtk_data_dir: Some(self.data_dir.clone()),
@@ -848,6 +854,7 @@ pub fn compress_response_with_store(
             force_json: true,
             allow_toon: false,
             min_toon_chars: MIN_TOON_CHARS,
+            mixed_content_enabled: false,
             json: json_config(options),
         },
         stash_store,
@@ -1956,6 +1963,7 @@ mod tests {
             search_path_sharing_enabled: config.search_path_sharing_enabled,
             diff_compression_enabled: config.diff_compression_enabled,
             html_extraction_enabled: config.html_extraction_enabled,
+            mixed_content_enabled: config.mixed_content_enabled,
             stash_enabled: true,
             rtk_launcher: None,
             rtk_data_dir: None,
