@@ -152,6 +152,32 @@ fn is_query_length_marker(tail: &str) -> bool {
     }
 }
 
+/// The audit `path` in the form persisted memory may quote it.
+///
+/// Episode extraction copies a record's `path` into the facts it writes, and
+/// FactWriter puts those under `facts/` where the index picks them up: whatever
+/// is quoted becomes searchable memory content. For `memory_search` that field
+/// is a [`sanitized_query_path`] marker, and its `len=<N>` half describes the
+/// audit record rather than the call. Quoting it verbatim wrote `bm25:len=14`
+/// into an episodic fact at confidence 0.9 — above the 0.8 that
+/// `memory_session_context` injects into every later prompt. The mode does
+/// describe the call, so that is what survives here.
+///
+/// Every other record is quoted as it stands: `mem_grep`'s directory, a
+/// `mem_promote` pair and a legacy row that really does carry a query are the
+/// call's own input, not a marker. Marker detection is
+/// [`is_sanitized_query_path`] — the predicate the writer and the
+/// consolidation rules already share — so this reader cannot drift from them.
+pub fn quotable_path<'a>(tool: &str, path: &'a str) -> &'a str {
+    if tool != "memory_search" || !is_sanitized_query_path(path) {
+        return path;
+    }
+    match path.split_once(':') {
+        Some((mode, _marker)) => mode,
+        None => path,
+    }
+}
+
 /// Append-only JSONL logger with a held file handle.
 ///
 /// Each `log()` call writes to a persistent `File` handle guarded by a
@@ -323,6 +349,59 @@ mod tests {
             assert!(
                 is_sanitized_query_path(&path),
                 "{path} is a sanitized marker and must be recognized as one"
+            );
+        }
+    }
+
+    #[test]
+    fn quotable_path_drops_the_marker_and_keeps_the_mode() {
+        // Every marker the writer can emit, built through the writer helper so
+        // this reader cannot stay green while the marker spelling moves.
+        for &mode in SANITIZED_QUERY_MODES {
+            let path = sanitized_query_path(mode, "rust ownership");
+            assert_eq!(
+                quotable_path("memory_search", &path),
+                mode,
+                "{path} must be quoted as its mode"
+            );
+        }
+        // A payload that is not a marker is the record's own text.
+        assert_eq!(
+            quotable_path("memory_search", "bm25:rust ownership rules"),
+            "bm25:rust ownership rules"
+        );
+        assert_eq!(
+            quotable_path("memory_search", "bm25:len= without a number"),
+            "bm25:len= without a number"
+        );
+        assert_eq!(quotable_path("memory_search", ""), "");
+    }
+
+    #[test]
+    fn quotable_path_leaves_every_other_record_alone() {
+        // A grep directory and a promote pair are the call's own input.
+        assert_eq!(quotable_path("mem_grep", "notes/kconfig"), "notes/kconfig");
+        assert_eq!(
+            quotable_path("mem_promote", "scratch/a.md -> notes/a.md"),
+            "scratch/a.md -> notes/a.md"
+        );
+        assert_eq!(quotable_path("mem_read", "notes/a.md"), "notes/a.md");
+    }
+
+    #[test]
+    fn quotable_path_keeps_legacy_queries_whose_tail_looks_like_a_marker() {
+        // The regression `is_sanitized_query_path` exists for: this row
+        // recorded the query `packet:len=14`, which is evidence worth quoting
+        // whole rather than a marker to trim down to its mode.
+        for path in [
+            "bm25:packet:len=14",
+            "hybrid:kernel:len=9",
+            "bm25(fallback from hybrid):packet:len=14",
+        ] {
+            assert_eq!(
+                quotable_path("memory_search", path),
+                path,
+                "{path} records a legacy query and must be quoted verbatim"
             );
         }
     }
