@@ -17,6 +17,8 @@ import { Assembler } from "./assembler.js";
 import { estimateTokens } from "./estimate-tokens.js";
 
 const MAX_CACHED_SESSIONS = 10;
+const MAX_CONCURRENT_SUMMARIES = 4;
+const MAX_SUMMARIES_PER_BATCH = 2;
 
 type ReconcileMessage = { role: string; content: string; toolIdentity: string | null };
 
@@ -77,6 +79,8 @@ export class SelectiveContextEngine implements ContextEngine {
   private migrated = false;
   private config: SelectiveClawConfig;
   private summarizeFn: SummarizeFn | null = null;
+  private activeSummaries = 0;
+  private summaryWaiters: Array<() => void> = [];
 
   constructor(
     private db: DatabaseSync,
@@ -378,6 +382,24 @@ export class SelectiveContextEngine implements ContextEngine {
     return bindings;
   }
 
+  private async summarizeBounded(text: string, summarize: SummarizeFn): Promise<string> {
+    // Share capacity across sessions and lifecycle calls; the host owns request deadlines.
+    if (this.activeSummaries >= MAX_CONCURRENT_SUMMARIES) {
+      await new Promise<void>((resolve) => this.summaryWaiters.push(resolve));
+    } else {
+      this.activeSummaries++;
+    }
+
+    try {
+      return await summarize(text);
+    } finally {
+      const next = this.summaryWaiters.shift();
+      // Hand off the occupied slot directly so new calls cannot bypass queued work.
+      if (next) next();
+      else this.activeSummaries--;
+    }
+  }
+
   private async generateMissingSummaries(
     sessionId: string,
     turns: Array<{ turnSeq: number; messages: AgentMessage[] }>,
@@ -395,18 +417,33 @@ export class SelectiveContextEngine implements ContextEngine {
     if (!summarizeFn || olderTurns.length === 0) return summaries;
     const needSummary = olderTurns.filter((turn) => !summaries.has(turn.turnSeq));
 
-    const results = await Promise.allSettled(
-      needSummary.map((turn) => {
+    const results: Array<{ turnSeq: number; summary: string } | undefined> = [];
+    let nextTurn = 0;
+    const summarizeNext = async (): Promise<void> => {
+      while (nextTurn < needSummary.length) {
+        const index = nextTurn++;
+        const turn = needSummary[index];
         const text = turn.messages
           .map((message) => `${message.role}: ${this.extractContent(message)}`)
           .join("\n");
-        return summarizeFn(text).then((summary) => ({ turnSeq: turn.turnSeq, summary }));
-      }),
-    );
+        try {
+          const summary = await this.summarizeBounded(text, summarizeFn);
+          results[index] = { turnSeq: turn.turnSeq, summary };
+        } catch {
+          // A failed summary stays missing; other turns must still make progress.
+        }
+      }
+    };
+    // Admit only two requests per invocation so one call cannot fill the shared pool
+    // or enqueue every turn ahead of another session's prompt assembly.
+    await Promise.all(Array.from(
+      { length: Math.min(MAX_SUMMARIES_PER_BATCH, needSummary.length) },
+      summarizeNext,
+    ));
 
     for (const result of results) {
-      if (result.status !== "fulfilled") continue;
-      const { turnSeq, summary } = result.value;
+      if (!result) continue;
+      const { turnSeq, summary } = result;
       summaries.set(turnSeq, summary);
       const archiveTurn = bindings.get(turnSeq);
       if (archiveTurn === undefined) continue;
