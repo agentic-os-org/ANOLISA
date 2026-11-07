@@ -590,9 +590,26 @@ fn full_scan(
             if !is_indexable(rel_path, meta.len()) {
                 continue;
             }
-            let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
-                Some(b) => b,
-                None => continue,
+            // Read with the error classification intact: `extract_text`
+            // collapses every failure into `None`, and the stale-row sweep
+            // below treats "not seen" as "gone from disk". A file that is
+            // merely unreadable *right now* (chmod 000, EIO, an atomic
+            // replace race) would be evicted from the index even though it
+            // is still on disk — and because its events were lost (that is
+            // why this rescan runs) nothing would re-index it until the
+            // next overflow rescan or a restart. The incremental flush path
+            // already retains rows on transient read errors; mirror that
+            // here: evict only NotFound (gone) and InvalidData (binary —
+            // same eviction the flush path performs), keep everything else.
+            let body = match crate::safe_fs::read_to_string(mount.root_fd.as_fd(), rel_path) {
+                Ok(b) => b,
+                Err(MemoryError::NotFound(_)) => continue,
+                Err(MemoryError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                Err(e) => {
+                    tracing::warn!("index full-scan read failed for {rel}, keeping its row: {e}");
+                    seen.insert(rel.clone());
+                    continue;
+                }
             };
             let mtime = super::store::mtime_ms_of(&meta);
             // Match the incremental fingerprint: timestamps alone can survive
@@ -1409,6 +1426,67 @@ mod tests {
         assert_eq!(hits.len(), 1, "the restored file must still be searchable");
         assert_eq!(hits[0].path, "notes/a.md");
         assert_eq!(stat(&store, "notes/a.md").mtime_ms, indexed.mtime_ms);
+    }
+
+    /// A file that exists but is unreadable at full-scan time (chmod 000,
+    /// EIO, an atomic replace race) must not be evicted from the index: the
+    /// rescan is the only recovery path after an inotify overflow dropped
+    /// the events, so evicting it here leaves it invisible to search until
+    /// the next overflow rescan or a restart. The incremental flush path
+    /// already retains rows on transient read errors; the full scan must
+    /// not be stricter than that.
+    #[test]
+    fn full_scan_keeps_the_row_of_a_temporarily_unreadable_file() {
+        // Root can bypass file permissions, so this fixture requires an
+        // ordinary user to exercise the read-error branch.
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("skipped permission-error fixture: running as root");
+            return;
+        }
+        let (_tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/a.md", "cobaltzebra original content");
+        flush_rels(&mount, &store, None, &["notes/a.md"]);
+
+        let path = root.join("notes/a.md");
+        let permissions = std::fs::metadata(&path).unwrap().permissions();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let scan_result = full_scan(&mount, &store, None, None);
+        // Restore before assertions so a failure cannot leave the fixture unreadable.
+        std::fs::set_permissions(&path, permissions).unwrap();
+        scan_result.unwrap();
+
+        let hits = store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .search("cobaltzebra", 10, false)
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "an unreadable-but-present file must stay indexed"
+        );
+        assert_eq!(hits[0].path, "notes/a.md");
+    }
+
+    /// The conservative read-error handling above must not weaken the sweep:
+    /// a row whose file really is gone still gets evicted by the full scan.
+    #[test]
+    fn full_scan_still_evicts_rows_whose_file_is_gone() {
+        let (_tmp, mount, store) = setup();
+        let root = mount.root.clone();
+        write(&root, "notes/a.md", "cobaltzebra original content");
+        flush_rels(&mount, &store, None, &["notes/a.md"]);
+
+        std::fs::remove_file(root.join("notes/a.md")).expect("unlink");
+        full_scan(&mount, &store, None, None).unwrap();
+
+        let hits = store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .search("cobaltzebra", 10, false)
+            .unwrap();
+        assert!(hits.is_empty(), "a gone file's row must be evicted");
     }
 
     /// The same regression end to end through the real watcher with embedding
