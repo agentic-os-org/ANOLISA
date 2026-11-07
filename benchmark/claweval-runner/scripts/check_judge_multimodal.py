@@ -35,8 +35,9 @@ import os
 import sys
 
 # ── Tiny 1x1 red PNG (base64) ──────────────────────────────────────────
+# 1x1, 8-bit RGBA, single opaque red pixel (255, 0, 0, 255).
 TINY_RED_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/VscvDQAAAABJRU5ErkJggg=="
 )
 
 PROBE_PROMPT = (
@@ -44,6 +45,28 @@ PROBE_PROMPT = (
     "ONLY with the single word for its color. If you cannot see any "
     "image, answer ONLY: NO_IMAGE"
 )
+
+# The fixture's sole pixel is opaque red, so the single word the prompt asks for
+# is the only reply that shows the model actually inspected the image.
+PROBE_COLOR = "red"
+# A trailing period is tolerated: it is formatting, not a different answer.
+_TRAILING_PUNCTUATION = ".!"
+
+
+def reply_confirms_image(reply: str | None) -> bool:
+    """Return True when *reply* is the single color word the prompt asks for.
+
+    Anything else — a different color, an explicit refusal, an empty reply or
+    out-of-protocol prose — is not evidence that the model looked at the image.
+    """
+    if not reply:
+        return False
+    stripped = reply.strip()
+    if not stripped:
+        return False
+    if "no_image" in stripped.lower():
+        return False
+    return stripped.rstrip(_TRAILING_PUNCTUATION).strip().lower() == PROBE_COLOR
 
 
 def check_multimodal(model: str, base_url: str, api_key: str,
@@ -81,13 +104,8 @@ def check_multimodal(model: str, base_url: str, api_key: str,
         temperature=0.0,
         max_tokens=16,
     )
-    text = (resp.choices[0].message.content or "").strip().lower()
-
-    if "no_image" in text:
-        return False
-    if not text:
-        return False
-    return True
+    reply = resp.choices[0].message.content
+    return reply_confirms_image(reply)
 
 
 def _load_config_yaml(config_path: str) -> dict:
