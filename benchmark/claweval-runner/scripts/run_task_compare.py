@@ -492,7 +492,12 @@ def _run_batch_mode(args) -> None:
         ce_ok = "✅" if results[tid].get("ce-runner") else "❌"
         print(f"  {tid:<40s} {native_ok:>10s} {ce_ok:>10s}")
 
-    if results.get("native") and results.get("ce-runner"):
+    # In batch mode `results` is keyed by task id, so the trace hint has to look at the
+    # per-task entries; `results.get("native")` would look up a mode name in a dict of
+    # task ids and never find one.
+    if any(entry.get("native") for entry in results.values()) and any(
+        entry.get("ce-runner") for entry in results.values()
+    ):
         print(f"\n  Compare traces:")
         print(f"    python scripts/check_trace_timestamps.py <trace_file>")
         print(f"    pytest tests/test_trace_timestamps.py -v")
