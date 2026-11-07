@@ -85,7 +85,7 @@ It performs five checks:
 
 1. **Error-value detection**: If the cell has `t="e"`, its `<v>` element contains an Excel error string. The cell is recorded with its sheet name, cell reference (e.g. `C5`), the error value, and the formula text if present.
 
-2. **Broken cross-sheet reference detection**: If the cell has an `<f>` element, the script extracts all sheet names referenced in the formula (both `SheetName!` and `'Sheet Name'!` syntax). Each name is compared against the list of sheets in `workbook.xml`. A mismatch is a broken reference.
+2. **Broken cross-sheet reference detection**: If the cell has an `<f>` element, the script extracts all sheet names referenced in the formula (both `SheetName!` and `'Sheet Name'!` syntax) and validates them against the list of sheets in `workbook.xml`. A mismatch is a broken reference. The first endpoint of a 3D range (`Sheet1:Sheet2!A1`, followed by `:` rather than `!`) is covered by a heuristic path of the same check: those records can produce false positives and carry a `note` asking for manual verification.
 
 3. **Unknown named-range detection (heuristic)**: Identifiers in formulas that are not function names, not cell references, and not found in `workbook.xml`'s `<definedNames>` are flagged as `unknown_name_ref` warnings. This is a heuristic — false positives are possible; always verify manually.
 
@@ -95,6 +95,7 @@ It performs five checks:
 
 Hard errors (exit code 1): `error_value`, `broken_sheet_ref`, `malformed_error_cell`, `file_error`
 Soft warnings (exit code 0): `unknown_name_ref` — must be verified manually but do not block delivery alone
+A `broken_sheet_ref` carrying a `note` (the 3D first-endpoint heuristic) is a hard error by type but a heuristic judgment in origin — verify manually before trusting it
 
 #### Reading formula_check.py human-readable output
 
@@ -189,7 +190,7 @@ Field reference:
 | Field | Meaning |
 |-------|---------|
 | `type: "error_value"` | Cell has `t="e"` — an Excel error is stored in the `<v>` element |
-| `type: "broken_sheet_ref"` | Formula references a sheet name not present in workbook.xml |
+| `type: "broken_sheet_ref"` | Formula references a sheet name not present in workbook.xml; records sourced from the 3D first-endpoint heuristic carry a `note` |
 | `type: "unknown_name_ref"` | Formula references an identifier not in `<definedNames>` (heuristic, soft warning) |
 | `type: "malformed_error_cell"` | Cell has `t="e"` but no `<v>` child — structural XML problem |
 | `type: "file_error"` | The file could not be opened (bad ZIP, not found, etc.) |
@@ -201,6 +202,7 @@ Field reference:
 | `valid_sheets` | All sheet names actually present in workbook.xml |
 | `unknown_name` | The identifier that was not found in `<definedNames>` |
 | `defined_names` | All named ranges actually present in workbook.xml |
+| `note` | Present on heuristic records (`unknown_name_ref`, and `broken_sheet_ref` from the 3D first-endpoint path): the judgment may be a false positive, verify manually |
 | `shared_formula_ranges` | Count of shared formula definitions (top-level `<f t="shared" ref="...">` elements) |
 
 ### Step 2: Manual XML inspection
