@@ -25,7 +25,7 @@ import tempfile
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PosixPath, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -48,6 +48,11 @@ WORKSPACE_SHELL_TOOLS = (
     "mcp__qw-builtin__mcp_workspace_bash",
     "mcp__qw-builtin__mcp__workspace__bash",
 )
+
+
+def _quote_ps(value: str) -> str:
+    """Mirror hook_utils._powershell_quote for command-shape assertions."""
+    return "'" + value.replace("'", "''") + "'"
 
 
 def snapshot(root: Path) -> dict:
@@ -996,7 +1001,10 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
         request = json.loads((private_bin / "request.json").read_text())
         self.assertEqual(
             request["capabilities"]["recovery"],
-            {"kind": "shell" if sys.platform == "darwin" else "none"},
+            # Shell recovery is now advertised on every host with a complete
+            # private bridge; Linux here proves the bridge alone is not
+            # macOS-gated.
+            {"kind": "shell"},
         )
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS private recovery bridge")
@@ -1083,8 +1091,80 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
                 self.assertIsNone(utils.rewrite_qwenwork_retrieve("Bash", {"command": command}))
                 self.assertFalse(utils.is_tokenless_retrieve_command("Bash", {"command": command}))
             with mock.patch.object(sys, "platform", "win32"):
-                utils.prepare_hook_input(payload, "qwenwork")
-                self.assertFalse(utils.tokenless_retrieve_command_available())
+                # Without the managed-engine compatibility flag, Windows keeps
+                # the POSIX rewrite: the legacy engine runs Git Bash, whose
+                # /usr/bin/env prefix works. The binary name changes to .exe.
+                with mock.patch.dict(os.environ, {"QWENWORK_PLUGIN_HOOK_COMPATIBILITY": ""}):
+                    utils.prepare_hook_input(payload, "qwenwork")
+                    self.assertTrue(utils.tokenless_retrieve_command_available())
+                    legacy = utils.rewrite_qwenwork_retrieve(
+                        "Bash", {"command": f"tokenless retrieve {key}"}
+                    )
+                    self.assertIsNotNone(legacy)
+                    self.assertTrue(legacy["command"].startswith("/usr/bin/env TOKENLESS_AGENT_ID="))
+                    self.assertTrue(
+                        legacy["command"].endswith(" retrieve " + key),
+                        legacy["command"],
+                    )
+                    self.assertTrue(utils.is_tokenless_retrieve_command("Bash", legacy))
+            with mock.patch.object(sys, "platform", "win32"), mock.patch.object(utils.os, "name", "nt"):
+                # The managed Windows engine calls its shell "Bash" but runs
+                # PowerShell; the rewrite must use the PowerShell contract.
+                with mock.patch.dict(
+                    os.environ,
+                    {"QWENWORK_PLUGIN_HOOK_COMPATIBILITY": "managed-tool-hooks-v1"},
+                ):
+                    shutil.copy2(self.bin / "tokenless", self.target / "bin/tokenless.exe")
+                    # A POSIX interpreter cannot query a process token; the
+                    # configured data directory also mirrors the live
+                    # installation, which always sets one.
+                    with mock.patch.dict(
+                        os.environ, {"TOKENLESS_DATA_DIR": str(self.root / "win databases")}
+                    ), mock.patch.object(utils, "Path", PosixPath):
+                        utils.prepare_hook_input(payload, "qwenwork")
+                    self.assertTrue(utils.tokenless_retrieve_command_available())
+                    managed = utils.rewrite_qwenwork_retrieve(
+                        "Bash", {"command": f"tokenless retrieve {key}"}
+                    )
+                    self.assertIsNotNone(managed)
+                    self.assertTrue(managed["command"].startswith("$env:TOKENLESS_AGENT_ID = "))
+                    self.assertIn(
+                        f"& {_quote_ps(utils._QWENWORK_RECOVERY['binary'])} retrieve {key}",
+                        managed["command"],
+                    )
+                    self.assertNotIn("/usr/bin/env", managed["command"])
+                    self.assertTrue(utils.is_tokenless_retrieve_command("Bash", managed))
+                    # Pipelines and extra arguments stay unrecognized on Windows.
+                    for command in (
+                        f"tokenless retrieve {key} | cat",
+                        managed["command"] + " | cat",
+                        managed["command"] + "; echo extra",
+                    ):
+                        self.assertIsNone(utils.rewrite_qwenwork_retrieve("Bash", {"command": command}))
+                        self.assertFalse(utils.is_tokenless_retrieve_command("Bash", {"command": command}))
+                    # Paths with spaces and shell-significant characters survive quoting.
+                    spaced = self.target / "bin/tokenless state '$;`"
+                    spaced.parent.mkdir(exist_ok=True)
+                    shutil.copy2(self.bin / "tokenless", spaced)
+                    # The POSIX interpreter cannot instantiate WindowsPath for the
+                    # plugin-root arithmetic; a POSIX Path keeps the sandbox layout
+                    # while the environment still carries the real values.
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "TOKENLESS_STASH_DB": str(self.target / "custom '$;` db"),
+                            "QODER_PLUGIN_ROOT": str(self.target),
+                            "TOKENLESS_DATA_DIR": str(self.root / "win databases"),
+                        },
+                    ), mock.patch.object(utils, "Path", PosixPath):
+                        utils.prepare_hook_input(payload, "qwenwork")
+                        quoted = utils.rewrite_qwenwork_retrieve(
+                            "Bash", {"command": f"tokenless retrieve '{key.upper()}'"}
+                        )
+                        self.assertIsNotNone(quoted)
+                        self.assertIn("$env:TOKENLESS_STASH_DB = ", quoted["command"])
+                        self.assertIn("custom ''$;` db';", quoted["command"])
+                        self.assertTrue(utils.is_tokenless_retrieve_command("Bash", quoted))
             hooks = self.target / "hooks/hooks.json"
             configuration = json.loads(hooks.read_text())
             configuration["hooks"]["PreToolUse"] = []
