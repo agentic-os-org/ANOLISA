@@ -9,10 +9,11 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, ApplyPolicy, CredentialExfiltrationPolicy, DestinationScope,
-    FILE_PROTECTION_POLICY_VERSION, FileProtectionExclusion, FileProtectionExclusionKind,
-    FileProtectionPolicy, FileProtectionTarget, FileProtectionTargetKind,
-    FileProtectionTopologyMode, FileProtections, PolicyMode, SecurityEvent, SecurityEventKind,
+    ApplyCredentialPolicy, ApplyPolicy, BindingState, CredentialExfiltrationPolicy,
+    DestinationScope, FILE_PROTECTION_POLICY_VERSION, FileProtectionExclusion,
+    FileProtectionExclusionKind, FileProtectionPolicy, FileProtectionTarget,
+    FileProtectionTargetKind, FileProtectionTopologyMode, FileProtections, PolicyMode,
+    SecurityEvent, SecurityEventKind,
 };
 use agentsight_enforcer::{ActPlaneBackend, BackendError, EnforcementBackend, SubscriberClass};
 use uuid::Uuid;
@@ -65,6 +66,14 @@ for line in sys.stdin:
         print('errno=' + str(e.errno), flush=True)
 "#;
 
+const PRIVATE_TMP_WORKER: &str = r#"
+set -eu
+mount -t tmpfs tmpfs /tmp
+mkdir -p "$(dirname "$1")"
+printf 'synthetic fixture, not a credential\n' > "$1"
+exec python3 -u -c "$2" "$1"
+"#;
+
 struct Worker {
     child: Child,
     input: ChildStdin,
@@ -73,12 +82,34 @@ struct Worker {
 
 impl Worker {
     fn spawn(path: &str) -> Self {
-        let mut child = Command::new("unshare")
-            .args(["-n", "python3", "-u", "-c", WORKER, path])
+        let mut command = Command::new("unshare");
+        command.args(["-n", "python3", "-u", "-c", WORKER, path]);
+        Self::spawn_command(&mut command)
+    }
+
+    fn spawn_private_tmp(path: &str) -> Self {
+        let mut command = Command::new("unshare");
+        command.args([
+            "-n",
+            "-m",
+            "--propagation",
+            "private",
+            "sh",
+            "-c",
+            PRIVATE_TMP_WORKER,
+            "sh",
+            path,
+            WORKER,
+        ]);
+        Self::spawn_command(&mut command)
+    }
+
+    fn spawn_command(command: &mut Command) -> Self {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("spawn network-isolated test process");
+            .expect("spawn isolated test process");
         let input = child.stdin.take().expect("child stdin");
         let mut output = BufReader::new(child.stdout.take().expect("child stdout"));
         let mut ready = String::new();
@@ -1506,6 +1537,42 @@ fn credentials(read_operation: &str) {
     assert_eq!(worker.run("connect 8.8.8.8"), "ok");
     assert!(events.recv_timeout(Duration::from_millis(250)).is_err());
     assert_eq!(worker.run("unlink"), "ok");
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and mount namespaces"]
+fn private_tmp_credential_binding_on_live_kernel() {
+    let files = Files::new("credential-exfiltration");
+    let root = files.root.to_str().expect("ASCII fixture root");
+    let source = format!("{root}/{}", "s".repeat(63 - root.len() - 1));
+    assert_eq!(source.len(), 63);
+    let worker = Worker::spawn_private_tmp(&source);
+    assert!(!PathBuf::from(&source).exists());
+
+    let backend = ActPlaneBackend::open().expect("credential runtime");
+    let binding = backend
+        .apply_credential_policy(ApplyCredentialPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "inode-test".into(),
+            session_id: None,
+            root_pid: worker.pid(),
+            process_start_time: worker.start_time(),
+            policy: CredentialExfiltrationPolicy {
+                policy_id: "private-tmp-credential-fixture".into(),
+                revision: 1,
+                source_patterns: vec![source],
+                trusted_endpoints: vec![],
+                taint_label: "CREDENTIAL".into(),
+                taint_ttl_secs: 900,
+                destination_scope: DestinationScope::PublicIpv4,
+                mode: PolicyMode::Audit,
+            },
+        })
+        .expect("apply credential policy through the target mount namespace");
+    assert_eq!(binding.state, BindingState::Enforced);
+    backend
+        .detach(binding.request.binding_id)
+        .expect("detach credential policy");
 }
 
 #[test]
