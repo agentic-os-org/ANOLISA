@@ -129,6 +129,11 @@ log_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
+can_use_tty() {
+    # /dev/tty can exist even when this process has no controlling terminal.
+    ( : < /dev/tty > /dev/tty ) 2>/dev/null
+}
+
 prompt_yes_no() {
     local question="$1"
     local default="${2:-yes}"
@@ -143,7 +148,7 @@ prompt_yes_no() {
 
     if [ "$IS_INTERACTIVE" = true ]; then
         read -r -p "$question $prompt_suffix " answer || answer=""
-    elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    elif can_use_tty; then
         printf "%s %s " "$question" "$prompt_suffix" > /dev/tty
         IFS= read -r answer < /dev/tty || answer=""
     else
@@ -1334,7 +1339,7 @@ run_setup_wizard() {
     # The setup wizard reads from /dev/tty, so it works even when the
     # install script itself is piped (curl | bash). Only skip if no
     # terminal is available at all (e.g. Docker build, CI).
-    if ! [ -e /dev/tty ]; then
+    if ! can_use_tty; then
         log_info "Setup wizard skipped (no terminal available). Run 'hermes setup' after install."
         return 0
     fi
@@ -1396,7 +1401,7 @@ maybe_start_gateway() {
         fi
     fi
 
-    if ! [ -e /dev/tty ]; then
+    if ! can_use_tty; then
         log_info "Gateway setup skipped (no terminal available). Run 'hermes gateway install' later."
         return 0
     fi
