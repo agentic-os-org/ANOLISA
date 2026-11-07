@@ -135,6 +135,18 @@ class JsonlEventWriter:
         """Return whether appending to the opened log would cross its size limit."""
         return os.fstat(fd).st_size + additional_bytes >= self._max_bytes
 
+    def _needs_line_separator(self, fd: int) -> bool:
+        metadata = os.fstat(fd)
+        if metadata.st_size == 0:
+            return False
+        # The append descriptor stays write-only to preserve support for legacy
+        # write-only files; it has already restored the owner's read permission.
+        with self._path.open("rb") as reader:
+            if not os.path.samestat(metadata, os.fstat(reader.fileno())):
+                raise OSError("log file changed while checking its record boundary")
+            reader.seek(-1, os.SEEK_END)
+            return reader.read(1) != b"\n"
+
     def _tighten_retained_backup(self, path: Path) -> None:
         """Best-effort tighten one recognized retained backup without following links."""
         try:
@@ -243,15 +255,21 @@ class JsonlEventWriter:
                 # Tighten an existing file before checking rotation so the
                 # resulting backup cannot retain a legacy group/world-readable
                 # mode. Reopen by path after rotation to avoid stale inodes.
-                if self._needs_rotation(event_fd, line_bytes):
+                needs_separator = self._needs_line_separator(event_fd)
+                if self._needs_rotation(event_fd, line_bytes + int(needs_separator)):
                     os.close(event_fd)
                     event_fd = None
                     self._rotate()
                     event_fd = self._open_private_append_fd(self._path)
+                    needs_separator = self._needs_line_separator(event_fd)
 
                 fh = os.fdopen(event_fd, "a", encoding="utf-8")
                 event_fd = None
                 with fh:
+                    # Keep a torn tail as evidence, but do not concatenate the
+                    # next accepted event to it. The flock covers this repair.
+                    if needs_separator:
+                        fh.write("\n")
                     fh.write(line)
                     fh.flush()
             finally:
