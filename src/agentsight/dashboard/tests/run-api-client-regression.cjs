@@ -42,6 +42,7 @@ try {
       'src/utils/enforcementMode.ts',
       'src/pages/security/utils.ts',
       'src/pages/LoginPage.tsx',
+      'src/pages/SettingsPage.tsx',
       'src/components/OptimizationSettings.tsx',
       'src/utils/optimizationStrategies.ts',
       'src/pages/AtifViewerPage.tsx',
@@ -54,7 +55,7 @@ try {
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/llm-locale-regression.test.cjs', 'tests/strategy-presentation-regression.test.cjs', 'tests/clipboard-regression.test.cjs', 'tests/savings-sort-regression.test.cjs', 'tests/download-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/settings-save-readiness.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs', 'tests/trajectory-filter-regression.test.cjs', 'tests/atif-shape-regression.test.cjs', 'tests/llm-locale-regression.test.cjs', 'tests/strategy-presentation-regression.test.cjs', 'tests/clipboard-regression.test.cjs', 'tests/savings-sort-regression.test.cjs', 'tests/download-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -72,6 +73,7 @@ try {
       AGENTSIGHT_SET_SELECTION_BUILD: join(outputDir, 'utils', 'setSelection.js'),
       AGENTSIGHT_ENFORCEMENT_MODE_BUILD: join(outputDir, 'utils', 'enforcementMode.js'),
       AGENTSIGHT_SECURITY_UTILS_BUILD: join(outputDir, 'pages', 'security', 'utils.js'),
+      AGENTSIGHT_SETTINGS_PAGE_BUILD: join(outputDir, 'pages', 'SettingsPage.js'),
       AGENTSIGHT_LOGIN_PAGE_BUILD: join(outputDir, 'pages', 'LoginPage.js'),
       AGENTSIGHT_LLM_CONFIG_BUILD: join(outputDir, 'components', 'OptimizationSettings.js'),
       AGENTSIGHT_STRATEGIES_BUILD: join(outputDir, 'utils', 'optimizationStrategies.js'),
