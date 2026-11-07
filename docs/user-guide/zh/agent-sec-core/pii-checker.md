@@ -171,7 +171,8 @@ agent-sec-cli scan-pii --input ./agent-output.txt --format text
 |------|------|--------------|
 | 个人数据 | `email`、`phone_cn`、`credit_card`、`cn_id` | `warn` |
 | 凭据 | `private_key`、`bearer_token`、`api_key`、`jwt` | `deny` |
-| 阿里云凭据 | `aliyun_access_key_id`、`aliyun_access_key_secret` | `deny` |
+| 阿里云 AccessKey Secret | `aliyun_access_key_secret` | `deny` |
+| 阿里云 AccessKey ID | `aliyun_access_key_id` | `warn` |
 | 敏感字段 | `generic_secret_field` | `deny` |
 
 信用卡号、中国身份证号和 JWT candidate 在生成 finding 前会经过格式校验。周边安全关键词可能提高
@@ -180,6 +181,30 @@ agent-sec-cli scan-pii --input ./agent-output.txt --format text
 手机号 finding，`test-only 13812345678` 仍按测试上下文产生低置信度 finding。`.invalid` 标记
 保留子串匹配，邮箱和私钥 finding 仍不受这项上下文降分影响。低于默认 `0.5` 阈值的 finding
 会被忽略，除非使用 `--include-low-confidence`。
+
+### 阿里云凭据
+
+阿里云凭据按官方环境变量赋值识别，不再依赖值前缀。finding 要求 `NAME=value` 或
+`export NAME=value` 形状，且变量名精确、区分大小写匹配；值可为裸值或一对成对引号包裹。
+证据 span 仅覆盖值本身，因此脱敏副本仍能看出该凭据来自哪个变量。
+
+`ALIBABA_CLOUD_BEARER_TOKEN` 报告 `bearer_token`，`DASHSCOPE_API_KEY` 报告 `api_key`，
+STS token 报告 `generic_secret_field`，三者均为 `deny`。AccessKey ID 单独无法完成认证，
+因此仅 `warn`。每个 finding 另带 `metadata.provider=alibaba_cloud` 与
+`metadata.credential_kind`。secret 和 token 会完全遮蔽。超过八个字符的字母数字 AccessKey ID
+保留前后各四个字符，中间使用 `...[REDACTED]...`；较短或复合值会完全遮蔽。
+
+完整占位符与未展开引用不报告：`$NAME`、`${NAME}`、`%NAME%`、`$(cat /run/secret)`、
+`<your-key>`、`changeme`，以及仅由 `x` 或 `*` 组成的值。单引号中的 `$` 引用按字面值报告。
+其他命令替换（例如
+`$(printf secret123)`）会报告。
+仅包含 `test` 或 `example` 的真实值（例如
+`testValue1234567890`）仍会报告。没有厂商上下文的 `accessKeySecret` 保持
+`generic_secret_field` 与 `deny`。`ACCESS_KEY_ID` 等通用回退变量不带厂商上下文；裸
+`LTAI...` 值本身也不再归属阿里云。
+
+深层嵌套赋值的重扫有工作量上限。达到上限时扫描报告 `matching_failed`，覆盖状态为
+unavailable，不会将结果标记为完整。
 
 邮箱检测支持句末 ASCII 句号及连续句号组成的省略号；连续句号后必须是输入结束、空白或支持的
 句末标点、闭合分隔符。例如，`alice@company.co.uk.` 的 finding 仅包含 `alice@company.co.uk`，

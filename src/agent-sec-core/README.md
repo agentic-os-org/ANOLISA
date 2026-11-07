@@ -443,7 +443,7 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 V2 loads custom business rules from `/etc/agent-sec/pii-checker/rules.yaml` at daemon startup;
 `agent-sec-daemon --pii-rules /absolute/path/rules.yaml` selects an alternative. Restart to update.
-V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.1.1"`;
+V1 retains `~/.config/agent-sec/pii-checker/rules.yaml`. V2 reports coverage, rule identity and `summary.scanner_version: "2.2.0"`;
 a `pass` result with partial coverage does not establish complete detection. This phase preserves
 Hook contracts without switching live hosts or adding PDP enforcement.
 The shared CLI `--trace-context` adapter propagates attribution through the top-level OTel

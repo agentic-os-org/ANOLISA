@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod aliyun;
 mod audit;
 mod builtin;
 mod custom;
@@ -28,4 +29,4 @@ pub use rules::{DEFAULT_CUSTOM_RULES_PATH, PiiRuleSet};
 pub use scanner::PiiScanner;
 
 /// Detection semantics version, independent of the `AgentSecCore` package version.
-pub const SCANNER_VERSION: &str = "2.1.1";
+pub const SCANNER_VERSION: &str = "2.2.0";
