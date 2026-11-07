@@ -13,7 +13,8 @@ Usage examples:
         --copy-style-from 5
 
 What it does:
-  1. Shifts all rows >= at down by 1 (calls xlsx_shift_rows.py)
+  1. Shifts all rows >= at down by 1 on the target sheet (calls
+     xlsx_shift_rows.py, forwarding --sheet; default: first sheet)
   2. Adds text values to sharedStrings.xml
   3. Inserts new row with specified cells (text, numbers, formulas)
   4. Copies cell styles from a reference row
@@ -169,13 +170,19 @@ def main() -> None:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     shift_script = os.path.join(script_dir, "xlsx_shift_rows.py")
 
+    # Forward the sheet to the shift script (default: first, matching this
+    # script's own --sheet contract) so multi-sheet workbooks don't hit the
+    # "multiple worksheets" refusal. "#1" forces the index form.
+    shift_sheet = args.sheet if args.sheet is not None else "#1"
     print(f"Step 1: Shifting rows >= {at} down by 1...")
     result = subprocess.run(
-        [sys.executable, shift_script, args.work_dir, "insert", str(at), "1"],
+        [sys.executable, shift_script, args.work_dir, "insert", str(at), "1",
+         "--sheet", shift_sheet],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        print(f"ERROR: shift_rows failed:\n{result.stderr}")
+        print(f"ERROR: shift_rows failed:\n{result.stdout}{result.stderr}",
+              file=sys.stderr)
         sys.exit(1)
     print(result.stdout)
 

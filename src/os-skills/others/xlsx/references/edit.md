@@ -508,13 +508,15 @@ Inserting a row at position N shifts all rows from N downward. Every reference t
 
 ```bash
 # Insert 1 row at row 5: all rows 5 and below shift down by 1
-python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 1
+python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ insert 5 1 [--sheet NAME|INDEX]
 
-# Delete 1 row at row 8: all rows 9 and above shift up by 1
-python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ delete 8 1
+# Delete 1 row at row 8: row 8 content is removed; rows 9+ shift up by 1
+python3 SKILL_DIR/scripts/xlsx_shift_rows.py /tmp/xlsx_work/ delete 8 1 [--sheet NAME|INDEX]
 ```
 
-The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, all `<f>` formula text across every worksheet, `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`.
+On a multi-sheet workbook `--sheet` is required (the script refuses and lists the sheets otherwise); `--sheet` matches the display name first, then the 1-based index, and `#N` forces index N.
+
+The script updates in one pass: `<row r="...">` attributes, `<c r="...">` cell addresses, `<f>` formula text on the targeted worksheet plus cross-sheet `<f>` references that name the targeted sheet (references qualified with a *different* sheet are left alone because its rows did not move), `<mergeCell>` ranges, `<conditionalFormatting sqref="...">`, `<dataValidation sqref="...">`, `<hyperlink ref="...">`, `<dimension ref="...">`, table `ref` attributes in `xl/tables/`, chart series ranges in `xl/charts/`, and pivot cache source ranges in `xl/pivotCaches/`. A range that collapses to nothing (its whole span was deleted) drops the element — with the parent `count` decremented — instead of writing an invalid empty attribute; a collapsed chart/table/pivot range is kept and reported with a `WARNING`.
 
 **After running the shift script, always repack and validate:**
 ```bash
@@ -540,6 +542,8 @@ Deletion is more dangerous than insertion because any formula that referenced a 
 1. Search all `<f>` elements for references to the deleted range.
 2. If any formula references a cell in the deleted row/column, do not delete — instead, either clear the row's data or consult the user.
 3. After deletion, shift all references to rows/columns beyond the deletion point downward/leftward.
+
+`xlsx_shift_rows.py` in delete mode drops the deleted rows' content, shifts the rows below, and updates the range endpoints listed in §5.1 (including `<f t="shared">` groups: when the row owning a shared-formula primary is deleted, the first surviving follower is promoted to primary with its text materialised). Note that formulas referencing a cell **inside** the deleted block are retargeted to the first surviving row rather than rewritten to `#REF!` — review them after the run. Worksheet `<autoFilter>`/`<sortState>` refs are not updated; review them.
 
 ---
 
