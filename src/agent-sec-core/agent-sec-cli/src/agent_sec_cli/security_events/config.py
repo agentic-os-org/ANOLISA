@@ -8,7 +8,10 @@ from pathlib import Path
 PRIMARY_LOG_PATH = "/var/log/agent-sec/security-events.jsonl"
 FALLBACK_LOG_PATH = str(Path.home() / ".agent-sec-core" / "security-events.jsonl")
 DEFAULT_SECURITY_STREAM = "security-events"
-_STREAM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# \Z (absolute end) instead of $: '$' also matches immediately before a
+# trailing newline, which would let "security-events\n" through this whitelist
+# and produce a log/db path containing an embedded newline.
+_STREAM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
 
 def _safe_tmp_dir() -> Path:
