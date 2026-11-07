@@ -35,8 +35,9 @@ QwenPaw 和 AgentScope SDK 集成提供静态恢复工具及当前模型调用�
 HTML 和 Diff 裁剪。内容来源、可恢复性和收益门禁仍然生效，不代表每个结果
 都会被压缩。QwenPaw 与 AgentScope 在构造 SDK 配置时继承
 `TOKENLESS_COMPRESSION_ENABLED`、`TOKENLESS_SEARCH_PATH_SHARING_ENABLED`、
-`TOKENLESS_HTML_EXTRACTION_ENABLED` 和 `TOKENLESS_DIFF_COMPRESSION_ENABLED`。
-显式 SDK 参数优先于环境默认值。Diff 默认开启；压缩总开关控制 dry-run，不会关闭 RTK 改写。
+`TOKENLESS_HTML_EXTRACTION_ENABLED`、`TOKENLESS_DIFF_COMPRESSION_ENABLED` 和
+`TOKENLESS_MIXED_CONTENT_ENABLED`。显式 SDK 参数优先于环境默认值。Diff 默认开启，
+混合区域压缩默认关闭；压缩总开关控制 dry-run，不会关闭 RTK 改写。
 
 | 宿主或集成 | 剩余边界 |
 |------------|----------|
@@ -77,6 +78,7 @@ macOS 私有恢复桥接。没有恢复路径时，Core 只接受无损候选。
 | 宿主支持文本替换时，来自命令输出的 Git Diff（默认开启，`TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭） | 按 Hunk 选择裁剪未变更上下文；保留全部变更行，完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | 宿主支持文本替换且 Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的完整 HTML 文档；默认开启，`TOKENLESS_HTML_EXTRACTION_ENABLED=0` 关闭 | 主内容转写为 Markdown，视图头部写明移除计数；完整原文经 Stash 可取回，收益过小的候选会被拒绝 |
 | Stash 恢复可用时，来自命令输出或 API 响应（不含文件读取）的 JSON 字符串值中的 HTML 片段或文档；与 HTML 页面共用开关 | 每个值就地完整转写为 Markdown，类型、数字和其他字段不变；视图可能丢失可见文字、目标地址、表单状态以及样式、属性、换行、列表编号或表头所承载含义，或暴露屏幕上被隐藏文字的值原样保留，每个原始值经 Stash 可取回。详见 [JSON 值中的 HTML](configuration-and-privacy.md#json-值中的-html) |
+| `TOKENLESS_MIXED_CONTENT_ENABLED` 显式开启（默认关闭）且宿主支持文本替换时，任何整内容领域都无法处理的混合工具输出 | fenced `json`/`csv`/`tsv` 块与括号平衡的裸 JSON 文档按区域用与独立路由相同的策略压缩；周围文本逐字节保留，被拒绝的区域逐字节保留 |
 | 长纯文本、Stack Trace、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于

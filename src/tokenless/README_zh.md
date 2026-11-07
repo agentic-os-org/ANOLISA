@@ -21,6 +21,7 @@ Flag 迁移、Pipeline 行为和输出恢复详见
 | Build Log 压缩 | 取决于具体负载 | 清理 SGR 颜色，并可恢复地缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C 和通用命令日志的常规进度；pnpm 还可在无需恢复时压紧已识别的通知、依赖清单和装饰条布局，保留全部任务相关事实 |
 | 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |
+| 混合内容区域压缩 | 取决于工作负载 | 通过 `TOKENLESS_MIXED_CONTENT_ENABLED=1` 显式开启：对既非完整结构化文档、也无法被其他领域处理的工具输出，识别显式定界的 typed region——标注 `json`/`csv`/`tsv` 的 fenced code block 与括号平衡的裸 JSON 文档——并用与独立文档相同的压缩器和策略逐段压缩。周围文本逐字节保留，压缩器拒绝的区域逐字节保留，选择 TOON 的 JSON 区域同步更新 fence label。默认关闭 |
 | HTML 页面转写 | 取决于工作负载 | 默认开启：把命令或 API 返回的完整 HTML 文档转写为 Markdown，只移除可枚举的非内容元素（脚本、样式、导航、页眉、页脚、侧栏、表单控件、媒体嵌入）并在视图头部计数，提供原文恢复；同类来源中 JSON 字符串值里的 HTML 在不丢失可见文字、链接目标、表单状态以及样式、属性、换行、列表编号或表头所承载的含义，且不暴露屏幕上被隐藏的文字时就地转写，保持 JSON 结构；通过 `TOKENLESS_HTML_EXTRACTION_ENABLED=0` 或 SDK `html_extraction_enabled=False` 关闭；文件读取透传 |
 | CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格及行列顺序；无收益时返回原文。不采样删行，不写入 Stash。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.6% | 将 JSON 编码为 TOON 格式；自 TOON spec v4.4 起也覆盖嵌套 Record 数组与按 ID 建键的对象映射——这两种形状此前编码后大于紧凑 JSON |

@@ -98,7 +98,7 @@ pub fn detect(content: &str) -> ContentType {
 
 /// The bounded slice all line-based checks operate on, cut at a char
 /// boundary at most [`MAX_SCAN_BYTES`] into the content.
-fn scan_prefix(content: &str) -> &str {
+pub(crate) fn scan_prefix(content: &str) -> &str {
     if content.len() <= MAX_SCAN_BYTES {
         return content;
     }

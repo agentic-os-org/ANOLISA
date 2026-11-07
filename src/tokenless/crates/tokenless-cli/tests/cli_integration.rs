@@ -2434,6 +2434,181 @@ fn diff_defaults_on_and_round_trips_git_patch_and_original() {
 }
 
 #[test]
+fn mixed_region_storage_failure_rolls_back_other_regions_in_either_order() {
+    // The small region attempts a one-element tail write but keeps its
+    // original representation. The large region successfully truncates.
+    let small = serde_json::to_string(&vec![0; 137]).unwrap();
+    let large = serde_json::to_string(&(0..2000).collect::<Vec<_>>()).unwrap();
+    for small_first in [true, false] {
+        for fail_small in [false, true] {
+            let fixture = TempDataDir::new().unwrap();
+            std::fs::create_dir_all(&fixture.data_dir).unwrap();
+            let stash_db = fixture.data_dir.join("stash.db");
+            drop(SqliteStore::new(&stash_db).unwrap());
+            if fail_small {
+                rusqlite::Connection::open(&stash_db)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_small_array BEFORE INSERT ON stash
+                         WHEN NEW.payload = '[0]'
+                         BEGIN SELECT RAISE(FAIL, 'injected region write failure'); END;",
+                    )
+                    .unwrap();
+            }
+            let (first, second) = if small_first {
+                (&small, &large)
+            } else {
+                (&large, &small)
+            };
+            let content = format!("before\n{first}\nbetween\n{second}\nafter\n");
+            let output = spawn_with_stdin(
+                fixture
+                    .command()
+                    .env("TOKENLESS_MIXED_CONTENT_ENABLED", "1")
+                    .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                    .env("TOKENLESS_STATS_ENABLED", "0")
+                    .env("TOKENLESS_SLS_ENABLED", "0"),
+                &["compress"],
+                &build_log_request(&content, "success", "mixed-partial-failure"),
+            );
+            let store = SqliteStore::new(&stash_db).unwrap();
+            if fail_small {
+                assert_eq!(output.status.code(), Some(1));
+                assert!(output.stdout.is_empty());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("1 stash write operation(s) failed")
+                );
+                assert_eq!(store.len(), 0, "small_first={small_first}");
+            } else {
+                assert!(output.status.success(), "{:?}", output);
+                let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let result = &response["result"];
+                assert_eq!(result["disposition"], "applied");
+                let keys = result["stash_keys"].as_array().unwrap();
+                assert_eq!(keys.len(), 1);
+                assert_eq!(store.len(), 1);
+                assert!(store.retrieve(keys[0].as_str().unwrap()).unwrap().is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_region_after_a_protected_fence_respects_the_line_window() {
+    let table = (0..40)
+        .map(|index| format!("{index},record-{index}-{}", "payload ".repeat(8)))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    for prefix_lines in [199, 200, 207] {
+        let fixture = TempDataDir::new().unwrap();
+        let prefix = format!("```python\n{}```\n", "pass\n".repeat(prefix_lines - 2));
+        let content = format!("{prefix}```csv\n{table}\r\n```\n");
+        let output = spawn_with_stdin(
+            fixture
+                .command()
+                .env("TOKENLESS_MIXED_CONTENT_ENABLED", "1")
+                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+                .env("TOKENLESS_STATS_ENABLED", "0")
+                .env("TOKENLESS_SLS_ENABLED", "0"),
+            &["compress"],
+            &build_log_request(&content, "success", "mixed-line-window"),
+        );
+        assert!(output.status.success(), "{:?}", output);
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        if prefix_lines < 200 {
+            assert_eq!(result["disposition"], "applied");
+            assert_eq!(
+                result["applied_operations"],
+                serde_json::json!(["tabular_compaction"])
+            );
+            assert!(result["output"].as_str().unwrap().starts_with(&prefix));
+        } else {
+            assert_eq!(result["disposition"], "passthrough");
+            assert_eq!(result["output"], content);
+        }
+    }
+}
+
+#[test]
+fn mixed_content_compression_follows_its_opt_in_switch() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let table = (0..40)
+        .map(|index| format!("{index},record-{index}-{}", "payload ".repeat(8)))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let body = serde_json::to_string_pretty(
+        &(0..40)
+            .map(|index| {
+                serde_json::json!({
+                    "id": index,
+                    "message": format!("record-{index}-{}", "x".repeat(60)),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let content = format!("HEAD /api/items HTTP/1.1\n\n{body}\n\n```csv\n{table}\n```\n\ndone\n");
+    for enabled in [None, Some("0"), Some("1"), Some("TRUE"), Some("yes")] {
+        let mut command = tokenless_bin();
+        command
+            .env("TOKENLESS_DATA_DIR", fixture.data_dir.join("mixed"))
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB")
+            .env_remove("TOKENLESS_MIXED_CONTENT_ENABLED")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0");
+        if let Some(value) = enabled {
+            command.env("TOKENLESS_MIXED_CONTENT_ENABLED", value);
+        }
+        let output = spawn_with_stdin(
+            &mut command,
+            &["compress"],
+            &build_log_request(&content, "success", "mixed-integration"),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = &response["result"];
+        if enabled.is_none() || enabled == Some("0") {
+            assert_eq!(result["disposition"], "passthrough");
+            assert_eq!(result["output"], content);
+            assert_eq!(result["stash_keys"], serde_json::json!([]));
+            continue;
+        }
+        assert_eq!(result["disposition"], "applied");
+        // Both regions route: the JSON region may select TOON or cleanup
+        // (policy-dependent), but the tabular region always compacts.
+        let operations = result["applied_operations"].as_array().unwrap();
+        assert!(
+            operations.contains(&serde_json::json!("tabular_compaction")),
+            "{operations:?}"
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|op| ["toon", "json_cleanup"].contains(&op.as_str().unwrap())),
+            "{operations:?}"
+        );
+        let compressed = result["output"].as_str().unwrap();
+        assert!(compressed.len() < content.len());
+        // Surrounding prose is byte-for-byte.
+        assert!(compressed.starts_with("HEAD /api/items HTTP/1.1\n\n"));
+        assert!(compressed.ends_with("\n\ndone\n"));
+        // The fence label survives untouched.
+        assert!(compressed.contains("```csv\n"));
+    }
+}
+
+#[test]
 fn compress_post_tool_reduces_and_restores_build_logs() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,

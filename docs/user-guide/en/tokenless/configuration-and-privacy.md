@@ -252,6 +252,43 @@ The response reports `html_extraction` with content type `json` and recoverabili
 pages (`html`). These rules have been verified with synthetic fragments and documents;
 they are guards, not proof that every fragment keeps its meaning for a model.
 
+## Optional mixed-content region compression
+
+Mixed-content region compression is disabled by default. Set
+`TOKENLESS_MIXED_CONTENT_ENABLED=1` in the environment inherited by Tokenless or its
+host agent to enable it; unset the variable or set it to `0` to disable it. `1`,
+`true`, and `yes` enable it (case-insensitively). This option is independent of the
+general compression switch and is not a `config.json` field. With it enabled,
+`TOKENLESS_COMPRESSION_ENABLED=0` measures candidates but returns the original.
+
+Python `TokenlessConfig` reads this environment variable by default; an explicit
+`mixed_content_enabled` argument takes precedence. Rust and direct native binding
+callers set `RuntimeConfig.mixed_content_enabled` to `true` or pass the native
+`TokenlessRuntime(mixed_content_enabled=True)` keyword.
+
+The route handles tool outputs that are neither a whole structured document nor
+handled by another domain. It recognizes explicitly bounded typed regions — fenced
+code blocks labeled `json`, `csv`, or `tsv` (indented at most three spaces, closed by
+a fence of the same marker at least as long), and bare JSON documents that start with
+`{` or `[` within the first three columns and balance their brackets — and compresses
+each region with the same compressor and policy as the standalone route. Prose,
+logs, and separators around regions stay byte-for-byte; a region the compressor
+rejects stays verbatim; a fenced JSON region that selects TOON has its fence label
+rewritten to `toon` (only the info word is replaced; the remaining attributes keep
+their text and order); an unclosed fence or an unbalanced document protects its
+remainder. Regions are recognized only inside the same 64 KiB / 200-line detection
+window the other domains use; a region opening past it is preserved verbatim. Regions
+run only when the output is neither from Grep nor a recognized shell `grep`/`rg`
+command and the host can replace output with text. Search output stays excluded even
+when search path sharing is disabled. The whole candidate still passes the pipeline's
+character and token arbitration. A candidate with no changed region, no tentative
+Stash write, and no Stash error passes through; an unchanged candidate carrying
+tentative writes reports `no_savings` and rolls them back. Any region's Stash write
+failure rolls back all tentative writes from the request, including successful writes
+from other regions, before the runtime reports the storage error.
+
+Local region compression and reconstruction have been verified on finite samples.
+
 ## Environment variables
 
 ### Common user variables
@@ -267,6 +304,7 @@ they are guards, not proof that every fragment keeps its meaning for a model.
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | On by default; `0` disables; explicit SDK options take precedence |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering, including HTML inside JSON values | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
+| `TOKENLESS_MIXED_CONTENT_ENABLED` | Enable mixed-content region compression | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
 
 ### Adapter and diagnostic variables
 

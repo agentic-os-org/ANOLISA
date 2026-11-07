@@ -242,10 +242,29 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "rtk_enabled",
                 "search_path_sharing_enabled",
                 "diff_compression_enabled",
+                "mixed_content_enabled",
                 "html_extraction_enabled",
                 "compression_enabled",
             },
         )
+
+    def test_legacy_positional_config_preserves_disabled_compression(self) -> None:
+        for mixed_enabled in (False, True):
+            with self.subTest(mixed_enabled=mixed_enabled), patch.dict(
+                os.environ,
+                {
+                    "TOKENLESS_COMPRESSION_ENABLED": "1",
+                    "TOKENLESS_HTML_EXTRACTION_ENABLED": "1",
+                    "TOKENLESS_MIXED_CONTENT_ENABLED": "1" if mixed_enabled else "0",
+                },
+            ):
+                config = TokenlessConfig(
+                    None, "tokenless_retrieve", True, True, True, False, False
+                )
+                self.assertFalse(config.compression_enabled)
+                self.assertFalse(config.html_extraction_enabled)
+                self.assertTrue(config.diff_compression_enabled)
+                self.assertEqual(config.mixed_content_enabled, mixed_enabled)
 
     async def test_environment_controls_sdk_candidates_and_explicit_overrides(self) -> None:
         with patch.dict(
@@ -294,6 +313,46 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             TokenlessConfig(retrieve_tool_name="tenant-retrieve_2").retrieve_tool_name,
             "tenant-retrieve_2",
         )
+
+    async def test_mixed_content_environment_default_and_explicit_override(self) -> None:
+        body = json.dumps([{"id": i, "name": "record " * 20} for i in range(10)], indent=4)
+        content = f"before\n{body}\nafter\n"
+        request = PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="api_call",
+            content=content,
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.API_RESPONSE,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(
+                replace_output=True,
+                replace_with_text=True,
+                recovery=RecoveryMethod(),
+            ),
+            attribution=Attribution("test-agent", "mixed-session", "mixed-tool-call"),
+        )
+        for env_value, override, enabled in [
+            ("", None, False),
+            ("0", None, False),
+            ("TRUE", None, True),
+            ("yes", None, True),
+            ("1", False, False),
+            ("0", True, True),
+        ]:
+            with self.subTest(env_value=env_value, override=override):
+                options = {} if override is None else {"mixed_content_enabled": override}
+                with patch.dict(os.environ, {"TOKENLESS_MIXED_CONTENT_ENABLED": env_value}):
+                    sdk = self.sdk(rtk_enabled=False, compression_enabled=True, **options)
+                self.assertEqual(sdk.config.mixed_content_enabled, enabled)
+                result = await sdk.post_tool(request)
+                if enabled:
+                    self.assertEqual(result.disposition.value, "applied")
+                    self.assertTrue(result.output.startswith("before\n"))
+                    self.assertTrue(result.output.endswith("\nafter\n"))
+                    self.assertLess(len(result.output), len(content))
+                else:
+                    self.assertEqual(result.disposition.value, "passthrough")
+                    self.assertEqual(result.output, content)
 
     def test_packaged_launcher_requires_a_stable_filesystem_resource(self) -> None:
         with patch("anolisa_tokenless.sdk.files") as package_files:

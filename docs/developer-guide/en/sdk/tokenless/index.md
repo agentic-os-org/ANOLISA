@@ -320,11 +320,14 @@ The lifecycle SDK reads these environment defaults when constructing `TokenlessC
 | `search_path_sharing_enabled` | `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | `True` |
 | `html_extraction_enabled` | `TOKENLESS_HTML_EXTRACTION_ENABLED` | `True` |
 | `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
+| `mixed_content_enabled` | `TOKENLESS_MIXED_CONTENT_ENABLED` | `False` |
 
 Explicit constructor arguments override the environment. Unset or empty values use the default;
 `1`, `true`, and `yes` enable the flag case-insensitively, and other values disable it.
 `compression_enabled=False` retains original output while recording eligible compression
-candidates (dry-run); it does not disable RTK. AgentScope and QwenPaw use these same defaults.
+candidates (dry-run); it does not disable RTK. `mixed_content_enabled` enables the optional
+mixed-region route; when false, that route produces no candidates, including in dry-run mode.
+AgentScope and QwenPaw use these same defaults.
 The direct `TokenlessRuntime` API retains its explicit constructor configuration.
 
 ### Direct Runtime examples

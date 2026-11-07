@@ -306,10 +306,12 @@ config = TokenlessConfig(
 | `search_path_sharing_enabled` | `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | `True` |
 | `html_extraction_enabled` | `TOKENLESS_HTML_EXTRACTION_ENABLED` | `True` |
 | `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
+| `mixed_content_enabled` | `TOKENLESS_MIXED_CONTENT_ENABLED` | `False` |
 
 显式构造参数优先于环境变量。未设置或空值采用默认值；`1`、`true`、`yes` 忽略大小写后
 启用，其他值关闭。`compression_enabled=False` 保留原始输出并记录符合条件的压缩候选
-（dry-run），不会关闭 RTK。AgentScope 和 QwenPaw 继承相同默认值。
+（dry-run），不会关闭 RTK。`mixed_content_enabled` 启用可选的混合区域路由；设为 false
+时，该路由不生成候选，dry-run 模式下也一样。AgentScope 和 QwenPaw 继承相同默认值。
 直接调用 `TokenlessRuntime` 时仍使用其显式构造配置。
 
 ### Runtime 直接调用示例
