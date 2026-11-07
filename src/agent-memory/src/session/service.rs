@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -16,6 +16,15 @@ use crate::ns::MountPoint;
 const SCRATCH_DIR: &str = "scratch";
 const META_FILE: &str = "meta.toml";
 const LOG_FILE: &str = "log.jsonl";
+
+/// Owner-only modes for the persistent mirror: the directory holding the
+/// `<sid>.jsonl` files, and the files themselves. The mirror carries the same
+/// per-tool-call history the session root is created 0700 for.
+const MIRROR_DIR_MODE: u32 = 0o700;
+const MIRROR_FILE_MODE: u32 = 0o600;
+
+/// The bits that would let another local user read the mirror.
+const GROUP_OR_OTHER_BITS: u32 = 0o077;
 
 /// On-disk shape of `<session>/meta.toml`. Serialized through the toml
 /// crate so user-supplied values (owner_user_id from env) cannot break
@@ -61,6 +70,65 @@ pub struct SessionLogService {
     /// `<mount>/.anolisa/session-logs/<sid>.jsonl`. Survives SIGKILL and
     /// tmpfs loss. Best-effort — failures are logged but never propagate.
     mirror_file: Mutex<Option<File>>,
+}
+
+/// Create (or tighten) the mirror directory and open `mirror_path` to append.
+///
+/// Both end up owner-only. `create_dir_all` would leave the directory at
+/// 0777 & ~umask — 0755 under the usual umask, so any local user could list
+/// the mirrored session ids and read the logs — and `OpenOptions::mode` only
+/// applies when the file is created, so an existing directory or a mirror an
+/// older version left world-readable is chmod-ed as well. The file mode is
+/// set through the descriptor the `O_NOFOLLOW` open returned, so tightening it
+/// cannot be redirected to another path.
+///
+/// Both chmods are read back: a mount that accepts one without applying it
+/// would otherwise report a private mirror and keep writing a readable one.
+fn open_mirror(dir: &Path, mirror_path: &Path) -> std::io::Result<File> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(MIRROR_DIR_MODE)
+        .create(dir)?;
+    std::fs::set_permissions(dir, PermissionsExt::from_mode(MIRROR_DIR_MODE))?;
+    check_owner_only(
+        std::fs::metadata(dir)?.permissions().mode(),
+        MIRROR_DIR_MODE,
+        dir,
+    )?;
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(MIRROR_FILE_MODE)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(mirror_path)?;
+    // `File::set_permissions` and `File::metadata` are `fchmod`/`fstat` on the
+    // descriptor the open returned, so neither the tightening nor the
+    // read-back can be redirected to another path.
+    file.set_permissions(PermissionsExt::from_mode(MIRROR_FILE_MODE))?;
+    check_owner_only(
+        file.metadata()?.permissions().mode(),
+        MIRROR_FILE_MODE,
+        mirror_path,
+    )?;
+    Ok(file)
+}
+
+/// Fail unless `mode` — what the inode actually has, read back after a chmod —
+/// leaves nothing for group or other.
+///
+/// A successful `chmod` is not proof the mode changed: some FUSE and network
+/// mounts accept the call without applying it. `probe_session_base` reads a
+/// session base's mode back for the same reason.
+fn check_owner_only(mode: u32, want: u32, what: &Path) -> std::io::Result<()> {
+    if mode & GROUP_OR_OTHER_BITS == 0 {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "{} is still mode {:o} after chmod to {want:o}; group and other can read it",
+        what.display(),
+        mode & 0o777
+    )))
 }
 
 impl SessionLogService {
@@ -115,7 +183,7 @@ impl SessionLogService {
         // meta.toml (owner_user_id, agent_id, mount_ns) and log.jsonl
         // (per-tool-call path/bytes/errors). ULID session ids provide
         // entropy but are not a substitute for filesystem ACLs.
-        std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        std::fs::set_permissions(&root, PermissionsExt::from_mode(0o700))?;
 
         // Serialize meta through the toml crate so quote / newline / TOML
         // special characters in owner_user_id (env-derived, user-supplied)
@@ -141,19 +209,11 @@ impl SessionLogService {
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&log_path)?;
 
-        // Open persistent mirror (best-effort — failure doesn't block session start).
+        // Open persistent mirror (best-effort — failure doesn't block session
+        // start, but a mirror we cannot keep owner-only is not opened at all).
         let mirror_file = mirror_dir.and_then(|dir| {
-            if std::fs::create_dir_all(dir).is_err() {
-                tracing::warn!("failed to create session log mirror dir: {}", dir.display());
-                return None;
-            }
             let mirror_path = dir.join(format!("{}.jsonl", sid.as_str()));
-            match OpenOptions::new()
-                .create(true)
-                .append(true)
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-                .open(&mirror_path)
-            {
+            match open_mirror(dir, &mirror_path) {
                 Ok(f) => {
                     tracing::debug!("session log mirror: {}", mirror_path.display());
                     Some(f)
@@ -492,5 +552,38 @@ mod tests {
         // The partial line is valid UTF-8 by construction here; the small
         // entries before it are gone (they are outside the window).
         assert!(!tail.contains("notes/small-4.md"));
+    }
+
+    #[test]
+    fn check_owner_only_accepts_owner_only_modes() {
+        for mode in [0o400, 0o500, 0o600, 0o700] {
+            let what = Path::new("/m/.anolisa/session-logs/ses_x.jsonl");
+            assert!(
+                check_owner_only(mode, mode, what).is_ok(),
+                "{mode:o} is owner-only"
+            );
+        }
+    }
+
+    #[test]
+    fn check_owner_only_rejects_a_chmod_that_did_not_apply() {
+        // A mount that accepted the chmod without applying it reports the old
+        // mode back. That has to fail instead of looking fixed.
+        let what = Path::new("/m/.anolisa/session-logs/ses_x.jsonl");
+        for mode in [0o604, 0o640, 0o644, 0o660, 0o755] {
+            let err = check_owner_only(mode, 0o600, what)
+                .err()
+                .unwrap_or_else(|| panic!("{mode:o} is readable beyond its owner"));
+            let msg = err.to_string();
+            assert!(msg.contains("ses_x.jsonl"), "{msg}");
+            assert!(msg.contains("600"), "{msg}");
+        }
+
+        // The message names the mode that was read back, in octal.
+        let msg = check_owner_only(0o644, 0o600, what)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| panic!("{} is readable beyond its owner", what.display()));
+        assert!(msg.contains("644"), "{msg}");
     }
 }
