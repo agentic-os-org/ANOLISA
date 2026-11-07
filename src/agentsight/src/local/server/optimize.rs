@@ -35,7 +35,9 @@ pub struct OptLlmConfig {
 impl OptLlmConfig {
     fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Ok(content) => {
+                serde_json::from_str(crate::config::strip_leading_bom(&content)).unwrap_or_default()
+            }
             Err(_) => Self::default(),
         }
     }
@@ -120,7 +122,7 @@ fn preserve_unparseable_config(path: &Path) -> std::io::Result<()> {
     // what makes a file like `{"search_timeout_secs": "60"}` unparseable here
     // too: `load` drops it to the default config, so its contents are just as
     // lost as truncated JSON if `save` overwrites it unpreserved.
-    if serde_json::from_str::<OptLlmConfig>(&content).is_ok() {
+    if serde_json::from_str::<OptLlmConfig>(crate::config::strip_leading_bom(&content)).is_ok() {
         return Ok(());
     }
     let ts = std::time::SystemTime::now()
@@ -723,6 +725,10 @@ pub async fn semantic_search_sessions(
     };
     semantic_search::handle_semantic_search(&client, &request, timeout).await
 }
+
+#[cfg(test)]
+#[path = "optimize_bom_tests.rs"]
+mod bom_tests;
 
 #[cfg(test)]
 mod tests {
