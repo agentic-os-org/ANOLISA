@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::Receiver;
+use std::sync::{OnceLock, mpsc::Receiver};
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
@@ -373,6 +373,18 @@ impl Drop for TreeWorker {
     }
 }
 
+fn fresh_pin_root(name: &str) -> PathBuf {
+    static PARENT: OnceLock<PathBuf> = OnceLock::new();
+    // Fixture setup replaces the process variable; later fixtures reuse the original parent.
+    PARENT
+        .get_or_init(|| {
+            std::env::var_os("ACTPLANE_BPF_PIN_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/sys/fs/bpf"))
+        })
+        .join(name)
+}
+
 struct Files {
     root: PathBuf,
     pin_root: PathBuf,
@@ -382,7 +394,7 @@ impl Files {
     fn new(profile: &str) -> Self {
         let name = format!("ap-{}", &Uuid::new_v4().simple().to_string()[..10]);
         let root = PathBuf::from("/tmp").join(&name);
-        let pin_root = PathBuf::from("/sys/fs/bpf").join(name);
+        let pin_root = fresh_pin_root(&name);
         fs::create_dir(&root).expect("test directory");
         fs::write(
             root.join("source"),
@@ -426,7 +438,7 @@ impl TreeFiles {
         let outer = PathBuf::from("/dev/shm").join(&name);
         let root = outer.join("protected");
         let outside = outer.join("outside");
-        let pin_root = PathBuf::from("/sys/fs/bpf").join(name);
+        let pin_root = fresh_pin_root(&name);
         fs::create_dir_all(root.join("nested")).expect("protected tree");
         fs::create_dir(&outside).expect("outside directory");
         fs::write(root.join("existing"), b"existing").expect("existing descendant");
@@ -1775,8 +1787,13 @@ fn private_tmp_credential_binding_on_live_kernel() {
 
 #[test]
 #[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
-fn inode_guard_and_credential_events_on_live_kernel() {
+fn file_guard_on_live_kernel() {
     file_guard();
+}
+
+#[test]
+#[ignore = "requires root, active BPF LSM, unlimited memlock, and --test-threads=1"]
+fn credential_events_on_live_kernel() {
     for read_operation in ["read", "readfd", "mmap"] {
         credentials(read_operation);
     }
