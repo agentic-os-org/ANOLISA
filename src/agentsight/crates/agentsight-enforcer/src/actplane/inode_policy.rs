@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ impl InodePolicy {
         dsl: &str,
         compiled: &Compiled,
         inode_only: bool,
+        root_pid: i32,
     ) -> Result<Self, BackendError> {
         // Full-path hooks evaluate the original policy, including globs and conditions.
         // Do not replace those semantics with an unconditional inode fast path.
@@ -53,17 +55,22 @@ impl InodePolicy {
             .iter()
             .filter(|source| source.kind == Kind::File)
         {
-            prepared.add_file(&source.pattern, None)?;
+            prepared.add_file(&source.pattern, None, root_pid)?;
         }
         for (path, rule_id) in guards {
-            prepared.add_file(&path, Some(rule_id))?;
+            prepared.add_file(&path, Some(rule_id), root_pid)?;
         }
         prepared.add_ancestors()?;
         Ok(prepared)
     }
 
-    fn add_file(&mut self, path: &str, rule_id: Option<u32>) -> Result<(), BackendError> {
-        let file = pin_file(path, rule_id)?;
+    fn add_file(
+        &mut self,
+        path: &str,
+        rule_id: Option<u32>,
+        root_pid: i32,
+    ) -> Result<(), BackendError> {
+        let file = pin_file(path, rule_id, root_pid)?;
         if let Some(existing) = self
             .files
             .iter_mut()
@@ -295,7 +302,7 @@ fn matches_clause(meta: &RuleMeta, rule: &Rule, clause: &Clause) -> bool {
         && meta.target_arg == clause.target.arg
 }
 
-fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError> {
+fn pin_file(path: &str, rule_id: Option<u32>, root_pid: i32) -> Result<InodeFile, BackendError> {
     if !Path::new(path).is_absolute() || path.contains(['*', '?', '[', ']', '{', '}', '\\']) {
         return Err(invalid(format!(
             "'{path}': inode-only paths must be exact absolute literals, not globs; use full-path mode for patterns"
@@ -306,9 +313,15 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
             "'{path}': inode path exceeds the 126-byte event limit; use a shorter canonical path (the compiler also has a smaller pattern limit)"
         )));
     }
-    let canonical = fs::canonicalize(path).map_err(|error| invalid(format!(
-        "'{path}': cannot resolve inode path: {error}; create an existing regular file before applying the policy"
-    )))?;
+    // realpath would re-enter the enforcer's PrivateTmp namespace after expanding proc root.
+    let namespaced_path = format!("/proc/{root_pid}/root{path}");
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&namespaced_path)
+        .map_err(|error| invalid(format!("'{path}': cannot hold inode with O_PATH: {error}")))?;
+    let canonical = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .map_err(|error| invalid(format!("'{path}': cannot resolve held inode path: {error}")))?;
     // Compare raw spelling, since Path equality normalizes redundant separators.
     if canonical.as_os_str() != OsStr::new(path) {
         return Err(invalid(format!(
@@ -316,11 +329,6 @@ fn pin_file(path: &str, rule_id: Option<u32>) -> Result<InodeFile, BackendError>
             canonical.display()
         )));
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|error| invalid(format!("'{path}': cannot hold inode with O_PATH: {error}")))?;
     let metadata = file
         .metadata()
         .map_err(|error| invalid(format!("'{path}': cannot stat held inode: {error}")))?;
@@ -427,6 +435,7 @@ mod tests {
             dsl,
             &compile_str(dsl).map_err(BackendError::CompileFailure)?,
             true,
+            std::process::id() as i32,
         )
     }
 
@@ -499,7 +508,8 @@ mod tests {
         let compiled = compile_str(&dsl).unwrap();
         assert_eq!(compiled.meta[3].name, "protect");
         assert_eq!(compiled.meta[3].clause_source_index, 1);
-        let prepared = InodePolicy::prepare(&dsl, &compiled, true).unwrap();
+        let prepared =
+            InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).unwrap();
         assert_eq!(prepared.files.len(), 1);
         assert_eq!(prepared.files[0].rule_id, Some(3));
         assert_eq!(prepared.files[0].path, path);
@@ -625,6 +635,17 @@ mod tests {
     }
 
     #[test]
+    fn pin_file_resolves_through_the_target_process_root() {
+        let fixture = Fixture::new();
+        let path = fixture.file("cred");
+        let pinned = pin_file(&path, None, std::process::id() as i32).unwrap();
+        assert_eq!(pinned.path, path);
+
+        let error = pin_file(&path, None, i32::MAX).unwrap_err();
+        assert!(error.to_string().contains("cannot hold inode with O_PATH"));
+    }
+
+    #[test]
     fn required_paths_reject_missing_glob_noncanonical_and_nonregular_files() {
         let fixture = Fixture::new();
         let path = fixture.file("p");
@@ -644,7 +665,12 @@ mod tests {
                 format!("source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{bad}\"\n");
             assert!(prepare(&source).is_err(), "source: {bad}");
         }
-        let error = pin_file(&format!("/{}", "a".repeat(126)), None).unwrap_err();
+        let error = pin_file(
+            &format!("/{}", "a".repeat(126)),
+            None,
+            std::process::id() as i32,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("126-byte"));
     }
 
@@ -681,20 +707,20 @@ mod tests {
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.meta.push(compiled.meta[0].clone());
         assert!(
-            InodePolicy::prepare(&dsl, &compiled, true)
+            InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32)
                 .unwrap_err()
                 .to_string()
                 .contains("unambiguous")
         );
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.meta[0].target_pattern = "/wrong".into();
-        assert!(InodePolicy::prepare(&dsl, &compiled, true).is_err());
+        assert!(InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).is_err());
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.meta[0].kernel_op = "read".into();
-        assert!(InodePolicy::prepare(&dsl, &compiled, true).is_err());
+        assert!(InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).is_err());
         let mut compiled = compile_str(&dsl).unwrap();
         compiled.reasons[0] = "wrong reason".into();
-        assert!(InodePolicy::prepare(&dsl, &compiled, true).is_err());
+        assert!(InodePolicy::prepare(&dsl, &compiled, true, std::process::id() as i32).is_err());
     }
 
     #[test]
@@ -705,7 +731,7 @@ mod tests {
         );
         let compiled = compile_str(&dsl).unwrap();
         assert!(
-            InodePolicy::prepare(&dsl, &compiled, false)
+            InodePolicy::prepare(&dsl, &compiled, false, std::process::id() as i32)
                 .unwrap()
                 .files
                 .is_empty()

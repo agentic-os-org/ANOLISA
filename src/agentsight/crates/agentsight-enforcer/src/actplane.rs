@@ -418,6 +418,7 @@ impl ActPlaneBackend {
             &request.policy_dsl,
             &compiled,
             self.engine.inode_guard_mode(),
+            request.root_pid,
         )?;
         preexisting_maps::reject_preexisting_write_access(
             request.root_pid,
