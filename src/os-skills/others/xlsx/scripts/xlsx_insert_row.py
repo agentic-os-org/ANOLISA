@@ -34,6 +34,8 @@ import sys
 import xml.dom.minidom
 import xml.etree.ElementTree as ET
 
+import xlsx_namespaces
+
 NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
@@ -50,6 +52,11 @@ def _tag(local: str) -> str:
 
 
 def _write_tree(tree: ET.ElementTree, path: str) -> None:
+    """Writes an edited part back, keeping the namespaces it already used."""
+    # Capture before writing: serialization is what drops a declaration whose
+    # prefix only appears inside an attribute value, such as mc:Ignorable.
+    declarations = xlsx_namespaces.capture_file(path)
+    xlsx_namespaces.register(declarations)
     tree.write(path, encoding="unicode", xml_declaration=False)
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()
@@ -57,10 +64,12 @@ def _write_tree(tree: ET.ElementTree, path: str) -> None:
         dom = xml.dom.minidom.parseString(raw.encode("utf-8"))
         pretty = dom.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
         lines = [line for line in pretty.splitlines() if line.strip()]
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+        raw = "\n".join(lines) + "\n"
     except Exception:
-        pass
+        pass  # If pretty-print fails, keep the ElementTree output
+    restored = xlsx_namespaces.restore(raw, declarations)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(restored)
 
 
 def col_number(s: str) -> int:
