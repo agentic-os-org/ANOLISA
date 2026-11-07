@@ -461,3 +461,60 @@ fn routing_c1_classifier_validates_full_utf8_before_han() {
         );
     }
 }
+
+fn arguments_have_no_unquoted_expansion(shell: &str, input: &str) -> bool {
+    let mut process = Process::new(shell);
+    if shell == "bash" {
+        process.args(["--noprofile", "--norc"]);
+    } else {
+        process.arg("-f");
+    }
+    let script = format!(
+        "{}\n_cosh_arguments_have_no_unquoted_expansion \"$1\"",
+        shell_intent_helpers(),
+    );
+    let output = process
+        .args(["-c", &script, "cosh-intent-test"])
+        .arg(input)
+        .output()
+        .expect("the shell should run the helper");
+    assert!(
+        output.status.code().is_some(),
+        "{shell}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.status.success()
+}
+
+/// A Han sentence that mentions a glob or home-directory character must reach
+/// the classifier. Those characters are only expanded by the shell in the
+/// command position, so bailing anywhere in the tail dropped lines that
+/// `_cosh_classify_missing` can still refuse on its own merits.
+#[test]
+fn a_han_sentence_keeps_glob_characters_in_its_tail() {
+    const TAIL: [&str; 8] = [
+        "\u{67e5}\u{770b} ~ \u{76ee}\u{5f55}\u{4e0b}\u{7684}\u{6587}\u{4ef6}",
+        "\u{5217}\u{51fa}\u{6240}\u{6709} *.log \u{6587}\u{4ef6}",
+        "\u{6709}\u{6ca1}\u{6709}\u{540d}\u{5b57}\u{5e26} [abc] \u{7684}\u{6587}\u{4ef6}",
+        "\u{4e3e}\u{4f8b} {a,b} \u{7684}\u{5199}\u{6cd5}",
+        "\u{6709}\u{591a}\u{5c11}\u{4e2a} ? \u{53f7}",
+        "\u{6253}\u{5370} $HOME \u{73af}\u{5883}\u{53d8}\u{91cf}",
+        "ls *.log",
+        "ls ~",
+    ];
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for input in TAIL {
+            assert!(
+                arguments_have_no_unquoted_expansion(shell, input),
+                "{shell}: {input} must reach the classifier"
+            );
+        }
+        assert!(
+            !arguments_have_no_unquoted_expansion(shell, "~/run.sh"),
+            "{shell}: a glob in the command position still bails"
+        );
+    }
+}
