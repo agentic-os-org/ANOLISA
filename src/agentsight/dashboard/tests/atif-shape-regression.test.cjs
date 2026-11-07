@@ -7,6 +7,14 @@ const test = require('node:test');
 const step = (extra = {}) => ({ step_id: 1, source: 'agent', message: 'message', ...extra });
 const document = (extra = {}) => ({ schema_version: 'ATIF-v1.7', session_id: 'fixture', steps: [step()], ...extra });
 
+function collapsibles(page, root, title) {
+  return page.find(root, (node) => node.type === 'button' && page.find(node, (child) =>
+    child.type === 'span' &&
+    child.props?.className === 'font-medium text-gray-700' &&
+    child.props.children === title
+  ).length > 0);
+}
+
 function viewer(locale = 'en-US') {
   const states = [], refs = [], readers = [], requests = [], downloads = [];
   let stateIndex = 0, refIndex = 0, child = false;
@@ -80,6 +88,7 @@ function viewer(locale = 'en-US') {
   }
   return {
     requests, downloads, parts: page.parts, t,
+    find(root, predicate) { return nodes(root, predicate); },
     import(data) {
       const input = nodes(render(), (node) => node.type === 'input' && node.props.type === 'file')[0];
       input.props.onChange({ target: { files: [{ name: 'fixture.json' }], value: 'fixture.json' } });
@@ -89,6 +98,9 @@ function viewer(locale = 'en-US') {
       if (kind === 'conversation') nodes(render(), (node) => node.type === 'button' && node.props.children === t('atif.byConversation'))[0].props.onClick();
       nodes(render(), (node) => node.type === 'input' && node.props.type === 'text')[0].props.onChange({ target: { value: 'fixture' } });
       nodes(render(), (node) => node.type === 'button' && node.props.children === t('atif.load'))[0].props.onClick();
+    },
+    search(value) {
+      nodes(render(), (node) => node.type === 'input' && node.props.type === 'search')[0].props.onChange({ target: { value } });
     },
     error() { return nodes(render(), (node) => node.props?.className === 'bg-red-50 border border-red-200 rounded-xl p-4 text-red-600 text-sm')[0]?.props.children.at(-1); },
     session() { return nodes(render(), (node) => node.type === 'span' && node.props.className === 'text-xs text-gray-400 font-mono truncate')[0]?.props.children; },
@@ -159,6 +171,69 @@ test('omitted default tool arguments render through the real step and tool compo
   page.import(document({ steps: [value] }));
   assert.equal(page.session(), 'fixture');
   assert.doesNotThrow(() => page.renderStep(value));
+});
+
+test('an imported user observation remains searchable and expands through the real section control', () => {
+  const page = viewer();
+  const content = { output: 'user-observation-needle' };
+  page.import(document({ steps: [
+    step({
+      source: 'user',
+      message: 'mixed user input',
+      observation: { results: [{ source_call_id: 'call-user', content }] },
+    }),
+    step({ step_id: 2, source: 'user', message: 'unrelated round' }),
+  ] }));
+
+  page.search('user-observation-needle');
+  let rendered = page.renderAll();
+  assert.ok(JSON.stringify(rendered).includes(page.t('atif.matchingRounds', { matched: 1, total: 2 })));
+
+  const title = page.t('atif.observation');
+  let buttons = collapsibles(page, rendered, title);
+  assert.equal(buttons.length, 1);
+  assert.equal(page.find(buttons[0], (node) => node.props?.className?.includes('bg-gray-200') && node.props.children === 1).length, 1);
+
+  const expected = JSON.stringify(content, null, 2);
+  const contents = (root) => page.find(root, (node) => node.type === 'pre' && node.props.children === expected);
+  assert.equal(contents(rendered).length, 0, 'the observation starts collapsed');
+
+  buttons[0].props.onClick();
+  rendered = page.renderAll();
+  assert.equal(contents(rendered).length, 1);
+  assert.ok(JSON.stringify(rendered).includes(page.t('atif.callLabel', { id: 'call-user' })));
+
+  collapsibles(page, rendered, title)[0].props.onClick();
+  rendered = page.renderAll();
+  assert.equal(contents(rendered).length, 0, 'the same control collapses the observation again');
+});
+
+test('observation rendering is source-independent without exposing agent-only sections', () => {
+  const page = viewer();
+  const value = step({
+    reasoning_content: 'agent reasoning',
+    tool_calls: [{ tool_call_id: 'call-agent', function_name: 'agent-tool' }],
+    observation: { results: [{ content: 'captured result' }] },
+    metrics: { prompt_tokens: 3 },
+  });
+  const user = page.renderStep(step({ ...value, source: 'user' }));
+  assert.equal(collapsibles(page, user, page.t('atif.observation')).length, 1);
+  assert.equal(collapsibles(page, user, page.t('atif.reasoning')).length, 0);
+  assert.equal(collapsibles(page, user, page.t('atif.toolCall')).length, 0);
+  assert.ok(!JSON.stringify(user).includes('agent-tool'));
+  assert.ok(!JSON.stringify(user).includes(page.t('atif.inputLabel', { n: '3' })));
+
+  const agent = page.renderStep(value);
+  assert.equal(collapsibles(page, agent, page.t('atif.observation')).length, 1);
+  const text = JSON.stringify(agent);
+  const ordered = [
+    page.t('atif.reasoning'),
+    page.t('atif.toolCall'),
+    page.t('atif.observation'),
+    page.t('atif.inputLabel', { n: '3' }),
+  ].map((label) => text.indexOf(label));
+  assert.ok(ordered.every((index) => index >= 0));
+  assert.deepEqual(ordered, [...ordered].sort((a, b) => a - b));
 });
 
 test('cached-only step metrics remain visible in the step card', () => {

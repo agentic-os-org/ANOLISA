@@ -280,79 +280,80 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                 </Collapsible>
               )}
 
-              {/* Observation */}
-              {hasObservation && (
-                <Collapsible
-                  icon="📋"
-                  title={t('atif.observation')}
-                  count={observationResults.length}
-                  isOpen={isOpen('observation')}
-                  onToggle={() => toggle('observation')}
-                >
-                  <div className="space-y-2">
-                    {observationResults.map((r, i) => {
-                      const content = asText(r.content);
-                      const subagentRefs = subagentRefsOf(r);
-                      const hasSubagentRef = subagentRefs.length > 0;
-                      return (
-                        <div key={i} className="border border-teal-100 rounded-lg overflow-hidden">
-                          {r.source_call_id && (
-                            <div className="px-3 py-1 bg-teal-50 border-b border-teal-100">
-                              <span className="text-xs text-gray-400 font-mono">{t('atif.callLabel', { id: shortId(r.source_call_id, 16) })}</span>
-                            </div>
-                          )}
-                          {hasSubagentRef && (
-                            <div className="px-3 py-2 bg-indigo-50 border-b border-indigo-100 flex flex-wrap gap-2">
-                              {subagentRefs.map((ref, ri) => (
-                                <button
-                                  key={ri}
-                                  onClick={() => onNavigateSubagent?.(ref)}
-                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-lg text-xs font-medium transition-colors"
-                                  title={t('atif.selectSubagentInGraph')}
-                                >
-                                  {t('atif.subagentTrajectory')}
-                                  {ref.trajectory_id && (
-                                    <span className="font-mono text-indigo-400">{shortId(ref.trajectory_id, 12)}</span>
-                                  )}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                          {content ? (
-                            <div className="p-2">
-                              <ExpandableText text={content} className="text-xs text-gray-700 bg-teal-50 font-mono" />
-                            </div>
-                          ) : !hasSubagentRef ? (
-                            <div className="px-3 py-2 text-xs text-gray-400 italic">{t('atif.noOutputContent')}</div>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </Collapsible>
-              )}
-
-              {/* Metrics */}
-              {hasMetrics && (
-                <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-100">
-                  {step.metrics!.prompt_tokens != null && (
-                    <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs">
-                      {t('atif.inputLabel', { n: fmtTokens(step.metrics!.prompt_tokens!) })}
-                    </span>
-                  )}
-                  {step.metrics!.completion_tokens != null && (
-                    <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs">
-                      {t('atif.outputLabel', { n: fmtTokens(step.metrics!.completion_tokens!) })}
-                    </span>
-                  )}
-                  {step.metrics!.cached_tokens != null && step.metrics!.cached_tokens! > 0 && (
-                    <span className="px-2 py-1 bg-yellow-50 text-yellow-700 rounded text-xs">
-                      {t('atif.cacheLabel', { n: fmtTokens(step.metrics!.cached_tokens!) })}
-                    </span>
-                  )}
-                </div>
-              )}
             </>
+          )}
+
+          {/* Observation */}
+          {hasObservation && (
+            <Collapsible
+              icon="📋"
+              title={t('atif.observation')}
+              count={observationResults.length}
+              isOpen={isOpen('observation')}
+              onToggle={() => toggle('observation')}
+            >
+              <div className="space-y-2">
+                {observationResults.map((r, i) => {
+                  const content = asText(r.content);
+                  const subagentRefs = subagentRefsOf(r);
+                  const hasSubagentRef = subagentRefs.length > 0;
+                  return (
+                    <div key={i} className="border border-teal-100 rounded-lg overflow-hidden">
+                      {r.source_call_id && (
+                        <div className="px-3 py-1 bg-teal-50 border-b border-teal-100">
+                          <span className="text-xs text-gray-400 font-mono">{t('atif.callLabel', { id: shortId(r.source_call_id, 16) })}</span>
+                        </div>
+                      )}
+                      {hasSubagentRef && (
+                        <div className="px-3 py-2 bg-indigo-50 border-b border-indigo-100 flex flex-wrap gap-2">
+                          {subagentRefs.map((ref, ri) => (
+                            <button
+                              key={ri}
+                              onClick={() => onNavigateSubagent?.(ref)}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-lg text-xs font-medium transition-colors"
+                              title={t('atif.selectSubagentInGraph')}
+                            >
+                              {t('atif.subagentTrajectory')}
+                              {ref.trajectory_id && (
+                                <span className="font-mono text-indigo-400">{shortId(ref.trajectory_id, 12)}</span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {content ? (
+                        <div className="p-2">
+                          <ExpandableText text={content} className="text-xs text-gray-700 bg-teal-50 font-mono" />
+                        </div>
+                      ) : !hasSubagentRef ? (
+                        <div className="px-3 py-2 text-xs text-gray-400 italic">{t('atif.noOutputContent')}</div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </Collapsible>
+          )}
+
+          {/* Metrics */}
+          {step.source === 'agent' && hasMetrics && (
+            <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-100">
+              {step.metrics!.prompt_tokens != null && (
+                <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs">
+                  {t('atif.inputLabel', { n: fmtTokens(step.metrics!.prompt_tokens!) })}
+                </span>
+              )}
+              {step.metrics!.completion_tokens != null && (
+                <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs">
+                  {t('atif.outputLabel', { n: fmtTokens(step.metrics!.completion_tokens!) })}
+                </span>
+              )}
+              {step.metrics!.cached_tokens != null && step.metrics!.cached_tokens! > 0 && (
+                <span className="px-2 py-1 bg-yellow-50 text-yellow-700 rounded text-xs">
+                  {t('atif.cacheLabel', { n: fmtTokens(step.metrics!.cached_tokens!) })}
+                </span>
+              )}
+            </div>
           )}
         </div>
       </div>

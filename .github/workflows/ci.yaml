@@ -819,6 +819,10 @@ jobs:
         working-directory: src/agentsight/dashboard
         run: npm ci --no-audit --no-fund
 
+      - name: Run dashboard API and ATIF regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:api-client
+
       - name: Run dashboard i18n regression
         working-directory: src/agentsight/dashboard
         run: npm run test:i18n
