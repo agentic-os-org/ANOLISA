@@ -30,20 +30,18 @@ def summary() -> dict[str, Any]:
             "payload_kb": 1024,
             "tokens_per_second": 100,
             "tokens_per_response": 1000,
-            "duration": 300,
+            "duration": 180,
             "ring_buffer_mb": 64,
-            "cpu_budget_percent": 25,
+            "cpu_budget_percent": 100,
             "mode": "cli",
         },
         "runs": {
             "run": {
                 "valid": True,
-                "measurement_window": {"start": 10, "end": 310},
+                "measurement_window": {"start": 10, "end": 190},
                 "rss_average_mib": 265,
                 "rss_peak_mib": 300,
-                "cpu_average_pct": 23.5,
-                "cpu_p95_pct": 34,
-                "cpu_peak_pct": 42,
+                "cpu_average_pct": 30,
             }
         },
     }
@@ -52,9 +50,9 @@ def summary() -> dict[str, Any]:
 def test_exact_limits_pass(summary: dict[str, Any]) -> None:
     passed, text = check_resource_limits.evaluate(summary)
     assert passed
-    assert text.count("| PASS |") == 5
+    assert text.count("| PASS |") == 3
     assert "265 MiB" in text
-    assert "23.5 %" in text
+    assert "30 %" in text
     assert "Result: PASS" in text
 
 
@@ -63,9 +61,7 @@ def test_exact_limits_pass(summary: dict[str, Any]) -> None:
     [
         ("rss_average_mib", 265.000001),
         ("rss_peak_mib", 300.000001),
-        ("cpu_average_pct", 23.500001),
-        ("cpu_p95_pct", 34.000001),
-        ("cpu_peak_pct", 42.000001),
+        ("cpu_average_pct", 30.000001),
     ],
 )
 def test_each_limit_fails_without_rounding(
@@ -158,12 +154,12 @@ def test_short_or_invalid_measurement_window_fails(summary: dict[str, Any], wind
 
 def test_generated_resource_report_is_accepted(tmp_path: Path, summary: dict[str, Any]) -> None:
     directory = artifacts(tmp_path, "run", 23, 260)
-    (directory / "agents/start.json").write_text(json.dumps({"start": 10, "end": 310}))
+    (directory / "agents/start.json").write_text(json.dumps({"start": 10, "end": 190}))
     (tmp_path / "settings.json").write_text(json.dumps(summary["settings"]))
     metrics = directory / "metrics.csv"
     with metrics.open(newline="") as handle:
         rows = list(csv.DictReader(handle))
-    rows[-1].update(monotonic_timestamp="310", cpu_interval_seconds="299")
+    rows[-1].update(monotonic_timestamp="190", cpu_interval_seconds="179")
     with metrics.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
@@ -203,7 +199,7 @@ def test_cli_exit_status_and_job_summary(
     job_summary = tmp_path / "job-summary.md"
     job_summary.write_text("Existing summary\n", encoding="utf-8")
     if case == "exceeded":
-        summary["runs"]["run"]["cpu_peak_pct"] = 43
+        summary["runs"]["run"]["cpu_average_pct"] = 30.1
     if case == "invalid":
         summary["valid"] = False
     if case != "missing":
