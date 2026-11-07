@@ -164,6 +164,8 @@ openclaw channels status --probe
 
 If schema validation says `must NOT have additional properties`, remove unsupported fields from `channels.dingtalk` and rerun the installer.
 
+If the installer exits with `Invalid OpenClaw config in ...: "plugins" must be a JSON object` or `"plugins.allow" must be a JSON array of plugin names`, the existing `openclaw.json` carries a malformed plugin section (for example `"plugins": null` or `"allow": "dingtalk"`). Nothing is written or backed up in that case. Edit the file so `plugins` is an object and `plugins.allow` is an array of plugin name strings, then rerun the installer.
+
 ## Device Identity Required
 
 If the dashboard/browser reports `device identity required`, reset pending devices before opening the dashboard again:
