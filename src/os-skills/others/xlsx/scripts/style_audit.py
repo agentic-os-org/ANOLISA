@@ -148,16 +148,26 @@ def _parse_styles(styles_xml: bytes) -> dict:
     }
 
 
+def _rgb_role(rgb: str, role_rgb: str) -> bool:
+    """Match a font color against a role color, ignoring the ARGB alpha byte.
+
+    Excel and LibreOffice write explicit colors with an FF alpha channel
+    (FF0000FF) while this skill's templates use the 00-alpha form
+    (000000FF); only the low 24 bits carry the color.
+    """
+    return rgb[-6:].lower() == role_rgb[-6:].lower()
+
+
 def _is_blue_font(font: dict) -> bool:
-    return font["rgb"] == BLUE_RGB
+    return _rgb_role(font["rgb"], BLUE_RGB)
 
 
 def _is_black_font(font: dict) -> bool:
-    return font["rgb"] == BLACK_RGB or (font["rgb"] == "" and font["theme"] is not None)
+    return _rgb_role(font["rgb"], BLACK_RGB) or (font["rgb"] == "" and font["theme"] is not None)
 
 
 def _is_green_font(font: dict) -> bool:
-    return font["rgb"] == GREEN_RGB
+    return _rgb_role(font["rgb"], GREEN_RGB)
 
 
 def _fmt_is_percent(num_fmt_id: int, num_fmts: dict) -> bool:
