@@ -118,6 +118,10 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。需要单独启动 enforcer 守护进程。
 源码运行见[源码构建](deployment.md#源码构建)。
 
+ActPlane 策略下发要求 enforcer 运行在宿主的初始 PID namespace。请直接在宿主运行守护进程，
+或为容器设置 `hostPID: true` / `--pid=host`。在其他 PID namespace 中，策略下发会返回
+`unsupported_environment`；采集与分析不受影响。
+
 守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
 以及 poller 错误：
 

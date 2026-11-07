@@ -378,7 +378,7 @@ fn replace_failure_code(code: &str) -> Option<ReplaceFailureCode> {
         "binding_conflict" | "missing_binding" => Some(ReplaceFailureCode::BindingConflict),
         "stale_process" => Some(ReplaceFailureCode::StaleProcess),
         "compile_failure" => Some(ReplaceFailureCode::CompileFailure),
-        "kernel_failure" => Some(ReplaceFailureCode::KernelFailure),
+        "kernel_failure" | "unsupported_environment" => Some(ReplaceFailureCode::KernelFailure),
         _ => None,
     }
 }
@@ -434,6 +434,7 @@ pub(super) fn is_binding_rejection(code: &str) -> bool {
             | "stale_process"
             | "compile_failure"
             | "kernel_failure"
+            | "unsupported_environment"
             | "preexisting_writable_map"
             | "preexisting_writable_fd"
     )
@@ -457,6 +458,9 @@ pub(super) fn remote_rejection_message(code: &str, _message: &str) -> String {
         "stale_process" => "enforcer rejected desired binding: process identity is stale",
         "compile_failure" => "enforcer rejected desired binding: policy compilation failed",
         "kernel_failure" => "enforcer rejected desired binding: kernel attachment failed",
+        "unsupported_environment" => {
+            "enforcer rejected desired binding: unsupported environment; run the enforcer on the host or with host PID visibility"
+        }
         "preexisting_writable_map" | "preexisting_writable_fd" => {
             "enforcer rejected desired binding: target tree holds pre-existing write access"
         }
