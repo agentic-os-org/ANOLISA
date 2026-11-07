@@ -21,12 +21,13 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | Passthrough in the V1 plugin |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
+| Command Code | `cmd` | Hard-disabled | Replaces the `shell_command` / `powershell` input | Replaces the tool result through `afterToolCall` | Pipeline-selected for replaceable text | — |
 
 “—” means that the capability is not available: the current adapter does not register it, or current host releases do not run it. The corresponding Tokenless CLI command may still be available.
 
 Cosh-NG uses the adapter value `cosh` and the existing `.copilot-shell` extension directory.
 
-Schema compression is active in QwenPaw and the AgentScope SDK integration, which supply a static recovery tool and current model-call marker authorization. Cosh-NG's `BeforeModel` hook and OpenCode's V1 `tool.definition` hook call the Common Hook without that recovery capability, so Core preserves their schemas. Qwen Code skips the declared, unsupported `BeforeModel` event at registration.
+Schema compression is active in QwenPaw and the AgentScope SDK integration, which supply a static recovery tool and current model-call marker authorization. Cosh-NG's `BeforeModel` hook and OpenCode's V1 `tool.definition` hook call the Common Hook without that recovery capability, so Core preserves their schemas. Qwen Code skips the declared, unsupported `BeforeModel` event at registration. Command Code's ModApi exposes two mutating tool hooks and no tool-schema seam, so its adapter registers no schema hook at all; the standalone `tokenless compress-schema` command is unchanged.
 
 ### Compression coverage and protocol limits
 
@@ -47,6 +48,7 @@ on by default; the global compression switch selects dry-run and does not disabl
 | OpenCode V1 plugin | `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions; Schema stays unchanged. OpenCode's V2 plugin API is a separate migration, not supported by this V1 adapter. This is not a claim that V2 cannot support Schema compression. |
 | Qoder, QwenWork, Hermes, DSH | Their current integration seams do not expose a mutable model-tool-schema list with static retrieval authorization. Hermes and DSH use block-and-suggest for RTK; DSH freezes and audits arguments before its pre-execute hook, so direct argument mutation is prohibited. |
 | QwenWork workspace Shell or plugin-private CLI | On macOS, a complete private recovery bridge rewrites Marker commands to the plugin binary with matching state and attribution. Without that bridge, including Windows private runtimes, only lossless candidates are eligible. |
+| Command Code | The ModApi exposes two mutating tool hooks and no tool-schema seam, so the adapter registers no schema hook and the standalone `tokenless compress-schema` command is unchanged. Results whose text blocks are interleaved with non-text blocks pass through. |
 | QwenPaw / AgentScope | All current Core domains are connected, including Schema and static retrieval. Intermediate stream chunks and non-text blocks remain unchanged. Custom AgentScope tools require an explicit content-origin contract. |
 
 OpenClaw recovery is authorized by markers in the current history and newly delivered results,
@@ -65,8 +67,8 @@ PostTool leaves the entire JSON response unchanged when its parser cannot preser
 
 ## Adapter processing rules
 
-The Cosh-NG, Qoder, QwenWork, Claude Code, and OpenCode adapters each send one
-`post_tool` request to `tokenless compress`. When the host can replace the result and bare
+The Cosh-NG, Qoder, QwenWork, Claude Code, OpenCode, and Command Code adapters each send
+one `post_tool` request to `tokenless compress`. When the host can replace the result and bare
 `tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
 with the existing shell tool. QwenWork can also use its verified macOS private recovery bridge.
 Otherwise Core accepts only lossless candidates. Every non-`applied`
@@ -471,7 +473,7 @@ The npm postinstall script attempts to copy adapter resources under:
 
 Confirm that this directory exists. Adapter copying is supplementary and fails open with a warning; a successful binary install can therefore exist without this copy. If it is absent, review the npm postinstall warning and prefer an anolisa-managed installation.
 
-An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and QwenPaw provide their own install scripts:
+An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, QwenPaw, and Command Code provide their own install scripts:
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
@@ -641,6 +643,52 @@ standalone scripts do not recover ANOLISA receipts or journals. Then rerun
 Restart OpenCode after enabling or disabling the plugin: an existing process keeps its loaded
 plugin, including tool-output replacement, until restart. After enabling and restarting, run a
 tool call and inspect `tokenless stats list`.
+
+### Command Code (cmd)
+
+Command Code discovers user-scope mods as loose files under `~/.commandcode/mods` and compiles
+them with jiti, so registration is a symlink to the shipped mod rather than a package install. The
+mod name Command Code derives from that file, `tokenless`, is what `cmd mods list` prints and what
+`cmd mods disable tokenless` accepts.
+
+No built-in ANOLISA driver ships for `cmd` yet, so `anolisa adapter scan` does not list it and
+`anolisa adapter enable tokenless cmd` reports an unknown framework. Register the mod with the
+bundled lifecycle script instead; from a source checkout `make cmd-install` runs the same scripts:
+
+```bash
+bash ~/.local/share/anolisa/adapters/tokenless/cmd/scripts/install.sh
+```
+
+The installer resolves the mods directory from `TOKENLESS_CMD_MODS_DIR`, then `COMMANDCODE_HOME`,
+and finally `~/.commandcode`; creates `mods/tokenless.ts` as a link to the bundled mod; and refuses
+to replace a file or link it does not own. `scripts/detect.sh` reports `ready` for that link, and
+`scripts/uninstall.sh` removes only it. Without a `cmd` binary on `PATH` the installer prints a hint
+and exits 0, so `make setup` still completes on hosts without Command Code.
+
+Both override variables are installer-side only. Command Code discovers user mods in
+`~/.commandcode/mods` plus the directories its own `mods.paths` setting lists, and it reads neither
+variable, so an override moves the link without activating the mod. `install.sh` and
+`scripts/detect.sh` therefore warn whenever the resolved directory is not `~/.commandcode/mods`. To
+use an override, also list that directory under `mods.paths` in `~/.commandcode/settings.json`, or
+load the mod for a single session with `cmd --mod <mods-dir>/tokenless.ts`; quote that path when it
+contains spaces, or the shell splits it into several arguments.
+
+The mod maps `beforeToolCall` and `afterToolCall` onto the shared Tokenless hooks. `beforeToolCall`
+replaces the `command` of the `shell_command` and `powershell` tools and carries every other input
+field over unchanged, because Command Code replaces the input wholesale and chains it into the next
+mod. `afterToolCall` replaces the model-visible text of a tool result and keeps non-text blocks,
+such as images, in their original position; when a non-text block separates two text blocks of the
+same result, the whole result is left unchanged instead, because folding those blocks into one
+string would detach each caption from the image it describes. Such a result never reaches the hook,
+so no saving is recorded for text the model still reads in full. Every hook call fails open: a
+missing runner, a hook timeout, or an undecodable reply leaves the tool call exactly as Command Code
+would have run it.
+
+Mods load once per process, so start a new session or run `/reload` after installing or removing
+the mod. Then run a tool call and inspect `tokenless stats list`, which attributes the records to
+`agent=cmd`. Both hooks send the same session and tool-call identity, so the shared PostTool hook
+carries RTK ownership into Core and a command Tokenless already rewrote to `rtk` is not compressed
+a second time.
 
 ### Qwen Code
 
