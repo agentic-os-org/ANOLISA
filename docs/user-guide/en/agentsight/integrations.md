@@ -148,6 +148,11 @@ Capture and analysis are unaffected; only the Risk Enforcement page and the
 `/api/enforcement/*` endpoints disappear. Start the enforcer daemon separately.
 For source builds, see [Source build](deployment.md#source-build).
 
+ActPlane policy application requires the enforcer to run in the host's initial PID namespace.
+Run the daemon on the host, or use `hostPID: true` / `--pid=host` for a container. In any other PID
+namespace, policy application is rejected with `unsupported_environment`; capture and analysis are
+unaffected.
+
 The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
 (including rollback detail when a kernel step fails), and poller errors:
 
