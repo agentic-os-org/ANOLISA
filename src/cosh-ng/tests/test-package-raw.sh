@@ -288,17 +288,17 @@ test_native_without_metadata() {
 test_native_without_metadata
 
 BUILD_ALL_UNINSTALL_OUTPUT="$TMP/build-all-uninstall.out"
-"$ROOT/../../scripts/build-all.sh" \
+if "$ROOT/../../scripts/build-all.sh" \
     --uninstall --component cosh-ng --system --dry-run \
-    > "$BUILD_ALL_UNINSTALL_OUTPUT"
-grep -Fxq 'DRY-RUN: systemctl stop cosh-gateway@*.service' \
-    "$BUILD_ALL_UNINSTALL_OUTPUT"
-grep -Fxq 'DRY-RUN: systemctl disable cosh-gateway@*.service' \
-    "$BUILD_ALL_UNINSTALL_OUTPUT"
-grep -Fxq 'DRY-RUN: systemctl stop cosh-gateway-acp@*.service' \
-    "$BUILD_ALL_UNINSTALL_OUTPUT"
-grep -Fxq 'DRY-RUN: systemctl disable cosh-gateway-acp@*.service' \
-    "$BUILD_ALL_UNINSTALL_OUTPUT"
+    > "$BUILD_ALL_UNINSTALL_OUTPUT" 2>&1; then
+    echo 'ERROR: unified build entrypoint accepted legacy uninstall' >&2
+    exit 1
+fi
+grep -Fq 'component-specific removal procedure' "$BUILD_ALL_UNINSTALL_OUTPUT"
+if grep -Eq 'DRY-RUN:|systemctl|rm -' "$BUILD_ALL_UNINSTALL_OUTPUT"; then
+    echo 'ERROR: rejected uninstall planned filesystem or service changes' >&2
+    exit 1
+fi
 
 STAGED="$TMP/staged"
 COSH_NG_SOURCE_DIR="$SOURCE" \
