@@ -443,7 +443,7 @@ Import replaces ASCII control characters, including newlines, with spaces
 before storing frontmatter. Summary rankings reflect those normalized entries;
 control characters are not preserved by an AMA import round trip.
 
-A missing store root is an export error, not an empty archive. Scan and read failures include the affected mount-relative path and are audited best-effort; an unavailable store can also prevent audit persistence.
+A missing store root is an export error, not an empty archive. Scan and read failures name the affected mount-relative path and are audited best-effort. The diagnostic never carries the host path, so it stays portable when the audit row is later consolidated into a lesson and re-exported; a failure the walk cannot attribute to a path is named `unknown location` rather than folded into the store root. An unavailable store can also prevent audit persistence: a moved or unlinked store may leave the failed-export row unavailable at the documented path even when writing through the already-open log handle succeeds, and a failed audit write never replaces the export error.
 
 `mem_export` stops with an error naming the affected path if it cannot scan a directory or read a Markdown file as UTF-8. It does not return a partial AMA archive as a successful export. Check file permissions or encoding and retry. Category and source filters require reading metadata, so a read failure can also block a filtered export. Metadata directories and non-Markdown files remain excluded.
 
