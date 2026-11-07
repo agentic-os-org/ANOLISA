@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar, Iterator
@@ -594,6 +594,7 @@ class GatewayCase(unittest.TestCase):
                 else {}
             ),
             "TMPDIR": str(cls.workdir),
+            **getattr(cls, "extra_environment", {}),
         }
         with open(cls.workdir / "mitmdump.log", "ab") as log:
             return subprocess.Popen(
@@ -1563,6 +1564,219 @@ class StartupTest(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stdout + result.stderr)
+
+
+@unittest.skipUnless(
+    os.geteuid() == 0
+    and os.environ.get("ASC_GATEWAY_PII_CLI")
+    and os.environ.get("ASC_GATEWAY_PII_DAEMON"),
+    "PII integration requires root and ASC_GATEWAY_PII_CLI/ASC_GATEWAY_PII_DAEMON",
+)
+class PiiTest(GatewayCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.pii_directory = Path(tempfile.mkdtemp(prefix="asc-gateway-pii-"))
+        cls.addClassCleanup(shutil.rmtree, cls.pii_directory)
+        cls.pii_cli = os.environ["ASC_GATEWAY_PII_CLI"]
+        cls.pii_socket = cls.pii_directory / "daemon.sock"
+        cls.pii_scanner = cls.pii_directory / "scanner"
+        cls.pii_scanner.symlink_to(cls.pii_cli)
+        cls.extra_environment = {"AGENT_SEC_DAEMON_SOCKET": str(cls.pii_socket)}
+        cls.start_daemon()
+        cls.addClassCleanup(cls.stop_daemon)
+        super().setUpClass()
+
+    @classmethod
+    def start_daemon(cls, rules: str = "[]") -> None:
+        config = cls.pii_directory / "skillsec.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "stateDir": str(cls.pii_directory / "skillsec"),
+                    "managedSkillDirs": [],
+                    "enableDefaultSkillDirs": False,
+                }
+            )
+        )
+        config.chmod(0o600)
+        rules_path = cls.pii_directory / "rules.yaml"
+        rules_path.write_text(rules)
+        with (cls.pii_directory / "daemon.log").open("ab") as log:
+            cls.daemon = subprocess.Popen(
+                [
+                    os.environ["ASC_GATEWAY_PII_DAEMON"],
+                    "--socket",
+                    str(cls.pii_socket),
+                    "--skillsec-config",
+                    str(config),
+                    "--pii-rules",
+                    str(rules_path),
+                ],
+                stdout=log,
+                stderr=log,
+                env={
+                    **os.environ,
+                    "AGENT_SEC_DATA_DIR": str(cls.pii_directory / "data"),
+                },
+            )
+        deadline = time.monotonic() + 30
+        while cls.daemon.poll() is None and time.monotonic() < deadline:
+            if cls.pii_socket.exists():
+                result = subprocess.run(
+                    [
+                        cls.pii_cli,
+                        "--socket",
+                        str(cls.pii_socket),
+                        "--timeout-ms",
+                        "1000",
+                        "scan-pii",
+                        "--stdin",
+                    ],
+                    input=b"",
+                    capture_output=True,
+                    check=False,
+                    timeout=3,
+                )
+                if result.returncode == 0:
+                    return
+            time.sleep(0.1)
+        cls.stop_daemon()
+        raise AssertionError((cls.pii_directory / "daemon.log").read_text())
+
+    @classmethod
+    def stop_daemon(cls) -> None:
+        if cls.daemon.poll() is None:
+            cls.daemon.terminate()
+            cls.daemon.wait(timeout=10)
+
+    @classmethod
+    def start_mitmdump(cls, *extra: str) -> subprocess.Popen[bytes]:
+        return super().start_mitmdump(
+            "--set",
+            "agent_sec_pii_scan=true",
+            "--set",
+            f"agent_sec_pii_cli={cls.pii_scanner}",
+            *extra,
+        )
+
+    def post(
+        self, path: str, body: bytes, content_type: str = "text/plain"
+    ) -> Response:
+        return self.send(
+            next(iter(self.ports)),
+            "POST",
+            path,
+            headers=[("Content-Type", content_type)],
+            body=body,
+        )
+
+    def test_real_scanner_and_request_validation(self) -> None:
+        for name, body, content_type, status in [
+            ("pass", b"hello world", "text/plain", 200),
+            ("json-pass", b'{"message":"hello world"}', "application/json", 200),
+            ("warn", b"contact alice@company.cn", "text/plain", 403),
+            ("deny", b"Bearer abcdefghijklmnopqrstuvwxyz012345", "text/plain", 403),
+            (
+                "escaped",
+                b'{"phone":"\\u0031\\u0033\\u0038\\u0031\\u0032\\u0033\\u0034\\u0035\\u0036\\u0037\\u0038"}',
+                "application/json",
+                403,
+            ),
+            (
+                "duplicate",
+                b'{"phone":"13812345678","phone":"hello"}',
+                "application/json",
+                403,
+            ),
+            ("utf8", b"\xff", "text/plain", 400),
+            ("invalid-json", b"{", "application/json", 400),
+            ("binary", b"bytes", "application/octet-stream", 415),
+        ]:
+            with self.subTest(name=name):
+                path = f"/pii/{name}"
+                response = self.post(path, body, content_type)
+                self.assertEqual(response.status, status)
+                if status == 200:
+                    self.assertEqual(self.recorded(path)[0]["body"], body)
+                else:
+                    if status == 403:
+                        self.assertEqual(response.json()["error"], "pii_blocked")
+                    self.assertEqual(self.recorded(path), [])
+        events = [
+            json.loads(line)
+            for line in (self.pii_directory / "data" / "security-events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        verdicts = {
+            event["details"]["result"]["verdict"]
+            for event in events
+            if event["category"] == "pii_scan"
+        }
+        self.assertTrue({"pass", "warn", "deny"} <= verdicts)
+        self.assertNotIn("alice@company.cn", self.log_text())
+
+    def test_daemon_unavailable_blocks_and_recovers(self) -> None:
+        self.stop_daemon()
+        try:
+            response = self.post("/pii/unavailable", b"hello world")
+            self.assertEqual(response.status, 503)
+            self.assertEqual(json.loads(response.body)["error"], "pii_scan_unavailable")
+            self.assertEqual(self.recorded("/pii/unavailable"), [])
+        finally:
+            self.start_daemon()
+        self.assertEqual(self.post("/pii/recovered", b"hello world").status, 200)
+
+    def test_partial_pass_is_not_forwarded(self) -> None:
+        self.stop_daemon()
+        try:
+            self.start_daemon("[")
+            response = self.post("/pii/partial", b"hello world")
+            self.assertEqual(response.status, 503)
+            self.assertEqual(json.loads(response.body)["error"], "pii_scan_incomplete")
+            self.assertEqual(self.recorded("/pii/partial"), [])
+        finally:
+            self.stop_daemon()
+            self.start_daemon()
+
+    def test_chunked_upload_is_bounded_before_eof(self) -> None:
+        path = "/pii/chunked-large"
+        with self.connection(next(iter(self.ports))) as stream:
+            stream.sendall(
+                (
+                    f"POST {path} HTTP/1.1\r\nHost: api.github.com\r\n"
+                    "Content-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n"
+                ).encode()
+            )
+            body = b"x" * (256 * 1024 + 1)
+            with suppress(OSError):
+                stream.sendall(f"{len(body):x}\r\n".encode() + body + b"\r\n")
+            stream.settimeout(5)
+            try:
+                self.assertEqual(stream.recv(4096), b"")
+            except (ConnectionResetError, ssl.SSLError):
+                pass
+        self.assertEqual(self.recorded(path), [])
+
+    def test_timeout_kills_scanner_and_blocks_request(self) -> None:
+        pid_path = self.pii_directory / "scanner.pid"
+        self.pii_scanner.unlink()
+        self.pii_scanner.write_text(
+            "#!/usr/bin/python3\nimport os, time\nfrom pathlib import Path\n"
+            f"Path({str(pid_path)!r}).write_text(str(os.getpid()))\ntime.sleep(30)\n"
+        )
+        self.pii_scanner.chmod(0o700)
+        try:
+            started = time.monotonic()
+            self.assertEqual(self.post("/pii/timeout", b"hello world").status, 503)
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertEqual(self.recorded("/pii/timeout"), [])
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid_path.read_text()), 0)
+        finally:
+            self.pii_scanner.unlink()
+            self.pii_scanner.symlink_to(self.pii_cli)
+        self.assertEqual(self.post("/pii/after-timeout", b"hello world").status, 200)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ never degrades to passthrough.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,12 @@ from mitmproxy.addons.termlog import TermLogHandler
 from mitmproxy.log import LegacyLogEvents
 from mitmproxy.net.http.http1 import expected_http_body_size
 from mitmproxy.proxy import commands, events, layer
-from mitmproxy.proxy.layers.http import HttpLayer, HttpStream, ResponseData
+from mitmproxy.proxy.layers.http import (
+    HttpLayer,
+    HttpStream,
+    RequestData,
+    ResponseData,
+)
 
 POLL_SECONDS = 0.5
 RETRY_SECONDS = 5.0
@@ -35,6 +41,10 @@ HEALTH_NAME = "health.json"
 CA_NAME = "ca-cert.pem"
 HEALTH_VERSION = 1
 METADATA_KEY = "agent_sec"
+PII_METADATA_KEY = "agent_sec_pii"
+PII_BODY_LIMIT = 256 * 1024
+PII_TIMEOUT = 5
+PII_MAX_ACTIVE = 2
 
 # Codes a client should retry on a fresh connection instead of treating as final.
 _STATUS_BY_CODE = {"sni_host_mismatch": 421}
@@ -139,6 +149,21 @@ def _abort_flow(flow: http.HTTPFlow) -> None:
 
 
 class _GatewayHttpStream(HttpStream):
+    def state_consume_request_body(
+        self, event: events.Event
+    ) -> layer.CommandGenerator[None]:
+        if (
+            isinstance(event, RequestData)
+            and self.flow.metadata.get(PII_METADATA_KEY)
+            and len(self.request_body_buf) + len(event.data) > PII_BODY_LIMIT
+        ):
+            # Bound actual bytes, including chunked uploads, before native buffering.
+            self.request_body_buf.clear()
+            self.client_state = self.server_state = self.state_errored
+            _abort_flow(self.flow)
+            return
+        yield from super().state_consume_request_body(event)
+
     def send_response(
         self, already_streamed: bool = False
     ) -> layer.CommandGenerator[None]:
@@ -239,10 +264,23 @@ class SecretGateway:
         self._health: bytes | None = None
         self._watcher: asyncio.Task[None] | None = None
         self._log_filter = _SafeDiagnostics()
+        self._pii_active = 0
 
     def load(self, loader: object) -> None:
         loader.add_option(  # type: ignore[attr-defined]
             "agent_sec_runtime_dir", str, "", "Runtime directory holding active.json"
+        )
+        loader.add_option(  # type: ignore[attr-defined]
+            "agent_sec_pii_scan",
+            bool,
+            False,
+            "Require a complete PII pass before forwarding request bodies",
+        )
+        loader.add_option(  # type: ignore[attr-defined]
+            "agent_sec_pii_cli",
+            str,
+            "/usr/bin/agent-sec-cli",
+            "Absolute path to the Rust PII CLI",
         )
 
     def next_layer(self, nextlayer: layer.NextLayer) -> None:
@@ -286,6 +324,8 @@ class SecretGateway:
             raise exceptions.OptionsError(
                 "agent-sec-gateway requires agent_sec_runtime_dir"
             )
+        if not os.path.isabs(options.agent_sec_pii_cli):
+            raise exceptions.OptionsError("agent_sec_pii_cli must be an absolute path")
         if options.termlog_verbosity not in ("warn", "error"):
             options.update(termlog_verbosity="warn")
         # Handler filters cover propagated logs, including pre-flow parser logs and ERROR tracebacks.
@@ -394,6 +434,14 @@ class SecretGateway:
         try:
             self._decide(flow)
             flow.request.stream = flow.response is None
+            if flow.response is None and ctx.options.agent_sec_pii_scan:
+                if "upgrade" in flow.request.headers:
+                    flow.response = _reject_response("pii_request_unsupported", 415)
+                elif (expected_http_body_size(flow.request) or 0) > PII_BODY_LIMIT:
+                    flow.response = _reject_response("pii_body_too_large", 413)
+                else:
+                    flow.metadata[PII_METADATA_KEY] = True
+                    flow.request.stream = False
         except Exception:  # noqa: BLE001 - an undecided request must not be forwarded
             logger.error("agent-sec-gateway request hook failed")
             flow.metadata.pop(METADATA_KEY, None)
@@ -405,6 +453,96 @@ class SecretGateway:
         ):
             # Header rejection must not wait for or buffer an untrusted upload.
             _abort_flow(flow)
+
+    async def request(self, flow: http.HTTPFlow) -> None:
+        if flow.response is not None or not flow.metadata.get(PII_METADATA_KEY):
+            return
+        try:
+            body = flow.request.raw_content
+            encoding = flow.request.headers.get("Content-Encoding", "identity").lower()
+            content_type = (
+                flow.request.headers.get("Content-Type", "")
+                .split(";", 1)[0]
+                .strip()
+                .lower()
+            )
+            if (
+                body is None
+                or len(body) > PII_BODY_LIMIT
+                or encoding not in ("", "identity")
+                or flow.request.trailers
+                or (body and content_type not in ("text/plain", "application/json"))
+            ):
+                flow.response = _reject_response("pii_request_unsupported", 415)
+                return
+            text = body.decode("utf-8")
+            if body and content_type == "application/json":
+                # Preserve duplicate keys and decode escapes before detection.
+                text = _pii_json_text(json.loads(text, object_pairs_hook=list))
+            scanned = text.encode("utf-8")
+            if len(scanned) > PII_BODY_LIMIT:
+                flow.response = _reject_response("pii_body_too_large", 413)
+                return
+        except (ValueError, RecursionError):
+            flow.response = _reject_response("pii_request_invalid", 400)
+            return
+
+        if self._pii_active >= PII_MAX_ACTIVE:
+            flow.response = _reject_response("pii_scan_busy", 503)
+            return
+        self._pii_active += 1
+        try:
+            rejection = await self._scan_pii(scanned)
+            if rejection is not None:
+                flow.response = _reject_response(*rejection)
+        except asyncio.CancelledError:
+            _abort_flow(flow)
+            raise
+        except Exception:  # noqa: BLE001 - no scanner failure may forward the request
+            flow.response = _reject_response("pii_scan_unavailable", 503)
+        finally:
+            self._pii_active -= 1
+
+    async def _scan_pii(self, text: bytes) -> tuple[str, int] | None:
+        # ponytail: one CLI process per scan; replace with direct UDS only if measured throughput requires it.
+        process = None
+        try:
+            async with asyncio.timeout(PII_TIMEOUT):
+                process = await asyncio.create_subprocess_exec(
+                    ctx.options.agent_sec_pii_cli,
+                    "--timeout-ms",
+                    str(PII_TIMEOUT * 1000),
+                    "scan-pii",
+                    "--stdin",
+                    "--format",
+                    "json",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                output, _ = await process.communicate(text)
+            if process.returncode != 0 or len(output) > 1024 * 1024:
+                return "pii_scan_unavailable", 503
+            report = json.loads(output)
+            if report["ok"] is not True:
+                return "pii_scan_unavailable", 503
+            if report["verdict"] in ("warn", "deny"):
+                return "pii_blocked", 403
+            summary = report["summary"]
+            if (
+                report["verdict"] != "pass"
+                or summary["execution_status"] != "completed"
+                or summary["coverage"]["status"] != "complete"
+                or summary["truncated"] is not False
+                or summary["scanned_bytes"] != len(text)
+            ):
+                return "pii_scan_incomplete", 503
+            return None
+        finally:
+            if process is not None and process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
 
     def _decide(self, flow: http.HTTPFlow) -> None:
         request = flow.request
@@ -504,6 +642,16 @@ class SecretGateway:
             and expected_http_body_size(flow.request, response) != 0
         ):
             flow.kill()
+
+
+def _pii_json_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, tuple):
+        return ": ".join(_pii_json_text(part) for part in value)
+    if isinstance(value, list):
+        return "\n".join(_pii_json_text(part) for part in value)
+    return json.dumps(value, allow_nan=False)
 
 
 addons = [SecretGateway()]

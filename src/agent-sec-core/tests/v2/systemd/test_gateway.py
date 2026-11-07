@@ -327,6 +327,7 @@ class _Upstream(http.server.ThreadingHTTPServer):
         self.repositories = repositories
         self.scheme = scheme
         self.seen = seen
+        self.bodies = {}
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -346,10 +347,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _handle(self):
         host = self.headers.get("Host", "").partition(":")[0]
         authorization = self.headers.get("Authorization")
-        body = self._body()
         self.server.seen.append(
             (self.server.scheme, host, self.command, self.path, authorization)
         )
+        body = self._body()
+        self.server.bodies[self.path] = body
         if host == "github.com":
             self._git(authorization, body)
             return
@@ -528,7 +530,12 @@ def upstream(host):
             f"{_unit_exec_start()} --set ssl_verify_upstream_trusted_ca={directory}/ca.pem\n"
         )
         command("systemctl", "daemon-reload")
-        yield {"seen": seen, "ca": directory / "ca.pem", "bare": bare}
+        yield {
+            "seen": seen,
+            "bodies": tls.bodies,
+            "ca": directory / "ca.pem",
+            "bare": bare,
+        }
     finally:
         DROP_IN.unlink(missing_ok=True)
         command("systemctl", "daemon-reload", check=False)
@@ -1214,3 +1221,120 @@ def test_credential_survives_daemon_and_gateway_restarts(host, upstream):
             echoed = curl(agent, "https://api.github.com/user")
             assert seen[-1][4] == f"Bearer {real}", unit
             assert echoed["authorization"] == f"Bearer {fake}"
+
+
+def test_pii_blocks_transparent_egress_and_scanner_failure(host, upstream):
+    """Uses real cgroup discovery, TLS interception, CLI and daemon PII decisions."""
+    cli, user = host
+    original = DROP_IN.read_text()
+    configured = (
+        original.rstrip()
+        + f" --set agent_sec_pii_scan=true --set agent_sec_pii_cli={cli}\n"
+    )
+    DROP_IN.write_text(configured)
+    command("systemctl", "daemon-reload")
+
+    def packets():
+        rules = json.loads(command("nft", "-j", "list", "table", "inet", TABLE).stdout)
+        return sum(
+            expression.get("counter", {}).get("packets", 0)
+            for item in rules["nftables"]
+            for expression in item.get("rule", {}).get("expr", [])
+        )
+
+    def post(agent, name, body):
+        result = agent.execute(
+            [
+                "curl", "-q", "--noproxy", "*", "-sS", "-m", "15",
+                *resolve_flags(), "-H", "Content-Type: text/plain",
+                "-H", f"Authorization: Bearer {fake_of(agent)}",
+                "--data-binary", body, "-w", "\n%{http_code}",
+                f"https://api.github.com/pii/{name}",
+            ],
+            refresh=False,
+        )  # fmt: skip
+        assert result.returncode == 0, result.stderr
+        payload, status = result.stdout.rsplit("\n", 1)
+        return int(status), json.loads(payload)
+
+    try:
+        with protected_token(cli, user) as (real, domains):
+            agent = domains[AGENT]
+            for name, body, expected in [
+                ("clean", "hello world", 200),
+                ("warn", "contact alice@company.cn", 403),
+            ]:
+                before = packets()
+                status, payload = post(agent, name, body)
+                assert status == expected, (name, status, payload)
+                assert packets() > before, name
+                received = [row for row in upstream["seen"] if row[3] == f"/pii/{name}"]
+                if expected == 200:
+                    assert len(received) == 1
+                    assert received[0][4] == f"Bearer {real}"
+                    assert upstream["bodies"][f"/pii/{name}"] == body.encode()
+                    assert payload["authorization"] == f"Bearer {fake_of(agent)}"
+                else:
+                    assert payload == {
+                        "error": "pii_blocked",
+                        "source": "agent-sec-gateway",
+                    }
+                    assert received == []
+
+            # Keep the control plane and routing alive while breaking only scanner execution.
+            DROP_IN.write_text(
+                configured.replace(
+                    f"agent_sec_pii_cli={cli}",
+                    "agent_sec_pii_cli=/nonexistent/asc-e2e-scanner",
+                )
+            )
+            command("systemctl", "daemon-reload")
+            command("systemctl", "restart", UNIT)
+            wait_loaded(cli)
+            before = packets()
+            status, payload = post(agent, "unavailable", "hello world")
+            assert status == 503 and payload["error"] == "pii_scan_unavailable"
+            assert packets() > before
+            assert not any(row[3] == "/pii/unavailable" for row in upstream["seen"])
+
+            DROP_IN.write_text(configured)
+            command("systemctl", "daemon-reload")
+            command("systemctl", "restart", UNIT)
+            wait_loaded(cli)
+            assert post(agent, "recovered-clean", "hello world")[0] == 200
+            assert post(agent, "recovered-pii", "13812345678")[0] == 403
+            assert not any(row[3] == "/pii/recovered-pii" for row in upstream["seen"])
+
+            command("systemctl", "stop", UNIT)
+            before = packets()
+            failed = agent.execute(
+                [
+                    "curl", "-q", "--noproxy", "*", "-sS", "-m", "5",
+                    *resolve_flags(), "https://api.github.com/pii/gateway-down",
+                ],
+                refresh=False,
+            )  # fmt: skip
+            assert failed.returncode != 0
+            assert packets() > before
+            assert not any(row[3] == "/pii/gateway-down" for row in upstream["seen"])
+            command("systemctl", "start", UNIT)
+            wait_loaded(cli)
+            assert post(agent, "gateway-recovered", "hello world")[0] == 200
+
+            # Explicit disable removes routing; document that this is not a DLP deny fence.
+            assert gateway(cli, "disable") == {}
+            direct = agent.execute(
+                [
+                    "curl", "-q", "--noproxy", "*", "-sS", "-m", "5",
+                    *resolve_flags(), "--cacert", str(upstream["ca"]),
+                    "-H", "Content-Type: text/plain", "--data-binary", "13812345678",
+                    "-w", "\n%{http_code}", "https://api.github.com/pii/disabled-direct",
+                ],
+                refresh=False,
+            )  # fmt: skip
+            assert direct.returncode == 0, direct.stderr
+            assert direct.stdout.endswith("\n200")
+            assert upstream["bodies"]["/pii/disabled-direct"] == b"13812345678"
+    finally:
+        DROP_IN.write_text(original)
+        command("systemctl", "daemon-reload", check=False)
