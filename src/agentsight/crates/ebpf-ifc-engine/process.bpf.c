@@ -4784,7 +4784,7 @@ int trace_splice_exit(struct trace_event_raw_sys_exit *ctx)
 SEC("tp/syscalls/sys_enter_membarrier")
 int cap_drain_tick(struct trace_event_raw_sys_enter *ctx)
 {
-	(void)ctx;
-	cap_drain_current();
+	cap_drain_current((__u32)ctx->args[0], (__u32)ctx->args[1],
+			  (__u32)ctx->args[2]);
 	return 0;
 }

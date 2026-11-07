@@ -138,6 +138,12 @@ $ sudo journalctl -u agentsight-enforcer
 切换 `agent-file-guard` 的前置条件、互斥能力、维护窗口及重新 Apply 步骤，见
 [启用系统层文件防误删](deployment.md#启用系统层文件防误删)。
 
+PID namespace 的支持边界更窄。enforcer 自身执行 map 操作时使用 BPF 捕获的
+init-namespace PID，但这不会把同一容器 procfs 中的目标 `root_pid` 转换为宿主 PID。
+目标解析仍要求 `/proc` 视图包含 init namespace 的完整 `NSpid` 链；只报告
+namespace-local ID 的容器 procfs 会在目标绑定前以 `unsupported_environment` 拒绝，
+采集与分析不受影响。`file_delete_guard` 同样仍仅限 init PID namespace。
+
 拦截能力还取决于引擎的 hook 预算：只有当引擎启动时预留了对应的 BPF LSM hook、且内核启用了
 BPF LSM（`/sys/kernel/security/lsm` 中包含 `bpf`）时，`block` 规则才能真正拒绝操作。上述不含
 argv 条件的 exec、文件 open/write 和 connect 规则在缺少支持时会按上文所述直接被拒绝。没有独立
