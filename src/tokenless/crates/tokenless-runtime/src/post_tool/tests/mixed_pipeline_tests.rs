@@ -236,6 +236,101 @@ fn grep_outputs_never_enter_the_mixed_route() {
 }
 
 #[test]
+fn compound_search_output_compresses_only_its_log_runs() {
+    // A compound command whose segments search: the log segment's lines
+    // reduce behind retrieval markers while every line the search may have
+    // produced — here, the numbered hits — stays byte-for-byte. No
+    // per-segment output boundaries exist, so the search hit grammar is the
+    // only claimable boundary, and a log line that could look like a match
+    // is preserved by the same rule.
+    let log = build_log();
+    let hits = "src/main.rs:12:fn entry() {\nsrc/main.rs:40:let done = false;\n";
+    let input = format!("{hits}{log}{hits}");
+    let mut req = request(&input);
+    req.command = Some("grep -n entry src/main.rs && cargo build".into());
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.applied_operations,
+        [AppliedOperation::BuildLogReduction]
+    );
+    let output = &run.response.output;
+    // The search bytes survive byte-for-byte, in order, around the log.
+    assert!(output.starts_with(hits), "{output}");
+    assert!(output.ends_with(hits), "{output}");
+    // The log's routine middle is behind a marker; recovery intact.
+    assert!(output.contains("lines omitted."));
+    // First and last log lines are kept as edges by the log compressor.
+    assert!(output.contains("$ cargo build\n"));
+    assert!(output.contains("Finished `dev` profile [unoptimized] target(s) in 1.2s\n"));
+    assert!(output.len() < input.len());
+    // The marker's retrieval payload is recoverable through the stash.
+    assert!(!run.response.stash_keys.is_empty());
+}
+
+#[test]
+fn compound_search_output_with_no_compressible_run_passes_through() {
+    // A quiet search followed by a log the compressor cannot shrink: no
+    // run offers a benefit, so the whole output passes through untouched.
+    let rows = (0..40)
+        .map(|i| format!("{i},v{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let input = format!("src/lib.rs:3:match\n{rows}\n");
+    let mut req = request(&input);
+    req.command = Some("grep -q needle Cargo.toml && cargo build 2>&1".into());
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
+    assert_eq!(run.response.disposition, Disposition::Passthrough);
+    assert_eq!(run.response.output, input);
+    assert_eq!(concrete.len(), 0);
+}
+
+#[test]
+fn compound_search_output_keeps_match_shaped_log_lines() {
+    // A log line shaped exactly like a search hit (`path:line:text`) is a
+    // claimable search byte: it is excluded from the run and preserved,
+    // even though the log segment produced it. The remaining routine run
+    // still compresses.
+    let log = build_log();
+    let hit_shaped = "warning from build.rs:41:see the log\n";
+    let input = format!("{log}{hit_shaped}");
+    let mut req = request(&input);
+    req.command = Some("cargo build 2>&1 | grep -E 'error|warning'".into());
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&req, &mixed_config(), Some(&store));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    let output = &run.response.output;
+    assert!(output.contains(hit_shaped), "{output}");
+    assert!(output.contains("lines omitted."));
+}
+
+#[test]
+fn compound_search_output_respects_the_mixed_switch() {
+    // The search-guarded path is part of the mixed route: with the switch
+    // off, the compound output falls back to #9370's whole-output search
+    // protection — the search route's do-not-touch verdict fires, not the
+    // mixed route, and nothing reaches Stash.
+    let log = build_log();
+    let hits = "src/main.rs:12:fn entry() {\n";
+    let input = format!("{hits}{log}");
+    let mut req = request(&input);
+    req.command = Some("grep -n entry src/main.rs && cargo build".into());
+    let mut config = mixed_config();
+    config.mixed_content_enabled = false;
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&req, &config, Some(&store));
+    assert_eq!(run.response.disposition, Disposition::NoSavings);
+    assert_eq!(run.response.output, input);
+    assert_eq!(concrete.len(), 0);
+}
+
+#[test]
 fn no_savings_reconstructs_the_original() {
     // An already-compact table offers compaction nothing: every region is
     // preserved, no candidate exists, and the original output is kept.

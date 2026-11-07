@@ -10,7 +10,8 @@
 
 use tokenless_ccr::{RecoveryMethod, StashStore};
 use tokenless_compressors::{
-    JsonCompressionContext, JsonCompressor, Recoverability, TabularCompressor, TabularOperation,
+    BuildLogCompressor, JsonCompressionContext, JsonCompressor, Recoverability, TabularCompressor,
+    TabularOperation,
 };
 use tokenless_protocol::AppliedOperation;
 
@@ -22,6 +23,20 @@ use super::pipeline::PostToolPipelineConfig;
 pub(crate) enum RegionKind {
     Json,
     Tabular,
+}
+
+/// A line-level region inside a compound command's output whose class was
+/// established by the command's own segments rather than by content alone.
+///
+/// The search segment's bytes are never claimable: a grep/rg run's matches
+/// must survive complete, and a match can itself look like a log line, so
+/// only runs of lines the command's non-search segments produced — bounded
+/// by recognized search-hit lines on both ends or by the output edges — are
+/// candidates. The run compresses only when the whole-run log compressor
+/// reports a benefit; otherwise the run stays byte-for-byte.
+pub(crate) struct SearchGuardedRun<'a> {
+    /// The candidate lines, complete with their line endings.
+    pub(crate) lines: Vec<&'a str>,
 }
 
 /// Per-region compression results for one mixed-content candidate.
@@ -306,6 +321,148 @@ pub(crate) fn has_recognizable_regions(content: &str) -> bool {
         }
     }
     false
+}
+
+/// A line the search segment may have produced: a numbered `path:line:text`
+/// hit the search-results validators accept, inside the bounded scan window.
+///
+/// Recognition is deliberately the *compressor's* own shape grammar — the
+/// same validators `SearchResultsCompressor` enforces before it would ever
+/// rewrite a record — so a line claimed as a search byte is a line the
+/// lossless search path itself would have recognized. Anything else (a
+/// timestamp like `12:30:00`, a bare `build.log:41` count, prose with a
+/// colon) is not a search byte here.
+fn is_search_hit_line(line: &str) -> bool {
+    // Mirrors `search_results::line_is_search_hit`: a path-like prefix
+    // (`/` or `.` present, so `12:30:00` timestamps do not match), then a
+    // line number, then a second colon.
+    let Some(colon) = line.find(':') else {
+        return false;
+    };
+    let path = &line[..colon];
+    if path.is_empty() || !(path.contains('/') || path.contains('.')) {
+        return false;
+    }
+    let rest = &line[colon + 1..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits >= 1 && rest.as_bytes().get(digits) == Some(&b':')
+}
+
+/// One piece of a search-guarded compound output, in source order: either a
+/// recognized search-hit line (protected bytes) or a maximal run of lines the
+/// non-search segments produced.
+pub(crate) enum GuardedSegment<'a> {
+    /// A search-hit line, emitted byte-for-byte and never compressed.
+    SearchHit(&'a str),
+    /// A run offered to the log domain as a whole.
+    Run(SearchGuardedRun<'a>),
+}
+
+/// Splits a search-guarded compound output into ordered segments: every
+/// recognized search-hit line becomes its own [`GuardedSegment::SearchHit`]
+/// and the remaining lines group into maximal [`GuardedSegment::Run`]s.
+/// Bounded by the shared scan window.
+///
+/// The split is conservative in both directions:
+///
+/// - A line the grammar recognizes as a search hit is a boundary and is
+///   never inside a run, even if the log segment could have produced an
+///   identical line (a log line that looks like a match is preserved).
+/// - Everything else joins the current run, including blank lines and
+///   prose: the run's own compressor decides whether the run compresses,
+///   and a rejected run survives byte-for-byte.
+pub(crate) fn search_guarded_runs(content: &str) -> Vec<GuardedSegment<'_>> {
+    let mut segments = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in scan_prefix(content).split_inclusive('\n') {
+        if is_search_hit_line(line.trim_end_matches(['\r', '\n'])) {
+            if !current.is_empty() {
+                segments.push(GuardedSegment::Run(SearchGuardedRun {
+                    lines: std::mem::take(&mut current),
+                }));
+            }
+            segments.push(GuardedSegment::SearchHit(line));
+            continue;
+        }
+        current.push(line);
+        if current.len() >= MAX_SCAN_LINES {
+            segments.push(GuardedSegment::Run(SearchGuardedRun {
+                lines: std::mem::take(&mut current),
+            }));
+        }
+    }
+    if !current.is_empty() {
+        segments.push(GuardedSegment::Run(SearchGuardedRun { lines: current }));
+    }
+    segments
+}
+
+/// Whether a search-guarded run offers the log domain anything: the run's
+/// complete text must be recognized as a build/test log and carry a routine
+/// run worth reducing. The run is tried as a whole; a run the compressor
+/// rejects compresses nothing.
+pub(crate) fn search_guarded_run_is_compressible(run: &SearchGuardedRun<'_>) -> bool {
+    let text: String = run.lines.concat();
+    BuildLogCompressor::detect(&text)
+}
+
+/// Compresses one search-guarded run through the build-log domain with the
+/// same stash lifecycle the standalone route uses (the log compressor takes
+/// no domain configuration; its detection and omission policy are fixed).
+///
+/// The run's lines carry their own endings, so the compressor's output
+/// splices back between the preserved search bytes with no separator
+/// reconstruction. A run the compressor leaves unchanged (or that saves
+/// nothing) reports `output: None`: the caller emits the run byte-for-byte,
+/// exactly like a rejected region in the fence/bare-JSON walk, while the
+/// run's tentative Stash writes and errors still reach the ledger.
+pub(crate) fn compress_search_guarded_run(
+    run: &SearchGuardedRun<'_>,
+    stash: Option<&dyn StashStore>,
+    recovery: &RecoveryMethod,
+) -> Option<SearchGuardedRunOutcome> {
+    let text: String = run.lines.concat();
+    let outcome = BuildLogCompressor.compress_with_recovery(&text, stash, recovery);
+    if outcome.output == text || outcome.operations.is_empty() {
+        // Same contract as an unchanged fenced region: the run survives
+        // byte-for-byte, but its tentative Stash writes and errors still
+        // reach the caller's ledger.
+        return Some(SearchGuardedRunOutcome {
+            output: None,
+            operations: Vec::new(),
+            stash_writes: outcome.stash_writes,
+            stash_errors: outcome.metrics.stash_errors,
+        });
+    }
+    Some(SearchGuardedRunOutcome {
+        output: Some(outcome.output),
+        operations: outcome
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                tokenless_compressors::BuildLogOperation::TerminalCleanup => {
+                    AppliedOperation::TerminalCleanup
+                }
+                tokenless_compressors::BuildLogOperation::ProgressReduction => {
+                    AppliedOperation::BuildLogReduction
+                }
+            })
+            .collect(),
+        stash_writes: outcome.stash_writes,
+        stash_errors: outcome.metrics.stash_errors,
+    })
+}
+
+/// The result of offering one search-guarded run to the log domain.
+pub(crate) struct SearchGuardedRunOutcome {
+    /// The compressed run, or `None` when the run survives byte-for-byte.
+    pub(crate) output: Option<String>,
+    /// Wire operations when the run compressed.
+    pub(crate) operations: Vec<AppliedOperation>,
+    /// Tentative Stash writes performed while producing candidates.
+    pub(crate) stash_writes: Vec<tokenless_ccr::StashWrite>,
+    /// Failed Stash writes.
+    pub(crate) stash_errors: usize,
 }
 
 /// Iterates the bounded scan window as `(indent, trimmed_line)` pairs,
