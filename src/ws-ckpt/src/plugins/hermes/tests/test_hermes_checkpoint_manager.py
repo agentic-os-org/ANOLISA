@@ -235,3 +235,22 @@ class TestCheckpointManager:
         args = mock_run.call_args[0][0]
         msg_idx = args.index("--message") + 1
         assert len(args[msg_idx]) == 80
+
+    @patch("hermes.checkpoint_manager.subprocess.run")
+    def test_create_checkpoint_keeps_caller_truncation_marker(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr = self._make("/ws")
+        # The turn-end hook already shortened the message and marked it.
+        mgr.create_checkpoint(snapshot_id="s1", message="x" * 80 + "...")
+        args = mock_run.call_args[0][0]
+        msg_idx = args.index("--message") + 1
+        assert len(args[msg_idx]) == 80
+        assert args[msg_idx].endswith("...")
+
+    @patch("hermes.checkpoint_manager.subprocess.run")
+    def test_create_checkpoint_leaves_short_message_alone(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr = self._make("/ws")
+        mgr.create_checkpoint(snapshot_id="s1", message="agent turn")
+        args = mock_run.call_args[0][0]
+        assert args[args.index("--message") + 1] == "agent turn"

@@ -200,7 +200,12 @@ class CheckpointManager:
         ]
 
         if message:
-            args.extend(["--message", message[:MSG_TRUNCATE_LEN]])
+            # Callers already shorten long text and append an ellipsis; slicing
+            # that result again drops the marker, so only shorten what still
+            # exceeds the limit and leave room for the marker.
+            if len(message) > MSG_TRUNCATE_LEN:
+                message = message[:MSG_TRUNCATE_LEN - 3] + "..."
+            args.extend(["--message", message])
 
         if metadata:
             args.extend(["--metadata", json.dumps(metadata)])
