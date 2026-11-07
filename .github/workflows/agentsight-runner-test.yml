@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - chore/test_sight
+      - main
+    paths:
+      - 'src/agentsight/**'
+      - '.github/workflows/agentsight-runner-test.yml'
+  # Kernel jobs execute PR code with sudo. Fork PRs must stay behind the
+  # repository's maintainer-approval requirement on disposable, isolated runners.
+  pull_request:
     paths:
       - 'src/agentsight/**'
       - '.github/workflows/agentsight-runner-test.yml'
@@ -78,7 +85,11 @@ jobs:
 
       - name: Lint
         working-directory: src/agentsight
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Mirror ci.yaml's agentsight clippy invocation: the vendored
+        # ActPlane crates are excluded (pre-existing lint debt tracked
+        # separately); ActPlane runtime tests are linted by the kernel-runner
+        # jobs with --no-deps.
+        run: cargo clippy --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --all-targets -- -D warnings
 
       - name: Test raw packaging
         working-directory: src/agentsight
@@ -86,9 +97,16 @@ jobs:
 
       - name: Run tests with coverage
         working-directory: src/agentsight
+        # Mirror ci.yaml's agentsight coverage invocation exactly: excluding
+        # the vendored ActPlane crates from instrumentation and capping
+        # parallelism is load-bearing — full-core instrumented builds of the
+        # whole workspace OOM-kill this self-hosted runner mid-step (the
+        # runner then reports "lost communication with the server").
         run: |
-          cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/)'
+          JOBS=$(( ($(nproc) + 1) / 2 ))
+          cargo llvm-cov --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/|crates/ebpf-ifc-engine/|crates/actplane-ifc-compiler/)' \
+            -j "$JOBS" -- --test-threads="$JOBS"
 
       - name: Upload coverage artifact
         if: always()
@@ -104,12 +122,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 5.10/5.15 runners have no BPF-LSM, so only 6.6 runs the
+          # enforcement-effectiveness test as a required gate.
           - kernel: '5.10'
             runner: anolisa-agentsight-kernel510-x64
+            enforcement: optional
           - kernel: '5.15'
             runner: anolisa-agentsight-kernel515-x64
+            enforcement: optional
           - kernel: '6.6'
             runner: anolisa-agentsight-kernel66-x64
+            enforcement: required
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -148,7 +171,7 @@ jobs:
           if [ -r /sys/kernel/security/lsm ]; then
             cat /sys/kernel/security/lsm
             grep -q bpf /sys/kernel/security/lsm || \
-              echo "::warning::BPF-LSM is not active on this runner; enforcement e2e tests will be skipped"
+              echo "::warning::BPF-LSM is not active on this runner"
           else
             echo "::warning::securityfs not available; cannot determine LSM status"
           fi
@@ -156,7 +179,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -179,6 +202,31 @@ jobs:
         run: |
           set -euo pipefail
           cd src/agentsight
+          # The default clippy pass does not enable actplane, so lint the live
+          # runtime test here. --no-deps keeps pre-existing vendored-crate lint
+          # debt out of scope; the test target itself is fully denied.
+          cargo clippy -p agentsight-enforcer --test inode_runtime \
+            --features actplane --no-deps -- -D warnings
+          # aya resolves tracepoints through /sys/kernel/tracing (or
+          # /sys/kernel/debug/tracing) and requires a non-empty directory:
+          # container runners may have neither mounted, which fails the
+          # engine's tracepoint attach with "tracefs not found".
+          sudo mkdir -p /sys/kernel/tracing 2>/dev/null || true
+          mountpoint -q /sys/kernel/tracing 2>/dev/null || \
+            sudo mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
+          # Fresh, job-private bpffs mount as the pin root (BPF_OBJ_PIN
+          # requires bpffs, and /sys/fs/bpf may not be bpffs in container
+          # runners): a reused self-hosted runner must not silently accept
+          # a stale /sys/fs/bpf/actplane/v1 pin — the current build's
+          # objects have to be installed and verified every run.
+          pin_root="/tmp/actplane-e2e-pin-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.kernel }}"
+          sudo mkdir -p "$pin_root"
+          sudo mount -t bpf bpf "$pin_root"
+          cleanup_pin_root() {
+            sudo umount "$pin_root" || true
+            sudo rm -rf "$pin_root"
+          }
+          trap cleanup_pin_root EXIT
           cargo_bin=$(command -v cargo)
           sudo env \
             HOME="$HOME" \
@@ -187,9 +235,19 @@ jobs:
             PATH="$PATH" \
             RUST_BACKTRACE="$RUST_BACKTRACE" \
             RUST_LOG="$RUST_LOG" \
+            ACTPLANE_BPF_PIN_ROOT="$pin_root" \
+            ACTPLANE_PINNED_PROFILE=agent-file-guard \
             CARGO_BIN="$cargo_bin" \
             bash -c '
+              set -e
               ulimit -l unlimited
-              exec "$CARGO_BIN" test --test bpf_load -- \
+              "$CARGO_BIN" test --test bpf_load -- \
                 --ignored --nocapture --test-threads=1
+              if [ "${{ matrix.enforcement }}" = "required" ]; then
+                "$CARGO_BIN" test -p agentsight-enforcer --features actplane \
+                  --test inode_runtime -- file_guard_on_live_kernel \
+                  --ignored --nocapture --test-threads=1
+              else
+                echo "Skipping enforcement effectiveness on kernel ${{ matrix.kernel }}: no BPF-LSM"
+              fi
             '
