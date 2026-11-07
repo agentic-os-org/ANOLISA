@@ -127,7 +127,7 @@ INSTANCE_TYPE=$(curl -s http://100.100.100.200/latest/meta-data/instance-type)
 | 导入密钥对 | `aliyun ecs ImportKeyPair --KeyPairName <密钥对名称> --PublicKeyBody <公钥内容>` |
 | 绑定密钥对 | `aliyun ecs AttachKeyPair --InstanceIds '["<实例ID>"]' --KeyPairName <密钥对名称>` |
 | 解绑密钥对 | `aliyun ecs DetachKeyPair --InstanceIds '["<实例ID>"]' --KeyPairName <密钥对名称>` |
-| 删除密钥对 | `aliyun ecs DeleteKeyPairs --KeyPairNames <密钥对名称>` |
+| 删除密钥对 | `aliyun ecs DeleteKeyPairs --KeyPairNames '["<密钥对名称>"]'` |
 
 ### 弹性网卡管理
 
