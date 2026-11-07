@@ -10,6 +10,8 @@ from bs4 import BeautifulSoup
 import markdownify
 import json
 import time
+import tempfile
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +43,7 @@ def get_page_content(url):
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         }
         response = requests.get(BASE_URL + url, headers=headers, timeout=30)
+        response.raise_for_status()
         response.encoding = 'utf-8'
         return response.text
     except Exception as e:
@@ -105,15 +108,30 @@ def extract_markdown(html, url):
     }
 
 def post_process_markdown(content):
-    """Markdown 后处理：优化格式"""
-    import re
-    
-    # 1. 清理标题中的多余加粗标记：#### **标题** → #### 标题
-    content = re.sub(r'^(#{1,6}) \*{2}(.+?)\*{2}$', r'\1 \2', content, flags=re.MULTILINE)
-    
-    # 2. 清理标题中分散的加粗：#### **什么** **是** → #### 什么是
-    content = re.sub(r'^(#{1,6}) (\*{2}[^\*]+\*{2}\s*)+', r'\1 ', content, flags=re.MULTILINE)
-    # 更精确的处理
+    """Format prose without changing fenced example contents."""
+    result = []
+    prose = []
+    fence = None
+    for line in content.splitlines(keepends=True):
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line.rstrip('\r\n'))
+        if fence is not None:
+            result.append(line)
+            if (marker and marker[1][0] == fence[0]
+                    and len(marker[1]) >= len(fence) and not marker[2].strip()):
+                fence = None
+        elif marker:
+            result.append(_format_prose(''.join(prose)))
+            prose = []
+            fence = marker[1]
+            result.append(line)
+        else:
+            prose.append(line)
+    result.append(_format_prose(''.join(prose)))
+    return ''.join(result)
+
+
+def _format_prose(content):
+    """Remove heading emphasis markers while retaining all heading text."""
     lines = content.split('\n')
     processed_lines = []
     for line in lines:
@@ -122,7 +140,9 @@ def post_process_markdown(content):
             level = re.match(r'^#{1,6}', line).group()
             # 提取标题内容，去掉所有 ** 标记
             title_content = line[len(level):].strip()
-            title_content = re.sub(r'\*{2}', '', title_content)
+            # Unwrap only paired emphasis markers so literal `**kwargs` or
+            # `a ** b` inside a heading survives.
+            title_content = re.sub(r'\*\*(.+?)\*\*', r'\1', title_content)
             title_content = re.sub(r'\s+', ' ', title_content).strip()
             processed_lines.append(f"{level} {title_content}")
         else:
@@ -157,10 +177,34 @@ def save_markdown_file(data, output_path):
 {data['content']}
 """
     
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(file_content)
+    _atomic_write_text(output_path, file_content)
     
     return file_content
+
+
+def _atomic_write_text(output_path, content):
+    """Publish a complete sibling file; failed writes retain the old cache."""
+    output_path = Path(output_path).resolve()
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=output_path.parent,
+            prefix=f'.{output_path.name}.', suffix='.tmp', delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if output_path.exists():
+            os.chmod(temporary_path, output_path.stat().st_mode & 0o777)
+        else:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            os.chmod(temporary_path, 0o666 & ~current_umask)
+        os.replace(temporary_path, output_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 def crawl_all_docs(reference_dir):
     """爬取所有文档"""
@@ -188,10 +232,32 @@ def crawl_all_docs(reference_dir):
         
         # 提取 Markdown
         data = extract_markdown(html, url)
-        
+
+        # A 200 response with no usable content (soft-404, interstitial, layout
+        # change) must not replace a good cached document.
+        if not data['content'].strip():
+            results.append({
+                'filename': filename,
+                'url': url,
+                'status': 'failed',
+                'error': '提取内容为空，保留现有缓存',
+            })
+            print("  ⚠️ 提取内容为空，保留现有缓存")
+            continue
+
         # 保存文件
         output_path = reference_dir / f"{filename}.md"
-        save_markdown_file(data, output_path)
+        try:
+            save_markdown_file(data, output_path)
+        except OSError as error:
+            results.append({
+                'filename': filename,
+                'url': url,
+                'status': 'failed',
+                'error': f'Cache write failed: {error}',
+            })
+            print(f"  Cache write failed: {error}")
+            continue
         
         print(f"  ✓ 已保存: {output_path}")
         print(f"  ✓ 内容长度: {len(data['content'])} 字符")
@@ -219,8 +285,14 @@ def crawl_all_docs(reference_dir):
     }
     
     summary_path = reference_dir / 'crawl_summary.json'
-    with open(summary_path, 'w', encoding='utf-8') as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+    try:
+        _atomic_write_text(summary_path, json.dumps(summary, ensure_ascii=False, indent=2))
+    except OSError as error:
+        # Keep the already-published documents and surface the failure through
+        # the exit status instead of an uncaught traceback.
+        summary['summary_write_failed'] = True
+        summary['summary_write_error'] = str(error)
+        print(f"  ⚠️ 摘要写入失败: {error}")
     
     print("\n" + "=" * 60)
     print(f"爬取完成！成功: {success_count}/{len(DOC_URLS)}")
@@ -263,7 +335,10 @@ def main():
     print(f"输出目录: {reference_dir}")
     
     # 爬取文档
-    crawl_all_docs(reference_dir)
+    summary = crawl_all_docs(reference_dir)
+    # A single dead URL must not downgrade every user to the packaged docs;
+    # only a run that published nothing is a failed refresh.
+    return 1 if summary['success_count'] == 0 or summary.get('summary_write_failed') else 0
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
