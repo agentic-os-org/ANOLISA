@@ -24,8 +24,10 @@ from agent_sec_cli.correlation_context import (
 from agent_sec_cli.daemon import server as daemon_server_module
 from agent_sec_cli.daemon.client import DaemonClient, daemon_health_reachable
 from agent_sec_cli.daemon.errors import (
+    DaemonClientError,
     DaemonProtocolError,
     DaemonRuntimePathError,
+    DaemonTransportError,
 )
 from agent_sec_cli.daemon.handlers.skill_ledger import (
     METHOD_SKILLFS_NOTIFY_CHANGE,
@@ -2134,3 +2136,48 @@ async def _close_stream_writer(writer: asyncio.StreamWriter) -> None:
         OSError,
     ):
         await writer.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# Timeout validation (appended)
+# ---------------------------------------------------------------------------
+
+
+class TestClientTimeoutValidation:
+    """Invalid timeouts fail locally, before any socket is opened."""
+
+    @staticmethod
+    def _client() -> DaemonClient:
+        return DaemonClient(socket_path="/nonexistent/agent-sec.sock")
+
+    def test_constructor_rejects_nonpositive_timeout(self) -> None:
+        # No socket_path on purpose: validation must not depend on the
+        # runtime environment (a runner may lack XDG_RUNTIME_DIR and
+        # /run/user/<uid>), so the check stays environment-independent.
+        for bad in (0, -1):
+            with pytest.raises(DaemonClientError, match="positive integer"):
+                DaemonClient(timeout_ms=bad)
+
+    def test_call_rejects_nonpositive_override(self) -> None:
+        client = self._client()
+        for bad in (0, -100):
+            with pytest.raises(DaemonClientError, match="positive integer"):
+                client.call("ping", trace_context={}, timeout_ms=bad)
+
+    def test_call_rejects_bool_and_non_int_overrides(self) -> None:
+        client = self._client()
+        for bad in (True, "5000", 5.0):
+            with pytest.raises(DaemonClientError):
+                client.call("ping", trace_context={}, timeout_ms=bad)  # type: ignore[arg-type]
+
+    def test_call_rejects_over_ceiling_override(self) -> None:
+        client = self._client()
+        with pytest.raises(DaemonClientError, match="must not exceed"):
+            client.call("ping", trace_context={}, timeout_ms=5 * 60 * 1000 + 1)
+
+    def test_ceiling_itself_is_accepted_locally(self) -> None:
+        # The boundary value is valid; the next step is the socket, which
+        # fails as a transport error on the nonexistent path.
+        client = self._client()
+        with pytest.raises(DaemonTransportError):
+            client.call("ping", trace_context={}, timeout_ms=5 * 60 * 1000)
