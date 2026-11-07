@@ -14,13 +14,16 @@ Does NOT modify the source file in any way.
 
 Exit codes:
     0 — success
-    1 — file not found / unsupported format / encoding failure
+    1 — file not found / unsupported format / encoding failure / JSON serialization failure
 """
 
 import sys
 import json
+import math
 import argparse
 from pathlib import Path
+
+_JSON_FALLBACK = str
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +218,39 @@ def audit_quality(sheets: dict) -> dict:
 # Summary statistics
 # ---------------------------------------------------------------------------
 
+def _json_safe(value: object) -> object:
+    """Return JSON-safe values and keys without dropping colliding labels.
+
+    Non-finite Python float values become null because RFC 8259 has no NaN
+    or Infinity and json.dumps(default=...) is not called for float values.
+    allow_nan=False remains a tripwire for future non-finite numeric leaks
+    to the encoder, and for non-finite float keys retained by the key whitelist below.
+    It does not reject valid JSON strings: scalar types outside
+    the Python float check, such as numpy.float32("nan"), retain the string
+    fallback and can become "nan" instead of null.
+
+    Date column keys use the same fallback as unsupported values because
+    dictionary keys never reach json.dumps(default=...). Conversion-induced
+    collisions are rejected before output. Pre-existing encoder key spelling
+    conflicts, such as integer 1 and string "1" becoming the same JSON member
+    name, remain outside this helper's date-key conversion scope.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key is not None and not isinstance(key, (str, int, float, bool)):
+                key = _JSON_FALLBACK(key)
+            if key in result:
+                raise ValueError(f"JSON keys collide after conversion: {key!r}")
+            result[key] = _json_safe(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def compute_stats(sheets: dict) -> dict:
     """Compute descriptive statistics for numeric columns per sheet."""
     stats = {}
@@ -352,7 +388,18 @@ def main() -> None:
             "stats": stats,
         }
         # Convert preview records to serializable form (handle non-JSON types)
-        print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+        try:
+            encoded = json.dumps(
+                _json_safe(output),
+                indent=2,
+                ensure_ascii=False,
+                default=_JSON_FALLBACK,
+                allow_nan=False,
+            )
+        except ValueError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            sys.exit(1)
+        print(encoded)
     else:
         report = render_report(args.file, structure, quality, stats)
         print(report)
