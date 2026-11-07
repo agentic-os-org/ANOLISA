@@ -19,6 +19,7 @@ Exit codes:
 
 import sys
 import json
+import math
 import argparse
 from pathlib import Path
 
@@ -215,6 +216,27 @@ def audit_quality(sheets: dict) -> dict:
 # Summary statistics
 # ---------------------------------------------------------------------------
 
+def _json_safe(value):
+    """Return a value JSON can carry, recursively.
+
+    NaN and the infinities have no JSON representation (RFC 8259) and
+    `json.dumps`' `default=str` never fires for floats, so they used to leave a
+    bare `NaN` token in the `--json` document — from the statistics (the std of
+    a single value) and from the structure preview (any missing cell in the
+    first rows of any column). Sanitizing here, at the boundary every producer
+    passes through, covers both; the call site's `allow_nan=False` is the
+    tripwire that makes a future non-finite value fail loudly instead of
+    silently shipping an unparseable document.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def compute_stats(sheets: dict) -> dict:
     """Compute descriptive statistics for numeric columns per sheet."""
     stats = {}
@@ -352,7 +374,8 @@ def main() -> None:
             "stats": stats,
         }
         # Convert preview records to serializable form (handle non-JSON types)
-        print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+        print(json.dumps(_json_safe(output), indent=2, ensure_ascii=False,
+                         default=str, allow_nan=False))
     else:
         report = render_report(args.file, structure, quality, stats)
         print(report)
