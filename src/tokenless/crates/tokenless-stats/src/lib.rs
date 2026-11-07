@@ -21,11 +21,13 @@ pub mod trace;
 
 pub use record::{CompressionMode, OperationType, StatsRecord};
 
-pub use recorder::{RetrieveTotals, StatsError, StatsRecorder, StatsResult, StatsSummary};
+pub use recorder::{
+    RetrieveTotals, StatsError, StatsRecorder, StatsResult, StatsSummary, SummaryWindow,
+};
 
 pub use query::{
     format_compare, format_compare_json, format_list, format_show, format_summary,
-    format_summary_json,
+    format_summary_json, format_summary_window, format_summary_window_json,
 };
 
 pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_bytes};
